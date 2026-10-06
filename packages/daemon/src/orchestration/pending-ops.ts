@@ -375,11 +375,13 @@ export class PendingOpRegistry {
    *  its timer on either race outcome, since this caller can pass a multi-minute `ms`. Never consumes
    *  (does not evict/read `result`/`error`) — the caller that eventually calls `attach()`/`peek()` still
    *  gets the real settled value normally. */
-  async waitBriefly(key: string, ms: number): Promise<boolean> {
+  // @decision 59986602 — `extraSignal` (optional, additive) folds a caller's own abort into this SAME
+  // race, so this call's internal timer is cleared instead of dangling for up to `ms` after a caller moves on.
+  async waitBriefly(key: string, ms: number, extraSignal?: Promise<unknown>): Promise<boolean> {
     const e = this.entries.get(key);
     if (!e || e.state !== "running") return true;
     const timeout = clearableSleep(ms);
-    try { await Promise.race([e.settle, timeout.promise]); } finally { timeout.clear(); }
+    try { await Promise.race(extraSignal ? [e.settle, timeout.promise, extraSignal] : [e.settle, timeout.promise]); } finally { timeout.clear(); }
     return e.state !== "running";
   }
 

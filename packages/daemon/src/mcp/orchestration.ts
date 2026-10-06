@@ -863,7 +863,8 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "activeCount, queuedCount, running: " +
         "GateQueueEntry[], queued: GateQueueEntry[], repoGuardOnly: RepoGuardOnlyQueueEntry[], " +
         "squashing: SquashQueueEntry[], " +
-        "declarations: GateIntentEntry[]} — `queued` is ordered by ARRIVAL within its priority tier (all " +
+        "declarations: GateIntentEntry[], waitingOnSelfCheck: WaitingOnSelfCheckQueueEntry[]} — " +
+        "`queued` is ordered by ARRIVAL within its priority tier (all " +
         "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
         "tier), so its array index + 1 IS `queuePosition` — but that position is a BELIEF about arrival " +
         "order, NOT a promise of GRANT order: the semaphore skips a head-of-line waiter that isn't " +
@@ -1039,6 +1040,18 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "never-queued op's envelope is small enough that its whole-op and command tiers nearly coincide, so " +
         "a wrong-tier reading can pass undetected on exactly that op (n=1, a named gap from this same " +
         "card's own investigation — not promoted to a general rule). " +
+        "ALSO returns `waitingOnSelfCheck` (card 59986602) — a FIFTH, independent array: a `merge`-kind op " +
+        "that has NOT YET reached its own gate admission at all — it's still parked inside its own pre-" +
+        "admission wait for its worker's `run_gate` self-check (the e50600d2 reuse check), so it appears in " +
+        "NONE of `running`/`queued`/`repoGuardOnly`/`squashing` above (none of those are backed by anything " +
+        "this op has touched yet). Each entry is {opId, blockingOpId, since, elapsedMs, projectId, " +
+        "projectName, taskId?, branch?, workerLabel?, redacted?} — `opId` is the MERGE's own opId (pass " +
+        "THIS to `gate_cancel` to abort the wait: the merge settles `cancelled`, exactly like a QUEUED " +
+        "merge gate withdrawn before admission); `blockingOpId` is the self-check's own opId, informational " +
+        "only — cancelling the merge does NOT touch the self-check, which is left running untouched, so " +
+        "cancel `blockingOpId` separately (also via `gate_cancel`) if its own verdict should stop too. Same " +
+        "cross-project redaction as `repoGuardOnly`/`squashing` (`taskId`/`branch`/`workerLabel` own-project " +
+        "only, a foreign entry carries `redacted: true` instead). " +
         "Cancel a QUEUED one via `gate_cancel(opId)` - see that tool's own doc for the fallback " +
         "resolution it uses.",
       inputSchema: strictShape({}),
@@ -4864,18 +4877,22 @@ export class OrchestrationMcpRouter {
           "deliberately NOT the same). A `deploy` gate is refused in EITHER phase (no `GateCancelledError` " +
           "catch exists for it yet, so cancelling one would surface as a misleading crash-shaped failure " +
           "instead of a clean outcome). " +
-          "Returns {outcome:\"cancelled\", phase:\"queued\"|\"running\", opId, gateType} on success. A " +
+          "Returns {outcome:\"cancelled\", phase:\"queued\"|\"running\", opId, gateType, note?} on success " +
+          "(`note` is present ONLY for the waiting-on-self-check branch below). A " +
           "cancelled QUEUED merge settles its `worker_merge_confirm` op as a distinct `cancelled` outcome — " +
           "not merged, not rejected — via a `[loom:merge-cancelled]` nudge, never `[loom:merge-failed]`. A " +
           "cancelled QUEUED `merge_batch` gate likewise settles as `cancelled` (`[loom:merge-batch-cancelled]`) and " +
           "starts NO per-candidate fallback merges. " +
           "{outcome:\"refused\", reason} means the op belongs to a DIFFERENT project — you cannot cancel " +
           "another project's gate op. {outcome:\"not_found\"} means there is nothing LIVE to cancel — this " +
-          "tool only ever acts on the live GateSemaphore registry, never the durable op history, so it can't " +
-          "itself tell you whether that's because the op already settled or never existed at all; call " +
-          "`gate_status(opId)` separately if you need to tell those apart (it now distinguishes `settled` " +
-          "from `never_existed`) — rely on the `[loom:gate-*]`/`[loom:merge-*]` nudge for a settled op's " +
-          "real pass/fail outcome either way. " +
+          "tool only ever acts on the live GateSemaphore registry (plus the two fallbacks below), never the " +
+          "durable op history, so it can't itself tell you whether that's because the op already settled or " +
+          "never existed at all; call `gate_status(opId)` separately if you need to tell those apart (it now " +
+          "distinguishes `settled` from `never_existed`) — rely on the `[loom:gate-*]`/`[loom:merge-*]` " +
+          "nudge for a settled op's real pass/fail outcome either way. If a merge may be waiting on its " +
+          "worker's self-check (see the waiting-on-self-check branch below), pass the MERGE's own opId " +
+          "(`gate_queue`'s `waitingOnSelfCheck` array) to cancel that wait, or the self-check's own opId to " +
+          "cancel it directly. " +
           "{outcome:\"ambiguous\", reason} means your opId prefix matches more than one op WITHIN YOUR OWN " +
           "PROJECT — pass more characters. {outcome:\"not_cancelled\", reason} covers every other miss: it " +
           "left the queue/finished running in the moments before this call landed (a genuine race with " +
@@ -4895,6 +4912,16 @@ export class OrchestrationMcpRouter {
           "for the same reason a RUNNING merge gate is (interrupting it risks the same staged-residue " +
           "hazard) - gateType on a successful cancel here always reads \"merge\" (this IS a merge op, " +
           "just one that never reached the ordinary gate registry). " +
+          "ALSO REACHES a merge waiting on its worker's self-check (card 59986602 — `gate_queue`'s " +
+          "`waitingOnSelfCheck` array, surfaced because `confirmWorkerMerge`'s pre-admission reuse-check " +
+          "wait is now abortable): tried automatically when the opId doesn't match the ordinary gate " +
+          "registry OR a repo-guard-only wait, same unscoped-then-project-scoped ambiguity handling as " +
+          "above. Pass the MERGE's own opId (never the self-check's) — cancelling it ends the merge's wait " +
+          "with zero process risk (nothing was ever spawned for THIS merge's own gate) and settles the " +
+          "merge as a clean `cancelled` outcome, exactly like a QUEUED merge gate withdrawn before " +
+          "admission. The self-check itself is LEFT RUNNING, untouched — its own verdict may still be " +
+          "wanted — so `note` on the success response names its opId; cancel that one too, separately, if " +
+          "you want it stopped as well. `gateType` on a successful cancel here always reads \"merge\". " +
           "`intent`/`reason` (card a0d912f5, both optional) are rendered straight into the SAME `reason` " +
           "text this call returns AND into the cancelled op's own settle text — which is what the " +
           "`[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge reads out to whoever is parked on that " +

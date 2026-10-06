@@ -286,6 +286,26 @@ export interface SquashQueueEntry {
   redacted?: true;
 }
 
+/** @decision 59986602 — a `merge`-kind op parked pre-admission, waiting on its worker's self-check; built
+ *  from `parkedMergeWaits`, never from `gateSemaphore` (nothing is registered there yet). */
+export interface WaitingOnSelfCheckQueueEntry {
+  /** The MERGE op's own opId — pass THIS to `gate_cancel` to abort the wait (the merge settles `cancelled`,
+   *  the self-check is left running untouched). */
+  opId: string;
+  /** The self-check's own opId, still running — informational only; cancel it separately (via `gate_cancel`)
+   *  if its own verdict, not just this merge's wait, should stop. */
+  blockingOpId: string;
+  since: string;
+  elapsedMs: number;
+  projectId: string;
+  projectName: string;
+  taskId?: string | null;
+  branch?: string | null;
+  workerLabel?: string | null;
+  /** Mirrors {@link SquashQueueEntry.redacted} exactly. */
+  redacted?: true;
+}
+
 /** @decision a5d1ae04 — `GateIntentEntry` deliberately omits `sessionId` on both sides of the redaction
  *  boundary; the dead-seat check runs server-side before this entry is built, so residue is structurally
  *  absent, not merely tagged. */
@@ -353,7 +373,11 @@ export interface PendingMergeOpNotice {
  *  `acquireRepoGuardOnly` hold, never an `admit()`-based one — see {@link SquashQueueEntry}'s own doc).
  *  `declarations` (card a5d1ae04) is a FIFTH, independent array again — see {@link GateIntentEntry}'s own
  *  doc; unlike the other four, nothing in it was ever admitted through (or even seen by) the GateSemaphore
- *  — it's pure advisory disclosure with no bearing on cap/admission at all. */
+ *  — it's pure advisory disclosure with no bearing on cap/admission at all. `waitingOnSelfCheck` (card
+ *  59986602) is a SIXTH, independent array: a `merge`-kind op that has not yet reached ITS OWN gate
+ *  admission at all — never in `running`/`queued` (no GateSemaphore registration of its own exists yet for
+ *  it to appear there), never `repoGuardOnly`/`squashing` either (both are GateSemaphore-sourced too) —
+ *  see {@link WaitingOnSelfCheckQueueEntry}'s own doc. */
 export interface GateQueueSnapshot {
   cap: number;
   activeCount: number;
@@ -363,6 +387,7 @@ export interface GateQueueSnapshot {
   repoGuardOnly: RepoGuardOnlyQueueEntry[];
   squashing: SquashQueueEntry[];
   declarations: GateIntentEntry[];
+  waitingOnSelfCheck: WaitingOnSelfCheckQueueEntry[];
 }
 
 /** The near-free identity {@link SessionService.reconcileOrchestrationOnBoot}'s Pass B already has in
@@ -1435,6 +1460,18 @@ function formatRecoveredGateOpNudge(
  *  "nothing changed". */
 type LastWorkerGateCheck = { passed: boolean; headCurrent: boolean; stamp: WorktreeGateStamp; opId: string; branch: string };
 
+/** @decision 59986602 — one entry in `SessionService.parkedMergeWaits`, keyed by the MERGE op's own opId.
+ *  `cancel` resolves the abort race in `confirmWorkerMerge`'s pre-admission wait — idempotent (returns
+ *  `false`, does nothing, if this wait already ended, by cancel or by the self-check settling naturally). */
+type ParkedMergeWait = {
+  sessionId: string;
+  projectId: string;
+  taskId: string | null;
+  branch: string | null;
+  since: number;
+  cancel: (detail: string) => boolean;
+};
+
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
  *  point of card 50c1e0d0, how long `PendingOpRegistry.attach()`'s own retention-window dedupe (see its
  *  class doc) will hand a RE-CALL back the SAME settled result — WHEN that result is usable (card 79b0ee52:
@@ -2471,6 +2508,9 @@ export class SessionService {
    *  own successful merge — a bounded, tiny (one small object per worker session ever created) leak on a
    *  long-running daemon, mirroring the accepted tradeoff already documented on {@link gateTimeoutStreak}. */
   private readonly lastWorkerGateCheck = new Map<string, LastWorkerGateCheck>();
+  /** @decision 59986602 — the ONE source of truth for "is this merge op parked, pre-admission, waiting on
+   *  its worker's self-check" — never re-derive that question from peek()+gateSemaphore snapshots. */
+  private readonly parkedMergeWaits = new Map<string, ParkedMergeWait>();
   /** Test-only override for {@link GATE_OP_RETAIN_MS} (mirrors the `wedgeSweepIntervalMs`-style seams
    *  below) — defaults to the real production constant. A hermetic test that deliberately issues several
    *  BACK-TO-BACK `runWorkerGate` calls, each expecting to trigger its OWN fresh gate invocation (e.g. the
@@ -5506,7 +5546,30 @@ export class SessionService {
     const declarations: GateIntentEntry[] = this.gateIntents
       .snapshot((sid) => this.db.getSession(sid)?.processState === "live")
       .map((row) => this.toGateIntentEntry(row, isCallerProject(row.projectId) ? row.projectId : callerProjectId, nowMs));
-    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, squashing, declarations };
+    // @decision 59986602 — reads `parkedMergeWaits` directly (the one source of truth); skips an entry
+    // whose self-check already left `pendingOps` rather than report a dangling `blockingOpId`.
+    const waitingOnSelfCheck: WaitingOnSelfCheckQueueEntry[] = [];
+    for (const [opId, parked] of this.parkedMergeWaits) {
+      const blockingOpId = this.pendingOps.peek(`gate:${parked.sessionId}`)?.opId;
+      if (!blockingOpId) continue;
+      const project = this.db.getProject(parked.projectId);
+      const entry: WaitingOnSelfCheckQueueEntry = {
+        opId, blockingOpId, projectId: parked.projectId, projectName: project?.name ?? parked.projectId,
+        since: new Date(parked.since).toISOString(), elapsedMs: Date.now() - parked.since,
+      };
+      if (isCallerProject(parked.projectId)) {
+        const task = parked.taskId ? this.db.getTask(parked.taskId) : undefined;
+        const session = this.db.getSession(parked.sessionId);
+        const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
+        entry.taskId = parked.taskId;
+        entry.branch = parked.branch;
+        entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
+      } else {
+        entry.redacted = true;
+      }
+      waitingOnSelfCheck.push(entry);
+    }
+    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, squashing, declarations, waitingOnSelfCheck };
   }
 
   /**
@@ -5647,7 +5710,9 @@ export class SessionService {
     callerSessionId: string, opId: string,
     params: { scope: GateCancelScope; intent?: string; reason?: string },
   ): Promise<
-    | { outcome: "cancelled"; phase: "queued" | "running"; opId: string; gateType: GateType }
+    // @decision 59986602 — `note` is OPTIONAL/additive (every pre-existing "cancelled" return omits it,
+    // byte-identical); set only by the waiting-on-self-check branch to say what was actually cancelled.
+    | { outcome: "cancelled"; phase: "queued" | "running"; opId: string; gateType: GateType; note?: string }
     | { outcome: "refused" | "not_found" | "ambiguous" | "not_cancelled"; reason: string; opId: string }
   > {
     const caller = this.db.getSession(callerSessionId);
@@ -5700,7 +5765,38 @@ export class SessionService {
         if (!cancelled) return { outcome: "not_cancelled", reason: "no longer queued (it was granted or settled moments ago) — re-check gate_queue", opId: rgoEntry.opId ?? opId };
         return { outcome: "cancelled", phase: "queued", opId: rgoEntry.opId ?? opId, gateType: "merge" };
       }
-      return { outcome: "not_found", reason: "no live gate op matches this id — it may have already settled (check the [loom:gate-*]/[loom:merge-*] nudge) or never existed", opId };
+      // @decision 59986602 — THIRD fallback (same unscoped/re-resolve shape as the two above): a merge
+      // parked pre-admission waiting on its self-check (`parkedMergeWaits`). Cancels the WAIT, not the self-check.
+      const parkedCandidates = () => [...this.parkedMergeWaits.entries()].map(([id, v]) => ({ id, ...v }));
+      let parkedFound = resolveIdPrefix(parkedCandidates(), opId);
+      if (parkedFound.kind === "ambiguous") {
+        parkedFound = caller?.projectId
+          ? resolveIdPrefix(parkedCandidates().filter((c) => c.projectId === caller.projectId), opId)
+          : { kind: "none" };
+        if (parkedFound.kind === "ambiguous") {
+          return { outcome: "ambiguous", reason: `ambiguous opId prefix '${opId}' — it matches ${parkedFound.ids.join(", ")}; pass more characters or the full id`, opId };
+        }
+      }
+      if (parkedFound.kind === "found") {
+        const parked = parkedFound.record;
+        if (parked.projectId !== caller?.projectId) {
+          return { outcome: "refused", reason: "this op belongs to a different project", opId: parked.id };
+        }
+        if (restrictToOwnerSessionId) {
+          return { outcome: "refused", reason: "this op is a merge-type wait, not your own run_gate self-check — workers may only cancel their own gate op", opId: parked.id };
+        }
+        // Resolve the self-check's own opId BEFORE cancelling — `cancel()` ends the wait, which races the
+        // self-check's own continued existence in `pendingOps` not at all (it is deliberately left running),
+        // but reading it after would still be correct too; done first purely so the two reads can't disagree.
+        const blockingOpId = this.pendingOps.peek(`gate:${parked.sessionId}`)?.opId;
+        const cancelled = parked.cancel(detail);
+        if (!cancelled) return { outcome: "not_cancelled", reason: "no longer waiting on its self-check (it proceeded or the self-check already settled moments ago) — re-check gate_queue", opId: parked.id };
+        return {
+          outcome: "cancelled", phase: "queued", opId: parked.id, gateType: "merge",
+          note: `cancelled the MERGE's wait on its worker's self-check${blockingOpId ? ` ${blockingOpId}` : ""} — the self-check itself was left running untouched; cancel it separately if its own verdict should stop too`,
+        };
+      }
+      return { outcome: "not_found", reason: "no live gate op matches this id — it may have already settled (check the [loom:gate-*]/[loom:merge-*] nudge) or never existed. If a merge may be waiting on its worker's self-check, pass the MERGE's own opId (gate_queue's waitingOnSelfCheck array) to cancel that wait, or the self-check's own opId to cancel it directly instead", opId };
     }
     const entry = found.record;
     // PROJECT SCOPE (DoD: cancel of another project's op → refused) — checked BEFORE any mutation, so a
@@ -16678,7 +16774,42 @@ export class SessionService {
       // ever feeds the EXISTING checks below a fresher `lastWorkerGateCheck`, never changes what they
       // trust. See Round 4 for the race, the lock audit, and why the bound is safe.
       if (!gateDisabled && this.pendingOps.peek(`gate:${workerSessionId}`)?.state === "running") {
-        await this.pendingOps.waitBriefly(`gate:${workerSessionId}`, gateTimeoutMs);
+        // @decision 59986602 — this wait is ABORTABLE via `gate_cancel(thisOpId)`: raced against an abort
+        // signal registered in `parkedMergeWaits` — the one map `cancelGateOp`/`gateQueueForManager` read.
+        let cancelDetail: string | undefined;
+        let resolveAbort!: () => void;
+        const abortSignal = new Promise<void>((resolve) => { resolveAbort = resolve; });
+        let settled = false;
+        this.parkedMergeWaits.set(thisOpId, {
+          sessionId: workerSessionId, projectId: project.id, taskId, branch, since: Date.now(),
+          cancel: (detail) => {
+            if (settled) return false;
+            settled = true;
+            cancelDetail = detail;
+            resolveAbort();
+            return true;
+          },
+        });
+        try {
+          // Passed straight into waitBriefly's OWN race (card 59986602, item 4) rather than wrapped in a
+          // second outer Promise.race — so an abort also clears waitBriefly's own internal timer immediately,
+          // instead of leaving it dangling for up to gateTimeoutMs after this call has already moved on.
+          await this.pendingOps.waitBriefly(`gate:${workerSessionId}`, gateTimeoutMs, abortSignal);
+        } finally {
+          settled = true;
+          this.parkedMergeWaits.delete(thisOpId);
+        }
+        if (cancelDetail !== undefined) {
+          // CANCELLED-WHILE-WAITING-ON-SELF-CHECK (card 59986602) — mirrors the repoGuardOnly/real-gate
+          // CANCELLED-WHILE-QUEUED catches elsewhere in this method (same `merge_cancelled`/`cancelled:true`
+          // shape, the one `confirmWorkerMergeTracked`'s own settle/classify/nudge logic already handles
+          // generically): nothing has been admitted to THIS merge's own gate yet (no process spawned, no
+          // squash reached), so return the same clean outcome rather than falling through to reuse/inert-
+          // skip/the real gate. The self-check this merge was waiting on is left untouched, still running —
+          // this ends only the MERGE's own wait on it, never the self-check itself.
+          evt("merge_cancelled", { cancelled: true, cancelKind: "manual", cancelDetail, waitingOnSelfCheck: true });
+          return { merged: false, cancelled: true, cancelKind: "manual", reason: cancelDetail, opId: thisOpId };
+        }
       }
       let reuseResult: GateSequentialResult | undefined;
       const lastCheck = this.lastWorkerGateCheck.get(workerSessionId);
