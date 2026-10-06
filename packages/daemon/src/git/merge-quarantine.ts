@@ -176,6 +176,25 @@ function quarantineHashFor(repoPath: string): string {
 }
 
 /**
+ * @decision f5c42043 — never write/arm at one of these hashes; an ancestor walk is never proof that `p`
+ * itself owns a corrupt latch, only that it WOULD have degraded there. Pure pending-divert only.
+ */
+function ancestorToplevelHashes(p: string): string[] {
+  const hashes = new Set<string>();
+  let dir = path.dirname(path.resolve(p));
+  for (;;) {
+    // Gated on existence purely to SKIP a redundant walk, never to drop a reachable key —
+    // canonicalRepoLockKey already tolerates a non-existent node internally (@decision 7673d096) and
+    // would just re-derive the SAME value a higher existing ancestor's own walk already produces.
+    if (fs.existsSync(dir)) hashes.add(quarantineHashForKey(canonicalRepoLockKey(dir)));
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
+  return [...hashes];
+}
+
+/**
  * Direct (non-walking) path identity: realpath + lowercase-on-win32 of `repoPath` AS GIVEN, falling back
  * to `path.resolve` when it doesn't currently exist on disk at all — deliberately NEVER walking up to find
  * an enclosing git toplevel (unlike `canonicalRepoLockKey`). Factored out of {@link legacyQuarantineHashFor}
@@ -768,7 +787,7 @@ function pendingEntryStillOwnsKey(key: string, pendingEntry: MergeQuarantineEntr
  * record for the reverse-drift repro this closes.
  */
 
-export function clearMergeQuarantineByKey(key: string, identityRepoPath: string): void {
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string): { wasQuarantined: true; latchKept: true; referencingRepoPaths: string[] } | void {
   const entry = activeQuarantines.get(key);
   // Lift EVERY key this entry is armed under (its own tracked set), never reference equality — a union or
   // an orphan merge REBUILDS the entry object, so a map slot holding an OLDER build of the "same" logical
@@ -805,8 +824,19 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // @decision 883e29bc (round 4) — sweep each removed entry's own sourceFile via
   // sweepOwnLatchFileUnlessOwnedElsewhere (never a bare unlink): it can be the SAME physical path a
   // different, surviving repo's fresh raise now owns (reusing the freed key).
-  for (const f of sourceFilesToSweep) sweepOwnLatchFileUnlessOwnedElsewhere(f);
+  //
+  // @decision f5c42043 — CAPTURE and SURFACE this sweep's `{kept, referencingRepoPaths}` (previously
+  // discarded) instead of a bare unqualified success, mirroring clearMergeQuarantineByRecordedPath's own
+  // `latchKept` reporting for the SAME "a sibling still needs this file" shape.
+  const keptReferencingRepoPaths = new Set<string>();
+  for (const f of sourceFilesToSweep) {
+    const result = sweepOwnLatchFileUnlessOwnedElsewhere(f);
+    if (result.kept) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+  }
   for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
+  if (keptReferencingRepoPaths.size > 0) {
+    return { wasQuarantined: true, latchKept: true, referencingRepoPaths: [...keptReferencingRepoPaths] };
+  }
 }
 
 /** For a repoPath that is NOT currently resolvable, its OWN recorded entry (active, any key; else
@@ -857,7 +887,7 @@ export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolea
   if (!isRepoPathCurrentlyResolvable(repoPath)) {
     return clearMergeQuarantineByRecordedPath(repoPath);
   }
-  clearMergeQuarantineByKey(canonicalRepoLockKey(repoPath), repoPath);
+  return clearMergeQuarantineByKey(canonicalRepoLockKey(repoPath), repoPath);
 }
 
 /**
@@ -1359,6 +1389,25 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
   for (const [h] of unresolvedClaimantsByHash) {
     if (hashToRepo.has(h)) unresolvedClaimantsByHash.delete(h);
   }
+  // @decision f5c42043 — THIRD, LOWEST-precedence tier, consulted only when both tiers above miss. See
+  // the decision record for why `hashToRepo`/`unresolvedClaimantsByHash` alone can go permanently stale.
+  //
+  // @decision f5c42043 (Code Review 2dd4401e) — built LAZILY on the FIRST miss in tiers 1+2, memoized
+  // after: an unreachable UNC/SMB registered path's own ancestor walk can stall every boot otherwise.
+  let ancestorHashToRepoCache: Map<string, string[]> | null = null;
+  const ancestorHashToRepo = (): Map<string, string[]> => {
+    if (ancestorHashToRepoCache) return ancestorHashToRepoCache;
+    const built = new Map<string, string[]>();
+    for (const p of registeredRepoPaths) {
+      for (const h of ancestorToplevelHashes(p)) {
+        const claimants = built.get(h) ?? [];
+        claimants.push(p);
+        built.set(h, claimants);
+      }
+    }
+    ancestorHashToRepoCache = built;
+    return built;
+  };
 
   let files: string[];
   // @decision bde5d1fe (item 5) — a leftover `.json.tmp-<pid>` is a write whose fsync completed but whose
@@ -1405,6 +1454,10 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
   // @decision 882d6cff (folds in ed74603b) — a matched-corrupt `.json` final is DEFERRED here too, never
   // armed/written inline inside this read loop; see the decision record for why.
   const deferredCorruptJsons: { f: string; matchedRepo: string }[] = [];
+  // @decision f5c42043 — a THIRD, distinct deferred collection for an ancestor-tier-only match: resolved
+  // by its OWN, simpler loop below that is ALWAYS a pure pending-divert, never the resolvable self-heal
+  // branch `deferredCorruptJsons` can take — an ancestor walk is never proof of ownership.
+  const deferredAncestorCorruptJsons: { f: string; matchedRepo: string }[] = [];
 
   // PASS 1 — process EVERY file, never return early.
   for (const f of files) {
@@ -1521,6 +1574,13 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] boot-time latch ${f} is CORRUPT/unparsable (${(e as Error).message}) but its filename hash matches ${claimants.length} unresolvable registered repo(s) sharing this degraded key (${claimants.join(", ")}) — deferring fail-closed handling for EACH of them until every file this boot has been read.`);
         for (const claimant of claimants) deferredCorruptJsons.push({ f, matchedRepo: claimant });
+      } else if ((ancestorHashToRepo().get(hash)?.length ?? 0) > 0) {
+        // @decision f5c42043 — an ANCESTOR-walk-only match is never proof of ownership: divert to
+        // pending for EACH claimant, never arm/write at this hash for any of them.
+        const ancestorClaimants = ancestorHashToRepo().get(hash)!;
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] boot-time latch ${f} is CORRUPT/unparsable (${(e as Error).message}) but its filename hash matches ${ancestorClaimants.length} registered repo(s)' own ANCESTOR-walk key, never their own verified identity (${ancestorClaimants.join(", ")}) — deferring fail-closed handling for EACH of them until every file this boot has been read.`);
+        for (const claimant of ancestorClaimants) deferredAncestorCorruptJsons.push({ f, matchedRepo: claimant });
       } else {
         // No registered repo matches this corrupt latch's hash — collect it; handled in PASS 2, AFTER
         // every file has been read, so a later file's own valid entry is never clobbered (round 7 cheap-minor).
@@ -1558,6 +1618,22 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
     migratedSourcesByKey.set(key, migratedList);
   }
 
+  // Resolve every ANCESTOR-TIER deferred corrupt `.json` — ALWAYS a pure pending-divert, regardless of
+  // whether matchedRepo is CURRENTLY resolvable (unlike the loop above): an ancestor-walk match is never
+  // proof of ownership, so this never self-heals/migrates/writes anywhere. Once matchedRepo is genuinely
+  // queried via activeMergeQuarantineFor while resolvable, the EXISTING lazy-graduation path (NOT this
+  // loop) arms/migrates it under its own verified key and sweeps this stale source file.
+  for (const { f, matchedRepo } of deferredAncestorCorruptJsons) {
+    // eslint-disable-next-line no-console
+    console.warn(`[merge-quarantine] boot-time latch ${f} is CORRUPT/unparsable and its filename hash matches an ANCESTOR-walk key for registered repo ${matchedRepo} — never a verified identity for ${matchedRepo} itself, so it is NOT armed/written at any key; leaving the corrupt latch file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query.`);
+    const entry: MergeQuarantineEntry = {
+      repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
+      reason: `boot found a CORRUPT/unparsable quarantine latch (${f}) whose hash matches an ancestor-walk key ${matchedRepo}'s own resolution would produce if it (or an intermediate ancestor) were unresolvable — fail-closed rather than risk discarding a real quarantine, but not a verified identity and never armed under any walked-up key`,
+      enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+    };
+    pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+  }
+
   // PASS 1b (item 5) — recover/repair any leftover `.json.tmp-<pid>` latch. Its filename is
   // `<hash>.json.tmp-<pid>`, so the SAME hash-matching logic as a corrupt `.json` applies once the
   // `.json.tmp-` suffix is stripped.
@@ -1567,6 +1643,9 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
   // final's own on-disk content is the FULL union, never "whichever tmp was processed last".
   const tmpsToUnlinkByKey = new Map<string, string[]>();
   const deferredCorruptTmps: { f: string; matchedRepo: string }[] = [];
+  // @decision f5c42043 — Site C's own twin of `deferredAncestorCorruptJsons`: resolved by its OWN,
+  // simpler loop below that always divert-to-pending, never folds into another key's unlink list.
+  const deferredAncestorCorruptTmps: { f: string; matchedRepo: string }[] = [];
 
   for (const f of tmpFiles) {
     const hash = f.slice(0, f.indexOf(".json.tmp-"));
@@ -1652,6 +1731,13 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
           // eslint-disable-next-line no-console
           console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable (${(e as Error).message}) but its filename hash matches ${claimants.length} unresolvable registered repo(s) sharing this degraded key (${claimants.join(", ")}) — deferring fail-closed handling for EACH of them until every sibling tmp for this repo has been read.`);
           for (const claimant of claimants) deferredCorruptTmps.push({ f, matchedRepo: claimant });
+        } else if ((ancestorHashToRepo().get(hash)?.length ?? 0) > 0) {
+          // @decision f5c42043 — Site C's own twin: an ANCESTOR-walk-only match is never proof of
+          // ownership; divert to pending for EACH claimant, never fold into another key's unlink list.
+          const ancestorClaimants = ancestorHashToRepo().get(hash)!;
+          // eslint-disable-next-line no-console
+          console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable (${(e as Error).message}) but its filename hash matches ${ancestorClaimants.length} registered repo(s)' own ANCESTOR-walk key, never their own verified identity (${ancestorClaimants.join(", ")}) — deferring fail-closed handling for EACH of them until every sibling tmp for this repo has been read.`);
+          for (const claimant of ancestorClaimants) deferredAncestorCorruptTmps.push({ f, matchedRepo: claimant });
         } else {
           orphanFilenames.push(f);
           orphanReasonParts.push(`${f}: ${(e as Error).message}`);
@@ -1705,6 +1791,20 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] fail-closed quarantine for ${matchedRepo} (matched-corrupt tmp latch ${f}) could NOT be durably persisted — it will NOT survive another restart until this is fixed.`);
     }
+  }
+
+  // Resolve every ANCESTOR-TIER deferred corrupt tmp — Site C's own twin of the `.json` loop above:
+  // ALWAYS a pure pending-divert, never folded into another key's unlink list (an ancestor-walk match is
+  // never proof of ownership). The tmp is left untouched; a later genuine query graduates it normally.
+  for (const { f, matchedRepo } of deferredAncestorCorruptTmps) {
+    // eslint-disable-next-line no-console
+    console.warn(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable and its filename hash matches an ANCESTOR-walk key for registered repo ${matchedRepo} — never a verified identity for ${matchedRepo} itself; keeping the tmp AS WRITTEN and deferring enforcement to a lazy re-resolve on first query.`);
+    const entry: MergeQuarantineEntry = {
+      repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
+      reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) whose hash matches an ancestor-walk key ${matchedRepo}'s own resolution would produce — fail-closed rather than risk discarding a real quarantine, but not a verified identity and never armed under any walked-up key`,
+      enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+    };
+    pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
   }
 
   // @decision 4480b077 (round 3) — WRITE-ALL then DELETE-ALL, never interleaved per key: a stale
