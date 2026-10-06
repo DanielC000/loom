@@ -32,6 +32,18 @@ The prohibition above (never fire `onDeliver` from claude's immediate idle-submi
 - Do not re-add `onDeliver`-firing to claude's immediate branch to "fix" a future resolution gap — fix it caller-side (resolve on `delivered:true`, idempotently), the way card 0075e20b did; the M1/M2 concern above is still live and unverified for that path.
 - Do not assume codex's own `onDeliver`-fires-on-immediate behavior generalizes to claude, or vice versa — a caller needing deterministic resolution must handle both harnesses the same way itself, never lean on firing-timing that differs between them.
 
+## Card e2d76c98 — the hand-off-resolve-to-re-mint gap is a conscious trade, not a residual bug
+
+0075e20b's caller-side resolve-on-`delivered:true` (above) closes a GUARANTEED duplicate, but admits a narrower one in trade: resolving the record right at hand-off, instead of waiting on engine confirmation, means the record can already read resolved before the engine ever actually confirms receiving it. `redriveQueuedMessage` and the `carryPendingToSuccessor` catch-block rearm (`sessions/service.ts`) both wire `onGiveUpExhausted` onto that same `enqueueStdin` call, so a genuine give-up re-mints a FRESH durable record via `handleGiveUpExhausted`'s own `enqueueDurableMessage` call. Content is lost only if a `daemon_restart` lands strictly between the hand-off resolve (near-instant, at enqueue time) and that re-mint (deferred until give-up is confirmed exhausted) — the old record is already resolved, so the boot scan's anti-join (`listUndeliveredQueuedMessages`) correctly never redrives it, and the new one was never minted.
+
+**Window, named by constant, not value:** reaching `onGiveUpExhausted` needs a full `fireEnterAndVerify` ladder (`SUBMIT_MAX_ATTEMPTS` attempts at `SUBMIT_VERIFY_TIMEOUT_MS` each, plus its `GIVE_UP_CONFIRM_SETTLE_MAX_POLLS`/`_POLL_MS` last-chance check) to run TWICE — `GIVE_UP_REQUEUE_LIMIT` + 1 times — with a `GIVE_UP_HOLD_MS` hold between the two. At time of writing `GIVE_UP_HOLD_MS` (20s) dwarfs both ladders combined, so this is realistically tens of seconds, not the `SUBMIT_VERIFY_TIMEOUT_MS × GIVE_UP_REQUEUE_LIMIT` (~1.8s) a naive read suggests — that product drops both the `SUBMIT_MAX_ATTEMPTS` multiplier per ladder and the hold. Still bounded, and still gated on a genuine engine give-up (frozen/crashed engine) — a responsive engine's confirming hook clears the hold and the ladder well before either runs to exhaustion.
+
+Same hand-off-stamp semantics as every ordinary drained message (`9da2a435`: `"handed-off"` ≠ confirmed) — this window already exists system-wide for any `delivered:true` return, not a defect specific to the redrive/recycle paths.
+
+**Do not (4):**
+- Do not cite `SUBMIT_VERIFY_TIMEOUT_MS × GIVE_UP_REQUEUE_LIMIT` as this window's worst-case bound — it omits `SUBMIT_MAX_ATTEMPTS` and `GIVE_UP_HOLD_MS`, the dominant term.
+- Do not "fix" this by deferring the resolve to confirmation instead of hand-off — that reopens the guaranteed duplicate 0075e20b closed. The trade is accepted, not a residual bug to chase.
+
 ## `recoverUndeliveredMessagesOnBoot` is the single re-enqueue owner
 
 The OTHER half of the dedup above: `recoverUndeliveredMessagesOnBoot` (`sessions/service.ts`) is the one
