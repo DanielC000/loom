@@ -881,6 +881,19 @@ export interface FastForwardResult {
    *  `unverified`, since that outcome is specifically the case where this could not be read. Lets the
    *  caller's durable event/typed field name both sides of the divert without re-parsing `reason` text. */
   observedBranch?: string | null;
+  /** Card b4080777 (Round 2) — true iff this refusal CANNOT rule out that
+   *  canonical main actually advanced to (or past) `targetSha` before the refusal was detected: set on
+   *  `unverified` (the `--ff-only` call itself never threw), on `quarantined` from an unconfirmed kill
+   *  (the reason text already says main may already be at `targetSha`), on a POST-ff `branchDiverted`
+   *  whose `observedSha` differs from `targetSha` (the `--ff-only` succeeded before something ELSE moved
+   *  main further), and on the generic ff-failure path whose own post-failure HEAD re-read ALSO failed
+   *  (so there's no way to tell whether the merge landed before throwing). Distinct from every OTHER
+   *  `quarantined`/`branchDiverted`/generic-failure shape, where the refusal is confirmed to have
+   *  mutated nothing. The caller must NOT write a terminal "this landing was aborted" event for a
+   *  `mayHaveLanded:true` outcome — doing so would block the trailer-based content-match attribution
+   *  that's the only safe way to resolve it later, for the exact reason `unverified` was already excluded
+   *  (see docs/decisions/b4080777-batch-ff-refused-terminal-event.md). */
+  mayHaveLanded?: boolean;
 }
 
 /**
@@ -954,9 +967,12 @@ export async function fastForwardCanonicalMain(
         // `--ff-only` call above did not throw, so the landing most likely happened and this is only a
         // verification failure. Typed distinctly (`unverified`, never `branchDiverted`) so the caller can
         // treat it as "probably landed, could not confirm" rather than a security-relevant divert.
-        if (!post) return { ok: false, unverified: true, reason: "fast-forward appeared to succeed but canonical HEAD (and checked-out branch) could not be re-read to verify — the landing likely happened but could not be confirmed" };
+        if (!post) return { ok: false, unverified: true, mayHaveLanded: true, reason: "fast-forward appeared to succeed but canonical HEAD (and checked-out branch) could not be re-read to verify — the landing likely happened but could not be confirmed" };
         if (post.sha !== targetSha) {
-          return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward appeared to succeed but canonical HEAD reads ${post.sha}, not the expected ${targetSha} — refusing to report success` };
+          // Card b4080777 (Round 2) — `mayHaveLanded:true`: the `--ff-only` call itself did not throw, so OUR content
+          // was placed on main at that instant; this mismatch means something ELSE advanced main further
+          // before this re-read, not that our own landing never happened.
+          return { ok: false, branchDiverted: true, observedBranch: post.branch, mayHaveLanded: true, reason: `fast-forward appeared to succeed but canonical HEAD reads ${post.sha}, not the expected ${targetSha} — refusing to report success` };
         }
         if (post.branch !== deps.expectedBaseBranch) {
           // Card ba663984 — same two-remedy wording as the pre-ff refusal above.
@@ -975,16 +991,22 @@ export async function fastForwardCanonicalMain(
           raisedToken = enterMergeQuarantine(repoPath, "(batch fast-forward)", unconfirmedKillReason("fast-forward merge could not be confirmed dead after a kill"));
           // @decision d8bb2074 — no HEAD re-read here (an unconfirmed kill means "touch nothing else");
           // name the already-known target sha so a reader knows main may already be there, not just stalled.
-          return { ok: false, quarantined: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it (canonical main may already be at ${targetSha} if the merge itself landed before the kill); canonical repo may need manual inspection: ${(e as Error).message}` };
+          // @decision b4080777 — `mayHaveLanded:true`: main may already be at `targetSha` if it landed
+          // before the kill — never a confirmed non-landing.
+          return { ok: false, quarantined: true, mayHaveLanded: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it (canonical main may already be at ${targetSha} if the merge itself landed before the kill); canonical repo may need manual inspection: ${(e as Error).message}` };
         }
         // A hung post-merge hook can outlive the timeout AFTER HEAD already moved — re-verify before
         // reporting a false failure (mirrors mergeBranchLocked's own post-commit-failure HEAD re-read).
         let headAfterFailure: string | undefined;
+        let headReadFailed = false;
         try {
           headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-ff-failure verify)")).trim();
-        } catch { /* unknown — fall through to the ordinary failure below */ }
+        } catch { headReadFailed = true; } // unknown — fall through to the ordinary failure below
         if (headAfterFailure === targetSha) return await verifyLanded();
-        return { ok: false, reason: `fast-forward failed: ${(e as Error).message}` };
+        // @decision b4080777 — `mayHaveLanded:true` ONLY when the re-read itself failed (`headReadFailed`):
+        // a successful re-read that simply disagrees with `targetSha` IS a confirmed non-landing; a failed
+        // re-read proves nothing either way, the same typing gap `unverified` exists to cover.
+        return { ok: false, mayHaveLanded: headReadFailed, reason: `fast-forward failed: ${(e as Error).message}` };
       }
       return await verifyLanded();
     });
@@ -1095,6 +1117,18 @@ export interface RunBatchedMergeResult {
    *  MUST treat this as distinct from every other failure: no per-candidate fallback confirm, and no
    *  batch-worktree removal — leave it for a human. Never inferred from `reason` text. */
   quarantined?: boolean;
+  /** Card b4080777 — true from the point `onBeforeFastForward` is invoked onward (forfeited,
+   *  branchDiverted, unverified, the ff-level `quarantined`/generic-failure shapes, and `ok:true`), false/
+   *  absent on every EARLIER return (pre-/mid-assembly quarantine, `rollbackUnverified`, `landed.length
+   *  === 0`, a cancelled/rejected gate, and the post-gate batch-worktree-HEAD-read failure). An explicit,
+   *  typed field BY DESIGN, never inferred from another field's incidental presence (e.g. `batchHeadSha`)
+   *  — see docs/decisions/1ac74580-merge-landing-started.md's "Known residual" section for why the
+   *  caller (`mergeBatchTracked`, sessions/service.ts) needs this at all. */
+  landingStarted?: boolean;
+  /** Card b4080777 (Round 2) — mirrors {@link FastForwardResult.mayHaveLanded}: true iff this refusal
+   *  cannot rule out that canonical main actually advanced. The caller must exclude a `mayHaveLanded:true`
+   *  outcome from the terminal "aborted" write (see docs/decisions/b4080777-batch-ff-refused-terminal-event.md). */
+  mayHaveLanded?: boolean;
 }
 
 /**
@@ -1167,10 +1201,11 @@ export async function runBatchedMerge(
   if (!ff.ok) {
     return {
       ok: false, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
-      forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha,
+      forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha, landingStarted: true,
       ...(ff.quarantined ? { quarantined: true } : {}), ...(ff.branchDiverted ? { branchDiverted: true } : {}),
       ...(ff.unverified ? { unverified: true } : {}), ...(ff.observedBranch !== undefined ? { observedBranch: ff.observedBranch } : {}),
+      ...(ff.mayHaveLanded ? { mayHaveLanded: true } : {}),
     };
   }
-  return { ok: true, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate };
+  return { ok: true, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate, landingStarted: true };
 }

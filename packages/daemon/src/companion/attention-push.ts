@@ -115,6 +115,10 @@ export function framedDigest(lines: string[]): string {
  * RESOLUTION of a merge_request, not its own alert (matches web/attention.ts's latestMerge pairing, which
  * treats merge_done as clearing the pending state rather than raising a new one) — confirmed correct by
  * Code Review, KEEP AS-IS.
+ *
+ * @decision b4080777 — `merge_landing_aborted` is likewise DELIBERATELY excluded (no case below): a
+ * refused batch ff may still land via a real per-candidate solo fallback, so pushing a "merge-gate" alert
+ * here would be a spurious companion notification for an outcome that may not hold moments later.
  */
 export function classify(kind: string, detail: Record<string, unknown> | undefined): AttentionAlertClass | null {
   switch (kind) {

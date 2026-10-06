@@ -171,6 +171,9 @@ export function activeBootStuckAlerts(
 // staleGenerationAttributed`), which shares its taskId with the CURRENT generation by construction (a
 // re-task targets the same card) and must never win that key over the current generation's own, still-
 // live merge_request — or the "awaiting review" item built from this map never surfaces again for that task.
+// @decision b4080777 — `merge_landing_aborted` is DELIBERATELY excluded from this filter (checked, not
+// added): a refused batch ff may still land via a real per-candidate solo fallback, so surfacing it here
+// as a "latest merge" state would flicker the fleet UI to a rejection that a moment later may not hold.
 export function buildLatestMergeMap(events: readonly OrchestrationEvent[]): Map<string, OrchestrationEvent> {
   const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
   const latest = new Map<string, OrchestrationEvent>();

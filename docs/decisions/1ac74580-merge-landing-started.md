@@ -106,20 +106,32 @@ not a special case needing its own code: a human re-reviewing X is a real signal
 stale, unresolved landing attempt — the SAME "latest wins" rule `21b53e6a`'s own decided-outcome check
 already relies on (a `merge_cancelled` after a `merge_request` wins the same way).
 
-## Known residual (not fixed in this branch — follow-up card `b4080777`)
+## Known residual — CLOSED by follow-up card `b4080777`
 
-A REFUSED batch fast-forward (`fastForwardCanonicalMain` returns `ok:false` — forfeited, diverted,
-unverified, quarantined) leaves every candidate in that batch's `landed` set carrying its own
-`merge_landing_started` with no terminal event yet, since `onBeforeFastForward` fires BEFORE the
+A refused batch fast-forward (`fastForwardCanonicalMain` returns `ok:false` — forfeited, diverted,
+unverified, quarantined) used to leave every candidate in that batch's `landed` set carrying its own
+`merge_landing_started` with no terminal event following it, since `onBeforeFastForward` fires BEFORE the
 fast-forward's own outcome is known (it has to, by construction — the marker must precede the write it's
-named for). If that candidate is then re-tasked before a batch retry or solo fallback ever files a
-terminal event for it, a later `resolveStaleGenerationOwnLanding` pass can still raise a false
-`[loom:merge-orphaned]` on it — the exact failure mode this card otherwise removes, re-opened narrowly on
-this one path. Not a regression (pre-card, the SAME row would have escalated too, just via the older,
-cruder `hasMergeRequest`-only check) — a genuine residual gap this card does not close. Left for
-follow-up card `b4080777` rather than fixed here, since closing it properly needs either a terminal event
-on every batch-FF-refusal path per candidate, or widening the predicate's attribution attempt to try
-harder on this specific shape — both out of scope for this round.
+named for). If such a candidate was then re-tasked before anything else filed a terminal event for it, a
+later `resolveStaleGenerationOwnLanding` pass could still raise a false `[loom:merge-orphaned]` on it — the
+exact failure mode this card otherwise removes, re-opened narrowly on this one path. Not a regression
+(pre-card, the SAME row would have escalated too, just via the older, cruder `hasMergeRequest`-only check).
+
+Card `b4080777` closed this: `RunBatchedMergeResult.landingStarted` (git/batch-merge.ts) is now an explicit
+typed field marking every return constructed AFTER `onBeforeFastForward` fires, and `mergeBatchTracked`
+(sessions/service.ts) writes one `merge_landing_aborted` event per landed candidate — a NEW, dedicated
+kind, deliberately never `merge_rejected` — whenever `landingStarted` is set on a refused outcome.
+`resolveStaleGenerationOwnLanding`'s lifecycle query now includes `merge_landing_aborted`, so it correctly
+reads as the latest, decided event and the predicate's existing `latest.kind !== "merge_landing_started"`
+check already treats it as a no-op. The ONE outcome still deliberately left at `merge_landing_started` with
+no terminal write is `unverified` (the `--ff-only` call didn't throw — the landing most likely DID happen,
+so a terminal "aborted" write would be a false claim); that case is covered instead by the pre-existing
+trailer-based content-match attribution (`attributeStaleGenerationOwnLanding`, card `e5458ccd`), which finds
+the batch-landed `Loom-Worker-Branch`/`Loom-Worker-Base` trailer commit on mainline and resolves it to
+`attributed` rather than escalating. See `docs/decisions/b4080777-batch-ff-refused-terminal-event.md` for
+the full audit of why `merge_rejected` itself was rejected as the terminal-event kind (it drives a user
+webhook, a companion push alert, and the web fleet "latest merge" display — all wrong for the
+`forfeited`/generic-failure shapes, which still run a real per-candidate solo fallback that may yet land).
 
 ## Do not
 

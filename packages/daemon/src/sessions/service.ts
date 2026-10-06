@@ -19422,6 +19422,23 @@ export class SessionService {
           // Card 6f13746c: a genuine batch gate FAILURE feeds the interval state ONCE (no branch tip — `candidates: K`).
           if (result.gateFailed && !batchRedRecorded) await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
 
+          // @decision b4080777 — fires ONCE, centrally, ahead of every per-outcome branch below, so a
+          // refused ff never leaves a landed candidate stranded at `merge_landing_started`; never move
+          // this after the `forfeited`/`branchDiverted`/etc. checks.
+          // @decision b4080777 — gate on `result.mayHaveLanded`, never the narrower `result.unverified`
+          // alone: an ff-level unconfirmed-kill `quarantined`, a POST-ff sha-mismatched `branchDiverted`,
+          // and a generic ff-failure with a failed post-failure HEAD re-read can ALL mean main already landed.
+          if (result.landingStarted && !result.ok && !result.mayHaveLanded) {
+            for (const lb of result.landed) {
+              try {
+                this.db.appendEvent({
+                  id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId: lb.workerSessionId,
+                  taskId: lb.taskId, kind: "merge_landing_aborted", detail: { opId, batch: true, reason: "batch_ff_refused", batchReason: result.reason },
+                });
+              } catch (err) { console.warn(`[merge-batch] appendEvent(merge_landing_aborted) failed for worker ${lb.workerSessionId.slice(0, 8)} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+            }
+          }
+
           if (result.forfeited) {
             // currentMainSha is `string | undefined` on RunBatchedMergeResult (batch-merge.ts) — passed
             // through as-is rather than defaulted to null: appendEvent's JSON.stringify (db.ts) drops an
@@ -22805,7 +22822,10 @@ export class SessionService {
     // @decision 1ac74580 — a bare merge_request with no merge_landing_started after it is REVIEW-ONLY
     // (this confirm never reached its own irreversible landing write) — no-op, never attempt attribution
     // or escalate; that was the false "may need to be redone" this card removes.
-    const lifecycle = this.db.listEventsForWorkerKinds(s.id, ["merge_request", "merge_landing_started", "merge_done", "merge_rejected", "merge_cancelled"]);
+    // @decision b4080777 — merge_landing_aborted (a refused BATCH fast-forward, after its own
+    // merge_landing_started) must be queried here too, or it never becomes `latest` and this predicate
+    // wrongly still attempts attribution on a row already decided.
+    const lifecycle = this.db.listEventsForWorkerKinds(s.id, ["merge_request", "merge_landing_started", "merge_done", "merge_rejected", "merge_cancelled", "merge_landing_aborted"]);
     const latest = lifecycle[lifecycle.length - 1];
     if (!latest || latest.kind === "merge_request") return "no-op";
     if (latest.kind !== "merge_landing_started") return "no-op";

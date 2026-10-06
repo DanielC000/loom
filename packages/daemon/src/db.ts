@@ -1639,7 +1639,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "build_gate", "build_gate_retry_attempt", "build_gate_retry", "build_gate_single_file_retry",
   // Card 2ec00f6a: attempt 1's own verdict, written before the retry runs (it is a link of the same admission, card 68155573) — see its types.ts doc.
   "build_gate_single_file_retry_attempt",
-  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "merge_landing_started", "batch_merge_forfeited", "batch_merge_branch_diverted", "batch_merge_ff_unverified", "batch_merge_dropped", "batch_merge_branch_retained", "merge_branch_retained", "kill_switch",
+  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "merge_landing_started", "merge_landing_aborted", "batch_merge_forfeited", "batch_merge_branch_diverted", "batch_merge_ff_unverified", "batch_merge_dropped", "batch_merge_branch_retained", "merge_branch_retained", "kill_switch",
   // Incident / forensic record
   "session_died", "session_recovery_abandoned", "worker_report_undelivered", "worker_exited_without_report",
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",

@@ -27,7 +27,7 @@ function eventTone(e: AuditEvent): Tone {
       k === "context_escalated" || k === "request_escalated" || k === "session_recovery_abandoned" || k === "session_died" ||
       k === "schedule_fire_failed" || k === "worker_report_undelivered") return "red";
   if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker" ||
-      k === "schedule_fire_deferred" || k === "merge_landing_started") return "amber";
+      k === "schedule_fire_deferred" || k === "merge_landing_started" || k === "merge_landing_aborted") return "amber";
   if (k === "merge_done" || k === "recycle_complete" || k === "session_recovered") return "phosphor";
   if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "cyan";
   if (k === "deploy") return (e.detail as { ok?: boolean } | null)?.ok ? "phosphor" : "red";
@@ -55,6 +55,9 @@ function detailLine(e: AuditEvent): string {
     // card 1ac74580: fired right before the irreversible landing write — carries no branch by design
     // (see docs/decisions/1ac74580-merge-landing-started.md), so show the batch flag instead of blank.
     case "merge_landing_started": return d.batch ? "batch" : "";
+    // card b4080777: a refused batch fast-forward after its own merge_landing_started — carries no
+    // branch by design (same reader-inertness rule), so show the refusal reason instead of blank.
+    case "merge_landing_aborted": return (s("batchReason") || s("reason")).slice(0, 90);
     case "idle_report": return `${s("state")}${s("detail") ? ` — ${s("detail").slice(0, 80)}` : ""}`;
     case "idle_escalated": return `${s("unanswered")} unanswered nudges`;
     case "context_escalated": return `~${s("pct")}% context · ${s("unanswered")} ignored nudges`;

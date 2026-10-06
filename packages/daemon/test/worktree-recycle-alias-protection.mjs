@@ -46,6 +46,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // stale row's own landing (solo-squash union-chain via verifyReviewedTipChain directly, and a BATCH
 // landing via a sha-parameterized content match — neither ever keyed on the shared branch name), and a
 // Pass A2 staleGeneration guard (scope addition #2). See docs/decisions/e5458ccd-*.md for the full design.
+//
+// Card b4080777 adds Z: X's lifecycle ends at the NEW `merge_landing_aborted` kind (a refused batch
+// fast-forward's own terminal event, fired after X's own `merge_landing_started`) rather than a crash —
+// a DECIDED outcome, mirroring P's own shape (merge_cancelled), never attempted attribution or escalated.
+// The real event-write mechanics (mergeBatchTracked, forfeited/branchDiverted/ff-quarantined/unverified)
+// are covered end-to-end by merge-landing-aborted-batch-refusal.mjs; this fixture is the cheaper, focused
+// proof that `resolveStaleGenerationOwnLanding`'s lifecycle QUERY actually picks the new kind up as
+// `latest` and its predicate already treats it as decided — see docs/decisions/b4080777-*.md.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -581,6 +589,42 @@ async function setupRealRetaskReviewOnlyNeverConfirmed(tag, repo) {
   return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip };
 }
 
+// Fixture Z: card b4080777 — X's own confirm genuinely reached `merge_landing_started` (a real attempt),
+// but the batch fast-forward that followed it was REFUSED (forfeited/branchDiverted/ff-quarantined/a
+// generic ff failure) before X was re-tasked — so X's lifecycle now ends at the NEW `merge_landing_aborted`
+// kind, never a crash with nothing after the marker. A DECIDED outcome, mirroring fixture P's shape
+// (merge_cancelled) rather than N's (unresolvable, escalates). Pre-card b4080777 this kind didn't exist, so
+// X's lifecycle would have stayed at the bare `merge_landing_started` fixtures M/N/.../X already cover —
+// this fixture is specifically about the NEW terminal kind itself being recognized, not a crash scenario.
+async function setupRealRetaskOwnLandingBatchFfRefused(tag, repo) {
+  initRepo(repo);
+  const projId = `wrap-${tag}-proj-${sfx}`, agentId = `wrap-${tag}-agent-${sfx}`, taskId = `wrap-${tag}-task-${sfx}`;
+  const mgrId = `wrap-${tag}-mgr-${sfx}`, workerXId = `wrap-${tag}-workerx-${sfx}`, workerYId = `wrap-${tag}-workery-${sfx}`;
+  db.insertProject({ id: projId, name: `WRAP-${tag}`, repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const first = await createWorktree(repo, projId, taskId);
+  db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+  fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x work\n");
+  commitAll(first.worktreePath, "x", GIT_ID);
+  const xTip = git(first.worktreePath, "rev-parse HEAD");
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: { batch: true } });
+  // The batch's fast-forward is refused right here (mergeBatchTracked's own centralized write, card
+  // b4080777) — X is re-tasked before anything else could happen to its row.
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_aborted", detail: { batch: true, reason: "batch_ff_refused" } });
+
+  const second = await createWorktree(repo, projId, taskId); // re-task reuses X's exact path/branch
+  db.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+  fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+  commitAll(second.worktreePath, "y", GIT_ID);
+  execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "WRAP-${tag}-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: repo });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+  return { projId, taskId, mgrId, workerXId, workerYId, worktreePath: second.worktreePath, branch: second.branch, repo, xTip };
+}
+
 // Fixture P: card 21b53e6a ROUND 3 item 1 — X files its OWN merge_request but a manager reviewed it and
 // CANCELLED it (a real merge_cancelled event, chronologically AFTER the merge_request) before the re-task
 // ever happened — a DECIDED outcome, not a stuck landing. Pre-fix, `resolveStaleGenerationOwnLanding`
@@ -986,7 +1030,8 @@ const R_MAIN_REF_DIVERTED_UNION_TRAP = path.join(os.tmpdir(), `loom-wrap-v-${sfx
 const R_WATERMARK_UNREADABLE = path.join(os.tmpdir(), `loom-wrap-w-${sfx}`);
 const R_WATERMARK_UNRESOLVABLE_REF = path.join(os.tmpdir(), `loom-wrap-x-${sfx}`);
 const R_REVIEW_ONLY_NEVER_CONFIRMED = path.join(os.tmpdir(), `loom-wrap-y-${sfx}`);
-let A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y;
+const R_BATCH_FF_REFUSED = path.join(os.tmpdir(), `loom-wrap-z-${sfx}`);
+let A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z;
 
 try {
   A = await setupRecycleChain("a", R_PROTECTED);
@@ -1014,6 +1059,7 @@ try {
   W = await setupStaleAttributionWatermarkUnreadable("w", R_WATERMARK_UNREADABLE);
   X = await setupStaleAttributionWatermarkUnresolvableRef("x", R_WATERMARK_UNRESOLVABLE_REF);
   Y = await setupRealRetaskReviewOnlyNeverConfirmed("y", R_REVIEW_ONLY_NEVER_CONFIRMED);
+  Z = await setupRealRetaskOwnLandingBatchFfRefused("z", R_BATCH_FF_REFUSED);
 
   // --- sanity: both fixtures start identical (real worktree registered, branch exists, 0 commits, clean) ---
   check("(pre-A) worktree registered before reconcile", fs.existsSync(A.worktreePath) && isRegisteredWorktree(A.repo, A.worktreePath));
@@ -1100,6 +1146,10 @@ try {
     return evs.length === 1 && evs[0].kind === "merge_request";
   })());
   check("(pre-Y) X's own real commit never reached main — a real review, never a real landing attempt", !git(Y.repo, "log main --format=%H").includes(Y.xTip));
+  check("(pre-Z) X's lifecycle ends at the NEW merge_landing_aborted kind, after its own merge_landing_started", (() => {
+    const kinds = db.listEventsForWorker(Z.workerXId).map((ev) => ev.kind);
+    return kinds[kinds.length - 1] === "merge_landing_aborted" && kinds.includes("merge_landing_started") && kinds.includes("merge_request");
+  })());
 
   // --- THE RECONCILE --- A's successor and C's successor are protected (about to be resumed); B/D/E are
   // not protected at all (abandoned/genuine crash). Session insertion order above is predecessor-then-
@@ -1255,6 +1305,19 @@ try {
   check("(Y) NO undelivered nudge was enqueued to the manager for X's review-only merge_request — THE discriminating assertion against fixture N immediately above", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === Y.mgrId).length === 0);
   check("(Y) worker X's own event log is completely untouched — still exactly its one original merge_request, nothing appended by reconcile at all", db.listEventsForWorker(Y.workerXId).length === 1);
   check("(Y) worker Y (the re-task) is still independently finalized, unaffected", db.listEventsForWorker(Y.workerYId).some((ev) => ev.kind === "merge_done"));
+
+  // (Z) card b4080777 — X's lifecycle ends at merge_landing_aborted (a refused batch fast-forward's own
+  // terminal event), a DECIDED outcome exactly like P's merge_cancelled — never attempted attribution,
+  // never escalated. Pre-card (merge_landing_aborted didn't exist, so the query at the predicate's own
+  // lifecycle read wouldn't even fetch it): X's lifecycle would read as ending at merge_landing_started,
+  // triggering an attempted attribution that fails (no real landing exists for this fixture) and escalates
+  // — RED-proofed by temporarily reverting the `listEventsForWorkerKinds` array edit (dropping
+  // "merge_landing_aborted") and re-running this file.
+  check("(Z) worker X gets NO merge_done — never attributed (no real landing exists for this fixture)", db.listEventsForWorker(Z.workerXId).every((ev) => ev.kind !== "merge_done"));
+  check("(Z) worker X is NEVER tracked in the one-shot escalation store — a decided outcome never escalates", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== Z.workerXId));
+  check("(Z) NO undelivered nudge was enqueued to the manager for X's aborted batch landing", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === Z.mgrId).length === 0);
+  check("(Z) worker X's own event log is completely untouched by reconcile — still exactly its 3 original events", db.listEventsForWorker(Z.workerXId).length === 3);
+  check("(Z) worker Y (the re-task) is still independently finalized, unaffected", db.listEventsForWorker(Z.workerYId).some((ev) => ev.kind === "merge_done"));
 
   // (Q) card e5458ccd item 2 — the BATCH-landing content-match path (no Loom-Landed-Tip at all).
   check("(Q) worker X GETS a merge_done via the content-match path (Loom-Worker-Base, never the live branch ref)", db.listEventsForWorker(Q.workerXId).some((ev) => ev.kind === "merge_done" && ev.detail?.branch === null && ev.detail?.attributedLandedSha === Q.xLandedSha));
