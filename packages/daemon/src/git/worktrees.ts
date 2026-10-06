@@ -276,6 +276,14 @@ export function taskKey(taskId: string): string {
 }
 
 /**
+ * The exact shape {@link taskKey} always produces — 12 hex characters, by construction. Shared (never
+ * re-derived) so a repoKey check and this module's own worktree-cut backstop can never silently drift
+ * apart from what `taskKey` actually emits (card c994ffeb — the same drift class 98039b36's decision
+ * record warns against for `isRegisteredRepoKeyName`).
+ */
+export const TASK_KEY_SHAPE_RE = /^[0-9a-f]{12}$/i;
+
+/**
  * The deterministic worktree dir path `createWorktree` cuts for a task — same formula it uses
  * internally (taskKey + {@link WORKTREES_DIR} + projectId + optional repoKey axis, card 49136451).
  * Exported so a caller can know the path BEFORE calling createWorktree (card a5d9c458 —
@@ -294,6 +302,13 @@ let renameDirAsideImpl: RenameSyncFn = fs.renameSync;
  *  deterministic rename-FAILURE test for {@link renameWorktreeDirAside} needs this instead of relying on
  *  a real, platform-specific OS condition. `undefined` restores the real `fs.renameSync`. */
 export function __setRenameDirAsideForTest(fn?: RenameSyncFn): void { renameDirAsideImpl = fn ?? fs.renameSync; }
+
+let worktreeCollisionBackstopEnabled = true;
+/** Test-only seam (card c994ffeb): disables `createWorktree`'s repoKey/taskKey collision backstop so a
+ *  test can prove the backstop is actually load-bearing — reproduce the pre-fix nesting/wrongful-
+ *  rename-aside behavior on demand, rather than only asserting the backstop fires. Omit the arg (or pass
+ *  `true`) to restore the real, enabled check. */
+export function __setWorktreeCollisionBackstopForTest(enabled?: boolean): void { worktreeCollisionBackstopEnabled = enabled ?? true; }
 
 export interface RenameAsideResult {
   ok: boolean;
@@ -967,6 +982,32 @@ export async function createWorktree(
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
   const worktreePath = resolveWorktreePath(projectId, taskId, repoKey);
+  // Card c994ffeb — cut-time backstop against a repoKey spelled like (or, on a case-insensitive
+  // filesystem, case-colliding with) a task's own 12-hex worktree-dir name. `validateRepoRegistry`
+  // rejects this shape for a NEW repos key (projects/repos.ts), but a key grandfathered in via its own
+  // `existingKeys` exemption carries no such protection — this is the independent, structural backstop
+  // for that gap, checked on EVERY cut regardless of when the colliding key was registered, in BOTH
+  // directions (whichever of the two colliding tasks happens to be cut second).
+  if (worktreeCollisionBackstopEnabled) {
+    if (repoKey && repoKey !== "primary") {
+      // FORWARD: this task's own repo-axis dir (one level up from worktreePath) may already BE some
+      // OTHER task's PRIMARY worktree (that task's taskKey === this repoKey) — nesting a secondary-repo
+      // worktree inside it would silently plant it inside that other task's own checked-out tree.
+      const axisDir = path.dirname(worktreePath);
+      if (worktreeHasGitLink(axisDir)) {
+        throw new Error(`repoKey "${repoKey}" collides with an existing task worktree at ${axisDir} (it already has its own .git link) — refusing to cut a secondary-repo worktree nested inside it`);
+      }
+    } else if (fs.existsSync(worktreePath) && !worktreeHasGitLink(worktreePath)) {
+      // REVERSE: this PRIMARY task's own worktree dir may already BE a repo-axis dir (repoKey === this
+      // task's own taskKey) holding real nested worktrees for OTHER tasks — the ordinary "exists with no
+      // .git link" branch just below would otherwise mistake it for a half-removed orphan and rename the
+      // whole thing (and everything live nested inside it) aside.
+      const nestedChild = findNestedWorktreeLikeChild(worktreePath);
+      if (nestedChild) {
+        throw new Error(`${worktreePath} already exists and is not a half-removed orphan — it contains "${nestedChild}", itself a real git worktree (a taskKey-shaped name with its own .git link FILE) — refusing to cut a primary worktree over it`);
+      }
+    }
+  }
   // The repo's CURRENT HEAD — the fork point this worktree's branch is (or was) cut off, captured up
   // front so it's correct for every path below (fresh cut, reuse, and reattach all fork off THIS sha).
   // BOUNDED (card c801d688): a hung rev-parse now throws within the bound instead of stalling the spawn
@@ -2132,6 +2173,36 @@ export function uncommittedWorkFiles(porcelainZ: string): string[] {
  *  NOT a dead leftover here (git cannot read it, so it may still hold work — callers fail closed). */
 export function worktreeHasGitLink(worktreePath: string): boolean {
   return fs.existsSync(path.join(worktreePath, ".git"));
+}
+
+/**
+ * Find a child of `dirPath` that looks like a REAL repo-axis-held task worktree: its NAME matches
+ * {@link TASK_KEY_SHAPE_RE} AND its `.git` entry is a FILE (a worktree link), never a directory.
+ *
+ * @decision c994ffeb — never match on "any child with a `.git` entry" alone — that over-matches a
+ * half-removed orphan holding a real nested clone/submodule, refusing a cut that should be renamed
+ * aside instead, with an error that wrongly implies a colliding repoKey exists.
+ *
+ * Returns the matching child's NAME (so the caller's error can describe what was actually found, never
+ * asserting a specific repoKey exists) or `null` if nothing matches. Fails safe to `null` on any read
+ * error. Bounded `readdirSync`, never a recursive scan.
+ */
+function findNestedWorktreeLikeChild(dirPath: string): string | null {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || !TASK_KEY_SHAPE_RE.test(e.name)) continue;
+    try {
+      if (fs.statSync(path.join(dirPath, e.name, ".git")).isFile()) return e.name;
+    } catch {
+      // not a worktree-shaped child (no .git, or an unreadable one) — keep scanning.
+    }
+  }
+  return null;
 }
 export type WorktreeUncommittedState = { state: "clean" } | { state: "dirty"; files: string[] } | { state: "unknown"; reason: string };
 export async function readWorktreeUncommittedState(worktreePath: string, deps: BoundedGitDeps = {}): Promise<WorktreeUncommittedState> {

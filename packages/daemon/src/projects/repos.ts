@@ -4,7 +4,7 @@ import type { RepoRegistryEntry } from "@loom/shared";
 import { isGitRepo } from "../git/reader.js";
 import { expandTilde } from "../paths.js";
 import { splitGateSteps } from "../orchestration/gate-runner.js";
-import { STALE_ASIDE_SUFFIX_RE } from "../git/worktrees.js";
+import { STALE_ASIDE_SUFFIX_RE, TASK_KEY_SHAPE_RE } from "../git/worktrees.js";
 
 /**
  * Canonicalize a path that is KNOWN (or expected) to exist on disk, for both COMPARISON and STORAGE.
@@ -143,6 +143,17 @@ export async function validateRepoRegistry(
     // independent reclaim-time refusal for protection, not on this guard, regardless of when it was written.
     if (STALE_ASIDE_SUFFIX_RE.test(key) && !opts.existingKeys?.has(key)) {
       return { ok: false, error: `repos entry key "${key}" looks like a renamed-aside stale worktree leftover (matches the .stale-<ts> suffix) — this shape is reserved to avoid colliding with that leftover-detection machinery` };
+    }
+    // Card c994ffeb (Code Review b0369501 of card 98039b36, finding out-of-scope of that fix): the
+    // secondary repoKey axis dir (`WORKTREES_DIR/<project>/<repoKey>`) and a PRIMARY task's worktree dir
+    // (`WORKTREES_DIR/<project>/<taskKey>`) share one namespace — `taskKey` (git/worktrees.ts) always
+    // outputs exactly 12 lowercase hex chars (`sha256(taskId).slice(0,12)`), so a repoKey spelled the same
+    // way (or a case variant of one, on a case-insensitive filesystem) can alias a real task's worktree
+    // dir. Rejected for NEW keys only, same `existingKeys` grandfather posture as the STALE_ASIDE_SUFFIX_RE
+    // guard immediately above — a pre-existing colliding key is backstopped instead at worktree-cut time
+    // (see `createWorktree`'s own axis-dir collision check in git/worktrees.ts).
+    if (TASK_KEY_SHAPE_RE.test(key) && !opts.existingKeys?.has(key)) {
+      return { ok: false, error: `repos entry key "${key}" matches the shape of a task worktree key (12 hex characters) — this shape is reserved to avoid colliding with a primary task's worktree directory` };
     }
     if (seenKeys.has(key)) {
       return { ok: false, error: `repos entry key "${key}" is duplicated — keys must be unique` };
