@@ -6,7 +6,10 @@ follow-up, out of scope there.
 `GitWriter.commit`/`checkout`/`createBranch` (`git/writer.ts`) each wrap their canonical-index mutation in
 `withVaultPauseLease`, which calls `pauseVaultAutoCommit(this.repoPath)` before the mutation and
 `resumeVaultAutoCommit(this.repoPath, token)` in a `finally` — so `VaultVersioner`'s own debounced
-auto-commit tick never races a `GitWriter` op's write to the same repo's working tree/index.
+auto-commit tick skips a tick that STARTS while the lease is held. **Correction (card `a7de9d88`): this is
+weaker than "never races."** The lease is advisory and checked, not a lock — a tick whose own check already
+ran (and saw "not paused") a moment before `GitWriter` raises the lease has no way to see it; see "Does not
+cover" below for what this bracket, by itself, leaves open.
 
 `mergeBranch`/`mergeBranchLocked` (`git/worktrees.ts`) never called `pauseVaultAutoCommit` at all —
 confirmed by a repo-wide grep (zero matches for `pauseVaultAutoCommit`/`resumeVaultAutoCommit` in
@@ -26,6 +29,33 @@ Same bracket added to `fastForwardCanonicalMain` (`git/batch-merge.ts`), the bat
 canonical mutation point (the `git merge --ff-only` that advances canonical main) — the per-candidate
 cherry-pick landing itself happens in the batch WORKTREE, not the canonical repo, so that part needs no
 bracket; only the fast-forward does.
+
+## Does not cover (added by card `a7de9d88`'s Code Review)
+
+This bracket alone — an advisory lease, checked once by the caller before it ever starts its own
+add+commit work — narrows the race window but does not close it. Three real gaps, found in review:
+
+- **Tick TOCTOU.** `VaultVersioner`'s own debounce tick checks the lease once, then runs `commitVault`
+  (seconds of real work: `git add -A` + `git commit`). If the tick's own check passes at `t0` and a merge
+  pauses and stages its squash at `t0+ε`, the tick's `git add`/`git commit` can sweep the merge's
+  staged-but-uncommitted squash into a `loom: auto-commit`. **CLOSED** — not by this bracket, but by card
+  `a09b81a0` round 3's separate, independent fix: `commitVault` now takes the SAME canonical index lock a
+  real merge takes, around its ENTIRE add+commit sequence, whenever its commitPath is merge-eligible — so
+  the tick's own git-mutating work and a merge's squash+commit can no longer interleave at all, regardless
+  of lease timing. Proven (both RED-without and GREEN-with) in
+  `packages/daemon/test/vault-tick-merge-toctou.mjs`.
+- **Direct `commitVault` callers.** `vault/writer.ts`'s three UI-write functions (reached by REST/the
+  Setup operator/the Platform Lead/the core `vault_write` MCP tool) call `commitVault` directly and never
+  checked the lease at all pre-`a09b81a0`. **CLOSED** by the same `a09b81a0` fix — the canonical-lock wrap
+  and (round 4) the in-sequence lease check both live inside `commitVault`'s own `runCommitSequence`, the
+  one place every caller converges, so a direct writer call gets the identical protection. Covered by the
+  same test above (its vault/writer.ts scenario).
+- **Single-token clobber.** A lease held by one op can be silently cleared by a different op's own
+  `resumeVaultAutoCommit` call before the first op's own mutation finishes. NOT closed here — tracked by
+  sibling card `6e6b342d` (a multi-holder lease, taken inside the canonical lock).
+
+See `docs/decisions/a09b81a0-vault-commit-code-repo-guard.md`'s "Round 4: the pause-lease check's
+placement" section for the full design of what actually closes the first two gaps.
 
 ## Do not
 
