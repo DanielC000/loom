@@ -16,8 +16,74 @@ import {
   type AgentForbiddenProfileKey,
   type AgentListItem,
   type BoundAgentRef,
+  type CapabilityGrant,
   type ProfileGrantFields,
 } from "@loom/shared";
+
+/**
+ * The Profiles editor's own field record, as far as the grant computation reads it. STRUCTURAL on
+ * purpose — the editor's full `ProfileFields` satisfies it, so this module never imports from the page
+ * (which would drag JSX into a test that strips types only).
+ *
+ * Every member is a HUMAN-ONLY grant key, so a new one added to `AGENT_FORBIDDEN_PROFILE_KEYS` that the
+ * editor exposes a control for belongs here AND in {@link grantFieldsOfValues} below — the one place that
+ * pairing is made, and the one place a test can see it.
+ */
+export interface ProfileGrantFormValues {
+  connections: string[];
+  capabilities: CapabilityGrant[];
+  vaultWrite: boolean;
+  harness: "claude" | "codex";
+  browserTesting: boolean;
+  documentConversion: boolean;
+  /** The editor holds `allowDelta` as raw textarea text — one permission glob per line. */
+  allowText: string;
+}
+
+/** The editor's textarea spelling of `allowDelta`, normalized to the array the wire carries. */
+export const parseAllowDelta = (text: string): string[] =>
+  text.split("\n").map((s) => s.trim()).filter(Boolean);
+
+/**
+ * The editor's live field values projected into the grant slice `@loom/shared` compares — the "after"
+ * side of a pending save.
+ *
+ * `allowText` is PARSED here rather than compared raw: a whitespace-only edit must not read as a new
+ * permission grant.
+ *
+ * @decision 6eb31db4 — never pin a key here to a constant because no control exposes it yet: the pin
+ * outlives the control, `addedProfileGrants` then sees no change, and the grant saves with no confirm.
+ */
+export function grantFieldsOfValues(v: ProfileGrantFormValues): ProfileGrantFields {
+  return {
+    connections: v.connections,
+    capabilities: v.capabilities,
+    vaultWrite: v.vaultWrite,
+    harness: v.harness,
+    browserTesting: v.browserTesting,
+    documentConversion: v.documentConversion,
+    allowDelta: parseAllowDelta(v.allowText),
+  };
+}
+
+/**
+ * The STORED row's grant slice — the baseline a pending save is compared against, matching what the
+ * daemon itself compares on the other side of the wire (`existing` vs the merged result).
+ *
+ * Narrowing to exactly these keys is the point: a whole `ProfileSummary` carries computed state
+ * (`customized`, `updateAvailable`, …) that is no part of any grant.
+ */
+export function grantFieldsOfProfile(p: ProfileGrantFields): ProfileGrantFields {
+  return {
+    connections: p.connections,
+    capabilities: p.capabilities,
+    vaultWrite: p.vaultWrite,
+    harness: p.harness,
+    browserTesting: p.browserTesting,
+    documentConversion: p.documentConversion,
+    allowDelta: p.allowDelta,
+  };
+}
 
 /**
  * What the editor should do with a pending save.

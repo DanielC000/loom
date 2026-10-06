@@ -8,10 +8,12 @@
 //   1. Adding a grant with an agent bound opens the confirm, naming the agent and its project.
 //   2. CANCEL leaves the stored profile UNCHANGED (REST read-back) — the grant did not land.
 //   3. SAVE applies it, and the daemon files the `profile_grant_reach` audit event.
-//   4. NEGATIVE CONTROL: a grant-free edit (description only) saves straight through with NO confirm.
-//   5. FAIL-CLOSED: with the agents request ABORTED, the confirm STILL appears — and never claims zero.
+//   4. The same three, driven from the `vaultWrite` toggle (card 6eb31db4) — the key whose "after" value
+//      this editor used to PIN to `false`, so a tick that saves silently is the regression it guards.
+//   5. NEGATIVE CONTROL: a grant-free edit (description only) saves straight through with NO confirm.
+//   6. FAIL-CLOSED: with the agents request ABORTED, the confirm STILL appears — and never claims zero.
 //
-// (5) is the load-bearing one and the reason this spec exists alongside the unit test. The planner is
+// (6) is the load-bearing one and the reason this spec exists alongside the unit test. The planner is
 // pure, so a unit test supplies its own inputs and can never be wrong about WHEN the caller sampled them
 // (the 654869e2 lesson). Route-abort is the only way to hold the UI in the unresolved state for real and
 // prove `isSuccess ? data : null` is what Profiles.tsx actually passes, rather than `data ?? []`.
@@ -31,7 +33,7 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-interface SeededProfile { id: string; name: string; description: string; browserTesting?: boolean }
+interface SeededProfile { id: string; name: string; description: string; browserTesting?: boolean; vaultWrite?: boolean }
 interface SeededAgent { id: string; projectId: string; name: string; profileId: string | null }
 interface ReachEvent { kind: string; detail?: { profileId?: string; agentCount?: number; addedKeys?: string[]; source?: string } }
 
@@ -60,7 +62,9 @@ async function seedBoundRig(baseURL: string, label: string, createProject: (n: s
   const agent = await seedAgent(baseURL, project.id, `Bound Agent ${label}`);
   const bound = await bindAgent(baseURL, agent.id, profile.id);
   expect(bound.profileId).toBe(profile.id);          // the binding this card's whole computation keys off
-  expect(profile.browserTesting ?? false).toBe(false); // and the grant under test is genuinely absent first
+  // And every grant these tests tick is genuinely absent first, so a later `true` can only be this save.
+  expect(profile.browserTesting ?? false).toBe(false);
+  expect(profile.vaultWrite ?? false).toBe(false);
   return { profile, project, agent };
 }
 
@@ -71,6 +75,11 @@ const openProfile = async (page: import("@playwright/test").Page, baseURL: strin
 
 const browserToggle = (page: import("@playwright/test").Page) =>
   page.locator("label", { hasText: "Browser testing" }).locator('input[type="checkbox"]');
+
+/** The vaultWrite grant toggle (card 6eb31db4) — by testid, not by label text: its own copy names the
+ *  `vault_write` tool, so a hasText locator would also match the capability-picker rows describing it. */
+const vaultWriteToggle = (page: import("@playwright/test").Page) =>
+  page.getByTestId("profile-vault-write");
 
 /** Navigate IN-APP via the rail — a page.goto would build a fresh QueryClient and drop the very cache
  *  these tests exist to exercise.
@@ -130,6 +139,66 @@ test.describe("profile grant blast radius", () => {
     expect(events[0]?.detail?.addedKeys).toEqual(["browserTesting"]);
     expect(events[0]?.detail?.agentCount).toBe(1);
     expect(events[0]?.detail?.source).toBe("rest");
+  });
+
+  test("the vaultWrite toggle grants through the same confirm: Cancel withholds, Save persists", async ({ page, loomDaemon }) => {
+    // Card 6eb31db4. `vaultWrite` is a human-only grant with no agent write path at all, and until this
+    // card the editor had no control for it — only raw REST could set it, while CLAUDE.md promised the
+    // Profiles UI. It is also the key card 3c4e0df6's "after" adapter PINNED to `false`, so this test is
+    // the wiring half of that fix: if the pin came back, the tick below would still save, just silently
+    // and with no confirm — which is why Cancel's read-back (observable #2) is the load-bearing assertion
+    // here, not the confirm's appearance.
+    const { profile, project, agent } = await seedBoundRig(loomDaemon.baseURL, "vault", (n) => loomDaemon.createProject(n));
+
+    await openProfile(page, loomDaemon.baseURL, profile.name);
+    const toggle = vaultWriteToggle(page);
+
+    // BEFORE: the control exists (the whole point of this card), reads OFF, and nothing is prompted.
+    await expect(toggle).toBeVisible();
+    await expect(toggle).not.toBeChecked();
+    await expect(page.getByTestId("grant-reach-confirm")).toHaveCount(0);
+
+    // ACT: tick it and press Save. An EXERCISED control, not a rendered one — the tick must flip state.
+    await toggle.check();
+    await expect(toggle).toBeChecked();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+
+    // AFTER (observable #1): the confirm fires, names THIS grant by its human label, and names the real
+    // blast radius — proving the adapter now reports the live value rather than a pinned `false`.
+    const confirm = page.getByTestId("grant-reach-confirm");
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText("vault write");
+    await expect(page.getByTestId("grant-reach-count")).toContainText("1 agent");
+    await expect(page.getByTestId("grant-reach-agents")).toContainText(agent.name);
+    await expect(page.getByTestId("grant-reach-agents")).toContainText(project.name);
+
+    // ACT: Cancel.
+    await page.getByTestId("grant-reach-cancel").click();
+
+    // AFTER (observable #2): the confirm closes and the STORED row is untouched — asserted over REST,
+    // because the editor still holds the ticked box locally. That local tick never reached the store.
+    await expect(confirm).toHaveCount(0);
+    await expect(toggle).toBeChecked();
+    expect((await getProfile(loomDaemon.baseURL, profile.id)).vaultWrite ?? false).toBe(false);
+    expect(await reachEventsFor(loomDaemon.baseURL, profile.id)).toHaveLength(0);
+
+    // ACT: Save again, and confirm this time.
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(confirm).toBeVisible();
+    await page.getByTestId("grant-reach-save").click();
+
+    // AFTER (observable #3): the grant lands in the store — the re-GET is the before/after state change
+    // this card is actually about — and the daemon files its audit row naming the key.
+    await expect.poll(() => getProfile(loomDaemon.baseURL, profile.id).then((p) => p.vaultWrite)).toBe(true);
+    await expect.poll(async () => (await reachEventsFor(loomDaemon.baseURL, profile.id)).length).toBe(1);
+    const events = await reachEventsFor(loomDaemon.baseURL, profile.id);
+    expect(events[0]?.detail?.addedKeys).toEqual(["vaultWrite"]);
+    expect(events[0]?.detail?.agentCount).toBe(1);
+    expect(events[0]?.detail?.source).toBe("rest");
+
+    // And the editor settles: the save cleared `dirty`, so the row reads "saved" rather than offering a
+    // Save that can never settle (the stuck-dirty failure card 65aa951c's comparers exist to avoid).
+    await expect(page.getByText("saved", { exact: true })).toBeVisible();
   });
 
   test("NEGATIVE CONTROL: a grant-free edit saves with no confirm and no event", async ({ page, loomDaemon }) => {

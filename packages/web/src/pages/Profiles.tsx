@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant, ProfileGrantFields } from "@loom/shared";
+import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant } from "@loom/shared";
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, tone, type Tone } from "../theme";
@@ -13,7 +13,9 @@ import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
 import { changedFields, type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
 import { errorText } from "../lib/loopbackCredential";
-import { planGrantSave, type GrantSavePlan } from "../lib/profileGrantReach";
+import {
+  grantFieldsOfProfile, grantFieldsOfValues, parseAllowDelta, planGrantSave, type GrantSavePlan,
+} from "../lib/profileGrantReach";
 import { GrantReachConfirm } from "../components/GrantReachConfirm";
 import { useAllAgents } from "../lib/useAllAgents";
 
@@ -274,6 +276,7 @@ interface ProfileFields {
   model: string;
   browserTesting: boolean;
   documentConversion: boolean;
+  vaultWrite: boolean;
   restrictedTools: boolean;
   noCommit: boolean;
   harness: Harness;
@@ -292,6 +295,7 @@ const profileFieldsOf = (p: ProfileSummary): ProfileFields => ({
   model: p.model ?? "",
   browserTesting: p.browserTesting ?? false,
   documentConversion: p.documentConversion ?? false,
+  vaultWrite: p.vaultWrite ?? false,
   restrictedTools: p.restrictedTools ?? false,
   noCommit: p.noCommit ?? false,
   harness: harnessOf(p.harness),
@@ -300,34 +304,9 @@ const profileFieldsOf = (p: ProfileSummary): ProfileFields => ({
   capabilities: p.capabilities ?? [],
 });
 
-const parseAllowDelta = (text: string) => text.split("\n").map((s) => s.trim()).filter(Boolean);
-/** This editor's field shape projected into the grant slice `@loom/shared` compares (card 3c4e0df6).
- *  `allowText` is the editor's own spelling of `allowDelta`, so it is PARSED here — comparing the raw
- *  text would read a whitespace-only edit as a new permission grant. */
-const grantFieldsOfValues = (v: ProfileFields): ProfileGrantFields => ({
-  connections: v.connections,
-  capabilities: v.capabilities,
-  // Not an editor-exposed control today, so a save can never change it; the stored value is what the
-  // comparison baseline carries (grantFieldsOfProfile below), and false here can only ever read as
-  // "not newly granted" — never as a grant being revoked.
-  vaultWrite: false,
-  harness: v.harness,
-  browserTesting: v.browserTesting,
-  documentConversion: v.documentConversion,
-  allowDelta: parseAllowDelta(v.allowText),
-});
-
-/** The STORED row's grant slice — the baseline a pending save is compared against, matching what the
- *  daemon itself compares on the other side of the wire (`existing` vs the merged result). */
-const grantFieldsOfProfile = (p: ProfileSummary): ProfileGrantFields => ({
-  connections: p.connections,
-  capabilities: p.capabilities,
-  vaultWrite: p.vaultWrite,
-  harness: p.harness,
-  browserTesting: p.browserTesting,
-  documentConversion: p.documentConversion,
-  allowDelta: p.allowDelta,
-});
+// `parseAllowDelta` + the two grant-slice adapters (`grantFieldsOfValues` / `grantFieldsOfProfile`) live
+// in lib/profileGrantReach.ts, imported above: this file is JSX, so a unit test cannot reach them here.
+// Both adapters read their fields LIVE; the decision record for that rule is anchored there, not here.
 
 const sortedJson = (xs: readonly string[]) => JSON.stringify([...xs].sort());
 // Canonical per-grant JSON (key-sorted) so {slug,connectionId} order never spuriously trips dirty/save —
@@ -367,6 +346,11 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   const [model, setModel] = useState(profile.model ?? "");
   const [browserTesting, setBrowserTesting] = useState(profile.browserTesting ?? false);
   const [documentConversion, setDocumentConversion] = useState(profile.documentConversion ?? false);
+  // Confined vault-write grant (card be8be211). HUMAN-only — on AGENT_FORBIDDEN_PROFILE_KEYS, so this
+  // control and the loopback REST it drives are the ONLY way it can ever be set. Harness-agnostic:
+  // `profiles/field-consumers.ts` proves the loom-tasks router reads it LIVE per request on BOTH
+  // harnesses, so unlike the capability grants above there is nothing for codex to drop.
+  const [vaultWrite, setVaultWrite] = useState(profile.vaultWrite ?? false);
   const [restrictedTools, setRestrictedTools] = useState(profile.restrictedTools ?? false);
   const [noCommit, setNoCommit] = useState(profile.noCommit ?? false);
   // Which vendor CLI this rig spawns (card fa2277b6). Absent on the row ⇒ "claude", so an untouched
@@ -454,13 +438,14 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
 
   // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a patch below.
   const values: ProfileFields = {
-    name, role, description, allowText, icon, model, browserTesting, documentConversion,
+    name, role, description, allowText, icon, model, browserTesting, documentConversion, vaultWrite,
     restrictedTools, noCommit, harness, skills, connections, capabilities,
   };
   const applyFields = (v: ProfileFields) => {
     setName(v.name); setRole(v.role); setDescription(v.description); setAllowText(v.allowText);
     setIcon(v.icon); setModel(v.model); setBrowserTesting(v.browserTesting);
-    setDocumentConversion(v.documentConversion); setRestrictedTools(v.restrictedTools);
+    setDocumentConversion(v.documentConversion); setVaultWrite(v.vaultWrite);
+    setRestrictedTools(v.restrictedTools);
     setNoCommit(v.noCommit); setHarness(v.harness); setSkills(v.skills);
     setConnections(v.connections); setCapabilities(v.capabilities);
   };
@@ -533,6 +518,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     if (delta.has("model")) patch.model = sent.model.trim() || null;
     if (delta.has("browserTesting")) patch.browserTesting = sent.browserTesting;
     if (delta.has("documentConversion")) patch.documentConversion = sent.documentConversion;
+    if (delta.has("vaultWrite")) patch.vaultWrite = sent.vaultWrite;
     if (delta.has("restrictedTools")) patch.restrictedTools = sent.restrictedTools;
     if (delta.has("noCommit")) patch.noCommit = sent.noCommit;
     if (delta.has("harness")) patch.harness = sent.harness;
@@ -693,6 +679,26 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
           would report health for something that is not going to run — the same false green this card is
           about, one layer down. */}
       {documentConversion && harness !== "codex" && <MarkitdownProvisioning />}
+
+      {/* Vault write (card be8be211) — grouped with the capability grants above because it is one: a
+          human-only widening of what a session may do. Rendered as its own checkbox rather than a
+          registry row because it mounts no host process and binds no connection — it unhides ONE MCP
+          tool, gated live off the session row. No harness annotation, deliberately: the loom-tasks
+          router is mounted for every harness, so unlike the picker above nothing is dropped on codex. */}
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+        <input type="checkbox" data-testid="profile-vault-write" checked={vaultWrite}
+          onChange={(e) => setVaultWrite(e.target.checked)} style={{ marginTop: 2 }} />
+        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={fieldLabel}>Vault write</span>
+          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            Let a session under this rig write notes into its OWN project's vault — the vault_write tool
+            may create a new file or overwrite an existing one, and nothing else: there is no delete, and
+            no path outside that project's vault root. Off by default; the tool is hidden entirely, not
+            merely refused, until you turn this on. Grant it to a rig whose job is to leave durable notes
+            (research, design write-ups); leave it off for anything that only needs to read the vault.
+          </span>
+        </span>
+      </label>
 
       {/* Opt-in restricted tools: a session under this rig spawns with the dangerous NATIVE tools (raw
           shell + host-writes) removed from the model's tool list. Blast-radius control for a chat-reachable
@@ -1023,6 +1029,7 @@ const FIELD_DISPLAY: Record<string, string> = {
   ...HARNESS_FIELD_LABELS,
   role: "Role", description: "Description", icon: "Icon",
   noCommit: "No-commit role", connections: "Connections", harness: "Harness",
+  vaultWrite: "Vault write",
   // The editor's own ProfileFields keys that have no schema-field twin above (card 65aa951c's conflict
   // notice names fields by this map, and `allowDelta` is held in the form as raw text).
   name: "Name", allowText: HARNESS_FIELD_LABELS.allowDelta,
