@@ -124,9 +124,26 @@ try {
   // the OUTER subshell backgrounds an INNER one and returns immediately, so by the time the kill-trigger's
   // tree-kill walks the tree, the escaped descendant is already unreachable by a PPID-walking kill. Here
   // it's installed on a branch's SECOND commit, landing mid-batch (not the solo squash path).
-  const SMALL_MS = 2000;
-  const S_HOLD_MS = 2 * SMALL_MS + 4000; // comfortably past withTimeoutKillingChild's own give-up deadline
-  const S_MAIN_MS = 15000;
+  // Card 5126718f: these were 2000/8000/15000. Diagnosed a host-load flake in scenario (E) (and, per a
+  // later baseline measurement, (B) too — both share these consts) — reproduced at ~1/20 and ~9/40 under
+  // real, saturating 100%-CPU host contention (14 genuine OS processes, not async callbacks in one
+  // thread) vs. 0/25 at idle. Root cause is test-only: the plain git-spawn-and-complete overhead for this
+  // call chain (canonical-index lock + HEAD read + the `--ff-only` merge itself, BEFORE the hook is even
+  // reached) was measured up to ~7.2s under that load — exceeding the OLD 2000ms kill-trigger budget
+  // before the hook's escaping descendant ever got forked, so the kill either lands on a bare unescaped
+  // "git" child (a correctly-CONFIRMED, non-quarantined failure — production behaved exactly as designed,
+  // just not the shape this scenario means to exercise) or, when the merge happens to finish first, a
+  // bare `{ok:true}` with no hook invocation at all (confirmed via an added "hook-invoked.marker" written
+  // as the hook's own first line, before its sleep: it was absent in the reproduced failures).
+  // SMALL_MS gives ~40% headroom over that measured 7.2s worst case — the hook only needs to OUTLIVE the
+  // kill-trigger deadline (2*SMALL_MS) by a margin, not hold for some large multiple of it, so S_HOLD_MS
+  // keeps the ORIGINAL file's own margin convention (+4000 over the give-up deadline) scaled to the new
+  // SMALL_MS, to bound this file's own standalone wall time (merge-quarantine-batch.mjs carries a
+  // test-daemon.mjs per-file timeout override sized off a measured max — see that file's own comment).
+  const SMALL_MS = 10000;
+  const S_HOLD_MS = 2 * SMALL_MS + 4000; // comfortably past withTimeoutKillingChild's own give-up deadline (2*SMALL_MS)
+  const S_MAIN_MS = SMALL_MS + 10000;
+  const AUTO_CLEAR_POLL_MS = S_HOLD_MS + 10000;
   const markerName = "escaped-descendant-b.marker";
   function installDoubleForkedPreCommitHook(repo, holdMs, mainMs) {
     const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
@@ -169,12 +186,12 @@ try {
 
     // POSITIVE CONTROL: prove the escaped descendant genuinely ran (this scenario is not vacuous) — a
     // bounded poll on the real event, never a single fixed-length guessed sleep.
-    const markerAppeared = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: S_HOLD_MS + 5000 });
+    const markerAppeared = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: S_HOLD_MS + 10000 });
     check("(B) the escaped descendant's marker write IS eventually observed (proves it genuinely ran, not skipped)", markerAppeared);
 
     // AUTO-CLEAR: once the descendant's own exit lets confirmation finally arrive, the quarantine lifts —
     // bounded poll on the real internal state, never a fixed guessed sleep.
-    const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: 20000 });
+    const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: AUTO_CLEAR_POLL_MS });
     check("(B) the quarantine auto-clears once the real tree-death confirmation eventually arrives", autoCleared);
 
     // Clean up the now-irrelevant slow hook + the (still staged, from the interrupted commit 2) residue
@@ -312,11 +329,11 @@ try {
 
     // POSITIVE CONTROL: the escaped descendant genuinely ran (this scenario is not vacuous) — a bounded
     // poll on the real event, never a single fixed-length guessed sleep.
-    const markerAppeared = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: S_HOLD_MS + 5000 });
+    const markerAppeared = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: S_HOLD_MS + 10000 });
     check("(E) the escaped descendant's marker write IS eventually observed (proves it genuinely ran)", markerAppeared);
 
     // AUTO-CLEAR: once the descendant's own exit lets confirmation finally arrive, the quarantine lifts.
-    const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: 20000 });
+    const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: AUTO_CLEAR_POLL_MS });
     check("(E) the quarantine auto-clears once the real tree-death confirmation eventually arrives", autoCleared);
 
     fs.rmSync(path.join(repo, ".git", "hooks", "post-merge"), { force: true });
