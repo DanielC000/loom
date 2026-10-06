@@ -69,6 +69,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitUntilInvoked(getRelease, label, timeoutMs = 5000, intervalMs = 25) {
   return sharedWaitUntil(() => typeof getRelease() === "function", { timeoutMs, intervalMs, label });
 }
+
+// Card 5eec2835: drains any SURFACED-PENDING run_gate op's background settle-nudge before this file's own
+// db.close() runs. `runWorkerGate` (service.ts) races its own settle against SYNC_ATTACH_BUDGET_MS (12s);
+// a call that loses that race (surfaces `{settled:false, op, ...}`) later settles via a FIRE-AND-FORGET
+// `onSettledAfterPending` callback that still touches `this.db` (resolveSettleNudgeTarget →
+// isSupersededByRecycle → db.hasSuccessor) — detached from anything a caller's own `Promise.all` awaits.
+// On a sufficiently loaded host, the queue-wait a second worker's own op spends behind a first one's
+// (every scenario below that calls `runWorkerGate` twice) can occasionally exceed that 12s budget,
+// surfacing pending for real; without this drain, this file's own `finally { db.close() }` can then race
+// that background nudge and crash the whole process with "database connection not open" — the exact
+// defect this card reports (seen once in the wild, 2026-10-06). A result that never surfaced pending
+// (`settled !== false` — the overwhelming common case) has nothing to drain; this is then a no-op. See
+// the dedicated "(regression)" scenario below for a DETERMINISTIC (not host-load-dependent) RED/GREEN
+// proof that this exact race is real and that this drain closes it.
+async function drainSurfacedPendingGates(results, enqueued, timeoutMs = 15000) {
+  for (const r of results) {
+    if (r && r.settled === false && r.op?.opId) {
+      await sharedWaitUntil(
+        () => enqueued.some((args) => typeof args[1] === "string" && args[1].includes(`op ${r.op.opId}`)),
+        { timeoutMs, intervalMs: 25, label: `drain surfaced-pending gate op ${r.op.opId.slice(0, 8)}'s settle-nudge before db.close` },
+      );
+    }
+  }
+}
 // Card 7b3a585a (from the 7b634e58 audit): `runWorkerGate` reads a REAL async git subprocess
 // (`computeWorktreeGateStamp`) BEFORE the semaphore ever sees the op, so "issue op 1, then op 2" does NOT
 // by itself guarantee op 1 is ADMITTED first — that depends on how long each op's git subprocess takes,
@@ -143,7 +167,8 @@ function makeRepo(repo) {
       if (worktreePath === wt1.worktreePath) release1 = res;
       else release2 = res;
     });
-    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const enqueued = []; // card 5eec2835: captured so drainSurfacedPendingGates can observe nudge delivery
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin: (...args) => { enqueued.push(args); return { delivered: false }; } };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
 
     const p1 = sessions.runWorkerGate(w1).catch((e) => { console.error("p1 rejected:", e); });
@@ -226,7 +251,8 @@ function makeRepo(repo) {
     const afterAll = sessions.gateQueueForManager(P1);
     check("(unit) registry empty once both settle (no leaked entries)", afterAll.running.length === 0 && afterAll.queued.length === 0 && afterAll.activeCount === 0 && afterAll.queuedCount === 0);
 
-    await Promise.all([p1, p2]);
+    const [r1, r2] = await Promise.all([p1, p2]);
+    await drainSurfacedPendingGates([r1, r2], enqueued); // card 5eec2835 — see its own doc above
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
     for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -267,7 +293,8 @@ function makeRepo(repo) {
       if (worktreePath === wt1.worktreePath) release1 = res;
       else release2 = res;
     });
-    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const enqueued = []; // card 5eec2835: captured so drainSurfacedPendingGates can observe nudge delivery
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin: (...args) => { enqueued.push(args); return { delivered: false }; } };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     const router = new OrchestrationMcpRouter(db, sessions);
 
@@ -326,7 +353,8 @@ function makeRepo(repo) {
     await sleep(200);
     const afterAll = await mgr.call("gate_queue");
     check("(e2e, MCP) empty once both settle", afterAll.running.length === 0 && afterAll.queued.length === 0);
-    await Promise.all([p1, p2]);
+    const [r1, r2] = await Promise.all([p1, p2]);
+    await drainSurfacedPendingGates([r1, r2], enqueued); // card 5eec2835 — see its own doc above
     await mgr.client.close();
 
     // Role gate: gate_queue IS on the worker's pinned depth-1 surface as of card d04f9c76 (mgmt-surface.mjs
@@ -386,7 +414,8 @@ function makeRepo(repo) {
       if (mode === "timeout") return { passed: false, failedTimedOut: true, failedSignal: "SIGKILL" };
       return new Promise((res) => { releaseSecond = res; });
     };
-    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const enqueued = []; // card 5eec2835: captured so drainSurfacedPendingGates can observe nudge delivery
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin: (...args) => { enqueued.push(args); return { delivered: false }; } };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
       runGate: fakeGate,
       reapWorktreeProcesses: async () => ({ killedPids: [] }), // stub — no real OS process scanning in this test
@@ -431,9 +460,161 @@ function makeRepo(repo) {
     const afterPass = sessions.gateQueueForManager(P);
     check("(unit, streak) registry empty once the second (passing) op settles", afterPass.running.length === 0 && afterPass.queued.length === 0);
     check("(unit, streak) a PASSING result clears the streak back to 0", sessions.gateTimeoutStreakCount(wt.branch) === 0);
-    await p2;
+    const r2 = await p2;
+    await drainSurfacedPendingGates([first, r2], enqueued); // card 5eec2835 — see its own doc above
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+    for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// ── (regression, card 5eec2835) RED — gate-queue.mjs occasionally crashed with "database connection not
+// open" from a runWorkerGate settle-nudge (resolveSettleNudgeTarget → isSupersededByRecycle →
+// db.hasSuccessor) firing after a scenario's own db.close(). Seen once in the wild (2026-10-06, worker
+// 01fad1d8 on 59986602's branch); Code Reviewer c9f63250 got 3/3 clean runs and judged it pre-existing
+// and test-only — gate-queue.mjs never reaches the parked-wait production code on the branch under
+// review, so the branch under review cannot have caused it (confirmed independently here too: the real
+// daemon's own graceful teardown, packages/daemon/src/index.ts's `gracefulShutdown`, never calls
+// `db.close()` at all — only the boot-time shutdown STUB does, before any session/gate could possibly
+// exist — so production never races a live settle against a close; this file's own throwaway-db
+// teardown is the only place that can).
+//
+// FORCED DETERMINISTICALLY, never via host load (this card's own LOAD prohibition): `syncAttachBudgetMs`
+// is an existing test-only DI seam on SessionService (service.ts; the SAME technique
+// merge-confirm-completion-nudge.mjs already uses for an analogous merge-side race) — a tiny value makes
+// THIS op's own sync-attach race (pending-ops.ts: `Promise.race([e.settle, sleep(waitMs)])`) lose in
+// milliseconds against a fakeGate the test holds open on purpose, instead of needing the real 12s
+// SYNC_ATTACH_BUDGET_MS to elapse or betting on a slow host. Once that race is lost
+// (`surfacedPending:true`), the eventual settle's `onSettledAfterPending` callback is a FIRE-AND-FORGET
+// background task — closing the db immediately afterward, in the SAME synchronous turn (no `await`
+// between releasing the fakeGate and calling `db.close()`), deterministically beats every microtask in
+// that background chain to the punch: JS always drains the current synchronous turn before any queued
+// microtask runs, so this ordering is guaranteed, not probabilistic. ──────────────────────────────────
+{
+  const worktrees = [];
+  const unhandled = [];
+  const onUnhandled = (err) => unhandled.push(err);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    // NEGATIVE CONTROL FIRST (mirrors daemon-restart-single-flight.mjs's identical pattern): proves the
+    // listener above is a real, working instrument before trusting a clean (or dirty) read from it below.
+    {
+      const rejecting = Promise.reject(new Error("synthetic rejection for the negative control"));
+      void rejecting.finally(() => {}); // the general bare-`.finally()`-on-a-rejecting-promise hazard
+      await new Promise((r) => setImmediate(r));
+      check("(regression, negative control) a bare `.finally()` on a rejecting promise DOES produce an unhandledRejection — proves the listener is real, not vacuously green",
+        unhandled.length === 1);
+      unhandled.length = 0;
+    }
+
+    const db = new Db();
+    const P = `gq-settle-race-red-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    registerForCleanup(repo);
+    db.insertProject({ id: P, name: "Settle Race RED", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "ra1", projectId: P, name: "dev-1", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`;
+    db.insertTask({ id: taskId, projectId: P, title: "Settle race task", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wt = await createWorktree(repo, P, taskId);
+    worktrees.push(wt.worktreePath);
+    const w = `${P}-wkr`;
+    db.insertSession({ id: w, projectId: P, agentId: "ra1", engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId, worktreePath: wt.worktreePath, branch: wt.branch });
+
+    let release;
+    const fakeGate = async () => new Promise((res) => { release = res; });
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin: () => ({ delivered: false }) };
+    // The controlled seam: forces this op's sync-attach race to lose in ~10ms instead of the real 12s.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: 10 });
+
+    const r = await sessions.runWorkerGate(w);
+    check("(regression, RED) a 10ms sync-attach budget forces this op to surface pending before the fakeGate ever resolves",
+      r.settled === false && typeof r.op?.opId === "string");
+
+    await waitUntilInvoked(() => release, "(regression, RED) the fakeGate assignment");
+    // Release the fakeGate, then close the db in the SAME synchronous turn — no drain. The background
+    // settle (fakeGate resolving → the gate-semaphore callback → runWorkerGate's own closure finishing →
+    // PendingOpRegistry's `.then` → `onSettledAfterPending`) is still genuinely mid-flight: it has real
+    // async git-subprocess reads ahead of it (computeWorktreeGateStamp/resolveGitRef) that cannot
+    // possibly have completed in the zero elapsed time between this line and the next.
+    release({ passed: false, failedTimedOut: false });
+    db.close();
+
+    // Let the background settle actually run its course against the now-closed db — POLL for the
+    // unhandledRejection rather than a fixed sleep: the real async git-subprocess reads ahead of it
+    // (computeWorktreeGateStamp/resolveGitRef) take genuinely variable real time, and a fixed sleep too
+    // short here wouldn't prove absence, it would just hand the LATE rejection to whichever scenario's
+    // listener happens to be installed when it finally fires (confirmed: an earlier 500ms version of this
+    // wait caused exactly that — the rejection arrived late and was caught by the GREEN scenario below
+    // instead, failing both checks for the wrong reason).
+    try {
+      await sharedWaitUntil(() => unhandled.length > 0, { timeoutMs: 5000, intervalMs: 25, label: "(regression, RED) waiting for the unhandledRejection the defect produces" });
+    } catch { /* a timeout here is itself informative — the check below reports it as a FAIL */ }
+    check("(regression, RED) closing the db while this op's settle was still in flight DOES produce an unhandledRejection — the exact defect card 5eec2835 reports",
+      unhandled.some((e) => /database connection|not open/i.test(String(e?.message ?? e))));
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
+    // `db` was already closed deliberately above — that IS this scenario's subject, not an oversight.
+  }
+}
+
+// ── (regression, card 5eec2835) GREEN — the SAME forced-pending precondition as RED above, but applying
+// the actual fix (drainSurfacedPendingGates, used for real in the (unit)/(e2e, MCP)/(unit, streak)
+// scenarios earlier in this file): wait for the surfaced-pending op's settle-nudge to actually be
+// delivered (observed via the captured `enqueueStdin` call — the SAME `op ${opId}` substring every
+// settle nudge embeds, regardless of outcome shape) before closing the db. Proves the fix actually
+// closes the race RED just demonstrated, rather than merely looking plausible. ───────────────────────
+{
+  const worktrees = [];
+  const unhandled = [];
+  const onUnhandled = (err) => unhandled.push(err);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const db = new Db();
+    const P = `gq-settle-race-green-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    registerForCleanup(repo);
+    db.insertProject({ id: P, name: "Settle Race GREEN", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "ga1", projectId: P, name: "dev-1", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`;
+    db.insertTask({ id: taskId, projectId: P, title: "Settle race task", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wt = await createWorktree(repo, P, taskId);
+    worktrees.push(wt.worktreePath);
+    const w = `${P}-wkr`;
+    db.insertSession({ id: w, projectId: P, agentId: "ga1", engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId, worktreePath: wt.worktreePath, branch: wt.branch });
+
+    let release;
+    const fakeGate = async () => new Promise((res) => { release = res; });
+    const enqueued = [];
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin: (...args) => { enqueued.push(args); return { delivered: false }; } };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: 10 });
+
+    const r = await sessions.runWorkerGate(w);
+    check("(regression, GREEN) the same forced-pending precondition as RED", r.settled === false && typeof r.op?.opId === "string");
+
+    await waitUntilInvoked(() => release, "(regression, GREEN) the fakeGate assignment");
+    release({ passed: false, failedTimedOut: false });
+    await drainSurfacedPendingGates([r], enqueued); // THE FIX — see its own doc above
+    db.close();
+
+    // No fixed-duration margin here, deliberately: `drainSurfacedPendingGates` already observed the
+    // settle-nudge's `enqueueDurableMessage` call land (the `enqueued` capture), which happens AFTER
+    // `resolveSettleNudgeTarget`'s own db access inside `onSettledAfterPending` — the only db touch
+    // anything downstream of it (`shouldCancelSettleWakeAfter`/`autoCancelSettleWakes`) is wrapped in the
+    // SAME try/catch as that enqueue call — so there is nothing left pending to wait out. `setImmediate`
+    // (not a guessed-duration sleep — same documented idiom as this file's own negative-control block
+    // above, and daemon-restart-single-flight.mjs's identical CRITICAL section) just lets Node's
+    // unhandledRejection tracker, which fires on a later event-loop phase than the microtask queue a
+    // rejection settles on, run its course for whatever already resolved by the time `drain` returned.
+    await new Promise((r2) => setImmediate(r2));
+    check("(regression, GREEN) draining before db.close() produces NO unhandledRejection — the fix closes the exact race RED proved above",
+      unhandled.length === 0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    // `db` was already closed above, right after the drain — that IS this scenario's point, not an
+    // oversight (there is no second db to close here, unlike every other scenario's own `dbs` array).
     for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
