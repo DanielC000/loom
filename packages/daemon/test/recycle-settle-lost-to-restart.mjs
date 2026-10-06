@@ -46,6 +46,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       3 — the [loom:orphaned-fleet] banner is un-archived back onto the live rail, not left invisible.
 //   (G) NORMAL SETTLE (no restart) clears the marker — the live in-memory loop resolves normally within
 //       one boot; proves the marker is cleared and a later reconcile pass is then a total no-op.
+//   (M) LATE RESOLUTION ACROSS A RESTART (card eddb768a) — a genuine recycle_fleet_unresolved alert
+//       already fired for M1 before the restart; M2 then durably reaches ready; the restart lands before
+//       the live loop's own next poll ever files recycle_fleet_resolved itself. Proves the deferred-
+//       success branch closes this out with exactly one recycle_fleet_resolved event, that the durable
+//       trail (latestMatchingUnresolvedSettleEvent) no longer matches afterwards, and that a stale
+//       escalation question filed after the alert is cancelled.
 //
 // RESTART SIMULATION: `new Db()` (no path arg) always opens the SAME fixed file, derived once from
 // LOOM_HOME at module-load time — so within one scenario, constructing a SECOND {Db, PtyHost} pair
@@ -86,6 +92,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -127,6 +134,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const { reconcileStrandedRecycleSettlesEarly } = await import("../dist/sessions/recycle-settle-reconcile.js");
+const { latestMatchingUnresolvedSettleEvent } = await import("../dist/orchestration/crash-orphaned-workers.js");
 const { runBootRecoveryPrefix } = await import("../dist/sessions/boot-backstop.js");
 // Card 062fa934: every resumeFleetOnBoot call in this corpus must pass a deployStaleness fixture — the
 // real currentDeployStaleness() read is slow and can flip non-deterministically on a cache-replayed build.
@@ -622,6 +630,11 @@ try {
     check("(D) FIX: the fleet stays on M2, untouched", db2.getSession(workerId)?.parentSessionId === m2.id);
     check("(D) no recycle_fleet_recovered/stranded event fabricated for a legitimate live successor",
       db2.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered" || e.kind === "recycle_fleet_stranded_across_restart").length === 0);
+    // Card eddb768a negative control: no prior unresolved alert ever existed, so the deferred-success
+    // branch must NOT append recycle_fleet_resolved either — an ordinary successful restart stays
+    // audit-silent, exactly like the live settle loop's own un-alerted ready branch.
+    check("(D) FIX card eddb768a: no recycle_fleet_resolved event fabricated — there was no prior alert to close",
+      hasEvent(db2, m1.id, "recycle_fleet_resolved") === false);
   }
 
   // ==================== (E) PLATFORM LEAD, RECOVERED — daemon_restart path ====================
@@ -760,6 +773,59 @@ try {
     check("(H) FIX: M2 is unlinked + archived", db2.getSession(m2.id)?.recycledFrom === null && !!db2.getSession(m2.id)?.archivedAt);
     check("(H) FIX: M2 stays dead after resumeFleetOnBoot — never resurrected", host2.isAlive(m2.id) === false);
     check("(H) FIX: M2 is filtered as a retired recycle successor, not merely an ordinary resume failure", retiredSkipped.includes(m2.id) && !resumed.includes(m2.id) && !failed.includes(m2.id));
+  }
+
+  // ==================== (M) LATE RESOLUTION ACROSS A RESTART — card eddb768a ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rslr-m";
+    seedProject(db1, P);
+    db1.setProjectConfig(P, { permission: { startupModeCycles: 0 } }); // markReady runs SYNCHRONOUSLY off the hook below
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-m" });
+    writeFakeTranscript(m1.cwd, "eng-m1-m");
+    const { workerId } = seedFleet(db1, sessions1, P, m1.id);
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — a prior unresolved alert already fired, then the successor reaches ready, then a restart lands");
+
+    // Simulate the live settle loop having already crossed its timeout and alerted BEFORE the successor
+    // reached ready (e07b1b1a's own documented race) — write the durable event directly, matching this
+    // file's own synchronous-restart-simulation discipline rather than waiting out the real bound.
+    const alertedAt = new Date().toISOString();
+    db1.appendEvent({ id: randomUUID(), ts: alertedAt, managerSessionId: m1.id, kind: "recycle_fleet_unresolved", detail: { deadSuccessorId: m2.id, oldStillLive: true, reason: "timeout" } });
+    check("(M pre) FIX: the durable unresolved alert is recorded for M1", hasEvent(db1, m1.id, "recycle_fleet_unresolved"));
+
+    // A predecessor stuck in this window could escalate via the ca0111a3 carve-out — seed exactly such a
+    // pending question, created strictly AFTER the alert, so cancelStaleEscalationQuestions has something
+    // real to cancel.
+    const escalationQId = `${m1.id}-escalation-q`;
+    db1.insertQuestion({ id: escalationQId, sessionId: m1.id, projectId: P, title: "escalate", body: "ask a human to hard-stop the successor", state: "pending", createdAt: new Date(Date.parse(alertedAt) + 1000).toISOString() });
+
+    // NOW the successor reaches ready, durably — the live loop's NEXT poll (lost to the restart below)
+    // would have observed this itself and filed recycle_fleet_resolved; the restart beats it to the punch.
+    host1.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: "eng-m2-m" });
+    writeFakeTranscript(m2.cwd, "eng-m2-m");
+    check("(M pre) FIX: M2 durably reached ready (reachedReadyAt set)", db1.getSession(m2.id)?.reachedReadyAt != null);
+
+    const preRestartFleet = sessions1.liveFleetResumeSet();
+    db1.close();
+    const { db: db2, host: host2 } = makeBoot();
+    const { sessions: sessions2, finish } = runRealBootSequenceUpToResume(db2, host2);
+    check("(M) FIX: M2 is classified + VERIFIED as the confirmed-live successor via a real resume() attempt", finish.confirmedLiveSuccessors.includes(m2.id));
+    check("(M) FIX: M1 is NOT in recoveredPredecessors", !finish.recoveredPredecessors.includes(m1.id));
+
+    const resolved = db2.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_resolved");
+    check("(M) FIX card eddb768a: exactly one recycle_fleet_resolved event naming the successor", resolved.length === 1 && resolved[0].detail?.successorId === m2.id);
+    // Code Review 0418e87d: currentUnresolvedSettleSuccessor can't discriminate here — M2's own
+    // reachedReadyAt short-circuits it before the event trail is ever consulted (it stayed GREEN even in
+    // the RED phase, against unfixed code). Assert the durable trail directly instead.
+    check("(M) FIX card eddb768a: latestMatchingUnresolvedSettleEvent now returns undefined for M1/M2", latestMatchingUnresolvedSettleEvent(db2, m1.id, m2.id) === undefined);
+    check("(M) FIX card eddb768a: the stale escalation question is cancelled, with history retained", db2.getQuestion(escalationQId)?.state === "cancelled");
+
+    const restartIntent = { reason: "test", managerSessionId: m2.id, resume: preRestartFleet };
+    await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
+    check("(M) FIX: M2 is ACTUALLY resumed (live)", host2.isAlive(m2.id) === true);
+    check("(M) FIX: M1 stays correctly superseded — NEVER resumed", host2.isAlive(m1.id) === false);
+    check("(M) FIX: the fleet stays on M2, untouched", db2.getSession(workerId)?.parentSessionId === m2.id);
   }
 } catch (e) {
   console.error(e);

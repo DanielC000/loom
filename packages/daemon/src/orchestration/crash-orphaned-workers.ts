@@ -1,4 +1,4 @@
-import { resolveConfig, columnKeyForRole, type Session } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, type Session, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import { engineTranscriptExists } from "../sessions/transcript.js";
 import { deriveAwaitingReview } from "./report-resolution.js";
@@ -134,6 +134,25 @@ export function currentHaltedSuccessor(db: Db, sessionId: string): Session | und
 }
 
 /**
+ * The event-only half of {@link currentUnresolvedSettleSuccessor}'s match, without its
+ * `reachedReadyAt` bypass — lets a caller that already knows `reachedReadyAt` is set still ask the
+ * durable trail directly.
+ * @decision 92c20eb9 — never re-derive this filter+match independently at a second call site.
+ */
+export function latestMatchingUnresolvedSettleEvent(db: Db, sessionId: string, freshId: string): OrchestrationEvent | undefined {
+  const latest = db.listEventsForSession(sessionId)
+    .filter((e) =>
+      e.kind === "recycle_fleet_unresolved" || e.kind === "recycle_fleet_resolved" ||
+      e.kind === "recycle_fleet_recovered" || e.kind === "recycle_fleet_stranded_across_restart")
+    .at(-1);
+  if (!latest || latest.kind !== "recycle_fleet_unresolved") return undefined;
+  const detail = latest.detail as { deadSuccessorId?: string; reason?: string; halted?: boolean } | undefined;
+  if (detail?.reason !== "timeout" || detail?.halted === true) return undefined;
+  if (detail?.deadSuccessorId !== freshId) return undefined;
+  return latest;
+}
+
+/**
  * @decision 92c20eb9 — never fold this into {@link currentHaltedSuccessor} or into
  * `isSupersededByRecycle` — they cover disjoint recycle-fleet scenarios, not variants of one check.
  * @decision 92c20eb9 — never drop the `reachedReadyAt` check: it can be set before the settle loop's
@@ -144,14 +163,7 @@ export function currentUnresolvedSettleSuccessor(db: Db, sessionId: string): Ses
   const fresh = db.getSuccessor(sessionId);
   if (!fresh) return undefined;
   if (fresh.reachedReadyAt != null) return undefined;
-  const latest = db.listEventsForSession(sessionId)
-    .filter((e) => e.kind === "recycle_fleet_unresolved" || e.kind === "recycle_fleet_resolved" || e.kind === "recycle_fleet_recovered")
-    .at(-1);
-  if (!latest || latest.kind !== "recycle_fleet_unresolved") return undefined;
-  const detail = latest.detail as { deadSuccessorId?: string; reason?: string; halted?: boolean } | undefined;
-  if (detail?.reason !== "timeout" || detail?.halted === true) return undefined;
-  if (fresh.id !== detail?.deadSuccessorId) return undefined;
-  return fresh;
+  return latestMatchingUnresolvedSettleEvent(db, sessionId, fresh.id) ? fresh : undefined;
 }
 
 /**

@@ -370,3 +370,51 @@ round-2 coverage for the `halted:true` exclusion, a stale/foreign successor id, 
   — it can only have come from this carve-out, and its content is now wrong the instant the successor
   becomes the fleet's sole live owner. Cancel it via the shared `question_cancel` semantics, never a hard
   delete, and never let one cancel's failure block another's.
+
+## Card eddb768a — close the recycle_fleet event family on boot reconcile
+
+Follow-up from the ca0111a3 Code Review: `finishReconcilingRecycleSettles`'s deferred-success branch
+(sessions/service.ts, the `early.deferred` loop's `resume(freshId)` success path) resumed the successor
+and wrote no `recycle_fleet_*` event at all; its `early.stranded` loop (and the other `stampStranded`
+call sites) write `recycle_fleet_stranded_across_restart`, a kind `currentUnresolvedSettleSuccessor`'s
+filtered event scan did not recognize as terminal.
+
+**Correction to the parent card's own framing:** `currentUnresolvedSettleSuccessor` was never actually
+stale for the deferred-success branch — its `fresh.reachedReadyAt != null` short-circuit already covers
+it, since `reconcileStrandedRecycleSettlesEarly` only classifies a row `deferred` when `reachedReadyAt`
+is already truthy. The real gap was human-facing: nothing told attention-push/alertWebhook that a
+pre-restart "unresolved" push had resolved, and nothing recognized `recycle_fleet_stranded_across_restart`
+as a terminal kind for the predicate's own purposes.
+
+### Fix
+
+- Extracted the event-only half of `currentUnresolvedSettleSuccessor`'s match into
+  `latestMatchingUnresolvedSettleEvent(db, sessionId, freshId)` (orchestration/crash-orphaned-workers.ts)
+  — the filtered scan now also includes `recycle_fleet_stranded_across_restart` as a terminal kind, so a
+  stranded lineage's own closing event stops an older `recycle_fleet_unresolved` row from being treated as
+  "latest". `currentUnresolvedSettleSuccessor` itself is now a thin wrapper: `reachedReadyAt` bypass, then
+  delegate to the shared helper.
+- The deferred-success branch now calls that same helper BEFORE clearing the settle-pending marker: if the
+  durable trail shows a genuine prior alert (a matching `recycle_fleet_unresolved`, timeout, non-halted,
+  `deadSuccessorId === freshId`), it appends `recycle_fleet_resolved` (reusing the existing kind — already
+  correctly classified by attention-push) and calls `cancelStaleEscalationQuestions(predecessorId, freshId,
+  unresolved.ts)`, passing the unresolved event's OWN timestamp as `alertedAt` so a pre-restart escalation
+  question telling a human to stop the now-ready successor is cancelled here too. If there was no prior
+  alert (the ordinary case), it writes nothing — mirroring `settleRecycleHandoff`'s own `if (alerted)` gate
+  exactly, re-derived from the durable trail since the in-memory `alerted` flag does not survive a restart.
+
+### Do not
+
+- Do not write `recycle_fleet_resolved` unconditionally in the deferred-success branch — an ordinary
+  successful restart recovery with no prior alert would become a new false worker-crashed-class push.
+- Do not give the stranded branch a new terminal event kind — `recycle_fleet_stranded_across_restart`
+  already exists and is already correctly classified; the fix is widening the READ-side filter, not the
+  write.
+- Do not re-derive the event-match filter+logic at a second call site — route through
+  `latestMatchingUnresolvedSettleEvent`, the one shared helper both `currentUnresolvedSettleSuccessor` and
+  the boot-reconcile deferred-success branch now consume.
+- Do not assume this closes the symmetrical gap for a stale escalation question filed before a restart
+  that is later resolved via the OTHER recovery paths (`finalizeRecovery`'s `recycle_fleet_recovered`
+  writes, or `stampStranded`'s own path) — `cancelStaleEscalationQuestions` is only wired into the
+  deferred-success branch here, matching the one scenario this card's DoD scoped; a recovered-onto-
+  predecessor lineage's own stale question (if any) is a separate, unanalyzed case.

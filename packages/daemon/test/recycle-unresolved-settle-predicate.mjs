@@ -31,6 +31,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        predicate must still pick the ts-LATEST, proving reliance on `listEventsForSession`'s
 //        `ORDER BY ts, rowid` rather than insertion/rowid order (mirrors is-superseded-by-recycle.mjs's
 //        own case (7) for the sibling predicate).
+//   (11) STRANDED supersedes (card eddb768a) — mirrors (8)/(9): a chronologically-later
+//        recycle_fleet_stranded_across_restart must ALSO stop a prior unresolved alert from matching,
+//        even though stampStranded never unlinks the dead successor (so neither of the predicate's two
+//        short-circuits — !fresh / reachedReadyAt — fire on their own here).
+//   (12) SHARED HELPER PARITY (card eddb768a) — latestMatchingUnresolvedSettleEvent (the extracted
+//        event-only half) agrees with currentUnresolvedSettleSuccessor on the same fixtures.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/recycle-unresolved-settle-predicate.mjs
 import fs from "node:fs";
@@ -38,7 +44,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Db } from "../dist/db.js";
-import { currentUnresolvedSettleSuccessor, currentHaltedSuccessor } from "../dist/orchestration/crash-orphaned-workers.js";
+import { currentUnresolvedSettleSuccessor, currentHaltedSuccessor, latestMatchingUnresolvedSettleEvent } from "../dist/orchestration/crash-orphaned-workers.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -74,6 +80,9 @@ function resolvedEvent(predecessorId, successorId, { ts } = {}) {
 }
 function recoveredEvent(predecessorId, deadSuccessorId, { ts, reparentedWorkers = 0 } = {}) {
   return { id: randomUUID(), ts: ts ?? new Date().toISOString(), managerSessionId: predecessorId, kind: "recycle_fleet_recovered", detail: { deadSuccessorId, oldStillLive: true, reparentedWorkers } };
+}
+function strandedEvent(predecessorId, deadSuccessorId, { ts } = {}) {
+  return { id: randomUUID(), ts: ts ?? new Date().toISOString(), managerSessionId: predecessorId, kind: "recycle_fleet_stranded_across_restart", detail: { deadSuccessorId } };
 }
 
 const dbFiles = [];
@@ -193,11 +202,38 @@ try {
     check("(10) the predicate correctly follows ts-order, not insertion order: matches",
       currentUnresolvedSettleSuccessor(e.db, "m10-old")?.id === "m10-new");
   }
+
+  // ==================== (11) STRANDED supersedes ====================
+  {
+    const e = makeDb(); dbFiles.push(e.dbFile);
+    seedSession(e, "m11-old");
+    seedSession(e, "m11-new", { gen: 1, recycledFrom: "m11-old" });
+    e.db.appendEvent(unresolvedEvent("m11-old", "m11-new"));
+    check("(11 setup) before stranding: matches", currentUnresolvedSettleSuccessor(e.db, "m11-old")?.id === "m11-new");
+    e.db.appendEvent(strandedEvent("m11-old", "m11-new"));
+    check("(11) FIX: a chronologically-later recycle_fleet_stranded_across_restart supersedes the unresolved alert: undefined",
+      currentUnresolvedSettleSuccessor(e.db, "m11-old") === undefined);
+  }
+
+  // ==================== (12) SHARED HELPER PARITY ====================
+  {
+    const e = makeDb(); dbFiles.push(e.dbFile);
+    seedSession(e, "m12-old");
+    seedSession(e, "m12-new", { gen: 1, recycledFrom: "m12-old" });
+    e.db.appendEvent(unresolvedEvent("m12-old", "m12-new"));
+    check("(12) latestMatchingUnresolvedSettleEvent matches the unresolved event on the positive baseline",
+      latestMatchingUnresolvedSettleEvent(e.db, "m12-old", "m12-new")?.kind === "recycle_fleet_unresolved");
+    check("(12) currentUnresolvedSettleSuccessor agrees (positive)", currentUnresolvedSettleSuccessor(e.db, "m12-old")?.id === "m12-new");
+    e.db.appendEvent(resolvedEvent("m12-old", "m12-new"));
+    check("(12) latestMatchingUnresolvedSettleEvent is undefined once resolved supersedes it",
+      latestMatchingUnresolvedSettleEvent(e.db, "m12-old", "m12-new") === undefined);
+    check("(12) currentUnresolvedSettleSuccessor agrees (superseded)", currentUnresolvedSettleSuccessor(e.db, "m12-old") === undefined);
+  }
 } finally {
   for (const f of dbFiles) { try { fs.rmSync(f, { force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — currentUnresolvedSettleSuccessor matches only a timeout-reason, non-halted, current-successor-id recycle_fleet_unresolved event, stays undefined once a durable reachedReadyAt latch is set (even with no superseding event yet) or once a resolved/recovered event supersedes it, and honors ts-order over insertion order."
+  ? "\n✅ ALL PASS — currentUnresolvedSettleSuccessor matches only a timeout-reason, non-halted, current-successor-id recycle_fleet_unresolved event, stays undefined once a durable reachedReadyAt latch is set (even with no superseding event yet) or once a resolved/recovered/stranded event supersedes it, honors ts-order over insertion order, and the extracted latestMatchingUnresolvedSettleEvent helper agrees with it."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

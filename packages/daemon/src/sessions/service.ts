@@ -75,7 +75,7 @@ import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_D
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
-import { isSupersededByRecycle, currentHaltedSuccessor, retiredCallerMessage, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
+import { isSupersededByRecycle, currentHaltedSuccessor, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, RESUME_UNKNOWN_REASON_FALLBACK, type ResumeOneResult } from "../orchestration/resume-nudge.js";
@@ -13638,6 +13638,15 @@ export class SessionService {
         try {
           this.resume(freshId);
           confirmedLiveSuccessors.push(freshId);
+          // @decision 92c20eb9 — only close a GENUINE pre-restart alert here, never unconditionally.
+          const unresolved = latestMatchingUnresolvedSettleEvent(this.db, predecessorId, freshId);
+          if (unresolved) {
+            this.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+              kind: "recycle_fleet_resolved", detail: { successorId: freshId },
+            });
+            this.cancelStaleEscalationQuestions(predecessorId, freshId, unresolved.ts);
+          }
           this.db.clearRecycleSettlePending(predecessorId);
           continue;
         } catch { /* durably-ready successor still failed to actually resume — fall through below */ }
