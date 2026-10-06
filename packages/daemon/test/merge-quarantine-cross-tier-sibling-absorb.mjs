@@ -362,6 +362,14 @@ try {
   // now requires the receiver itself to be `isKeyVerifiedFor` — currently resolvable AND its own fresh
   // `canonicalRepoLockKey` recompute equals the key in question. X fails that check (still unresolvable),
   // so T is left untouched, genuinely independent, and survives X's own later clear intact.
+  //
+  // @decision 883e29bc — board card 883e29bc went further and stopped PASS 1 from EVER arming X directly
+  // at the degraded, walked-up key at all (only at its own trusted resolvedKey Kx; the degraded key's
+  // signal is diverted to pendingUnresolvedQuarantines instead — see that card's own decision record).
+  // So by the time THIS query runs, T — now genuinely resolvable — graduates into `activeQuarantines` at
+  // Kr normally (the SAME ordinary graduation an isolated pending entry would get), and the query below
+  // returns T's OWN clean entry, not X's. The property this scenario exists to prove (T's quarantine is
+  // never contaminated by X, and survives X's own later clear) still holds — see the updated assertions.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const { repo, nested, subdir } = makeRepoWithNestedRepoAndSubdir("s6");
@@ -384,15 +392,17 @@ try {
   fs.renameSync(nested, parkedX);
   fs.renameSync(subdir, parkedT);
   reenterMergeQuarantinesAtBoot([repo, nested, subdir]); // BOTH X and T are missing at this boot
-  check("(s6 precondition) both X (dual-armed) and T (pending) are represented under R's own key", listingCountForKey({ listActiveMergeQuarantines }, Kr) === 2);
+  check("(s6 precondition) both X (resolvedKey-armed + diverted-pending) and T (pending) are represented under R's own key", listingCountForKey({ listActiveMergeQuarantines }, Kr) === 2);
 
   // T returns; X stays UNMOUNTED — the exact ordering the repro needs.
   fs.renameSync(parkedT, subdir);
   check("(s6 precondition) X is still genuinely unresolvable", !fs.existsSync(nested));
 
   const activeR = activeMergeQuarantineFor(repo); // THE QUERY THAT USED TO TRIGGER THE BUG
-  check("(s6 R query) R reads as quarantined via X's dual-armed entry", !!activeR && (activeR.tokens ?? []).includes("s6-x-token"));
-  check("(s6 R query) THE FIX: T's own token is NEVER absorbed into X's unverified entry", !(activeR?.tokens ?? []).includes("s6-t-token"));
+  // Post-883e29bc: R's query now hits T's OWN clean, just-graduated entry directly (X is no longer armed
+  // at Kr at all) — the SAME ultimate property (T's quarantine never contaminated by X) holds either way.
+  check("(s6 R query) R reads as quarantined via T, the genuinely verified occupant", !!activeR && (activeR.tokens ?? []).includes("s6-t-token"));
+  check("(s6 R query) THE FIX: X's own unverified token is NEVER present in T's entry", !(activeR?.tokens ?? []).includes("s6-x-token"));
   check("(s6 R query) THE FIX: T's own pending record SURVIVES, independent of X's entry", listingCountForKey({ listActiveMergeQuarantines }, Kr) === 2);
   const tEntryAfterRQuery = listActiveMergeQuarantines().find((q) => q.repoPath === subdir);
   check("(s6 R query) T's own entry still carries EXACTLY its own token, unmerged", !!tEntryAfterRQuery && (tEntryAfterRQuery.tokens ?? []).length === 1 && tEntryAfterRQuery.tokens.includes("s6-t-token"));

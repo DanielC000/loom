@@ -219,6 +219,36 @@ clearMergeQuarantine(repoOrphan);
     check("(H6) each item's id matches quarantineLatchIdFor(repoPath)", registeredItem?.id === quarantineLatchIdFor(registeredRepoH) && orphanItem?.id === quarantineLatchIdFor(orphanRepoH2));
     clearMergeQuarantine(registeredRepoH);
     clearMergeQuarantine(orphanRepoH2);
+
+    // --- (H7) /clear's own `reason` threading (card 883e29bc, round 3, finding 4) — a diverted blocker
+    // (X = projRepo's own nested sub-repo, unresolvable, resolvedKey=Kx) must have its `reason` field
+    // actually forwarded by the ROUTE, not just computed and dropped. projRepo needs its OWN `.git`
+    // marker so X's degraded walked-up key (once X itself vanishes) lands EXACTLY on projRepo's own key
+    // — never a coincidental collision with an unrelated path, which would let a single clear fully
+    // resolve X instead of leaving it as a genuine, re-discoverable (tier 4) residual blocker. ---
+    fs.mkdirSync(path.join(projRepo, ".git"), { recursive: true }); // never existed before (H1-H6 never needed it)
+    const kProjRepo = canonicalRepoLockKey(projRepo);
+    const nestedH7 = path.join(projRepo, "nestedH7");
+    fs.mkdirSync(path.join(nestedH7, ".git"), { recursive: true });
+    const kNestedH7 = canonicalRepoLockKey(nestedH7); // X's own TRUE key, captured while it still resolves
+    check("(H7 precondition) X's own key differs from projRepo's own key", kNestedH7 !== kProjRepo);
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${quarantineLatchIdFor(nestedH7)}.json`), JSON.stringify({
+      repoPath: nestedH7, branch: "x-h7-branch", reason: "X's own prior raise, recorded under its TRUE key",
+      enteredAt: Date.now() - 60_000, tokens: ["x-h7-token"], resolvedKey: kNestedH7,
+    }, null, 2) + "\n");
+    fs.rmSync(nestedH7, { recursive: true, force: true }); // X vanishes — its degraded walk now lands on projRepo
+    check("(H7 precondition) X no longer resolves", !fs.existsSync(nestedH7));
+    reenterMergeQuarantinesAtBoot([projRepo, nestedH7]);
+    check("(H7 precondition) projRepo reads quarantined via X's diverted entry", !!activeMergeQuarantineFor(projRepo) && (activeMergeQuarantineFor(projRepo).tokens ?? []).includes("x-h7-token"));
+
+    const clearH7 = await app.inject({ method: "POST", url: "/internal/merge-quarantine/clear", headers: H, payload: { projectId: "projH" } });
+    check("(H7) /clear → 200", clearH7.statusCode === 200);
+    const bodyH7 = clearH7.json();
+    check("(H7) wasQuarantined:true — projRepo genuinely still quarantined (nothing was lifted)", bodyH7.wasQuarantined === true);
+    check("*** THE FIX *** the route threads a `reason` naming X — never silently dropping the spread", typeof bodyH7.reason === "string" && bodyH7.reason.includes(nestedH7));
+    check("*** THE FIX *** the reason points at /clear-by-path", bodyH7.reason.includes("clear-by-path"));
+
+    clearMergeQuarantineByRecordedPath(nestedH7); // cleanup
   } finally {
     await app.close();
     db.close();
@@ -231,16 +261,23 @@ function hashKey(key) {
   return createHash("sha256").update(key).digest("hex").slice(0, 24);
 }
 
-// ===================== (I) clearMergeQuarantineLatchFile — a DUAL-ARMED entry (round 2, card c0be9bf9) =====================
+// ===================== (I) clearMergeQuarantineLatchFile — a degraded-divert entry (round 2, card c0be9bf9; SUPERSEDED by card 883e29bc) =====================
 // Round 2 scope (Code Review c2aa28c3 of e5ba5376, blocking Major): clearing by id used to re-implement
 // clearMergeQuarantine by hand and only ever unlink the ONE file named `<id>.json` — missing a
 // dual-armed entry's SECOND latch file entirely (decision 54054c01: an entry armed under both its
 // `resolvedKey` and a degraded current-key fallback has its REAL physical file at the resolvedKey hash,
-// which can differ from the id a human reads off a recomputed-key listing). Reproduced the same way
-// decision 54054c01's own fixture does: a latch manufactured BY HAND with an explicit `resolvedKey` that
-// differs from the repo's own (degraded, since the repo path never exists) current key — this is exactly
-// what `reenterMergeQuarantinesAtBoot`'s PASS 1 dual-arms under BOTH keys, with only ONE physical file
-// (at the resolvedKey hash) ever written.
+// which can differ from the id a human reads off a recomputed-key listing).
+//
+// @decision 883e29bc — board card 883e29bc stopped PASS 1 from EVER arming a degraded, unresolvable
+// entry directly at its walked-up current key at all (it arms ONLY at the entry's own trusted
+// resolvedKey, diverting the degraded key's own signal to pendingUnresolvedQuarantines instead — see
+// that card's own decision record). So the shape this scenario originally manufactured — a repo that
+// never resolves, armed under TWO distinct keys — can no longer occur for an entry with no verified
+// sibling sharing its degraded key; it is now SINGLE-armed, under resolvedKey alone, and the "degraded
+// id" a human might previously have read off a recomputed-key listing no longer corresponds to anything
+// at all (`quarantineLatchFileIdsFor` now returns exactly one id, the real one). Updated to assert the
+// new (single-arm) contract directly, and to cover the new no-op shape (clearing by a key nothing is
+// armed under is a benign `{ok:true, wasQuarantined:false}`, never a false positive or a thrown error).
 {
   const repoDual = path.join(os.tmpdir(), `loom-mqcbp-dual-nonexist-${sfx}`); // deliberately never created
   check("(I precondition) repoDual does not resolve on disk at all", !fs.existsSync(repoDual));
@@ -254,7 +291,7 @@ function hashKey(key) {
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   const realLatchPathDual = path.join(MERGE_QUARANTINE_DIR, `${realHash}.json`);
   fs.writeFileSync(realLatchPathDual, JSON.stringify({
-    repoPath: repoDual, branch: "dual-arm-branch", reason: "round 2 (c0be9bf9) — manufactured dual-armed latch",
+    repoPath: repoDual, branch: "dual-arm-branch", reason: "round 2 (c0be9bf9) — manufactured degraded-divert latch",
     enteredAt: Date.now(), tokens: ["token-dual-i"], resolvedKey: resolvedKeyFake,
   }, null, 2) + "\n");
   check("(I precondition) the manufactured real latch file exists under the resolvedKey hash", fs.existsSync(realLatchPathDual));
@@ -262,27 +299,19 @@ function hashKey(key) {
   reenterMergeQuarantinesAtBoot([repoDual]);
   const dualEntry = activeMergeQuarantineFor(repoDual);
   check("(I precondition) boot re-entry arms repoDual in-memory", !!dualEntry);
-  check("(I precondition) it is genuinely DUAL-armed (two distinct keys)", (dualEntry?.armedKeys?.length ?? 0) >= 2);
-  check("(I precondition) one of those armed keys is the resolvedKey (hashes to the real file)", (dualEntry?.armedKeys ?? []).some((k) => hashKey(k) === realHash));
+  check("(I) THE 883e29bc FIX: it is SINGLE-armed, at resolvedKey alone — never the degraded current key too", (dualEntry?.armedKeys?.length ?? 0) === 1 && (dualEntry?.armedKeys ?? []).every((k) => hashKey(k) === realHash));
 
-  // The id a human would actually be handed by a RECOMPUTED-key listing (quarantineLatchIdFor) — this is
-  // the DEGRADED current-key hash, which has NO physical file of its own.
+  // The id a human would have been handed by a RECOMPUTED-key listing pre-883e29bc — the DEGRADED
+  // current-key hash. It has NO physical file, and (post-883e29bc) nothing is armed there either.
   const degradedId = quarantineLatchIdFor(repoDual);
   check("(I precondition) the recomputed/degraded id differs from the real file's own hash", degradedId !== realHash);
   check("(I precondition) no file exists under the degraded id", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${degradedId}.json`)));
 
-  // Round 3 (card c0be9bf9, minor): quarantineLatchFileIdsFor must sort this dual-armed entry's own id
-  // list so the id with a REAL on-disk file sorts first — PASS 1 always arms the degraded (no-file)
-  // current key before the real resolvedKey one, so an unsorted list's ids[0] would be the wrong one
-  // (what GET /internal/merge-quarantine/list hands out as its `id` field).
   const idsI = quarantineLatchFileIdsFor(dualEntry);
-  check("(I) THE ROUND-3 ORDERING BUG: quarantineLatchFileIdsFor's ids[0] (what /list hands out as `id`) names the hash with a real on-disk file", idsI[0] === realHash);
-  check("(I) negative control: the OTHER id in the list (the degraded one) genuinely has NO file on disk", idsI.length === 2 && !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${idsI[1]}.json`)));
+  check("(I) THE 883e29bc FIX: quarantineLatchFileIdsFor returns EXACTLY one id — the real, on-disk one", idsI.length === 1 && idsI[0] === realHash);
 
-  // --- (I-list) GET /internal/merge-quarantine/list projects THIS dual-armed entry's own `id`/`ids`
-  // correctly, BEFORE it's cleared (round 4, card abccee85) — the existing (H6) coverage only exercises a
-  // single-armed entry's id/ids, so a revert of the /list route back to `id: quarantineLatchIdFor(e.repoPath)`
-  // would pass (H6) but silently hand out the wrong (no-file) id for a dual-armed entry like this one.
+  // --- (I-list) GET /internal/merge-quarantine/list projects this single-armed entry's own `id`/`ids`
+  // correctly — only the real id, never the now-meaningless degraded one.
   {
     const TMPI = mkdtempManaged("loom-mqcbp-gw-i-");
     const PORTI = 46300 + (process.pid % 400);
@@ -297,18 +326,104 @@ function hashKey(key) {
       const listResI = await appI.inject({ method: "GET", url: "/internal/merge-quarantine/list", headers: HI });
       check("(I-list) GET /list → 200", listResI.statusCode === 200);
       const itemI = listResI.json().items.find((it) => it.repoPath === repoDual);
-      check("(I-list) THE ROUND-3 ORDERING BUG, VIA THE ROUTE: item.id names the hash WITH a real on-disk file", itemI?.id === realHash);
-      check("(I-list) item.ids includes the degraded (no-file) id too", (itemI?.ids ?? []).includes(degradedId));
+      check("(I-list) item.id names the real, on-disk hash", itemI?.id === realHash);
+      check("(I-list) THE 883e29bc FIX: item.ids no longer includes the (now-meaningless) degraded id", !(itemI?.ids ?? []).includes(degradedId));
     } finally {
       await appI.close();
       dbI.close();
     }
   }
 
-  const clearDual = clearMergeQuarantineLatchFile(degradedId);
-  check("(I) clearing by the degraded id reports ok:true, wasQuarantined:true", clearDual.ok === true && clearDual.wasQuarantined === true);
-  check("(I) the in-memory entry is fully gone (both armed keys lifted)", !activeMergeQuarantineFor(repoDual));
-  check("(I) THE ROUND-2 BUG: the REAL (resolvedKey-hashed) latch file is actually deleted, not left behind to re-arm on the next boot", !fs.existsSync(realLatchPathDual));
+  // Clearing by the (now-meaningless) degraded id is a benign no-op — nothing is armed there, nothing on
+  // disk names it, so this must report success without any wasQuarantined/latch-removal side effect.
+  const clearByDegraded = clearMergeQuarantineLatchFile(degradedId);
+  check("(I) clearing by the degraded id is a benign no-op: ok:true, wasQuarantined:false", clearByDegraded.ok === true && clearByDegraded.wasQuarantined === false);
+  check("(I) the real entry is UNAFFECTED by that no-op clear", !!activeMergeQuarantineFor(repoDual));
+  check("(I) its real latch file is UNAFFECTED too", fs.existsSync(realLatchPathDual));
+
+  // Clearing by the REAL id is what actually lifts this entry now.
+  const clearByReal = clearMergeQuarantineLatchFile(realHash);
+  check("(I) clearing by the real id reports ok:true, wasQuarantined:true", clearByReal.ok === true && clearByReal.wasQuarantined === true);
+  check("(I) the in-memory entry is fully gone", !activeMergeQuarantineFor(repoDual));
+  check("(I) its real latch file is actually deleted, not left behind to re-arm on the next boot", !fs.existsSync(realLatchPathDual));
+}
+
+// ===================== (I2) clearMergeQuarantineLatchFile — a GENUINE dual-armed entry still exists (round 2, card 883e29bc, finding 4) =====================
+// Card 883e29bc stopped PASS 1/1b from dual-arming a DEGRADED, unresolvable entry — but PASS 1b's own
+// fall-through for a RESOLVABLE tmp-residue entry whose stored resolvedKey differs from its current key
+// is UNCHANGED (that branch is gated on `!isRepoPathCurrentlyResolvable`, never reached when the path
+// DOES resolve) — so a genuine dual-arm, with two distinct ids, is still fully reachable this way. This
+// restores the coverage (I)'s own rewrite lost for `quarantineLatchFileIdsFor`'s round-3 real-file-first
+// sort: repoDual2 is a REAL, RESOLVABLE directory the whole time; its latch exists only as a torn-write
+// tmp residue (PASS 1b's recovery path) carrying a SYNTHETIC resolvedKey distinct from its own real key.
+{
+  const repoDual2 = freshDir("dual2");
+  const realKey2 = canonicalRepoLockKey(repoDual2);
+  const realHash2 = quarantineLatchIdFor(repoDual2);
+  const fakeResolvedKey2 = `/synthetic/toplevel/for-dual-arm-i2-${sfx}`;
+  const fakeHash2 = hashKey(fakeResolvedKey2);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // Filed under the FAKE key's own hash, as a `.json.tmp-<pid>-<hex>` torn-write residue — PASS 1b reads
+  // every `*.json.tmp-...` file regardless of its own filename hash.
+  const tmpLatchPathDual2 = path.join(MERGE_QUARANTINE_DIR, `${fakeHash2}.json.tmp-999-deadbeef`);
+  fs.writeFileSync(tmpLatchPathDual2, JSON.stringify({
+    repoPath: repoDual2, branch: "dual-arm-i2-branch", reason: "round 2 (883e29bc, finding 4) — genuine resolvable dual-arm via PASS 1b",
+    enteredAt: Date.now(), tokens: ["token-dual-i2"], resolvedKey: fakeResolvedKey2,
+  }, null, 2) + "\n");
+  check("(I2 precondition) repoDual2 is genuinely resolvable", fs.existsSync(repoDual2));
+
+  reenterMergeQuarantinesAtBoot([repoDual2]);
+  const dualEntry2 = activeMergeQuarantineFor(repoDual2);
+  check("(I2 precondition) boot re-entry arms repoDual2 in-memory", !!dualEntry2);
+  check("(I2) genuinely DUAL-armed (two distinct keys) — PASS 1b's resolvable fall-through is unaffected by 883e29bc", (dualEntry2?.armedKeys?.length ?? 0) === 2);
+  check("(I2) one of those armed keys is repoDual2's own real key", (dualEntry2?.armedKeys ?? []).some((k) => k === realKey2));
+  check("(I2) the other is the synthetic resolvedKey", (dualEntry2?.armedKeys ?? []).some((k) => k === fakeResolvedKey2));
+
+  // PASS 1b's own post-loop promotion (`writeMergeQuarantineLatch`) durably writes the union under the
+  // REAL key's own hash and deletes the tmp residue on success — so by now realHash2.json exists and
+  // fakeHash2 has no file at all; natural armedKeys insertion order (currentKey=real first, resolvedKey=
+  // fake second) already happens to put the real-file id first here too, so this alone does not
+  // discriminate the SORT specifically (verified separately below).
+  const idsI2 = quarantineLatchFileIdsFor(dualEntry2);
+  check("(I2) exactly two ids, the on-disk (real-key) one sorted FIRST", idsI2.length === 2 && idsI2[0] === realHash2 && idsI2[1] === fakeHash2);
+  check("(I2) negative control: the synthetic-key id genuinely has NO file of its own on disk", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${fakeHash2}.json`)));
+  check("(I2) and the real-key id's own file DOES exist (promoted by PASS 1b)", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${realHash2}.json`)));
+
+  const clearDual2 = clearMergeQuarantineLatchFile(idsI2[0]);
+  check("(I2) clearing by the real (on-disk) id reports ok:true, wasQuarantined:true", clearDual2.ok === true && clearDual2.wasQuarantined === true);
+  check("(I2) the in-memory entry is fully gone (BOTH armed keys lifted)", !activeMergeQuarantineFor(repoDual2));
+  check("(I2) the tmp residue is actually deleted", !fs.existsSync(tmpLatchPathDual2));
+}
+
+// ===================== (I3) quarantineLatchFileIdsFor — real-file-first sort, directly (round 2, card 883e29bc, finding 4) =====================
+// (I2) above restores a genuine PRODUCTION path (PASS 1b's resolvable dual-arm) that still creates a
+// multi-key armedKeys entry — but its own NATURAL armedKeys insertion order happens to already put the
+// real-file key first, so it cannot by itself discriminate whether the SORT in quarantineLatchFileIdsFor
+// is actually doing anything (round 1 of this card's own review: disabling the sort there does NOT flip
+// (I2)'s own result). This isolates the sort's OWN contract directly: armedKeys whose NATURAL (insertion)
+// order has the NO-FILE key first and the HAS-FILE key second — the shape PASS 1's original (now-removed)
+// degraded-dual-arm used to produce, and the one the round-3 sort (card c0be9bf9) exists for.
+{
+  const keyNoFile = `/synthetic/sort-check/no-file-${sfx}`;
+  const keyHasFile = `/synthetic/sort-check/has-file-${sfx}`;
+  const hashNoFile = hashKey(keyNoFile);
+  const hashHasFile = hashKey(keyHasFile);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashHasFile}.json`), JSON.stringify({
+    repoPath: "/unused/sort-check-fixture", branch: "b", reason: "fixture file for the sort check only",
+    enteredAt: Date.now(), tokens: ["unused"],
+  }, null, 2) + "\n");
+  check("(I3 precondition) the has-file hash's own file exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${hashHasFile}.json`)));
+  check("(I3 precondition) the no-file hash's own file does NOT exist", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${hashNoFile}.json`)));
+
+  const constructedEntry = {
+    repoPath: "/unused/sort-check-entry", branch: "b", reason: "r", enteredAt: Date.now(), tokens: ["t"],
+    armedKeys: [keyNoFile, keyHasFile], // NATURAL insertion order: no-file FIRST, has-file SECOND
+  };
+  const idsI3 = quarantineLatchFileIdsFor(constructedEntry);
+  check("(I3) THE SORT: the on-disk (has-file) id is returned FIRST despite natural insertion order", idsI3[0] === hashHasFile && idsI3[1] === hashNoFile);
+
+  try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, `${hashHasFile}.json`)); } catch { /* best-effort */ }
 }
 
 // ===================== (J) clearMergeQuarantineLatchFile — an orphanLatchFiles sweep (round 2, card c0be9bf9) =====================
@@ -886,7 +1001,10 @@ function hashKey(key) {
   const childOutQ = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptQ], {
     env: { ...process.env, LOOM_HOME: loomHome },
   }).toString();
-  const resultQ = JSON.parse(childOutQ);
+  // .trim().split("\n").pop() — card 883e29bc round 4: clearMergeQuarantineByRecordedPath's pending
+  // branch now routes its sourceFile delete through sweepOwnLatchFileUnlessOwnedElsewhere, which LOGS on
+  // a successful delete (unlike the old bare, silent unlink) — stdout is no longer pure JSON.
+  const resultQ = JSON.parse(childOutQ.trim().split("\n").pop());
 
   check("(Q precondition, child) outer is active before the clear", resultQ.beforeOuter === true);
   check("(Q precondition, child) inner is pending before the clear", resultQ.beforePendingInner === true);
@@ -1043,7 +1161,8 @@ function hashKey(key) {
   const childOutT = execFileSync(process.execPath, ["--input-type=module", "-e", childScriptT], {
     env: { ...process.env, LOOM_HOME: loomHome },
   }).toString();
-  const resultT = JSON.parse(childOutT);
+  // .trim().split("\n").pop() — same reason as (Q) above.
+  const resultT = JSON.parse(childOutT.trim().split("\n").pop());
 
   check("(T) THE ROUND-6 MAJOR BUG: a fresh raise on OUTER carries OUTER's own repoPath, never adopting the unrelated pending INNER's identity", resultT.outerRepoPathAfterRaise === outerT);
   check("(T) and clearing INNER by its own stored repoPath leaves OUTER's real, independent quarantine fully armed", resultT.outerCheckAfterClearingInner.ok === false);

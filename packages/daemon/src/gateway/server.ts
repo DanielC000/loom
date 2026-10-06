@@ -3230,8 +3230,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const { wasQuarantined } = clearMergeQuarantineReporting(repo.path);
-    return { ok: true, wasQuarantined, repoPath: repo.path };
+    const { wasQuarantined, reason } = clearMergeQuarantineReporting(repo.path);
+    return { ok: true, wasQuarantined, repoPath: repo.path, ...(reason ? { reason } : {}) };
   });
 
   // --- Merge-quarantine HUMAN clear, no project resolution (card c0be9bf9) — reaches a latch whose repo

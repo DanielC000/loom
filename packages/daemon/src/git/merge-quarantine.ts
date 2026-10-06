@@ -572,7 +572,11 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   if (!current || !current.tokens.includes(token)) return; // not ours — leave whatever is (or isn't) there alone
   const remaining = current.tokens.filter((t) => t !== token);
   if (remaining.length === 0) {
-    clearMergeQuarantine(repoPath); // last outstanding token cleared — also handles any orphan-file bookkeeping
+    // @decision 883e29bc — clear via the key/entry ALREADY matched above (c0be9bf9's rule), never by
+    // re-deriving from `repoPath` again — `current.repoPath` can be a DIFFERENT, longer-outstanding
+    // raiser's own identity (enterMergeQuarantine's `existing` branch), and clearMergeQuarantine(repoPath)
+    // now resolves by identity when unresolvable, which can silently no-op against it.
+    clearMergeQuarantineByKey(key, current.repoPath);
     return;
   }
   const updated: MergeQuarantineEntry = { ...current, tokens: remaining };
@@ -725,6 +729,20 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string): { kept: boolea
   return { kept: false, referencingRepoPaths: [] };
 }
 
+/** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `pendingEntry` itself — either
+ *  the exact same object (the ordinary, still-valid diverted case) or a DIFFERENT object that shares its
+ *  own recorded identity (a legitimate rebuild — a union, an orphan merge — of the SAME logical entry).
+ *  `false` for anything else: nothing occupies `key` at all, or a WHOLLY UNRELATED entry does — e.g. a
+ *  fresh raise that reused a key a now-stale pending snapshot's own `armedKeys` still names (card
+ *  883e29bc, round 3, finding 1). Lifting `key` in that case would destroy an unrelated repo's own,
+ *  completely unrelated, genuine quarantine — gate EVERY pending-sweep's `armedKeys` lift on this. */
+function pendingEntryStillOwnsKey(key: string, pendingEntry: MergeQuarantineEntry): boolean {
+  const occupant = activeQuarantines.get(key);
+  if (!occupant) return false;
+  if (occupant === pendingEntry) return true;
+  return directPathIdentity(occupant.repoPath) === directPathIdentity(pendingEntry.repoPath);
+}
+
 /**
  * KEY-ADDRESSED core — empties the WHOLE outstanding-token set at once (round 7, M1) for the entry
  * currently armed at `key`: lifts every map slot it's armed under, deletes each one's physical latch,
@@ -739,6 +757,7 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string): { kept: boolea
  * directPathIdentity}, never a freshly-recomputed walking `canonicalRepoLockKey` — see the decision
  * record for the reverse-drift repro this closes.
  */
+
 export function clearMergeQuarantineByKey(key: string, identityRepoPath: string): void {
   const entry = activeQuarantines.get(key);
   // Lift EVERY key this entry is armed under (its own tracked set), never reference equality — a union or
@@ -758,24 +777,74 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // file too (round 2 finding 1), or it survives to resurrect the quarantine.
   const identity = directPathIdentity(identityRepoPath);
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
+  const sourceFilesToSweep: string[] = [];
   pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => {
     if (directPathIdentity(p.entry.repoPath) !== identity) return true;
     for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
-    try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, p.sourceFile)); } catch { /* best-effort */ }
+    // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too, but
+    // ONLY when it still genuinely occupies that key (pendingEntryStillOwnsKey) — a stale snapshot can
+    // otherwise name a key a wholly unrelated later raise has since reused.
+    for (const k of p.entry.armedKeys ?? []) {
+      if (!pendingEntryStillOwnsKey(k, p.entry)) continue;
+      activeQuarantines.delete(k);
+      deleteMergeQuarantineLatchByKey(k);
+    }
+    sourceFilesToSweep.push(p.sourceFile);
     return false;
   });
+  // @decision 883e29bc (round 4) — sweep each removed entry's own sourceFile via
+  // sweepOwnLatchFileUnlessOwnedElsewhere (never a bare unlink): it can be the SAME physical path a
+  // different, surviving repo's fresh raise now owns (reusing the freed key).
+  for (const f of sourceFilesToSweep) sweepOwnLatchFileUnlessOwnedElsewhere(f);
   for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
 }
 
+/** For a repoPath that is NOT currently resolvable, its OWN recorded entry (active, any key; else
+ *  pending) by {@link directPathIdentity} — never the generic key-based lookup, which can surface an
+ *  unrelated repo's entry merely occupying the same walked-up key (card 883e29bc, round 2). Returns
+ *  undefined when repoPath has no entry of its own at all. */
+function ownIdentityEntryFor(repoPath: string): MergeQuarantineEntry | undefined {
+  const identity = directPathIdentity(repoPath);
+  for (const entry of activeQuarantines.values()) {
+    if (directPathIdentity(entry.repoPath) === identity) return entry;
+  }
+  return pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === identity)?.entry;
+}
+
+/** The entry a query for `repoPath` should treat as ITS OWN blocker: {@link ownIdentityEntryFor} when
+ *  repoPath is currently unresolvable and has one, else the ordinary key-based {@link
+ *  activeMergeQuarantineFor} (unchanged for the resolvable case, and the fallback — an ancestor's own
+ *  fail-closed signal is still legitimate — when repoPath has no entry of its own). Shared by {@link
+ *  assertRepoNotQuarantined} and {@link clearMergeQuarantineReporting} (card 883e29bc, round 2, findings
+ *  1/2) so the two never disagree about which entry a given repoPath is actually blocked by. */
+function resolveQuarantineFor(repoPath: string): MergeQuarantineEntry | undefined {
+  if (!isRepoPathCurrentlyResolvable(repoPath)) {
+    const own = ownIdentityEntryFor(repoPath);
+    if (own) return own;
+  }
+  return activeMergeQuarantineFor(repoPath);
+}
+
 /**
- * UNCONDITIONAL clear for `repoPath` — thin wrapper over {@link clearMergeQuarantineByKey}, addressed by a
- * FRESHLY-recomputed `canonicalRepoLockKey(repoPath)`. Called from exactly two places: (1) the human-only
- * loopback REST route (`POST /internal/merge-quarantine/clear`, gateway/server.ts), and (2) internally,
- * once {@link clearMergeQuarantineByToken} empties the token set itself. A RESTORED quarantine (re-entered
- * at boot) can ONLY ever be cleared this way, since the original in-process promise chain(s) that could
+ * UNCONDITIONAL clear for `repoPath`. Called from exactly two places: (1) the human-only loopback REST
+ * route (`POST /internal/merge-quarantine/clear`, gateway/server.ts), and (2) internally, once {@link
+ * clearMergeQuarantineByToken} empties the token set itself. A RESTORED quarantine (re-entered at boot)
+ * can ONLY ever be cleared this way, since the original in-process promise chain(s) that could
  * auto-clear it are gone once the process(es) that held them have exited.
+ *
+ * When `repoPath` is NOT currently resolvable, a freshly-recomputed `canonicalRepoLockKey(repoPath)` can
+ * walk UP past repoPath's own absence to an ENCLOSING repo's real key and lift ITS unrelated quarantine
+ * instead of repoPath's own — `abccee85` deliberately kept this function on the fresh key for the
+ * RESOLVABLE case, which stays unchanged; only the unresolvable branch is redirected.
+ *
+ * @decision 883e29bc — delegate to clearMergeQuarantineByRecordedPath (resolves by STORED identity)
+ * instead, when repoPath is not currently resolvable.
  */
 export function clearMergeQuarantine(repoPath: string): void {
+  if (!isRepoPathCurrentlyResolvable(repoPath)) {
+    clearMergeQuarantineByRecordedPath(repoPath);
+    return;
+  }
   clearMergeQuarantineByKey(canonicalRepoLockKey(repoPath), repoPath);
 }
 
@@ -789,8 +858,10 @@ export function clearMergeQuarantine(repoPath: string): void {
  * reports NOT FOUND (round 7) when NEITHER matches at all — never a recompute (see this function's own
  * `@decision` tag below for why).
  *
- * Used ONLY by `/clear-by-path`'s `{repoPath}` form — `/clear` (project-resolved) keeps calling
- * {@link clearMergeQuarantineReporting} directly (see the decision record for why).
+ * Used directly by `/clear-by-path`'s `{repoPath}` form, AND (card 883e29bc, round 2) by {@link
+ * clearMergeQuarantine} itself whenever its own `repoPath` is not currently resolvable — including,
+ * transitively, `/clear` (project-resolved) via {@link clearMergeQuarantineReporting}. No longer the
+ * no-project-resolution route's own exclusive caller.
  *
  * @decision abccee85 — never recompute `canonicalRepoLockKey` from a human-supplied repoPath string to
  * decide which entry to clear; see the decision record for the key-drift bugs this closes, including
@@ -825,7 +896,17 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     const orphanFilesToSweep = new Set<string>();
     for (const p of matchedPending) {
       for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
-      try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, p.sourceFile)); } catch { /* best-effort */ }
+      // @decision 883e29bc — mirror clearMergeQuarantineByKey's own armedKeys lift, gated the same way
+      // via pendingEntryStillOwnsKey — a key here can belong to someone else entirely by now.
+      for (const k of p.entry.armedKeys ?? []) {
+        if (!pendingEntryStillOwnsKey(k, p.entry)) continue;
+        activeQuarantines.delete(k);
+        deleteMergeQuarantineLatchByKey(k);
+      }
+      // @decision 883e29bc (round 4) — never a bare unlink: `p` is already removed from
+      // pendingUnresolvedQuarantines above, so this correctly checks whether a SURVIVING entry (e.g. a
+      // fresh raise reusing the freed key) now physically owns this exact filename.
+      sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile);
     }
     for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
     return { wasQuarantined: true };
@@ -879,6 +960,11 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
   if (indices.length === 0) {
     indices = collectPendingIndices((p) => isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key);
   }
+  if (indices.length === 0) {
+    // @decision 883e29bc — match a STILL-unresolvable entry by key, gated on its OWN resolvedKey (PASS
+    // 1/1b's divert); never a bare never-resolved no-resolvedKey latch (abccee85/r7's "nothing to walk").
+    indices = collectPendingIndices((p) => !isRepoPathCurrentlyResolvable(p.entry.repoPath) && !!p.entry.resolvedKey && canonicalRepoLockKey(p.entry.repoPath) === key);
+  }
   if (indices.length === 0) return undefined;
   const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine); // indices are verified hits above
   const first = matched[0] as PendingUnresolvedQuarantine;
@@ -914,10 +1000,13 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
 /** Diagnostic snapshot only (e.g. a status endpoint) — never used to decide anything itself. Includes
  *  PENDING (boot-unverifiable) entries too, so a human reading this never sees a blind spot that
  *  `activeMergeQuarantineFor` itself would resolve the moment it's actually queried for that repo.
- *  De-duped by entry IDENTITY — an entry armed under two keys (see `armedKeys`) sits twice in
- *  `activeQuarantines.values()` (once per key) and must be reported once, not twice. */
+ *  De-duped by entry IDENTITY (reference) ACROSS BOTH sources in ONE Set — an entry armed under two keys
+ *  (see `armedKeys`) sits twice in `activeQuarantines.values()` (once per key), and (card 883e29bc) PASS
+ *  1/1b's degraded-arm diversion can ALSO push the SAME object into `pendingUnresolvedQuarantines` (it is
+ *  armed at its own resolvedKey while its degraded walked-up key's signal is deferred to pending) — either
+ *  way, it must be reported once, never twice. */
 export function listActiveMergeQuarantines(): MergeQuarantineEntry[] {
-  return [...new Set(activeQuarantines.values()), ...pendingUnresolvedQuarantines.map((p) => p.entry)];
+  return [...new Set([...activeQuarantines.values(), ...pendingUnresolvedQuarantines.map((p) => p.entry)])];
 }
 
 /** The bare 24-hex-character latch FILE id (never a repoPath) `repoPath`'s own canonical key currently
@@ -962,13 +1051,37 @@ export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[]
   return [quarantineHashFor(entry.repoPath)];
 }
 
-/** Thin, symmetric wrapper shared by BOTH the project-resolved `/internal/merge-quarantine/clear` route
- *  and its no-project-resolution twin `/internal/merge-quarantine/clear-by-path` (card c0be9bf9) — factored
- *  out so the two routes cannot drift in what a clear actually DOES; each route's own job ends at
- *  resolving its own address (projectId/repoKey, or a raw repoPath) down to a `repoPath` and calling this. */
-export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantined: boolean } {
-  const wasQuarantined = !!activeMergeQuarantineFor(repoPath);
+/** Thin wrapper over {@link clearMergeQuarantine} for the project-resolved `/internal/merge-quarantine/clear`
+ *  route (card c0be9bf9) — that route's own job ends at resolving projectId/repoKey down to a `repoPath`
+ *  and calling this.
+ *
+ * A clear can run and lift NOTHING belonging to `repoPath`'s own entry: `repoPath` may be resolvable
+ * (its own key addressed, unchanged) while what makes it read quarantined is a DIFFERENT repo's diverted
+ * entry merely occupying that same key (PASS 1's degraded-divert; the 4th `activeMergeQuarantineFor`
+ * tier). Plain `wasQuarantined:true` there would falsely imply success.
+ *
+ * @decision 883e29bc — judge by RE-RESOLVING repoPath fresh AFTER the clear, never by whether the
+ * PRE-clear object still exists: a lifted blocker can unmask a different one; a stale pending remnant
+ * of an already-lifted blocker can look like "still quarantined" when it is not.
+ */
+export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantined: boolean; reason?: string } {
+  const before = resolveQuarantineFor(repoPath);
+  const wasQuarantined = !!before;
   clearMergeQuarantine(repoPath);
+  const after = resolveQuarantineFor(repoPath);
+  if (after) {
+    const latchId = quarantineLatchFileIdsFor(after)[0];
+    // @decision 883e29bc — word by WHICH blocker remains: the SAME one `before` already was (never
+    // touched), or a DIFFERENT repo's own separate quarantine (not residue of this clear).
+    const sameAsBefore = !!before && directPathIdentity(before.repoPath) === directPathIdentity(after.repoPath);
+    const reason = sameAsBefore
+      ? `repoPath is still quarantined by its own recorded entry (repoPath '${after.repoPath}', latch id '${latchId}') — this clear did not lift it`
+      : `repoPath is quarantined by ANOTHER repo's own, separate quarantine (repoPath '${after.repoPath}', latch id '${latchId}') that this clear never addressed`;
+    return {
+      wasQuarantined: true,
+      reason: `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })} or ${JSON.stringify({ id: latchId })} to clear it directly.`,
+    };
+  }
   return { wasQuarantined };
 }
 
@@ -1104,9 +1217,13 @@ export function partitionQuarantinesByRegistration(
  * @decision abccee85 (round 6) — name the BLOCKING entry's own `repoPath`/latch id and point at
  * `/clear-by-path`, never bare `/clear` — see the decision record for why the blocking repo can differ
  * from the one asked about, and why `/clear` alone can be a dead end.
+ *
+ * @decision 883e29bc (round 2, finding 1) — resolve via {@link resolveQuarantineFor}, never a bare
+ * `activeMergeQuarantineFor`: when repoPath is unresolvable and has its OWN recorded (diverted) entry,
+ * name THAT one — never an unrelated repo's entry that merely occupies the same walked-up key.
  */
 export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok: false; reason: string } {
-  const q = activeMergeQuarantineFor(repoPath);
+  const q = resolveQuarantineFor(repoPath);
   if (!q) return { ok: true };
   const latchId = quarantineLatchFileIdsFor(q)[0];
   return {
@@ -1204,6 +1321,16 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
   // CLEAN parse here, never on `byRepoKey.has(...)` alone (a corrupt-but-hash-matched placeholder also
   // lands in `byRepoKey`, even when its own self-heal write failed).
   const cleanlyParsedKeys = new Set<string>();
+  // @decision 883e29bc — a degraded-divert's pending copy must reference byRepoKey's FINAL value, never
+  // a mid-loop snapshot a later same-pass union would make stale; collect then flush after each pass.
+  const degradedDivertsToFlush: { resolvedKey: string; sourceFile: string }[] = [];
+  const flushDegradedDiverts = () => {
+    for (const { resolvedKey, sourceFile } of degradedDivertsToFlush) {
+      const finalEntry = byRepoKey.get(resolvedKey);
+      if (finalEntry) pendingUnresolvedQuarantines.push({ entry: finalEntry, sourceFile });
+    }
+    degradedDivertsToFlush.length = 0;
+  };
 
   // PASS 1 — process EVERY file, never return early.
   for (const f of files) {
@@ -1253,7 +1380,7 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         // instead and let activeMergeQuarantineFor re-resolve it lazily, against whatever key its own
         // repoPath resolves to at the moment it's actually queried.
         // eslint-disable-next-line no-console
-        console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} has no recorded resolvedKey and could NOT be verified against its current key — ${entry.repoPath} (and every one of its ancestors) does not currently resolve on disk — leaving the latch file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query (never guessing a key now that a later remount this boot would not match).`);
+        console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} has no recorded resolvedKey and could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk — leaving the latch file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query (never guessing a key now that a later remount this boot would not match).`);
         pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
         continue;
       }
@@ -1285,8 +1412,16 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         } else {
           // entry.resolvedKey is guaranteed set here (the no-resolvedKey+unresolvable case is handled, and
           // `continue`d past, above).
+          //
+          // @decision 883e29bc — never arm at the degraded walked-up `currentKey` directly, only at
+          // resolvedKey; divert the degraded key's signal to pendingUnresolvedQuarantines instead.
           // eslint-disable-next-line no-console
-          console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} (and every one of its ancestors) does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the latch file AS WRITTEN rather than risk migrating/deleting it on an unreliable reading; arming enforcement under BOTH the current (possibly degraded) key and its recorded original key.`);
+          console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the latch file AS WRITTEN rather than risk migrating/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
+          armQuarantineKey(byRepoKey, entry.resolvedKey!, entry);
+          if (currentKey !== entry.resolvedKey) {
+            degradedDivertsToFlush.push({ resolvedKey: entry.resolvedKey!, sourceFile: f });
+          }
+          continue;
         }
       }
       // Thread the return value through both arms — armQuarantineKey folds `key` into the result's
@@ -1325,6 +1460,7 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       }
     }
   }
+  flushDegradedDiverts(); // PASS 1's own degraded diverts, now that byRepoKey holds its FINAL values.
 
   // PASS 1b (item 5) — recover/repair any leftover `.json.tmp-<pid>` latch. Its filename is
   // `<hash>.json.tmp-<pid>`, so the SAME hash-matching logic as a corrupt `.json` applies once the
@@ -1374,8 +1510,17 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       // degraded key the way the rest of this loop otherwise would.
       if (!isRepoPathCurrentlyResolvable(entry.repoPath) && !entry.resolvedKey) {
         // eslint-disable-next-line no-console
-        console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} has no recorded resolvedKey and could NOT be verified against its current key — ${entry.repoPath} (and every one of its ancestors) does not currently resolve on disk — leaving the tmp file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query.`);
+        console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} has no recorded resolvedKey and could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk — leaving the tmp file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query.`);
         pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+        continue;
+      }
+      if (!isRepoPathCurrentlyResolvable(entry.repoPath) && entry.resolvedKey && entry.resolvedKey !== currentKey) {
+        // @decision 883e29bc — mirror PASS 1's own fix above: never arm this tmp-sourced entry at its
+        // degraded walked-up `currentKey`, only at resolvedKey; divert the degraded signal to pending.
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the tmp file AS WRITTEN rather than risk promoting/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
+        armQuarantineKey(byRepoKey, entry.resolvedKey, entry);
+        degradedDivertsToFlush.push({ resolvedKey: entry.resolvedKey, sourceFile: f });
         continue;
       }
       // See PASS 1's identical threading note above — the second call must build on the first's result.
@@ -1404,6 +1549,7 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       }
     }
   }
+  flushDegradedDiverts(); // PASS 1b's own degraded diverts, now that byRepoKey holds its FINAL values.
 
   // Resolve every deferred corrupt tmp now that every real tmp this boot has already been armed.
   // @decision 92c645cc (round 2, item 2b) — a corrupt tmp's matched repo may ALREADY carry real
