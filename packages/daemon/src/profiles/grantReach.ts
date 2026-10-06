@@ -6,6 +6,7 @@ import {
   resolveProfile,
   type AgentListItem,
   type ProfileWideningFields,
+  type ProfileWideningKey,
   type ProfileGrantReach,
 } from "@loom/shared";
 
@@ -134,6 +135,28 @@ export const PROFILE_DELETE_BACKSTOP_FIELDS: ProfileWideningFields = (() => {
   };
 })();
 
+/** The narrow db surface {@link rebindWideningFields} needs. */
+export interface RebindWideningFieldsDbStore {
+  getProfile(id: string): ProfileWideningFields | undefined;
+}
+
+/**
+ * @decision 8b236b22 — ONE place that resolves an agent rebind's before/after widening-field pair
+ * (Code Review nit, round 2) — the OLD bound profile vs. the NEW one, each substituting
+ * {@link PROFILE_DELETE_BACKSTOP_FIELDS} when null/dangling. Call this, never re-derive it inline.
+ */
+export function rebindWideningFields(
+  db: RebindWideningFieldsDbStore,
+  oldProfileId: string | null,
+  newProfileOrNull: ProfileWideningFields | null,
+): { before: ProfileWideningFields; after: ProfileWideningFields } {
+  const before = oldProfileId != null ? db.getProfile(oldProfileId) ?? null : null;
+  return {
+    before: before ? grantFieldsOf(before) : PROFILE_DELETE_BACKSTOP_FIELDS,
+    after: newProfileOrNull ? grantFieldsOf(newProfileOrNull) : PROFILE_DELETE_BACKSTOP_FIELDS,
+  };
+}
+
 /**
  * The Setup Assistant's OWN view of a `grantReach` payload (card `be447b3f`, MINOR): filters `agents[]`
  * down to agents in a LIVE project only. The setup operator's other reads (`list_all_projects`/
@@ -184,4 +207,76 @@ export function recordProfileDeleteGrantReach(
     after: PROFILE_DELETE_BACKSTOP_FIELDS,
     source: args.source,
   });
+}
+
+/**
+ * @decision 8b236b22 — the REBIND twin of {@link recordProfileGrantReach}: one agent moving onto a
+ * DIFFERENT pre-existing profile, kept structurally separate per `be447b3f`. See the decision record
+ * for the backstop-substitution and `DURABLE_AUDIT_EVENT_KINDS` reasoning.
+ *
+ * `before`/`after` are the agent's OLD/NEW bound profile's widening fields (substitute
+ * {@link PROFILE_DELETE_BACKSTOP_FIELDS} for either side when that side's `profileId` is/was `null`).
+ * Returns the reach payload for the caller's response (`rebindReach`), or `null` when nothing widened.
+ * Best-effort on the audit write ONLY, same posture as {@link recordProfileGrantReach}.
+ */
+export function recordAgentProfileRebindReach(
+  db: AgentRebindReachDbStore,
+  args: {
+    agentId: string;
+    agentName: string;
+    projectId: string;
+    before: ProfileWideningFields;
+    after: ProfileWideningFields;
+    source: AgentRebindSource;
+  },
+): AgentRebindReach | null {
+  const addedKeys = profileWideningsOf(args.before, args.after);
+  if (addedKeys.length === 0) return null;
+  const roleChange = addedKeys.includes("role")
+    ? { from: args.before.role ?? null, to: args.after.role ?? null }
+    : undefined;
+  const reach: AgentRebindReach = { addedKeys, ...(roleChange ? { roleChange } : {}) };
+
+  try {
+    db.appendEvent({
+      id: randomUUID(),
+      ts: new Date().toISOString(),
+      managerSessionId: "",
+      kind: "agent_profile_rebind",
+      detail: {
+        agentId: args.agentId,
+        agentName: args.agentName,
+        projectId: args.projectId,
+        source: args.source,
+        ...reach,
+      },
+    });
+  } catch { /* best-effort — a failed audit write must never fail an already-persisted rebind */ }
+
+  return reach;
+}
+
+/** Which write path produced an agent rebind — the REBIND twin of {@link GrantReachSource}, minus the
+ *  two profile-field-edit-only values ("adopt"/"reset") that have no rebind equivalent. */
+export type AgentRebindSource = "setup" | "platform" | "manager" | "rest";
+
+/** The narrow db surface {@link recordAgentProfileRebindReach} needs — just the append, kind-narrowed to
+ *  `agent_profile_rebind` (distinct from {@link GrantReachDbStore}'s `profile_grant_reach`, and with no
+ *  `listAllAgents` — a rebind reaches exactly the one agent being rebound, never a scanned list). */
+export interface AgentRebindReachDbStore {
+  appendEvent(evt: {
+    id: string;
+    ts: string;
+    managerSessionId: string;
+    kind: "agent_profile_rebind";
+    detail: Record<string, unknown>;
+  }): unknown;
+}
+
+/** The `agent_profile_rebind` event's own payload shape — deliberately NOT {@link ProfileGrantReach}:
+ *  a rebind always reaches exactly the ONE agent being rebound, so there is no bound-agent LIST/cap/
+ *  count to carry, only the widening itself. */
+export interface AgentRebindReach {
+  addedKeys: ProfileWideningKey[];
+  roleChange?: { from: string | null; to: string | null };
 }

@@ -5574,7 +5574,10 @@ export class OrchestrationMcpRouter {
           "human-authored 'QA Tester' browser profile) without waiting on a human. The target agent must be in " +
           "YOUR project (an agent outside it is REJECTED). agentId accepts the full id OR an unambiguous " +
           "8-char id-prefix (same resolution as agent_get) — an ambiguous prefix errors naming the candidate " +
-          "ids, never resolving to an arbitrary match.",
+          "ids, never resolving to an arbitrary match. REJECTED if the rebind would remove this agent's " +
+          "restrictedTools restriction — that axis can never be silently widened this way. When the rebind " +
+          "widens anything else (e.g. a role change), the response carries a `rebindReach` field " +
+          "({addedKeys, roleChange?}) — RELAY this to the human; it's the only signal they get.",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string().nullable() }),
       },
       async ({ agentId, profileId }) => {

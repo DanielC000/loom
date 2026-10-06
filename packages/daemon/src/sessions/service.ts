@@ -5,7 +5,7 @@ import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
   usesOrchestrationMcp, contextPercentFor,
-  type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
+  type Session, type StopMode, type OrchestrationEvent, type Task, type Project, type Profile,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type MergeGateAgentView, type MergeGateStatus, type CompanionRoute, type ProjectMemoryEntry,
@@ -15,8 +15,8 @@ import {
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
-import { agentAssignableProfileError } from "../profiles/validate.js";
-import { recordProfileDeleteGrantReach } from "../profiles/grantReach.js";
+import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError } from "../profiles/validate.js";
+import { recordProfileDeleteGrantReach, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
@@ -14710,11 +14710,15 @@ export class SessionService {
    * @decision 3de74275 — Option B's "every assignable profile is human-blessed" premise no longer holds.
    * @decision d25e4ea7 — also refuses a manager-role profile when the agent's project is barred
    * (`managerSessionBarredFrom`) — defense-in-depth; not reachable via a live manager spawn today.
+   * @decision 8b236b22 — this is the manager's ONLY route to touch restrictedTools on an agent (no
+   * profile_update tool exists on this surface), so a rebind REFUSES a restrictedTools removal; any
+   * other widening (e.g. role) is allowed and audited via `rebindReach`.
    */
-  assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent {
+  assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent & { rebindReach?: AgentRebindReach } {
     this.requireManager(managerSessionId, "agent_assign_profile");
     const agent = this.resolveManagerAgentRef(managerSessionId, agentId);
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_assign_profile");
+    let newProfile: Profile | null = null;
     if (profileId != null) {
       const profile = this.db.getProfile(profileId);
       if (!profile) throw new Error("profile not found");
@@ -14722,10 +14726,19 @@ export class SessionService {
       if (assignErr) throw new Error(assignErr);
       const reservedErr = reservedProjectManagerProfileError(this.db.getProject(agent.projectId), profile);
       if (reservedErr) throw new Error(reservedErr);
+      newProfile = profile;
     }
+    const { before: beforeFields, after: afterFields } = rebindWideningFields(this.db, agent.profileId, newProfile);
+    const restrictedErr = agentRebindRestrictedToolsWideningError(beforeFields, afterFields);
+    if (restrictedErr) throw new Error(restrictedErr);
+    const rebindReach = recordAgentProfileRebindReach(this.db, {
+      agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
+      before: beforeFields, after: afterFields, source: "manager",
+    });
     this.db.updateAgent(agent.id, { profileId });
     this.auditManage(managerSessionId, "agent_assign_profile", { agentId: agent.id, profileId });
-    return this.db.getAgent(agent.id)!;
+    const updated = this.db.getAgent(agent.id)!;
+    return rebindReach ? { ...updated, rebindReach } : updated;
   }
 
   /**

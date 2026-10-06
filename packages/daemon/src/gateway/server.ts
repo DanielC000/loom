@@ -81,7 +81,7 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
-import { recordProfileGrantReach, grantFieldsOf, recordProfileDeleteGrantReach } from "../profiles/grantReach.js";
+import { recordProfileGrantReach, grantFieldsOf, recordProfileDeleteGrantReach, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
@@ -5274,11 +5274,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // HUMAN-only endpoint/ioSchema (Agent Runs R1) writable here — the MCP path passes false.
     const v = validateAgentPatch(req.body, (pid) => !!deps.db.getProfile(pid), { allowEndpointFlags: true });
     if (!v.ok) return reply.code(v.kind === "notFound" ? 404 : 400).send({ error: v.error });
+    // @decision 8b236b22 — human-only, audit-only (no guard, this caller is already trusted): compute
+    // the old/new bound profile's widening whenever `profileId` is a patch key at all.
+    let rebindReach: ReturnType<typeof recordAgentProfileRebindReach> | undefined;
+    if ("profileId" in v.patch) {
+      const newProfile = v.patch.profileId != null ? deps.db.getProfile(v.patch.profileId)! : null;
+      const { before: beforeFields, after: afterFields } = rebindWideningFields(deps.db, existing.profileId, newProfile);
+      rebindReach = recordAgentProfileRebindReach(deps.db, {
+        agentId: existing.id, agentName: existing.name, projectId: existing.projectId,
+        before: beforeFields, after: afterFields, source: "rest",
+      });
+    }
     // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
     const warning = agentUpdatePromptWarning(deps.db, existing, v.patch);
     deps.db.updateAgent(id, v.patch);
     const updated = deps.db.getAgent(id);
-    return warning ? { ...updated, promptWarning: warning } : updated;
+    const withWarning = warning ? { ...updated, promptWarning: warning } : updated;
+    return rebindReach ? { ...withWarning, rebindReach } : withWarning;
   });
 
   // --- Agent Runs R1: project-scoped API keys (HUMAN-only, loopback REST — a TRUST-BOUNDARY surface

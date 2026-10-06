@@ -11,7 +11,7 @@ import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
-import { recordProfileGrantReach, grantFieldsOf, setupVisibleGrantReach } from "../profiles/grantReach.js";
+import { recordProfileGrantReach, recordAgentProfileRebindReach, grantFieldsOf, setupVisibleGrantReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -574,7 +574,7 @@ export class SetupMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is anything but manager/worker/null (a setup operator can never elevate an agent — that's human-only). And the WHOLE call is REJECTED outright — a bare rename included — when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when the agent lives in a reserved/system project (the Setup Assistant, Companion, Workspace Auditor, Elevated Operator, or dev-only Platform Lead/Audit): this surface can never touch one of Loom's own standing agents, however it's reached, including renaming one to collide with (hijack) another agent's name. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
+          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is anything but manager/worker/null (a setup operator can never elevate an agent — that's human-only). And the WHOLE call is REJECTED outright — a bare rename included — when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when the agent lives in a reserved/system project (the Setup Assistant, Companion, Workspace Auditor, Elevated Operator, or dev-only Platform Lead/Audit): this surface can never touch one of Loom's own standing agents, however it's reached, including renaming one to collide with (hijack) another agent's name. REBINDING this agent's profileId (including clearing it to null) onto a DIFFERENT profile can widen what this agent can do — a role change, a restrictedTools relax, or a grant key via the backstop — never blocked here (this surface already lets you reach the same widening directly via profile_update); when it does, the response carries a `rebindReach` field ({addedKeys, roleChange?}) — RELAY this to the human; it's the only signal they get that this agent's standing reach just changed. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -625,18 +625,30 @@ export class SetupMcpRouter {
         // EXIST by validateAgentPatch above, so getProfile resolves — reject if its role is elevated, or if
         // it carries a human-only field (agentAssignableProfileError, profiles/validate.ts), so the ungated
         // setup surface can never bind an agent to an elevated rig or a human-only-field-carrying profile.
-        if (v.patch.profileId != null) {
-          const assignErr = agentAssignableProfileError(db.getProfile(v.patch.profileId)!);
-          if (assignErr) return ok({ error: assignErr });
+        // @decision 8b236b22 — a REBIND can also widen this ONE agent without touching either profile's
+        // own fields. AUDIT-ONLY, no guard (round 2 revision) — see the decision record for why.
+        let rebindReach: ReturnType<typeof recordAgentProfileRebindReach> | undefined;
+        if ("profileId" in v.patch) {
+          const newProfile = v.patch.profileId != null ? db.getProfile(v.patch.profileId)! : null;
+          if (newProfile) {
+            const assignErr = agentAssignableProfileError(newProfile);
+            if (assignErr) return ok({ error: assignErr });
+          }
+          const { before: beforeFields, after: afterFields } = rebindWideningFields(db, resolved.profileId, newProfile);
+          rebindReach = recordAgentProfileRebindReach(db, {
+            agentId: resolved.id, agentName: resolved.name, projectId: resolved.projectId,
+            before: beforeFields, after: afterFields, source: "setup",
+          });
         }
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
         db.updateAgent(resolved.id, v.patch);
         const updated = agentFields(db.getAgent(resolved.id))!;
         const withWarning = warning ? { ...updated, promptWarning: warning } : updated;
+        const withRebindReach = rebindReach ? { ...withWarning, rebindReach } : withWarning;
         // card 91fef05a: same unbounded-startupPrompt shape spillableAgentGet already protects for
         // agent_get — a PATCH that touches/keeps a large prompt echoes it right back in the response.
-        return ok(callerSessionId ? spillableAgentGet(callerSessionId, "agent-update-spills", withWarning.id, withWarning) : withWarning);
+        return ok(callerSessionId ? spillableAgentGet(callerSessionId, "agent-update-spills", withRebindReach.id, withRebindReach) : withRebindReach);
       },
     );
 
@@ -804,7 +816,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). LEAST-PRIVILEGE: REJECTED outright when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when it lives in a reserved/system project — regardless of which profile you're trying to assign it — and separately rejected when the NEW profile's role is anything but manager/worker/null, or when it carries a human-only field (see agentAssignableProfileError in profiles/validate.ts).",
+        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). LEAST-PRIVILEGE: REJECTED outright when the TARGET agent's CURRENT rig role is anything but manager/worker/null, or when it lives in a reserved/system project — regardless of which profile you're trying to assign it — and separately rejected when the NEW profile's role is anything but manager/worker/null, or when it carries a human-only field (see agentAssignableProfileError in profiles/validate.ts). A rebind that widens this agent's reach relative to its PRIOR profile (a role change, a restrictedTools relax, or a grant key via the backstop) is never blocked here (reachable the same way directly via profile_update) but IS reported on the response as a `rebindReach` field ({addedKeys, roleChange?}) — RELAY this to the human.",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
@@ -824,8 +836,15 @@ export class SetupMcpRouter {
         // manager/null/plain rig with no such grant still assigns fine.
         const assignErr = agentAssignableProfileError(assigned);
         if (assignErr) return ok({ error: assignErr });
+        // @decision 8b236b22 — audit-only, no guard; see agent_update's own comment above.
+        const { before: beforeFields, after: afterFields } = rebindWideningFields(db, agent.profileId, assigned);
+        const rebindReach = recordAgentProfileRebindReach(db, {
+          agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
+          before: beforeFields, after: afterFields, source: "setup",
+        });
         db.updateAgent(agent.id, { profileId });
-        return ok(agentFields(db.getAgent(agent.id)));
+        const updated = agentFields(db.getAgent(agent.id))!;
+        return ok(rebindReach ? { ...updated, rebindReach } : updated);
       },
     );
 

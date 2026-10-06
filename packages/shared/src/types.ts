@@ -1867,6 +1867,22 @@ export type OrchestrationEventKind =
   // membership there to survive: both event-deletion sites are session-keyed, so this row is reached by
   // neither deleteAgent's cascade nor deleteProject's.
   | "profile_grant_reach"
+  // Card 8b236b22 — the REBIND twin of `profile_grant_reach`: fires when a single agent is rebound
+  // (or cleared) onto a DIFFERENT, already-existing profile that widens what that ONE agent can do —
+  // `agent_update`/`profile_assign` (setup + platform), `agent_assign_profile` (manager), and the human
+  // REST `POST /api/agents/:id`. This is a genuinely different computation from `profile_grant_reach`
+  // (one agent moving between two static profiles, not one profile's own fields changing and reaching
+  // every agent already bound to it) — see `be447b3f`'s decision record for why the two were kept apart.
+  // `detail` carries { agentId, agentName, projectId, source, addedKeys, roleChange? } — `addedKeys`/
+  // `roleChange` are `profileWideningsOf`'s own shape (see `profile_grant_reach` above). `source` is
+  // "setup" | "platform" | "manager" | "rest". Unlike `profile_grant_reach`, an agent rebind has a real,
+  // single `projectId` (the agent's own project) — ALWAYS stamped on `detail`. This kind IS in
+  // `DURABLE_AUDIT_EVENT_KINDS` anyway, but that membership is NOT why the row survives a later
+  // deleteAgent/deleteProject — like `profile_grant_reach`, it's filed with `managerSessionId: ""` (no
+  // owning session), and BOTH cascades only delete rows keyed by `manager_session_id`/`worker_session_id`
+  // matching one of the deleted agent/project's OWN sessions, which `""` can never match. See the
+  // `8b236b22` decision record for the verified mechanics.
+  | "agent_profile_rebind"
   // OBSERVABILITY ONLY — records whether a PRIVATE, presence-gated per-project discovery block was
   // appended to a spawn/recycle's startupPrompt, filed at all FIVE real injection call sites in the
   // daemon's own `sessions/service.ts`. WHAT the block is and WHY it's gated stays documented
@@ -1963,7 +1979,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_session_barred: true,
   vault_index_lock_stale: true,
   vault_index_lock_cleared: true,
-  profile_grant_reach: true,
+  profile_grant_reach: true, agent_profile_rebind: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

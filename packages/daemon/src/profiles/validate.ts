@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Profile, SessionRole } from "@loom/shared";
+import type { Profile, ProfileWideningFields, SessionRole } from "@loom/shared";
 import { AGENT_FORBIDDEN_PROFILE_KEYS } from "@loom/shared";
 import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOffenders, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleUnsupportedReason } from "./codex-compat.js";
@@ -294,6 +294,19 @@ export function agentAssignableProfileError(
     return "cannot assign profile: it carries a non-empty allowDelta (widens the rig's spawn permission allowlist — the same trust class as gateCommand) — human-only, via the Profiles UI / REST";
   }
   return null;
+}
+
+/**
+ * @decision 8b236b22 — a rebind can silently strip `restrictedTools` without touching either
+ * profile's own fields; refuse only that widening direction, only on Setup + manager's
+ * `agent_assign_profile`. See the decision record for why Platform/REST are exempt.
+ */
+export function agentRebindRestrictedToolsWideningError(
+  before: ProfileWideningFields,
+  after: ProfileWideningFields,
+): string | null {
+  if (!before.restrictedTools || after.restrictedTools) return null;
+  return "rebinding would remove this agent's tool restriction (restrictedTools); ask the human to do it in the Profiles UI";
 }
 
 /** The narrow db surface `capabilityGrantBindingError` needs — mirrors the read-only slice of
