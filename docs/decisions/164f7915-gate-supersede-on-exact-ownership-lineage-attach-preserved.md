@@ -46,6 +46,96 @@ Round 2's gate (`isExactWorkerOwner`, evaluated synchronously right after `key` 
 
 **A secondary finding, orthogonal to correctness, ACCEPTED as a named residual (not fixed by this round):** moving the decision past the two real git-subprocess awaits means a caller who releases a cap-saturating holder essentially concurrently with firing the confirm can let the self-check win ADMISSION into the just-freed slot before this (now later) decision ever runs — an entirely different race from the one above (GateSemaphore admission latency vs. this call's own git reads). This does **not** get absorbed by `confirmWorkerMerge`'s own reuse-a-green-self-check optimization: that optimization reads `this.lastWorkerGateCheck.get(workerSessionId)` ONCE, at the moment `confirmWorkerMerge` reaches it, and that map is written only at a self-check's own SETTLE (`runWorkerGate`'s settle path) — never while one is merely running. A self-check that won admission via this race is, by construction, still RUNNING (not yet settled) when the merge's own reuse check executes moments later, so there is nothing fresh to reuse: the merge runs a genuine, REDUNDANT SECOND gate invocation on the identical tree. Measured directly (Code Review, Round 2) with a 3-second fake gate: two real gate invocations, not one. No correctness loss — both the self-check's own caller and the merge both still see a true, passing result — but it is real wasted work this card does not close. A structural mitigation is tracked as a separate, later card: `5f7d7a01`. Observed directly in `gate-cancel.mjs`'s "(e2e single-admission)" block, which now holds the unrelated holder until this decision has genuinely run (pausing on `confirmMergeMainlineHeadReader`, mirroring `merge-confirm-supersede-mint-window.mjs`'s own technique) so the self-check reliably stays queued long enough to be superseded, and asserts the single `cancelled:true, cancelKind:"superseded-by-merge"` shape again — proven RED against a no-op `supersedeQueuedSelfCheck` stub, confirming the block is no longer vacuous.
 
+## Round 4 (card `5f7d7a01`) — closes the redundant-second-gate residual Round 3 named, WITHOUT touching the supersede decision at all
+
+Round 3's own residual: a self-check that wins GateSemaphore ADMISSION during `confirmWorkerMergeTracked`'s
+two identity-resolving awaits defeats `supersedeQueuedSelfCheck` (QUEUED-only, per 8d585277) and keeps
+running for real; `confirmWorkerMerge`'s own gate step then queues behind it (per-worktree exclusivity) and
+mints a second, genuinely redundant real gate invocation once the self-check releases.
+
+Two directions were considered: (a) teach GateSemaphore to stand down a self-check AT ADMISSION by
+consulting whether a merge confirm is pending/minting for the same worktree; (b) have the merge wait for
+and reuse the in-flight self-check's verdict. (a) was rejected: making it SAFE (never standing down a
+self-check for a confirm that is later refused — the original 164f7915 bug, in a new shape) requires
+re-deriving `isExactWorkerOwner`/`attachingToRunningOp` fresh at the exact admission instant, which either
+duplicates that decision (forbidden below) or threads a new SessionService→GateSemaphore callback that
+must stay registered for confirmWorkerMerge's ENTIRE pre-gate lifetime (the race can recur during its own
+later awaits too — e.g. the union-merge — not just the two awaits before the Round 3 decision). That is new
+cross-module coupling with its own leak/staleness risk, for no correctness gain over (b).
+
+**The fix (b):** `confirmWorkerMerge`'s existing e50600d2 reuse block (`sessions/service.ts`, immediately
+before `const lastCheck = this.lastWorkerGateCheck.get(workerSessionId)`) first checks
+`this.pendingOps.peek(\`gate:${workerSessionId}\`)?.state === "running"` — the SAME key
+`supersedeQueuedSelfCheck` already reads, and the SAME key/kind (`"gate"`) `runWorkerGate`'s own
+`pendingOps.attach()` call uses. If running, it `await`s `this.pendingOps.waitBriefly(key, gateTimeoutMs)`
+(an existing, already-used-elsewhere bounded-wait primitive) before falling through to the reuse block,
+unchanged. `runWorkerGate`'s settle path writes `lastWorkerGateCheck` synchronously, inside the same `run()`
+callback, BEFORE `attach()` ever resolves any attached waiter — so by the time the wait resolves, the
+existing reuse-eligibility checks (branch match, `passed`, `headCurrent`, fresh stamp/dirty, `freshBehindMain
+=== 0`, `onBranch`) have real, current data to evaluate. This adds NO new trust logic: it only changes
+WHETHER those checks get a value to look at, never WHAT they trust once they have one.
+
+**No new ownership/race surface, by construction — but the merge OP's OWN cancel-visibility genuinely
+regresses while this wait is outstanding, corrected here (Code Review, round 2):**
+- A self-check CANCELLED while running (`gate_cancel`, or the manual RUNNING-cancel path, 8d585277) returns
+  before ever reaching the `lastWorkerGateCheck.set` call (`runWorkerGate`'s "CANCELLED-WHILE-RUNNING"
+  branch returns strictly earlier in the same function) — the wait resolves, `lastCheck` is whatever it was
+  before (stale or absent), and the existing `hasLastCheck`/`checkPassed` checks correctly refuse reuse and
+  fall through to a fresh gate. No stale/wrong reuse is possible either way.
+- **The merge op's own cancel-visibility is NOT "identical in kind" to before this fix — it is a real,
+  named trade-off.** PRE-fix, a self-check that won the admission race left the MERGE'S OWN gate call
+  QUEUED (visible in `gate_queue`/`gateQueueForManager`, cancellable via `gate_cancel(mergeOpId)` per
+  8d585277's "QUEUED is zero-risk for any gate type"). POST-fix, that same window is this wait instead — an
+  in-process `await` with no GateSemaphore registration at all, so it is INVISIBLE to `gate_queue` and
+  `gate_cancel(mergeOpId)` returns `not_found` for up to `gateCommandTimeoutMs`. **The remedy: `gate_cancel`
+  the SELF-CHECK's OWN opId instead** (visible and cancellable the whole time, QUEUED-or-RUNNING per
+  8d585277) — cancelling or killing it settles its `pendingOps` entry, which ends this wait immediately
+  (whichever branch of `Promise.race` it's blocking on) and falls through to the pre-existing real-gate
+  path, exactly as a `hasLastCheck:false` miss always has. A follow-up card (filed separately, NOT part of
+  this round's scope) tracks making the wait itself visible/cancellable as a merge-op-shaped thing instead
+  of relying on a caller knowing to target the self-check's opId.
+- Dead-owner eviction while waiting: unchanged, pre-existing (27ea069e) — an evicted entry's orphaned
+  `run()` keeps executing in the background regardless of this wait's existence.
+- A self-check that PASSES but whose branch tip moved mid-run (`headCurrent:false`, 39196378) is caught by
+  the EXISTING `checkHeadCurrent` condition exactly as it always was — this fix changes nothing about that
+  check, it only gives it a fresher (or the same) `lastCheck` to evaluate.
+
+**Lock audit — nothing held during the wait (cited by call, not a bare line number that drifts on the
+next edit above it — card `5f7d7a01`'s own record cited lines that were already 7 off by the time this
+round's text settled; re-grep the call name below rather than trusting any number here):**
+- `withCanonicalIndexLock` (`git/repo-lock.ts`'s `withCanonicalIndexLock`, a plain promise-chain mutex
+  scoped to its own callback) is acquired-and-released around the three canonical-dirt probes
+  (`detectCanonicalStagedDirt`/`detectCanonicalDirtyOverlap`/`detectCanonicalUntrackedOverlap`) in
+  `confirmWorkerMerge`, well before this wait — released by the time its own `await` resolves.
+- The union-merge (`mergeMainIntoWorktree`, called directly from `confirmWorkerMerge`) runs with NO lock
+  of its own at all — see this record's own Round 2/3 text above.
+- GateSemaphore's per-worktree/per-repo admission guards (`activeWorktrees`/`activeMergeRepos`) are only
+  taken inside `gateSemaphore.runExclusive`, called for THIS merge's own gate (the `"low"`-priority call
+  passing `gateDescriptor`/`gateCap`) — strictly AFTER this wait.
+- `acquireRepoGuardOnly` (the inert-diff-skip path's own `releaseInertRepoGuard = await
+  this.gateSemaphore.acquireRepoGuardOnly(...)` call) and `beginSquash`/`endSquash` (the squashing slot)
+  are both reached later still.
+- The only thing held across the wait is the outer `pendingOps.attach(key: "merge:"+workerSessionId, ...)`
+  entry `confirmWorkerMergeTracked` wraps this whole call in — a per-WORKER dedupe entry, never a cross-
+  worker/cross-repo lock. A long wait here can never block a sibling merge's admission on this repo or any
+  other.
+
+**Accepted residual:** if the self-check is still QUEUED (not yet admitted) behind unrelated cap pressure
+when this check runs, `gateTimeoutMs` alone may not cover the remaining queue wait plus its full run —
+`waitBriefly` simply times out and falls through to the pre-existing, safe-but-costly real-gate path. Never
+an incorrect reuse, only a missed optimization in that one sub-case.
+
+**Test:** `merge-confirm-self-check-admission-race.mjs`, mirroring `merge-confirm-supersede-mint-window.mjs`'s
+rig but inverted — releases the held slot FROM INSIDE the `confirmMergeMainlineHeadReader` override's first
+call (i.e. during the two identity-resolving awaits, before the Round 3 decision runs), forcing the self-
+check to win admission mid-window. Asserts the self-check settles `ran:true`/`passed:true` with no
+`cancelled` (supersede genuinely defeated, not avoided by test luck), the confirm's own merge succeeds, and
+exactly one real gate call total. RED on main at `86c3286a` (two real gate invocations, matching this
+record's own Round 3 measurement) — green after this round. A sibling case drives a commit onto the
+worktree WHILE the self-check's fake gate is executing, producing a PASS with `headCurrent:false`; asserts
+the merge does NOT reuse it and runs its own fresh gate instead (two real gate invocations in THAT case,
+by design) — the behavioural control proving reuse still goes through the unchanged existing checks.
+
 ## Do not
 
 - Do not widen `isExactWorkerOwner` (or either call site) to lineage-tolerant — that would let a lineage-matching-but-exact-mismatched caller actually MERGE, a materially bigger behavioral change than this card's own scope, and would make this one method's ownership strength diverge from its 7 untouched siblings in the same file.
@@ -58,3 +148,6 @@ Round 2's gate (`isExactWorkerOwner`, evaluated synchronously right after `key` 
 - Do not drop the `attachingToRunningOp` arm of the Round 3 condition on the theory that it duplicates `isExactWorkerOwner` — it is the fix for a SEPARATE, independently-discovered gap (the accepted residual named in Round 2 above), not a redundant restatement.
 - Do not move the supersede decision back to BEFORE the identity-resolving awaits to "fix" the redundant-second-gate residual above — that reopens the exact→stale window this round exists to close (a real, narrow bug) in exchange for closing a wasted-work residual that has no correctness cost. The two defects are not the same severity; do not trade the real one away for the cosmetic one.
 - Do not "fix" the `attachingToRunningOp` arm's own lineage staleness (noted above) by re-checking exactness for it — that would require the attaching caller to BE the exact owner, defeating the entire purpose of this arm, which exists specifically for a lineage-only, non-exact caller. The staleness here is accepted as bounded, not a defect to close.
+- Do not move Round 4's wait earlier than immediately before the reuse block's own `lastCheck` read, and do not let it decide reuse itself — it must only feed the existing, unchanged eligibility checks a fresher value; deciding reuse from "something finished" alone would bypass `checkPassed`/`checkHeadCurrent`/the fresh-stamp/`freshBehindMain` checks entirely.
+- Do not revisit direction (a) (admission-time stand-down in GateSemaphore) without a story for the "minting" window too — the Round 4 narrative above explains why it needs the decision registered for confirmWorkerMerge's whole pre-gate lifetime, not just the two awaits before the Round 3 decision, and why that is worse than (b).
+- Do not widen Round 4's wait bound past `gateTimeoutMs` to try to also cover a self-check still queued behind unrelated cap pressure — the residual there is accepted (falls through to a real gate, never an incorrect reuse); a larger bound trades a known-safe fallback for an unbounded wait with no new correctness benefit.

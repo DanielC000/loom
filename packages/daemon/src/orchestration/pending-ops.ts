@@ -171,6 +171,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** @decision 164f7915 — a bare `sleep()` timer keeps running up to `ms` even once `e.settle` wins the
+ *  race; clear it instead, now that a caller can pass a multi-minute `ms`. See 164f7915 Round 4. */
+function clearableSleep(ms: number): { promise: Promise<void>; clear: () => void } {
+  let timer: ReturnType<typeof setTimeout>;
+  const promise = new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); });
+  return { promise, clear: () => clearTimeout(timer) };
+}
+
 /** The common allowlisted-fields shape both `Entry` and `RetainedView` satisfy — used ONLY to type
  *  {@link projectView}'s input, so that function is the single place either internal shape is narrowed
  *  down to the caller-facing {@link PendingOpView}. */
@@ -354,14 +362,17 @@ export class PendingOpRegistry {
    *  `gate_cancel` (card 8d585277) needs after asking an already-running gate to stop: a manager-facing
    *  tool call must answer promptly, never hang for however long the underlying `gateTimeoutMs` backstop
    *  might take if the kill is never verified. Returns `true` immediately if there's nothing running under
-   *  `key` at all (already settled, or never existed) — nothing to wait for. Reuses the SAME
-   *  `Promise.race(e.settle, sleep(ms))` shape `attach()` itself races against its own `waitMs`, rather
-   *  than inventing a second concurrency primitive. Never consumes (does not evict/read `result`/`error`)
-   *  — the caller that eventually calls `attach()`/`peek()` still gets the real settled value normally. */
+   *  `key` at all (already settled, or never existed) — nothing to wait for. Mirrors the SAME
+   *  `Promise.race(e.settle, <timer>)` shape `attach()` itself races against its own `waitMs`, rather than
+   *  inventing a second concurrency primitive — but via `clearableSleep` (164f7915 Round 4), which clears
+   *  its timer on either race outcome, since this caller can pass a multi-minute `ms`. Never consumes
+   *  (does not evict/read `result`/`error`) — the caller that eventually calls `attach()`/`peek()` still
+   *  gets the real settled value normally. */
   async waitBriefly(key: string, ms: number): Promise<boolean> {
     const e = this.entries.get(key);
     if (!e || e.state !== "running") return true;
-    await Promise.race([e.settle, sleep(ms)]);
+    const timeout = clearableSleep(ms);
+    try { await Promise.race([e.settle, timeout.promise]); } finally { timeout.clear(); }
     return e.state !== "running";
   }
 

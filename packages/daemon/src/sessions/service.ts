@@ -16630,6 +16630,13 @@ export class SessionService {
       // @decision 2e52bf99 — every reuse condition below is computed unconditionally (hoisted), even
       //  once an earlier one already disqualifies reuse, so a masked second blocker (dirty worktree,
       //  main advanced) is never hidden behind whichever cause happens to be checked first.
+      //
+      // @decision 164f7915 — never move this wait earlier or decide reuse from its own result: it only
+      // ever feeds the EXISTING checks below a fresher `lastWorkerGateCheck`, never changes what they
+      // trust. See Round 4 for the race, the lock audit, and why the bound is safe.
+      if (!gateDisabled && this.pendingOps.peek(`gate:${workerSessionId}`)?.state === "running") {
+        await this.pendingOps.waitBriefly(`gate:${workerSessionId}`, gateTimeoutMs);
+      }
       let reuseResult: GateSequentialResult | undefined;
       const lastCheck = this.lastWorkerGateCheck.get(workerSessionId);
       // `lastCheck !== undefined` (never `!!lastCheck`) deliberately — TS's aliased-condition narrowing
