@@ -5643,6 +5643,10 @@ export class Db {
    * Delete a profile. SAFE for assigned agents: an agent whose profile_id now dangles resolves to the
    * plain backstop via resolveProfile (getProfile → undefined). A bundled profile re-seeds on next
    * boot (seed-if-absent), so deleting one is non-destructive.
+   *
+   * @decision be447b3f — the dangling backstop itself WIDENS reach (role/restrictedTools); "SAFE" above
+   * is non-destructive to the agent row, not trust-neutral. Callers file that via
+   * `profiles/grantReach.ts`'s compute/file helpers — this method itself has no widening logic.
    */
   deleteProfile(id: string): void {
     this.db.prepare("DELETE FROM profiles WHERE id = ?").run(id);

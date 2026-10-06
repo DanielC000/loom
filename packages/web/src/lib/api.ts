@@ -973,7 +973,10 @@ export const api = {
   // profile. Its mere presence is the signal; it is never an empty payload meaning "nothing granted".
   updateProfile: (id: string, patch: Partial<Omit<Profile, "id">>) =>
     put<Profile & { grantReach?: ProfileGrantReach }>(`/api/profiles/${encodeURIComponent(id)}`, patch),
-  deleteProfile: (id: string) => del<{ ok: boolean }>(`/api/profiles/${encodeURIComponent(id)}`),
+  // The response may carry `grantReach` too (card be447b3f round 3/8fd36112): deleting a profile is itself
+  // a widening write path when the deleted row carried `restrictedTools:true` or a non-null `role` — the
+  // dangling-profileId backstop un-restricts/re-roles every still-bound agent, same mechanism as a save.
+  deleteProfile: (id: string) => del<{ ok: boolean; grantReach?: ProfileGrantReach }>(`/api/profiles/${encodeURIComponent(id)}`),
   resetProfile: (id: string) => post<ProfileSummary & { grantReach?: ProfileGrantReach }>(`/api/profiles/${encodeURIComponent(id)}/reset`),
   // --- Bundled-profile update adoption (field-level 3-way merge; only meaningful when a bundled-by-name
   // profile reports updateAvailable). The profiles analog of the skill adoption routes, but FIELD-level

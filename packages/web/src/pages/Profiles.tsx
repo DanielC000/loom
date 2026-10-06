@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant } from "@loom/shared";
+import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, ProfileGrantReach, SessionRole, CapabilityGrant } from "@loom/shared";
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, tone, type Tone } from "../theme";
@@ -14,7 +14,7 @@ import { changedFields, type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
 import { errorText } from "../lib/loopbackCredential";
 import {
-  grantFieldsOfProfile, grantFieldsOfValues, parseAllowDelta, planGrantSave, type GrantSavePlan,
+  grantFieldsOfProfile, grantFieldsOfValues, grantKeyList, parseAllowDelta, planGrantSave, type GrantSavePlan,
 } from "../lib/profileGrantReach";
 import { GrantReachConfirm } from "../components/GrantReachConfirm";
 import { useAllAgents } from "../lib/useAllAgents";
@@ -45,6 +45,11 @@ export default function Profiles() {
   useEffect(() => { if (profileParam) setSelected(profileParam); }, [profileParam]);
   const [newName, setNewName] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0); // bumped on revert/adopt to remount the editor onto fresh fields
+  // Card 8fd36112: a delete that widens reach (the dangling-profileId backstop un-restricts/re-roles every
+  // still-bound agent) has no editor to confirm it IN — the row is gone by the time the response lands. So
+  // this shows AFTER, not before; it lives here (not inside ProfileEditor) because the editor unmounts the
+  // instant the delete succeeds (`selected` goes null), and the notice needs to outlive that unmount.
+  const [deleteReach, setDeleteReach] = useState<{ name: string; reach: ProfileGrantReach } | null>(null);
 
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const current = useQuery({ queryKey: ["profile", selected], queryFn: () => api.profile(selected!), enabled: !!selected });
@@ -63,8 +68,12 @@ export default function Profiles() {
     },
   });
   const remove = useMutation({
-    mutationFn: (id: string) => api.deleteProfile(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["profiles"] }); setSelected(null); },
+    mutationFn: (v: { id: string; name: string }) => api.deleteProfile(v.id),
+    onSuccess: (res, v) => {
+      qc.invalidateQueries({ queryKey: ["profiles"] });
+      setSelected(null);
+      setDeleteReach(res.grantReach ? { name: v.name, reach: res.grantReach } : null);
+    },
   });
   const revert = useMutation({
     mutationFn: (id: string) => api.resetProfile(id),
@@ -91,50 +100,107 @@ export default function Profiles() {
   const validNew = newName.trim().length > 0 && !profiles.data?.some((p) => p.name === newName.trim());
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
-      <Panel style={{ alignSelf: "start" }}>
-        <SectionLabel>Profiles</SectionLabel>
-        <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
-          Reusable, cross-project rig — role, model, permission deltas, skill subset, icon, plus a
-          description blurb. An agent runs under one to drive how its sessions spawn; the injected
-          prompt comes from the agent. Human-managed only; edits apply on the next spawn.
-        </p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {/* The companion's assistant-role rig is HIDDEN here — companion config lives entirely under
-              Companion → Manage now, so it never shows among the agent rigs. */}
-          {agentProfiles(profiles.data ?? []).map((p) => (
-            <Button key={p.id} variant={p.id === selected ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
-              onClick={() => setSelected(p.id)} title={p.description || p.name}>
-              {p.icon && <span>{p.icon}</span>}
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
-              {/* A rig that spawns a DIFFERENT vendor binary should be identifiable without opening it
-                  (card fa2277b6 item 5). Only codex is marked — claude is the default, so badging every
-                  row would be noise, not signal. */}
-              <HarnessTag harness={harnessOf(p.harness)} title={`${p.name} spawns the codex CLI, not claude`} />
-              <StatusDots customized={!!p.customized} updateAvailable={!!p.updateAvailable} />
-              <span style={{ fontSize: 10, color: roleColor(p.role), fontFamily: font.mono }}>{roleDisplay(p.role).short}</span>
-            </Button>
-          ))}
-          {agentProfiles(profiles.data ?? []).length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No profiles yet.</span>}
-        </div>
-        <div style={{ marginTop: 12, display: "flex", gap: 6 }}>
-          <Input placeholder="new profile name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ flex: 1 }} />
-          <Button variant="primary" disabled={!validNew || create.isPending} onClick={() => create.mutate(newName.trim())}>+ New</Button>
-        </div>
-      </Panel>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {deleteReach && (
+        <DeleteGrantReachNotice name={deleteReach.name} reach={deleteReach.reach} onDismiss={() => setDeleteReach(null)} />
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
+        <Panel style={{ alignSelf: "start" }}>
+          <SectionLabel>Profiles</SectionLabel>
+          <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
+            Reusable, cross-project rig — role, model, permission deltas, skill subset, icon, plus a
+            description blurb. An agent runs under one to drive how its sessions spawn; the injected
+            prompt comes from the agent. Human-managed only; edits apply on the next spawn.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {/* The companion's assistant-role rig is HIDDEN here — companion config lives entirely under
+                Companion → Manage now, so it never shows among the agent rigs. */}
+            {agentProfiles(profiles.data ?? []).map((p) => (
+              <Button key={p.id} variant={p.id === selected ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
+                onClick={() => setSelected(p.id)} title={p.description || p.name}>
+                {p.icon && <span>{p.icon}</span>}
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                {/* A rig that spawns a DIFFERENT vendor binary should be identifiable without opening it
+                    (card fa2277b6 item 5). Only codex is marked — claude is the default, so badging every
+                    row would be noise, not signal. */}
+                <HarnessTag harness={harnessOf(p.harness)} title={`${p.name} spawns the codex CLI, not claude`} />
+                <StatusDots customized={!!p.customized} updateAvailable={!!p.updateAvailable} />
+                <span style={{ fontSize: 10, color: roleColor(p.role), fontFamily: font.mono }}>{roleDisplay(p.role).short}</span>
+              </Button>
+            ))}
+            {agentProfiles(profiles.data ?? []).length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No profiles yet.</span>}
+          </div>
+          <div style={{ marginTop: 12, display: "flex", gap: 6 }}>
+            <Input placeholder="new profile name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ flex: 1 }} />
+            <Button variant="primary" disabled={!validNew || create.isPending} onClick={() => create.mutate(newName.trim())}>+ New</Button>
+          </div>
+        </Panel>
 
-      <Panel style={{ minHeight: "72vh", padding: 12 }}>
-        {selected && current.data ? (
-          <ProfileEditor key={`${selected}:${grantParam ?? ""}:${reloadNonce}`} profile={current.data}
-            grantConnectionId={selected === profileParam ? grantParam : null}
-            onSave={(patch) => save.mutate({ id: selected, patch })} saving={save.isPending}
-            saveError={save.error as Error | null}
-            onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
-            onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
-            onAdopt={(resolutions) => adopt.mutate(resolutions)} adopting={adopt.isPending} adoptError={adopt.error as Error | null} />
-        ) : <p style={{ color: color.textMuted, padding: 12 }}>Select a profile to edit it, or create a new one.</p>}
-      </Panel>
+        <Panel style={{ minHeight: "72vh", padding: 12 }}>
+          {selected && current.data ? (
+            <ProfileEditor key={`${selected}:${grantParam ?? ""}:${reloadNonce}`} profile={current.data}
+              grantConnectionId={selected === profileParam ? grantParam : null}
+              onSave={(patch) => save.mutate({ id: selected, patch })} saving={save.isPending}
+              saveError={save.error as Error | null}
+              onDelete={() => remove.mutate({ id: selected, name: current.data!.name })} deleting={remove.isPending}
+              onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
+              onAdopt={(resolutions) => adopt.mutate(resolutions)} adopting={adopt.isPending} adoptError={adopt.error as Error | null} />
+          ) : <p style={{ color: color.textMuted, padding: 12 }}>Select a profile to edit it, or create a new one.</p>}
+        </Panel>
+      </div>
     </div>
+  );
+}
+
+// Card 8fd36112: a profile delete that widened reach (the dangling-profileId backstop un-restricting /
+// re-roling every still-bound agent) has no pre-delete confirm — the row is already gone by the time the
+// response lands. This is the AFTER-the-fact equivalent of GrantReachConfirm: same restrained, amber
+// hairline language, past tense, and a dismiss instead of the two forward-looking choices.
+function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reach: ProfileGrantReach; onDismiss: () => void }) {
+  return (
+    <Panel data-testid="delete-grant-reach-notice" role="alert"
+      style={{ borderColor: color.amber, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Badge tone="amber">grant</Badge>
+        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 12, color: color.text }}>
+          Deleting {name} widened what agents can do
+        </strong>
+        <span style={{ flex: 1 }} />
+        <Button onClick={onDismiss}>Dismiss</Button>
+      </div>
+      <p style={{ margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: color.text }}>
+        The deleted profile granted <strong style={{ color: color.amber }}>{grantKeyList(reach.addedKeys)}</strong>.
+        {" "}Agents bound to it now fall back to the plain default, so{" "}
+        <strong style={{ color: color.amber }} data-testid="delete-grant-reach-count">
+          {reach.agentCount} agent{reach.agentCount === 1 ? "" : "s"}
+        </strong>{" "}
+        {reach.agentCount === 1 ? "picks" : "pick"} this up on their next session.
+      </p>
+      {reach.roleChange && (
+        <p data-testid="delete-grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: color.text }}>
+          Role changes from <strong style={{ color: color.amber }}>{reach.roleChange.from ?? "none"}</strong>
+          {" "}to <strong style={{ color: color.amber }}>{reach.roleChange.to ?? "none"}</strong>.
+        </p>
+      )}
+      {reach.agentCount > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel>Affected</SectionLabel>
+          <ul data-testid="delete-grant-reach-agents"
+            style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
+            {reach.agents.map((a) => (
+              <li key={a.id} style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>
+                <span style={{ color: color.textDim }}>{a.projectName}</span>
+                <span style={{ color: color.textMuted }}> / </span>
+                {a.name}
+              </li>
+            ))}
+          </ul>
+          {reach.truncated && (
+            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>+more (truncated)</span>
+          )}
+        </div>
+      )}
+    </Panel>
   );
 }
 

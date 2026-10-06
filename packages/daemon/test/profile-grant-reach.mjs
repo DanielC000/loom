@@ -49,8 +49,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Code Review of d027ce92 (round 3, blocking Major) found profile_delete had TWO more write paths round 2
 // never touched — the manager's own MCP tool and the human REST route — each still skipping the reach
-// computation entirely. Both now route through the SAME shared recordProfileDeleteGrantReach helper (N)
-// already exercises for the platform tool:
+// computation entirely. Both now route through the SAME shared compute/file helpers (N) already
+// exercises for the platform tool:
 //   (P) sessions/service.ts's deleteProfileAsManager (source "manager"); a BEHAVIOURAL NEGATIVE CONTROL
 //       (deleting a profile already AT the backstop state) fires nothing.
 //   (Q) REST DELETE /api/profiles/:id (source "rest"); a BEHAVIOURAL NEGATIVE CONTROL, plus the idempotent
@@ -59,6 +59,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       hand-copied (round 3, Minor: nothing caught the two drifting) — a confirming positive proof of the
 //       derivation's field mapping (allow->allowDelta, harness null->undefined), not a drift detector in
 //       its own right; the derivation itself is what removes the drift risk.
+//
+// Card 8fd36112 (be447b3f round-3 Minor): recordProfileDeleteGrantReach used to run AFTER db.deleteProfile
+// with no transaction — a listAllAgents() fault post-delete left the profile gone with no audit event.
+//   (S) FAULT INJECTION: a listAllAgents() throw aborts the REST delete BEFORE db.deleteProfile runs (the
+//       profile survives, no event fires); a NEGATIVE CONTROL (clearing the same fault) proves the abort
+//       was caused by the injected fault, by showing the identical request then succeeds normally.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/profile-grant-reach.mjs
 import fs from "node:fs";
@@ -521,7 +527,7 @@ const parseMcp = (res) => JSON.parse(res.content[0].text);
 // Code Review of d027ce92 (round 3, blocking Major): the manager surface's profile_delete had NO reach
 // computation at all — an agent manager could delete a restrictedTools:true rig (e.g. the bundled
 // Companion profile, profiles/seed.ts) and silently un-restrict every bound agent. Routed through the
-// SAME shared recordProfileDeleteGrantReach helper (N) above exercises for the platform tool.
+// SAME shared compute/file helpers (N) above exercises for the platform tool.
 {
   const { SessionService } = await import("../dist/sessions/service.js");
   const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -595,6 +601,37 @@ const parseMcp = (res) => JSON.parse(res.content[0].text);
   check("(Q) deleting an unknown id still 200s (idempotent, no 404)", missing.statusCode === 200);
   const missingBody = JSON.parse(missing.payload);
   check("(Q) ...ok:true, no grantReach, nothing filed", missingBody.ok === true && missingBody.grantReach === undefined && reachEvents(e).length === before);
+  cleanup(e);
+}
+
+// ===================== (S) fault injection: a listAllAgents() fault must abort BEFORE the delete =====================
+// Card 8fd36112 (be447b3f round-3 Minor): the old recordProfileDeleteGrantReach ran AFTER db.deleteProfile,
+// with no transaction wrapping the two — a listAllAgents() fault post-delete left the profile gone with NO
+// audit event, and the caller facing a bare error indistinguishable from "the delete failed" when it had
+// actually already succeeded. The fix computes the reach BEFORE deleting, so a fault there aborts the
+// request before the destructive write ever runs. This is the behavioural proof, on the REST delete path.
+{
+  const e = mkDb("delete-fault-injection");
+  const app = await mkApp(e);
+  const prof = mkProfile(e, "prof-fault", { role: "worker", restrictedTools: true });
+  mkAgent(e, "agent-fault", "proj-fault", "Fault", prof);
+
+  const originalListAllAgents = e.db.listAllAgents.bind(e.db);
+  e.db.listAllAgents = () => { throw new Error("injected fault: listAllAgents"); };
+
+  const res = await app.inject({ method: "DELETE", url: `/api/profiles/${prof}` });
+  check("(S) a listAllAgents() fault during the widening compute surfaces as a server error", res.statusCode >= 500);
+  check("(S) ...and the profile is STILL THERE — db.deleteProfile never ran", !!e.db.getProfile(prof));
+  check("(S) ...and NO event was filed (nothing to roll back)", reachEvents(e).length === 0);
+
+  // ===== NEGATIVE CONTROL: clearing the SAME fault lets the SAME request succeed normally — proving the
+  // abort above is caused by the injected fault, not by some other defect in the fixture/request shape. =====
+  e.db.listAllAgents = originalListAllAgents;
+  const res2 = await app.inject({ method: "DELETE", url: `/api/profiles/${prof}` });
+  check("(S) NEGATIVE CONTROL: with the fault cleared, the SAME delete now succeeds", res2.statusCode === 200);
+  check("(S) ...the profile really is gone now", !e.db.getProfile(prof));
+  check("(S) ...and the event fires normally, naming the bound agent", reachEvents(e).length === 1 && reachEvents(e)[0]?.detail?.agentCount === 1);
+
   cleanup(e);
 }
 

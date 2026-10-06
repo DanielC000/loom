@@ -30,7 +30,7 @@ import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { splitGateSteps } from "../orchestration/gate-runner.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, HARNESS_ID_SCHEMA, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
-import { recordProfileGrantReach, grantFieldsOf, recordProfileDeleteGrantReach, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
+import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore, cloneSourceFieldError, reservedProjectManagerProfileError, reservedProjectAgentBoundToProfile, nonReservedElevatedProfileError, nonReservedAgentBoundToProfile } from "../agents/clone-core.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -2161,11 +2161,13 @@ export class PlatformMcpRouter {
       async ({ profileId }) => {
         const existing = db.getProfile(profileId);
         if (!existing) return ok({ error: "profile not found" });
-        db.deleteProfile(profileId);
         // Blast radius (card be447b3f): deletion is itself a widening write path, not just update — routed
-        // through the SHARED delete helper (recordProfileDeleteGrantReach, round 3) alongside the manager's
-        // own profile_delete and the human REST route, so this can never drift from either of them.
-        const grantReach = recordProfileDeleteGrantReach(db, { profileId, existing, source: "platform" });
+        // through the SHARED delete helpers alongside the manager's own profile_delete and the human REST
+        // route, so this can never drift from either of them.
+        // @decision 8fd36112 — compute BEFORE delete, file only after it succeeds.
+        const grantReach = computeProfileDeleteGrantReach(db, { profileId, existing });
+        db.deleteProfile(profileId);
+        if (grantReach) fileProfileDeleteGrantReachEvent(db, { profileId, profileName: existing.name, source: "platform", reach: grantReach });
         return ok(grantReach ? { deleted: true, profileId, grantReach } : { deleted: true, profileId });
       },
     );

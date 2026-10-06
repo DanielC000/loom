@@ -348,6 +348,58 @@ test.describe("profile grant blast radius", () => {
     expect((await getProfile(loomDaemon.baseURL, profile.id)).browserTesting ?? false).toBe(false);
   });
 
+  test("DELETE widening (card 8fd36112/be447b3f round 3): the post-delete notice names what was granted", async ({ page, loomDaemon }) => {
+    // Unlike a save, a widening DELETE has no editor left to confirm it IN — the row is gone by the time
+    // the response lands. This proves the AFTER notice actually renders from the real response, with a
+    // before/after DOM difference (the notice is absent, then present, naming the real key/agent/count),
+    // not merely "the component compiles".
+    const profile = await seedProfile(loomDaemon.baseURL, `Grant Reach Delete ${Date.now()}`);
+    await apiJson(`${loomDaemon.baseURL}/api/profiles/${profile.id}`, {
+      method: "PUT", body: JSON.stringify({ role: "worker", restrictedTools: true }),
+    });
+    const project = await loomDaemon.createProject(`grant-reach-delete-${Date.now()}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, "Delete Reach Agent");
+    await bindAgent(loomDaemon.baseURL, agent.id, profile.id);
+
+    await openProfile(page, loomDaemon.baseURL, profile.name);
+
+    // BEFORE: no notice is on screen — nothing has been deleted yet.
+    await expect(page.getByTestId("delete-grant-reach-notice")).toHaveCount(0);
+
+    // ACT: Delete -> Confirm.
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+
+    // AFTER: the profile is really gone (REST read-back), and the notice names the real widening — both
+    // keys (the backstop un-restricts AND re-roles), the real agent, and the real count.
+    await expect.poll(() => getProfile(loomDaemon.baseURL, profile.id).then((p) => p).catch((e) => String(e)))
+      .toMatch(/404|not found/i);
+    const notice = page.getByTestId("delete-grant-reach-notice");
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText(profile.name);
+    await expect(page.getByTestId("delete-grant-reach-count")).toContainText("1 agent");
+    await expect(page.getByTestId("delete-grant-reach-agents")).toContainText(agent.name);
+    await expect(page.getByTestId("delete-grant-reach-agents")).toContainText(project.name);
+    await expect(page.getByTestId("delete-grant-reach-role-change")).toContainText("worker");
+
+    // ACT: Dismiss.
+    await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await expect(notice).toHaveCount(0);
+  });
+
+  test("NEGATIVE CONTROL: deleting a profile that widens nothing shows no notice", async ({ page, loomDaemon }) => {
+    const { profile } = await seedBoundRig(loomDaemon.baseURL, "delete-neg", (n) => loomDaemon.createProject(n));
+    expect(profile.role ?? null).toBeNull(); // fixture identity: already at the backstop state
+
+    await openProfile(page, loomDaemon.baseURL, profile.name);
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+
+    await expect.poll(() => getProfile(loomDaemon.baseURL, profile.id).then((p) => p).catch((e) => String(e)))
+      .toMatch(/404|not found/i);
+    await expect(page.getByTestId("delete-grant-reach-notice")).toHaveCount(0);
+  });
+
   test("the pages sharing that cache still render agent labels after Profiles has used it", async ({ page, loomDaemon }) => {
     // The OTHER direction of the same collision. With one owner per key the cache holds RAW rows, so a
     // label consumer must derive its own shape via `select` instead of expecting a pre-projected cache;

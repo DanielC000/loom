@@ -16,9 +16,10 @@ import {
  * a grant before the save (role/restrictedTools have no editor confirm yet — see that card); this is the
  * backstop for every profile update/delete write path, including the ones that can never be prompted:
  * REST, the two agent-facing `profile_update` MCP tools, and all THREE `profile_delete` write paths —
- * platform, an agent manager's own tool, and the human REST route — which all route through the ONE
- * shared {@link recordProfileDeleteGrantReach} (built on {@link PROFILE_DELETE_BACKSTOP_FIELDS}) so a
- * fourth can never drift from the other three. An agent REBIND (`agent_update`/`profile_assign` widening
+ * platform, an agent manager's own tool, and the human REST route — which all route through the SHARED
+ * {@link computeProfileDeleteGrantReach}/{@link fileProfileDeleteGrantReachEvent} pair (built on
+ * {@link PROFILE_DELETE_BACKSTOP_FIELDS}) so a fourth can never drift from the other three. An agent
+ * REBIND (`agent_update`/`profile_assign` widening
  * what a single already-bound agent's profile reaches) is accepted OUT of scope here and tracked on its
  * own card (`8b236b22`) — see `be447b3f`'s own decision record for why.
  *
@@ -46,7 +47,8 @@ export interface GrantReachDbStore {
  * `be447b3f`) — the two surfaces where this durable event is the ONLY signal a human gets, since neither
  * can be interactively confirmed the way the editor's save button can. `"manager"` (round 3) is an agent
  * manager's OWN `profile_delete` tool — the third of three delete paths that now all route through
- * {@link recordProfileDeleteGrantReach}, alongside `"platform"`'s and REST's.
+ * {@link computeProfileDeleteGrantReach}/{@link fileProfileDeleteGrantReachEvent}, alongside
+ * `"platform"`'s and REST's.
  */
 export type GrantReachSource = "rest" | "adopt" | "reset" | "setup" | "platform" | "manager";
 
@@ -75,17 +77,39 @@ export function recordProfileGrantReach(
     source: GrantReachSource;
   },
 ): ProfileGrantReach | null {
-  const addedKeys = profileWideningsOf(args.before, args.after);
-  if (addedKeys.length === 0) return null;
-
   // `agent.profileId` is the WHOLE binding surface — see `agentsBoundToProfile`'s own doc for the
   // source-level verification, and for why a pending-binding row is NOT a binding.
+  const reach = computeProfileGrantReach(db, args);
+  if (!reach) return null;
+  fileProfileGrantReachEvent(db, { profileId: args.profileId, profileName: args.profileName, source: args.source, reach });
+  return reach;
+}
+
+/**
+ * The READ-ONLY half of {@link recordProfileGrantReach} — `profileWideningsOf` plus the
+ * `listAllAgents()` bound-agent scan, no write. Split out (card `8fd36112`) so a delete path can run
+ * this BEFORE `db.deleteProfile`, while the row (and every agent's live binding) still exists, and file
+ * the resulting event only once the delete itself has actually succeeded — see
+ * {@link computeProfileDeleteGrantReach}/{@link fileProfileDeleteGrantReachEvent}.
+ */
+function computeProfileGrantReach(
+  db: Pick<GrantReachDbStore, "listAllAgents">,
+  args: { profileId: string; before: ProfileWideningFields; after: ProfileWideningFields },
+): ProfileGrantReach | null {
+  const addedKeys = profileWideningsOf(args.before, args.after);
+  if (addedKeys.length === 0) return null;
   const bound = agentsBoundToProfile(db.listAllAgents(), args.profileId);
   const roleChange = addedKeys.includes("role")
     ? { from: args.before.role ?? null, to: args.after.role ?? null }
     : undefined;
-  const reach = profileGrantReachOf(addedKeys, bound, roleChange);
+  return profileGrantReachOf(addedKeys, bound, roleChange);
+}
 
+/** The WRITE-ONLY half of {@link recordProfileGrantReach} — best-effort, same posture as before the split. */
+function fileProfileGrantReachEvent(
+  db: GrantReachDbStore,
+  args: { profileId: string; profileName: string; source: GrantReachSource; reach: ProfileGrantReach },
+): void {
   try {
     db.appendEvent({
       id: randomUUID(),
@@ -98,12 +122,10 @@ export function recordProfileGrantReach(
         profileId: args.profileId,
         profileName: args.profileName,
         source: args.source,
-        ...reach,
+        ...args.reach,
       },
     });
   } catch { /* best-effort — a failed audit write must never fail an already-persisted save */ }
-
-  return reach;
 }
 
 /**
@@ -193,20 +215,34 @@ export function grantFieldsOf(p: ProfileWideningFields): ProfileWideningFields {
  * The SHARED "delete = reach against the backstop" computation (card `be447b3f` round 3) — the one place
  * every `profile_delete` write path (the platform MCP tool, an agent manager's own MCP tool, and the human
  * REST route) computes reach, so a future fourth path can never drift by re-deriving its own before/after
- * pair. Never deletes anything itself — call `db.deleteProfile` separately, in whichever order that path's
- * own existing logic already uses; this only needs the row as it stood BEFORE deletion.
+ * pair.
+ *
+ * @decision 8fd36112 — call this BEFORE `db.deleteProfile`, never after: a `listAllAgents()` fault here
+ * must abort the delete, not leave the profile gone with no event and an opaque 500 on an already-
+ * committed deletion. File via {@link fileProfileDeleteGrantReachEvent} only once delete has succeeded.
  */
-export function recordProfileDeleteGrantReach(
-  db: GrantReachDbStore,
-  args: { profileId: string; existing: { name: string } & ProfileWideningFields; source: GrantReachSource },
+export function computeProfileDeleteGrantReach(
+  db: Pick<GrantReachDbStore, "listAllAgents">,
+  args: { profileId: string; existing: { name: string } & ProfileWideningFields },
 ): ProfileGrantReach | null {
-  return recordProfileGrantReach(db, {
+  return computeProfileGrantReach(db, {
     profileId: args.profileId,
-    profileName: args.existing.name,
     before: grantFieldsOf(args.existing),
     after: PROFILE_DELETE_BACKSTOP_FIELDS,
-    source: args.source,
   });
+}
+
+/**
+ * The write half — call AFTER `db.deleteProfile` has actually succeeded, with the (non-null) reach
+ * {@link computeProfileDeleteGrantReach} returned. Skip the call entirely when that returned `null` —
+ * nothing widened, nothing to file. Best-effort on the write, same posture as
+ * {@link recordProfileGrantReach}.
+ */
+export function fileProfileDeleteGrantReachEvent(
+  db: GrantReachDbStore,
+  args: { profileId: string; profileName: string; source: GrantReachSource; reach: ProfileGrantReach },
+): void {
+  fileProfileGrantReachEvent(db, args);
 }
 
 /**

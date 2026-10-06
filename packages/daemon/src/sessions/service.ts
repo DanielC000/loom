@@ -16,7 +16,7 @@ import {
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError } from "../profiles/validate.js";
-import { recordProfileDeleteGrantReach, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
+import { computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
@@ -14910,8 +14910,8 @@ export class SessionService {
    * silently dangles the instant that project is restored.
    *
    * @decision be447b3f — deletion is itself a widening write path, routed through the SHARED
-   * recordProfileDeleteGrantReach helper (profiles/grantReach.ts) alongside the platform profile_delete
-   * tool and the human REST route, so this surface can never drift from either of them.
+   * compute/file helpers (profiles/grantReach.ts) alongside the platform profile_delete tool and the
+   * human REST route, so this surface can never drift from either of them.
    */
   deleteProfileAsManager(managerSessionId: string, profileId: string): { deleted: true; profileId: string; grantReach?: ProfileGrantReach } {
     this.requireManager(managerSessionId, "profile_delete");
@@ -14926,8 +14926,10 @@ export class SessionService {
       const blockers = external.map(({ agent, project }) => `${agent.name} (${agent.id}) in project ${project.name} (${project.id})`).join(", ");
       throw new Error(`profile_delete: profile is still referenced by agents outside your project — ${blockers}`);
     }
+    // @decision 8fd36112 — compute BEFORE delete, file only after it succeeds.
+    const grantReach = computeProfileDeleteGrantReach(this.db, { profileId, existing });
     this.db.deleteProfile(profileId);
-    const grantReach = recordProfileDeleteGrantReach(this.db, { profileId, existing, source: "manager" });
+    if (grantReach) fileProfileDeleteGrantReachEvent(this.db, { profileId, profileName: existing.name, source: "manager", reach: grantReach });
     this.auditManage(managerSessionId, "profile_delete", grantReach ? { profileId, grantReach } : { profileId });
     return grantReach ? { deleted: true, profileId, grantReach } : { deleted: true, profileId };
   }

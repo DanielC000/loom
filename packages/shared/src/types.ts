@@ -1854,9 +1854,11 @@ export type OrchestrationEventKind =
   // `detail`: {profileId, profileName, addedKeys, agentCount, agents[], truncated?, source, roleChange?}
   // — `addedKeys` is `ProfileWideningKey[]` (every `AGENT_FORBIDDEN_PROFILE_KEYS` member, plus "role" and
   // "restrictedTools"); `roleChange: {from,to}` is present only when "role" is one of `addedKeys`.
-  // `source` is "rest" | "adopt" | "reset" | "setup" | "platform" — the last two are the Setup
-  // Assistant's and the Platform Lead's own agent-facing `profile_update` MCP tools, where this durable
-  // event is the ONLY signal a human gets (neither surface can show an interactive pre-save confirm).
+  // `source` is "rest" | "adopt" | "reset" | "setup" | "platform" | "manager" — "setup" and "platform"
+  // are the Setup Assistant's and the Platform Lead's own agent-facing `profile_update` MCP tools, AND
+  // (platform only) its `profile_delete` tool; "manager" (card be447b3f round 3) is an agent manager's
+  // OWN `profile_delete` MCP tool. All three are agent-facing surfaces where this durable event is the
+  // ONLY signal a human gets (none of the three can show an interactive pre-save confirm).
   // `agents` is CAPPED (GRANT_REACH_AGENTS_CAP); `agentCount` is always the true total, so derive "how
   // many" from it and NEVER from `agents.length`.
   // Filed on EVERY widening, `agentCount: 0` included (it records the WIDENING; reach is a field on it)

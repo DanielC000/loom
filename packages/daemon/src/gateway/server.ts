@@ -81,7 +81,7 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
-import { recordProfileGrantReach, grantFieldsOf, recordProfileDeleteGrantReach, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
+import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
@@ -4303,9 +4303,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.delete("/api/profiles/:id", async (req) => {
     const id = (req.params as { id: string }).id;
     const existing = deps.db.getProfile(id);
+    // @decision 8fd36112 — compute BEFORE delete (a listAllAgents() fault must abort before the
+    // destructive write), file the event only once the delete has actually succeeded.
+    const reach = existing ? computeProfileDeleteGrantReach(deps.db, { profileId: id, existing }) : null;
     deps.db.deleteProfile(id);
-    const grantReach = existing ? recordProfileDeleteGrantReach(deps.db, { profileId: id, existing, source: "rest" }) : null;
-    return grantReach ? { ok: true, grantReach } : { ok: true };
+    if (reach) fileProfileDeleteGrantReachEvent(deps.db, { profileId: id, profileName: existing!.name, source: "rest", reach });
+    return reach ? { ok: true, grantReach: reach } : { ok: true };
   });
   // Restore a bundled profile to its shipped fields (discards UI edits) — the profile analogue of the
   // skill reset. ALSO advances base=shipped (in resetProfileToBundled) so the result is pristine. 404 if
