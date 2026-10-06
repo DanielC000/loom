@@ -40,9 +40,15 @@ const probing = (answer) => {
 };
 const anyStatusPasses = () => true;
 
-// ── the one rule that is NOT negotiable per path: what each outcome may be claimed for ────────────────
-await acheck("a 401 — and ONLY a 401 — is `invalid`: the daemon itself rejected this credential", async () => {
-  assert.equal(await V.classifyCredentialProbe(probing(401), anyStatusPasses), "invalid");
+// ── card f53eaa57: a 401 is `invalid` only when the path's OWN provesRefusal affirms it ────────────────
+await acheck("a BARE 401 with no provesRefusal is `unknown` — a path must supply one to ever claim `invalid`", async () => {
+  assert.equal(await V.classifyCredentialProbe(probing(401), anyStatusPasses), "unknown",
+    "a bare 401 could be an intermediary's own answer, not the daemon's — it is never assumed");
+});
+
+await acheck("a 401 IS `invalid` once the path's provesRefusal affirms it — the daemon's own coded body", async () => {
+  const coded = async () => ({ status: 401, json: async () => ({ code: "gateway-token-required" }) });
+  assert.equal(await V.classifyCredentialProbe(coded, anyStatusPasses, async (r) => (await r.json()).code === "gateway-token-required"), "invalid");
 });
 
 await acheck("a thrown probe is `unknown`, never `invalid` — a dropped request is not a refusal", async () => {
@@ -69,12 +75,14 @@ await acheck("the path's own passage predicate decides `valid` — the classifie
   assert.equal(await V.classifyCredentialProbe(probing(200), (s) => s >= 200 && s < 300), "valid");
 });
 
-await acheck("a 401 is `invalid` even for a path whose predicate would have passed it", async () => {
-  assert.equal(await V.classifyCredentialProbe(probing(401), anyStatusPasses), "invalid",
-    "the refusal check comes FIRST — a path must not be able to opt out of it by predicate");
+await acheck("provesPassage is never even asked about a 401 — a path must not be able to call its own refusal a success", async () => {
+  let calls = 0;
+  const spyPasses = (s) => { calls++; return true; };
+  assert.equal(await V.classifyCredentialProbe(probing(401), spyPasses), "unknown");
+  assert.equal(calls, 0, "the passage predicate must never even run for a 401");
 });
 
-// ── card a1ec70a6 round 3: a path's OWN second refusal status, consulted LAST and never instead ────────
+// ── card a1ec70a6 round 3 / f53eaa57: provesRefusal decides EVERY refusal, 401 included, consulted LAST ──
 await acheck("provesRefusal can name a non-401 refusal — but only for a response that would be `unknown`", async () => {
   const coded = async () => ({ status: 429, json: async () => ({ code: "gateway-token-required" }) });
   // The gateway's case: the daemon answers a coded 429 only to a token whose verification just failed.
@@ -83,8 +91,8 @@ await acheck("provesRefusal can name a non-401 refusal — but only for a respon
   const ok = async () => ({ status: 200, json: async () => ({}) });
   assert.equal(await V.classifyCredentialProbe(ok, (s) => s >= 200 && s < 300, async () => true), "valid",
     "a path that proved passage has its answer — the refusal hook is a last resort, not an override");
-  // …nor change what a 401 already means.
-  assert.equal(await V.classifyCredentialProbe(probing(401), anyStatusPasses, async () => false), "invalid");
+  // A 401 whose body the path's own refusal check declines to affirm is `unknown`, not `invalid`.
+  assert.equal(await V.classifyCredentialProbe(probing(401), anyStatusPasses, async () => false), "unknown");
 });
 
 await acheck("a provesRefusal that THROWS (an unreadable body) falls back to `unknown`, never a rejection", async () => {
@@ -94,9 +102,10 @@ await acheck("a provesRefusal that THROWS (an unreadable body) falls back to `un
   assert.equal(await V.classifyCredentialProbe(probing(503), (s) => s === 200, async () => { throw new Error("boom"); }), "unknown");
 });
 
-await acheck("omitting provesRefusal leaves the two-argument behaviour byte-identical", async () => {
-  // The loopback path passes no third argument, so its every outcome must be exactly what it was.
-  for (const [status, predicate, expected] of [[404, (s) => s !== 403, "valid"], [403, (s) => s !== 403, "unknown"], [401, () => true, "invalid"]]) {
+await acheck("omitting provesRefusal: passage still decides `valid`/`unknown`, and a 401 can never be `invalid`", async () => {
+  // Card f53eaa57: a path with no provesRefusal has no way to prove a 401 refusal at all, so it is
+  // `unknown` — not the `invalid` a bare 401 used to get before any path could supply one.
+  for (const [status, predicate, expected] of [[404, (s) => s !== 403, "valid"], [403, (s) => s !== 403, "unknown"], [401, () => true, "unknown"]]) {
     assert.equal(await V.classifyCredentialProbe(probing(status), predicate), expected, String(status));
   }
 });

@@ -203,14 +203,18 @@ export function isCredentialSocketFailure(everOpened: boolean, token: string | n
  * so the 404 is structural; and an empty patch is a verified no-op even against a REAL id. All three
  * were checked against a live daemon on card 093981dd.
  *
- * 401 ⇒ the guard rejected this credential (`"invalid"` — the one outcome a refusal may be claimed for).
- * A 403 ⇒ the CSRF/Host hook refused us BEFORE the guard ever ran (a reverse-proxied origin); a 408/429
- * or any 5xx is as likely an intermediary's answer as the daemon's — all `"unknown"`, since none of them
- * TESTED the credential. Anything else means the guard let us through, INCLUDING the structural 404 this
- * probe expects.
+ * 401 carrying the guard's own coded body (the `loom open` pointer, card f53eaa57) ⇒ the guard rejected
+ * this credential (`"invalid"` — the one outcome a refusal may be claimed for). A BARE or foreign 401 —
+ * one an intermediary in front of this origin could have authored — proves nothing either, same as a 403
+ * (the CSRF/Host hook refusing us before the guard ever ran), a 408/429, or any 5xx: all `"unknown"`,
+ * since none of them TESTED the credential. Anything else means the guard let us through, INCLUDING the
+ * structural 404 this probe expects.
  *
  * @decision 093981dd — never "verify" a pasted credential with a GET, and never clear the lock without
  * a guarded round-trip: reads are ungated, so a GET proves nothing about whether writes will work.
+ * @decision f53eaa57 — a 401 is `invalid` only when its body carries the guard's own `loom open` pointer.
+ * Widening this to a bare status would stop a socket retry ladder on a reverse proxy's or corporate
+ * gateway's OWN 401, never the daemon's.
  */
 export async function verifyLoopbackToken(token: string): Promise<CredentialVerifyOutcome> {
   return classifyCredentialProbe(
@@ -221,8 +225,11 @@ export async function verifyLoopbackToken(token: string): Promise<CredentialVeri
     }),
     // The guard runs ahead of the route, so reaching ANY of its own answers (404 for the fresh uuid, 400
     // on a validation change) proves passage. The excluded statuses are the ones nothing downstream of
-    // the guard authored.
+    // the guard authored. (401 is never asked about passage at all — see classifyCredentialProbe.)
     (status) => status !== 403 && status !== 408 && status !== 429 && status < 500,
+    // Checking the status FIRST skips parsing a body this predicate can never affirm for anyway — a 403/
+    // 408/429/5xx's `.json()` was never written with this guard's shape in mind.
+    async (response) => response.status === 401 && isCredentialGuardMessage((await response.json())?.error ?? ""),
   );
 }
 

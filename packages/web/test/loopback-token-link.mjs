@@ -84,9 +84,13 @@ const spyVerify = (answer) => {
 };
 
 // ── this path's own status map: which answers mean refused, which mean "we learned nothing" ───────────
-await acheck("verifyLoopbackToken: a 401 is `invalid`; the structural 404 of its own probe is `valid`", async () => {
+await acheck("verifyLoopbackToken: a CODED 401 is `invalid`; the structural 404 of its own probe is `valid`", async () => {
   const seen = [];
-  globalThis.fetch = async (url, init) => { seen.push({ url, init }); return { status: seen.length === 1 ? 401 : 404 }; };
+  const GUARD_BODY = { error: "unauthorized — see `loom open` for how to obtain the local access credential" };
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url, init });
+    return seen.length === 1 ? { status: 401, json: async () => GUARD_BODY } : { status: 404, json: async () => ({}) };
+  };
   assert.equal(await L.verifyLoopbackToken("bad-secret"), "invalid");
   assert.equal(await L.verifyLoopbackToken("good-secret"), "valid",
     "the probe POSTs an empty patch to a fresh uuid, so its 404 is proof the write guard let us through");
@@ -96,12 +100,28 @@ await acheck("verifyLoopbackToken: a 401 is `invalid`; the structural 404 of its
 
 await acheck("verifyLoopbackToken: a pre-guard 403, a throttle, a 5xx and a dropped request are all `unknown`", async () => {
   for (const status of [403, 408, 429, 500, 503]) {
-    globalThis.fetch = async () => ({ status });
+    globalThis.fetch = async () => ({ status, json: async () => ({}) });
     assert.equal(await L.verifyLoopbackToken("candidate"), "unknown", String(status));
   }
   globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
   assert.equal(await L.verifyLoopbackToken("candidate"), "unknown",
     "an offline daemon never TESTED the secret — reporting a refusal here is a fabricated observation");
+});
+
+// ── card f53eaa57: a BARE/foreign 401 (no coded `loom open` body) must never be `invalid` ──────────────
+await acheck("verifyLoopbackToken: a BARE 401 (no readable body) and a FOREIGN-JSON 401 both stay `unknown`; only the guard's own coded body is `invalid`", async () => {
+  // A bare 401 — nothing readable as JSON, the shape an intermediary's plain-text refusal gives.
+  globalThis.fetch = async () => ({ status: 401, json: async () => { throw new SyntaxError("Unexpected end of JSON input"); } });
+  assert.equal(await L.verifyLoopbackToken("candidate"), "unknown",
+    "a bare 401 could be an intermediary's own answer, not the daemon's guard — never assumed a refusal");
+  // A foreign-JSON 401 — valid JSON, but not the guard's own coded message (e.g. the trust-tier wall's
+  // bare `unauthorized`, which needs a gateway token, not this secret).
+  globalThis.fetch = async () => ({ status: 401, json: async () => ({ error: "unauthorized" }) });
+  assert.equal(await L.verifyLoopbackToken("candidate"), "unknown",
+    "valid JSON that is not the guard's own coded body proves nothing either");
+  // The guard's own coded 401 — the one body this path may claim a refusal from.
+  globalThis.fetch = async () => ({ status: 401, json: async () => ({ error: "unauthorized — see `loom open` for how to obtain the local access credential" }) });
+  assert.equal(await L.verifyLoopbackToken("candidate"), "invalid");
 });
 
 // ── the shared verify-then-store helper ────────────────────────────────────────────────────────────────

@@ -25,20 +25,27 @@ export type CredentialVerifyOutcome = "valid" | "invalid" | "unknown";
 /**
  * Run one credential probe and classify it. `provesPassage` is the PATH's own answer to "given this
  * non-401 status, did my probe reach its route?" — the classifier never guesses it, because a 404 is proof
- * on one path and meaningless on the other.
+ * on one path and meaningless on the other. A thrown probe (offline, DNS, CORS, an aborted navigation) is
+ * `unknown` rather than a refusal.
  *
- * The 401 check deliberately runs FIRST, so no path can opt out of it with a lax predicate, and a thrown
- * probe (offline, DNS, CORS, an aborted navigation) is `unknown` rather than a refusal.
- *
- * `provesRefusal` is the ONE narrow extension of that: a path whose auth layer can refuse a credential
- * with a status other than 401 (the gateway's failed-auth 429, which the daemon answers only to a token
- * that just FAILED verification — card cf9ebab9) says so here. It is consulted LAST, only for a response
- * that would otherwise be `unknown`, and it reads the BODY — so it is async, and anything it throws
- * (a non-JSON body, an already-consumed stream) falls back to `unknown` rather than rejecting.
+ * `provesRefusal` decides EVERY refusal now, 401 included (card f53eaa57) — not just a path's second
+ * status (the gateway's failed-auth 429, which the daemon answers only to a token that just FAILED
+ * verification — card cf9ebab9). A bare 401 is not, by itself, the daemon's own auth layer: a reverse
+ * proxy or corporate gateway in front of a remote daemon can author one too, and while this classifier
+ * only gated a token STORE that was benign — a 401 from either source refused the paste the same way.
+ * Once a `probeHeldGatewayToken` outcome can STOP a retry ladder (card a6d7bf36), the two stopped being
+ * equivalent: a proxy's own 401 would permanently end a ladder that should have kept retrying through it.
+ * So 401, like every other status, is consulted LAST through `provesRefusal` — never assumed — and that
+ * callback reads the BODY, so it is async; anything it throws (a non-JSON body, an already-consumed
+ * stream) falls back to `unknown` rather than rejecting. `provesPassage` is still never asked about a 401
+ * (a path's predicate must not be able to call its own refusal a success).
  *
  * @decision a1ec70a6 — a path may widen what counts as a REFUSAL only for a status its own auth layer
  * authored. Never widen it to a status an intermediary could have produced: that fabricates the one
  * observation the whole three-state split exists to protect.
+ * @decision f53eaa57 — a bare/foreign 401 (no coded body a path's own auth layer wrote) is `unknown`,
+ * never `invalid`. A path with no `provesRefusal` therefore can never claim a 401 refusal at all — every
+ * real caller must supply one.
  */
 export async function classifyCredentialProbe(
   probe: () => Promise<Response>,
@@ -51,8 +58,7 @@ export async function classifyCredentialProbe(
   } catch {
     return "unknown"; // the request never reached the daemon, so the credential was never tested
   }
-  if (response.status === 401) return "invalid";
-  if (provesPassage(response.status)) return "valid";
+  if (response.status !== 401 && provesPassage(response.status)) return "valid";
   if (provesRefusal) {
     try {
       if (await provesRefusal(response)) return "invalid";

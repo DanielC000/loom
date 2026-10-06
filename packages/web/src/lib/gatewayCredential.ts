@@ -419,15 +419,17 @@ export async function probeHeldGatewayToken(
  * @decision a1ec70a6 — the coded 429 is `invalid`, a BARE 429 stays `unknown`: never widen this to the status
  * alone. The daemon answers the coded one only to a token that just failed verification; a bare throttle is an
  * observation nobody made.
+ * @decision f53eaa57 — the same now holds for 401: only the daemon's own coded body (`GATEWAY_TOKEN_REQUIRED_BODY`,
+ * on either status) is `invalid`. A bare or foreign 401 — one a reverse proxy in front of the remote daemon could
+ * have authored — is `unknown`, so it can never permanently stop a socket retry ladder on its own.
  */
 export async function verifyGatewayTokenAgainstDaemon(token: string): Promise<CredentialVerifyOutcome> {
   return classifyCredentialProbe(
     () => fetch("/api/version", { headers: { authorization: `Bearer ${token.trim()}` } }),
     (status) => status >= 200 && status < 300,
-    // `isGatewayTokenRequired` only ever says `true` for a 401 or 429 — and `classifyCredentialProbe`
-    // already returns `invalid` for a 401 before this runs at all — so the ONLY status this can still
-    // affirm for is 429. Checking that FIRST skips parsing a body (403/5xx/etc.) this predicate can never
-    // affirm for anyway, and whose `.json()` the daemon never even wrote with this shape in mind.
-    async (response) => response.status === 429 && isGatewayTokenRequired(response.status, await response.json()),
+    // `isGatewayTokenRequired` only ever says `true` for a 401 or 429, so checking the status FIRST skips
+    // parsing a body (403/5xx/etc.) this predicate can never affirm for anyway, and whose `.json()` the
+    // daemon never even wrote with this shape in mind.
+    async (response) => (response.status === 401 || response.status === 429) && isGatewayTokenRequired(response.status, await response.json()),
   );
 }

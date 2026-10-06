@@ -156,22 +156,40 @@ await acheck("captureGatewayTokenFromUrl: a successful verify clears a previous 
   assert.equal(globalThis.window.location.href.includes("gwtoken"), false);
 });
 
-// ── card a1ec70a6: the same three-state rule as the loopback path, on this path's own probe ───────────
-await acheck("verifyGatewayTokenAgainstDaemon: 2xx is `valid`, a 401 is `invalid`, and a 404 proves NOTHING here", async () => {
+// ── card a1ec70a6 / f53eaa57: the same three-state rule as the loopback path, on this path's own probe ──
+await acheck("verifyGatewayTokenAgainstDaemon: 2xx is `valid`, a CODED 401 is `invalid`, and a 404 proves NOTHING here", async () => {
   const seen = [];
-  for (const [status, expected] of [[200, "valid"], [204, "valid"], [401, "invalid"], [404, "unknown"], [403, "unknown"], [429, "unknown"], [502, "unknown"]]) {
-    globalThis.fetch = async (url, init) => { seen.push({ url, init }); return { status }; };
+  for (const [status, expected] of [[200, "valid"], [204, "valid"], [404, "unknown"], [403, "unknown"], [429, "unknown"], [502, "unknown"]]) {
+    globalThis.fetch = async (url, init) => { seen.push({ url, init }); return { status, json: async () => ({}) }; };
     assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), expected, String(status));
   }
+  // card f53eaa57: a 401 needs the daemon's own coded body too, exactly like the 429 case below.
+  globalThis.fetch = async (url, init) => { seen.push({ url, init }); return { status: 401, json: async () => ({ error: "unauthorized", code: "gateway-token-required", hint: "x" }) }; };
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "invalid");
   assert.equal(seen[0].url, "/api/version", "a Tier-1 read a remote-class request must authenticate");
   assert.equal(seen[0].init.headers.authorization, "Bearer gw-candidate");
   globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
   assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown");
   // The predicate difference from loopback is deliberate, and this is the case that proves it: a proxied
   // origin is exactly where some intermediary, not the daemon, may answer a path it does not route.
-  globalThis.fetch = async () => ({ status: 404 });
+  globalThis.fetch = async () => ({ status: 404, json: async () => ({}) });
   assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown",
     "a 404 is proof of passage on the LOOPBACK probe only — never here");
+});
+
+// ── card f53eaa57: a BARE/foreign 401 (no coded body) must never permanently stop a socket retry ladder ──
+await acheck("verifyGatewayTokenAgainstDaemon: a BARE 401 (no body) and a FOREIGN-JSON 401 both stay `unknown`; only the coded body is `invalid`", async () => {
+  // A bare 401 — no body at all, the shape a response with no readable JSON gives.
+  globalThis.fetch = async () => ({ status: 401, json: async () => { throw new SyntaxError("Unexpected end of JSON input"); } });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown",
+    "a bare 401 could be an intermediary's own answer, not the daemon's — never assumed a refusal");
+  // A foreign-JSON 401 — valid JSON, but not the daemon's coded shape (e.g. a different auth layer entirely).
+  globalThis.fetch = async () => ({ status: 401, json: async () => ({ error: "Unauthorized" }) });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "unknown",
+    "valid JSON that is not the daemon's own coded body proves nothing either");
+  // The daemon's own coded 401 — the one body this path may claim a refusal from.
+  globalThis.fetch = async () => ({ status: 401, json: async () => ({ error: "unauthorized", code: "gateway-token-required", hint: "x" }) });
+  assert.equal(await G.verifyGatewayTokenAgainstDaemon("gw-candidate"), "invalid");
 });
 
 // ── card a1ec70a6 round 3 item 3: the daemon's OWN second refusal status, and only that one ───────────
