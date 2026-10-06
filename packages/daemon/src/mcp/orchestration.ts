@@ -3944,6 +3944,11 @@ export class OrchestrationMcpRouter {
         inputSchema: strictShape(QUESTION_ASK_INPUT_SHAPE),
       },
       async (input) => {
+        // @decision 92c20eb9 — a question filed in the settle window keeps session_id = predecessor
+        // forever (reparentQuestions is a one-shot UPDATE at recycle time); see that record's own
+        // section for what that breaks on the successor's side.
+        const superseded = callerSupersededError();
+        if (superseded) return ok(superseded);
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
         const built = buildQuestionAsk(input, { sessionId: managerSessionId, projectId, db, role });
@@ -4891,6 +4896,9 @@ export class OrchestrationMcpRouter {
         }),
       },
       async ({ opId, intent, reason }) => {
+        // @decision 92c20eb9 — a retiring predecessor must not cancel a gate op its successor now owns.
+        const superseded = callerSupersededError();
+        if (superseded) return ok(superseded);
         try {
           return ok(await sessions.cancelGateOp(managerSessionId, opId, { scope: { kind: "project" }, intent, reason }));
         } catch (e) {
@@ -4934,6 +4942,9 @@ export class OrchestrationMcpRouter {
         inputSchema: strictShape({ reason: z.string() }),
       },
       async ({ reason }) => {
+        // @decision 92c20eb9 — a retiring predecessor must not trigger a fleet-wide restart mid-settle.
+        const superseded = callerSupersededError();
+        if (superseded) return ok(superseded);
         try {
           return ok(await sessions.requestDaemonRestart(managerSessionId, reason));
         } catch (e) {
@@ -5114,6 +5125,9 @@ export class OrchestrationMcpRouter {
           inputSchema: strictShape({ reason: z.string() }),
         },
         async ({ reason }) => {
+          // @decision 92c20eb9 — a retiring predecessor must not unilaterally deploy on the fleet's behalf.
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           try {
             const r = await sessions.deployOwnProject(managerSessionId, reason);
             // Card bed91595: `deployOwnProject` now writes its own durable `pending_gate_ops` tombstone —

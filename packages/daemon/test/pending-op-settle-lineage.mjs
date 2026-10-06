@@ -48,6 +48,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        51d85532 existed at all — see that card's own resolution) but the routing code this scenario
 //        proves correct is exactly what a manager recycling mid-batch depends on, so the gap is worth
 //        closing on its own merits.
+//   (E)  @decision 92c20eb9 — MERGE / MANAGER RECYCLE, SETTLES INSIDE THE STILL-LIVE SETTLE WINDOW:
+//        (A)-(D) all stamp the predecessor `processState:"exited"` right after recycling (simulating the
+//        predecessor already hard-stopped). This scenario DELIBERATELY leaves it `"live"` — the predecessor
+//        row genuinely stays `processState:"live"` for the whole recycle-settle window — and lets the op
+//        settle WHILE that is still true. Before the 8ca27cce fix, `liveLineageSuccessor`'s own
+//        starting-id liveness check made `resolveSettleNudgeTarget` return the dying (but still-"live")
+//        predecessor itself in this exact window, not the successor.
+//   (F)  @decision 92c20eb9 — HALTED CONTROL: a genuinely HALTED predecessor (unsuperseded, per
+//        386e4eb5/f1969787 — its ownership-transfer handoff is still unresolved) confirms its OWN worker's
+//        merge; the settle nudge must stay on the predecessor itself, never redirected to its not-yet-
+//        reunited successor — proving the fix is keyed off `isSupersededByRecycle`, never a bare
+//        `hasSuccessor`.
+//   (G)  @decision 92c20eb9 (Code Review 74d00a2a) — SUCCESSOR DIED BEFORE READY: the predecessor is
+//        superseded (hasSuccessor, not halted) but the successor itself is now dead too, with neither
+//        cleanup path (an ordinary hard-stop, or recoverFleetAfterFailedRecycleSuccessor) having run yet.
+//        `resolveSettleNudgeTarget`'s superseded branch finds NOTHING live forward of the dead successor —
+//        it must fall through to the ORIGINAL lineage walk from the predecessor itself (which IS still
+//        live, same as (E)) rather than returning the dead successor's id, which no live pty would ever
+//        drain.
 //
 // (A)/(B)/(C) run SEQUENTIALLY — each needs a real gate that outlives the SessionService's own
 // `syncAttachBudgetMs` (shrunk to 100ms here via a test-only DI seam — card 0faaaa55 — from the 12s
@@ -112,6 +131,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
 const { liveLineageSuccessor } = await import("../dist/sessions/lineage.js");
+const { isSupersededByRecycle } = await import("../dist/orchestration/crash-orphaned-workers.js");
 
 const GIT_ID = "-c user.email=posl@loom -c user.name=posl";
 const now = new Date().toISOString();
@@ -176,6 +196,14 @@ function seedProject(projId, repo) {
   db.insertProject({ id: projId, name: "POSL", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "gate" } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: `${projId}-mgr`, projectId: projId, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
   db.insertAgent({ id: `${projId}-dev`, projectId: projId, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
+}
+
+/** Forces reattemptManagerOwnershipTransfer's halt branch (mirrors recycle-refuses-fleet-writes.mjs's own
+ *  helper) — used by scenario (F), the HALTED control. */
+function stubWakesPermanentFailure() {
+  const original = Db.prototype.reparentWakes;
+  Db.prototype.reparentWakes = function () { throw new Error("injected PERMANENT failure (test)"); };
+  return () => { Db.prototype.reparentWakes = original; };
 }
 
 const worktrees = [];
@@ -354,10 +382,116 @@ try {
     worktrees.push([repo, undefined]); // both worker worktrees + the batch worktree are removed by finalize
   };
 
+  // ==================== (E): settles WHILE the predecessor's own row still reads "live" ====================
+  const scenarioE_mergeSuccessInsideLiveSettleWindow = async () => {
+    const P = "posl-merge-ok-live-window", repo = makeRepo();
+    const { worktreePath, branch } = await createWorktree(repo, P, "te");
+    fs.writeFileSync(path.join(worktreePath, "feate.txt"), "work\n");
+    commitAll(worktreePath, "feate", GIT_ID);
+    seedProject(P, repo);
+    const mgrAId = `${P}-mgr1`, workerId = `${P}-wkr`;
+    db.insertTask({ id: "te", projectId: P, title: "te", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrAId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrAId, taskId: "te", worktreePath, branch });
+
+    const first = await svc.confirmWorkerMergeTracked(mgrAId, workerId);
+    check("(E) degrades to pending past the sync-wait budget", first.settled === false);
+
+    const mgrB = await svc.recycleManager(mgrAId, "successor: a merge confirm is still pending — settling while you (and I) are BOTH still live, inside the settle window.");
+    check("(E) recycleManager produced a fresh successor session", !!mgrB && mgrB.id !== mgrAId);
+    // DELIBERATELY NOT stamping mgrAId "exited" (unlike A-D) — the op must settle while the predecessor's
+    // own row genuinely still reads "live" (the real settle window), or this scenario can't exercise the
+    // 8ca27cce fix at all: `liveLineageSuccessor`'s own starting-id check would mask the bug by finding
+    // mgrAId itself still "live" and returning it, exactly like the pre-fix defect this proves closed.
+    check("(E setup) predecessor mgrAId is STILL processState:'live' (the open settle window)", db.getSession(mgrAId)?.processState === "live");
+    check("(E setup) predecessor IS superseded (isSupersededByRecycle)", isSupersededByRecycle(db, mgrAId) === true);
+
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrB.id && /\[loom:merge-done\]/.test(c.text)), 30_000);
+    const onSuccessor = host.enqueueCalls.filter((c) => c.sessionId === mgrB.id && /\[loom:merge-done\]/.test(c.text));
+    const onLivePredecessor = host.enqueueCalls.filter((c) => c.sessionId === mgrAId && /\[loom:merge-(done|failed)\]/.test(c.text));
+    check("(E) THE CARD 8ca27cce FIX: the completion nudge landed on successor B, NOT the still-live-but-superseded predecessor A", onSuccessor.length === 1 && onLivePredecessor.length === 0);
+    check("(E) the nudge carries the predecessor-attribution suffix (the target differed from the originating session)", onSuccessor[0] && /your predecessor session/.test(onSuccessor[0].text));
+    check("(E) the merge actually landed on main (unaffected by this fix)", fs.existsSync(path.join(repo, "feate.txt")));
+    worktrees.push([repo, undefined]);
+  };
+
+  // ==================== (F): HALTED control — nudge stays on the predecessor ====================
+  const scenarioF_haltedControlStaysOnPredecessor = async () => {
+    const P = "posl-merge-ok-halted", repo = makeRepo();
+    seedProject(P, repo);
+    const mgrAId = `${P}-mgr1`;
+    db.insertSession({ id: mgrAId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    const unstub = stubWakesPermanentFailure();
+    const mgrB = await svc.recycleManager(mgrAId, "handoff — forcing a halt for the card 8ca27cce control");
+    unstub();
+    check("(F setup) the recycle halted (ownership-transfer unresolved)", db.listEventsForSession(mgrB.id).some((e) => e.kind === "recycle_ownership_transfer_failed"));
+    check("(F setup) predecessor is NOT superseded while genuinely halted (the carve-out)", isSupersededByRecycle(db, mgrAId) === false);
+
+    // The worker is created AFTER the halt — mirrors a "window-created" fleet member the ownership-transfer
+    // pass never saw, so it stays parented to mgrAId (never moved) and confirmWorkerMergeTracked's own
+    // exact-parent ownership check passes cleanly, for the HALTED predecessor itself.
+    const { worktreePath, branch } = await createWorktree(repo, P, "tf");
+    fs.writeFileSync(path.join(worktreePath, "featf.txt"), "work\n");
+    commitAll(worktreePath, "featf", GIT_ID);
+    const workerId = `${P}-wkr`;
+    db.insertTask({ id: "tf", projectId: P, title: "tf", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrAId, taskId: "tf", worktreePath, branch });
+
+    const first = await svc.confirmWorkerMergeTracked(mgrAId, workerId);
+    check("(F) degrades to pending past the sync-wait budget", first.settled === false);
+
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrAId && /\[loom:merge-done\]/.test(c.text)), 30_000);
+    const onPredecessor = host.enqueueCalls.filter((c) => c.sessionId === mgrAId && /\[loom:merge-done\]/.test(c.text));
+    const onHaltedSuccessor = host.enqueueCalls.filter((c) => c.sessionId === mgrB.id && /\[loom:merge-(done|failed)\]/.test(c.text));
+    check("(F) HALTED CONTROL: the nudge stays on the genuinely-halted predecessor, NOT redirected to its (not-yet-reunited) successor", onPredecessor.length === 1 && onHaltedSuccessor.length === 0);
+    check("(F) no predecessor-attribution suffix (the target equals the originating session)", onPredecessor[0] && !/your predecessor session/.test(onPredecessor[0].text));
+    check("(F) the merge actually landed on main", fs.existsSync(path.join(repo, "featf.txt")));
+    worktrees.push([repo, undefined]);
+  };
+
+  // ==================== (G): successor died before ready — fall through to the predecessor ====================
+  const scenarioG_successorDiedBeforeReady = async () => {
+    const P = "posl-merge-ok-dead-successor", repo = makeRepo();
+    const { worktreePath, branch } = await createWorktree(repo, P, "tg");
+    fs.writeFileSync(path.join(worktreePath, "featg.txt"), "work\n");
+    commitAll(worktreePath, "featg", GIT_ID);
+    seedProject(P, repo);
+    const mgrAId = `${P}-mgr1`, workerId = `${P}-wkr`;
+    db.insertTask({ id: "tg", projectId: P, title: "tg", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrAId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrAId, taskId: "tg", worktreePath, branch });
+
+    const first = await svc.confirmWorkerMergeTracked(mgrAId, workerId);
+    check("(G) degrades to pending past the sync-wait budget", first.settled === false);
+
+    const mgrB = await svc.recycleManager(mgrAId, "successor: dies before ready — the predecessor must still get this op's nudge.");
+    check("(G) recycleManager produced a fresh successor session", !!mgrB && mgrB.id !== mgrAId);
+    // The successor dies BEFORE READY, with neither cleanup path (an ordinary hard-stop of the
+    // predecessor, or recoverFleetAfterFailedRecycleSuccessor unwinding the link) having run yet. The
+    // predecessor is DELIBERATELY left "live" (same as scenario E) — it is the only thing left alive in
+    // this lineage, so it must be where the nudge lands.
+    db.setProcessState(mgrB.id, "exited");
+    check("(G setup) predecessor mgrAId is STILL processState:'live'", db.getSession(mgrAId)?.processState === "live");
+    check("(G setup) successor mgrB is now dead (died before ready)", db.getSession(mgrB.id)?.processState === "exited");
+    check("(G setup) predecessor IS superseded (isSupersededByRecycle) despite the dead successor", isSupersededByRecycle(db, mgrAId) === true);
+
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrAId && /\[loom:merge-done\]/.test(c.text)), 30_000);
+    const onPredecessor = host.enqueueCalls.filter((c) => c.sessionId === mgrAId && /\[loom:merge-done\]/.test(c.text));
+    const onDeadSuccessor = host.enqueueCalls.filter((c) => c.sessionId === mgrB.id && /\[loom:merge-(done|failed)\]/.test(c.text));
+    check("(G) THE REVIEW FIX: the nudge falls through to the STILL-LIVE PREDECESSOR, never the dead successor", onPredecessor.length === 1 && onDeadSuccessor.length === 0);
+    check("(G) no predecessor-attribution suffix (the fallthrough target equals the originating session)", onPredecessor[0] && !/your predecessor session/.test(onPredecessor[0].text));
+    check("(G) the merge actually landed on main", fs.existsSync(path.join(repo, "featg.txt")));
+    worktrees.push([repo, undefined]);
+  };
+
   await scenarioA_mergeSuccess();
   await scenarioB_mergeRejection();
   await scenarioC_gateRecycle();
   await scenarioD_mergeBatchRecycle();
+  await scenarioE_mergeSuccessInsideLiveSettleWindow();
+  await scenarioF_haltedControlStaysOnPredecessor();
+  await scenarioG_successorDiedBeforeReady();
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
@@ -365,6 +499,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every PendingOpRegistry settle push (confirmWorkerMergeTracked's generic echo, rejectNotify's rich rejection, finishAlreadyMerged's success announcement, runWorkerGate's echo, mergeBatchTracked's aggregate batch echo, and the durable boot sweep) resolves its target through the CURRENT session lineage at settle time: unchanged for a never-recycled session, unchanged (best-effort no-op) for a fully-dead lineage, and routed to the live successor — including the SUPPRESSING rejection push, not just the generic echo — when the originating manager/worker recycled mid-op. Never delivered to the dead predecessor."
+  ? "\n✅ ALL PASS — every PendingOpRegistry settle push (confirmWorkerMergeTracked's generic echo, rejectNotify's rich rejection, finishAlreadyMerged's success announcement, runWorkerGate's echo, mergeBatchTracked's aggregate batch echo, and the durable boot sweep) resolves its target through the CURRENT session lineage at settle time: unchanged for a never-recycled session, unchanged (best-effort no-op) for a fully-dead lineage, and routed to the live successor — including the SUPPRESSING rejection push, not just the generic echo — when the originating manager/worker recycled mid-op. Never delivered to the dead predecessor, including (card 8ca27cce) when the op settles WHILE the predecessor's own row still reads processState:\"live\" (the open settle window); a genuinely HALTED predecessor's own nudge stays correctly on itself, never redirected; and (Code Review 74d00a2a) a successor that died before ready never swallows the nudge either — it falls through to the still-live predecessor instead."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

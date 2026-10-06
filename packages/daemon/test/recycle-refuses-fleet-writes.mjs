@@ -42,6 +42,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // worker_set_mode, worker_flush, worker_reap, worker_relink — refuse with the retirement error while
 // superseded (not just worker_message), via a table-driven loop.
 //
+// PART C/C-HALTED (card 8ca27cce, from the 92c20eb9 Code Review's Minors 1+2, plus its own follow-up
+// review 74d00a2a): FIVE MORE writes unguarded during the SAME window — gate_cancel, daemon_restart,
+// deploy, question_ask (all four via the SAME callerSupersededError() chokepoint, orchestration.ts) and
+// wake_me (via the two exported primitives isSupersededByRecycle/retiredCallerMessage directly, scoped to
+// role==="manager" only — mcp/server.ts, the universal loom-tasks router). Each is proven refused while
+// superseded AND NOT refused while genuinely halted (the same carve-out as the original 10). See
+// docs/decisions/92c20eb9-...md's own "card 8ca27cce" section for why schedule_create/reminder_create
+// needed NO fix here (question_ask DID, on review — see that section's own history of the correction).
+//
 // Negative control (behavioural, per DoD): verified manually by temporarily reverting both guards
 // (service.ts's spawnWorker check and orchestration.ts's callerSupersededError/selfHealWorkerLink guard)
 // and re-running this file — every check above that currently PASSes goes RED (a worker is actually
@@ -50,7 +59,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // ALSO separately verified: reverting ONLY its own 2-line guard in selfHealWorkerLink (leaving the
 // superseded-caller guard intact) turns the (B-halted) checks red while the (A)/(B) superseded-state
 // checks stay green — proving this specific fix is load-bearing on its own, not merely redundant with the
-// broader superseded-caller guard. Restored before commit.
+// broader superseded-caller guard. Restored before commit. The five PART C guards (card 8ca27cce) got the
+// SAME negative-control treatment, applied via `pnpm --filter @loom/daemon negative-control` against the
+// committed guard commits rather than by hand — see that card's own worker_report for the exact invocation
+// and output.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE: a REAL Db + SessionService + PtyHost driven against the
 // shared fake-pty seam (createSeamHost) — mirrors recycle-reattempt.mjs's and worker-revive.mjs's own
@@ -87,6 +99,8 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { TaskMcpRouter } = await import("../dist/mcp/server.js");
+const { WakeService } = await import("../dist/orchestration/wake.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { isSupersededByRecycle } = await import("../dist/orchestration/crash-orphaned-workers.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -182,6 +196,20 @@ async function mcpClientFor(db, sessions, host, managerSessionId) {
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   await server.connect(serverT);
   const client = new Client({ name: "recycle-refuses-fleet-writes-test", version: "0" });
+  await client.connect(clientT);
+  const parse = (res) => JSON.parse(res.content[0].text);
+  const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
+  return { client, call };
+}
+
+/** Drives the real registered `loom-tasks` MCP server (wake_me lives there, not on orchestration.ts). */
+async function taskMcpClientFor(db, wakes, sessionId) {
+  const router = new TaskMcpRouter(db, wakes);
+  const projectId = router.resolveProject(sessionId);
+  const server = router.buildServer(projectId, sessionId);
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverT);
+  const client = new Client({ name: "recycle-refuses-fleet-writes-test-tasks", version: "0" });
   await client.connect(clientT);
   const parse = (res) => JSON.parse(res.content[0].text);
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
@@ -352,12 +380,108 @@ try {
     await assertAllRefuseRetirement(callAsM1, liveW, "B6");
     check("(B6) parentSessionId is still m2 after exercising all 10 refused write tools", db.getSession(liveW)?.parentSessionId === m2.id);
   }
+
+  // ======================================================================================
+  // PART C — card 8ca27cce: gate_cancel / daemon_restart / deploy / wake_me / question_ask — five
+  // more writes unguarded during the SAME recycle-settle window, found by the 92c20eb9 Code Review
+  // (Minors 1+2) plus its own follow-up review (question_ask, 74d00a2a).
+  // ======================================================================================
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rfw-c";
+    seedProject(db, P);
+    // deploy is only REGISTERED when orchestration.deployCommand is configured (conditional
+    // registration) — merge it into the SAME setProjectConfig call seedProject already made
+    // (setProjectConfig REPLACES wholesale, never merges), keeping the startupModeCycles override too.
+    db.setProjectConfig(P, { permission: { startupModeCycles: 0 }, orchestration: { deployCommand: "node -e \"process.exit(0)\"" } });
+    const m1 = sessions.startManager(`${P}-mgr`);
+    const wakes = new WakeService({ db, pty: host, resume: () => { throw new Error("resume not used in this test"); }, enqueueDurable: () => ({ delivered: false }) });
+
+    // ---- pre-recycle sanity: ordinary (non-superseded) calls reach past the new guards ----
+    const { call: callPre } = await mcpClientFor(db, sessions, host, m1.id);
+    const gateCancelPre = await callPre("gate_cancel", { opId: "nonexistent-op" });
+    check("(C pre) gate_cancel reaches its own 'not_found' logic pre-recycle (not refused)", gateCancelPre.outcome === "not_found");
+    const daemonRestartPre = await callPre("daemon_restart", { reason: "pre" });
+    check("(C pre) daemon_restart reaches its own 'not supervised' refusal pre-recycle (not the retirement error)",
+      typeof daemonRestartPre.error === "string" && /restart supervisor/.test(daemonRestartPre.error) && !RETIRED_RE.test(daemonRestartPre.error));
+    const deployPre = await callPre("deploy", { reason: "pre" });
+    check("(C pre) deploy reaches its own run/rate-limit logic pre-recycle (not the retirement error)", !RETIRED_RE.test(deployPre.error ?? ""));
+    const { call: callTasksPre } = await taskMcpClientFor(db, wakes, m1.id);
+    const wakePre = await callTasksPre("wake_me", { delaySeconds: 30, note: "pre" });
+    check("(C pre) wake_me succeeds pre-recycle", typeof wakePre.wakeId === "string");
+    const questionAskPre = await callPre("question_ask", { title: "pre", body: "pre" });
+    check("(C pre) question_ask succeeds pre-recycle", typeof questionAskPre.questionId === "string");
+
+    const m2 = await sessions.recycleManager(m1.id, "handoff — card 8ca27cce window");
+    check("(C) m1 is superseded by m2", isSupersededByRecycle(db, m1.id) === true);
+    check("(C) the predecessor has NOT been hard-stopped yet (still inside the settle window)", !host.stoppedIds.has(m1.id));
+
+    const { call: callPost } = await mcpClientFor(db, sessions, host, m1.id);
+    const gateCancelPost = await callPost("gate_cancel", { opId: "nonexistent-op" });
+    check("(C1) gate_cancel refuses with the retirement error while superseded",
+      typeof gateCancelPost.error === "string" && RETIRED_RE.test(gateCancelPost.error));
+
+    const daemonRestartPost = await callPost("daemon_restart", { reason: "post" });
+    check("(C2) daemon_restart refuses with the retirement error while superseded",
+      typeof daemonRestartPost.error === "string" && RETIRED_RE.test(daemonRestartPost.error));
+
+    const deployPost = await callPost("deploy", { reason: "post" });
+    check("(C3) deploy refuses with the retirement error while superseded",
+      typeof deployPost.error === "string" && RETIRED_RE.test(deployPost.error));
+
+    const { call: callTasksPost } = await taskMcpClientFor(db, wakes, m1.id);
+    const wakesBefore = db.listWakesForSession(m1.id).length;
+    const wakePost = await callTasksPost("wake_me", { delaySeconds: 30, note: "post" });
+    check("(C4) wake_me refuses with the retirement error while superseded",
+      typeof wakePost.error === "string" && RETIRED_RE.test(wakePost.error));
+    check("(C4) no NEW wake was actually scheduled by the refused call", db.listWakesForSession(m1.id).length === wakesBefore);
+
+    const questionsBefore = db.listQuestionsForSession(m1.id).length;
+    const questionAskPost = await callPost("question_ask", { title: "post", body: "post" });
+    check("(C5) question_ask refuses with the retirement error while superseded",
+      typeof questionAskPost.error === "string" && RETIRED_RE.test(questionAskPost.error));
+    check("(C5) no NEW question was actually filed by the refused call",
+      db.listQuestionsForSession(m1.id).length === questionsBefore);
+  }
+
+  // ======================================================================================
+  // PART C-HALTED — card 8ca27cce's own halted-predecessor carve-out: none of the four new
+  // guards fire while genuinely halted (ownership-transfer unresolved, per 386e4eb5/f1969787).
+  // ======================================================================================
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rfw-c-halted";
+    seedProject(db, P);
+    db.setProjectConfig(P, { permission: { startupModeCycles: 0 }, orchestration: { deployCommand: "node -e \"process.exit(0)\"" } });
+    const h1 = sessions.startManager(`${P}-mgr`);
+    seedLiveWorker(db, P, h1.id);
+    const wakes = new WakeService({ db, pty: host, resume: () => { throw new Error("resume not used in this test"); }, enqueueDurable: () => ({ delivered: false }) });
+
+    const unstub = stubWakesPermanentFailure();
+    const h2 = await sessions.recycleManager(h1.id, "handoff — forcing a halt (card 8ca27cce)");
+    unstub();
+    check("(C-halted setup) h1 is NOT superseded while genuinely halted", isSupersededByRecycle(db, h1.id) === false);
+    void h2;
+
+    const { call: callHalted } = await mcpClientFor(db, sessions, host, h1.id);
+    const gc = await callHalted("gate_cancel", { opId: "nonexistent-op" });
+    check("(C-halted) gate_cancel does NOT return the retirement error while halted", !RETIRED_RE.test(gc.error ?? ""));
+    const dr = await callHalted("daemon_restart", { reason: "halted" });
+    check("(C-halted) daemon_restart does NOT return the retirement error while halted", !RETIRED_RE.test(dr.error ?? ""));
+    const dp = await callHalted("deploy", { reason: "halted" });
+    check("(C-halted) deploy does NOT return the retirement error while halted", !RETIRED_RE.test(dp.error ?? ""));
+    const { call: callTasksHalted } = await taskMcpClientFor(db, wakes, h1.id);
+    const wk = await callTasksHalted("wake_me", { delaySeconds: 30, note: "halted" });
+    check("(C-halted) wake_me succeeds (NOT refused) while halted", typeof wk.wakeId === "string");
+    const qa = await callHalted("question_ask", { title: "halted", body: "halted" });
+    check("(C-halted) question_ask succeeds (NOT refused) while halted", typeof qa.questionId === "string");
+  }
 } finally {
   // best-effort cleanup — a leaked temp LOOM_HOME under os.tmpdir() is harmless but tidy up anyway.
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — spawnWorker/reviveWorker and all 10 selfHealWorkerLink write tools refuse a manager superseded by its own recycle successor, in BOTH the recycle_me and recycle_reattempt windows, naming the real successor; a read tool never relinks a correctly-reparented worker back; and a genuinely HALTED (unsuperseded) predecessor is neither refused nor allowed to relink a worker already owned by its successor."
+  ? "\n✅ ALL PASS — spawnWorker/reviveWorker and all 10 selfHealWorkerLink write tools, plus (card 8ca27cce) gate_cancel/daemon_restart/deploy/wake_me/question_ask, refuse a manager superseded by its own recycle successor, in BOTH the recycle_me and recycle_reattempt windows, naming the real successor; a read tool never relinks a correctly-reparented worker back; and a genuinely HALTED (unsuperseded) predecessor is neither refused nor allowed to relink a worker already owned by its successor."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

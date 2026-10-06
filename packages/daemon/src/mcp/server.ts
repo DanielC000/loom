@@ -21,6 +21,7 @@ import { resolveAlias, strictShape } from "./arg-alias.js";
 import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { recordBoardRead } from "../orchestration/board-read.js";
+import { isSupersededByRecycle, retiredCallerMessage } from "../orchestration/crash-orphaned-workers.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -697,6 +698,12 @@ export class TaskMcpRouter {
         }),
       },
       async ({ delaySeconds, minutes, wakeAt, note, reason }) => {
+        // @decision 92c20eb9 — a superseded manager must not schedule a new wake (it fires into a dying
+        // predecessor, or is silently dropped once stopped). role==="manager" only — worker/platform-lead
+        // recycled-wake semantics are un-analyzed, not confirmed safe.
+        if (db.getSession(sessionId)?.role === "manager" && isSupersededByRecycle(db, sessionId)) {
+          return ok({ error: retiredCallerMessage(db, sessionId), ...nowEcho() });
+        }
         try {
           return ok(withWakeTimeEcho(wakes.schedule(sessionId, { delaySeconds, minutes, wakeAt, note, reason })));
         } catch (e) {

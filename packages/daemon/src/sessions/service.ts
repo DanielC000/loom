@@ -8716,8 +8716,16 @@ export class SessionService {
   }
 
   /** @decision 05c36bf4 — re-resolves the settle-nudge target AT SETTLE TIME, never at attach()-call
-   *  time: a manager recycle mid-flight used to fire the nudge at a now-dead predecessor. */
+   *  time: a manager recycle mid-flight used to fire the nudge at a now-dead predecessor.
+   * @decision 92c20eb9 — a superseded caller routes to its successor even while its OWN row still reads
+   *  "live"; if nothing is LIVE forward of that successor, falls through to the ORIGINAL lineage walk
+   *  from `sessionId` itself — never returns a dead successor's id. */
   private resolveSettleNudgeTarget(sessionId: string): string {
+    if (isSupersededByRecycle(this.db, sessionId)) {
+      const successor = this.db.getSuccessor(sessionId);
+      const live = successor ? liveLineageSuccessor(this.db, successor.id) : null;
+      if (live) return live.id;
+    }
     return liveLineageSuccessor(this.db, sessionId)?.id ?? sessionId;
   }
 
@@ -14942,6 +14950,8 @@ export class SessionService {
   createSchedule(
     managerSessionId: string, input: { agentId: string; cron: string; enabled?: boolean; prompt?: string | null; name?: string },
   ): Schedule {
+    // @decision 92c20eb9 — intentionally NOT refused for a superseded caller: a schedule row is keyed by
+    // agentId/cron, never by this session's id, so there is nothing here for a recycle to leave stranded.
     this.requireManager(managerSessionId, "schedule_create");
     const targetAgent = this.db.getAgent(input.agentId);
     if (!targetAgent) throw new Error("agent not found");
