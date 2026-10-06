@@ -38,6 +38,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     still settling against that exact path (including removeWorktree's OWN clean-reject retry delay)
 //     must REFUSE outright, never recreate a fresh worktree there while the old removal is in flight.
 //
+// Card ceeb188b (Code Review of 367d53f6, finding 2 — c994ffeb's own finding 1 fixed createWorktree's
+// OWN reverse check; this is the SAME predicate consulted a second time):
+// (I) reclaimWedgedWorktreePathForSpawn must NOT rename aside a wedge-tracked path that is really a
+//     repo-axis dir holding a REAL, live nested secondary-repo worktree — refuse instead (throw, keep
+//     the wedge entry, release the claim), leaving the nested worktree's data + git registration intact.
+// (I-control) BEHAVIOURAL NEGATIVE CONTROL: disabling the shared backstop flag (the SAME
+//     __setWorktreeCollisionBackstopForTest seam createWorktree's own reverse check uses — card ceeb188b
+//     deliberately reuses it rather than adding a second one) brings the pre-fix bug back.
+// (I-resolve) the refusal is NOT permanent — once the nested worktree is removed (simulating it being
+//     merged/stopped), the SAME wedge-tracked path reclaims and respawns normally.
+//
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/createworktree-wedge-reclaim.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -50,7 +61,10 @@ import { requireHermeticEnv } from "./_guard.mjs";
 useOwnLoomHome("loom-cwr-home-");
 requireHermeticEnv();
 
-const { createWorktree, resolveWorktreePath, normForCompare, killableRemoveDir, __setRenameDirAsideForTest } = await import("../dist/git/worktrees.js");
+const {
+  createWorktree, resolveWorktreePath, normForCompare, killableRemoveDir, __setRenameDirAsideForTest,
+  taskKey, __setWorktreeCollisionBackstopForTest,
+} = await import("../dist/git/worktrees.js");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -323,12 +337,120 @@ try {
     !(sessionsH.removingWorktreePaths && sessionsH.removingWorktreePaths.has(normForCompare(pathH))));
 
   dbH.close();
+
+  // ============================================================================================
+  // (I) card ceeb188b — a wedge-tracked path can ALSO be a repo-axis dir holding a REAL, live nested
+  //     secondary-repo worktree (a grandfathered repoKey aliasing this task's own taskKey, per c994ffeb).
+  //     reclaimWedgedWorktreePathForSpawn must refuse (throw) rather than renaming the whole axis dir
+  //     aside, leaving the nested worktree's data + git registration + the wedge entry all intact.
+  // ============================================================================================
+  const taskI = "nested-live-wedge-iiii-9999";
+  const keyI = taskKey(taskI);
+  const pathI = resolveWorktreePath(PROJ, taskI);
+  fs.mkdirSync(pathI, { recursive: true }); // bare axis dir — no .git link of its own
+
+  const repoI2 = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cwr-nested-"));
+  fs.writeFileSync(path.join(repoI2, "README.md"), "# nested\n");
+  execSync(`git init -q`, { cwd: repoI2 });
+  commitAll(repoI2, "init", GIT_ID);
+
+  const taskI2 = "nested-live-secondary-jjjj-0000";
+  const wtI2 = await createWorktree(repoI2, PROJ, taskI2, {}, keyI);
+  fs.writeFileSync(path.join(wtI2.worktreePath, "i2-uncommitted.txt"), "I2's real uncommitted work\n");
+  check("(I setup) I2's worktree is nested directly under pathI", wtI2.worktreePath.startsWith(pathI + path.sep));
+  check("(I setup) I2's .git entry is a FILE (a real worktree link, not a clone)", fs.statSync(path.join(wtI2.worktreePath, ".git")).isFile());
+
+  const dbI = new Db();
+  dbI.recordWorktreeWedgeAttempt(pathI, repo, "simulated: an earlier removal of I's primary worktree failed");
+  check("(I setup) pathI is tracked as wedged", dbI.getWedgedWorktree(pathI) !== undefined);
+  const sessionsI = new SessionService(dbI, {}, new OrchestrationControl(), {});
+
+  let threwI = null;
+  try { sessionsI.reclaimWedgedWorktreePathForSpawn(PROJ, taskI); } catch (e) { threwI = e; }
+
+  check("(I) reclaim REFUSES (throws) instead of renaming the axis dir aside", threwI !== null);
+  check("(I) refusal names the nested child it actually found", threwI !== null && threwI.message.includes(path.basename(wtI2.worktreePath)));
+  check("(I) refusal states what unblocks it (the nested worktree being merged/stopped and removed)", threwI !== null && /merged\/stopped and removed/.test(threwI.message));
+  check("(I) pathI itself is UNTOUCHED — no rename-aside happened", fs.existsSync(pathI) && !findStaleAside(pathI));
+  check("(I) I2's worktree is STILL at its original, nested path", fs.existsSync(wtI2.worktreePath));
+  check("(I) I2's uncommitted work SURVIVED untouched", fs.readFileSync(path.join(wtI2.worktreePath, "i2-uncommitted.txt"), "utf8") === "I2's real uncommitted work\n");
+  const worktreeListI = execSync("git worktree list", { cwd: repoI2 }).toString();
+  check("(I) I2's git worktree registration still resolves (not prunable)", worktreeListI.includes(wtI2.worktreePath.replace(/\\/g, "/")) && !/prunable/.test(worktreeListI));
+  check("(I) the wedge-tracking entry for pathI is KEPT (not cleared) — a later retry can act on it once I2 clears", dbI.getWedgedWorktree(pathI) !== undefined);
+  check("(I) the in-flight claim was self-released on throw (not leaked)",
+    !(sessionsI.claimedWorktreePaths && sessionsI.claimedWorktreePaths.has(normForCompare(pathI))));
+
+  // --- (I-control) BEHAVIOURAL NEGATIVE CONTROL: disable the SAME shared backstop flag createWorktree's
+  //     own reverse check uses -> the pre-fix bug returns. Reuses pathI/wtI2/dbI unmutated by (I) above. ---
+  __setWorktreeCollisionBackstopForTest(false);
+  let threwIControl = null;
+  try { sessionsI.reclaimWedgedWorktreePathForSpawn(PROJ, taskI); } catch (e) { threwIControl = e; }
+  __setWorktreeCollisionBackstopForTest(true); // restore immediately, before any further assertions/tests
+
+  check("(I-control) with the shared backstop disabled, the OLD bug reproduces: reclaim does NOT throw", threwIControl === null);
+  check("(I-control) pathI was renamed aside despite holding I2's live nested worktree", !fs.existsSync(pathI));
+  const asideI = findStaleAside(pathI);
+  check("(I-control) I2's worktree now sits only under the renamed-aside dir — orphaned from its own git registration", asideI !== null && fs.existsSync(path.join(asideI, path.basename(wtI2.worktreePath), "i2-uncommitted.txt")));
+  check("(I-control) the wedge-tracking entry for pathI was cleared, as if the rename were safe", dbI.getWedgedWorktree(pathI) === undefined);
+
+  if (asideI) fs.rmSync(asideI, { recursive: true, force: true });
+  try { execSync("git worktree prune", { cwd: repoI2 }); } catch { /* ignore — admin record now dangles after the control's raw fs rename */ }
+  fs.rmSync(repoI2, { recursive: true, force: true });
+  dbI.close();
+
+  // ============================================================================================
+  // (I-resolve) the refusal in (I) is NOT permanent — once the nested worktree is removed (simulating
+  //     it being merged/stopped), the SAME wedge-tracked path reclaims and respawns normally. Fresh
+  //     task/repo identifiers — (I)'s own entities are left exactly as the control above mutated them.
+  // ============================================================================================
+  const taskK = "nested-live-resolve-kkkk-1111";
+  const keyK = taskKey(taskK);
+  const pathK = resolveWorktreePath(PROJ, taskK);
+  fs.mkdirSync(pathK, { recursive: true });
+
+  const repoK2 = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cwr-resolve-"));
+  fs.writeFileSync(path.join(repoK2, "README.md"), "# resolve\n");
+  execSync(`git init -q`, { cwd: repoK2 });
+  commitAll(repoK2, "init", GIT_ID);
+
+  const taskK2 = "nested-live-resolve-sec-llll-2222";
+  const wtK2 = await createWorktree(repoK2, PROJ, taskK2, {}, keyK);
+  check("(I-resolve setup) K2's worktree is nested under pathK", wtK2.worktreePath.startsWith(pathK + path.sep));
+
+  const dbK = new Db();
+  dbK.recordWorktreeWedgeAttempt(pathK, repo, "simulated wedge, to be resolved once K2 clears");
+  const sessionsK = new SessionService(dbK, {}, new OrchestrationControl(), {});
+
+  let threwKBefore = null;
+  try { sessionsK.reclaimWedgedWorktreePathForSpawn(PROJ, taskK); } catch (e) { threwKBefore = e; }
+  check("(I-resolve) while K2 is still live, reclaim refuses exactly like (I)", threwKBefore !== null);
+
+  // K2 "completes" — its own worktree is removed (the normal lifecycle, not this fix's own code path).
+  execSync(`git worktree remove --force "${wtK2.worktreePath}"`, { cwd: repoK2 });
+  check("(I-resolve) K2's nested worktree is now gone", !fs.existsSync(wtK2.worktreePath));
+  check("(I-resolve) pathK is still wedge-tracked and still on disk", dbK.getWedgedWorktree(pathK) !== undefined && fs.existsSync(pathK));
+
+  let threwKAfter = null;
+  try { sessionsK.reclaimWedgedWorktreePathForSpawn(PROJ, taskK); } catch (e) { threwKAfter = e; }
+  check("(I-resolve) reclaim no longer refuses now that the nested worktree is gone — SELF-RESOLVED", threwKAfter === null);
+  check("(I-resolve) pathK was renamed aside via the ordinary wedge-reclaim path", !fs.existsSync(pathK));
+  check("(I-resolve) the wedge-tracking entry was cleared normally", dbK.getWedgedWorktree(pathK) === undefined);
+
+  const resultKResolve = await createWorktree(repo, PROJ, taskK);
+  check("(I-resolve) a genuinely fresh worktree now cuts at pathK, completing the respawn", resultKResolve.worktreePath === pathK && fs.existsSync(path.join(pathK, ".git")));
+
+  const asideK = findStaleAside(pathK);
+  if (asideK) fs.rmSync(asideK, { recursive: true, force: true });
+  execSync(`git worktree remove --force "${pathK}"`, { cwd: repo });
+  try { execSync("git worktree prune", { cwd: repoK2 }); } catch { /* ignore */ }
+  fs.rmSync(repoK2, { recursive: true, force: true });
+  dbK.close();
 } finally {
   try { execSync("git worktree prune", { cwd: repo }); } catch { /* ignore */ }
   fs.rmSync(repo, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createWorktree never reuses/recuts a dir with no .git link (set aside, never deleted, then fresh-cut); SessionService.reclaimWedgedWorktreePathForSpawn clears a stale wedge-tracking entry (and sets aside whatever still sits there, even a dir that still has a .git link) BEFORE createWorktree can claim the same deterministic path; an ordinary, never-wedged spawn is unaffected; a 'starting' claimant protects a path exactly like a 'live' one; a rename-aside failure on EITHER side REFUSES outright (throws) instead of silently proceeding against unknown content, keeping the wedge entry intact on reclaim's own failure; and a respawn's reclaim racing in WHILE a removal is still settling against the exact same path (including removeWorktree's own clean-reject retry delay) is REFUSED outright, never left to recreate a fresh worktree out from under an in-flight removal."
+  ? "\n✅ ALL PASS — createWorktree never reuses/recuts a dir with no .git link (set aside, never deleted, then fresh-cut); SessionService.reclaimWedgedWorktreePathForSpawn clears a stale wedge-tracking entry (and sets aside whatever still sits there, even a dir that still has a .git link) BEFORE createWorktree can claim the same deterministic path; an ordinary, never-wedged spawn is unaffected; a 'starting' claimant protects a path exactly like a 'live' one; a rename-aside failure on EITHER side REFUSES outright (throws) instead of silently proceeding against unknown content, keeping the wedge entry intact on reclaim's own failure; a respawn's reclaim racing in WHILE a removal is still settling against the exact same path (including removeWorktree's own clean-reject retry delay) is REFUSED outright, never left to recreate a fresh worktree out from under an in-flight removal; and (card ceeb188b) reclaimWedgedWorktreePathForSpawn refuses to rename aside a wedge-tracked path that holds a REAL, live nested secondary-repo worktree (leaving its data + git registration + the wedge entry intact), the pre-fix bug returns when the shared backstop flag is disabled, and the refusal self-resolves once the nested worktree is removed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

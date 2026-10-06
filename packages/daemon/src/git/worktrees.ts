@@ -304,11 +304,19 @@ let renameDirAsideImpl: RenameSyncFn = fs.renameSync;
 export function __setRenameDirAsideForTest(fn?: RenameSyncFn): void { renameDirAsideImpl = fn ?? fs.renameSync; }
 
 let worktreeCollisionBackstopEnabled = true;
-/** Test-only seam (card c994ffeb): disables `createWorktree`'s repoKey/taskKey collision backstop so a
- *  test can prove the backstop is actually load-bearing — reproduce the pre-fix nesting/wrongful-
- *  rename-aside behavior on demand, rather than only asserting the backstop fires. Omit the arg (or pass
- *  `true`) to restore the real, enabled check. */
+/** Test-only seam (card c994ffeb, widened by card ceeb188b): disables BOTH rename-aside collision
+ *  backstops that guard against destroying a live repo-axis dir — `createWorktree`'s own reverse check
+ *  AND `SessionService.reclaimWedgedWorktreePathForSpawn`'s pre-spawn wedge-reclaim check (service.ts) —
+ *  so a test can prove either backstop is actually load-bearing by reproducing the pre-fix wrongful-
+ *  rename-aside behavior on demand, rather than only asserting it fires. ONE switch governs both sites
+ *  deliberately (card ceeb188b review decision) — do not add a second seam for the reclaim side; read
+ *  the shared flag via {@link isWorktreeCollisionBackstopEnabled} instead. Omit the arg (or pass `true`)
+ *  to restore the real, enabled check. */
 export function __setWorktreeCollisionBackstopForTest(enabled?: boolean): void { worktreeCollisionBackstopEnabled = enabled ?? true; }
+/** Read-only counterpart to {@link __setWorktreeCollisionBackstopForTest} — lets a caller outside this
+ *  module (`SessionService.reclaimWedgedWorktreePathForSpawn`) consult the SAME shared flag before
+ *  running its own nested-worktree-child check, so the one test seam above governs both backstops. */
+export function isWorktreeCollisionBackstopEnabled(): boolean { return worktreeCollisionBackstopEnabled; }
 
 export interface RenameAsideResult {
   ok: boolean;
@@ -2186,8 +2194,12 @@ export function worktreeHasGitLink(worktreePath: string): boolean {
  * Returns the matching child's NAME (so the caller's error can describe what was actually found, never
  * asserting a specific repoKey exists) or `null` if nothing matches. Fails safe to `null` on any read
  * error. Bounded `readdirSync`, never a recursive scan.
+ *
+ * Exported (card ceeb188b) so `SessionService.reclaimWedgedWorktreePathForSpawn` (service.ts) can
+ * consult the SAME predicate before its own unconditional rename-aside — the ONE shared signature for
+ * "this dir is really a repo-axis dir holding a live nested worktree", never a second copy.
  */
-function findNestedWorktreeLikeChild(dirPath: string): string | null {
+export function findNestedWorktreeLikeChild(dirPath: string): string | null {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dirPath, { withFileTypes: true });
