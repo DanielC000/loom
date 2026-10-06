@@ -151,7 +151,7 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 - **Caveat (supervisor code is NOT `daemon_restart`-deployable):** `daemon_restart` only rebuilds +
   relaunches the daemon *process*; the **supervisor** (`scripts/daemon-supervisor.mjs`) and anything it loads are NOT re-read across exit `75` (the same running supervisor execs the new `dist/`). A merge that edits the supervisor needs a **human Ctrl-C + re-run of `pnpm daemon:stable`** to go live — a manager must flag that human action in its done-report (mirrors the unsupervised `restarting:false` refusal). If `daemon_restart`'s result (or the post-restart resume nudge) instead carries `supervisorCheckFailed` — the check itself failed, not a confirmed unchanged — flag that supervisor-liveness is **unknown**, not confirmed-fine; the check couldn't tell you either way, so don't assume the human step is unnecessary.
 
-**Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these four footguns:
+**Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these five footguns:
 - A bash `run_in_background` PID is the **shell's** PID, not the daemon's — `taskkill //PID <that-pid>`
   fails. Find the real node listener with `netstat -ano | grep :<port>`, then `taskkill //F //T //PID <that-pid>`, and confirm the port actually freed. (This identifies which PID holds the port, not how many listeners are on it — a matching row count is not a listener count.)
 - A helper `.mjs` must **LIVE under `packages/daemon`** for its deps (e.g. `ws`, `better-sqlite3`) to
@@ -167,6 +167,11 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   reviewing the wrong daemon's sessions/board/settings with no visible sign. Set `LOOM_PORT` before
   starting `pnpm web`, and check the `[web] proxying → http://127.0.0.1:NNNN` line it logs on startup to
   confirm the target.
+- A **fake-home smoke of `scripts/daemon-supervisor.mjs`** (overriding `HOME`/`USERPROFILE` to a throwaway
+  dir, same pattern as the isolated-daemon recipe above) fails turbo's own build step with `x Global
+  config path not found.` — turbo resolves its global config directory from the real OS profile dirs, and
+  a fake/empty `HOME`/`USERPROFILE` has none. Set `TURBO_CONFIG_DIR_PATH=<a dir under that same fake
+  home>` (create the dir first) alongside the fake `HOME`/`USERPROFILE` and it resolves normally.
 
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.
