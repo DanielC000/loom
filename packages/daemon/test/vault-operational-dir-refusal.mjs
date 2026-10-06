@@ -55,7 +55,7 @@ requireHermeticEnv(); // confirms LOOM_HOME is the temp dir just established abo
 const loomHome = fs.realpathSync(loomHomePath);
 
 const { writeVaultFile, createVaultFile, deleteVaultFile } = await import("../dist/vault/writer.js");
-const { commitVault, isOperationalVaultDir, resolveVaultGitTarget } = await import("../dist/vault/versioner.js");
+const { commitVault, isOperationalVaultDir, resolveVaultGitTarget, setCodeRepoGuardProvider } = await import("../dist/vault/versioner.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
 // Fixture sanity: WORKTREES_DIR really is a SIBLING of LOOM_HOME under `home` (paths.ts derives it as
 // `dirname(LOOM_HOME)/${basename(LOOM_HOME)}-worktrees`) — the real shape the ancestor tests below rely on.
@@ -73,6 +73,7 @@ function initVault(dir) {
   git(dir, "config user.email loom-test@example.com");
   git(dir, "config user.name loom-test");
 }
+const commitCount = (dir) => parseInt(git(dir, "rev-list --all --count").trim() || "0", 10);
 
 // Sanity: this test's fixture actually IS what isOperationalVaultDir detects — not a broken assumption.
 check("fixture precondition: LOOM_HOME has no .gitignore yet", !fs.existsSync(path.join(loomHome, ".gitignore")));
@@ -212,6 +213,80 @@ const scratchRoot = fs.realpathSync(mkdtempManaged("loom-op-dir-refusal-scratch-
   const rNormal = await resolveVaultGitTarget(siblingVault);
   check("negative control: resolveVaultGitTarget on an ordinary vault still resolves ok:true", rNormal.ok === true);
   check("negative control: …and the resolved repoPath actually has a .git", fs.existsSync(path.join(rNormal.repoPath ?? "", ".git")));
+}
+
+// (i) Card a018fb5a, shape (a): a vault inside a REAL linked worktree directly under WORKTREES_DIR, whose
+// owning repo is NOT in the codeRepoGuard snapshot at all (hard-deleted project, or a worktree never
+// registered in the first place). Before this card, NEITHER mechanism refused this: isOperationalVaultDir
+// doesn't recognize a WORKTREES_DIR descendant, and checkCodeRepoCollision has nothing in its (empty)
+// snapshot to collide against — RED on pre-fix code (commitVault would actually commit). After this card,
+// isOperationalVaultDir alone refuses it, independent of the collision guard/provider at all.
+{
+  const mainCheckoutI = path.join(scratchRoot, "a018-main-i");
+  initVault(mainCheckoutI);
+  fs.writeFileSync(path.join(mainCheckoutI, "src.ts"), "export const x = 1;\n");
+  git(mainCheckoutI, "add src.ts");
+  git(mainCheckoutI, "commit -m init");
+
+  const deregisteredWorktree = path.join(WORKTREES_DIR, "a018fb5a-deregistered-i");
+  git(mainCheckoutI, `worktree add "${deregisteredWorktree}" -b a018fb5a-deregistered-branch-i`);
+
+  // Simulate the project being hard-deleted / never registered: an empty snapshot, so
+  // checkCodeRepoCollision has nothing to collide against (confirms the collision guard alone would NOT
+  // have caught this — the actual gap this scenario closes).
+  setCodeRepoGuardProvider({ snapshot: () => [], recordEvent: () => {} });
+
+  check("(i) isOperationalVaultDir flags a vault inside a worktree of a DEREGISTERED/never-registered repo", isOperationalVaultDir(deregisteredWorktree));
+
+  const vaultDirI = path.join(deregisteredWorktree, "notes");
+  fs.mkdirSync(vaultDirI);
+  fs.writeFileSync(path.join(vaultDirI, "note.md"), "# a real vault edit\n");
+  const beforeI = commitCount(deregisteredWorktree);
+  const resultI = await commitVault(deregisteredWorktree, "loom: auto-commit (should be refused — worktree of a deregistered repo)");
+  check("(i) commitVault refuses a vault inside a deregistered-repo worktree (GREEN after a018fb5a)", resultI.committed === false && resultI.blockedReason === undefined);
+  check("(i) ...and no new commit landed", commitCount(deregisteredWorktree) === beforeI);
+
+  setCodeRepoGuardProvider(undefined);
+}
+
+// (j) Card a018fb5a, shape (b): a NON-GIT directory placed DIRECTLY under WORKTREES_DIR (e.g.
+// WORKTREES_DIR/<projectId> before a real worktree exists there yet). It carries neither pre-existing
+// content marker (no loom.db, no worktrees/ subdir) — RED on pre-fix code, commitVault would lazily
+// `git init` it and a later `git add -A` could record sibling worker worktrees as embedded gitlinks.
+{
+  const nonGitDir = path.join(WORKTREES_DIR, "a018fb5a-non-git-j");
+  fs.mkdirSync(nonGitDir, { recursive: true });
+
+  check("(j) fixture precondition: the non-git dir has no .git yet", !fs.existsSync(path.join(nonGitDir, ".git")));
+  check("(j) fixture precondition: the non-git dir carries neither pre-existing content marker", !fs.existsSync(path.join(nonGitDir, "loom.db")) && !fs.existsSync(path.join(nonGitDir, "worktrees")));
+  check("(j) isOperationalVaultDir flags a non-git dir directly under WORKTREES_DIR", isOperationalVaultDir(nonGitDir));
+
+  fs.writeFileSync(path.join(nonGitDir, "note.md"), "# a real vault edit\n");
+  const resultJ = await commitVault(nonGitDir, "loom: auto-commit (should be refused — non-git dir under WORKTREES_DIR)");
+  check("(j) commitVault refuses rather than lazily git-init'ing a non-git dir under WORKTREES_DIR (GREEN after a018fb5a)", resultJ.committed === false && resultJ.blockedReason === undefined);
+  check("(j) ...and no .git was ever created there", !fs.existsSync(path.join(nonGitDir, ".git")));
+
+  const w = await writeVaultFile(nonGitDir, "notes/pwned.md", "should never be written");
+  check("(j) writeVaultFile also refuses the non-git dir under WORKTREES_DIR", w.ok === false && w.reason === "operational-dir");
+  check("(j) ...and no file landed on disk", !fs.existsSync(path.join(nonGitDir, "notes", "pwned.md")));
+}
+
+// (k) BEHAVIOURAL NEGATIVE CONTROL for (i)/(j): a dir that is a SIBLING of WORKTREES_DIR (same parent,
+// NOT nested inside it) must be completely unaffected by the new descendant check — proves
+// isDescendantOfWorktreesDir discriminates on actual nesting, not a loose prefix/substring match.
+{
+  const siblingOfWorktrees = path.join(home, "not-a-worktree-vault");
+  initVault(siblingOfWorktrees);
+  check("(k) NEGATIVE CONTROL: isOperationalVaultDir does NOT flag a sibling of WORKTREES_DIR", !isOperationalVaultDir(siblingOfWorktrees));
+  const wSibling = await writeVaultFile(siblingOfWorktrees, "notes/hello.md", "# hello\n");
+  check("(k) NEGATIVE CONTROL: a sibling-of-WORKTREES_DIR vault write still succeeds", wSibling.ok === true && wSibling.committed === true);
+  check("(k) NEGATIVE CONTROL: .git WAS created for the sibling vault", fs.existsSync(path.join(siblingOfWorktrees, ".git")));
+
+  // A textually-prefixed-but-not-nested sibling must not false-positive either (e.g. WORKTREES_DIR with a
+  // trailing suffix appended to its basename, rather than a real path separator boundary).
+  const prefixedSibling = `${WORKTREES_DIR}-decoy`;
+  fs.mkdirSync(prefixedSibling, { recursive: true });
+  check("(k) NEGATIVE CONTROL: a textually-prefixed (not path-nested) sibling of WORKTREES_DIR is not flagged", !isOperationalVaultDir(prefixedSibling));
 }
 
 console.log(failures === 0 ? "\nALL PASS — operational vault dirs refuse init/commit/write; ordinary vaults unaffected." : `\n${failures} FAILURE(S).`);

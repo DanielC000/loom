@@ -1946,13 +1946,29 @@ export function isLoomHomeOrAncestor(dir: string): boolean {
 }
 
 /**
+ * VAULT-SIDE ONLY: is `dir` strictly NESTED INSIDE `WORKTREES_DIR` — the mirror-image relation
+ * {@link isLoomHomeOrAncestor} does not cover (ancestor-or-equal only, never a descendant).
+ *
+ * @decision a018fb5a — never fold this into `isLoomHomeOrAncestor`, shared with GitWriter's own guard
+ *  (decision f9360c84) — that predicate has no comparable descendant-of-WORKTREES_DIR use case, and
+ *  widening it risks regressing GitWriter's own proven semantics.
+ */
+function isDescendantOfWorktreesDir(dir: string): boolean {
+  const realDir = normLoomPath(realpathNativeOrResolve(dir));
+  const realWorktrees = normLoomPath(realpathNativeOrResolve(WORKTREES_DIR));
+  return realDir !== realWorktrees && realDir.startsWith(`${realWorktrees}/`);
+}
+
+/**
  * An OPERATIONAL/daemon-home directory is NOT a docs vault — it is Loom's own state dir (`LOOM_HOME`:
  * `loom.db` + its -wal/-shm, `backups/`, `worktrees/` with node_modules, `logs/`, `tmp/`). The reserved
  * "Loom Platform" home points its `vaultPath` AT this dir, so `startVaultVersioners` must NEVER watch it:
  * a `git add -A` there would stage the LIVE SQLite DB (churn / bloat / commit-mid-write corruption) and
  * chokidar walking `worktrees/`+node_modules thrashes. We detect it by CONTENT (a `loom.db` file or a
  * `worktrees/` dir present — env-independent, the robust PRIMARY signal) PLUS the shared path-relation
- * check ({@link isLoomHomeOrAncestor}, equality-or-ancestor against `LOOM_HOME`/`WORKTREES_DIR`).
+ * check ({@link isLoomHomeOrAncestor}, equality-or-ancestor against `LOOM_HOME`/`WORKTREES_DIR`) PLUS, for
+ * this (vault-side-only) predicate, any path strictly NESTED INSIDE `WORKTREES_DIR`
+ * ({@link isDescendantOfWorktreesDir} — card a018fb5a).
  *
  * @decision 68cc29db — `dir` being an ANCESTOR of `LOOM_HOME`/`WORKTREES_DIR` (e.g. the user's home dir
  *  itself as `vaultPath`) is ALSO operational — `git add .` there would sweep loom.db/secrets/worktrees
@@ -1960,6 +1976,7 @@ export function isLoomHomeOrAncestor(dir: string): boolean {
  */
 export function isOperationalVaultDir(dir: string): boolean {
   if (isLoomHomeOrAncestor(dir)) return true; // path-relation half — shared with GitWriter's guard
+  if (isDescendantOfWorktreesDir(dir)) return true; // vault-side only — card a018fb5a, see doc above
   if (fs.existsSync(path.join(dir, "loom.db"))) return true; // the live daemon DB lives here
   if (fs.existsSync(path.join(dir, "worktrees"))) return true; // worker worktrees (node_modules churn)
   return false;

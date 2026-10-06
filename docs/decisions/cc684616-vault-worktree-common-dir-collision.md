@@ -74,12 +74,20 @@ changed classifications.
 **Evaluation order is unchanged.** `isOperationalVaultDir` (Loom's own `LOOM_HOME`/`WORKTREES_DIR`
 refusal) is checked by every real caller (`commitVault`, `flushSync`, `startVaultVersioners`'s boot loop)
 BEFORE `checkCodeRepoCollision` is ever reached — this card does not touch that ordering, or
-`isOperationalVaultDir` itself, at all. `isOperationalVaultDir` catches a vaultPath that IS, or is an
-ANCESTOR of, `LOOM_HOME`/`WORKTREES_DIR` (or carries their content markers) — it does NOT, today, catch a
-vaultPath merely located somewhere INSIDE one specific worker worktree UNDER `WORKTREES_DIR` (a
-descendant, not an ancestor); that shape falls through to `checkCodeRepoCollision`, which (after this
-card) now correctly refuses it as a collision instead of silently missing it, exactly like any other
-user-created worktree of a registered repo.
+`isOperationalVaultDir` itself, at all. At the time of THIS card, `isOperationalVaultDir` caught a
+vaultPath that IS, or is an ANCESTOR of, `LOOM_HOME`/`WORKTREES_DIR` (or carries their content markers) —
+but NOT a vaultPath merely located somewhere INSIDE one specific worker worktree UNDER `WORKTREES_DIR` (a
+descendant, not an ancestor); that shape fell through to `checkCodeRepoCollision`, which this card made
+correctly refuse it as a collision instead of silently missing it, exactly like any other user-created
+worktree of a registered repo.
+
+**Superseded by card `a018fb5a`.** `isOperationalVaultDir` now ALSO catches any descendant of
+`WORKTREES_DIR` directly (see that card's own record) — so a vault inside a worker worktree of a
+STILL-REGISTERED repo (this card's own test (16) shape) is refused at the EARLIER operational-dir check
+today, not by the collision guard this card added. This card's own fix is still load-bearing for the
+case `a018fb5a` does NOT cover: a vault colliding with a registered repo via a linked worktree OUTSIDE
+`WORKTREES_DIR` (e.g. a user-created worktree elsewhere on disk) still reaches, and is refused by, this
+card's common-dir widening of `checkCodeRepoCollision`.
 
 **`isCommitPathMergeEligible` is unchanged.** The new worktree-collision case is refused by
 `checkCodeRepoCollision` outright, before the auto-committer ever reaches the lock-taking step — there is

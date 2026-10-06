@@ -782,18 +782,17 @@ function toEntry(p) {
   check("(15d) ...and the commit actually landed", commitCount(unrelatedWorktree15d) === before15d + 1);
 }
 
-// ===================== (16) card cc684616: evaluation ORDER — Loom's own WORKTREES_DIR operational refusal =====================
+// ===================== (16) card cc684616/a018fb5a: evaluation ORDER — Loom's own WORKTREES_DIR operational refusal =====================
 // Loom's own worker worktrees ARE linked worktrees of a registered repo, so this card's new common-dir
-// widening could in principle race the pre-existing operational-dir refusal for a vault bound at/under
-// WORKTREES_DIR. Verified directly (see this test's own two checks): isOperationalVaultDir fires on
-// WORKTREES_DIR itself (pre-existing, unaffected by this card) but — BOTH before and after this card's
-// fix — does NOT independently recognize a path merely INSIDE one specific worker worktree UNDER
-// WORKTREES_DIR (a descendant, not an ancestor, and it carries none of the two content markers either).
-// That shape was previously UNCAUGHT by either mechanism (the exact bug this card fixes); after this fix
-// it is correctly refused via the collision guard — "code-repo-collision", not "operational-dir". This
-// is a SAFE outcome (the auto-commit is still refused), just not the "operational" label a different
-// mental model of WORKTREES_DIR coverage might expect — recorded here as the actual, verified behavior
-// rather than assumed.
+// widening could in principle race the operational-dir refusal for a vault bound at/under WORKTREES_DIR.
+// Verified directly (see this test's own two isOperationalVaultDir checks): it fires on WORKTREES_DIR
+// itself (pre-existing), and — since card a018fb5a — it ALSO fires on a path merely INSIDE one specific
+// worker worktree UNDER WORKTREES_DIR (a descendant, not an ancestor), via the new
+// isDescendantOfWorktreesDir check, even though it carries neither of the two pre-existing content
+// markers. So a vault at a worker-worktree-shaped path is now refused at the EARLIER operational-dir
+// check, before checkCodeRepoCollision is ever reached — "operational-dir", not "code-repo-collision".
+// (Before a018fb5a this shape fell through operational-dir and was refused only by the collision guard
+// below — see docs/decisions/a018fb5a-vault-operational-dir-worktrees-descendant.md for the full history.)
 {
   check("(16) isOperationalVaultDir(WORKTREES_DIR itself) is true — pre-existing, unaffected by this card", isOperationalVaultDir(WORKTREES_DIR));
 
@@ -808,7 +807,7 @@ function toEntry(p) {
   const workerShapedWorktree16 = path.join(WORKTREES_DIR, "cc684616-fake-worker-16");
   git(mainCheckout16, `worktree add "${workerShapedWorktree16}" -b cc684616-fake-worker-branch-16`);
 
-  check("(16) isOperationalVaultDir does NOT independently flag a path merely inside WORKTREES_DIR (pre-existing scope, not this card's)", !isOperationalVaultDir(workerShapedWorktree16));
+  check("(16) isOperationalVaultDir DOES flag a path merely inside WORKTREES_DIR, since card a018fb5a", isOperationalVaultDir(workerShapedWorktree16));
 
   const vaultDir16 = path.join(workerShapedWorktree16, "notes");
   fs.mkdirSync(vaultDir16);
@@ -818,7 +817,7 @@ function toEntry(p) {
   fs.writeFileSync(path.join(vaultDir16, "note.md"), "# a real vault edit\n");
   const before16 = commitCount(workerShapedWorktree16);
   const result16 = await commitVault(workerShapedWorktree16, "loom: auto-commit (should be refused — vault at a worker-worktree-shaped path)");
-  check("(16) a vault at a worker-worktree-shaped path under WORKTREES_DIR is refused (via the collision guard, not operational-dir)", result16.committed === false && result16.blockedReason === "code-repo-collision");
+  check("(16) a vault at a worker-worktree-shaped path under WORKTREES_DIR is refused (via operational-dir, caught before the collision guard)", result16.committed === false && result16.blockedReason === undefined);
   check("(16) ...and no new commit landed", commitCount(workerShapedWorktree16) === before16);
 }
 
