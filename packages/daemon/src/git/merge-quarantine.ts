@@ -369,40 +369,6 @@ function consumeMatchedPendingsIntoArmedEntry(
   return { armed, matched, writeSucceeded };
 }
 
-/** The stable hash-prefixed glob for a bare latch HASH's own tmp residue — `<hash>.json.tmp-<pid>`, any
- *  pid. Best-effort; a missing/unreadable directory is not an error. Never throws. UNCONDITIONAL — never
- *  call this (or {@link deleteMergeQuarantineTmpResidueForKey}/{@link deleteMergeQuarantineTmpResidue})
- *  at a site that must spare a DIFFERENT, surviving entry's own cross-referenced residue; reach for
- *  {@link sweepTmpResidueForHashIfUnreferenced} there instead (card be79f4d5). As of round 4, EVERY
- *  production caller of this chain has been migrated to that reference-aware sweep instead
- *  (`clearMergeQuarantineLatchFile`'s two sweeps, `deleteMergeQuarantineLatchByKey`,
- *  `writeMergeQuarantineLatch`'s `sweepOtherTmpsOnSuccess`, and `clearMergeQuarantineByToken`'s
- *  partial-clear branch) — this function, {@link deleteMergeQuarantineTmpResidueForKey}, and
- *  {@link deleteMergeQuarantineTmpResidue} now have NO remaining caller at all (left in place rather
- *  than deleted, like the pre-existing dead {@link deleteMergeQuarantineLatch}; see
- *  docs/decisions/be79f4d5-lazy-graduation-source-latch-ownership.md). */
-function deleteMergeQuarantineTmpResidueForHash(hash: string): void {
-  const prefix = `${hash}.json.tmp-`;
-  let files: string[];
-  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return; }
-  for (const f of files) {
-    if (!f.startsWith(prefix)) continue;
-    try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
-  }
-}
-
-/** The stable hash-prefixed glob for KEY's OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid. Best-effort;
- *  a missing/unreadable directory is not an error. Never throws. */
-function deleteMergeQuarantineTmpResidueForKey(key: string): void {
-  deleteMergeQuarantineTmpResidueForHash(quarantineHashForKey(key));
-}
-
-/** The stable hash-prefixed glob for `repoPath`'s OWN tmp residue — `<hash>.json.tmp-<pid>`, any pid.
- *  Best-effort; a missing/unreadable directory is not an error. Never throws. */
-function deleteMergeQuarantineTmpResidue(repoPath: string): void {
-  deleteMergeQuarantineTmpResidueForKey(canonicalRepoLockKey(repoPath));
-}
-
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
  *  residue for KEY — a failed write DELIBERATELY leaves its tmp behind (round 2: it's the only durable
  *  record of an active quarantine until resolved) — HERE, at clear time, is where it gets swept.
@@ -415,10 +381,6 @@ function deleteMergeQuarantineLatchByKey(key: string): void {
   // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
   // because THIS key's own entry is being legitimately cleared.
   sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key));
-}
-
-function deleteMergeQuarantineLatch(repoPath: string): void {
-  deleteMergeQuarantineLatchByKey(canonicalRepoLockKey(repoPath));
 }
 
 /**
@@ -642,11 +604,10 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string): { kept: boolean; 
  * Used by every call site a same-hash tmp residue can be swept from: `clearMergeQuarantineLatchFile`'s raw
  * "no entry matches this id" fallback (card c0be9bf9/9cabd143), `deleteMergeQuarantineLatchByKey`'s own
  * legitimate-clear sweep, `writeMergeQuarantineLatch`'s `sweepOtherTmpsOnSuccess` path, and
- * `clearMergeQuarantineByToken`'s own partial-clear branch (round 4) — the chain in
- * {@link deleteMergeQuarantineTmpResidueForHash}'s own doc now has NO remaining production caller.
+ * `clearMergeQuarantineByToken`'s own partial-clear branch (round 4).
  *
- * @decision be79f4d5 (round 3) — do NOT fold this into `deleteMergeQuarantineTmpResidueForHash` itself;
- * call THIS at each site instead. RETRACTED: an earlier "leaves residue behind forever" rationale was
+ * @decision be79f4d5 (round 3) — call THIS at every site that sweeps a same-hash tmp, never an
+ * unconditional-by-hash delete. RETRACTED: an earlier "leaves residue behind forever" rationale was
  * never true (a kept file sweeps once its owner clears).
  */
 function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; referencingRepoPaths: string[] } {
@@ -995,8 +956,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // or physical latch even when nothing in-memory matches `id` itself.
   const ownSweep = sweepOrphanLatchFileIfUnreferenced(`${id}.json`);
   // @decision be79f4d5 — the tmp-residue twin of the `.json` sweep just above: ownership-checked, never
-  // the unconditional `deleteMergeQuarantineTmpResidueForHash` (see that function's own doc for why this
-  // one call site must differ from every other caller of it).
+  // an unconditional-by-hash delete.
   const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id);
   const keptRepoPaths = new Set<string>([...ownSweep.referencingRepoPaths, ...tmpSweep.referencingRepoPaths]);
   return {

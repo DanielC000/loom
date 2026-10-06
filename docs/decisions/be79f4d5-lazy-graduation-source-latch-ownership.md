@@ -176,12 +176,12 @@ fourth call site. Fixed by routing it through `sweepTmpResidueForHashIfUnreferen
 delete repoB's only durable copy regardless; proven RED at the pre-round-4 commit, GREEN after).
 
 As of this fix, `deleteMergeQuarantineTmpResidueForHash`/`ForKey`/`ForRepoPath` (the UNCONDITIONAL chain)
-have ZERO remaining production callers anywhere in this module — every site that sweeps a same-hash tmp
-now goes through the reference-aware helper. Left in place rather than deleted (out of scope for a
-targeted bugfix round; a drive-by deletion is its own review surface) — same posture as the PRE-EXISTING
-dead `deleteMergeQuarantineLatch(repoPath)` (line ~354, zero callers, unrelated to this card, noted here
-only because the reviewer flagged it in the same pass). A future housekeeping pass may remove both; this
-card does not.
+had ZERO remaining production callers anywhere in this module — every site that sweeps a same-hash tmp
+now goes through the reference-aware helper. Left in place at the time (out of scope for a targeted
+bugfix round; a drive-by deletion is its own review surface) — same posture as the PRE-EXISTING dead
+`deleteMergeQuarantineLatch(repoPath)` (zero callers, unrelated to this card, noted here only because the
+reviewer flagged it in the same pass). **Removed by card `590f1f81`** (verified zero callers against
+current main, positive control run first): all four functions are gone from `git/merge-quarantine.ts`.
 
 ### Two doc corrections (findings 1-2, no behavior change)
 
@@ -207,17 +207,16 @@ to point at this card's rounds 3-4 instead of restating a now-irrelevant justifi
 
 ## Do not
 
-- Do not add the ownership check inside `deleteMergeQuarantineTmpResidueForHash`/
-  `deleteMergeQuarantineTmpResidueForKey` themselves — call `sweepTmpResidueForHashIfUnreferenced` at
-  each site that needs it instead. As of round 4 that is EVERY production site that ever swept a
-  same-hash tmp: `clearMergeQuarantineLatchFile`'s two sweeps (round 1/2), `deleteMergeQuarantineLatchByKey`'s
-  own legitimate-clear sweep (round 3), `writeMergeQuarantineLatch`'s `sweepOtherTmpsOnSuccess` (round 3),
-  and `clearMergeQuarantineByToken`'s partial-clear branch (round 4) — the unconditional chain now has NO
-  remaining production caller; see `deleteMergeQuarantineTmpResidueForHash`'s own doc. Do NOT cite "would
-  leave orphaned residue behind forever" as a reason to avoid the reference-aware check anywhere — that
-  framing is RETRACTED (round 2) and was never true (a kept file sweeps once its own referencing entry
-  later clears) and never actually justified anything (rounds 3-4 showed the real unconditional call
-  sites were a genuine bug, not a deliberate design needing that justification).
+- Do not reintroduce the unconditional-by-hash chain (`deleteMergeQuarantineTmpResidueForHash`/`ForKey`/
+  `ForRepoPath`, removed by card `590f1f81` once it had zero remaining callers) as a shortcut at a new
+  call site — call `sweepTmpResidueForHashIfUnreferenced` instead. Every production site that ever swept
+  a same-hash tmp already goes through it: `clearMergeQuarantineLatchFile`'s two sweeps (round 1/2),
+  `deleteMergeQuarantineLatchByKey`'s own legitimate-clear sweep (round 3), `writeMergeQuarantineLatch`'s
+  `sweepOtherTmpsOnSuccess` (round 3), and `clearMergeQuarantineByToken`'s partial-clear branch (round 4).
+  Do NOT cite "would leave orphaned residue behind forever" as a reason to avoid the reference-aware check
+  anywhere — that framing is RETRACTED (round 2) and was never true (a kept file sweeps once its own
+  referencing entry later clears) and never actually justified anything (rounds 3-4 showed the real
+  unconditional call sites were a genuine bug, not a deliberate design needing that justification).
 - Do not describe the entry actually being cleared/superseded at a `sweepTmpResidueForHashIfUnreferenced`
   call as "exempt from" or "unaffected by" the ownership check (round 4, findings 1-2) — the scan is not
   entry-scoped: if that SAME entry's own `orphanLatchFiles` self-references a same-hash tmp (e.g. from an
