@@ -40,3 +40,63 @@ Code Review MINOR (confirmed), later found INCOMPLETE and completed: unlike sibl
 ### Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`PROMPT_MISMATCH_RESOLVE_WINDOW_MS`'s top-of-const doc). Relocated by card `a4818d7a` (tranche 1). Folded into this pre-existing record by card `6de8956e`.
+
+## §3 — `isRecognizedReplayAwaitingResolution` arms the follow-up timer iff the notice ACTUALLY made the "wait and re-check" promise, and why it is `isUnmatchableMismatch`'s own structural twin
+
+### Narrative
+
+Code Review CRITICAL (confirmed, board card `f9b1ea00`): the follow-up resolve-timer must arm iff
+`mismatchText` just above ACTUALLY made the "wait one generation and re-check" promise — i.e. iff
+`lossClause` took its `replayedEntry !== undefined` branch, which only happens in `mismatchText`'s own
+FINAL fallback arm (none of the confirmed/benign shapes above matched).
+
+The ORIGINAL cut of this card armed on the broader `replayedEntry !== undefined` alone, at the point
+`live.lastMismatchReplay` is set, well BEFORE `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit` are
+even computed — but both of those are, by construction, ALSO `replayedEntry !== undefined` cases, and
+their own notice text says the OPPOSITE: "NOT A LOSS ... every byte did arrive." Worse, their gens are
+UNSATISFIABLE via `confirmedFusion` SPECIFICALLY: that mechanism requires `replayedEntry === undefined`,
+mutually exclusive with the wrapper/ANSI-strip shapes (neither of which requires `replayedEntry ===
+undefined` itself — see each one's own doc for why). This is a narrower claim than "`Live.
+mismatchResolvedGens` is populated only by a confirmed fusion" — it is NOT; a plain recognized replay, a
+confirmed wrapper-aware fusion, and (since card `dc92f4b6`) `confirmedPastedContentWrapOfPriorWrite` each
+add to it too. The point above is only that `confirmedFusion` ITSELF can never resolve a wrapper/ANSI-strip
+gen. Left as originally shipped, 100% of that population armed a timer that could NEVER resolve, and fired
+a false "confirmed loss, please resend" 10 minutes after Loom had told the session the exact opposite.
+
+`isRecognizedReplayAwaitingResolution` is deliberately `isUnmatchableMismatch`'s own structural TWIN —
+the SAME six negations, with the OPPOSITE `replayedEntry` polarity — rather than a fresh "exclude the
+current benign shapes" redraw: a future benign shape only needs its own `confirmed<X>` local threaded into
+BOTH twins to stay correct on both sides, instead of this arming condition needing its own
+independently-driftable update. Membership so far: `confirmedFusion`, `confirmedDivergedPrior`,
+`confirmedWrapperDeficit`, `confirmedAnsiStripDeficit` (the original four), `confirmedWrapperAwareFusion`
+as the 5th (card `c23e2869`), `confirmedPastedContentWrapOfPriorWrite` as the 6th (card `dc92f4b6`) — a
+future addition would be the 7th.
+
+**Not every member of this list is a REAL, reachable exclusion on this branch.** `confirmedWrapperDeficit`
+and `confirmedAnsiStripDeficit` genuinely are: neither requires `replayedEntry === undefined` in its own
+definition, so either can co-occur with `replayedEntry !== undefined` and correctly pre-empt this branch.
+`confirmedPastedContentWrapOfPriorWrite` is different: it requires `replayedEntry === undefined` by
+construction (a pasted-content wrap is never byte-identical to the whole `reported` string), so it can
+NEVER actually be true here — it is listed purely for the twin-pairing contract's own textual completeness,
+not because it is expected to matter on this branch. See `docs/decisions/dc92f4b6-pasted-content-wrap-can-replay-an-earlier-generation.md`
+for why no follow-up timer is reachable for that population at all, under any cut of that detector.
+
+### Do not
+
+- Do not add a new confirmed/benign shape to `isUnmatchableMismatch`'s own negation list without adding
+  the SAME local to `isRecognizedReplayAwaitingResolution`'s — the two must stay the same set, with
+  opposite `replayedEntry` polarity, or the arming condition silently drifts from the notice text's own
+  branch structure.
+- Do not read a shape's membership in this exclusion list as proof it can reach a `replayedEntry !==
+  undefined` state — `confirmedPastedContentWrapOfPriorWrite` is a documented counter-example (listed for
+  textual completeness, structurally unreachable here).
+- Do not generalize that counter-example to the WHOLE list — `confirmedWrapperDeficit`/
+  `confirmedAnsiStripDeficit` are genuinely reachable, real exclusions on this branch; only
+  `confirmedPastedContentWrapOfPriorWrite` is provably vacuous here.
+
+### Source
+
+Inline comment in `packages/daemon/src/pty/host.ts`, immediately above `isRecognizedReplayAwaitingResolution`'s
+own declaration (`UserPromptSubmit` mismatch-detection case). Extracted by card `dc92f4b6` (Code Review
+rework) when that card's own addition pushed the comment over this project's long-unanchored-block
+threshold.

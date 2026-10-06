@@ -529,6 +529,30 @@ function detectPastedContentWrapContentDivergence(reported: string, intended: st
   return { divergedIndex: i, divergedChar: inner[i]!, intendedChar: intended[i]! };
 }
 
+/** @decision dc92f4b6 — proves CONTENT identity, never lineage: requires BOTH the wrap's inner content
+ *  AND `currentIntendedText` (possible-duplicate tag stripped) to exactly match the SAME prior entry,
+ *  never a wrap-only match (confirms on any stale entry regardless of the CURRENT gen) or a substring. */
+function findRecognizedPastedContentWrapOfPriorWrite(
+  reported: string,
+  currentIntendedText: string,
+  window: ReadonlyArray<{ gen: number; text: string }>,
+): { gen: number; matchedLen: number } | null {
+  const strippedCurrent = stripPossibleDuplicateFrame(currentIntendedText);
+  if (strippedCurrent === currentIntendedText) return null; // current gen carries no tag to strip — nothing to prove content-identity against
+  const m = PASTED_CONTENT_WRAP_RE.exec(reported);
+  if (m === null) return null;
+  const inner = m[2]!;
+  for (let idx = window.length - 1; idx >= 0; idx--) {
+    const entry = window[idx];
+    if (!entry || entry.text.length === 0) continue;
+    const matchesEntry = (s: string) => s === entry.text || s === entry.text.trimEnd();
+    if (matchesEntry(inner) && matchesEntry(strippedCurrent)) {
+      return { gen: entry.gen, matchedLen: entry.text.length };
+    }
+  }
+  return null;
+}
+
 /** Card b1cc4f01 (owner ruling, card 16c93a50 / request 0eb43216): a coarse, disclosure-safe
  *  classification of a single dropped character — logged UNCONDITIONALLY, alongside (never instead of)
  *  `redactedExcerpt(droppedChar)` through the same chokepoint every content-bearing diagnostic in this
@@ -7518,6 +7542,14 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-wrapper-aware-fusion] ${sessionId} gen=${live.submitGeneration} recognizedGen=${wrapperAwareFusion.recognizedGen} matchedLen=${wrapperAwareFusion.matchedLen} reportedLen=${reported.length} leadingRemainderLen=${wrapperAwareFusion.leadingRemainderLen} trailingRemainderLen=${wrapperAwareFusion.trailingRemainderLen} — the engine's report is EXACTLY generation ${wrapperAwareFusion.recognizedGen}'s own recorded write plus THIS generation's own intended text with a possible-duplicate tag stripped, byte-for-byte (card c23e2869). NOT A LOSS — every byte of both generations' content did arrive.`);
               }
+              // @decision dc92f4b6 — a LATE engine echo of an EARLIER generation's own write, paste-
+              // wrapped, where the CURRENT generation's own intended text (tag stripped) is CONTENT-
+              // IDENTICAL to that same entry — never lineage (see the function's own doc).
+              const pastedContentWrapOfPriorWrite = findRecognizedPastedContentWrapOfPriorWrite(reported, intended, live.recentWrittenTurns.slice(0, -1));
+              if (pastedContentWrapOfPriorWrite) {
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-pasted-content-wrap-replay] ${sessionId} gen=${live.submitGeneration} recognizedGen=${pastedContentWrapOfPriorWrite.gen} matchedLen=${pastedContentWrapOfPriorWrite.matchedLen} reportedLen=${reported.length} — the engine's report is EXACTLY generation ${pastedContentWrapOfPriorWrite.gen}'s own recorded write, wrapped in the engine's own pasted-content paste-composer framing (card dc92f4b6). NOT A LOSS OF CONTENT — that content arrived, and THIS generation's own (tag-stripped) intended text is content-identical to it. THIS generation's OWN tagged write has not itself been independently confirmed and may still surface later as a separate possible-duplicate-labelled copy.`);
+              }
               // @decision 201d0d95 — Q1: SURFACE the mismatch to the session (report OBSERVED FIELDS ONLY —
               // never assert a CLI-internal cause) and use `findLast`, not `find`, when matching the replay
               // ring; see that record for the measured platform-sweep numbers and why `findLast` is required.
@@ -7538,7 +7570,10 @@ export class PtyHost {
               // @decision d005f55b — DoD-3: only reached once an exact replay AND both confirmed-
               // accumulation shapes above have refused, searching PRIOR writes only; also skipped when
               // `wrapperAwareFusion` already FULLY explains `reported` (card c23e2869), a stronger result.
-              const unmatchedRecognized = (replayedEntry === undefined && !accumulation?.confirmed && !divergedPriorAccumulation && !wrapperAwareFusion)
+              // @decision dc92f4b6 — also skipped when `pastedContentWrapOfPriorWrite` already FULLY
+              // explains `reported` (an exact pasted-content-wrap of an earlier generation's own write) —
+              // same "a stronger result already fully explains this" posture as `wrapperAwareFusion`.
+              const unmatchedRecognized = (replayedEntry === undefined && !accumulation?.confirmed && !divergedPriorAccumulation && !wrapperAwareFusion && !pastedContentWrapOfPriorWrite)
                 ? findRecognizedSubstring(reported, live.recentWrittenTurns.slice(0, -1))
                 : null;
               if (unmatchedRecognized) {
@@ -7738,6 +7773,17 @@ export class PtyHost {
                   live.mismatchResolvedGens.add(confirmedWrapperAwareFusion.recognizedGen);
                   live.mismatchResolvedGens.add(live.submitGeneration);
                 }
+                // @decision dc92f4b6 — same precedence posture as `confirmedWrapperAwareFusion` above; a
+                // full, zero-remainder reconciliation against an earlier generation's own recorded write,
+                // via `pastedContentWrapOfPriorWrite` (computed above alongside its own diagnostic log).
+                const confirmedPastedContentWrapOfPriorWrite = (!confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion && pastedContentWrapOfPriorWrite) ? pastedContentWrapOfPriorWrite : null;
+                if (confirmedPastedContentWrapOfPriorWrite) {
+                  // @decision dc92f4b6 — marking the matched prior gen is a REAL effect (clears its own
+                  // pending resolve-timer, if any). Marking `live.submitGeneration` too is STATE HYGIENE
+                  // with NO observable effect — this branch structurally never reaches a timer for it.
+                  live.mismatchResolvedGens.add(confirmedPastedContentWrapOfPriorWrite.gen);
+                  live.mismatchResolvedGens.add(live.submitGeneration);
+                }
                 // @decision d0952a73 — the actual `live.lastMismatchReplay` write:
                 //
                 // threads the
@@ -7811,7 +7857,7 @@ export class PtyHost {
                 // `recentWrittenTurns` will have rotated past this generation by the time any
                 // reader asks, so `intended`, still in scope here, is the only place this content
                 // still exists once detection has passed.
-                const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion;
+                const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion && !confirmedPastedContentWrapOfPriorWrite;
                 if (isUnmatchableMismatch) {
                   live.lastMismatchUnmatched = { gen: live.submitGeneration, intendedLen: intended.length, intendedText: intended, detectedAt: Date.now() };
                 }
@@ -7884,6 +7930,21 @@ export class PtyHost {
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS — the engine's report is EXACTLY generation ${confirmedWrapperAwareFusion.recognizedGen}'s own recorded write (${confirmedWrapperAwareFusion.matchedLen} chars) plus THIS turn's own intended text with a possible-duplicate redelivery tag stripped, byte-for-byte. Every byte of both generations' content did arrive; this is an attribution/ordering artifact, not corruption. ` +
                       `What YOU can check yourself: if generation ${confirmedWrapperAwareFusion.recognizedGen}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that.`
+                  // Card dc92f4b6 — its OWN complete notice text, same posture as `confirmedWrapperAwareFusion`'s
+                  // own branch above (never patched onto `lossClause`/`replayNote`, never worded as a possible
+                  // LOSS). The check proves CONTENT identity, never lineage: THIS turn's own intended text,
+                  // tag stripped, is byte-for-byte IDENTICAL to generation
+                  // `confirmedPastedContentWrapOfPriorWrite.gen`'s own recorded write — it does NOT prove THIS
+                  // turn's own write was literally minted AS that generation's re-send, only that the content
+                  // matches. The content Loom intended for THIS turn is therefore already known to have
+                  // arrived, via that OTHER generation's own echo — but THIS generation's own tagged write has
+                  // NOT itself been independently confirmed, and may still surface later as its own, separate
+                  // `[loom:possible-duplicate]`-labelled copy; the notice below must name THAT pending write as
+                  // the duplicate-check risk, not the already-confirmed one.
+                    : confirmedPastedContentWrapOfPriorWrite
+                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS OF CONTENT — the engine's report is EXACTLY generation ${confirmedPastedContentWrapOfPriorWrite.gen}'s own recorded write (${confirmedPastedContentWrapOfPriorWrite.matchedLen} chars), wrapped in the engine's own paste-composer framing; every byte of THAT content did arrive. THIS turn's own intended text, possible-duplicate tag stripped, is CONTENT-IDENTICAL to generation ${confirmedPastedContentWrapOfPriorWrite.gen}'s write, byte-for-byte — so the content Loom intended for THIS turn is already known to have arrived, confirmed via generation ${confirmedPastedContentWrapOfPriorWrite.gen}'s own echo, not via a confirmation of THIS turn's own submission. Generation ${live.submitGeneration}'s OWN tagged write has NOT itself been independently confirmed, and may still surface later as a separate possible-duplicate-labelled copy. ` +
+                      `What YOU can check yourself: watch for a LATER, separately-confirmed [loom:possible-duplicate]-labelled copy of generation ${live.submitGeneration}'s own tagged write — if one arrives, it is the SAME content already established here, not new information; check your own artifacts before acting on it twice.`
                   // @decision 1a315058 — its OWN complete notice text: unrecognized is a THIRD state,
                   // neither confirmed benign nor established loss, so it asserts neither — and skips the
                   // artifact-audit ask below it, having nothing recognized to have duplicated.
@@ -7894,33 +7955,11 @@ export class PtyHost {
                     : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). ${lossClause} ${replayNote} ` +
                       `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
-                // Card f9b1ea00 — Code Review CRITICAL (confirmed, board card f9b1ea00): arm the follow-up
-                // timer iff `mismatchText` just above ACTUALLY made the "wait one generation and re-check"
-                // promise — i.e. iff `lossClause` took its `replayedEntry !== undefined` branch, which only
-                // happens in `mismatchText`'s own FINAL fallback arm (none of the five confirmed/benign
-                // shapes above matched: `confirmedFusion`/`confirmedDivergedPrior`/`confirmedWrapperDeficit`/
-                // `confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`, card c23e2869). The ORIGINAL cut of this card armed on the broader
-                // `replayedEntry !== undefined` alone, at the point `live.lastMismatchReplay` is set, well
-                // BEFORE `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit` are even computed — but both of
-                // those are, by construction (see each's own doc above), ALSO `replayedEntry !== undefined`
-                // cases, and their own notice text says the OPPOSITE: "NOT A LOSS ... every byte did arrive."
-                // Worse, their gens are UNSATISFIABLE by construction: `Live.mismatchResolvedGens` is
-                // populated ONLY by a CONFIRMED fusion (`confirmedFusion`, above), which itself REQUIRES
-                // `replayedEntry === undefined` — mutually exclusive with the wrapper/ANSI-strip shapes. Left
-                // as originally shipped, 100% of that population armed a timer that could NEVER resolve, and
-                // fired a false "confirmed loss, please resend" 10 minutes after Loom had told the session
-                // the exact opposite.
-                //
-                // This condition is deliberately `isUnmatchableMismatch`'s own structural TWIN, above — the
-                // SAME five negations with the OPPOSITE `replayedEntry` polarity (card c23e2869 added
-                // `confirmedWrapperAwareFusion` as the predicted 6th — see the comment this replaced) —
-                // rather than a fresh "exclude the current benign shapes" redraw: a future 7th benign shape
-                // only needs its own `confirmed<X>` local threaded into BOTH twins (the same way
-                // `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`
-                // already are here) to stay correct on both sides, instead of this arming condition needing
-                // its own independently-driftable update.
+                // @decision f9b1ea00 — `isUnmatchableMismatch`'s own structural twin: a new confirmed/
+                // benign shape added to one list MUST be added to the other, or the arming condition
+                // silently drifts from the notice text's own branch structure.
                 const isRecognizedReplayAwaitingResolution = replayedEntry !== undefined
-                  && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion;
+                  && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion && !confirmedPastedContentWrapOfPriorWrite;
                 if (isRecognizedReplayAwaitingResolution) {
                   // Schedule the follow-up: after `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (see that constant's
                   // own sizing doc), `checkPromptMismatchUnresolved` re-checks whether THIS gen has since been
@@ -8035,6 +8074,7 @@ export class PtyHost {
                   : confirmedWrapperDeficit ? "confirmed-wrapper-deficit"
                   : confirmedAnsiStripDeficit ? "confirmed-ansi-strip"
                   : confirmedWrapperAwareFusion ? "confirmed-wrapper-aware-fusion"
+                  : confirmedPastedContentWrapOfPriorWrite ? "confirmed-pasted-content-wrap-replay"
                   : isTrulyUnrecognizedDivergence ? "fallback-unrecognized"
                   : isRecognizedReplayAwaitingResolution ? "fallback-replay-awaiting-resolution"
                   : (isOffsetInsertion && !unmatchedRecognized) ? "fallback-benign-offset-insertion"
