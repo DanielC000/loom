@@ -44,9 +44,15 @@ function readStorage(key: string): string | null {
 /** The captured gateway token, or null. */
 export function getGatewayToken(): string | null { return readStorage(GATEWAY_TOKEN_STORAGE_KEY); }
 
-/** Persist a VERIFIED gateway token. Trimmed; an empty result is rejected. Card a1ec70a6: every caller goes
- *  through `storeVerifiedGatewayToken` below, which is what proves the candidate first. */
-export function setGatewayToken(token: string): boolean {
+/**
+ * Persist a VERIFIED gateway token. Trimmed; an empty result is rejected. Not even a test-only seed
+ * export: a test seeds its OWN fake localStorage, so this module exports no write path at all rather
+ * than one it merely asks callers not to use.
+ *
+ * @decision a1ec70a6 — module-PRIVATE, like the loopback writer it mirrors: the only caller is
+ * `storeVerifiedGatewayToken` below, so no call site can write the token without proving it first.
+ */
+function writeGatewayToken(token: string): boolean {
   const trimmed = token.trim();
   if (!trimmed) return false;
   try { window.localStorage.setItem(GATEWAY_TOKEN_STORAGE_KEY, trimmed); return true; } catch { return false; }
@@ -109,7 +115,7 @@ export async function storeVerifiedGatewayToken(
   const outcome = await verify(candidate);
   if (outcome === "invalid") return "refused";
   if (outcome === "unknown") return "unverified";
-  return setGatewayToken(candidate) ? "stored" : "unstorable";
+  return writeGatewayToken(candidate) ? "stored" : "unstorable";
 }
 
 /** Re-check the candidate held by an earlier `"unverified"` capture — the gateway banner's Retry. A
@@ -418,6 +424,10 @@ export async function verifyGatewayTokenAgainstDaemon(token: string): Promise<Cr
   return classifyCredentialProbe(
     () => fetch("/api/version", { headers: { authorization: `Bearer ${token.trim()}` } }),
     (status) => status >= 200 && status < 300,
-    async (response) => isGatewayTokenRequired(response.status, await response.json()),
+    // `isGatewayTokenRequired` only ever says `true` for a 401 or 429 — and `classifyCredentialProbe`
+    // already returns `invalid` for a 401 before this runs at all — so the ONLY status this can still
+    // affirm for is 429. Checking that FIRST skips parsing a body (403/5xx/etc.) this predicate can never
+    // affirm for anyway, and whose `.json()` the daemon never even wrote with this shape in mind.
+    async (response) => response.status === 429 && isGatewayTokenRequired(response.status, await response.json()),
   );
 }

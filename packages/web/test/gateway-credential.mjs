@@ -37,6 +37,15 @@ const LOOPBACK_KEY = "loom.loopbackToken";
 // all now, so a test that wants a browser already holding a loopback secret seeds its own fake storage.
 const seedHeldLoopbackSecret = (secret) => { mem.set(LOOPBACK_KEY, secret); };
 
+const GATEWAY_KEY = "loom.gatewayToken";
+// Card 28c3ca92: the gateway writer is module-private now too (mirroring the loopback one above) — no
+// test-only seed export either, so a test that wants a browser already holding a gateway token seeds its
+// own fake storage directly, exactly like seedHeldLoopbackSecret.
+const seedHeldGatewayToken = (token) => {
+  mem.set(GATEWAY_KEY, token);
+  if (G.getGatewayToken() !== token) throw new Error("the seed did not land in the slot the module reads");
+};
+
 let pass = 0;
 const reset = () => {
   mem.clear();
@@ -74,12 +83,11 @@ check("SEPARATION: the gateway 401 body does NOT trip the loopback banner's pred
   assert.equal(L.credentialLock(), null);
 });
 
-check("storage: a SEPARATE key from the loopback token; set/get round-trips; empty is rejected", () => {
+check("storage: a SEPARATE key from the loopback token; reads round-trip against a seeded value", () => {
   assert.equal(G.getGatewayToken(), null);
-  assert.equal(G.setGatewayToken("   "), false);
-  assert.equal(G.setGatewayToken("  gw-abc \n"), true);
+  seedHeldGatewayToken("gw-abc");
   assert.equal(G.getGatewayToken(), "gw-abc");
-  assert.equal(L.getLoopbackToken(), null, "writing the gateway token never touches the loopback key");
+  assert.equal(L.getLoopbackToken(), null, "the gateway slot and the loopback slot are never the same one");
   seedHeldLoopbackSecret("loop-secret");
   assert.equal(G.getGatewayToken(), "gw-abc", "…nor the other way round");
   assert.equal(L.getLoopbackToken(), "loop-secret", "control: the seed really did land in the loopback slot");
@@ -89,6 +97,20 @@ check("storage: a SEPARATE key from the loopback token; set/get round-trips; emp
 const acheck = async (name, fn) => { reset(); await fn(); pass++; console.log(`ok   ${name}`); };
 // Card a1ec70a6: the injected verifier is THREE-state now. UNKNOWN is the one that is not a refusal.
 const GOOD = async () => "valid", BAD = async () => "invalid", UNREACHED = async () => "unknown";
+
+// ── the shared verify-then-store helper, the writer's own moved-here behaviour (card 28c3ca92) ─────────
+// `writeGatewayToken` is module-private now, so its trim/empty-reject behaviour is proven only through the
+// one chokepoint that can still reach it — the twin of loopback-token-link.mjs's own equivalent test.
+await acheck("storeVerifiedGatewayToken: an empty/whitespace candidate is refused WITHOUT a round trip; a verified one is stored trimmed", async () => {
+  const seen = [];
+  const spy = async (t) => { seen.push(t); return "valid"; };
+  assert.equal(await G.storeVerifiedGatewayToken("   \n ", spy), "refused");
+  assert.deepEqual(seen, [], "nothing to prove — never ask the daemon about an empty candidate");
+  assert.equal(G.getGatewayToken(), null);
+  assert.equal(await G.storeVerifiedGatewayToken("  gw-abc \n", spy), "stored");
+  assert.deepEqual(seen, ["gw-abc"], "the TRIMMED candidate is what gets proved");
+  assert.equal(G.getGatewayToken(), "gw-abc", "…and what gets stored");
+});
 
 await acheck("captureGatewayTokenFromUrl (token VERIFIES): stored into the gateway key, stripped from the URL, other params kept, page reloaded", async () => {
   let reloads = 0;
@@ -101,7 +123,7 @@ await acheck("captureGatewayTokenFromUrl (token VERIFIES): stored into the gatew
 });
 
 await acheck("captureGatewayTokenFromUrl (token REFUSED): NOTHING is stored, a WORKING stored token is KEPT, the link is stripped, the rejection is surfaced", async () => {
-  G.setGatewayToken("owner-working-token");
+  seedHeldGatewayToken("owner-working-token");
   let reloads = 0;
   assert.equal(await G.captureGatewayTokenFromUrl(BAD, () => { reloads++; }, true), "rejected");
   assert.equal(G.getGatewayToken(), "owner-working-token", "a crafted link must never clobber the owner's token");
@@ -174,7 +196,7 @@ await acheck("verifyGatewayTokenAgainstDaemon: the failed-auth 429 WITH the daem
 });
 
 await acheck("the coded 429 reaches the CAPTURE path as a refusal: the held token survives and the rejection is surfaced", async () => {
-  G.setGatewayToken("owner-working-token");
+  seedHeldGatewayToken("owner-working-token");
   globalThis.fetch = async () => ({ status: 429, json: async () => ({ error: "too many failed attempts", code: "gateway-token-required" }) });
   let reloads = 0;
   // The REAL verifier here, not an injected one: this is the end-to-end proof that the classification above
@@ -194,7 +216,7 @@ await acheck("the coded 429 reaches the CAPTURE path as a refusal: the held toke
 // loop in a real browser. Both failure shapes get their own case because they reach the same state by
 // different routes, and the try/catch only ever addressed one of them.
 await acheck("captureGatewayTokenFromUrl: re-opening a link carrying the ALREADY-held token is a no-op — no verify, no reload", async () => {
-  G.setGatewayToken("GW-TOKEN");
+  seedHeldGatewayToken("GW-TOKEN");
   const seen = [];
   const wouldReject = async (t) => { seen.push(t); return "invalid"; }; // a consult shows up as a failure here
   let reloads = 0;
@@ -230,7 +252,7 @@ await acheck("captureGatewayTokenFromUrl: a SILENTLY NO-OP replaceState is bound
 });
 
 await acheck("captureGatewayTokenFromUrl (UNCHECKED): nothing stored, no refusal claimed, no lock, and the candidate is HELD", async () => {
-  G.setGatewayToken("owner-working-token");
+  seedHeldGatewayToken("owner-working-token");
   let reloads = 0;
   assert.equal(await G.captureGatewayTokenFromUrl(UNREACHED, () => { reloads++; }, true), "unverified");
   assert.equal(G.getGatewayToken(), "owner-working-token", "an unproven candidate never overwrites a working token");
@@ -321,14 +343,19 @@ check("GatewayTokenBanner takes its link wording from the pure helper, and expla
   // entirely, while still rendering the Retry button — a button with nothing saying what it retries.
   assert.ok(src.includes("!linkLeads && linkCopy"),
     "a lock-led banner must STILL say what the Retry rendered beside it is retrying");
-  assert.equal(/could not reach the daemon/i.test(src), false,
+  // Card 28c3ca92: the SAME regex as the loopback twin's own scan (test/loopback-token-link.mjs) — unified
+  // so the two banners' component-local copy can never drift apart on which unreachability phrasing they
+  // reject inline.
+  assert.equal(/could not reach the daemon|no answer from the daemon/i.test(src), false,
     "…and the unreachability claim must not survive inlined in the JSX either");
   assert.ok(/could not reach the daemon/i.test("Loom could not reach the daemon to check"),
-    "negative control: the pattern does match the bad copy");
+    "negative control: the pattern does match one bad-copy phrasing");
+  assert.ok(/no answer from the daemon/i.test("Still no answer from the daemon — held."),
+    "negative control: the pattern does match the OTHER bad-copy phrasing too");
 });
 
 check("withGatewayAuth: adds the bearer on a REMOTE origin (reads too); never overrides one the caller set", () => {
-  G.setGatewayToken("gw-1");
+  seedHeldGatewayToken("gw-1");
   const bare = G.withGatewayAuth(undefined, true);
   assert.equal(new Headers(bare.headers).get("authorization"), "Bearer gw-1");
   const withInit = G.withGatewayAuth({ method: "POST", headers: { "content-type": "application/json" }, body: "{}" }, true);
@@ -341,7 +368,7 @@ check("withGatewayAuth: adds the bearer on a REMOTE origin (reads too); never ov
 });
 
 check("withGatewayAuth: UNCHANGED on a loopback origin (byte-identical) and when no token is held", () => {
-  G.setGatewayToken("gw-1");
+  seedHeldGatewayToken("gw-1");
   const init = { method: "GET" };
   assert.equal(G.withGatewayAuth(init, false), init);
   assert.equal(G.withGatewayAuth(undefined, false), undefined);
@@ -541,6 +568,27 @@ await acheck("probeHeldGatewayToken: `none` when there is nothing to ask about �
   assert.equal(await G.probeHeldGatewayToken(count, false), "none");
   assert.equal(calls, 0, "`none` must cost no request — this runs on every socket close");
   assert.equal(G.gatewayLock(), false, "and `none` is not an outcome ABOUT a token, so never a refusal");
+});
+
+// ── card 28c3ca92: the chokepoint, now the twin of loopback-token-link.mjs's own scan ──────────────────
+// `writeGatewayToken` is module-private (no export, no test-only seed) — the only caller left is
+// `storeVerifiedGatewayToken` above, so no call site can write the token without proving it first.
+const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+  d.isDirectory() ? walk(new URL(`${d.name}/`, dir)) : /\.tsx?$/.test(d.name) ? [new URL(d.name, dir)] : []);
+const srcFiles = walk(new URL("../src/", import.meta.url));
+
+check("the writer is module-private, and there is no test-only seed export beside it either", () => {
+  const src = fs.readFileSync(new URL("../src/lib/gatewayCredential.ts", import.meta.url), "latin1");
+  assert.ok(src.includes("function writeGatewayToken("), "positive control: the scan is reading the real module");
+  assert.equal(/export\s+(async\s+)?function\s+writeGatewayToken/.test(src), false,
+    "exporting the writer re-opens the hole: a call site could then store a token it never proved");
+  assert.equal(/export\s*\{[^}]*\bwriteGatewayToken\b/.test(src), false, "…nor via an export list");
+  assert.ok(/export\s+\{[^}]*\bwriteGatewayToken\b/.test("export { getGatewayToken, writeGatewayToken };"),
+    "negative control: the pattern matches the bad shape");
+  const seedNamers = srcFiles.filter((f) => /\bseedGatewayTokenForTest\b/.test(fs.readFileSync(f, "latin1")));
+  assert.deepEqual(seedNamers, [], "no src file may name a seed helper — there is no longer one to name");
+  assert.ok(/\bseedGatewayTokenForTest\b/.test("export function seedGatewayTokenForTest(t) {}"),
+    "negative control: the pattern does match the shape it is asserting the absence of");
 });
 
 console.log(`\n${pass} checks passed`);
