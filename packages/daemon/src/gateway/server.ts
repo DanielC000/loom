@@ -3231,8 +3231,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const { wasQuarantined, reason } = clearMergeQuarantineReporting(repo.path);
-    return { ok: true, wasQuarantined, repoPath: repo.path, ...(reason ? { reason } : {}) };
+    const { wasQuarantined, reason, latchKept, referencingRepoPaths } = clearMergeQuarantineReporting(repo.path);
+    return {
+      ok: true, wasQuarantined, repoPath: repo.path, ...(reason ? { reason } : {}),
+      ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
+    };
   });
 
   // --- Merge-quarantine HUMAN clear, no project resolution (card c0be9bf9) — reaches a latch whose repo
@@ -3261,13 +3264,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
       // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
       // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
-      const { wasQuarantined, reason } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
-      return { ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}) };
+      const { wasQuarantined, reason, latchKept, referencingRepoPaths } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      return {
+        ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}),
+        ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
+      };
     }
     const result = clearMergeQuarantineLatchFile(body.id as string);
     if (!result.ok) return reply.code(400).send({ error: result.reason });
     return {
-      ok: true, wasQuarantined: result.wasQuarantined, id: body.id,
+      ok: true, wasQuarantined: result.wasQuarantined, id: body.id, liftedRepoPaths: result.liftedRepoPaths,
       ...(result.latchKept ? { latchKept: true, referencingRepoPaths: result.referencingRepoPaths } : {}),
     };
   });

@@ -35,7 +35,7 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
-  PLACEHOLDER_BRANCH_CORRUPT, quarantineLatchIdFor,
+  quarantineLatchIdFor,
 } = await import(mergeQuarantineModuleHref);
 
 // A genuinely fresh ESM module instance (its OWN empty `activeQuarantines` map, a real module-scope
@@ -141,15 +141,18 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
-  // SCENARIO R1 (card cac93b4c, item 3) — boot 1 self-heals a corrupt final OK (PASS 1's own placeholder
-  // write succeeds) but the UNION PROMOTE of the recovered real tmp (PASS 1b's per-key write, later in
-  // the SAME boot) fails (EMFILE). `writeMergeQuarantineLatch`'s failure path never touches the final
-  // path at all (open/write/fsync all happen against a NEW tmp, before the rename that would replace the
-  // final) — so the ON-DISK final after boot 1 is still whatever the self-heal wrote: the PRE-EXISTING
-  // placeholder, not the recovered real identity (which stays active in-memory only for this boot, per
-  // the promote loop's own comment). This pins `placeholder: true` on disk — deleting the field
-  // elsewhere must fail this check. Boot 2 (a genuinely fresh module instance, EMFILE no longer
-  // injected) then recovers and actually promotes the real entry.
+  // SCENARIO R1 (card cac93b4c, item 3; REVISED by card 882d6cff) — boot 1's self-heal write succeeds
+  // (interceptCount 1) and the LATER union-promote write for the tmp fails (EMFILE, interceptCount 2).
+  //
+  // card 882d6cff deferred PASS 1's own matched-corrupt self-heal into the SAME post-read write pass
+  // 4480b077 introduced for migrated sources — which runs AFTER PASS 1b has already read and armed the
+  // real tmp's content in-memory. So by the time THIS test's "self-heal" write (interceptCount 1) fires,
+  // `byRepoKey` already holds the REAL union (not the bare placeholder) — the self-heal write durably
+  // writes the RECOVERED identity on its own, and the later, separate tmp-promote write (interceptCount
+  // 2, the one EMFILE actually hits) failing no longer matters: the data is already on disk. This is a
+  // STRICTLY BETTER outcome than the old pin (which only survived a fault on the FIRST write, never the
+  // second) — updated here rather than left asserting the now-superseded behavior. Boot 2 (a genuinely
+  // fresh module instance, EMFILE no longer injected) remains a stable no-op on top of already-correct data.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const repo = makeRepo("r1");
@@ -195,24 +198,27 @@ try {
     check("(R1) boot 1 still recovers this repo", found.some((q) => q.repoPath === repo));
     check("(R1) boot 1 recovers the REAL entry IN-MEMORY despite the failed promote", activeMergeQuarantineFor(repo)?.reason === "the REAL r1 reason — must survive");
     check("(R1) the real tmp survives untouched (the promote failed, nothing was unlinked)", fs.existsSync(tmpPath));
-    // THE PIN (item 3's actual target): the final's OWN ON-DISK content after the failed promote is still
-    // the PRE-EXISTING self-heal PLACEHOLDER — never the recovered identity, which the failed promote
-    // never reached the final path to write. Deleting `placeholder` everywhere must flip this RED.
+    // THE REVISED PIN (card 882d6cff): the self-heal write (interceptCount 1, succeeded) now ALREADY
+    // carries the union — PASS 1b armed the real tmp content in-memory BEFORE this deferred write ran —
+    // so the final's own on-disk content is the RECOVERED REAL identity even though the separate,
+    // later tmp-promote write (interceptCount 2) failed. Regressing the defer-and-union fix back to an
+    // inline, pre-union self-heal write must flip this RED.
     const onDiskAfterBoot1 = (() => { try { return JSON.parse(fs.readFileSync(latchPath, "utf8")); } catch { return null; } })();
-    check("(R1) THE PIN: the on-disk final after the failed promote still carries placeholder:true (the pre-existing self-heal write, not the recovered identity)",
-      onDiskAfterBoot1?.placeholder === true && onDiskAfterBoot1?.branch === PLACEHOLDER_BRANCH_CORRUPT);
-    check("(R1) the on-disk final is NOT the recovered real reason (the promote never reached it)", onDiskAfterBoot1?.reason !== "the REAL r1 reason — must survive");
+    check("(R1) THE REVISED PIN: the on-disk final after the failed promote already carries the REAL recovered identity (the deferred self-heal wrote the union, not a bare placeholder)",
+      onDiskAfterBoot1?.reason === "the REAL r1 reason — must survive" && onDiskAfterBoot1?.branch === "real-branch" && !onDiskAfterBoot1?.placeholder);
 
-    // Boot 2: a genuinely fresh module instance, EMFILE no longer injected — the real entry should now
-    // actually promote to disk, lifting the placeholder and sweeping the tmp.
+    // Boot 2: a genuinely fresh module instance, EMFILE no longer injected. The on-disk final is ALREADY
+    // the real recovered identity (the revised pin above) — boot 2's own job is just the now-unblocked
+    // tmp-promote write succeeding this time, sweeping the real tmp boot 1 left behind only because ITS
+    // tmp-promote write (not the self-heal) was the one that failed.
     const bootMod2 = await freshBootModule();
     const found2 = bootMod2.reenterMergeQuarantinesAtBoot([repo]);
-    check("(R1) boot 2 (fresh module instance) recovers and PROMOTES the real entry to disk",
+    check("(R1) boot 2 (fresh module instance) still recovers the real entry",
       found2.some((q) => q.repoPath === repo) && bootMod2.activeMergeQuarantineFor(repo)?.reason === "the REAL r1 reason — must survive");
     const onDiskAfterBoot2 = (() => { try { return JSON.parse(fs.readFileSync(latchPath, "utf8")); } catch { return null; } })();
-    check("(R1) boot 2's on-disk final now carries the real identity, no longer the placeholder",
+    check("(R1) boot 2's on-disk final still carries the real identity (unchanged from boot 1, never a placeholder)",
       onDiskAfterBoot2?.reason === "the REAL r1 reason — must survive" && onDiskAfterBoot2?.branch === "real-branch" && !onDiskAfterBoot2?.placeholder);
-    check("(R1) boot 2 sweeps the now-superseded real tmp", !fs.existsSync(tmpPath));
+    check("(R1) boot 2 sweeps the now-superseded real tmp (its own tmp-promote write is no longer faulted)", !fs.existsSync(tmpPath));
 
     clearMergeQuarantine(repo);
   }
