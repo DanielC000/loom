@@ -487,6 +487,13 @@ function detectPastedContentWrapSingleCharDeficit(reported: string, intended: st
   return { droppedIndex: i, droppedChar: intended[i]! };
 }
 
+/** @decision 79999395 — never add a content/excerpt field to this decline shape; reason code + lengths
+ *  only, mirroring the sibling near-miss diagnostics' own disclosure posture. */
+type PastedContentWrapSmallExcessDecline =
+  | { reason: "regex-no-match" }
+  | { reason: "excess-len-out-of-range"; wrapIdLen: number; innerLen: number; excessLen: number }
+  | { reason: "non-contiguous-placement"; wrapIdLen: number; innerLen: number; excessLen: number; commonPrefixLen: number; commonSuffixLen: number };
+
 /** Card ff871b77 — sibling near-miss diagnostic to `detectPastedContentWrapSingleCharDeficit`, for the
  *  OPPOSITE (insertion) direction: the wrap FRAMING matches the SAME id-backreferenced shape byte-for-byte
  *  (never the frame — verified against 3 real production specimens, all with the same 4-char id shape
@@ -496,16 +503,27 @@ function detectPastedContentWrapSingleCharDeficit(reported: string, intended: st
  *  this note; a larger excess is a structurally different, unmeasured shape (see `[prompt-mismatch-
  *  unmatched-longer]`'s own uncharacterized-population tag, card 68459420, for that population instead).
  *  Diagnostic only, exactly like its sibling — this does NOT suppress the "possible LOSS" notice and must
- *  never be used to relax `isRecognizedPastedContentWrap`'s own `m[2] === intended` check. */
-function detectPastedContentWrapSmallExcess(reported: string, intended: string): { excessIndex: number, excessChars: string } | null {
+ *  never be used to relax `isRecognizedPastedContentWrap`'s own `m[2] === intended` check.
+ *  @decision 79999395 — the null-return case now carries WHY (see `PastedContentWrapSmallExcessDecline`
+ *  above); the call site logs it unconditionally, same posture as the positive match. */
+function detectPastedContentWrapSmallExcess(reported: string, intended: string): { excessIndex: number, excessChars: string } | { decline: PastedContentWrapSmallExcessDecline } {
   const m = PASTED_CONTENT_WRAP_RE.exec(reported);
-  if (m === null) return null;
+  if (m === null) return { decline: { reason: "regex-no-match" } };
+  const wrapIdLen = m[1]!.length;
   const inner = m[2]!;
   const excessLen = inner.length - intended.length;
-  if (excessLen !== 1 && excessLen !== 2) return null;
+  if (excessLen !== 1 && excessLen !== 2) return { decline: { reason: "excess-len-out-of-range", wrapIdLen, innerLen: inner.length, excessLen } };
   let i = 0;
   while (i < intended.length && inner[i] === intended[i]) i++;
-  if (inner.slice(i + excessLen) !== intended.slice(i)) return null;
+  if (inner.slice(i + excessLen) !== intended.slice(i)) {
+    // A separate, backward common-suffix scan (never computed by the forward-only check above), purely
+    // for diagnostic value: how far the wrap's own inner content reconciles from either end when no
+    // single contiguous insertion explains the whole divergence.
+    let j = 0;
+    const maxSuffix = intended.length - i;
+    while (j < maxSuffix && inner[inner.length - 1 - j] === intended[intended.length - 1 - j]) j++;
+    return { decline: { reason: "non-contiguous-placement", wrapIdLen, innerLen: inner.length, excessLen, commonPrefixLen: i, commonSuffixLen: j } };
+  }
   return { excessIndex: i, excessChars: inner.slice(i, i + excessLen) };
 }
 
@@ -3144,6 +3162,9 @@ interface Live {
   //
   // @decision e1ac691b — one of FOUR sibling candidates surfaced together; see that record.
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
+  // @decision 79999395 — never word this as an established loss; CONTENT identity against `recognizedGen`
+  // only, never lineage (dc92f4b6's own posture). NOT one of e1ac691b's four worker_merge_confirm candidates.
+  lastMismatchPastedContentWrapReplay: { gen: number; recognizedGen: number; reportedLen: number; intendedLen: number; detectedAt: number } | null;
   // Card f9b1ea00 — CONSUMED by `checkPromptMismatchUnresolved`'s bounded-window follow-up, NOT a reader-
   // facing pull surface like its siblings above. Every gen a CONFIRMED fusion's own `spanGens` has ever
   // named (i.e. every gen `lastMismatchFusion` above has ever explained, across the session's whole life —
@@ -5126,7 +5147,7 @@ export class PtyHost {
       lastPromptSenderId: null,
       activeTurnProactive: false,
       lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchPastedContentWrapReplay: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
       // Boot is gate-free: it targets the resolved mode DIRECTLY when expressible (computeBootMode, card
@@ -5412,7 +5433,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchPastedContentWrapReplay: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true, startupCycleInFlight: false, // a shell never cycles a permission mode — never flipped
@@ -6635,7 +6656,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchPastedContentWrapReplay: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true, startupCycleInFlight: false, // a canned entry never cycles a permission mode — never flipped
@@ -7638,10 +7659,22 @@ export class PtyHost {
               // far (two +2, one +1), all on the gen=1 kickoff path — the realistic deliverable for this
               // shape is naming it, not fixing it (the cause is almost certainly outside this repo, in the
               // engine's own composer round-trip, exactly like the deficit shape).
-              const pastedContentWrapSmallExcess = isPastedContentWrap ? null : detectPastedContentWrapSmallExcess(reported, intended);
+              const pastedContentWrapSmallExcessCheck = isPastedContentWrap ? null : detectPastedContentWrapSmallExcess(reported, intended);
+              const pastedContentWrapSmallExcess = pastedContentWrapSmallExcessCheck !== null && "excessIndex" in pastedContentWrapSmallExcessCheck ? pastedContentWrapSmallExcessCheck : null;
               if (pastedContentWrapSmallExcess) {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-pasted-content-wrap-near-miss-excess] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} excessIndex=${pastedContentWrapSmallExcess.excessIndex} excessLen=${pastedContentWrapSmallExcess.excessChars.length} excessCharsClass=${classifyExcessChars(pastedContentWrapSmallExcess.excessChars, intended, pastedContentWrapSmallExcess.excessIndex)} excessChars=${redactedExcerpt(pastedContentWrapSmallExcess.excessChars)} — the engine's own pasted-content wrap framing matches EXACTLY (id-backreferenced, byte-for-byte), but the wrapped body is ${pastedContentWrapSmallExcess.excessChars.length} character(s) LONGER than what Loom wrote. Card ff871b77 (measured, n=3): the opposite shape to the single-character-deficit near-miss above — content ADDED, not dropped, by the engine's own paste round-trip. Still a real divergence (the wrapper-reconciliation check above correctly declines it) — this only names the shape, it does not suppress the notice.`);
+              }
+              // @decision 79999395 — card 79999395 found the positive tag just above never fired for the 3
+              // live specimens dc92f4b6's own decision record had attributed to this shape; this names WHY,
+              // whenever this detector declines, as a reason code + lengths only — never content.
+              if (pastedContentWrapSmallExcessCheck !== null && "decline" in pastedContentWrapSmallExcessCheck) {
+                const decline = pastedContentWrapSmallExcessCheck.decline;
+                const declineExtra = decline.reason === "regex-no-match" ? ""
+                  : decline.reason === "excess-len-out-of-range" ? ` wrapIdLen=${decline.wrapIdLen} innerLen=${decline.innerLen} excessLen=${decline.excessLen}`
+                  : ` wrapIdLen=${decline.wrapIdLen} innerLen=${decline.innerLen} excessLen=${decline.excessLen} commonPrefixLen=${decline.commonPrefixLen} commonSuffixLen=${decline.commonSuffixLen}`;
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-pasted-content-wrap-excess-declined] ${sessionId} gen=${live.submitGeneration} reason=${decline.reason} reportedLen=${reported.length} intendedLen=${intended.length}${declineExtra} — detectPastedContentWrapSmallExcess declined to recognize this mismatch as its own 1-2-char wrap-excess near-miss shape (card 79999395); names WHY so the next occurrence of this shape self-explains without needing raw content.`);
               }
               // Card dccb6290 — the ZERO-DELTA sibling to the deficit/excess near-misses above: the wrap
               // framing matches byte-for-byte and the body is the SAME LENGTH as `intended`, but content
@@ -7783,6 +7816,10 @@ export class PtyHost {
                   // with NO observable effect — this branch structurally never reaches a timer for it.
                   live.mismatchResolvedGens.add(confirmedPastedContentWrapOfPriorWrite.gen);
                   live.mismatchResolvedGens.add(live.submitGeneration);
+                  // @decision 79999395 — this arm wrote `mismatchResolvedGens` only, with no
+                  // worker_status/worker_list pull surface at all; mirrors `lastMismatchFusion`'s own
+                  // write-at-detection shape (card f5f6515a) for the same reason.
+                  live.lastMismatchPastedContentWrapReplay = { gen: live.submitGeneration, recognizedGen: confirmedPastedContentWrapOfPriorWrite.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
                 }
                 // @decision d0952a73 — the actual `live.lastMismatchReplay` write:
                 //
@@ -12522,6 +12559,18 @@ export class PtyHost {
    */
   getLastMismatchFusion(sessionId: string): Live["lastMismatchFusion"] | undefined {
     return this.live.get(sessionId)?.lastMismatchFusion;
+  }
+
+  /** The PASTED-CONTENT-WRAP-REPLAY counterpart to `getLastMismatchFusion` above (`Live.
+   *  lastMismatchPastedContentWrapReplay` — see that field's own doc). `null` = none fired yet since this
+   *  session went live, `undefined` = session not live in this process, never cleared once set,
+   *  overwritten (not accumulated) by a later occurrence.
+   *
+   * @decision 79999395 — same NOT-A-LOSS, content-identity-only contract as the field itself; never
+   *  describe a non-null read here as an established loss or as proving lineage.
+   */
+  getLastMismatchPastedContentWrapReplay(sessionId: string): Live["lastMismatchPastedContentWrapReplay"] | undefined {
+    return this.live.get(sessionId)?.lastMismatchPastedContentWrapReplay;
   }
 
   /** The UNMATCHABLE counterpart to `getLastMismatchReplay`/`getLastMismatchFusion` above (`Live.

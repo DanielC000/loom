@@ -85,7 +85,7 @@ const EXPECTED_KEYS = [
   // Card bba13405: codexBootStuck — the wedged-at-boot codex discriminator, see pty/host.ts's
   // getCodexBootStuck.
   "codexBootStuck",
-  "lastMismatchReplay", "lastMismatchFusion", "lastMismatch",
+  "lastMismatchReplay", "lastMismatchFusion", "lastMismatchPastedContentWrapReplay", "lastMismatch",
   "lastMismatchNoticeSuppressed", "lastPasteTripwireGiveUp", "lastFlushAttribution", "pendingMerge", "worktreePathAliases",
   "reportedState", "awaitingReview", "staleReport", "directive", "staleDirective", "parkedDirective",
   "archivedWithoutReport", "unresolvedCascade",

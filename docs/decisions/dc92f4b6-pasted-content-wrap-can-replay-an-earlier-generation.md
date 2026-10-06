@@ -28,11 +28,17 @@ overhead baked into the re-mint's `intended`), `divergesAtChar=0`, and `findReco
 `[prompt-mismatch-unmatched-remainder]` log named `recognizedGen=1` with `matchedLen` equal to generation
 1's own recorded write length every time.
 
-The fourth specimen (d0c329c1, gen=1 itself, `lenDelta=+60`, no re-mint involved) is a DIFFERENT,
-already-known, already-instrumented shape: a 1-2 char excess INSIDE the wrap relative to the CURRENT
-generation's own `intended` (card `ff871b77`'s `detectPastedContentWrapSmallExcess`), deliberately left
-unsuppressed since existing doctrine there is "name it, don't fix it" (an unmeasured, possibly-genuine
-tiny content divergence). This card's fix does not touch that shape.
+The fourth specimen (d0c329c1, gen=1 itself, `lenDelta=+60`, no re-mint involved) was ORIGINALLY attributed
+here to card `ff871b77`'s known 1-2-char wrap-excess shape (`detectPastedContentWrapSmallExcess`), left
+unsuppressed under that card's "name it, don't fix it" posture. **CORRECTION (card `79999395`,
+2026-10-06): that attribution was UNVERIFIED and does not hold.** `detectPastedContentWrapSmallExcess`'s own
+positive-match tag, `[prompt-mismatch-pasted-content-wrap-near-miss-excess]`, has ZERO occurrences for
+d0c329c1 across the full retained log window, and likewise zero for two further same-magnitude live
+specimens (the Loom lead's own session, gen=8 `+61` and gen=13 `+60`, 2026-10-06) — despite its sibling
+near-miss diagnostics firing correctly in the SAME window (a positive control proving the logging path is
+live, not dead). What this shape actually is remains OPEN; see card `79999395`'s own record for the
+decline-reason diagnostics added to `detectPastedContentWrapSmallExcess` so the next occurrence self-
+explains without needing raw content. This card's own fix still does not touch it either way.
 
 A fifth, unrelated specimen (19b3d5cf, card `bd9a483b`) was checked and confirmed structurally distinct:
 zero `[prompt-echo]` lines ever appear for it (the engine never confirms at all), vs. three stacking

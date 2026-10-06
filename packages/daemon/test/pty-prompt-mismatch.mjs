@@ -170,6 +170,17 @@ function captureExcessNearMissWarnings(fn) {
   return lines;
 }
 
+// Card 79999395: captures the wrap-excess DECLINE-REASON diagnostic's own
+// [prompt-mismatch-pasted-content-wrap-excess-declined] line — never a substring of
+// captureExcessNearMissWarnings' own filter above ("near-miss-excess]" vs "excess-declined]").
+function captureExcessDeclineWarnings(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-pasted-content-wrap-excess-declined]")) lines.push(msg); };
+  try { fn(); } finally { console.log = orig; }
+  return lines;
+}
+
 // Card d1ac9fed: captures MULTIPLE distinct tags from the SAME deliverHook call in one pass, keyed by
 // tag. Needed because nesting two of the single-tag capture helpers above does NOT work — the inner
 // helper's own console.log override REPLACES the outer one entirely rather than chaining through it, so
@@ -608,10 +619,13 @@ try {
     const reported = `\n\n<pasted_content id="f5c5">\n${innerWithTwoExtraChars}\n</pasted_content id="f5c5">\n`;
     host.enqueueStdin(sid, intended);
     const writesBeforeMismatch = fake.writes.length;
-    const nearMiss6k = captureExcessNearMissWarnings(() => {
+    const tags6k = captureMultiWarnings(["[prompt-mismatch-pasted-content-wrap-near-miss-excess]", "[prompt-mismatch-pasted-content-wrap-excess-declined]"], () => {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
+    const nearMiss6k = tags6k["[prompt-mismatch-pasted-content-wrap-near-miss-excess]"];
     check("6k: POSITIVE CONTROL — a wrap with exactly two extra characters fires the excess near-miss diagnostic exactly once", nearMiss6k.length === 1);
+    // Card 79999395 — NEGATIVE CONTROL: the decline-reason diagnostic must NOT fire alongside a genuine match.
+    check("6k: the decline-reason diagnostic does NOT also fire for a genuine, recognized match", tags6k["[prompt-mismatch-pasted-content-wrap-excess-declined]"].length === 0);
     check("6k: it names the excess index", (nearMiss6k[0] ?? "").includes(`excessIndex=${excessIndex}`));
     check("6k: it names the excess length", (nearMiss6k[0] ?? "").includes("excessLen=2"));
     check("6k: it classifies the excess characters as NEITHER local-duplicate shape (arbitrary, unrelated text)",
@@ -642,10 +656,13 @@ try {
     const innerWithOneExtraChar = intended.slice(0, excessIndex) + excessChars + intended.slice(excessIndex);
     const reported = `\n\n<pasted_content id="f5c5">\n${innerWithOneExtraChar}\n</pasted_content id="f5c5">\n`;
     host.enqueueStdin(sid, intended);
-    const nearMiss6l = captureExcessNearMissWarnings(() => {
+    const tags6l = captureMultiWarnings(["[prompt-mismatch-pasted-content-wrap-near-miss-excess]", "[prompt-mismatch-pasted-content-wrap-excess-declined]"], () => {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
+    const nearMiss6l = tags6l["[prompt-mismatch-pasted-content-wrap-near-miss-excess]"];
     check("6l: POSITIVE CONTROL — a wrap with exactly one extra character fires the excess near-miss diagnostic exactly once", nearMiss6l.length === 1);
+    // Card 79999395 — NEGATIVE CONTROL: the decline-reason diagnostic must NOT fire alongside a genuine match.
+    check("6l: the decline-reason diagnostic does NOT also fire for a genuine, recognized match", tags6l["[prompt-mismatch-pasted-content-wrap-excess-declined]"].length === 0);
     check("6l: it names excessLen=1", (nearMiss6l[0] ?? "").includes("excessLen=1"));
     check("6l: it classifies a boundary-echo insertion as local-duplicate-preceding", (nearMiss6l[0] ?? "").includes("excessCharsClass=local-duplicate-preceding"));
   }
@@ -804,6 +821,74 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
     check("6r: the notice actually reached the pty", fake.writes.slice(writesBeforeMismatch).join("").includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6s. Card 79999395 — DECLINE-REASON diagnostic, reason="regex-no-match": an ordinary, unwrapped
+  // mismatch (no `<pasted_content id="...">` framing at all) must name WHY `detectPastedContentWrapSmallExcess`
+  // declined — the regex itself never matched. No lengths beyond reportedLen/intendedLen. =====
+  {
+    const sid = newSession("DeclineRegexNoMatch"); SIDS.push(sid);
+    const intended = "the real content Loom intended for this generation, with no paste framing involved";
+    const reported = `completely unrelated junk prefix that is not a pasted_content wrap at all — ${intended}`;
+    host.enqueueStdin(sid, intended);
+    const decline6s = captureExcessDeclineWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6s: POSITIVE CONTROL — the decline diagnostic fires exactly once", decline6s.length === 1);
+    check("6s: reason=regex-no-match", /reason=regex-no-match\b/.test(decline6s[0] ?? ""));
+    check("6s: no wrapIdLen/innerLen/excessLen fields are present (nothing to carry — the wrap was never found)",
+      !/wrapIdLen=/.test(decline6s[0] ?? "") && !/innerLen=/.test(decline6s[0] ?? "") && !/excessLen=/.test(decline6s[0] ?? ""));
+    check("6s: disclosure-safe — no raw content leaks into the decline line", !(decline6s[0] ?? "").includes(intended));
+  }
+
+  // ===== 6t. Card 79999395 — DECLINE-REASON diagnostic, reason="excess-len-out-of-range": reuses 6m's own
+  // fixture (the wrap framing matches, but THREE extra characters is outside the 1-2 bound) — must now ALSO
+  // name why, carrying the real (out-of-range) excessLen and the matched wrap id's own length. =====
+  {
+    const sid = newSession("DeclineExcessLenOutOfRange"); SIDS.push(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const innerWithThreeExtraChars = intended.slice(0, 30) + "XYZ" + intended.slice(30);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithThreeExtraChars}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const decline6t = captureExcessDeclineWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6t: POSITIVE CONTROL — the decline diagnostic fires exactly once", decline6t.length === 1);
+    check("6t: reason=excess-len-out-of-range", /reason=excess-len-out-of-range\b/.test(decline6t[0] ?? ""));
+    check("6t: names the real (out-of-range) excessLen=3, not clamped or hidden", /excessLen=3\b/.test(decline6t[0] ?? ""));
+    check("6t: names the matched wrap id's own length (wrapIdLen=4, \"f5c5\")", /wrapIdLen=4\b/.test(decline6t[0] ?? ""));
+    check("6t: names innerLen (intended.length + 3)", new RegExp(`innerLen=${intended.length + 3}\\b`).test(decline6t[0] ?? ""));
+    check("6t: no commonPrefixLen/commonSuffixLen fields (never reached that check)",
+      !/commonPrefixLen=/.test(decline6t[0] ?? "") && !/commonSuffixLen=/.test(decline6t[0] ?? ""));
+  }
+
+  // ===== 6u. Card 79999395 — DECLINE-REASON diagnostic, reason="non-contiguous-placement": the wrap framing
+  // matches and the total excess is exactly 2 characters (within bound), but the two extra characters are
+  // TWO SEPARATE single-char insertions at different positions, not one contiguous 2-char insertion — the
+  // shape the detector's own algorithm requires. Must decline with the real common-prefix/common-suffix
+  // reach named, never silently misreport this as a clean 2-char excess. =====
+  {
+    const sid = newSession("DeclineNonContiguousPlacement"); SIDS.push(sid);
+    const intended = "0123456789abcdefghijklmnopqrstuvwxyz9876543210zyxwvutsrqponmlkjihgfedcba0123456789"; // 85 distinct-ish chars, no long runs to coincidentally re-match
+    const firstInsertAt = 10;
+    const secondInsertAt = 50;
+    const innerTwoSeparateInsertions = intended.slice(0, firstInsertAt) + "Q" + intended.slice(firstInsertAt, secondInsertAt) + "Z" + intended.slice(secondInsertAt);
+    check("6u: fixture sanity — total excess is exactly 2 characters", innerTwoSeparateInsertions.length === intended.length + 2);
+    const reported = `\n\n<pasted_content id="nc12">\n${innerTwoSeparateInsertions}\n</pasted_content id="nc12">\n`;
+    host.enqueueStdin(sid, intended);
+    const decline6u = captureExcessDeclineWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6u: POSITIVE CONTROL — the decline diagnostic fires exactly once", decline6u.length === 1);
+    check("6u: reason=non-contiguous-placement (a clean 2-char excess would NOT reach this branch)", /reason=non-contiguous-placement\b/.test(decline6u[0] ?? ""));
+    check("6u: excessLen=2 (within the 1-2 bound — this is what makes it reach the placement check at all)", /excessLen=2\b/.test(decline6u[0] ?? ""));
+    check("6u: names the matched wrap id's own length (wrapIdLen=4, \"nc12\")", /wrapIdLen=4\b/.test(decline6u[0] ?? ""));
+    // The forward common-prefix scan finds the FIRST insertion point (index 10); the independent backward
+    // common-suffix scan finds how far the inner's own tail reconciles with intended's own tail — bounded
+    // by (intended.length - commonPrefixLen), never claiming more than is actually left to compare.
+    check("6u: names commonPrefixLen (the first insertion point, index 10)", /commonPrefixLen=10\b/.test(decline6u[0] ?? ""));
+    check("6u: names a real, non-negative commonSuffixLen (the independent backward scan ran)", /commonSuffixLen=\d+\b/.test(decline6u[0] ?? ""));
+    check("6u: disclosure-safe — no raw content leaks into the decline line", !(decline6u[0] ?? "").includes(intended));
   }
 
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not
