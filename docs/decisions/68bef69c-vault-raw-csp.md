@@ -22,9 +22,15 @@ The classifier (`isActiveDocumentContentType`) keys on the **resolved Content-Ty
 PDFs get `nosniff` but **no CSP**. This is deliberate, and reverting it to "apply the header uniformly" breaks a shipped feature:
 
 - CSP `sandbox` applies sandbox flags to the resulting document, and a sandboxed document **cannot instantiate the browser's native PDF viewer** — Chrome renders a blank/failed frame. The Vault page embeds PDFs via `<object data={rawUrl} type="application/pdf">`, and `packages/web/src/pages/Vault.tsx` already records the same finding for the iframe `sandbox` attribute, which is why no sandbox was used there in the first place.
-- The exfiltration path this record is about does not exist for a PDF: PDF script runs in the viewer's own restricted engine with no DOM and no `localStorage` reach.
+- The exfiltration path this record is about does not exist for a PDF under NORMAL rendering: PDF script runs in the viewer's own restricted engine with no DOM and no `localStorage` reach.
 
-So the carve-out costs nothing on the threat model it was written for and buys back a working viewer.
+The carve-out does **not** reopen the exfiltration path CSP `sandbox` closes for `.svg`/`.html`/`.xml` — but, reworded from an earlier "costs nothing" claim (card `f2c5eff2`): it is **not literally zero residual risk**. The residual is a browser-ENGINE PDF-parser bug (the pdf.js `CVE-2024-4367` class), not a gap in this route's own logic, and nothing here can detect or block a *future* bug of that shape — it scales with the browser's own PDF-parser history, not with anything `/vault/raw` controls.
+
+### Optional hardening shipped: `Content-Disposition: attachment` gated on `Sec-Fetch-Dest: document`
+
+Card `f2c5eff2` narrows that window. A PDF-renderer RCE would need a **top-level navigation** to the raw URL — the browser parsing the bytes as the origin's own document — and the Fetch Metadata header `Sec-Fetch-Dest` reads `"document"` only for exactly that case. `resolveVaultRawHeaders` now forces `Content-Disposition: attachment` for a PDF **only** when `Sec-Fetch-Dest: document`, turning that navigation into a download instead.
+
+The Vault page's `<object data={rawUrl} type="application/pdf">` embed never carries `Sec-Fetch-Dest: document` — verified empirically (`packages/web/e2e/vault.spec.ts`), not assumed from the Fetch spec's `<object>` destination (`"object"`): against this project's headless-Chromium harness the embed's real request reads `Sec-Fetch-Dest: empty` (no native PDF plugin to negotiate an "object" load, so it falls back to a generic fetch). Either value is safe — the gate only fires on the literal string `"document"`. This is additive on top of the CSP exemption above, never a replacement. `Vary: Sec-Fetch-Dest` stops a cache serving one requester's header choice to the other. A browser sending no `Sec-Fetch-Dest` (older Firefox/Safari) keeps the pre-existing, unhardened PDF behavior — this can only narrow the window, never widen it.
 
 ## Do not assume this affects the web UI
 

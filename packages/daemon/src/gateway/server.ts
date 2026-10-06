@@ -4524,17 +4524,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       .header("Content-Type", ctype)
       .header("Content-Length", stat.size)
       .header("X-Content-Type-Options", "nosniff");
-    // Vault bytes are UNTRUSTED (an agent's vault_write, a research import), and this is the DAEMON's
-    // own origin — where the web app keeps the loopback + gateway tokens in localStorage. `sandbox`
-    // with NO tokens puts the response in an opaque origin with scripting off, so navigating to a
-    // scripted .svg can neither run it nor reach this origin's storage; `default-src 'none'` stops the
-    // document fetching anything. The web UI is unaffected: CSP applies to DOCUMENTS, and every
-    // consumer is an <img>/<object>/download, which ignores it.
-    // The application/pdf carve-out is load-bearing — CSP sandbox disables the browser's native PDF
-    // viewer, so it would blank the Vault page's <object> embed (Vault.tsx notes the same of the
-    // iframe `sandbox` attribute). A PDF's own script engine has no DOM/localStorage reach, so the
-    // exfiltration path this guards does not exist for it.
-    if (ctype !== "application/pdf") reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
+    // @decision 68bef69c — never drop the application/pdf CSP carve-out or the Sec-Fetch-Dest-gated
+    // Content-Disposition hardening below; both are deliberate trust-boundary choices, not polish.
+    if (ctype !== "application/pdf") {
+      reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
+    } else {
+      reply.header("Vary", "Sec-Fetch-Dest");
+      if (req.headers["sec-fetch-dest"] === "document") reply.header("Content-Disposition", "attachment");
+    }
     // Belt and braces for the one family a browser really executes: make it a download, not a
     // document, so the CSP is not the only thing between an untrusted .svg and this origin.
     if (isActiveDocumentContentType(ctype)) reply.header("Content-Disposition", "attachment");

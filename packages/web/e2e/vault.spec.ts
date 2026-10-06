@@ -433,6 +433,126 @@ test("a hostile vault SVG downloads instead of scripting the daemon origin, and 
   expect(await page.evaluate(() => localStorage.getItem("loom.loopbackToken"))).toBe("SENTINEL-68bef69c");
 });
 
+// ── PDF hardening gated on Sec-Fetch-Dest (card f2c5eff2, docs/decisions/68bef69c-vault-raw-csp.md) ──
+// The application/pdf CSP carve-out is deliberate (a CSP sandbox would blank the Vault page's native
+// <object> embed) but not literally zero residual risk — a browser-engine PDF-parser bug (the pdf.js
+// CVE-2024-4367 class) would need a TOP-LEVEL navigation to the raw URL to matter. The route now forces
+// Content-Disposition: attachment for a PDF only when the real browser's own Sec-Fetch-Dest request
+// header reads "document". Both legs are driven for real against a genuine browser here, never asserted
+// from the daemon side alone (that's vault-raw.mjs's job): the embed must keep rendering unforced, and a
+// bare top-level navigation to the identical URL must become a forced download.
+//
+// What the embed's OWN Sec-Fetch-Dest value actually is was deliberately measured rather than assumed:
+// per the Fetch spec an `<object>` load's destination is `"object"`, but against this harness's headless
+// Chromium (no native PDF plugin to negotiate that load) it empirically reads `"empty"` — a generic
+// fetch fallback. Either is safe (the gate only ever fires on the literal string `"document"`), so this
+// asserts the actual safety property — never `"document"` — rather than re-asserting one specific value
+// a different browser engine need not produce the same way.
+test("the PDF <object> embed never carries Sec-Fetch-Dest: document and is never forced to download; a top-level navigation to the same URL is", async ({ page, loomDaemon }) => {
+  const { id, vaultDir } = await seedVaultProject(loomDaemon.baseURL, { "note.md": "# plain\n" });
+  writeFileSync(path.join(vaultDir, "doc.pdf"), "%PDF-1.4\n%%EOF\n", "latin1");
+  await pinActiveProject(page, id);
+
+  const rawUrl = `${loomDaemon.baseURL}/api/projects/${id}/vault/raw?path=doc.pdf`;
+  let embedRequestSecFetchDest: string | undefined;
+  let embedResponseHeaders: Record<string, string> | undefined;
+  page.on("request", (r) => {
+    if (r.url() === rawUrl) {
+      // `request.headers()` is a snapshot taken before the browser's network layer adds its own
+      // Sec-Fetch-* headers — `allHeaders()` resolves once the request has actually gone out, which is
+      // the only way to see them at all (verified: the synchronous form never carries this header here).
+      void r.allHeaders().then((h) => { embedRequestSecFetchDest = h["sec-fetch-dest"]; });
+    }
+  });
+  page.on("response", (r) => { if (r.url() === rawUrl) embedResponseHeaders = r.headers(); });
+
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+  await treeRow(page, "doc.pdf").click();
+
+  const object = page.locator("main object[type='application/pdf']");
+  await expect(object).toHaveCount(1);
+  await expect(object).toHaveAttribute("data", /\/vault\/raw\?path=doc\.pdf$/);
+
+  // THE WITNESS, on both sides of the wire: the real browser's own <object> fetch really did happen (the
+  // value is defined, not an artifact of a listener that never fired), it never equals "document", and
+  // the daemon answered it without forcing a download.
+  await expect.poll(() => embedRequestSecFetchDest, "the <object> embed's own request must have been observed at all").toBeDefined();
+  expect(embedRequestSecFetchDest, "the <object> embed's own request must never carry Sec-Fetch-Dest: document").not.toBe("document");
+  expect(embedResponseHeaders?.["content-disposition"], "the embed must never be forced to download").toBeUndefined();
+  expect(embedResponseHeaders?.["vary"]).toBe("Sec-Fetch-Dest");
+  expect(embedResponseHeaders?.["content-security-policy"], "the pdf CSP carve-out is unaffected by this hardening").toBeUndefined();
+
+  // A genuine top-level navigation to the SAME URL, driven for real: Chromium sends Sec-Fetch-Dest:
+  // document for this, and the route forces a download instead of letting the native PDF viewer parse
+  // these bytes as the daemon's own top-level document — the exact hardening the record describes.
+  const download = page.waitForEvent("download");
+  await page.goto(rawUrl).catch(() => { /* an `attachment` response aborts the navigation by design */ });
+  expect((await download).suggestedFilename()).toMatch(/\.pdf$/);
+});
+
+// ── CSP `sandbox` ALONE — the layer that must hold if Content-Disposition is ever dropped or ignored
+// (card f2c5eff2, item 2) ────────────────────────────────────────────────────────────────────────────
+// Every other SVG test in this file navigates to the raw URL only to hit the `attachment` download
+// prompt — the navigation never actually becomes a rendered document, so CSP `sandbox` itself is never
+// exercised. These two intercept the response via `page.route` to strip Content-Disposition (simulating
+// it being dropped or ignored) while leaving every other header — the CSP sandbox included — untouched,
+// so the navigation genuinely becomes a document this time. The positive control strips CSP too, so a
+// reader can see this harness is actually capable of detecting the exfiltration when nothing stops it,
+// not merely that a navigation silently did nothing either way.
+test.describe("CSP sandbox alone stops a navigated SVG, independent of Content-Disposition", () => {
+  async function stripRawResponseHeaders(page: Page, relPath: string, remove: string[]): Promise<void> {
+    await page.route(
+      (url) => url.pathname.endsWith("/vault/raw") && url.searchParams.get("path") === relPath,
+      async (route) => {
+        const response = await route.fetch();
+        const headers = { ...response.headers() };
+        for (const h of remove) delete headers[h];
+        await route.fulfill({ response, headers });
+      },
+    );
+  }
+
+  test("CSP sandbox alone stops the script, with Content-Disposition stripped (the attachment defense dropped)", async ({ page, loomDaemon }) => {
+    const { id, vaultDir } = await seedVaultProject(loomDaemon.baseURL, { "note.md": "# plain\n" });
+    writeFileSync(path.join(vaultDir, "art.svg"), HOSTILE_SVG, "utf8");
+    await pinActiveProject(page, id);
+    await page.addInitScript(() => localStorage.setItem("loom.loopbackToken", "SENTINEL-CSP-ONLY"));
+    await stripRawResponseHeaders(page, "art.svg", ["content-disposition"]);
+
+    const rawUrl = `${loomDaemon.baseURL}/api/projects/${id}/vault/raw?path=art.svg`;
+    // With no Content-Disposition, this is a genuine navigation to the SVG DOCUMENT — unlike every other
+    // SVG test in this file, which never gets past the download prompt. A throw here would itself be a
+    // (different) defense — Chrome refusing the navigation outright — so record it rather than fail on
+    // it alone; the real assertion is about storage either way.
+    let navigated = true;
+    try { await page.goto(rawUrl); } catch { navigated = false; }
+
+    await page.goto(`${loomDaemon.baseURL}/vault`);
+    expect(
+      await page.evaluate(() => localStorage.getItem("loom.PWNED")),
+      `CSP sandbox alone must still block the script (navigation ${navigated ? "succeeded" : "was refused by the browser"})`,
+    ).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("loom.loopbackToken"))).toBe("SENTINEL-CSP-ONLY");
+  });
+
+  test("POSITIVE CONTROL: with CSP also stripped, the identical navigation DOES script the origin", async ({ page, loomDaemon }) => {
+    const { id, vaultDir } = await seedVaultProject(loomDaemon.baseURL, { "note.md": "# plain\n" });
+    writeFileSync(path.join(vaultDir, "art.svg"), HOSTILE_SVG, "utf8");
+    await pinActiveProject(page, id);
+    await page.addInitScript(() => localStorage.setItem("loom.loopbackToken", "SENTINEL-NO-DEFENSE"));
+    await stripRawResponseHeaders(page, "art.svg", ["content-disposition", "content-security-policy"]);
+
+    const rawUrl = `${loomDaemon.baseURL}/api/projects/${id}/vault/raw?path=art.svg`;
+    await page.goto(rawUrl);
+
+    await page.goto(`${loomDaemon.baseURL}/vault`);
+    expect(
+      await page.evaluate(() => localStorage.getItem("loom.PWNED")),
+      "without CSP, the exact same navigation DOES exfiltrate — proving this harness can detect it when nothing stops it",
+    ).toBe("STOLEN:SENTINEL-NO-DEFENSE");
+  });
+});
+
 // Card f7525818 made `Markdown`'s `components` map memoised (it is used as the ELEMENT TYPE for every
 // rendered node, so rebuilding it remounted them all — which now re-fetches an authenticated inline
 // image). Keeping that memo stable meant routing `onOpen` through a ref, since the caller passes a fresh

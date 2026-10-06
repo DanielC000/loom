@@ -73,13 +73,13 @@ db.insertProject({ id: "pVaultHead", name: "VaultedHead", repoPath: TMP, vaultPa
 const stub = {};
 const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
 const urlFor = (rel) => `/api/projects/pVaultHead/vault/raw?path=${encodeURIComponent(rel)}`;
-const head = (rel) => app.inject({ method: "HEAD", url: urlFor(rel) });
-const get = (rel) => app.inject({ method: "GET", url: urlFor(rel) });
+const head = (rel, headers) => app.inject({ method: "HEAD", url: urlFor(rel), headers });
+const get = (rel, headers) => app.inject({ method: "GET", url: urlFor(rel), headers });
 
 // Headers to compare for parity — the ones the raw route actually sets. Fastify's injected response
 // always carries a `date` on both sides; `connection`/`content-length` framing quirks aside, these are
 // the ones the route itself is responsible for keeping identical.
-const HEADER_KEYS = ["content-type", "content-length", "x-content-type-options", "content-security-policy", "content-disposition"];
+const HEADER_KEYS = ["content-type", "content-length", "x-content-type-options", "content-security-policy", "content-disposition", "vary"];
 const headersOf = (resp) => Object.fromEntries(HEADER_KEYS.map((k) => [k, resp.headers[k]]));
 
 try {
@@ -125,6 +125,22 @@ try {
   check("(2) HEAD evil.svg → Content-Disposition: attachment", headSvg.headers["content-disposition"] === "attachment");
   check("(2) HEAD evil.svg → Content-Length matches the fixture size (same as GET, not 0)",
     String(headSvg.headers["content-length"]) === String(EVIL_SVG.length));
+
+  // --- (2b) HEAD carries the PDF Sec-Fetch-Dest hardening (card f2c5eff2) identically to GET, since
+  // both share the same resolveVaultRawHeaders path — a drift here would mean the two routes disagree
+  // on whether a HEAD preflight for a top-level PDF navigation gets the same download signal GET would ---
+  for (const dest of [undefined, "document", "embed", "iframe"]) {
+    const h = await head("doc.pdf", dest ? { "sec-fetch-dest": dest } : undefined);
+    const g = await get("doc.pdf", dest ? { "sec-fetch-dest": dest } : undefined);
+    check(`(2b) HEAD doc.pdf Sec-Fetch-Dest:${dest ?? "(none)"} → Content-Disposition equals GET's (HEAD=${h.headers["content-disposition"]}, GET=${g.headers["content-disposition"]})`,
+      h.headers["content-disposition"] === g.headers["content-disposition"]);
+    check(`(2b) HEAD doc.pdf Sec-Fetch-Dest:${dest ?? "(none)"} → Vary equals GET's`,
+      h.headers["vary"] === g.headers["vary"]);
+  }
+  check("(2b) HEAD doc.pdf with Sec-Fetch-Dest: document → Content-Disposition: attachment",
+    (await head("doc.pdf", { "sec-fetch-dest": "document" })).headers["content-disposition"] === "attachment");
+  check("(2b) HEAD doc.pdf with Sec-Fetch-Dest: embed (the <object> embed's own shape) → NO Content-Disposition",
+    (await head("doc.pdf", { "sec-fetch-dest": "embed" })).headers["content-disposition"] === undefined);
 
   // --- (3) status parity on error paths ---
   streamOpens = 0;

@@ -15,6 +15,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       `Content-Security-Policy: sandbox; default-src 'none'` on every served type EXCEPT
 //       application/pdf (sandbox disables the browser's native PDF viewer → blanks the Vault page's
 //       <object> embed), plus `Content-Disposition: attachment` for the active-document family only.
+//   (8) PDF hardening (card f2c5eff2): Content-Disposition: attachment for a PDF ONLY when
+//       Sec-Fetch-Dest: document (a top-level navigation) — never for Sec-Fetch-Dest: embed (the
+//       Vault page's own <object> embed) and never when the header is absent — plus Vary:
+//       Sec-Fetch-Dest on the PDF response only, never on a type this gate doesn't touch.
 // Run after build: node test/vault-raw.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -82,6 +86,8 @@ db.insertProject({ id: "pVault", name: "Vaulted", repoPath: TMP, vaultPath: vaul
 
 const app = await buildApp(db);
 const raw = (rel) => app.inject({ method: "GET", url: `/api/projects/pVault/vault/raw?path=${encodeURIComponent(rel)}` });
+const rawWithHeaders = (rel, headers) =>
+  app.inject({ method: "GET", url: `/api/projects/pVault/vault/raw?path=${encodeURIComponent(rel)}`, headers });
 
 try {
   // (1) byte-exact RAW serving of the PNG
@@ -154,12 +160,54 @@ try {
     pdf.headers["content-security-policy"] === undefined);
   check("(7) .pdf → NO Content-Disposition", pdf.headers["content-disposition"] === undefined);
   check("(7) .pdf still → nosniff", pdf.headers["x-content-type-options"] === "nosniff");
+
+  // (8) PDF hardening (card f2c5eff2, docs/decisions/68bef69c-vault-raw-csp.md): Content-Disposition:
+  // attachment ONLY for a genuine top-level navigation (Sec-Fetch-Dest: document) — never for the
+  // Vault page's own <object> embed (Sec-Fetch-Dest: embed), and never for a request with no
+  // Sec-Fetch-Dest at all (the pre-existing, unhardened behavior — this can only narrow the window).
+  const pdfDocument = await rawWithHeaders("doc.pdf", { "sec-fetch-dest": "document" });
+  check("(8) .pdf with Sec-Fetch-Dest: document → Content-Disposition: attachment",
+    pdfDocument.headers["content-disposition"] === "attachment");
+  check("(8) .pdf with Sec-Fetch-Dest: document → still NO CSP (the carve-out itself is unaffected)",
+    pdfDocument.headers["content-security-policy"] === undefined);
+  check("(8) .pdf with Sec-Fetch-Dest: document → Vary: Sec-Fetch-Dest",
+    pdfDocument.headers["vary"] === "Sec-Fetch-Dest");
+
+  const pdfEmbed = await rawWithHeaders("doc.pdf", { "sec-fetch-dest": "embed" });
+  check("(8) .pdf with Sec-Fetch-Dest: embed (the <object> embed's own shape) → NO Content-Disposition",
+    pdfEmbed.headers["content-disposition"] === undefined);
+  check("(8) .pdf with Sec-Fetch-Dest: embed → Vary: Sec-Fetch-Dest still present",
+    pdfEmbed.headers["vary"] === "Sec-Fetch-Dest");
+
+  // (8-control) NEGATIVE: a request with no Sec-Fetch-Dest header at all (older browsers) gets the
+  // pre-existing behavior — no Content-Disposition — never a fail-closed-into-breaking-the-viewer surprise.
+  check("(8-control) .pdf with NO Sec-Fetch-Dest header → NO Content-Disposition (pre-existing behavior)",
+    pdf.headers["content-disposition"] === undefined);
+  // (8-control) the Sec-Fetch-Dest gate is specific to "document" — a near-miss value (case-sensitive,
+  // and a different real destination) must NOT trip it, proving this isn't a broken-pattern always-match.
+  const pdfIframe = await rawWithHeaders("doc.pdf", { "sec-fetch-dest": "iframe" });
+  check("(8-control) .pdf with Sec-Fetch-Dest: iframe → NO Content-Disposition",
+    pdfIframe.headers["content-disposition"] === undefined);
+  const pdfDocumentWrongCase = await rawWithHeaders("doc.pdf", { "sec-fetch-dest": "Document" });
+  check("(8-control) .pdf with Sec-Fetch-Dest: Document (wrong case) → NO Content-Disposition",
+    pdfDocumentWrongCase.headers["content-disposition"] === undefined);
+
+  // (8) the hardening is PDF-specific: Sec-Fetch-Dest: document on an already-attachment'd active type
+  // (svg) changes nothing — it was already forced regardless, and Vary is not added where the header
+  // never varies the response.
+  const svgDocument = await rawWithHeaders("evil.svg", { "sec-fetch-dest": "document" });
+  check("(8) .svg with Sec-Fetch-Dest: document → still Content-Disposition: attachment (unaffected)",
+    svgDocument.headers["content-disposition"] === "attachment");
+  check("(8) .svg → NO Vary header (Sec-Fetch-Dest never changes an svg response)",
+    svgDocument.headers["vary"] === undefined);
+  check("(8) .png → NO Vary header either (the gate is pdf-only)",
+    (await rawWithHeaders("pic.png", { "sec-fetch-dest": "document" })).headers["vary"] === undefined);
 } finally {
   try { await app.close(); } catch { /* ignore */ }
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — /vault/raw serves binaries byte-exact with the right Content-Type + nosniff, sandboxes every non-PDF response (CSP sandbox; default-src 'none', plus Content-Disposition: attachment for svg/html/xml), streams under a 50 MB cap (413 over), and rejects ../ / absolute / symlink-escape with 404."
+  ? "\n✅ ALL PASS — /vault/raw serves binaries byte-exact with the right Content-Type + nosniff, sandboxes every non-PDF response (CSP sandbox; default-src 'none', plus Content-Disposition: attachment for svg/html/xml), streams under a 50 MB cap (413 over), rejects ../ / absolute / symlink-escape with 404, and gates a PDF's Content-Disposition on Sec-Fetch-Dest: document (never for the <object> embed's Sec-Fetch-Dest: embed) with Vary: Sec-Fetch-Dest on that response only."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
