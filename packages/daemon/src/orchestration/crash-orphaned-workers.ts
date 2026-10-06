@@ -157,6 +157,15 @@ export function isSupersededByRecycle(db: Db, sessionId: string): boolean {
 }
 
 /**
+ * @decision 92c20eb9 — shared refusal text for BOTH spawnWorker and callerSupersededError, so the
+ * wording can't drift between the two chokepoints; never re-checks isSupersededByRecycle itself.
+ */
+export function retiredCallerMessage(db: Db, managerSessionId: string): string {
+  const successor = db.getSuccessor(managerSessionId);
+  return `you are being retired (recycled); your successor ${successor?.id ?? "(unknown)"} owns the fleet`;
+}
+
+/**
  * @decision sha:a9c9a342 — a manager crash-orphaned in its own right, with no surviving worker to
  *  ride along on, used to never get a resume attempt at all; every manager/platform row in `recovered`
  *  not covered by `orphanedWorkers` now gets ONE independent attempt via this list (`soloManagerIds`).

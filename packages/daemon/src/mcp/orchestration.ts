@@ -38,6 +38,7 @@ import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { buildServedStatus, currentDeployStaleness } from "../served-status.js";
 import { advisoryBuildStamp } from "../deploy-staleness.js";
 import { lineageRootId } from "../sessions/lineage.js";
+import { isSupersededByRecycle, retiredCallerMessage } from "../orchestration/crash-orphaned-workers.js";
 import { resolveResumeDocPath } from "../sessions/resume-doc-notes.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import {
@@ -2723,10 +2724,24 @@ export class OrchestrationMcpRouter {
     // confirmWorkerMergeTracked's supersedeQueuedSelfCheck call on isExactWorkerOwner) never surfaced via
     // `worker_merge_confirm` in production — this relink runs BEFORE that method is ever called, so its
     // exact-id check rarely has anything stale left to gate on for THIS entry point.
+    // @decision 92c20eb9 — never relink a worker onto a caller superseded by recycle; it would undo
+    // attemptManagerOwnershipTransfer's correct reparent onto the successor right before the caller is
+    // hard-stopped, orphaning the worker from the successor's worker_list.
+    const callerSupersededError = (): { error: string } | null => {
+      if (!isSupersededByRecycle(db, managerSessionId)) return null;
+      return { error: retiredCallerMessage(db, managerSessionId) };
+    };
+
     const selfHealWorkerLink = (workerSessionId: string, op: string) => {
       const w = db.getSession(workerSessionId);
       if (!w || w.parentSessionId === managerSessionId) return w; // no row, or already correctly linked
       if (!workerReadableByManager(w)) return w; // genuinely not this manager's lineage — leave it to the "not your worker" guard
+      if (callerSupersededError()) return w; // card 92c20eb9: never relink onto a retiring caller
+      // @decision 92c20eb9 — never relink a worker AWAY from the caller's OWN successor, regardless of
+      // supersession — a halted (genuinely not superseded, 386e4eb5) predecessor's own successor can
+      // already own this worker too (halting only blocks RETIRING, not the reparent).
+      const successor = db.getSuccessor(managerSessionId);
+      if (successor && w.parentSessionId === successor.id) return w;
       console.warn(
         `[orchestration] worker/manager parent desync self-healed: op=${op} worker=${workerSessionId} ` +
         `managerSessionId(closure)=${managerSessionId} row.parentSessionId=${w.parentSessionId ?? "null"}`,
@@ -3428,6 +3443,10 @@ export class OrchestrationMcpRouter {
         inputSchema: strictShape({ workerSessionId: z.string() }),
       },
       async ({ workerSessionId }) => {
+        // @decision 92c20eb9 — refuse outright rather than relink-but-report-false; the caller is being
+        // retired and no longer owns the fleet to relink anything onto.
+        const superseded = callerSupersededError();
+        if (superseded) return ok(superseded);
         // Resolve a full id OR an unambiguous 8-char id-PREFIX (mirrors transcript_read's own resolution
         // over db.findSessionsByIdPrefix): the exact-id fast path covers the common case; only a miss
         // falls back to a prefix scan. An ambiguous prefix gets its OWN distinct signal — never silently
@@ -3599,6 +3618,10 @@ export class OrchestrationMcpRouter {
         inputSchema: strictShape({ workerSessionId: z.string().optional(), opId: z.string().optional(), mode: z.enum(["graceful", "hard"]).optional() }),
       },
       async ({ workerSessionId, opId, mode }) => {
+        // @decision 92c20eb9 — refuse the whole tool (both the opId withdrawal and the workerSessionId
+        // stop) once the caller is itself superseded by recycle; it no longer owns the fleet.
+        const superseded = callerSupersededError();
+        if (superseded) return ok(superseded);
         if (!workerSessionId && !opId) return ok({ error: "worker_stop requires either workerSessionId or opId" });
         if (workerSessionId && opId) return ok({ error: "worker_stop takes EITHER workerSessionId OR opId, not both" });
         if (opId) {
@@ -3635,6 +3658,8 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId }) => {
         try {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           selfHealWorkerLink(workerSessionId, "worker_reap");
           return ok(await sessions.reapWorkerStrays(managerSessionId, workerSessionId));
         } catch (e) {
@@ -3667,6 +3692,8 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, mode }) => {
         try {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           selfHealWorkerLink(workerSessionId, "worker_set_mode");
           const landed = await sessions.setWorkerMode(managerSessionId, workerSessionId, mode);
           return ok({ landed });
@@ -3739,6 +3766,8 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId }) => {
         try {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           selfHealWorkerLink(workerSessionId, "worker_flush");
           return ok(await sessions.flushWorkerComposer(managerSessionId, workerSessionId));
         } catch (e) {
@@ -3755,6 +3784,8 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, text, message, resendOf }) => {
         try {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           const resolvedText = resolveAlias(text, message);
           if (resolvedText === undefined) return ok({ error: "text (or message) is required" });
           selfHealWorkerLink(workerSessionId, "worker_message");
@@ -3821,6 +3852,8 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, text, message }) => {
         try {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           const resolvedText = resolveAlias(text, message);
           if (resolvedText === undefined) return ok({ error: "text (or message) is required" });
           selfHealWorkerLink(workerSessionId, "worker_redirect");
@@ -4184,6 +4217,8 @@ export class OrchestrationMcpRouter {
         inputSchema: strictShape({ workerSessionId: z.string(), handoffSummary: z.string().optional(), continuationPrompt: z.string().optional() }),
       },
       async ({ workerSessionId, handoffSummary, continuationPrompt }) => {
+        const superseded = callerSupersededError();
+        if (superseded) return ok(superseded);
         const summary = resolveAlias(handoffSummary, continuationPrompt);
         // Falsy check (NOT `=== undefined`) — restores the PRE-alias behavior where an empty string was
         // rejected at the tool boundary with this clear message, rather than passing through to the
@@ -4345,6 +4380,8 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, forceRemoveWorktree }) => {
         try {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           selfHealWorkerLink(workerSessionId, "worker_merge_confirm");
           const r = await sessions.confirmWorkerMergeTracked(managerSessionId, workerSessionId, forceRemoveWorktree);
           // FRESH-MINT ANNOUNCEMENT (card 615967c5): `r.freshMint` is set ONLY when this call's result came
@@ -4385,6 +4422,8 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionIds }) => {
         try {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
           for (const workerSessionId of workerSessionIds) selfHealWorkerLink(workerSessionId, "merge_batch");
           const r = await sessions.mergeBatchTracked(managerSessionId, workerSessionIds);
           if (!r.settled) {
