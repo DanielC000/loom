@@ -33,7 +33,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("the pid record is written BEFORE the daemon is booted (mirrors startDetached's own ordering)", writeIdx !== -1 && importIdx !== -1 && writeIdx < importIdx);
 }
 
-const home = useOwnLoomHome("loom-fg-pid-");
+// Card 8378984b: {fresh:true} — the checks below assume NO pre-existing daemon.pid (line 45), which only
+// holds under a genuinely pristine home, not merely "whatever useOwnLoomHome's reuse contract hands back".
+const home = useOwnLoomHome("loom-fg-pid-", { fresh: true });
 const pidPath = path.join(home, "daemon.pid");
 
 // --- (2) writeForegroundPidRecord: same shape startDetached already writes, using process.pid ----------

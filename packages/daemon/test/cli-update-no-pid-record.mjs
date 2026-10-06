@@ -98,7 +98,9 @@ function spawnStandIn(behavior) {
   });
 }
 
-const home = useOwnLoomHome("loom-update-no-pid-");
+// Card 8378984b: {fresh:true} — scenarios (A)/(B) both assert "no PID file exists in this LOOM_HOME"
+// before anything in this file has written one; that only holds under a genuinely pristine home.
+const home = useOwnLoomHome("loom-update-no-pid-", { fresh: true });
 let standInA, standInB;
 try {
   // ===================== SCENARIO A: gracefully-stoppable daemon, NO pid record =====================

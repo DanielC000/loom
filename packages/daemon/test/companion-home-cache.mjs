@@ -18,7 +18,10 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- Hermetic LOOM_HOME + sandboxed HOME. Set BEFORE importing dist (paths.ts reads LOOM_HOME at import). ---
-const tmpHome = useOwnLoomHome("loom-companion-home-cache-");
+// Card 8378984b: {fresh:true} — Part 1's "still exactly one live session" check reconcile()s from
+// p1.db's FULL companion_config table; a fixed db filename under a reused home could carry rows from an
+// earlier run of this same file (or another file sharing the same literal ambient LOOM_HOME).
+const tmpHome = useOwnLoomHome("loom-companion-home-cache-", { fresh: true });
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });

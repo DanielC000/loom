@@ -110,7 +110,10 @@ try {
   process.exit(0);
 }
 
-useOwnLoomHome("loom-home-deny-real-");
+// Card 8378984b: {fresh:true} — the setup check below asserts skill-provenance.json "does NOT pre-exist",
+// which only holds under a genuinely pristine home, not merely "whatever useOwnLoomHome's reuse contract
+// hands back".
+useOwnLoomHome("loom-home-deny-real-", { fresh: true });
 // reserveHermeticPort (not the plain pid-derived hermeticPort()) — this file imports PtyHost BEFORE its
 // server/listen() exist, so the port must be FINAL here. See disallow-harness-scheduling-tools-real-
 // spawn.mjs's own copy of this note / _hermetic-port.mjs's listenHermetic doc comment.

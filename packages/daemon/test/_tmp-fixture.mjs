@@ -218,6 +218,23 @@ export function mkdtempManaged(prefix) {
 }
 
 /**
+ * Like `mkdtempManaged`, but rooted at an arbitrary existing directory instead of unconditionally
+ * `os.tmpdir()` — the primitive behind `useOwnLoomHome`'s `{fresh: true}` option (card 8378984b), which
+ * needs to nest a guaranteed-empty subdirectory inside an AMBIENT LOOM_HOME (one this process did not
+ * itself create) rather than an unrelated tmpdir path.
+ * @param {string} baseDir
+ * @param {string} prefix
+ * @returns {string} the created directory's absolute path
+ */
+function mkdtempManagedIn(baseDir, prefix) {
+  installHooksOnce();
+  fs.mkdirSync(baseDir, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(baseDir, prefix));
+  registry.add(dir);
+  return dir;
+}
+
+/**
  * Register a path this module did NOT create itself (e.g. `createWorktree()`'s return value, a marker
  * log file) for the SAME guaranteed cleanup. Closes the "tracked in my own array but never actually
  * removed" leak shape — a registered path is swept regardless of whether the caller's own `finally`
@@ -239,11 +256,40 @@ export function registerForCleanup(p) {
  * when it's unset (this file run directly, outside the runner) does this create its OWN dir, via
  * `mkdtempManaged` — so "created" and "registered for guaranteed cleanup" happen in the same call and
  * there is no ordering in which a self-assigned home can escape tracking.
- * @param {string} prefix used only when this process creates its own home (LOOM_HOME was unset)
- * @returns {string} the LOOM_HOME now in effect — the pre-existing one, or the newly created one
+ *
+ * 🔴 CARD 8378984b: "reuse unchanged" means exactly that — under the normal runner, LOOM_HOME is always
+ * fresh already, but a human who runs this file DIRECTLY with an externally-exported `LOOM_HOME` (e.g.
+ * iterating on a single test outside the suite) gets that SAME, possibly-already-populated directory
+ * back verbatim. A test whose own assertions ASSUME the resulting home starts empty/absent — a hardcoded
+ * `0`/`[]` baseline later compared via a delta, a marker/pid file asserted "doesn't exist yet", an
+ * `initRepo()`-style helper that unconditionally `git checkout -b main`s the home itself — is silently
+ * wrong (or outright crashes, e.g. "branch already exists") under that reused-home case, even though
+ * nothing is actually broken in the code under test. Two fixes for this, pick whichever fits the shape:
+ *   1. SEED THE BASELINE FROM A REAL READ instead of assuming empty (see
+ *      graceful-teardown-hard-exit-backstop.mjs's `listAsideFiles`-seeded `asideFilesSeenSoFar` for the
+ *      worked example) — right when the check is itself a running COUNT/delta over time.
+ *   2. PASS `{ fresh: true }` here (below) when the test needs a genuinely pristine directory up front —
+ *      right when the check is a one-shot "nothing here yet" / "no pre-existing repo" assumption that a
+ *      directory-read can't meaningfully seed (there's no baseline to subtract, only a precondition to
+ *      guarantee). This nests a SECOND, independently-tracked `mkdtemp`'d subdirectory inside whatever
+ *      LOOM_HOME already resolved to (ambient-set or freshly minted — either way) and points LOOM_HOME at
+ *      THAT instead: still swept transitively when the ambient home is cleaned up, and swept on its own
+ *      via the normal registry backstop if it isn't. When LOOM_HOME was unset to begin with, this is a
+ *      harmless no-op on top of the already-fresh dir the plain path minted (one extra nesting level,
+ *      same guarantee).
+ * @param {string} prefix used only when this process creates its own home (LOOM_HOME was unset) or when
+ *   `opts.fresh` nests a new subdirectory inside an ambient one
+ * @param {{fresh?: boolean}} [opts] pass `{fresh: true}` to guarantee a pristine directory even when an
+ *   ambient LOOM_HOME was reused from outside this process — see CARD 8378984b above
+ * @returns {string} the LOOM_HOME now in effect — the pre-existing one, the newly created one, or (with
+ *   `opts.fresh`) a freshly minted subdirectory nested inside whichever of those applied
  */
-export function useOwnLoomHome(prefix) {
-  if (!process.env.LOOM_HOME) process.env.LOOM_HOME = mkdtempManaged(prefix);
+export function useOwnLoomHome(prefix, opts = {}) {
+  if (!process.env.LOOM_HOME) {
+    process.env.LOOM_HOME = mkdtempManaged(prefix);
+  } else if (opts.fresh) {
+    process.env.LOOM_HOME = mkdtempManagedIn(process.env.LOOM_HOME, prefix);
+  }
   return process.env.LOOM_HOME;
 }
 

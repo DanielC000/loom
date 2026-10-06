@@ -25,7 +25,9 @@ import http from "node:http";
 import "./_guard.mjs"; // arms the Db prod-guard (LOOM_TEST=1)
 import { useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mjs";
 
-const LOOM_HOME = useOwnLoomHome("loom-tg-dl-bounds-");
+// Card 8378984b: {fresh:true} — case 3a asserts audioDir (a fixed path under LOOM_HOME) ends up with
+// ZERO leftover files; that absolute count only holds under a genuinely pristine home.
+const LOOM_HOME = useOwnLoomHome("loom-tg-dl-bounds-", { fresh: true });
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

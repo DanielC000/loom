@@ -28,7 +28,10 @@ import { mkdtempManaged, useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mj
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const loomHome = fs.realpathSync(useOwnLoomHome("loom-createworktree-ophome-"));
+// Card 8378984b: {fresh:true} — initRepo(loomHome) below unconditionally `git checkout -b main`s the
+// home itself; under a reused LOOM_HOME that already carries a `main` branch from an earlier run of this
+// same file, that throws outright instead of running this file's actual assertions.
+const loomHome = fs.realpathSync(useOwnLoomHome("loom-createworktree-ophome-", { fresh: true }));
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv();
