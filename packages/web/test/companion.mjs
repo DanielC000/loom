@@ -73,13 +73,18 @@ check("formFromMasked leaves botToken blank (a read never carries the token)", (
   assert.equal(form.botToken, "");
 });
 
-// 5) maskedToken renders ONLY the last-4 behind a dot run, never a full token; an empty last-4 reads
-//    "unreadable" (a corrupt daemon-side blob) rather than a bare mask.
-check("maskedToken shows only the last-4, and flags an empty last-4 as unreadable", () => {
-  assert.match(maskedToken({ tokenLast4: "1234" }), /1234$/);
-  assert.ok(!maskedToken({ tokenLast4: "1234" }).includes("123456"), "never the full token");
-  assert.match(maskedToken({ tokenLast4: "" }), /unreadable/);
-  assert.match(maskedToken({ tokenLast4: "   " }), /unreadable/, "whitespace-only last-4 is unreadable too");
+// 5) maskedToken renders ONLY the last-4 behind a dot run, never a full token. An empty last-4 reads
+//    one of TWO distinct messages, disambiguated by `tokenConfigured` (card 5ccd5ee3): "unreadable" for a
+//    corrupt daemon-side blob (tokenConfigured:true, empty last-4 — a real token exists but can't be
+//    read back), vs "no token" for an in-app-only companion that never had one (tokenConfigured:false,
+//    by design, not a failure).
+check("maskedToken shows only the last-4, and disambiguates an empty last-4 by tokenConfigured", () => {
+  assert.match(maskedToken({ tokenConfigured: true, tokenLast4: "1234" }), /1234$/);
+  assert.ok(!maskedToken({ tokenConfigured: true, tokenLast4: "1234" }).includes("123456"), "never the full token");
+  assert.match(maskedToken({ tokenConfigured: true, tokenLast4: "" }), /unreadable/, "a stored-but-corrupt token reads unreadable");
+  assert.match(maskedToken({ tokenConfigured: true, tokenLast4: "   " }), /unreadable/, "whitespace-only last-4 is unreadable too");
+  assert.match(maskedToken({ tokenConfigured: false, tokenLast4: "" }), /no token/, "an in-app-only companion (never had a token) reads 'no token', not 'unreadable'");
+  assert.ok(!maskedToken({ tokenConfigured: false, tokenLast4: "" }).includes("unreadable"), "the two cases must never share wording");
 });
 
 // ── Required-field + numeric + home validation ──────────────────────────────────────────────────────
@@ -386,6 +391,7 @@ function maskedRow() {
   return {
     sessionId: "sess-123",
     configured: true,
+    tokenConfigured: true,
     tokenLast4: "6789",
     channel: "telegram",
     allowedChatId: "999",

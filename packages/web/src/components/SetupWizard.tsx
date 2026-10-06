@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { errorText } from "../lib/loopbackCredential";
 import { useNavigate } from "react-router-dom";
@@ -92,6 +92,17 @@ function WizardBody({ onClose }: { onClose: () => void }) {
     return m;
   }, [profilesQ.data]);
 
+  // Resumable retry across a partial failure (card 5ccd5ee3): if applyTemplate fails AFTER the project was
+  // already created, re-clicking "Apply template" must not create a SECOND project on the same repo. This
+  // ref stashes the project created by the most recent attempt, keyed by that attempt's own create inputs
+  // — a retry with the SAME inputs reuses it and only re-runs the failed applyTemplate step; a changed
+  // input (the user went Back and edited a field) invalidates the stash, forcing a fresh create. It's a
+  // ref (not state) purely as in-memory bookkeeping across retries within this mount, and does NOT survive
+  // a page reload/remount — acceptable here because the ["projects"] invalidation right after creation
+  // (below) means a reloaded user at least SEES the half-created project in the list, rather than it being
+  // invisible and inviting a blind re-create.
+  const createdProjectRef = useRef<{ key: string; project: { id: string; name: string } } | null>(null);
+
   // Escape closes the wizard from any step (except mid-apply, where it would strand the flow).
   const apply = useMutation({
     meta: { inlineError: true },
@@ -103,9 +114,19 @@ function WizardBody({ onClose }: { onClose: () => void }) {
       // Same additive contract as `refs`: an empty registry is OMITTED, not sent as [], so a single-repo
       // project's create payload is byte-identical to what it was before multi-repo existed.
       const reg = cleanRepos.length ? { repos: cleanRepos } : {};
-      const project = mode === "new"
-        ? await api.projectInit({ name: name.trim(), ...refs, ...reg })
-        : await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim(), ...refs, ...reg });
+      const createKey = JSON.stringify({ mode, name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim(), refs, reg });
+      let project: { id: string; name: string };
+      if (createdProjectRef.current && createdProjectRef.current.key === createKey) {
+        project = createdProjectRef.current.project;
+      } else {
+        project = mode === "new"
+          ? await api.projectInit({ name: name.trim(), ...refs, ...reg })
+          : await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim(), ...refs, ...reg });
+        createdProjectRef.current = { key: createKey, project: { id: project.id, name: project.name } };
+        // The project is real server-side the instant this call returns — invalidate NOW, not only in
+        // onSuccess below, so a subsequent applyTemplate failure doesn't leave it invisible in the list.
+        qc.invalidateQueries({ queryKey: ["projects"] });
+      }
       // "Start empty" registers the project only — no template to apply.
       const result = choice && choice !== "empty" ? await api.applyTemplate(project.id, choice) : null;
       return { projectId: project.id, projectName: project.name, result };

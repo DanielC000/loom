@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type ReactNode } from "react";
+import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { errorText } from "../lib/loopbackCredential";
 import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type RepoRegistryEntry, type StalePromptWarning } from "@loom/shared";
@@ -72,9 +72,29 @@ export default function Projects() {
     return { liveByProject: byProject, liveByAgent: byAgent };
   }, [globalSessions.data]);
 
+  // Resumable retry across a partial failure (card 5ccd5ee3): if the columns/agent-seed steps below fail
+  // AFTER the project was already created, re-clicking "Create project" must not create a SECOND project
+  // on the same repo. This ref stashes the project created by the most recent attempt, keyed by that
+  // attempt's own create inputs — a retry with the SAME inputs reuses it and only re-runs the remaining
+  // steps; a changed input (the user edited the form after a failure) invalidates the stash, forcing a
+  // fresh create. It's a ref (not state) purely as in-memory bookkeeping across retries within this mount,
+  // and does NOT survive a page reload/remount — acceptable here because the ["projects"] invalidation
+  // right after creation (below) means a reloaded user at least SEES the half-created project in the
+  // list, rather than it being invisible and inviting a blind re-create.
+  const createdProjectRef = useRef<{ key: string; project: Project } | null>(null);
   const createProject = useMutation({
     mutationFn: async (b: { name: string; repoPath: string; vaultPath: string; seedAgents: boolean; presetId: string }) => {
-      const project = await api.createProject({ name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath });
+      const createKey = JSON.stringify({ name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath });
+      let project: Project;
+      if (createdProjectRef.current && createdProjectRef.current.key === createKey) {
+        project = createdProjectRef.current.project;
+      } else {
+        project = await api.createProject({ name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath });
+        createdProjectRef.current = { key: createKey, project };
+        // The project is real server-side the instant this call returns — invalidate NOW, not only in
+        // onSuccess below, so a subsequent columns/agent-seed failure doesn't leave it invisible in the list.
+        qc.invalidateQueries({ queryKey: ["projects"] });
+      }
       // Seed the chosen board preset through the SAME atomic columns API the editor uses (no new
       // endpoint). The default preset matches PLATFORM_DEFAULTS, so skip the call — a fresh project
       // already inherits that board and applying it would be a no-op write.
@@ -209,7 +229,11 @@ export default function Projects() {
                 onArchive={() => archiveProject.mutate(selectedProject.id)}
                 onDelete={() => deleteProject.mutate(selectedProject.id)}
                 saving={updateProject.isPending} archiving={archiveProject.isPending} deleting={deleteProject.isPending}
-                staleStartupPrompts={updateProject.isSuccess ? updateProject.data?.staleStartupPrompts : undefined} />
+                // Scoped to the CURRENTLY selected project, not just "a save succeeded": `updateProject`
+                // is owned by this parent component, which does not remount on project switch (only the
+                // child ProjectManage below does, via key={selectedProject.id}) — without this check, a
+                // warning from saving project A keeps rendering after switching to project B.
+                staleStartupPrompts={updateProject.isSuccess && updateProject.data?.id === selectedProject.id ? updateProject.data.staleStartupPrompts : undefined} />
             </Panel>
 
             <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>

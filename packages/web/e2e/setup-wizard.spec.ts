@@ -172,3 +172,60 @@ test("the wizard's Start-empty path registers a project with no agents", async (
   const agents = (await (await fetch(`${loomDaemon.baseURL}/api/projects/${created!.id}/agents`)).json()) as unknown[];
   expect(agents).toEqual([]);
 });
+
+// Card 5ccd5ee3 — a PARTIAL failure (createProject succeeds, applyTemplate fails) must (a) make the
+// already-created project visible in the list right away, not only after the whole flow succeeds, and
+// (b) never duplicate the project if the user retries with the same inputs. applyTemplate inserts agent +
+// task rows only (no PTY, per this file's own header), so forcing it to fail via route interception never
+// risks a real claude spawn — nothing here reaches POST /api/agents/:id/sessions (startSession).
+test("a template-apply failure after project creation invalidates the list and retry resumes without duplicating the project", async ({ page, loomDaemon }) => {
+  const suffix = randomUUID().slice(0, 8);
+  const projectName = `wizard-resume-${suffix}`;
+  const primary = await loomDaemon.createProject(`wizard-resume-primary-${suffix}`);
+  const { repoPath, vaultPath } = await realPaths(loomDaemon.baseURL, primary.id);
+
+  let failApply = true;
+  await page.route("**/api/setup/templates/apply", async (route) => {
+    if (route.request().method() !== "POST" || !failApply) return route.fallback();
+    await route.fulfill({
+      status: 500, contentType: "application/json",
+      body: JSON.stringify({ error: "forced apply failure (card 5ccd5ee3)" }),
+    });
+  });
+
+  await page.goto(`${loomDaemon.baseURL}/platform`);
+  await page.getByRole("button", { name: /Start guided setup/ }).click();
+
+  await page.getByRole("radio", { name: /Software team/ }).click();
+  await page.getByRole("button", { name: "Continue →" }).click();
+
+  await page.getByLabel("Repository path").fill(repoPath);
+  await page.getByLabel("Project name").fill(projectName);
+  await page.getByLabel("Vault path").fill(vaultPath);
+  await page.getByRole("button", { name: "Continue →" }).click();
+
+  await expect(page.getByRole("heading", { name: "Review & confirm" })).toBeVisible();
+  await page.getByRole("button", { name: "Apply template →" }).click();
+
+  // The forced failure surfaces inline on the review screen (createProject itself succeeded; only the
+  // subsequent applyTemplate call failed).
+  const err = page.getByRole("alert");
+  await expect(err).toContainText("forced apply failure (card 5ccd5ee3)");
+
+  // BEFORE any retry: the project already exists server-side AND the ["projects"] cache was invalidated
+  // the instant createProject returned — so a user who reloads right now sees it, rather than it being
+  // invisible and inviting a blind re-create. Checked by BOTH name and repoPath (manager review point b).
+  const afterFail = (await (await fetch(`${loomDaemon.baseURL}/api/projects`)).json()) as { name: string; repoPath: string }[];
+  expect(afterFail.filter((p) => p.name === projectName)).toHaveLength(1);
+  expect(afterFail.filter((p) => p.repoPath === repoPath && p.name === projectName)).toHaveLength(1);
+
+  // Retry with the SAME inputs — must resume the already-created project (only re-run applyTemplate),
+  // never call createProject a second time.
+  failApply = false;
+  await page.getByRole("button", { name: "Apply template →" }).click();
+  await expect(page.getByRole("heading", { name: `${projectName} is ready` })).toBeVisible();
+
+  const afterRetry = (await (await fetch(`${loomDaemon.baseURL}/api/projects`)).json()) as { name: string; repoPath: string }[];
+  expect(afterRetry.filter((p) => p.name === projectName)).toHaveLength(1);
+  expect(afterRetry.filter((p) => p.repoPath === repoPath && p.name === projectName)).toHaveLength(1);
+});

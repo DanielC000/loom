@@ -95,11 +95,14 @@ export function formFromMasked(cfg: CompanionConfigMasked): CompanionConfigForm 
 }
 
 // The ONLY way the UI renders a token: a fixed dot run plus the last-4 (never the token — a masked
-// config carries no token). An empty last-4 (a corrupt/undecryptable blob on the daemon) reads as
-// "unreadable" rather than a bare mask, so a broken key isn't silently indistinguishable from a good one.
-export function maskedToken(cfg: Pick<CompanionConfigMasked, "tokenLast4">): string {
+// config carries no token). An empty last-4 reads as EITHER "no token" (an in-app-only companion never
+// had one — `tokenConfigured:false`, by design) or "(unreadable)" (a corrupt/undecryptable blob on the
+// daemon — `tokenConfigured:true` with an empty last-4), so a broken key isn't silently indistinguishable
+// from a companion that was simply never wired to an external channel.
+export function maskedToken(cfg: Pick<CompanionConfigMasked, "tokenConfigured" | "tokenLast4">): string {
   const last4 = (cfg.tokenLast4 ?? "").trim();
-  return last4 ? `••••••••••${last4}` : "•••••••••• (unreadable)";
+  if (last4) return `••••••••••${last4}`;
+  return cfg.tokenConfigured ? "•••••••••• (unreadable)" : "•••••••••• (no token)";
 }
 
 // The companion's DISPLAY NAME — authoritative from its own `config.name` (the field the user sets at
