@@ -1,4 +1,4 @@
-import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, OrchestrationEventKind, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, OrchestrationEventKind, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning, ProfileGrantReach } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -968,9 +968,13 @@ export const api = {
   profiles: () => get<ProfileSummary[]>("/api/profiles"),
   profile: (id: string) => get<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}`),
   createProfile: (b: Omit<Profile, "id">) => post<Profile>("/api/profiles", b),
-  updateProfile: (id: string, patch: Partial<Omit<Profile, "id">>) => put<Profile>(`/api/profiles/${encodeURIComponent(id)}`, patch),
+  // The save/reset/adopt responses may carry `grantReach` (card 3c4e0df6) — present ONLY when that write
+  // ADDED a human-only grant, naming which agents (in which projects) were already bound to this GLOBAL
+  // profile. Its mere presence is the signal; it is never an empty payload meaning "nothing granted".
+  updateProfile: (id: string, patch: Partial<Omit<Profile, "id">>) =>
+    put<Profile & { grantReach?: ProfileGrantReach }>(`/api/profiles/${encodeURIComponent(id)}`, patch),
   deleteProfile: (id: string) => del<{ ok: boolean }>(`/api/profiles/${encodeURIComponent(id)}`),
-  resetProfile: (id: string) => post<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}/reset`),
+  resetProfile: (id: string) => post<ProfileSummary & { grantReach?: ProfileGrantReach }>(`/api/profiles/${encodeURIComponent(id)}/reset`),
   // --- Bundled-profile update adoption (field-level 3-way merge; only meaningful when a bundled-by-name
   // profile reports updateAvailable). The profiles analog of the skill adoption routes, but FIELD-level
   // (profiles are structured, not text). ---
@@ -982,7 +986,7 @@ export const api = {
   // conflict field → mine|shipped) lands a conflict resolution. Advances base=shipped, returns the updated
   // profile + computed state. 409 (surfaced via postErr) if conflicts are left unresolved or there's no update.
   adoptProfile: (id: string, resolutions?: Record<string, ProfileFieldResolution>) =>
-    postErr<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}/adopt`, resolutions ? { resolutions } : undefined),
+    postErr<ProfileSummary & { grantReach?: ProfileGrantReach }>(`/api/profiles/${encodeURIComponent(id)}/adopt`, resolutions ? { resolutions } : undefined),
 
   // --- Shared Python venv provisioning (document conversion). HUMAN-only loopback REST — provisioning
   // launches a host process (venv create + pip install), same trust posture as the git/vault writers, so

@@ -6,7 +6,7 @@ import type { Schedule, CronBuilderState, CronFrequency, ScheduleHistoryEntry } 
 import { cronFromBuilder, describeCron, parseCronToBuilder, defaultBuilderState } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAllAgents } from "../lib/useAllAgents";
+import { useAllAgentLabels } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill } from "../components/ui";
 import { color, font, radius } from "../theme";
 
@@ -52,7 +52,7 @@ export default function Schedules() {
   const schedulerOff = orch.data?.schedulerEnabled === false;
   // Flat cross-project "Project / Agent" labels for TABLE resolution only — the table stays god-eye
   // (shows schedules targeting any project). The builder's picker below is scoped to the active project.
-  const agents = useAllAgents();
+  const agents = useAllAgentLabels();
   const agentLabel = (id: string) => agents.data?.find((a) => a.id === id)?.label ?? id;
   // The builder's agent dropdown is scoped to the ACTIVE project's agents (re-scopes on project switch).
   const projectAgents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });

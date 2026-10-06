@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Profile, SessionRole } from "@loom/shared";
+import { AGENT_FORBIDDEN_PROFILE_KEYS } from "@loom/shared";
 import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOffenders, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleUnsupportedReason } from "./codex-compat.js";
 
@@ -156,16 +157,16 @@ export const PROFILE_FIELD_NAMES = Object.keys(profileSchema.shape) as (keyof z.
  *
  * An elevated profile-writing agent must never be able to grant itself (or any other rig) one of these
  * capabilities.
+ *
+ * ⚠️ THE ARRAY ITSELF NOW LIVES IN `@loom/shared` (`shared/src/profileGrants.ts`, card `3c4e0df6`) and is
+ * re-exported here so every existing daemon-side reader is untouched. It moved because the Profiles
+ * EDITOR has to decide, before it sends a save, whether that save widens one of these — and a web-side
+ * re-spelling of this list would drift silently (nothing on this side type-checks it). Add a key THERE;
+ * the two exhaustive Records below, and `addedProfileGrants`'s own, all fail to compile until it is
+ * handled in each.
+ *
+ * Imported, not re-exported: this module's own public surface is unchanged by the move.
  */
-const AGENT_FORBIDDEN_PROFILE_KEYS = [
-  "connections",
-  "capabilities",
-  "vaultWrite",
-  "harness",
-  "browserTesting",
-  "documentConversion",
-  "allowDelta",
-] as const;
 
 /**
  * @decision 8c27ae8e — each forbidden key's rejection message must name ITS OWN reason, not one generic

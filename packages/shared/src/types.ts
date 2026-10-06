@@ -1828,6 +1828,20 @@ export type OrchestrationEventKind =
   // `GATE_HISTORY_KINDS`/`ORCH_ACTIVITY_KINDS`/`REPORT_RESOLVED_EVENT_KINDS`, for the same reason the
   // `stale` kind is excluded from those.
   | "vault_index_lock_cleared"
+  // Card 3c4e0df6: a HUMAN added a human-only grant (an `AGENT_FORBIDDEN_PROFILE_KEYS` member) to a
+  // GLOBAL Profile, reaching every agent already bound to it in every project. The Profiles UI confirms
+  // before saving; this row is the backstop for a REST-only save, which cannot be prompted.
+  // `detail`: {profileId, profileName, addedKeys, agentCount, agents[], truncated?, source} — `source`
+  // is "rest" | "adopt" | "reset". `agents` is CAPPED (GRANT_REACH_AGENTS_CAP); `agentCount` is always
+  // the true total, so derive "how many" from it and NEVER from `agents.length`.
+  // Filed on EVERY added grant, `agentCount: 0` included (it records the GRANT; reach is a field on it)
+  // — so an absent row means no grant was added, never "added but reached nobody".
+  // `managerSessionId: ""` (the vault_index_lock_stale sentinel): a Profile is GLOBAL, so there is no
+  // owning session and no single projectId to stamp — which is why it is deliberately NOT in
+  // DURABLE_AUDIT_EVENT_KINDS, whose own comment forbids adding a kind without that stamp. It needs no
+  // membership there to survive: both event-deletion sites are session-keyed, so this row is reached by
+  // neither deleteAgent's cascade nor deleteProject's.
+  | "profile_grant_reach"
   // OBSERVABILITY ONLY — records whether a PRIVATE, presence-gated per-project discovery block was
   // appended to a spawn/recycle's startupPrompt, filed at all FIVE real injection call sites in the
   // daemon's own `sessions/service.ts`. WHAT the block is and WHY it's gated stays documented
@@ -1923,6 +1937,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_session_barred: true,
   vault_index_lock_stale: true,
   vault_index_lock_cleared: true,
+  profile_grant_reach: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

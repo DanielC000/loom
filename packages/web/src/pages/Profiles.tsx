@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant } from "@loom/shared";
+import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant, ProfileGrantFields } from "@loom/shared";
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, tone, type Tone } from "../theme";
@@ -13,6 +13,9 @@ import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
 import { changedFields, type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
 import { errorText } from "../lib/loopbackCredential";
+import { planGrantSave, type GrantSavePlan } from "../lib/profileGrantReach";
+import { GrantReachConfirm } from "../components/GrantReachConfirm";
+import { useAllAgents } from "../lib/useAllAgents";
 
 // Loom's Profiles — the reusable, platform-level rig (role + model + permission deltas + icon) an
 // agent runs under via its profileId. The injected prompt comes from the AGENT; a profile's
@@ -298,6 +301,34 @@ const profileFieldsOf = (p: ProfileSummary): ProfileFields => ({
 });
 
 const parseAllowDelta = (text: string) => text.split("\n").map((s) => s.trim()).filter(Boolean);
+/** This editor's field shape projected into the grant slice `@loom/shared` compares (card 3c4e0df6).
+ *  `allowText` is the editor's own spelling of `allowDelta`, so it is PARSED here — comparing the raw
+ *  text would read a whitespace-only edit as a new permission grant. */
+const grantFieldsOfValues = (v: ProfileFields): ProfileGrantFields => ({
+  connections: v.connections,
+  capabilities: v.capabilities,
+  // Not an editor-exposed control today, so a save can never change it; the stored value is what the
+  // comparison baseline carries (grantFieldsOfProfile below), and false here can only ever read as
+  // "not newly granted" — never as a grant being revoked.
+  vaultWrite: false,
+  harness: v.harness,
+  browserTesting: v.browserTesting,
+  documentConversion: v.documentConversion,
+  allowDelta: parseAllowDelta(v.allowText),
+});
+
+/** The STORED row's grant slice — the baseline a pending save is compared against, matching what the
+ *  daemon itself compares on the other side of the wire (`existing` vs the merged result). */
+const grantFieldsOfProfile = (p: ProfileSummary): ProfileGrantFields => ({
+  connections: p.connections,
+  capabilities: p.capabilities,
+  vaultWrite: p.vaultWrite,
+  harness: p.harness,
+  browserTesting: p.browserTesting,
+  documentConversion: p.documentConversion,
+  allowDelta: p.allowDelta,
+});
+
 const sortedJson = (xs: readonly string[]) => JSON.stringify([...xs].sort());
 // Canonical per-grant JSON (key-sorted) so {slug,connectionId} order never spuriously trips dirty/save —
 // mirrors the daemon's customization.ts fieldEqual for the same field.
@@ -357,6 +388,12 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   // Registry-capability grants BEYOND browserTesting/documentConversion above (agent-tooling P4) — raw,
   // never pre-bridged with the two legacy booleans (mirrors the daemon's resolveProfileCapabilities split).
   const [capabilities, setCapabilities] = useState<CapabilityGrant[]>(profile.capabilities ?? []);
+  // A pending save held back by the grant confirm (card 3c4e0df6): the already-built patch plus the plan
+  // that explains WHY it is held. Held as ONE object so what the human is shown and what eventually goes
+  // on the wire cannot drift apart — the confirm never rebuilds the patch.
+  const [pendingGrant, setPendingGrant] = useState<
+    { patch: Partial<Omit<Profile, "id">>; plan: Extract<GrantSavePlan, { kind: "confirm" } | { kind: "confirm-unknown" }> } | null
+  >(null);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [resolver, setResolver] = useState<ProfileMergeResult | null>(null); // open ⇔ a conflicting adopt
@@ -391,6 +428,15 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   // Profile editor's picker renders every entry as a checkbox, transparently backed by browserTesting/
   // documentConversion for the two reserved slugs and by the `capabilities` array
   // for everything else.
+  // Every agent across every project — the BINDING map behind the pre-save grant confirm (card 3c4e0df6).
+  // Via the SHARED hook, never a local useQuery on the same key: a second queryFn on ["allAgents"]
+  // that projected the rows would serve its reduced shape here from cache whenever a page using it
+  // mounted first, dropping profileId — which reads as isSuccess with nobody bound, i.e. no prompt.
+  // `isSuccess` is the gate, NOT `data`: an unresolved or failed fetch must stay DISTINCT from "nobody
+  // is bound", or a trust-boundary grant saves silently. lib/profileGrantReach carries the @decision.
+  const allAgents = useAllAgents();
+  const boundAgents = allAgents.isSuccess ? allAgents.data : null;
+
   const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
   const availableCapabilities = capabilityList.data ?? [];
   const isCapabilityChecked = (slug: string) =>
@@ -493,6 +539,22 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     if (delta.has("skills")) patch.skills = sent.skills.length ? sent.skills : null;
     if (delta.has("connections")) patch.connections = sent.connections;
     if (delta.has("capabilities")) patch.capabilities = sent.capabilities;
+
+    // Card 3c4e0df6. Profiles are GLOBAL, so a human-only grant added here reaches every agent already
+    // bound to this rig, in every project — a trust boundary the human should see BEFORE it takes
+    // effect, not discover afterwards. Computed from the STORED row against what this save would land,
+    // by the same `@loom/shared` helpers the daemon uses on its side to record the audit event.
+    const plan = planGrantSave(grantFieldsOfProfile(profile), grantFieldsOfValues(sent), profile.id, boundAgents);
+    if (plan.kind !== "save") { setPendingGrant({ patch, plan }); return; }
+    onSave(patch);
+  };
+
+  // The confirm Save. Submits the patch EXACTLY as `submit` built it — never a rebuilt one, which
+  // could pick up state that changed while the confirm was open and save something nobody reviewed.
+  const confirmGrantSave = () => {
+    if (!pendingGrant) return;
+    const { patch } = pendingGrant;
+    setPendingGrant(null);
     onSave(patch);
   };
 
@@ -767,8 +829,16 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
           Saving replaces {liveConflicts.length === 1 ? "it" : "them"} with your version — Reset takes theirs.
         </span>
       )}
+      {/* Card 3c4e0df6: a save that ADDS a human-only grant is held here until the human confirms the
+          blast radius. Rendered in the flow directly above Save — the same placement as the conflict
+          notice — rather than as an overlay, matching this page’s existing inline-confirm language. */}
+      {pendingGrant && (
+        <GrantReachConfirm plan={pendingGrant.plan} saving={saving}
+          onConfirm={confirmGrantSave} onCancel={() => setPendingGrant(null)} />
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Button variant="primary" disabled={!dirty || !name.trim() || saving} onClick={submit}>
+        {/* Disabled while the confirm is open so the row underneath cannot re-submit around it. */}
+        <Button variant="primary" disabled={!dirty || !name.trim() || saving || !!pendingGrant} onClick={submit}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty

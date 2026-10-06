@@ -81,6 +81,7 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
+import { recordProfileGrantReach, grantFieldsOf } from "../profiles/grantReach.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
@@ -4257,7 +4258,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // omits required fields still passes). `id` is path-scoped, and bundled/customized/updateAvailable are
     // COMPUTED read-model fields the GET response now carries — drop all four so a verbatim round-trip PUT
     // (GET → PUT the same body) doesn't trip validateProfile's .strict() unknown-key guard.
-    const { id: _drop, bundled: _b, customized: _c, updateAvailable: _u, ...patch } = (req.body ?? {}) as Record<string, unknown>;
+    // `grantReach` joins the four computed keys this strips: it is a per-SAVE fact this route adds to its
+    // own response (card 3c4e0df6), never a stored field, so a REST caller echoing that response straight
+    // back as the next patch must not trip validateProfile's .strict() unknown-key guard.
+    const { id: _drop, bundled: _b, customized: _c, updateAvailable: _u, grantReach: _gr, ...patch } = (req.body ?? {}) as Record<string, unknown>;
     const { id: _eid, ...base } = existing;
     // previousRole + the raw un-merged patch let validateProfile's assistant-role restrictedTools gate
     // (card 8feb55b8) tell a genuine role TRANSITION into "assistant" (must state restrictedTools) apart
@@ -4268,6 +4272,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const bindingError = capabilityGrantBindingError(v.value.capabilities ?? [], deps.db);
     if (bindingError) return reply.code(400).send({ error: bindingError });
     deps.db.updateProfile(id, v.value);
+    // Blast radius (card 3c4e0df6): if this save ADDED a human-only grant, record which agents — in which
+    // projects — were already bound to this GLOBAL profile, and hand the same list back on the response.
+    // The editor already confirmed it pre-save; this covers the REST-only caller, who cannot be prompted.
+    // Computed from the PRE-save row (`existing`) against the merged result, so it sees exactly what the
+    // write changed. Null when the save granted nothing new — see recordProfileGrantReach's own doc.
+    const grantReach = recordProfileGrantReach(deps.db, {
+      profileId: id, profileName: v.value.name,
+      before: grantFieldsOf(existing), after: grantFieldsOf(v.value), source: "rest",
+    });
     // Grant-boundary reconcile (card 12dc7fc9): saving a connection onto this profile's allowlist IS the
     // deliberate owner grant, so any PENDING binding requesting exactly that profile→connection is now
     // satisfied — flip it 'pending'→'applied' so it leaves the "Pending bindings" queue (listPendingBindings
@@ -4277,7 +4290,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Same cold-skip-window pre-warm as POST: if this save turns documentConversion ON, kick the shared
     // markitdown venv now (deduped async background job; no-op when already warm).
     if (v.value.documentConversion) prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
-    return deps.db.getProfile(id);
+    // `grantReach` is OMITTED entirely when the save granted nothing new, so its mere presence is the
+    // signal — a reader never has to tell an empty payload apart from "no grant added".
+    return { ...deps.db.getProfile(id), ...(grantReach ? { grantReach } : {}) };
   });
   // Delete is SAFE for assigned agents: a dangling profile_id resolves to the plain backstop (a
   // bundled profile re-seeds on next boot). Idempotent — mirrors the skills DELETE (no 404).
@@ -4290,8 +4305,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // the id is unknown or its name isn't a bundled one (a user-created profile).
   app.post("/api/profiles/:id/reset", async (req, reply) => {
     const id = (req.params as { id: string }).id;
+    // Card 3c4e0df6: a reset can RE-ADD a shipped grant a customized profile had dropped (a QA-Tester rig
+    // whose browserTesting the human turned off, restored by one click), so it widens reach exactly like
+    // an editor save and gets the same audit. Snapshot the PRE-reset row — the write happens in-place.
+    const beforeReset = deps.db.getProfile(id);
     if (!resetProfileToBundled(deps.db, id)) return reply.code(404).send({ error: "no bundled version for this profile" });
-    return { ...deps.db.getProfile(id), ...profileCustomizationState(deps.db, id) };
+    const after = deps.db.getProfile(id)!;
+    const grantReach = beforeReset
+      ? recordProfileGrantReach(deps.db, {
+        profileId: id, profileName: after.name,
+        before: grantFieldsOf(beforeReset), after: grantFieldsOf(after), source: "reset",
+      })
+      : null;
+    return { ...after, ...profileCustomizationState(deps.db, id), ...(grantReach ? { grantReach } : {}) };
   });
   // "What shipped changed" since the user's last sync: the base→shipped FIELD changes, for the web to render
   // the incoming update next to "update available". 404 if not a bundled-by-name profile.
@@ -4317,13 +4343,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/profiles/:id/adopt", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const body = (req.body ?? {}) as { resolutions?: Record<string, ProfileFieldResolution> };
+    // Card 3c4e0df6: adopting a shipped update can pull in a grant the human never typed, so it is audited
+    // exactly like an editor save. Snapshot PRE-adopt — adoptProfileUpdate writes the row in place.
+    const beforeAdopt = deps.db.getProfile(id);
     const r = adoptProfileUpdate(deps.db, id, body.resolutions ?? {});
     if (!r.ok) {
       if (r.reason === "not-bundled") return reply.code(404).send({ error: "no bundled version for this profile" });
       if (r.reason === "no-update") return reply.code(409).send({ error: "no update available" });
       return reply.code(409).send({ error: "merge has conflicts; resolve and resubmit", unresolved: r.unresolved });
     }
-    return { ...deps.db.getProfile(id), ...profileCustomizationState(deps.db, id) };
+    const adopted = deps.db.getProfile(id)!;
+    const grantReach = beforeAdopt
+      ? recordProfileGrantReach(deps.db, {
+        profileId: id, profileName: adopted.name,
+        before: grantFieldsOf(beforeAdopt), after: grantFieldsOf(adopted), source: "adopt",
+      })
+      : null;
+    return { ...adopted, ...profileCustomizationState(deps.db, id), ...(grantReach ? { grantReach } : {}) };
   });
 
   app.get("/api/projects/:id/agents", async (req) =>

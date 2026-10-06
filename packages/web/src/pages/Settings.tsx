@@ -31,7 +31,7 @@ import {
   type NodeModulesReclaimRunResult,
 } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAllAgents } from "../lib/useAllAgents";
+import { useAllAgentLabels } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import {
@@ -2737,7 +2737,7 @@ function PollJobsPanel() {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: () => api.allSessions() });
   // Flat cross-project "Project / Agent" labels for the spawn-mode target picker. Poll jobs are
   // daemon-global, so the target can be any project's agent.
-  const agents = useAllAgents();
+  const agents = useAllAgentLabels();
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["pollJobs"] });
   const create = useMutation({

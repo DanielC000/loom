@@ -4,7 +4,7 @@ import { errorText } from "../lib/loopbackCredential";
 import type { EventTrigger, EventTriggerEventKind } from "@loom/shared";
 import { EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
 import { api } from "../lib/api";
-import { useAllAgents } from "../lib/useAllAgents";
+import { useAllAgentLabels } from "../lib/useAllAgents";
 import { Panel, Button, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
 import { color, font, radius } from "../theme";
 
@@ -37,7 +37,7 @@ export default function EventTriggers() {
   // Flat "Project / Agent" labels for BOTH the spawn-mode picker and the table's target resolution. A
   // trigger's scope (which project's events it reacts to) is independent of where its target lives, so
   // the target may be any project's agent — this stays god-eye.
-  const agents = useAllAgents();
+  const agents = useAllAgentLabels();
 
   const projectName = (id: string | null) =>
     id == null ? "All projects" : projects.data?.find((p) => p.id === id)?.name ?? id;
