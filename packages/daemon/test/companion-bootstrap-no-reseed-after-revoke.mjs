@@ -52,6 +52,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      (non-numeric, dm-scope allowed_chat_id) but whose session ALREADY HOLDS a real binding (bound
 //      through some other, valid route) must stay bindingsSeeded:TRUE, not be narrowed to false — it WAS
 //      genuinely seeded. (RED on the pre-fix code: the narrowing predicate didn't check binding existence.)
+//   J. THE DEAD PARAM IS GONE AT RUNTIME TOO (card ba2e1508, from the 012d0089 Code Review):
+//      upsertCompanionConfig's `bindingsSeeded?` input param had zero callers and was the one door the
+//      G/H asymmetry fixes closed by convention only; an UPDATE carrying a stray `bindingsSeeded:false`
+//      must not clear an already-seeded row. (RED on the pre-fix code: `input.bindingsSeeded ?? (...)`
+//      reads an explicit `false` as the caller's value and clears the flag.)
 // Run: 1) build (turbo builds shared first), 2) node test/companion-bootstrap-no-reseed-after-revoke.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -438,6 +443,30 @@ try {
   const legacyDb3 = new Db(legacyPath3); // opening runs the idempotent additive migration + narrowing
   check("(I) THE FIX: a legacy row that LOOKS refused but whose session already HOLDS a binding stays bindingsSeeded:TRUE, not narrowed to false", legacyDb3.getCompanionConfig("sess-legacy-refused-but-bound")?.bindingsSeeded === true);
   legacyDb3.close();
+
+  // ============ J. THE DEAD PARAM IS GONE AT RUNTIME TOO (card ba2e1508, from the 012d0089 Code Review):
+  // upsertCompanionConfig no longer reads ANY `bindingsSeeded` key off its input — the computation is now
+  // unconditional (existing ? stored : EXISTS(binding)), with no caller-passed branch left to misuse. Pass
+  // an extraneous `bindingsSeeded: false` on an UPDATE anyway (plain JS, so nothing here enforces the
+  // TypeScript type that no longer declares the param) and confirm it's silently ignored rather than
+  // clearing an already-seeded row. (RED on the pre-this-fix code: `input.bindingsSeeded ?? (...)` reads
+  // an explicit `false` as the caller's value, since `??` only falls through on null/undefined — it would
+  // have cleared the flag.)
+  const SID6 = "sess-update-cannot-clear-seeded";
+  seedSession(db, SID6);
+  db.upsertCompanionConfig({
+    sessionId: SID6, botTokenBlob: "", channel: TELEGRAM_CHANNEL, allowedChatId: "955955955",
+    chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true,
+  });
+  db.upsertCompanionBinding({ sessionId: SID6, channel: TELEGRAM_CHANNEL, chatId: "955955955", scope: "dm" });
+  check("(J setup) the binding write marks bindingsSeeded TRUE via the chokepoint", db.getCompanionConfig(SID6)?.bindingsSeeded === true);
+
+  db.upsertCompanionConfig({
+    sessionId: SID6, botTokenBlob: "", channel: TELEGRAM_CHANNEL, allowedChatId: "955955955",
+    chatScope: "dm", heartbeatIntervalMinutes: 0, heartbeatPrompt: null, enabled: true,
+    bindingsSeeded: false,
+  });
+  check("(J) THE FIX: an UPDATE carrying a stray bindingsSeeded:false cannot clear an already-seeded row", db.getCompanionConfig(SID6)?.bindingsSeeded === true);
 } finally {
   db.close();
   cleanupPathSync(tmpHome);

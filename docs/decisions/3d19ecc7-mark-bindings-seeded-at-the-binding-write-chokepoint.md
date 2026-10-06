@@ -55,23 +55,19 @@ once enabled; biasing the other way would silently re-arm a genuinely revoked ch
 re-enables a long-disabled companion, with no signal that it happened. Leave it at the blanket backfill's
 `1`, same as Shape 2.
 
-## Round 4 (012d0089): the chokepoint UPDATE can still no-op
+## Round 4 and later: see 012d0089
 
-`upsertCompanionBinding`'s mark is an `UPDATE ... WHERE session_id = ?` — a no-op with no `companion_config`
-row yet. Reachable: an unprovisioned session takes a REST bind BEFORE its first config POST; that later
-INSERT then starts the flag at its own omitted-param default (`false`), discarding the binding that already
-exists. Closed WITHOUT a second explicit mark: `upsertCompanionConfig`'s genuine-first-INSERT path (no
-existing row, `bindingsSeeded` omitted) now defaults to `EXISTS(binding for this session)`, not a bare
-`false` — fires once, at insert time, never on an UPDATE, and marks nothing for a session with no binding.
-Same shape in the backfill: `narrowBindingsSeededBackfillForRefusedRows` now also requires
-`NOT EXISTS(binding for that session)` — a legacy row that LOOKS refused but whose session already HOLDS a
-binding (via some other, valid route) stays `1`.
+The chokepoint UPDATE's own no-op case (an unprovisioned session's REST bind landing before its first
+config POST) and everything built on it since — the EXISTS-derived first-INSERT default, removing the
+dead caller-side override, and the transaction wrap around the read-then-INSERT — are recorded in
+`docs/decisions/012d0089-upsertcompanionconfig-exists-derived-default-is-the-only-computation.md`, split
+out here once this file neared its size cap.
 
 ## Do not
 
 - Do not reintroduce a caller-side `bindings_seeded` mark passing an explicit `true` — the two-path shape
-  this record closed. Round 4's INSERT-path default above is NOT this: fires once, on a genuine first row,
-  reading existing state only.
+  this record closed. The EXISTS-derived first-INSERT default (see 012d0089) is NOT this: it fires once,
+  on a genuine first row, reading existing state only, with no caller-passed input at all.
 - Do not mark it for a refused write — strictly AFTER the binding row is durably written, never before,
   never on the `InvalidTelegramChatIdError` throw path.
 - Do not narrow `enabled=0 AND zero bindings` to 0 — see "The never-armed population" above; a

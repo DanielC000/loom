@@ -53,7 +53,8 @@ test("Manage tab: the initial chat id is labelled as seed + default home, and th
 
   // ── State 1: NOT seeded ────────────────────────────────────────────────────────────────────────────
   // Server-side contract first: a freshly seeded config row has never been bound, so the flag is false.
-  // (The test-seed handler never passes bindingsSeeded, and upsertCompanionConfig defaults a new row to 0.)
+  // (upsertCompanionConfig has no bindingsSeeded input — a new row derives EXISTS(binding for this
+  // session), which is 0 here since the test-seed handler never writes one.)
   const preBody = await (await page.request.get(configUrl)).json();
   expect(preBody.bindingsSeeded).toBe(false);
 
