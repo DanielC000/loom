@@ -10,7 +10,7 @@ import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv } from "../git/bounded.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
-import { resolveGitToplevelSync } from "../git/repo-lock.js";
+import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, resolveGitToplevelSync } from "../git/repo-lock.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -598,6 +598,250 @@ function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeou
 }
 
 /**
+ * Card a09b81a0: a legacy project row whose `vaultPath` is a SUBDIR of its own (or another registered
+ * project's) code repo resolves, via `resolveVaultRepoContext`'s upward walk, to that code repo's ROOT —
+ * so the auto-committer was staging and committing arbitrary code files, on the code repo's own branch,
+ * outside `withCanonicalIndexLock` (able to race `mergeBranchLocked`/batch assembly on the shared index).
+ * `cb6ba196`/`8d49c36c` only refuse NEW creates/updates into that shape; an untouched legacy row keeps it.
+ *
+ * One entry per project this daemon knows about — the SAME flattening `index.ts` already does for merge-
+ * quarantine re-arm (`project.repoPath` + every `project.repos[].path`), plus `vaultOnly`/`vaultPath` so
+ * the exemption below can be decided without a second lookup.
+ */
+export interface CodeRepoGuardEntry {
+  id: string;
+  repoPath: string;
+  repos: { path: string }[];
+  vaultOnly: boolean;
+  vaultPath: string;
+}
+
+/**
+ * Registered ONCE at boot (`index.ts`, from the live `Db`) via {@link setCodeRepoGuardProvider} — a
+ * PROVIDER, not a cached snapshot, so a runtime `repoPath` rebind or a freshly created project is visible
+ * to the very NEXT `commitVault`/`flushSync` call, with no daemon restart needed. `snapshot()` is called
+ * fresh on every check (cheap: a couple of SQLite SELECTs) — never memoized here.
+ */
+export interface CodeRepoGuard {
+  snapshot: () => CodeRepoGuardEntry[];
+  /** File the durable audit event for a refusal — the caller supplies only the detail payload; this
+   *  callback owns the real `db.appendEvent({..., kind:"vault_autocommit_refused_code_repo", ...})` call
+   *  (versioner.ts has no `Db` import of its own outside `startVaultVersioners`'s parameter type). */
+  recordEvent: (detail: Record<string, unknown>) => void;
+}
+
+let codeRepoGuard: CodeRepoGuard | undefined;
+
+/**
+ * Wire (or, passing `undefined`, unwire — real callers never do) the code-repo collision guard.
+ * **FAIL-OPEN when unset**: a unit test that calls `commitVault`/`flushSync` directly, with no boot-wired
+ * `Db`, has nothing to check a collision against and must not refuse just because nothing was wired —
+ * see {@link checkCodeRepoCollision}. Production boot ALWAYS wires one (see
+ * `vault-commit-code-repo-guard.mjs`'s own boot-wiring assertion) — a forgotten wiring is caught there,
+ * never silently masked by this fail-open.
+ */
+export function setCodeRepoGuardProvider(provider: CodeRepoGuard | undefined): void {
+  codeRepoGuard = provider;
+}
+
+/** The result of a collision hit — which OTHER registered project/path this `commitPath` collides with. */
+export interface CodeRepoCollision {
+  collidesWithProjectId: string;
+  collidesWithRepoPath: string;
+}
+
+/**
+ * Whether `candidateKey` (an already-canonicalized {@link canonicalRepoLockKey} result) names the SAME
+ * directory as, or a path-segment-aware DESCENDANT of, `rootKey` (also already-canonicalized). Plain
+ * `startsWith` would wrongly match a sibling whose name happens to extend the root's (`mono2` vs `mono`);
+ * this requires a full path-segment boundary between them.
+ *
+ * @decision a09b81a0 — pure path comparison, deliberately never a per-candidate git-toplevel probe; see
+ *  the decision record's round-2 section for why.
+ */
+function isCanonicallyAtOrUnder(candidateKey: string, rootKey: string): boolean {
+  if (candidateKey === rootKey) return true;
+  const rootWithSep = rootKey.endsWith(path.sep) ? rootKey : rootKey + path.sep;
+  return candidateKey.startsWith(rootWithSep);
+}
+
+/**
+ * @decision a09b81a0 — round 3, owner ruling on request `8d6fea89` (option A): a repo that is itself some
+ * project's vault root is exempt from the collision refusal below, EVEN IF it is also registered as some
+ * OTHER project's own `repoPath`.
+ *
+ * ⚠️ **KNOWN HOLE, NOT YET FIXED — a THIRD party can grant this exemption for a code repo it has nothing
+ * to do with.** Given `P = {repoPath: C, vaultPath: C/docs}` (the ORIGINAL bug shape) and an UNRELATED
+ * `Q = {repoPath: D, vaultPath: C/q-notes}` (Q's own code lives at `D`, entirely outside `C`), `Q` vouches
+ * for `C` — its own code is not at risk there — and `commitVault(C)` then auto-commits `C`'s real source.
+ * Verified directly with real git: `committed:true`, `C`'s commit count increments. The predicate below
+ * CANNOT tell this apart from Parallax's shape; geometry alone is not a sufficient discriminator for "is
+ * this really just notes." Two further degenerate variants of the SAME hole, also verified: a voucher
+ * entry with `repoPath: ""` vouches for ANY `key` unconditionally (its `ownCandidates` list is empty after
+ * `.filter(Boolean)`, so `.some(...)` is vacuously `false`); a voucher whose `repoPath` is an ANCESTOR of
+ * `key` (rather than at-or-under it) also vouches, since `isCanonicallyAtOrUnder` only checks one
+ * direction. **The owner is choosing the real discriminator — an explicit per-project flag or a platform
+ * list of recognized vault roots — do not extend or "harden" this geometric predicate in the meantime.**
+ * See `vault-commit-code-repo-guard.mjs`'s dedicated tests (14)/(14b)/(14c) for this hole — now green
+ * tripwires pinning today's known-wrong behavior (request `f7cc5951` pending, tracked by card `7c1d6dbf`),
+ * not deliberately-red assertions.
+ *
+ * Is `key` (an already-canonicalized {@link canonicalRepoLockKey} result for an already-RESOLVED governing
+ * repo root) a NOTES repo — "some project's vault root" — rather than a code repo? The shared Obsidian
+ * vault is the motivating case: Parallax/Shahnameh/Federalist/Menu Visualizer all bind `repoPath` to it,
+ * while ~20 unrelated code projects' `vaultPath` lives under it as a subfolder.
+ *
+ * **The predicate:** `key` is a recognized vault root iff some registered entry's `vaultPath` is
+ * canonically at-or-under `key` AND that SAME entry's own code candidates (`repoPath` + every `repos[]`
+ * entry) are NOT themselves at-or-under `key`. The second half excludes SELF-vouching only — it does NOT
+ * close the third-party hole above, which is a DIFFERENT entry vouching for a key it has no stake in.
+ *
+ * **What self-exclusion DOES close.** `vaultPath` nested inside `repoPath` is EXACTLY the shape of the
+ * original bug — geometrically indistinguishable, from a single entry's own two fields, from Parallax's
+ * shape. Excluding an entry from vouching for a `key` its OWN code is also at risk under is what keeps
+ * that SAME entry from exempting itself, and what keeps the monorepo-subdir shape (round 2, Finding 1:
+ * `repoPath=mono/pkg`, `vaultPath=mono/notes`, siblings under `mono`) from self-exempting — that project's
+ * OWN `repoPath` is at-or-under `mono`, so it can never vouch for `mono` either, and the collision below
+ * still fires. It is a genuinely useful, correct narrowing — it just is not, on its own, sufficient; the
+ * third-party hole above is a SEPARATE gap self-exclusion was never meant to address.
+ *
+ * Cheap and git-free, like {@link isCanonicallyAtOrUnder} itself — pure path comparison over the SAME
+ * snapshot `checkCodeRepoCollision` already holds, never a per-candidate git-toplevel probe.
+ */
+function isRecognizedVaultRoot(key: string, entries: CodeRepoGuardEntry[]): boolean {
+  for (const entry of entries) {
+    if (!entry.vaultPath) continue;
+    const vaultKey = canonicalRepoLockKey(entry.vaultPath);
+    if (!isCanonicallyAtOrUnder(vaultKey, key)) continue; // this entry's vault isn't even located at/under `key`
+    const ownCandidates = [entry.repoPath, ...entry.repos.map((r) => r.path)].filter(Boolean);
+    const ownCodeAtRisk = ownCandidates.some((c) => isCanonicallyAtOrUnder(canonicalRepoLockKey(c), key));
+    if (ownCodeAtRisk) continue; // this project's OWN code (if any) is ALSO under `key` — can't vouch for it
+    return true; // a genuinely separate project's real vault lives at/under `key` — safe to treat as notes
+  }
+  return false;
+}
+
+/**
+ * Whether `commitPath` (an ALREADY-RESOLVED governing repo root — the point every real caller below checks
+ * this at) canonically collides with some registered project's own code repo (`repoPath` or a `repos[]`
+ * entry) — i.e. staging/committing here would commit THAT project's code, not vault content. Matches a
+ * candidate that is canonically AT-OR-UNDER `commitPath`, not just an exact match — see
+ * {@link isCanonicallyAtOrUnder}.
+ *
+ * EXEMPTS a recognized vault root (round 3) UNCONDITIONALLY, before the per-candidate loop below ever
+ * runs — see {@link isRecognizedVaultRoot}.
+ *
+ * ALSO EXEMPTS a TRUE vault-only project, decided PER CANDIDATE: only when the matched candidate IS that
+ * entry's own `repoPath`, re-verified against `entry.vaultPath` rather than trusting the flag alone. This
+ * is a SEPARATE, narrower exemption from the vault-root one above (exact `repoPath === vaultPath` pairing,
+ * e.g. the `5af9020b` legacy-aliased-code shape) and stays in place unchanged.
+ *
+ * @decision a09b81a0 — see the decision record's round-2 section for the monorepo-subdir repro the
+ *  at-or-under rule closes and why the vaultOnly exemption moved from per-entry to per-candidate, and its
+ *  round-3 section for the vault-root exemption and the anti-gaming argument behind it.
+ *
+ * FAIL-OPEN (returns `null`) when no provider is registered — see {@link setCodeRepoGuardProvider}.
+ */
+function checkCodeRepoCollision(commitPath: string): CodeRepoCollision | null {
+  if (!codeRepoGuard) return null;
+  const key = canonicalRepoLockKey(commitPath);
+  const entries = codeRepoGuard.snapshot();
+  if (isRecognizedVaultRoot(key, entries)) return null;
+  for (const entry of entries) {
+    const candidates = [entry.repoPath, ...entry.repos.map((r) => r.path)];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const candidateKey = canonicalRepoLockKey(candidate);
+      if (!isCanonicallyAtOrUnder(candidateKey, key)) continue;
+      const isOwnRepoPath = candidate === entry.repoPath;
+      if (isOwnRepoPath && entry.vaultOnly && canonicalRepoLockKey(entry.repoPath) === canonicalRepoLockKey(entry.vaultPath)) continue;
+      return { collidesWithProjectId: entry.id, collidesWithRepoPath: candidate };
+    }
+  }
+  return null;
+}
+
+/**
+ * @decision a09b81a0 — round 3: when `commitPath` is merge-eligible (below), the auto-committer's own
+ * add+commit sequence must take `withCanonicalIndexLock` for it, keyed EXACTLY like a real merge would —
+ * see {@link commitVault}'s own call site for the lock.
+ *
+ * Whether `commitPath` (an already-RESOLVED governing root) canonically EQUALS some registered project's
+ * own `repoPath` or a `repos[]` entry — i.e. a real `mergeBranchLocked`/batch merge or a `GitWriter`
+ * commit/checkout/createBranch for THAT project could also target this exact physical repo. EXACT match
+ * only, deliberately never at-or-under: every real canonical-index lock is keyed via `canonicalRepoLockKey`
+ * (`git/repo-lock.ts`) on that same `repoPath` value (see `git/worktrees.ts`'s `mergeBranch`, `git/writer.ts`'s
+ * `GitWriter`), never a derived ancestor.
+ *
+ * @decision 7673d096 — `canonicalRepoLockKey` now keys on the resolved git TOPLEVEL, which closes what used
+ * to be a known subdir-bound-project gap in this exact-match check. See that decision record's own
+ * "Consequence for a09b81a0's isCommitPathMergeEligible" section for the full explanation.
+ *
+ * Independent of {@link checkCodeRepoCollision}'s own collision/exemption verdict — a repo can be BOTH a
+ * recognized vault root (exempt from refusal) AND merge-eligible (needs the lock) at once, which is
+ * exactly the shared-vault shape this whole round exists for.
+ *
+ * FAIL-OPEN (returns `false`, no lock) when no provider is registered, mirroring
+ * {@link checkCodeRepoCollision}'s own fail-open.
+ */
+function isCommitPathMergeEligible(commitPath: string): boolean {
+  if (!codeRepoGuard) return false;
+  const key = canonicalRepoLockKey(commitPath);
+  for (const entry of codeRepoGuard.snapshot()) {
+    const candidates = [entry.repoPath, ...entry.repos.map((r) => r.path)];
+    for (const candidate of candidates) {
+      if (candidate && canonicalRepoLockKey(candidate) === key) return true;
+    }
+  }
+  return false;
+}
+
+/** One warn + one durable event per (subjectPath, commitPath) per PROCESS — never one per debounce tick
+ *  (the tick, and the UI-write path via `commitVault`, can both re-hit the SAME collision repeatedly for
+ *  as long as it remains unfixed). `subjectPath` is whatever identity the caller has for "which vault" —
+ *  the project's raw configured `vaultPath` at `startVaultVersioners`, or `commitVault`/`flushSync`'s own
+ *  (already-resolved) `commitPath` when no distinct raw path is available to them. */
+const warnedCodeRepoCollisions = new Set<string>();
+
+function refuseCodeRepoCollision(
+  subjectPath: string,
+  commitPath: string,
+  collision: CodeRepoCollision,
+  source: "boot" | "commit_vault" | "flush_sync",
+  projectId?: string,
+): void {
+  const dedupeKey = `${subjectPath.replace(/\\/g, "/")}::${canonicalRepoLockKey(commitPath)}`;
+  if (warnedCodeRepoCollisions.has(dedupeKey)) return;
+  warnedCodeRepoCollisions.add(dedupeKey);
+  console.warn(
+    `[vault-versioner] ${subjectPath} resolves to ${commitPath}, which IS registered project ` +
+    `${collision.collidesWithProjectId}'s own code repo (${collision.collidesWithRepoPath}) — refusing to ` +
+    `auto-commit arbitrary code files into it (card a09b81a0).`,
+  );
+  try {
+    codeRepoGuard?.recordEvent({
+      ...(projectId ? { projectId } : {}),
+      vaultPath: subjectPath,
+      commitPath,
+      collidesWithProjectId: collision.collidesWithProjectId,
+      collidesWithRepoPath: collision.collidesWithRepoPath,
+      source,
+    });
+  } catch { /* best-effort — an audit-event fault must never block the refusal itself */ }
+}
+
+/** `commitVault`'s own result (replaces a bare `boolean` — card a09b81a0): `blockedReason` is present
+ *  (and `committed:false`) ONLY for the code-repo-collision refusal above, distinct from every OTHER
+ *  silent backoff this function already had (quarantined / externally-managed / nothing-staged /
+ *  operational-dir / oversized-only) — those stay `committed:false` with no reason, unchanged. Exists so
+ *  `vault/writer.ts`'s UI-write callers can surface THIS specific refusal to their own caller instead of
+ *  swallowing it indistinguishably from an ordinary no-op backoff. */
+export interface CommitVaultResult {
+  committed: boolean;
+  blockedReason?: "code-repo-collision" | "paused";
+}
+
+/**
  * Stage-all + commit a vault folder, honoring the same externally-managed backoff as the
  * auto-committer: if the vault sits inside a git repo whose root is ABOVE the vault folder
  * (e.g. a vault-wide Obsidian Git repo), we do NOT init or commit, to avoid double-committing.
@@ -644,11 +888,11 @@ export async function commitVault(
   vaultPath: string,
   message: string,
   opts?: { maxFileBytes?: number; deps?: VaultGitDeps },
-): Promise<boolean> {
+): Promise<CommitVaultResult> {
   // @decision 68cc29db — refuse unconditionally rather than init/stage/commit an operational dir.
   if (isOperationalVaultDir(vaultPath)) {
     console.warn(`[vault-versioner] refusing to git-init/commit operational vault dir: ${vaultPath}`);
-    return false;
+    return { committed: false };
   }
   const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
   const deps = opts?.deps ?? {};
@@ -681,17 +925,34 @@ export async function commitVault(
         `[vault-versioner] ${vaultPath} commitVault: discovery check-is-repo failed (not a clean "not a ` +
         `git repository" result) — skipping this commit rather than risk initialising a nested repo: ${(e as Error)?.message ?? e}`,
       );
-      return false;
+      return { committed: false };
     }
     isRepo = false;
   }
   if (isRepo) {
     const root = (await withTimeout(git.revparse(["--show-toplevel"]), cheapTimeoutMs, "git rev-parse --show-toplevel (vault commit)").catch(() => "")).trim();
     const externallyManaged = !!root && root.replace(/\\/g, "/") !== vaultPath.replace(/\\/g, "/");
-    if (externallyManaged) return false;
+    if (externallyManaged) {
+      // @decision a09b81a0 — an UNRESOLVED subfolder vaultPath (vault/writer.ts's own call shape) lands
+      // here; check the REAL root for a collision before treating this as a harmless backoff.
+      const rootCollision = checkCodeRepoCollision(root);
+      if (rootCollision) {
+        refuseCodeRepoCollision(vaultPath, root, rootCollision, "commit_vault");
+        return { committed: false, blockedReason: "code-repo-collision" };
+      }
+      return { committed: false };
+    }
     // else: root === vaultPath — vaultPath IS the confirmed repo root.
   }
   // else: no repo discoverable anywhere up the chain — vaultPath itself will BECOME the repo root below.
+
+  // @decision a09b81a0 — never cache this check; consult the live provider on every call so a runtime
+  // repoPath rebind or a freshly created project is seen without a daemon restart.
+  const collision = checkCodeRepoCollision(vaultPath);
+  if (collision) {
+    refuseCodeRepoCollision(vaultPath, vaultPath, collision, "commit_vault");
+    return { committed: false, blockedReason: "code-repo-collision" };
+  }
 
   // @decision 8d49c36c — key this check on the CONFIRMED governing root (vaultPath, at this point), never
   // a raw/possibly-nested caller argument; re-check again immediately before the commit call below; never
@@ -699,7 +960,7 @@ export async function commitVault(
   const quarantineCheck = assertRepoNotQuarantined(vaultPath);
   if (!quarantineCheck.ok) {
     console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${quarantineCheck.reason}`);
-    return false;
+    return { committed: false };
   }
 
   // Every remaining call operates on a CONFIRMED root (vaultPath) — pin GIT_DIR/GIT_WORK_TREE to it.
@@ -727,7 +988,7 @@ export async function commitVault(
           `clean "not a git repository" result) — skipping this commit rather than risk initialising a ` +
           `nested repo: ${(e as Error)?.message ?? e}`,
         );
-        return false;
+        return { committed: false };
       }
       // genuine "not a git repository" from OUTSIDE the vault dir too — safe to git init below.
     }
@@ -737,7 +998,7 @@ export async function commitVault(
         `${parentDir} is itself inside a git repository (${enclosingRoot}); skipping this commit rather ` +
         `than nest a repo inside it.`,
       );
-      return false;
+      return { committed: false };
     }
     await withTimeout(pinnedGit.init(), cheapTimeoutMs, "git init (vault commit)");
   }
@@ -745,66 +1006,95 @@ export async function commitVault(
   // Tracks the call in flight so the warn below names WHICH op hit its bound (mirrors flushSync's own
   // `currentOp` tracking) — this is the section covering the actual named hang vector (add/status/commit).
   let currentOp: { label: string; timeoutMs: number } | undefined;
-  try {
-    // @decision 8d49c36c — visibility only, never a refusal and never built further than a log line: this
-    // module's own `git add .` can sweep pre-staged residue into an unattended commit exactly like
-    // GitWriter.commit's `add -A` does, but nothing human reviews this path to warn structurally at.
-    if (isRepo) {
-      currentOp = { label: "git status (pre-add residue check)", timeoutMs: cheapTimeoutMs };
-      const preAddStatus = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
-      const preExistingResidue = preAddStatus.files
-        .filter((f) => f.index !== " " && f.index !== "?")
-        .map((f) => f.path);
-      if (preExistingResidue.length > 0) {
-        console.warn(
-          `[vault-versioner] ${vaultPath} commitVault: ${preExistingResidue.length} file(s) were already ` +
-          `staged before this auto-commit's own "git add ." ran and will be swept into it: ` +
-          `${preExistingResidue.join(", ")} — possibly an escaped descendant's residue from an earlier ` +
-          `quarantine (see git-writer.ts's commit() for the human-facing equivalent of this check).`,
-        );
+  const runCommitSequence = async (): Promise<CommitVaultResult> => {
+    try {
+      // @decision 8d49c36c — visibility only, never a refusal and never built further than a log line: this
+      // module's own `git add .` can sweep pre-staged residue into an unattended commit exactly like
+      // GitWriter.commit's `add -A` does, but nothing human reviews this path to warn structurally at.
+      if (isRepo) {
+        currentOp = { label: "git status (pre-add residue check)", timeoutMs: cheapTimeoutMs };
+        const preAddStatus = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
+        const preExistingResidue = preAddStatus.files
+          .filter((f) => f.index !== " " && f.index !== "?")
+          .map((f) => f.path);
+        if (preExistingResidue.length > 0) {
+          console.warn(
+            `[vault-versioner] ${vaultPath} commitVault: ${preExistingResidue.length} file(s) were already ` +
+            `staged before this auto-commit's own "git add ." ran and will be swept into it: ` +
+            `${preExistingResidue.join(", ")} — possibly an escaped descendant's residue from an earlier ` +
+            `quarantine (see git-writer.ts's commit() for the human-facing equivalent of this check).`,
+          );
+        }
       }
+      // @decision a09b81a0 — round 4: the authoritative pause-lease check, placed HERE (inside
+      // runCommitSequence, immediately before the mutating "git add .") rather than before the lock is
+      // taken. See that decision record's "Round 4: the pause-lease check's placement" section.
+      if (isVaultAutoCommitPaused(vaultPath)) {
+        console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — an advisory pause lease is held (card 614dfbef).`);
+        return { committed: false, blockedReason: "paused" };
+      }
+      currentOp = { label: "git add .", timeoutMs: workTreeTimeoutMs };
+      await withTimeout(workGit.add("."), workTreeTimeoutMs, currentOp.label);
+      currentOp = { label: "git status", timeoutMs: cheapTimeoutMs };
+      const status = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
+      if (status.files.length === 0) return { committed: false };
+      const skipped = await unstageOversizedFiles(pinnedGit, vaultPath, status.files, maxFileBytes, cheapTimeoutMs);
+      // NOTE: an unstaged file does NOT disappear from `git status` (it just reverts to untracked/modified),
+      // so re-querying status here would still see it and wrongly think there's something left to commit.
+      // Comparing counts against the ORIGINAL staged set is the correct "anything real left?" check.
+      if (skipped.length >= status.files.length) return { committed: false }; // everything staged was oversized — nothing left to commit
+      currentOp = { label: "git commit", timeoutMs: workTreeTimeoutMs };
+      // @decision ffe98495 — `--no-verify` on EVERY commit here, identity-fallback branch or not; belt-
+      // and-suspenders on top of boundedVaultGit's hooksPath override (see that constant's own doc).
+      const identityConfigured = await hasConfiguredGitIdentity(pinnedGit, cheapTimeoutMs);
+      // @decision 8d49c36c — re-check right before the real commit call, AFTER hasConfiguredGitIdentity (its
+      // own `git config` subprocesses can take ~15s and would otherwise widen the window this check closes).
+      const recheck = assertRepoNotQuarantined(vaultPath);
+      if (!recheck.ok) {
+        console.warn(`[vault-versioner] ${vaultPath} skipping commitVault (quarantined mid-call, after add) — ${recheck.reason}`);
+        return { committed: false };
+      }
+      if (identityConfigured) {
+        await withTimeout(workGit.raw(["commit", "--no-verify", "-m", message]), workTreeTimeoutMs, currentOp.label);
+      } else {
+        await withTimeout(workGit.raw([
+          "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
+          "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
+          "commit", "--no-verify", "-m", message,
+        ]), workTreeTimeoutMs, currentOp.label);
+      }
+      return { committed: true };
+    } catch (err) {
+      // Closing the observability gap named above: before this fix a hung commit wedged the caller
+      // forever with nothing in the logs; now it's bounded AND visible. Still rethrows — see this
+      // function's own doc for why a bound expiry here stays a rejection rather than a swallowed `false`.
+      console.warn(
+        `[vault-versioner] ${vaultPath} commitVault's "${currentOp?.label}" call FAILED (bound ${currentOp?.timeoutMs}ms) — ` +
+        `a real user edit may sit uncommitted until the next auto-commit tick: ${(err as Error)?.message ?? err}`,
+      );
+      throw err;
     }
-    currentOp = { label: "git add .", timeoutMs: workTreeTimeoutMs };
-    await withTimeout(workGit.add("."), workTreeTimeoutMs, currentOp.label);
-    currentOp = { label: "git status", timeoutMs: cheapTimeoutMs };
-    const status = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
-    if (status.files.length === 0) return false;
-    const skipped = await unstageOversizedFiles(pinnedGit, vaultPath, status.files, maxFileBytes, cheapTimeoutMs);
-    // NOTE: an unstaged file does NOT disappear from `git status` (it just reverts to untracked/modified),
-    // so re-querying status here would still see it and wrongly think there's something left to commit.
-    // Comparing counts against the ORIGINAL staged set is the correct "anything real left?" check.
-    if (skipped.length >= status.files.length) return false; // everything staged was oversized — nothing left to commit
-    currentOp = { label: "git commit", timeoutMs: workTreeTimeoutMs };
-    // @decision ffe98495 — `--no-verify` on EVERY commit here, identity-fallback branch or not; belt-
-    // and-suspenders on top of boundedVaultGit's hooksPath override (see that constant's own doc).
-    const identityConfigured = await hasConfiguredGitIdentity(pinnedGit, cheapTimeoutMs);
-    // @decision 8d49c36c — re-check right before the real commit call, AFTER hasConfiguredGitIdentity (its
-    // own `git config` subprocesses can take ~15s and would otherwise widen the window this check closes).
-    const recheck = assertRepoNotQuarantined(vaultPath);
-    if (!recheck.ok) {
-      console.warn(`[vault-versioner] ${vaultPath} skipping commitVault (quarantined mid-call, after add) — ${recheck.reason}`);
-      return false;
+  };
+  // @decision a09b81a0 — round 3: take the SAME canonical index lock a real merge/GitWriter write for this
+  // repo would, whenever merge-eligible (isCommitPathMergeEligible — see that function's own doc for a
+  // known gap this does NOT close: a project bound to a no-.git subfolder of this root).
+  //
+  // `vaultPath` here is the CONFIRMED governing root (see above). `withCanonicalIndexLock` re-checks
+  // quarantine itself (AFTER acquiring the lock, which the pre-check above cannot see) — translate that
+  // into commitVault's own established graceful quarantine-backoff shape rather than letting a new throw
+  // type escape this function.
+  if (isCommitPathMergeEligible(vaultPath)) {
+    try {
+      return await withCanonicalIndexLock(vaultPath, runCommitSequence);
+    } catch (err) {
+      if (err instanceof RepoQuarantinedError) {
+        console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${err.message}`);
+        return { committed: false };
+      }
+      throw err;
     }
-    if (identityConfigured) {
-      await withTimeout(workGit.raw(["commit", "--no-verify", "-m", message]), workTreeTimeoutMs, currentOp.label);
-    } else {
-      await withTimeout(workGit.raw([
-        "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
-        "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
-        "commit", "--no-verify", "-m", message,
-      ]), workTreeTimeoutMs, currentOp.label);
-    }
-    return true;
-  } catch (err) {
-    // Closing the observability gap named above: before this fix a hung commit wedged the caller
-    // forever with nothing in the logs; now it's bounded AND visible. Still rethrows — see this
-    // function's own doc for why a bound expiry here stays a rejection rather than a swallowed `false`.
-    console.warn(
-      `[vault-versioner] ${vaultPath} commitVault's "${currentOp?.label}" call FAILED (bound ${currentOp?.timeoutMs}ms) — ` +
-      `a real user edit may sit uncommitted until the next auto-commit tick: ${(err as Error)?.message ?? err}`,
-    );
-    throw err;
   }
+  return runCommitSequence();
 }
 
 /**
@@ -1289,6 +1579,13 @@ export class VaultVersioner {
   flushSync(): boolean {
     if (this.externallyManaged) return false;
     if (isVaultAutoCommitPaused(this.commitPath)) return false;
+    // @decision a09b81a0 — re-check live on every flush (never cache): a project rebound onto this
+    // commitPath AFTER start() must still be caught at shutdown, not just at boot.
+    const collision = checkCodeRepoCollision(this.commitPath);
+    if (collision) {
+      refuseCodeRepoCollision(this.commitPath, this.commitPath, collision, "flush_sync");
+      return false;
+    }
     // @decision 8d49c36c — `this.commitPath` is already the resolved governing root (set in `start()`);
     // one check suffices here (unlike commitVault's add/commit split) since this is one synchronous burst.
     const quarantineCheck = assertRepoNotQuarantined(this.commitPath);
@@ -1296,6 +1593,14 @@ export class VaultVersioner {
       console.warn(`[vault-versioner] ${this.commitPath} skipping shutdown flush — ${quarantineCheck.reason}`);
       return false;
     }
+    // @decision a09b81a0 — round 3: deliberately NOT wrapped in withCanonicalIndexLock, unlike commitVault's
+    // own add+commit sequence — see below for why.
+    //
+    // That lock is async; this method is synchronous by necessity (shutdown, execSync — see this method's
+    // own doc) and cannot await it without reopening the exact process-exits-before-the-async-commit-
+    // finishes gap flushSync exists to close. A merge landing on the SAME repo in the narrow shutdown
+    // window this runs in is a known, accepted residual risk — same judgment as d671f1b8's own documented
+    // lock-contention trade-off for this method.
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     // Tracks the call currently in flight so the `catch` below can name WHICH op timed out and at what
     // bound (card 816f0056 review round 2, finding 5) — `execSync`'s own timeout error just names the
@@ -1679,6 +1984,13 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
       // against both the raw vault dir and the resolved governing repo root. BEFORE constructing/starting.
       if (isOperationalVaultDir(vaultPath) || isOperationalVaultDir(ctx.commitPath)) {
         console.warn(`[vault-versioner] project ${project.id} vault (${vaultPath}) is an operational/daemon-home dir (loom.db/worktrees/LOOM_HOME) — skipping; not a docs vault.`);
+        continue;
+      }
+      // @decision a09b81a0 — never let the sibling-dedupe `seen` set below short-circuit this check; run
+      // it per-project so two projects colliding on the SAME commitPath are each warned independently.
+      const collision = checkCodeRepoCollision(ctx.commitPath);
+      if (collision) {
+        refuseCodeRepoCollision(vaultPath, ctx.commitPath, collision, "boot", project.id);
         continue;
       }
       const key = ctx.commitPath.replace(/\\/g, "/");

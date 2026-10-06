@@ -122,7 +122,7 @@ function makeHangingCommitGitFactory(repo) {
   const resultB = await commitVault(repoB, "loom: write urgent.md (via UI)", { deps: { timeoutMs: TINY_TIMEOUT_MS } });
   check(
     "commitVault under the SAME tiny timeout still commits a normal (un-hung) write",
-    resultB === true && commitCount(repoB) === 1,
+    resultB.committed === true && commitCount(repoB) === 1,
   );
 
   console.log(failures === 0

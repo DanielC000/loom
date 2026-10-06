@@ -196,7 +196,7 @@ function walkAll(root) {
   fs.writeFileSync(path.join(repo, "urgent.md"), "planted by hand, not via vault_write\n");
   const before = commitCount(repo);
   const result = await commitVault(repo, "loom: hand-planted hook test");
-  check("commitVault against a hand-planted pre-commit hook still commits (ok, not silently refused)", result === true);
+  check("commitVault against a hand-planted pre-commit hook still commits (ok, not silently refused)", result.committed === true);
   check("commitVault's commit actually landed", commitCount(repo) === before + 1);
   check("the hand-planted pre-commit hook did NOT fire under commitVault", !fs.existsSync(markerPath));
 
@@ -229,7 +229,7 @@ function walkAll(root) {
   fs.writeFileSync(path.join(repo, "b.md"), "second\n");
   const before = commitCount(repo);
   const result = await commitVault(repo, "loom: fsmonitor test");
-  check("commitVault against a hand-planted core.fsmonitor hook still commits", result === true);
+  check("commitVault against a hand-planted core.fsmonitor hook still commits", result.committed === true);
   check("commitVault's commit actually landed", commitCount(repo) === before + 1);
   check("the hand-planted core.fsmonitor hook did NOT fire under commitVault", !fs.existsSync(markerPath));
 
@@ -287,7 +287,7 @@ function walkAll(root) {
   let result;
   let threw;
   try { result = await commitVault(repo, "loom: gpgsign test"); } catch (err) { threw = err; }
-  check("commitVault against a hand-planted commit.gpgsign=true still commits (no throw)", threw === undefined && result === true);
+  check("commitVault against a hand-planted commit.gpgsign=true still commits (no throw)", threw === undefined && result.committed === true);
   check("commitVault's commit actually landed", commitCount(repo) === before + 1);
   check("the hand-planted gpg.program did NOT fire under commitVault (gpgsign forced off)", !fs.existsSync(markerPath));
 
@@ -335,7 +335,7 @@ function walkAll(root) {
     process.env.GIT_WORK_TREE = decoy;
     fs.writeFileSync(path.join(vault, "urgent.md"), "hello\n");
     const result = await commitVault(vault, "loom: ambient-gitdir test");
-    check("commitVault still succeeds despite an ambient GIT_DIR/GIT_WORK_TREE pointing elsewhere", result === true);
+    check("commitVault still succeeds despite an ambient GIT_DIR/GIT_WORK_TREE pointing elsewhere", result.committed === true);
 
     // Resilient to a genuinely missing/broken repo (the exact RED-proof shape on pre-round-2 code, where
     // the vault's own `.git` may never even get created) — a query that can't run reports a count of -1,

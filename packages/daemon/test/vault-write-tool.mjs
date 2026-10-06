@@ -245,8 +245,8 @@ try {
       process.env.GIT_CONFIG_NOSYSTEM = "1";
       fs.writeFileSync(path.join(noIdVault, "note.md"), "no identity");
       const committedNoId = await commitVaultSafe(noIdVault, "test: no ambient identity");
-      check("(f1) commitVault commits via the Loom fallback identity when the host has NO git identity configured", committedNoId === true);
-      check("(f1) the fallback commit's author is the generic Loom identity", committedNoId === true && authorOf(noIdVault) === "Loom\tloom@localhost");
+      check("(f1) commitVault commits via the Loom fallback identity when the host has NO git identity configured", committedNoId?.committed === true);
+      check("(f1) the fallback commit's author is the generic Loom identity", committedNoId?.committed === true && authorOf(noIdVault) === "Loom\tloom@localhost");
 
       // (f2) a repo WITH a configured identity (a global config this test controls, distinct from the
       // fallback) still commits with ITS OWN identity — the fallback must never shadow a real one.
@@ -260,8 +260,8 @@ try {
       process.env.GIT_CONFIG_NOSYSTEM = "1";
       fs.writeFileSync(path.join(withIdVault, "note.md"), "with identity");
       const committedWithId = await commitVaultSafe(withIdVault, "test: configured identity");
-      check("(f2) commitVault commits when the host DOES have a git identity configured", committedWithId === true);
-      check("(f2) the commit uses the CONFIGURED identity, not the Loom fallback (no shadowing)", committedWithId === true && authorOf(withIdVault) === "Test Vault User\ttest-vault@example.com");
+      check("(f2) commitVault commits when the host DOES have a git identity configured", committedWithId?.committed === true);
+      check("(f2) the commit uses the CONFIGURED identity, not the Loom fallback (no shadowing)", committedWithId?.committed === true && authorOf(withIdVault) === "Test Vault User\ttest-vault@example.com");
     } finally {
       process.env = savedEnv;
     }

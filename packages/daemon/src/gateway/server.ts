@@ -4572,7 +4572,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // role==="platform". Every op is vault-confined by writer.ts's path-traversal guard and commits
   // through the SAME path as the auto-committer. A traversal escape → 400 (never writes).
   const writeReply = (reply: FastifyReply, r: Awaited<ReturnType<typeof writeVaultFile>>, relPath: string) => {
-    if (r.ok) return { ok: true, path: relPath, committed: r.committed };
+    // committedBlockedReason (card a09b81a0): surfaced alongside `committed:false`, not as a refusal — the
+    // file write itself already succeeded (hence the 200/ok:true either way); only the commit was blocked.
+    if (r.ok) return { ok: true, path: relPath, committed: r.committed, ...(r.committedBlockedReason ? { committedBlockedReason: r.committedBlockedReason } : {}) };
     if (r.reason === "traversal") return reply.code(400).send({ error: "path escapes the vault root" });
     if (r.reason === "exists") return reply.code(409).send({ error: "file already exists" });
     if (r.reason === "not-found") return reply.code(404).send({ error: "file not found" });

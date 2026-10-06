@@ -87,7 +87,7 @@ git("config", "user.name", "loom-test");
   // 7. the EXISTING auto-commit path is unbroken: the shared commitVault still commits a plain
   //    filesystem change made OUTSIDE the writer (this is exactly what VaultVersioner calls).
   fs.writeFileSync(path.join(vault, "external.md"), "changed outside the writer\n");
-  check("shared auto-commit path still commits", (await commitVault(vault, "loom: auto-commit test")) === true);
+  check("shared auto-commit path still commits", (await commitVault(vault, "loom: auto-commit test")).committed === true);
   check("auto-commit landed in history", git("log", "--pretty=%s").includes("loom: auto-commit test"));
   check("nothing left uncommitted", git("status", "--porcelain").trim() === "");
 }

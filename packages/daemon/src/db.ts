@@ -1639,8 +1639,8 @@ const GATE_HISTORY_KINDS = ["worker_gate", "build_gate", "build_gate_retry", "de
 const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<OrchestrationEventKind>([
   // Security / trust-boundary
   "credential_revoked", "credential_undeliverable", "manager_manage", "deploy", "worker_gate", "discovery_block_injection",
-  "engine_session_rotated", "codex_auto_commit", "mainline_moved_outside_loom", "vault_index_lock_stale",
-  "vault_index_lock_cleared", "agent_profile_rebind",
+  "engine_session_rotated", "codex_auto_commit", "mainline_moved_outside_loom", "vault_autocommit_refused_code_repo",
+  "vault_index_lock_stale", "vault_index_lock_cleared", "agent_profile_rebind",
   // Cross-board / cross-project escalation trail
   "platform_escalate", "escalation_triaged", "audit_finding", "workspace_audit_suggestion",
   "cross_project_message", "assistant_relay_message", "session_message", "session_steer_dropped",

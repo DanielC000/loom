@@ -86,7 +86,7 @@ process.env.GIT_CEILING_DIRECTORIES = root;
   // (control, round 2 item 2) — "SKIPS/returns false" and "parent history untouched" would ALSO pass if
   // discovery failed closed for some unrelated reason; they're sanity checks, not proof the bare-repo-
   // illusion discovery path specifically fired. The warning-text check below is the actual proof.
-  check("[1] (control) commitVault SKIPS (returns false) rather than initialising on a bare-repo-illusion vault", result === false);
+  check("[1] (control) commitVault SKIPS (committed:false) rather than initialising on a bare-repo-illusion vault", result.committed === false);
   check("[1] NO nested .git was created inside the vault", !fs.existsSync(path.join(vault, ".git")));
   check("[1] (control) the parent repo's own history is untouched", commitCount(parentRepo) === 1);
   check(
@@ -104,7 +104,7 @@ process.env.GIT_CEILING_DIRECTORIES = root;
   const result = await commitVault(vault, "loom: first commit of a brand-new vault");
   check(
     "[2] negative control: an ordinary (non-illusory) not-a-repo vault still git-inits + commits",
-    result === true && commitCount(vault) === 1,
+    result.committed === true && commitCount(vault) === 1,
   );
 }
 
@@ -153,7 +153,7 @@ process.env.GIT_CEILING_DIRECTORIES = root;
   // (control, round 2 item 2) — same caveat as test [1]'s controls: these two would ALSO pass on the
   // parent repo (or on any unrelated skip reason), so they're sanity checks, not proof the outside-vault
   // probe mechanism specifically fired. The warning-text check below (naming the enclosing root) is proof.
-  check("[3] (control) commitVault SKIPS when the outside-vault probe finds a real enclosing repo", result === false);
+  check("[3] (control) commitVault SKIPS when the outside-vault probe finds a real enclosing repo", result.committed === false);
   check("[3] NO nested .git was created inside the vault (outside probe fired before git init)", !fs.existsSync(path.join(vault, ".git")));
   check("[3] (control) the parent repo's own history is untouched", commitCount(parentRepo) === 1);
   check(
@@ -240,7 +240,7 @@ process.env.GIT_CEILING_DIRECTORIES = root;
   // vault still gets initialised — exactly the "never init on a non-English host" regression this closes.
   check(
     "[4] commitVault still inits + commits a genuinely-not-a-repo vault under a simulated localized host",
-    result === true && commitCount(vault) === 1,
+    result.committed === true && commitCount(vault) === 1,
   );
 }
 

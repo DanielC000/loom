@@ -61,7 +61,7 @@ import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline, rateLimitedUntil, resumeResetFromUsageStatus } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent, supervisorIterationAtBoot } from "./orchestration/restart.js";
-import { startVaultVersioners, logVaultPushStatus, VaultPushStatusWatcher, type VaultVersioner } from "./vault/versioner.js";
+import { startVaultVersioners, logVaultPushStatus, VaultPushStatusWatcher, setCodeRepoGuardProvider, type VaultVersioner, type CodeRepoGuardEntry } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
 import { resolveAllCompanionConfigs } from "./companion/store.js";
 import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
@@ -139,6 +139,24 @@ async function main(): Promise<void> {
   if (bootBackupCfg.enabled) await takeBackup({ reason: "boot", keep: bootBackupCfg.keep });
   const db = new Db();
   dbForShutdown = db; // lets the boot-safe shutdown stub registered above best-effort close it
+  // Card a09b81a0 (round 2): wire the code-repo-collision guard HERE, immediately after `db` opens and
+  // well before `startGatewayListeners`/`companionController.startInitial` below — the old position
+  // (just before `startVaultVersioners`) left commitVault/vault_write fail-open for the whole window
+  // the gateway was already accepting REST/MCP vault writes. A PROVIDER (re-queried live on every check,
+  // never cached) so a later runtime repoPath rebind is seen without a restart — see versioner.ts's
+  // setCodeRepoGuardProvider doc. INCLUDES archived projects (fail closed: an archived project's checkout
+  // is still a real code repo on disk) via listArchivedProjects() alongside listAllProjects() (which
+  // excludes them).
+  setCodeRepoGuardProvider({
+    snapshot: (): CodeRepoGuardEntry[] =>
+      [...db.listAllProjects(), ...db.listArchivedProjects()].map((p) => ({
+        id: p.id, repoPath: p.repoPath, repos: p.repos, vaultOnly: p.vaultOnly, vaultPath: p.vaultPath,
+      })),
+    recordEvent: (detail) => db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "",
+      kind: "vault_autocommit_refused_code_repo", detail,
+    }),
+  });
   // Card 14f14d92: snapshot every project's resume doc BEFORE anything below can spawn/resume an agent
   // that might touch it — the resume doc is load-bearing (injected into every manager spawn) and had no
   // backup at all; `rotation-check.ts` only ever VERIFIED an archive a caller claimed to have written, it
@@ -1513,6 +1531,8 @@ async function main(): Promise<void> {
   // is ONE repo at the vault root with each project's vaultPath a SUBFOLDER, so sibling subfolders collapse
   // to a single root watcher that commits the whole repo. An Obsidian-Git-managed repo is skipped (a real
   // external auto-committer owns its history); a bare vault folder with no repo is git-inited. Best-effort.
+  // The code-repo-collision guard provider is wired much earlier now, right after `db` opens — see that
+  // site's own comment (card a09b81a0 round 2).
   let vaultVersioners: VaultVersioner[] = [];
   try {
     vaultVersioners = await startVaultVersioners(db);

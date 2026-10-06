@@ -82,7 +82,7 @@ check("fixture precondition: LOOM_HOME has no .git yet", !fs.existsSync(path.joi
 // (a) commitVault itself refuses — the chokepoint every caller reaches.
 {
   const committed = await commitVault(loomHome, "loom: should never land");
-  check("commitVault(LOOM_HOME, ...) returns false (refused)", committed === false);
+  check("commitVault(LOOM_HOME, ...) returns false (refused)", committed.committed === false);
   check("commitVault did not git-init LOOM_HOME", !fs.existsSync(path.join(loomHome, ".git")));
 }
 
@@ -154,7 +154,7 @@ const scratchRoot = fs.realpathSync(mkdtempManaged("loom-op-dir-refusal-scratch-
   // commitVault itself (the versioner's own tick, and the chokepoint every writer reaches) also refuses —
   // not just the writer-level pre-disk guard.
   const committedAncestor = await commitVault(home, "loom: should never land");
-  check("commitVault(ancestor-of-LOOM_HOME, ...) returns false (refused)", committedAncestor === false);
+  check("commitVault(ancestor-of-LOOM_HOME, ...) returns false (refused)", committedAncestor.committed === false);
   check("commitVault did not git-init the ancestor (home) dir either", !fs.existsSync(path.join(home, ".git")));
 }
 

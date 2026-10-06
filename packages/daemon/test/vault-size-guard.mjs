@@ -28,7 +28,7 @@ const MAX_BYTES = 1024; // 1KB threshold for the test — real default is ~95MB
   fs.writeFileSync(path.join(root, "small.md"), "# small doc\n");
   fs.writeFileSync(path.join(root, "big.bin"), Buffer.alloc(MAX_BYTES + 1, 1));
   const committed1 = await commitVault(root, "loom: auto-commit 1", { maxFileBytes: MAX_BYTES });
-  check("commit proceeds despite an oversized staged file (pre-first-commit repo)", committed1 === true);
+  check("commit proceeds despite an oversized staged file (pre-first-commit repo)", committed1.committed === true);
   const log1 = git("log", "--oneline");
   check("exactly one commit made", log1.trim().split("\n").length === 1);
   const tracked1 = git("ls-tree", "-r", "--name-only", "HEAD").trim().split("\n");
@@ -39,7 +39,7 @@ const MAX_BYTES = 1024; // 1KB threshold for the test — real default is ~95MB
   // 2. A LATER commit: the still-oversized file is skipped again (repeat offense), a new small file commits.
   fs.writeFileSync(path.join(root, "small2.md"), "# another doc\n");
   const committed2 = await commitVault(root, "loom: auto-commit 2", { maxFileBytes: MAX_BYTES });
-  check("second commit proceeds, still skipping the oversized file", committed2 === true);
+  check("second commit proceeds, still skipping the oversized file", committed2.committed === true);
   const tracked2 = git("ls-tree", "-r", "--name-only", "HEAD").trim().split("\n");
   check("small2.md committed on the second pass", tracked2.includes("small2.md"));
   check("big.bin still not committed on the second pass", !tracked2.includes("big.bin"));
@@ -47,21 +47,21 @@ const MAX_BYTES = 1024; // 1KB threshold for the test — real default is ~95MB
   // 3. Shrinking the file below the threshold lets it commit normally on the next pass.
   fs.writeFileSync(path.join(root, "big.bin"), Buffer.alloc(10, 1)); // now well under MAX_BYTES
   const committed3 = await commitVault(root, "loom: auto-commit 3", { maxFileBytes: MAX_BYTES });
-  check("commit proceeds after the file shrinks below threshold", committed3 === true);
+  check("commit proceeds after the file shrinks below threshold", committed3.committed === true);
   const tracked3 = git("ls-tree", "-r", "--name-only", "HEAD").trim().split("\n");
   check("big.bin committed once it's no longer oversized", tracked3.includes("big.bin"));
 
   // 4. An ONLY-oversized commit attempt (nothing else staged) is a clean no-op — false, not a throw.
   fs.writeFileSync(path.join(root, "big2.bin"), Buffer.alloc(MAX_BYTES + 1, 2));
   const committed4 = await commitVault(root, "loom: auto-commit 4 (oversized only)", { maxFileBytes: MAX_BYTES });
-  check("an oversized-only staged set commits nothing (false, not a throw)", committed4 === false);
+  check("an oversized-only staged set commits nothing (false, not a throw)", committed4.committed === false);
   const tracked4 = git("ls-tree", "-r", "--name-only", "HEAD").trim().split("\n");
   check("big2.bin never entered history", !tracked4.includes("big2.bin"));
 
   // 5. Default threshold (no opts) never trips on ordinary small files — no regression for the common path.
   fs.writeFileSync(path.join(root, "normal.md"), "# ordinary vault doc\n");
   const committedDefault = await commitVault(root, "loom: auto-commit 5 (default threshold)");
-  check("default (~95MB) threshold commits an ordinary small file normally", committedDefault === true);
+  check("default (~95MB) threshold commits an ordinary small file normally", committedDefault.committed === true);
 }
 // root's own manual finally-block cleanup loop removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).

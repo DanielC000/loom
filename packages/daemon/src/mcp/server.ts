@@ -779,10 +779,16 @@ export class TaskMcpRouter {
               "through the vault auto-committer. `path` is a vault-RELATIVE path (e.g. \"Design/My Note.md\") " +
               "— confined to the project's vault root; a `..`/absolute-path escape or a backslash is REJECTED. " +
               "Prefer the project's documented vault taxonomy folder for a well-behaved note rather than the " +
-              "vault root. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path " +
-              "escape, 'is-dir', 'hard-link' if the overwrite target is a hard link to another file, " +
-              "'operational-dir' if this project's vault points at Loom's own home " +
-              "directory, 'error'). There is no delete — this tool only ever creates or overwrites.",
+              "vault root. Returns { ok:true, committed, committedBlockedReason? } or { ok:false, reason } " +
+              "('traversal' on a path escape, 'is-dir', 'hard-link' if the overwrite target is a hard link " +
+              "to another file, 'operational-dir' if this project's vault points at Loom's own home " +
+              "directory, 'error'). The file write always lands on disk when ok:true; " +
+              "committed:false with committedBlockedReason:'code-repo-collision' means this project's vault " +
+              "is configured on top of a registered code repo — fix the project's vaultPath/repoPath " +
+              "pairing rather than retrying; 'paused' means an advisory auto-commit pause lease is " +
+              "currently held — it commits on the NEXT CHANGE to this vault after the lease lifts, not " +
+              "automatically the instant the lease expires. Either way the write succeeded but was NOT " +
+              "committed. There is no delete — this tool only ever creates or overwrites.",
             inputSchema: strictShape({ path: z.string(), content: z.string() }),
           },
           async ({ path: relPath, content }) => {

@@ -1904,6 +1904,10 @@ export type OrchestrationEventKind =
   // specifically BECAUSE revocation is decoupled from that session's own row, so its absence must never
   // block the audit write.
   | "credential_revoked"
+  // @decision a09b81a0 — the vault auto-committer refused to commit a resolved repo root that canonically
+  //  collides with a registered project's own code repo (see the decision record for the full predicate).
+  //  `detail`: { projectId?, vaultPath, commitPath, collidesWithProjectId, collidesWithRepoPath, source }.
+  | "vault_autocommit_refused_code_repo"
   // Card 4b2e0146 — a `recycleManager`/`resume` fresh-spawn refused by `managerSessionBarredFrom`
   // (agents/clone-core.ts): the project's repoPath became reserved/an operational-home ancestor (e.g. a
   // repoPath rebind) while a manager session already existed there. Filed under the REFUSED session's
@@ -1975,6 +1979,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
   credential_revoked: true,
+  vault_autocommit_refused_code_repo: true,
   credential_undeliverable: true,
   worker_retired: true,
   worker_retirement_lifted: true,

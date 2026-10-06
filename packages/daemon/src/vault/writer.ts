@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { commitVault, isOperationalVaultDir } from "./versioner.js";
+import { commitVault, isOperationalVaultDir, type CommitVaultResult } from "./versioner.js";
 
 // Sibling to browser.ts: the WRITE side of the vault. Every operation is confined to the
 // project's vault dir by a mandatory path-traversal guard (see resolveInVault), and on success
@@ -13,7 +13,13 @@ import { commitVault, isOperationalVaultDir } from "./versioner.js";
 // confined to the project's own vault root via resolveInVault, same as every other caller.
 
 export type VaultWriteOutcome =
-  | { ok: true; committed: boolean }
+  // `committedBlockedReason` (card a09b81a0) is present ONLY when `committed:false` because commitVault
+  // refused on a code-repo collision, or (round 4) backed off because an advisory pause lease is held —
+  // distinct from every OTHER silent `committed:false` backoff (an ordinary no-op, quarantined,
+  // externally-managed), which carry no reason, unchanged. The write to disk already succeeded by the time
+  // this is returned — `ok` stays true; only the COMMIT was blocked. A `"paused"` write is NOT lost: it
+  // sits uncommitted on disk until a later auto-commit tick (once the lease lifts) commits it.
+  | { ok: true; committed: boolean; committedBlockedReason?: "code-repo-collision" | "paused" }
   | { ok: false; reason: "traversal" | "exists" | "not-found" | "is-dir" | "error" | "operational-dir" | "hard-link" };
 
 /** @decision b2fde796 — `O_NOFOLLOW` is POSIX-only (Node's `fs.constants` omits it on win32, confirmed
@@ -189,6 +195,17 @@ export function ensureVaultRoot(vaultPath: string): void {
   try { fs.mkdirSync(vaultPath, { recursive: true }); } catch { /* best-effort — vault_write surfaces real errors */ }
 }
 
+/** Shared `commitVault(...)` → `VaultWriteOutcome`'s `ok:true` arm mapping for the three writers below —
+ *  one place, so the `committedBlockedReason` surfacing (card a09b81a0) can't drift between them. A
+ *  `commitVault` rejection (a bound-timeout rethrow — see that function's own doc) degrades to the same
+ *  `committed:false`, no-reason shape every other silent backoff already gets. */
+async function commitAndReportOutcome(vaultPath: string, message: string): Promise<VaultWriteOutcome> {
+  const result = await commitVault(vaultPath, message).catch((): CommitVaultResult => ({ committed: false }));
+  return result.blockedReason
+    ? { ok: true, committed: result.committed, committedBlockedReason: result.blockedReason }
+    : { ok: true, committed: result.committed };
+}
+
 /**
  * Write (create or overwrite) a file's text content within the vault, then commit.
  *
@@ -231,8 +248,7 @@ export async function writeVaultFile(vaultPath: string, relPath: string, content
     const code = (err as NodeJS.ErrnoException)?.code;
     return { ok: false, reason: code === "ELOOP" ? "traversal" : "error" };
   }
-  const committed = await commitVault(vaultPath, `loom: write ${relPath} (via UI)`).catch(() => false);
-  return { ok: true, committed };
+  return commitAndReportOutcome(vaultPath, `loom: write ${relPath} (via UI)`);
 }
 
 /** Create a NEW file (fails if it already exists), then commit. */
@@ -245,8 +261,7 @@ export async function createVaultFile(vaultPath: string, relPath: string, conten
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content, { encoding: "utf8", flag: "wx" }); // wx: fail if exists (race-safe)
   } catch { return { ok: false, reason: "error" }; }
-  const committed = await commitVault(vaultPath, `loom: create ${relPath} (via UI)`).catch(() => false);
-  return { ok: true, committed };
+  return commitAndReportOutcome(vaultPath, `loom: create ${relPath} (via UI)`);
 }
 
 /**
@@ -270,6 +285,5 @@ export async function deleteVaultFile(vaultPath: string, relPath: string): Promi
     // some older semantics); using it unconditionally here makes that non-following intent explicit.
     fs.unlinkSync(target);
   } catch { return { ok: false, reason: "error" }; }
-  const committed = await commitVault(vaultPath, `loom: delete ${relPath} (via UI)`).catch(() => false);
-  return { ok: true, committed };
+  return commitAndReportOutcome(vaultPath, `loom: delete ${relPath} (via UI)`);
 }

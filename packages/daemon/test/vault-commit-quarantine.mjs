@@ -56,12 +56,12 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
   fs.writeFileSync(path.join(repo, "note.md"), "# note 1\n");
   enterMergeQuarantine(repo, "some-branch", "test: simulated quarantine, vault IS the repo root");
   const resultWhileQuarantined = await commitVault(repo, "loom: should be skipped");
-  check("[1] commitVault() SKIPS (returns false) while the repo is quarantined", resultWhileQuarantined === false);
+  check("[1] commitVault() SKIPS (returns false) while the repo is quarantined", resultWhileQuarantined.committed === false);
   check("[1] nothing was actually committed while quarantined", commitCount(git) === 1);
 
   clearMergeQuarantine(repo);
   const resultAfterClear = await commitVault(repo, "loom: should land now");
-  check("[1] commitVault() succeeds once the quarantine clears", resultAfterClear === true);
+  check("[1] commitVault() succeeds once the quarantine clears", resultAfterClear.committed === true);
   check("[1] the commit actually landed", commitCount(git) === 2 && git("log", "--oneline").includes("should land now"));
 }
 
@@ -104,14 +104,14 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
   const trailingSepVariant = repo + path.sep;
   enterMergeQuarantine(trailingSepVariant, "some-branch", "test: quarantine raised with a TRAILING SEPARATOR variant");
   const resultTrailingSep = await commitVault(repo, "loom: should be skipped (trailing sep variant)");
-  check("[3] a trailing-separator spelling variant still matches (commitVault skips)", resultTrailingSep === false);
+  check("[3] a trailing-separator spelling variant still matches (commitVault skips)", resultTrailingSep.committed === false);
   check("[3] trailing-separator variant: nothing committed", commitCount(git) === 1);
   clearMergeQuarantine(trailingSepVariant);
 
   const forwardSlashVariant = repo.replace(/\\/g, "/");
   enterMergeQuarantine(forwardSlashVariant, "some-branch", "test: quarantine raised with a FORWARD-SLASH variant");
   const resultForwardSlash = await commitVault(repo, "loom: should be skipped (forward-slash variant)");
-  check("[3] a forward-slash spelling variant still matches (commitVault skips)", resultForwardSlash === false);
+  check("[3] a forward-slash spelling variant still matches (commitVault skips)", resultForwardSlash.committed === false);
   check("[3] forward-slash variant: nothing committed", commitCount(git) === 1);
   clearMergeQuarantine(forwardSlashVariant);
 
@@ -120,7 +120,7 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
     const caseVariant = (driveLetter === driveLetter.toUpperCase() ? driveLetter.toLowerCase() : driveLetter.toUpperCase()) + repo.slice(1);
     enterMergeQuarantine(caseVariant, "some-branch", "test: quarantine raised with a drive-letter CASE variant");
     const resultCase = await commitVault(repo, "loom: should be skipped (case variant)");
-    check("[3] a drive-letter case variant still matches (commitVault skips, win32-only)", resultCase === false);
+    check("[3] a drive-letter case variant still matches (commitVault skips, win32-only)", resultCase.committed === false);
     check("[3] case variant: nothing committed", commitCount(git) === 1);
     clearMergeQuarantine(caseVariant);
   } else {
@@ -130,7 +130,7 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
   // Confirm the repo is genuinely clear now and a normal commit lands (negative control — proves [3]'s
   // skips above were the quarantine, not some unrelated breakage).
   const resultAfterAllClears = await commitVault(repo, "loom: should land now");
-  check("[3] once every variant is cleared, commitVault() succeeds normally", resultAfterAllClears === true);
+  check("[3] once every variant is cleared, commitVault() succeeds normally", resultAfterAllClears.committed === true);
   check("[3] the commit actually landed", commitCount(git) === 2);
 }
 
@@ -170,7 +170,7 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
   // assembly or a merge) quarantining the SAME canonical repo via a completely different code path.
   enterMergeQuarantine(repo, "merge-batch-branch", "test: quarantine raised by a NON-GitWriter path, no pause lease held");
   const result = await commitVault(repo, "loom: must be skipped — this is the real wiring gap");
-  check("[5] NEGATIVE CONTROL: commitVault SKIPS a quarantine raised with no pause lease ever held (the real gap this card fixes)", result === false);
+  check("[5] NEGATIVE CONTROL: commitVault SKIPS a quarantine raised with no pause lease ever held (the real gap this card fixes)", result.committed === false);
   check("[5] NEGATIVE CONTROL: nothing committed", commitCount(git) === 1);
   clearMergeQuarantine(repo);
 }
@@ -196,7 +196,7 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
   } finally {
     console.warn = origWarn;
   }
-  check("[6] commitVault still SUCCEEDS despite pre-existing residue (logged, never refused)", result === true);
+  check("[6] commitVault still SUCCEEDS despite pre-existing residue (logged, never refused)", result.committed === true);
   check("[6] both files actually landed in the commit", git("show", "--stat", "HEAD").includes("orphaned.md") && git("show", "--stat", "HEAD").includes("intended.md"));
   check("[6] a [vault-versioner] warning names the pre-existing residue file", warnings.some((w) => w.includes("[vault-versioner]") && w.includes("orphaned.md") && w.includes("already")));
 }
@@ -238,7 +238,7 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
 
   const result = await commitVault(repo, "loom: must be skipped — quarantine appeared mid-call", { deps: { gitFactory: midCallQuarantineGitFactory } });
   check("[7] precondition: the mid-call quarantine injection actually fired", quarantineRaisedMidCall === true);
-  check("[7] commitVault SKIPS when the quarantine appears mid-call, AFTER the first check already passed (pins the RE-CHECK)", result === false);
+  check("[7] commitVault SKIPS when the quarantine appears mid-call, AFTER the first check already passed (pins the RE-CHECK)", result.committed === false);
   check("[7] nothing committed despite the mid-call quarantine", commitCount(git) === 1);
   clearMergeQuarantine(repo);
 }
@@ -258,13 +258,13 @@ const root = fs.realpathSync(mkdtempManaged("loom-vault-quarantine-"));
 
   enterMergeQuarantine(repo, "some-branch", "test: quarantine raised BEFORE the call — pins the FIRST check");
   const result = await commitVault(repo, "loom: should be skipped (pins the first check)");
-  check("[8] commitVault() SKIPS while quarantined (pre-call)", result === false);
+  check("[8] commitVault() SKIPS while quarantined (pre-call)", result.committed === false);
   check("[8] the index is UNTOUCHED — `git add .` never ran (pins the FIRST check, not just the re-check)", git("diff", "--cached", "--name-only").trim() === "");
   check("[8] nothing committed", commitCount(git) === 1);
 
   clearMergeQuarantine(repo);
   const resultAfterClear = await commitVault(repo, "loom: should land now (after the first-check pin test)");
-  check("[8] commitVault() succeeds once the quarantine clears", resultAfterClear === true);
+  check("[8] commitVault() succeeds once the quarantine clears", resultAfterClear.committed === true);
   check("[8] the commit actually landed", commitCount(git) === 2);
 }
 

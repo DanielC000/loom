@@ -128,6 +128,22 @@ failure mode is a harmless stray lease file in the unrelated repo's `.git`, neve
 repo's own history. The common, realistic case this card targets — a subdir genuinely inside the SAME
 physical repo as its vault's toplevel — is unaffected and is what this walk is for.
 
+### Consequence for a09b81a0's `isCommitPathMergeEligible` (vault/versioner.ts)
+
+That function decides whether the vault auto-committer must take `withCanonicalIndexLock` before
+committing — i.e. whether a real merge for some registered project could also target the exact same
+physical repo. It matches EXACT `canonicalRepoLockKey` equality only, deliberately never at-or-under (see
+its own doc for why at-or-under would reopen the monorepo-subdir danger `isCanonicallyAtOrUnder`'s
+collision match exists to catch). Before this card, that exact-match check had a known gap: a project
+bound to a SUBDIRECTORY of a repo with no `.git` of its own (real specimen, "P&C Oslo Case Study" — bound
+inside the shared Obsidian vault, not at the vault's own root) computed a DIFFERENT `canonicalRepoLockKey`
+than the vault root's own, so the lock never fired for that shape even though both are the same physical
+`.git` index. This card's toplevel-walk key closes that gap by construction: both now resolve to the same
+nearest-`.git` ancestor, so the exact-match check (and the lock it gates) correctly fires. No code change
+was needed in `isCommitPathMergeEligible` itself — only its own doc comment, which used to describe this
+as a known, unclosed gap and now points here instead. Verified: a synthetic repo-root + no-`.git` subdir
+fixture resolves to the identical key via `canonicalRepoLockKey`.
+
 ## Do not
 
 - Do not make `canonicalRepoLockKey`/`resolveGitToplevelSync` async, or thread a `git rev-parse
@@ -157,6 +173,7 @@ physical repo as its vault's toplevel — is unaffected and is what this walk is
 ## Source
 
 `git/repo-lock.ts` (`resolveGitToplevelSync`/`isRepoPathCurrentlyResolvable`/`canonicalRepoLockKey`),
-`vault/versioner.ts` (`resolveLeaseGitDir`, routed through the same walk), `git/merge-quarantine.ts`
+`vault/versioner.ts` (`resolveLeaseGitDir`, routed through the same walk; `isCommitPathMergeEligible`,
+whose exact-match check now covers the subdir-bound shape by construction), `git/merge-quarantine.ts`
 (`MergeQuarantineEntry.resolvedKey`, `legacyQuarantineHashFor`, `armQuarantineKey`/
 `unionQuarantineEntries`, `reenterMergeQuarantinesAtBoot`'s PASS 1/1b).
