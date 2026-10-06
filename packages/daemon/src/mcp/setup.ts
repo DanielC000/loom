@@ -11,6 +11,7 @@ import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
+import { recordProfileGrantReach, grantFieldsOf, setupVisibleGrantReach } from "../profiles/grantReach.js";
 import { reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -734,7 +735,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker or null ONLY — a patch that yields any other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup) is rejected (human-only). LEAST-PRIVILEGE: REJECTED outright, before the patch is even validated, when the profile's CURRENT (pre-patch) role is anything but manager/worker/null — this includes the Setup Assistant's own rig, so this surface can never self-modify, and closes a patch that clears `role` to null in the SAME call that also strips another field (e.g. a Companion's restrictedTools), which would otherwise pass the resolved-role check below. A `role` CHANGE is ALSO REJECTED outright if the stored profile carries any human-set AGENT_FORBIDDEN_PROFILE_KEYS-class capability (card 05153988) — e.g. flipping a QA-Tester-shaped worker rig's human-set browserTesting to \"manager\" is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker or null ONLY — a patch that yields any other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup) is rejected (human-only). LEAST-PRIVILEGE: REJECTED outright, before the patch is even validated, when the profile's CURRENT (pre-patch) role is anything but manager/worker/null — this includes the Setup Assistant's own rig, so this surface can never self-modify, and closes a patch that clears `role` to null in the SAME call that also strips another field (e.g. a Companion's restrictedTools), which would otherwise pass the resolved-role check below. A `role` CHANGE is ALSO REJECTED outright if the stored profile carries any human-set AGENT_FORBIDDEN_PROFILE_KEYS-class capability (card 05153988) — e.g. flipping a QA-Tester-shaped worker rig's human-set browserTesting to \"manager\" is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged. BLAST-RADIUS SIGNAL (card be447b3f): a `role` CHANGE, or flipping `restrictedTools` false (removing a rig's tool restriction), on a profile that already has bound agents reaches each of them on their NEXT session — the response then carries a `grantReach` field ({addedKeys, agentCount, agents[], roleChange?}) naming exactly who. RELAY THIS to whoever asked for the change before treating the edit as routine, the same way you would surface any other newly-widened trust boundary — there is no human-facing confirm on this surface, so your relay is the only signal. `agents[]` here is narrowed to LIVE projects only (this surface's other reads already exclude archived ones) — `agentCount` stays the true total regardless.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
@@ -780,7 +781,23 @@ export class SetupMcpRouter {
           }
         }
         db.updateProfile(profileId, v.value);
-        return ok(profileFields(db.getProfile(profileId)));
+        // Blast radius (card be447b3f, extending 3c4e0df6 to this agent-facing surface): this tool can
+        // flip restrictedTools (false<-true: see the field's own decision 8c27ae8e) or change role on a
+        // profile already bound to agents, and unlike the Profiles editor's Save button this surface has
+        // no pre-save confirm to show — the durable event is the ONLY signal a human gets. Computed from
+        // the PRE-patch row (`existing`) against the merged result, same shape as every other write path.
+        const grantReach = recordProfileGrantReach(db, {
+          profileId, profileName: v.value.name,
+          before: grantFieldsOf(existing), after: grantFieldsOf(v.value), source: "setup",
+        });
+        const fields = profileFields(db.getProfile(profileId))!;
+        if (!grantReach) return ok(fields);
+        // This router's own visibility, not the durable event: the setup operator can't see an archived
+        // project any other way (list_all_projects/list_all_agents already exclude them), so an
+        // archived-project agent/project name is filtered from the RESPONSE only — agentCount stays the
+        // true total, and the event just filed above already carries the unfiltered reach.
+        const liveProjectIds = new Set(db.listAllProjects().map((p) => p.id));
+        return ok({ ...fields, grantReach: setupVisibleGrantReach(grantReach, liveProjectIds) });
       },
     );
 

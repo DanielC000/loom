@@ -526,10 +526,11 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     if (delta.has("connections")) patch.connections = sent.connections;
     if (delta.has("capabilities")) patch.capabilities = sent.capabilities;
 
-    // Card 3c4e0df6. Profiles are GLOBAL, so a human-only grant added here reaches every agent already
-    // bound to this rig, in every project — a trust boundary the human should see BEFORE it takes
-    // effect, not discover afterwards. Computed from the STORED row against what this save would land,
-    // by the same `@loom/shared` helpers the daemon uses on its side to record the audit event.
+    // Card 3c4e0df6 (grants) + be447b3f (role change / restrictedTools relaxing). Profiles are GLOBAL, so
+    // a widening here reaches every agent already bound to this rig, in every project — a trust boundary
+    // the human should see BEFORE it takes effect, not discover afterwards. Computed from the STORED row
+    // against what this save would land, by the same `@loom/shared` helpers the daemon uses on its side
+    // to record the audit event.
     const plan = planGrantSave(grantFieldsOfProfile(profile), grantFieldsOfValues(sent), profile.id, boundAgents);
     if (plan.kind !== "save") { setPendingGrant({ patch, plan }); return; }
     onSave(patch);

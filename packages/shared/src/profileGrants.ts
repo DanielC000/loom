@@ -40,6 +40,21 @@ export type AgentForbiddenProfileKey = (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[num
 /** The slice of a Profile the grant-reach computation reads — nothing else is consulted. */
 export type ProfileGrantFields = Pick<Profile, AgentForbiddenProfileKey>;
 
+/**
+ * `role` and `restrictedTools` widen what a profile's ALREADY-bound agents can do — same blast-radius
+ * shape as an `AGENT_FORBIDDEN_PROFILE_KEYS` grant — but neither CONFERS a capability: a role selects
+ * which orchestration surface a spawn gets, and restrictedTools only restricts/relaxes an already-
+ * available native tool set.
+ *
+ * @decision be447b3f — a SEPARATE, superset key for the reach/audit computation only; must never be read
+ * as "these two are now human-only too". Neither belongs in `AGENT_FORBIDDEN_PROFILE_KEYS`; both stay
+ * agent-writable by design, per decision 8c27ae8e.
+ */
+export type ProfileWideningKey = AgentForbiddenProfileKey | "role" | "restrictedTools";
+
+/** The slice of a Profile the WIDENING computation reads: every grant field, plus `role`/`restrictedTools`. */
+export type ProfileWideningFields = ProfileGrantFields & Pick<Profile, "role" | "restrictedTools">;
+
 /** One agent a profile grant already reaches, with the project it lives in (for a "Project / Agent" label). */
 export interface BoundAgentRef {
   id: string;
@@ -115,6 +130,44 @@ export function addedProfileGrants(
 }
 
 /**
+ * Per-key "did this edit widen reach" predicate for `role`/`restrictedTools` — the two keys `addedProfileGrants`
+ * deliberately does not cover (card `be447b3f`). Kept as its own exhaustive Record, same posture as
+ * `GRANT_ADDED`, so a key added here later cannot silently go unchecked.
+ *
+ * `role`: ANY change is reportable, not only an "escalating" one — this computation does not judge which
+ * direction is safe (that would need its own, separately-reviewed ordering over the role enum); it reports
+ * the same way a grant addition does, and leaves the judgment to the reader.
+ *
+ * `restrictedTools`: INVERTED relative to a boolean grant like `vaultWrite` — this field RESTRICTS rather
+ * than grants, so the widening direction is true→false (removing the restriction reaches every bound
+ * agent with a less-restricted tool surface); false→true is a narrowing, never reported.
+ *
+ * @decision 8c27ae8e — restrictedTools stays agent-writable by design (it only restricts, never grants).
+ */
+const WIDENING_ADDED: Record<"role" | "restrictedTools", (before: ProfileWideningFields, after: ProfileWideningFields) => boolean> = {
+  role: (b, a) => (b.role ?? null) !== (a.role ?? null),
+  restrictedTools: (b, a) => !!b.restrictedTools && !a.restrictedTools,
+};
+
+/**
+ * The superset of {@link addedProfileGrants} that also reports `role`/`restrictedTools` widening — the
+ * ONE computation the reach/audit machinery (planner + `recordProfileGrantReach`) calls. `addedProfileGrants`
+ * itself is UNCHANGED and still the right call for anything that only cares about `AGENT_FORBIDDEN_PROFILE_KEYS`
+ * grants (e.g. `roleChangeCapabilityCarryoverError`'s carry-over check) — this is a strict superset, in a
+ * fixed order: every grant key first (in `AGENT_FORBIDDEN_PROFILE_KEYS` order), then "role", then
+ * "restrictedTools".
+ */
+export function profileWideningsOf(
+  before: ProfileWideningFields,
+  after: ProfileWideningFields,
+): ProfileWideningKey[] {
+  const keys: ProfileWideningKey[] = [...addedProfileGrants(before, after)];
+  if (WIDENING_ADDED.role(before, after)) keys.push("role");
+  if (WIDENING_ADDED.restrictedTools(before, after)) keys.push("restrictedTools");
+  return keys;
+}
+
+/**
  * The agents a profile grant already reaches: every agent bound to `profileId`, across every project.
  *
  * ⚠️ `agent.profileId` is the WHOLE binding surface — verified at source (card `3c4e0df6`): `profile_id`
@@ -132,18 +185,23 @@ export function agentsBoundToProfile(agents: readonly AgentListItem[], profileId
 }
 
 /**
- * The reach of a grant, as both the UI preview and the durable audit record carry it.
+ * The reach of a grant (or a role/restrictedTools widening — card `be447b3f`), as both the UI preview and
+ * the durable audit record carry it.
  *
  * `agents` is CAPPED at {@link GRANT_REACH_AGENTS_CAP} with `truncated: true`; `agentCount` is always the
  * true total. A profile bound to hundreds of agents must not bloat an append-only event row, and a reader
  * deriving "how many" must never get the capped length by mistake — hence a separate count field rather
  * than `agents.length`.
+ *
+ * `roleChange` is present ONLY when `"role"` is one of `addedKeys` — a bare key name can't carry a
+ * from/to VALUE the way a boolean grant key doesn't need to.
  */
 export interface ProfileGrantReach {
-  addedKeys: AgentForbiddenProfileKey[];
+  addedKeys: ProfileWideningKey[];
   agentCount: number;
   agents: BoundAgentRef[];
   truncated?: true;
+  roleChange?: { from: string | null; to: string | null };
 }
 
 /** How many bound agents a reach payload lists before truncating. `agentCount` stays exact regardless. */
@@ -151,8 +209,9 @@ export const GRANT_REACH_AGENTS_CAP = 50;
 
 /** Build the capped reach payload from a full bound-agent list. */
 export function profileGrantReachOf(
-  addedKeys: AgentForbiddenProfileKey[],
+  addedKeys: ProfileWideningKey[],
   bound: BoundAgentRef[],
+  roleChange?: { from: string | null; to: string | null },
 ): ProfileGrantReach {
   const truncated = bound.length > GRANT_REACH_AGENTS_CAP;
   return {
@@ -160,6 +219,7 @@ export function profileGrantReachOf(
     agentCount: bound.length,
     agents: truncated ? bound.slice(0, GRANT_REACH_AGENTS_CAP) : bound,
     ...(truncated ? { truncated: true as const } : {}),
+    ...(roleChange ? { roleChange } : {}),
   };
 }
 
@@ -172,4 +232,16 @@ export const AGENT_FORBIDDEN_PROFILE_KEY_LABELS: Record<AgentForbiddenProfileKey
   browserTesting: "browser testing",
   documentConversion: "document conversion",
   allowDelta: "permission allowlist delta",
+};
+
+/**
+ * The superset of {@link AGENT_FORBIDDEN_PROFILE_KEY_LABELS} for the widening computation (card
+ * `be447b3f`) — adds the two non-grant keys {@link profileWideningsOf} can also name. Kept as its own
+ * export, never merged into the grant-only map above: that map's keys are, by construction, exactly
+ * `AGENT_FORBIDDEN_PROFILE_KEYS` (several call sites rely on that exact correspondence).
+ */
+export const PROFILE_WIDENING_KEY_LABELS: Record<ProfileWideningKey, string> = {
+  ...AGENT_FORBIDDEN_PROFILE_KEY_LABELS,
+  role: "a role change",
+  restrictedTools: "unrestricted tool access",
 };

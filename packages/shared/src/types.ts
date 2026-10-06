@@ -1848,11 +1848,19 @@ export type OrchestrationEventKind =
   // Card 3c4e0df6: a HUMAN added a human-only grant (an `AGENT_FORBIDDEN_PROFILE_KEYS` member) to a
   // GLOBAL Profile, reaching every agent already bound to it in every project. The Profiles UI confirms
   // before saving; this row is the backstop for a REST-only save, which cannot be prompted.
-  // `detail`: {profileId, profileName, addedKeys, agentCount, agents[], truncated?, source} — `source`
-  // is "rest" | "adopt" | "reset". `agents` is CAPPED (GRANT_REACH_AGENTS_CAP); `agentCount` is always
-  // the true total, so derive "how many" from it and NEVER from `agents.length`.
-  // Filed on EVERY added grant, `agentCount: 0` included (it records the GRANT; reach is a field on it)
-  // — so an absent row means no grant was added, never "added but reached nobody".
+  // Card be447b3f widens this to two non-grant keys that widen reach the same way without CONFERRING a
+  // capability: a `role` CHANGE, and `restrictedTools` RELAXING (true->false) — reported via the SAME
+  // `profileWideningsOf` computation, the same event kind, never a sibling kind.
+  // `detail`: {profileId, profileName, addedKeys, agentCount, agents[], truncated?, source, roleChange?}
+  // — `addedKeys` is `ProfileWideningKey[]` (every `AGENT_FORBIDDEN_PROFILE_KEYS` member, plus "role" and
+  // "restrictedTools"); `roleChange: {from,to}` is present only when "role" is one of `addedKeys`.
+  // `source` is "rest" | "adopt" | "reset" | "setup" | "platform" — the last two are the Setup
+  // Assistant's and the Platform Lead's own agent-facing `profile_update` MCP tools, where this durable
+  // event is the ONLY signal a human gets (neither surface can show an interactive pre-save confirm).
+  // `agents` is CAPPED (GRANT_REACH_AGENTS_CAP); `agentCount` is always the true total, so derive "how
+  // many" from it and NEVER from `agents.length`.
+  // Filed on EVERY widening, `agentCount: 0` included (it records the WIDENING; reach is a field on it)
+  // — so an absent row means nothing was widened, never "widened but reached nobody".
   // `managerSessionId: ""` (the vault_index_lock_stale sentinel): a Profile is GLOBAL, so there is no
   // owning session and no single projectId to stamp — which is why it is deliberately NOT in
   // DURABLE_AUDIT_EVENT_KINDS, whose own comment forbids adding a kind without that stamp. It needs no

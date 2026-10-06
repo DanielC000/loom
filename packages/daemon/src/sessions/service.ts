@@ -9,12 +9,14 @@ import {
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type MergeGateAgentView, type MergeGateStatus, type CompanionRoute, type ProjectMemoryEntry,
+  type ProfileGrantReach,
 } from "@loom/shared";
 // Card 66b1b40d: its own statement (not folded into the import above). orchestration-mcp-role-guard.mjs now matches the
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
+import { recordProfileDeleteGrantReach } from "../profiles/grantReach.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
@@ -14883,10 +14885,15 @@ export class SessionService {
    * projects — archived is a soft, RESTORABLE state (not gone), so an agent in an archived foreign
    * project still counts as an external reference; skipping it would let a manager delete a rig that
    * silently dangles the instant that project is restored.
+   *
+   * @decision be447b3f — deletion is itself a widening write path, routed through the SHARED
+   * recordProfileDeleteGrantReach helper (profiles/grantReach.ts) alongside the platform profile_delete
+   * tool and the human REST route, so this surface can never drift from either of them.
    */
-  deleteProfileAsManager(managerSessionId: string, profileId: string): { deleted: true; profileId: string } {
+  deleteProfileAsManager(managerSessionId: string, profileId: string): { deleted: true; profileId: string; grantReach?: ProfileGrantReach } {
     this.requireManager(managerSessionId, "profile_delete");
-    if (!this.db.getProfile(profileId)) throw new Error("profile not found");
+    const existing = this.db.getProfile(profileId);
+    if (!existing) throw new Error("profile not found");
     const ownProjectId = this.db.getSession(managerSessionId)?.projectId;
     if (!ownProjectId) throw new Error("no project for this session");
     const external = [...this.db.listAllProjects(), ...this.db.listArchivedProjects()]
@@ -14897,8 +14904,9 @@ export class SessionService {
       throw new Error(`profile_delete: profile is still referenced by agents outside your project — ${blockers}`);
     }
     this.db.deleteProfile(profileId);
-    this.auditManage(managerSessionId, "profile_delete", { profileId });
-    return { deleted: true, profileId };
+    const grantReach = recordProfileDeleteGrantReach(this.db, { profileId, existing, source: "manager" });
+    this.auditManage(managerSessionId, "profile_delete", grantReach ? { profileId, grantReach } : { profileId });
+    return grantReach ? { deleted: true, profileId, grantReach } : { deleted: true, profileId };
   }
 
   /**

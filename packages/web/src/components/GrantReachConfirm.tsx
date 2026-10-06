@@ -47,6 +47,15 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
         )}
       </p>
 
+      {/* Role carries a from/to VALUE a bare key name can't express (card be447b3f) — shown as its own
+          line rather than folded into grantKeyList's prose clause. */}
+      {plan.roleChange && (
+        <p data-testid="grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: color.text }}>
+          Role changes from <strong style={{ color: color.amber }}>{plan.roleChange.from ?? "none"}</strong>
+          {" "}to <strong style={{ color: color.amber }}>{plan.roleChange.to ?? "none"}</strong>.
+        </p>
+      )}
+
       {!unknown && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <SectionLabel>Already bound</SectionLabel>

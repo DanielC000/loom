@@ -1,17 +1,25 @@
 import { randomUUID } from "node:crypto";
 import {
-  addedProfileGrants,
   agentsBoundToProfile,
   profileGrantReachOf,
+  profileWideningsOf,
+  resolveProfile,
   type AgentListItem,
-  type ProfileGrantFields,
+  type ProfileWideningFields,
   type ProfileGrantReach,
 } from "@loom/shared";
 
 /**
- * Blast-radius audit for a HUMAN grant onto a GLOBAL Profile: which agents, in which projects, are
- * already bound to it. The Profiles editor confirms this before the save; this is the backstop for a
- * REST-only caller, which cannot be prompted.
+ * Blast-radius audit for a HUMAN grant, or a role/restrictedTools widening (card `be447b3f`), onto a
+ * GLOBAL Profile: which agents, in which projects, are already bound to it. The Profiles editor confirms
+ * a grant before the save (role/restrictedTools have no editor confirm yet — see that card); this is the
+ * backstop for every profile update/delete write path, including the ones that can never be prompted:
+ * REST, the two agent-facing `profile_update` MCP tools, and all THREE `profile_delete` write paths —
+ * platform, an agent manager's own tool, and the human REST route — which all route through the ONE
+ * shared {@link recordProfileDeleteGrantReach} (built on {@link PROFILE_DELETE_BACKSTOP_FIELDS}) so a
+ * fourth can never drift from the other three. An agent REBIND (`agent_update`/`profile_assign` widening
+ * what a single already-bound agent's profile reaches) is accepted OUT of scope here and tracked on its
+ * own card (`8b236b22`) — see `be447b3f`'s own decision record for why.
  *
  * @decision 3c4e0df6 — a grant reaches each bound agent's NEXT session, never its live ones, so never
  * write copy implying a retroactive grant; and `agent.profileId` is the whole binding surface — never
@@ -30,19 +38,27 @@ export interface GrantReachDbStore {
   }): unknown;
 }
 
-/** Which human write path granted this — carried on the event so an auditor can tell a deliberate
- *  editor save apart from a grant pulled in by adopting or resetting to shipped bundled fields. */
-export type GrantReachSource = "rest" | "adopt" | "reset";
+/**
+ * Which write path produced this — carried on the event so an auditor can tell a deliberate editor save
+ * apart from a grant pulled in by adopting/resetting to shipped bundled fields, or a role/restrictedTools
+ * widening landed via the Setup Assistant's or the Platform Lead's own `profile_update` MCP tool (card
+ * `be447b3f`) — the two surfaces where this durable event is the ONLY signal a human gets, since neither
+ * can be interactively confirmed the way the editor's save button can. `"manager"` (round 3) is an agent
+ * manager's OWN `profile_delete` tool — the third of three delete paths that now all route through
+ * {@link recordProfileDeleteGrantReach}, alongside `"platform"`'s and REST's.
+ */
+export type GrantReachSource = "rest" | "adopt" | "reset" | "setup" | "platform" | "manager";
 
 /**
- * Compute the reach of a profile save and, when it added at least one human-only grant, file the audit
- * event. Returns the reach payload for the caller's own response, or `null` when the save granted
- * nothing new — a rename, a description edit, a grant being REMOVED, or a re-save of grants already
- * present all return null and file nothing, which is what makes an absent row mean "no grant added".
+ * Compute the reach of a profile save and, when it widened trust (a human-only grant, a role change, or
+ * restrictedTools relaxing — {@link profileWideningsOf}), file the audit event. Returns the reach payload
+ * for the caller's own response, or `null` when the save widened nothing — a rename, a description edit,
+ * a grant/role being REVERTED, or a re-save of values already there all return null and file nothing,
+ * which is what makes an absent row mean "nothing was widened".
  *
- * Filed even when `agentCount` is 0: the row records the GRANT, and the reach is a field on it. An absent
- * row therefore never has to be disambiguated between "nothing was granted" and "something was granted
- * but happened to reach nobody".
+ * Filed even when `agentCount` is 0: the row records the WIDENING, and the reach is a field on it. An
+ * absent row therefore never has to be disambiguated between "nothing widened" and "something widened but
+ * happened to reach nobody".
  *
  * Best-effort on the audit write ONLY — a failed append must never turn a legitimate, already-persisted
  * profile save into a 500. The reach is still returned to the caller in that case, so the response half
@@ -53,18 +69,21 @@ export function recordProfileGrantReach(
   args: {
     profileId: string;
     profileName: string;
-    before: ProfileGrantFields;
-    after: ProfileGrantFields;
+    before: ProfileWideningFields;
+    after: ProfileWideningFields;
     source: GrantReachSource;
   },
 ): ProfileGrantReach | null {
-  const addedKeys = addedProfileGrants(args.before, args.after);
+  const addedKeys = profileWideningsOf(args.before, args.after);
   if (addedKeys.length === 0) return null;
 
   // `agent.profileId` is the WHOLE binding surface — see `agentsBoundToProfile`'s own doc for the
   // source-level verification, and for why a pending-binding row is NOT a binding.
   const bound = agentsBoundToProfile(db.listAllAgents(), args.profileId);
-  const reach = profileGrantReachOf(addedKeys, bound);
+  const roleChange = addedKeys.includes("role")
+    ? { from: args.before.role ?? null, to: args.after.role ?? null }
+    : undefined;
+  const reach = profileGrantReachOf(addedKeys, bound, roleChange);
 
   try {
     db.appendEvent({
@@ -86,8 +105,54 @@ export function recordProfileGrantReach(
   return reach;
 }
 
-/** Narrow an arbitrary profile-shaped row to just the fields the grant computation reads. */
-export function grantFieldsOf(p: ProfileGrantFields): ProfileGrantFields {
+/**
+ * The {@link ProfileWideningFields} a dangling `agent.profileId` resolves to once its Profile is gone —
+ * DERIVED from `resolveProfile`'s own backstop (`packages/shared/src/config.ts`) rather than restated by
+ * hand (card `be447b3f` round 3: a hand-copied constant is exactly the second-source-of-truth this
+ * project's `CLAUDE.md` warns can drift silently — this round's Minor found no test would have caught
+ * `PROFILE_DELETE_BACKSTOP_FIELDS` going stale against a future backstop change). Deleting a profile is
+ * itself a widening write path for `role`/`restrictedTools` (never for a grant key — every grant backstops
+ * to empty/off, which `profileWideningsOf` only ever reports as a NARROWING) — e.g. deleting a
+ * `restrictedTools:true` profile un-restricts every still-bound agent's next session.
+ *
+ * Only two shape differences exist between `ResolvedProfile` and `ProfileWideningFields`, both translated
+ * here once: `allow` → `allowDelta`, and a backstop `harness:null` → `undefined` (`Profile.harness` is
+ * `"claude" | "codex" | undefined` — never `null`; `isDefaultHarness` treats the two identically).
+ */
+export const PROFILE_DELETE_BACKSTOP_FIELDS: ProfileWideningFields = (() => {
+  const backstop = resolveProfile({ startupPrompt: null }, null);
+  return {
+    connections: backstop.connections,
+    capabilities: backstop.capabilities,
+    vaultWrite: backstop.vaultWrite,
+    harness: backstop.harness ?? undefined,
+    browserTesting: backstop.browserTesting,
+    documentConversion: backstop.documentConversion,
+    allowDelta: backstop.allow,
+    role: backstop.role,
+    restrictedTools: backstop.restrictedTools,
+  };
+})();
+
+/**
+ * The Setup Assistant's OWN view of a `grantReach` payload (card `be447b3f`, MINOR): filters `agents[]`
+ * down to agents in a LIVE project only. The setup operator's other reads (`list_all_projects`/
+ * `list_all_agents`) already exclude archived projects — surfacing an archived-project agent name/project
+ * name here, which `3c4e0df6`'s unfiltered reach does for the Platform Lead by design, would leak
+ * visibility this least-privilege surface has no other route to. `agentCount` is left as the TRUE total
+ * (including any archived-project agents) — only the listed names are narrowed, never the count — and the
+ * durable event this reach was already filed from (`recordProfileGrantReach`, above) is untouched; this
+ * runs ONLY on the response a setup caller sees.
+ */
+export function setupVisibleGrantReach(
+  reach: ProfileGrantReach,
+  liveProjectIds: ReadonlySet<string>,
+): ProfileGrantReach {
+  return { ...reach, agents: reach.agents.filter((a) => liveProjectIds.has(a.projectId)) };
+}
+
+/** Narrow an arbitrary profile-shaped row to just the fields the widening computation reads. */
+export function grantFieldsOf(p: ProfileWideningFields): ProfileWideningFields {
   return {
     connections: p.connections,
     capabilities: p.capabilities,
@@ -96,5 +161,27 @@ export function grantFieldsOf(p: ProfileGrantFields): ProfileGrantFields {
     browserTesting: p.browserTesting,
     documentConversion: p.documentConversion,
     allowDelta: p.allowDelta,
+    role: p.role,
+    restrictedTools: p.restrictedTools,
   };
+}
+
+/**
+ * The SHARED "delete = reach against the backstop" computation (card `be447b3f` round 3) — the one place
+ * every `profile_delete` write path (the platform MCP tool, an agent manager's own MCP tool, and the human
+ * REST route) computes reach, so a future fourth path can never drift by re-deriving its own before/after
+ * pair. Never deletes anything itself — call `db.deleteProfile` separately, in whichever order that path's
+ * own existing logic already uses; this only needs the row as it stood BEFORE deletion.
+ */
+export function recordProfileDeleteGrantReach(
+  db: GrantReachDbStore,
+  args: { profileId: string; existing: { name: string } & ProfileWideningFields; source: GrantReachSource },
+): ProfileGrantReach | null {
+  return recordProfileGrantReach(db, {
+    profileId: args.profileId,
+    profileName: args.existing.name,
+    before: grantFieldsOf(args.existing),
+    after: PROFILE_DELETE_BACKSTOP_FIELDS,
+    source: args.source,
+  });
 }

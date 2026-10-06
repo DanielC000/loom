@@ -33,9 +33,12 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-interface SeededProfile { id: string; name: string; description: string; browserTesting?: boolean; vaultWrite?: boolean }
+interface SeededProfile { id: string; name: string; description: string; browserTesting?: boolean; vaultWrite?: boolean; role?: string | null }
 interface SeededAgent { id: string; projectId: string; name: string; profileId: string | null }
-interface ReachEvent { kind: string; detail?: { profileId?: string; agentCount?: number; addedKeys?: string[]; source?: string } }
+interface ReachEvent {
+  kind: string;
+  detail?: { profileId?: string; agentCount?: number; addedKeys?: string[]; source?: string; roleChange?: { from: string | null; to: string | null } };
+}
 
 const seedProfile = (baseURL: string, name: string) =>
   apiJson<SeededProfile>(`${baseURL}/api/profiles`, { method: "POST", body: JSON.stringify({ name }) });
@@ -80,6 +83,10 @@ const browserToggle = (page: import("@playwright/test").Page) =>
  *  `vault_write` tool, so a hasText locator would also match the capability-picker rows describing it. */
 const vaultWriteToggle = (page: import("@playwright/test").Page) =>
   page.getByTestId("profile-vault-write");
+
+/** The Role picker's selectable card for a given role key (components/RolePicker.tsx's own testid). */
+const roleCard = (page: import("@playwright/test").Page, roleKey: string) =>
+  page.getByTestId(`role-card-${roleKey}`);
 
 /** Navigate IN-APP via the rail — a page.goto would build a fresh QueryClient and drop the very cache
  *  these tests exist to exercise.
@@ -199,6 +206,59 @@ test.describe("profile grant blast radius", () => {
     // And the editor settles: the save cleared `dirty`, so the row reads "saved" rather than offering a
     // Save that can never settle (the stuck-dirty failure card 65aa951c's comparers exist to avoid).
     await expect(page.getByText("saved", { exact: true })).toBeVisible();
+  });
+
+  test("a ROLE CHANGE goes through the same confirm (card be447b3f): Cancel withholds, Save audits it", async ({ page, loomDaemon }) => {
+    // role/restrictedTools widen reach exactly like a grant, but neither IS a grant (@decision 8c27ae8e),
+    // so this is the same mechanism extended to a non-grant key — and role carries a from/to VALUE a bare
+    // key name can't express, which is the one thing this test must show on top of the browserTesting/
+    // vaultWrite cases above.
+    const { profile, project, agent } = await seedBoundRig(loomDaemon.baseURL, "role", (n) => loomDaemon.createProject(n));
+    expect(profile.role ?? null).toBeNull(); // fixture identity: starts role-less (plain), like the others start grant-less
+
+    await openProfile(page, loomDaemon.baseURL, profile.name);
+    await expect(page.getByTestId("grant-reach-confirm")).toHaveCount(0);
+
+    // ACT: pick the "worker" role card and press Save. An EXERCISED control, not a rendered one.
+    await roleCard(page, "worker").click();
+    await expect(roleCard(page, "worker")).toHaveAttribute("data-selected", "true");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+
+    // AFTER (observable #1): the confirm fires AND names the role change by its real from/to values —
+    // the clause GrantReachConfirm renders alongside the generic "you are granting X" sentence.
+    const confirm = page.getByTestId("grant-reach-confirm");
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText("a role change");
+    const roleChangeLine = page.getByTestId("grant-reach-role-change");
+    await expect(roleChangeLine).toContainText("none"); // from: null, rendered as "none"
+    await expect(roleChangeLine).toContainText("worker"); // to: "worker"
+    await expect(page.getByTestId("grant-reach-count")).toContainText("1 agent");
+    await expect(page.getByTestId("grant-reach-agents")).toContainText(agent.name);
+    await expect(page.getByTestId("grant-reach-agents")).toContainText(project.name);
+
+    // ACT: Cancel.
+    await page.getByTestId("grant-reach-cancel").click();
+
+    // AFTER (observable #2): the confirm closes and the STORED role is UNCHANGED — asserted over REST,
+    // since the editor still holds the picked card locally.
+    await expect(confirm).toHaveCount(0);
+    expect((await getProfile(loomDaemon.baseURL, profile.id)).role ?? null).toBeNull();
+    expect(await reachEventsFor(loomDaemon.baseURL, profile.id)).toHaveLength(0);
+
+    // ACT: Save again, and confirm this time.
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(confirm).toBeVisible();
+    await page.getByTestId("grant-reach-save").click();
+
+    // AFTER (observable #3): the role lands in the store, and the daemon's audit row carries the real
+    // roleChange — this is the field a bare addedKeys entry of "role" cannot express on its own.
+    await expect.poll(() => getProfile(loomDaemon.baseURL, profile.id).then((p) => p.role)).toBe("worker");
+    await expect.poll(async () => (await reachEventsFor(loomDaemon.baseURL, profile.id)).length).toBe(1);
+    const events = await reachEventsFor(loomDaemon.baseURL, profile.id);
+    expect(events[0]?.detail?.addedKeys).toEqual(["role"]);
+    expect(events[0]?.detail?.agentCount).toBe(1);
+    expect(events[0]?.detail?.source).toBe("rest");
+    expect(events[0]?.detail?.roleChange).toEqual({ from: null, to: "worker" });
   });
 
   test("NEGATIVE CONTROL: a grant-free edit saves with no confirm and no event", async ({ page, loomDaemon }) => {

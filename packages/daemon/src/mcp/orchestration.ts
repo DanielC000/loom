@@ -5620,7 +5620,13 @@ export class OrchestrationMcpRouter {
           "the human DELETE /api/profiles/:id and the Platform Lead's profile_delete use — a reference confined " +
           "to your own project does NOT block delete (matches the human path's safe-by-design cascade: a " +
           "dangling profileId resolves to the plain backstop). 404 (\"profile not found\") if the id is unknown. " +
-          "FULL id required (no 8-char prefix). Returns { deleted:true, profileId }.",
+          "FULL id required (no 8-char prefix). BLAST-RADIUS SIGNAL (card be447b3f): that backstop can itself " +
+          "WIDEN reach for any agent still bound to this profile IN YOUR OWN PROJECT (the only ones delete " +
+          "can ever reach, by the in-use guard above) — deleting a `restrictedTools:true` profile un-restricts " +
+          "them, and deleting a non-null-role profile re-roles them, on their NEXT session. The response then " +
+          "carries a `grantReach` field ({addedKeys, agentCount, agents[], roleChange?}) naming exactly who; " +
+          "RELAY THIS the same way you would any other newly-widened trust boundary — there is no human-facing " +
+          "confirm on this surface. Returns { deleted:true, profileId, grantReach? }.",
         inputSchema: strictShape({ profileId: z.string() }),
       },
       async ({ profileId }) => {

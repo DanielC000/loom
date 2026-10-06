@@ -81,7 +81,7 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
-import { recordProfileGrantReach, grantFieldsOf } from "../profiles/grantReach.js";
+import { recordProfileGrantReach, grantFieldsOf, recordProfileDeleteGrantReach } from "../profiles/grantReach.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
@@ -4294,11 +4294,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // signal — a reader never has to tell an empty payload apart from "no grant added".
     return { ...deps.db.getProfile(id), ...(grantReach ? { grantReach } : {}) };
   });
-  // Delete is SAFE for assigned agents: a dangling profile_id resolves to the plain backstop (a
-  // bundled profile re-seeds on next boot). Idempotent — mirrors the skills DELETE (no 404).
+  // Delete is safe in the sense that nothing BREAKS for an assigned agent — a dangling profile_id
+  // resolves to the plain backstop (a bundled profile re-seeds on next boot) — but that backstop can
+  // itself WIDEN reach (card be447b3f round 3): un-restricting/re-roling every bound agent if the
+  // deleted profile had restrictedTools:true or a non-null role. Idempotent — mirrors the skills DELETE
+  // (no 404) — so the pre-delete row is snapshotted ONLY when it exists, never synthesized for an
+  // unknown id.
   app.delete("/api/profiles/:id", async (req) => {
-    deps.db.deleteProfile((req.params as { id: string }).id);
-    return { ok: true };
+    const id = (req.params as { id: string }).id;
+    const existing = deps.db.getProfile(id);
+    deps.db.deleteProfile(id);
+    const grantReach = existing ? recordProfileDeleteGrantReach(deps.db, { profileId: id, existing, source: "rest" }) : null;
+    return grantReach ? { ok: true, grantReach } : { ok: true };
   });
   // Restore a bundled profile to its shipped fields (discards UI edits) — the profile analogue of the
   // skill reset. ALSO advances base=shipped (in resetProfileToBundled) so the result is pristine. 404 if

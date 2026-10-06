@@ -25,7 +25,9 @@ import {
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
 
-const BARE = { connections: [], capabilities: [], allowDelta: [] };
+// `role`/`restrictedTools` join the widening slice (card be447b3f) — BARE carries the "widens nothing"
+// baseline for both, same posture as the original seven grant keys.
+const BARE = { connections: [], capabilities: [], allowDelta: [], role: null, restrictedTools: false };
 const fields = (over = {}) => ({ ...BARE, ...over });
 
 const AGENTS = [
@@ -182,15 +184,86 @@ check("ADAPTER: allowText is PARSED, so a whitespace-only edit grants nothing", 
   assert.deepEqual(parseAllowDelta(""), []);
 });
 
-check("ADAPTER: grantFieldsOfProfile narrows to the grant keys and drops computed state", () => {
+check("ADAPTER: grantFieldsOfProfile narrows to the widening keys and drops computed state", () => {
   // A whole ProfileSummary carries bundled/customized/updateAvailable; none of it is any part of a grant.
   const slice = grantFieldsOfProfile({
     connections: ["c1"], capabilities: [], allowDelta: ["Read(*)"], vaultWrite: true,
     harness: "codex", browserTesting: false, documentConversion: true,
+    role: "worker", restrictedTools: false,
     name: "Rig", bundled: true, customized: true, updateAvailable: true,
   });
-  assert.deepEqual(Object.keys(slice).sort(), [...AGENT_FORBIDDEN_PROFILE_KEYS].sort());
+  assert.deepEqual(Object.keys(slice).sort(), [...AGENT_FORBIDDEN_PROFILE_KEYS, "role", "restrictedTools"].sort());
   assert.equal(slice.vaultWrite, true);
+  assert.equal(slice.role, "worker");
+});
+
+// ── §be447b3f — role change + restrictedTools relaxing join the SAME widening computation ──────────────
+//
+// Neither is a human-only grant key (both stay agent-writable, @decision 8c27ae8e) — this is the
+// reach/audit VISIBILITY layer on top, same mechanism as the §ADAPTERS block above, extended to two more
+// keys. Mirrors that block's shape: a positive control (the widening direction fires), a negative control
+// (the narrowing direction does not), and the end-to-end planner chain.
+
+check("role: ANY change is a widening — not only an 'escalating' one", () => {
+  const up = planGrantSave(fields({ role: "worker" }), fields({ role: "manager" }), "rig", AGENTS);
+  assert.equal(up.kind, "confirm");
+  assert.deepEqual(up.addedKeys, ["role"]);
+  assert.deepEqual(up.roleChange, { from: "worker", to: "manager" });
+
+  // The computation does not judge direction — a "narrowing" role change is reported identically.
+  const down = planGrantSave(fields({ role: "manager" }), fields({ role: "worker" }), "rig", AGENTS);
+  assert.equal(down.kind, "confirm");
+  assert.deepEqual(down.addedKeys, ["role"]);
+  assert.deepEqual(down.roleChange, { from: "manager", to: "worker" });
+});
+
+check("role: NEGATIVE CONTROL — an unchanged role, including null<->'' normalization, widens nothing", () => {
+  assert.equal(planGrantSave(fields({ role: "worker" }), fields({ role: "worker" }), "rig", AGENTS).kind, "save");
+  // grantFieldsOfValues normalizes the editor's "" to null — a never-set role stays a non-change.
+  assert.equal(grantFieldsOfValues({ ...FORM, role: "" }).role, null);
+  assert.equal(planGrantSave(fields({ role: null }), fields({ role: null }), "rig", AGENTS).kind, "save");
+});
+
+check("restrictedTools: true->false (removing the restriction) is a widening", () => {
+  const plan = planGrantSave(fields({ restrictedTools: true }), fields({ restrictedTools: false }), "rig", AGENTS);
+  assert.equal(plan.kind, "confirm");
+  assert.deepEqual(plan.addedKeys, ["restrictedTools"]);
+  assert.equal(plan.roleChange, undefined); // no role key, so no roleChange on the plan
+});
+
+check("restrictedTools: NEGATIVE CONTROL — false->true (ADDING the restriction) is a narrowing, not reported", () => {
+  const plan = planGrantSave(fields({ restrictedTools: false }), fields({ restrictedTools: true }), "rig", AGENTS);
+  assert.equal(plan.kind, "save");
+});
+
+check("role + restrictedTools: both widening at once are reported together, in the fixed order", () => {
+  const plan = planGrantSave(
+    fields({ role: "worker", restrictedTools: true }),
+    fields({ role: "manager", restrictedTools: false }),
+    "rig", AGENTS,
+  );
+  assert.equal(plan.kind, "confirm");
+  assert.deepEqual(plan.addedKeys, ["role", "restrictedTools"]);
+  assert.deepEqual(plan.roleChange, { from: "worker", to: "manager" });
+});
+
+check("grantKeyList reads role/restrictedTools as prose too", () => {
+  assert.equal(grantKeyList(["role"]), "a role change");
+  assert.equal(grantKeyList(["role", "restrictedTools"]), "a role change and unrestricted tool access");
+});
+
+check("ADAPTER: a role/restrictedTools flip is detected end to end, through grantFieldsOfProfile + grantFieldsOfValues", () => {
+  const stored = { connections: [], capabilities: [], allowDelta: [], role: "worker", restrictedTools: true };
+  const plan = planGrantSave(
+    grantFieldsOfProfile(stored),
+    grantFieldsOfValues(form({ role: "manager", restrictedTools: false })),
+    "rig",
+    AGENTS,
+  );
+  assert.equal(plan.kind, "confirm");
+  assert.deepEqual(plan.addedKeys, ["role", "restrictedTools"]);
+  assert.deepEqual(plan.roleChange, { from: "worker", to: "manager" });
+  assert.equal(plan.agentCount, 2);
 });
 
 console.log(`\n${pass} check(s) passed`);
