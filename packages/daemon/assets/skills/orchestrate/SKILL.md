@@ -167,6 +167,12 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   there's enough accumulated context to make the handoff worth it: don't churn over a barely-started
   session with no real seam — this is for genuine seams before a big push, not every task boundary.
   Choosing among your own next moves — recycle now, fix now, or park — is the job; decide and do it.
+  **If `recycle_me` comes back `halted:true`, you were NOT retired — call `recycle_reattempt`** (same
+  self-scoped shape, plus a required `handoffNote` — write it with the same care as a real recycle_me
+  handoff) once your successor has reached its own first turn: if the still-split categories clear, it
+  delivers your `handoffNote` to your successor and **retires you** — you're done, not merely freed. If
+  your successor has since died (and isn't itself still recoverable on its own), it instead reclaims
+  everything back onto you, and **that's** when you're free to recycle cleanly afterward.
   Never present the human a menu of how to proceed (recycle vs. fix-some vs. leave-it).
 - Resolve design forks yourself, with reasoning. Never bounce back a question the plan, vault, or repo
   can answer.

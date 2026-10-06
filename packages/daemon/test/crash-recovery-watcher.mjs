@@ -16,8 +16,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   • zod orchestrationOverride accepts crashRecoveryMaxAttempts (incl. 0; negatives rejected).
 //   • FIX 386e4eb5 — a HALTED recycle predecessor whose CURRENT successor still exactly matches its latest
 //     unresolved `recycle_ownership_transfer_failed` event (id+gen) is auto-resumed by tick, same as any
-//     other unexpectedly-dead resumable session (test 10); a STALE-GENERATION lineage (successor no longer
-//     matches) stays superseded and is NOT resumed (test 11); and a DELIBERATELY STOPPED halted predecessor
+//     other unexpectedly-dead resumable session (test 10); a DIFFERENT SUCCESSOR lineage (cleanly
+//     re-recycled to an unrelated successor — an id mismatch, not a generation one; see section (19) below)
+//     stays superseded and is NOT resumed (test 11); and a DELIBERATELY STOPPED halted predecessor
 //     (intended=true, so recordUnexpectedExit records nothing) is never even considered a candidate,
 //     proving the carve-out never revives a session a human or the manager itself deliberately ended
 //     (test 12).

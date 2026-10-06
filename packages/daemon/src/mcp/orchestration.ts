@@ -5301,6 +5301,46 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // recycle_reattempt — card dfc3b014: a halted predecessor's own remedy for recycle_me's `halted:true`
+    // result, which nothing ever automatically retries. Self-scoped: always targets managerSessionId.
+    server.registerTool(
+      "recycle_reattempt",
+      {
+        description:
+          "Retry (or reclaim) a HALTED recycle's still-split ownership handoff — call this when you are " +
+          "the PREDECESSOR of a recycle_me that returned `halted:true` (or you got a " +
+          "'[loom:recycle-ownership-transfer-failed]' nudge) and want another shot at reuniting. `handoffNote` " +
+          "is REQUIRED (mirrors recycle_me's own continuationPrompt) — delivered to your successor ONLY if " +
+          "ownership comes out whole (see the resolved outcome below); give it the same care as a real " +
+          "recycle_me handoff even though it's unused for the other two outcomes. Three outcomes depending " +
+          "on your successor's health: if it's alive and has reached SessionStart, this retries the same " +
+          "worker/wake/question/event-trigger/poll-job/webhook/pending-queue reparent steps for your " +
+          "still-failed categories, and — once everything is clean — delivers `handoffNote` to your " +
+          "successor and retires you, exactly like an ordinary recycle_me would have " +
+          "({outcome:\"resolved\", reparentedWorkers, successorId}) — you are RETIRED once this returns, " +
+          "not merely freed. If your successor has since died AND is not itself durably resumable, this " +
+          "instead reclaims everything it held back onto you, so you keep going " +
+          "({outcome:\"reclaimed\", successorId}) — your ordinary recycle_me guard then allows you to " +
+          "recycle again fresh. If categories are still failing after the retry, you remain live with " +
+          "nothing changed about what you still own ({outcome:\"still-split\", failedSteps, successorId}). " +
+          "Refuses ({error}) if you aren't a genuinely still-halted predecessor, if your successor exists " +
+          "but hasn't reached SessionStart yet (try again shortly), or if your successor is down but still " +
+          "durably resumable — reclaiming it here would permanently discard its context, so this never " +
+          "does. That refusal names what to actually do next: if crash recovery is genuinely still pending " +
+          "for it, \"wait for its automatic recovery, then retry\"; otherwise (an intentional stop, crash " +
+          "recovery exhausted or disabled, or a restart that didn't cover this shape) \"nothing will " +
+          "recover it automatically — escalate: a human must resume successor <id>, then retry\".",
+        inputSchema: strictShape({ handoffNote: z.string() }),
+      },
+      async ({ handoffNote }) => {
+        try {
+          return ok(await sessions.reattemptManagerOwnershipTransfer(managerSessionId, handoffNote));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     // end_me — the no-successor sibling of recycle_me (card 3b015fc7). Self-scoped: NO target arg, always
     // ends managerSessionId (the URL-path session), never another. Two gates (queued inbound / live
     // workers) may REFUSE — see SessionService.endMe's doc for the full contract.

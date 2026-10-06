@@ -1045,6 +1045,23 @@ export type OrchestrationEventKind =
   // Deliberately NOT added to EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/REPORT_RESOLVED_EVENT_KINDS —
   // mirrors `recycle_fleet_unresolved`'s posture; no wake-mode trigger should fire off this.
   | "recycle_ownership_transfer_failed"
+  // The resolution marker for the halt above, filed by `recycle_reattempt` once a retry goes clean and
+  // settles forward. `detail` carries { successorId, gen }.
+  //
+  // @decision dfc3b014 — never let a halt resolve by nulling `recycled_from` when the successor remains
+  // the genuine forward owner; file this marker instead, so `currentHaltedSuccessor` stops matching.
+  | "recycle_ownership_transfer_resolved"
+  // Audit-only: `recycle_reattempt` retried a halted handoff and at least one category is STILL failing.
+  // `detail` carries { successorId, gen, failedSteps: string[], failedMessageRefs }.
+  //
+  // @decision dfc3b014 — never fold this into `currentHaltedSuccessor`'s id/gen match — a retry changes
+  // neither, so this kind must stay purely observational.
+  | "recycle_reattempt_failed"
+  // Audit-only (Code Review ROUND 3): `recycle_reattempt`'s resolved branch delivered the handoff nudge to
+  // the successor, but `enqueueDurableNudge`'s own `onOutcome` reported `dispatched:false` — the enqueue
+  // itself never landed (not even durably). The ownership transfer + resolution marker are UNAFFECTED;
+  // this names only the one thing that didn't survive. `detail` carries { successorId, handoffNote }.
+  | "recycle_reattempt_handoff_undelivered"
   // @decision 4ee527d1 — the durable, EPOCH-scoped marker (not permanent, unlike recycle_successor_retired
   // above) that a WORKER was deliberately retired; resume()'s chokepoint `Db.isWorkerRetirementActive`
   // epoch-compares this against `worker_retirement_lifted` below. See that record for the mechanism.
@@ -1898,7 +1915,8 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   spawn_worker: true, message_worker: true, worker_report: true, stop_worker: true,
   redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true,
   recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true,
-  recycle_fleet_stranded_across_restart: true, recycle_successor_retired: true, recycle_ownership_transfer_failed: true, worker_revived: true, merge_request: true,
+  recycle_fleet_stranded_across_restart: true, recycle_successor_retired: true, recycle_ownership_transfer_failed: true,
+  recycle_ownership_transfer_resolved: true, recycle_reattempt_failed: true, recycle_reattempt_handoff_undelivered: true, worker_revived: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, merge_landing_started: true, merge_landing_aborted: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, build_gate_single_file_retry_attempt: true, schedule_fire_failed: true, schedule_fire_deferred: true,

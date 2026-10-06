@@ -23,6 +23,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (8) rate limiting caps a flood from the same origin manager session.
 //   (9) the project-link WRITE has NO MCP reachability — no tool on the platform OR manager surface can
 //       create/delete a project_links row.
+//   (11)/(12) CARD dfc3b014 — findLiveManagerForProject routing: a live, genuinely still-halted
+//       predecessor (dead successor, matching halt event) is reachable (11); an ordinary in-flight recycle
+//       (successor also live, no halt) still routes to the successor, unaffected (12).
+//   (13) CARD dfc3b014 — NEGATIVE CONTROL for the EXCLUSION/BOARDING leg: a predecessor whose successor is
+//       NOT live and is NOT a genuinely matching halt (no halt event at all) is excluded — the message
+//       boards, it never reaches the stale predecessor. Must go RED if the predicate's final
+//       `!!currentHaltedSuccessor(...)` check were ever weakened to an unconditional `true`.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/peer-message.mjs
 import fs from "node:fs";
@@ -72,12 +79,21 @@ db.insertProject({ id: "pB", name: "Project B", repoPath: repo, vaultPath: repo,
 db.insertProject({ id: "pC", name: "Project C (unlinked)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertProject({ id: "pD", name: "Project D (worker-only)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertProject({ id: "pE", name: "Project E (archived)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: now, reserved: false });
+db.insertProject({ id: "pF", name: "Project F (halted predecessor)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+db.insertProject({ id: "pG", name: "Project G (ordinary in-flight recycle)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+db.insertProject({ id: "pH", name: "Project H (dead successor, NOT a matching halt)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertAgent({ id: "agentA", projectId: "pA", name: "A", startupPrompt: "A", position: 0, profileId: null });
 db.insertAgent({ id: "agentB", projectId: "pB", name: "B", startupPrompt: "B", position: 0, profileId: null });
 db.insertAgent({ id: "agentD", projectId: "pD", name: "D", startupPrompt: "D", position: 0, profileId: null });
+db.insertAgent({ id: "agentF", projectId: "pF", name: "F", startupPrompt: "F", position: 0, profileId: null });
+db.insertAgent({ id: "agentG", projectId: "pG", name: "G", startupPrompt: "G", position: 0, profileId: null });
+db.insertAgent({ id: "agentH", projectId: "pH", name: "H", startupPrompt: "H", position: 0, profileId: null });
 
 // A links pB only (NOT pC) — the containment boundary under test.
 db.createProjectLink("pA", "pB");
+db.createProjectLink("pA", "pF");
+db.createProjectLink("pA", "pG");
+db.createProjectLink("pA", "pH");
 
 const seedSession = (id, projectId, agentId, role, parent, processState = "live") => db.insertSession({
   id, projectId, agentId, engineSessionId: null, title: null, cwd: repo,
@@ -87,6 +103,51 @@ const seedSession = (id, projectId, agentId, role, parent, processState = "live"
 seedSession("MGR_A", "pA", "agentA", "manager", null);           // the sending manager (pA)
 seedSession("MGR_B", "pB", "agentB", "manager", null);           // the linked peer's LIVE manager
 seedSession("WKR_D", "pD", "agentD", "worker", null);            // a live WORKER in pD — no live manager there
+
+// Card dfc3b014 — pF: a genuinely still-halted predecessor (live) whose successor has since DIED. Seeded
+// with insertSession directly (not the seedSession helper above) so gen/recycledFrom can be set.
+db.insertSession({
+  id: "MGR_F_OLD", projectId: "pF", agentId: "agentF", engineSessionId: null, title: null, cwd: repo,
+  processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "manager", parentSessionId: null,
+});
+db.insertSession({
+  id: "MGR_F_NEW", projectId: "pF", agentId: "agentF", engineSessionId: null, title: null, cwd: repo,
+  processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "manager", parentSessionId: null, gen: 1, recycledFrom: "MGR_F_OLD",
+});
+db.appendEvent({
+  id: "halt-pf", ts: now, managerSessionId: "MGR_F_NEW", workerSessionId: "MGR_F_OLD", taskId: null,
+  kind: "recycle_ownership_transfer_failed", detail: { recycledFrom: "MGR_F_OLD", gen: 1, failedSteps: ["wakes"] },
+});
+
+// Card dfc3b014 — pG: the ORDINARY in-flight-recycle shape (negative control) — predecessor live, successor
+// ALSO live, no halt event at all. Fresh traffic must still route to the successor, unchanged.
+db.insertSession({
+  id: "MGR_G_OLD", projectId: "pG", agentId: "agentG", engineSessionId: null, title: null, cwd: repo,
+  processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "manager", parentSessionId: null,
+});
+db.insertSession({
+  id: "MGR_G_NEW", projectId: "pG", agentId: "agentG", engineSessionId: null, title: null, cwd: repo,
+  processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "manager", parentSessionId: null, gen: 1, recycledFrom: "MGR_G_OLD",
+});
+
+// Card dfc3b014 — pH: a DEAD successor with NO matching halt event at all (not even a halt event naming a
+// DIFFERENT successor — simply none). The exclusion/boarding leg's own negative control: MGR_H_OLD must be
+// excluded (hasSuccessor true, successor not live, currentHaltedSuccessor undefined) so the message boards
+// instead of reaching either the stale predecessor or the dead successor.
+db.insertSession({
+  id: "MGR_H_OLD", projectId: "pH", agentId: "agentH", engineSessionId: null, title: null, cwd: repo,
+  processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "manager", parentSessionId: null,
+});
+db.insertSession({
+  id: "MGR_H_NEW", projectId: "pH", agentId: "agentH", engineSessionId: null, title: null, cwd: repo,
+  processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "manager", parentSessionId: null, gen: 1, recycledFrom: "MGR_H_OLD",
+});
 
 // Fake pty: capture createPty (spawn) + stop, AND spy enqueueStdin (full arg list, so we can assert the
 // framing/source/kind the real enqueueDurableMessage channel uses) so we can prove delivery routing
@@ -235,6 +296,42 @@ try {
   const allMcpToolNames = [...mgrTools, ...platformTools];
   check("(9) NO tool on the manager OR platform MCP surface can create/delete a project link",
     !allMcpToolNames.some((n) => /project.?link/i.test(n)));
+
+  // ========= (11)/(12) Card dfc3b014 — findLiveManagerForProject routing (fresh client; mgrAClient is
+  // already closed above). =========
+  const routingClient = await connect(orch.buildServer("MGR_A", "manager"));
+  const routingCall = async (args) => parse(await routingClient.callTool({ name: "peer_message", arguments: args }));
+
+  // (11) a live, still-halted predecessor is reachable — pF's successor (MGR_F_NEW) is exited/dead, so the
+  // predecessor (MGR_F_OLD) stays live and must receive fresh peer traffic instead of it boarding.
+  const enqBeforeF = host.enqueued.length;
+  const tasksFBefore = db.listTasks("pF").length;
+  const toHalted = await routingCall({ targetProjectId: "pF", text: "still there?" });
+  check("(11) a live, still-halted predecessor (dead successor) delivers LIVE", toHalted.deliveryStatus === "delivered-live" && !toHalted.error);
+  check("(11) delivered to the PREDECESSOR (MGR_F_OLD), not boarded, not the dead successor",
+    host.enqueued.slice(enqBeforeF).some((e) => e.id === "MGR_F_OLD") && db.listTasks("pF").length === tasksFBefore);
+
+  // (12) NEGATIVE CONTROL: ordinary in-flight recycle is unaffected — pG's successor (MGR_G_NEW) is ALSO
+  // live, no halt event at all — fresh traffic must still route to the successor (the pre-existing,
+  // unchanged behavior `findLiveManagerForProject` must not regress).
+  const enqBeforeG = host.enqueued.length;
+  const toInFlight = await routingCall({ targetProjectId: "pG", text: "handoff in progress?" });
+  check("(12) an ordinary in-flight recycle (successor also live) still delivers LIVE", toInFlight.deliveryStatus === "delivered-live" && !toInFlight.error);
+  check("(12) delivered to the SUCCESSOR (MGR_G_NEW), never the about-to-retire predecessor",
+    host.enqueued.slice(enqBeforeG).some((e) => e.id === "MGR_G_NEW") && !host.enqueued.slice(enqBeforeG).some((e) => e.id === "MGR_G_OLD"));
+
+  // (13) NEGATIVE CONTROL for the EXCLUSION/BOARDING leg — pH's successor (MGR_H_NEW) is dead and NO halt
+  // event names it at all, so MGR_H_OLD must NOT be treated as a valid live-manager target. This is the
+  // check that must go RED if findLiveManagerForProject's final `!!currentHaltedSuccessor(...)` were ever
+  // weakened to an unconditional `true`.
+  const enqBeforeH = host.enqueued.length;
+  const tasksHBefore = db.listTasks("pH").length;
+  const toExcluded = await routingCall({ targetProjectId: "pH", text: "anyone home?" });
+  check("(13) a dead successor with NO matching halt excludes the predecessor — BOARDS instead of delivering",
+    toExcluded.deliveryStatus === "boarded" && !toExcluded.error && db.listTasks("pH").length === tasksHBefore + 1);
+  check("(13) neither MGR_H_OLD nor MGR_H_NEW was ever enqueued to",
+    !host.enqueued.slice(enqBeforeH).some((e) => e.id === "MGR_H_OLD" || e.id === "MGR_H_NEW"));
+  await routingClient.close();
 
   // ===================== (10) Card 417cea0a — PARK COVERAGE: this file had ZERO park coverage before this =====
   // ===== (negative grep for "park", case-insensitive: 0 hits). A peer_message sender (MGR_A) is NEVER the ===

@@ -99,10 +99,12 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
 
 /**
  * `sessionId`'s CURRENT successor (`db.getSuccessor`), but ONLY when it is exactly the successor named by
- * `sessionId`'s LATEST `recycle_ownership_transfer_failed` event (same id AND same `gen`) — i.e. "is this
- * session a HALTED recycle predecessor whose ownership-transfer handoff is still genuinely unresolved,
- * right now". Returns `undefined` for every other shape: no successor at all, an ordinary (never-halted)
- * recycle, or a halt event that no longer names the current successor.
+ * `sessionId`'s LATEST `recycle_ownership_transfer_failed` event (same id — the real discriminator; `gen`
+ * is checked too, but only as a defensive secondary check, ⛔ never simplify the match to gen-only — see
+ * `halted-recycle-reconcile.ts`'s identical framing) — i.e. "is this session a HALTED recycle predecessor
+ * whose ownership-transfer handoff is still genuinely unresolved, right now". Returns `undefined` for
+ * every other shape: no successor at all, an ordinary (never-halted) recycle, a halt event that no longer
+ * names the current successor, or a halt that has since been RESOLVED (see below).
  *
  * `recycle_ownership_transfer_failed` is filed ONLY by `recycleManager` (sessions/service.ts) — never
  * `recyclePlatformLead` (no ownership-transfer/halt branch exists there) and never a worker recycle (that
@@ -110,18 +112,24 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
  * guaranteed no-op for a platform or worker `sessionId`, by construction, not by a role check here.
  *
  * @decision 386e4eb5 — never treat a missing/non-numeric `detail.gen` on either side as a match (fails
- *  CLOSED); never add a separate "is this halt resolved" flag — every reclaim path nulls `recycled_from`
- *  on success, so the exact id+gen match above already IS the unresolved test.
+ *  CLOSED) — every RECLAIM path (pulling the fleet back onto the predecessor) already nulls
+ *  `recycled_from` on success, which alone makes the `getSuccessor` check above return undefined.
+ *
+ * @decision dfc3b014 — a SETTLE-FORWARD path (`recycle_reattempt`) deliberately leaves `recycled_from`
+ *  intact instead, so it needs its own marker: the latest-by-ts event of EITHER kind decides, and a
+ *  `recycle_ownership_transfer_resolved` latest means "no longer unresolved", full stop.
  */
 export function currentHaltedSuccessor(db: Db, sessionId: string): Session | undefined {
   const fresh = db.getSuccessor(sessionId);
   if (!fresh) return undefined;
-  const latestHalt = db.listEventsForSession(sessionId)
-    .filter((e) => e.kind === "recycle_ownership_transfer_failed" && e.workerSessionId === sessionId)
+  const latest = db.listEventsForSession(sessionId)
+    .filter((e) =>
+      (e.kind === "recycle_ownership_transfer_failed" || e.kind === "recycle_ownership_transfer_resolved")
+      && e.workerSessionId === sessionId)
     .at(-1); // listEventsForSession is ORDER BY ts, rowid — chronological; .at(-1) is genuinely the latest.
-  if (!latestHalt) return undefined;
-  const haltGen = (latestHalt.detail as { gen?: number } | undefined)?.gen;
-  if (fresh.id !== latestHalt.managerSessionId || typeof haltGen !== "number" || fresh.gen !== haltGen) return undefined;
+  if (!latest || latest.kind !== "recycle_ownership_transfer_failed") return undefined;
+  const haltGen = (latest.detail as { gen?: number } | undefined)?.gen;
+  if (fresh.id !== latest.managerSessionId || typeof haltGen !== "number" || fresh.gen !== haltGen) return undefined;
   return fresh;
 }
 

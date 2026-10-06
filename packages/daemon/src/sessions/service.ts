@@ -37,7 +37,7 @@ import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOn
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
-import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
+import { isDurablyResumable, type RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
 import type { HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
@@ -73,7 +73,7 @@ import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_D
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
-import { isSupersededByRecycle, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
+import { isSupersededByRecycle, currentHaltedSuccessor, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, RESUME_UNKNOWN_REASON_FALLBACK, type ResumeOneResult } from "../orchestration/resume-nudge.js";
@@ -11157,12 +11157,9 @@ export class SessionService {
     // the target project must never be matched, even if it's the only live session there. Resolved BEFORE
     // the redelivery-trim decision below (Defect A CR follow-up): that decision needs to know who the
     // CURRENT recipient actually is, not just what this sender last wrote.
-    // Card e79e2956: also exclude a session with a live successor — a recycling predecessor stays
-    // "live" until its successor settles (async, seconds later), else this can target the about-to-retire
-    // predecessor instead (mirrors redriveQueuedMessage's own hasSuccessor guard).
-    const targetManager = this.db.listAllSessions().find(
-      (s) => s.projectId === targetProjectId && s.role === "manager" && s.processState === "live" && !this.db.hasSuccessor(s.id),
-    );
+    // Card e79e2956 / dfc3b014: see `findLiveManagerForProject`'s own doc for why this isn't a bare
+    // `hasSuccessor` exclusion — a live, genuinely still-halted predecessor must still be reachable.
+    const targetManager = this.findLiveManagerForProject(targetProjectId);
 
     // Card e79e2956 (Defect A): detect a "growing resend" — this SAME session re-sending its own prior
     // letter to this SAME target verbatim, plus more (observed: turn N carries A+B, a later turn carries
@@ -11383,12 +11380,10 @@ export class SessionService {
     // session could hand the manager fabricated text as if it were owner-authored.
     const framed = `[loom:from-assistant · ${senderName} · sessionId:${assistantSessionId}]\n${text}`;
 
-    // @decision 2db23c4d — resolve the target manager FRESH on every call (no caching), excluding a
-    // session with a live successor (card 8457d0ed, mirrors e79e2956's hasSuccessor guard) — a recycling
-    // predecessor stays "live" until its successor settles, so a bare scan could target it instead.
-    const targetManager = this.db.listAllSessions().find(
-      (s) => s.projectId === projectId && s.role === "manager" && s.processState === "live" && !this.db.hasSuccessor(s.id),
-    );
+    // @decision 2db23c4d — resolve the target manager FRESH on every call (no caching). Card 8457d0ed /
+    // dfc3b014: see `findLiveManagerForProject`'s own doc — a recycling predecessor whose successor is
+    // ALSO live is excluded in favor of it, but a live, genuinely still-halted predecessor is not.
+    const targetManager = this.findLiveManagerForProject(projectId);
 
     const now = new Date().toISOString();
     let result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string };
@@ -13687,6 +13682,27 @@ export class SessionService {
   }
 
   /**
+   * The "live manager for project X" lookup shared by `peer_message`/`notify_lead`. A live candidate with
+   * no successor is always a match. A live candidate WITH a successor is excluded in favor of that
+   * successor when the successor is itself live — the ordinary in-flight-recycle case, where fresh
+   * traffic belongs with the forward-going owner (the rule the two call sites this replaces, cards
+   * e79e2956/8457d0ed, already enforced via a bare `hasSuccessor` exclusion).
+   *
+   * @decision dfc3b014 — when the successor is NOT live, the candidate is still valid IFF
+   *  `currentHaltedSuccessor` confirms it's genuinely the still-unresolved halted owner (not some other
+   *  stale shape) — otherwise leave it excluded, today's conservative default (board the message).
+   */
+  private findLiveManagerForProject(projectId: string): Session | undefined {
+    return this.db.listAllSessions().find((s) => {
+      if (s.projectId !== projectId || s.role !== "manager" || s.processState !== "live") return false;
+      if (!this.db.hasSuccessor(s.id)) return true;
+      const successor = this.db.getSuccessor(s.id);
+      if (successor && successor.processState === "live") return false;
+      return !!currentHaltedSuccessor(this.db, s.id);
+    });
+  }
+
+  /**
    * Run `recycleManager`'s 8 ownership-transfer DB/cap-queue steps (worker/wake/question/event-trigger/
    * poll-job/webhook/pending-owner-message reparent, cap-queue reparent), retrying ONLY the steps that
    * failed exactly once before giving up on them — each step is a single atomic statement or an idempotent
@@ -13726,6 +13742,71 @@ export class SessionService {
       }
     }
     return { reparentedWorkers, failedSteps };
+  }
+
+  /**
+   * The pending-queue-carry step of a manager ownership transfer — the durable-queue DB read +
+   * `pty.flushPending` + `carryPendingToSuccessor`, with the stale-context-nudge filtering.
+   *
+   * @decision dfc3b014 — extracted out of `recycleManager` so `reattemptManagerOwnershipTransfer`'s own
+   * retry of a still-halted handoff shares this EXACT logic, never a second copy.
+   *
+   * @decision f1969787 — skipped entirely when `workersStepFailed`: the predecessor still owns those
+   * workers, so carrying its inbound queue to a successor that never received them strands those reports
+   * on the wrong owner.
+   *
+   * Mutates `failedSteps` in place (pushing `"pendingQueueCarry"` on failure), mirroring
+   * `attemptManagerOwnershipTransfer`'s own shape, and returns the individual `failedRefs` for the
+   * caller's own per-message reporting.
+   */
+  private attemptPendingQueueCarry(oldManagerId: string, freshId: string, workersStepFailed: boolean, failedSteps: string[]): string[] {
+    let pendingCarryFailedRefs: string[] = [];
+    if (workersStepFailed) return pendingCarryFailedRefs;
+    let durableRaw: OrchestrationEvent[] = [];
+    let flushedRaw: QueuedMessage[] = [];
+    let pendingCarryHardFailed = false;
+    const readDurableQueue = (): boolean => {
+      try { durableRaw = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId); return true; }
+      catch (e) { console.error(`[recycle] reading the predecessor's unresolved durable queue failed for ${oldManagerId.slice(0, 8)}:`, (e as Error).message); return false; }
+    };
+    if (!readDurableQueue() && !readDurableQueue()) pendingCarryHardFailed = true;
+    const flushLiveQueue = (): boolean => {
+      try { flushedRaw = this.pty.flushPending(oldManagerId); return true; }
+      catch (e) { console.error(`[recycle] flushing the predecessor's pending stdin queue failed for ${oldManagerId.slice(0, 8)}:`, (e as Error).message); return false; }
+    };
+    if (!pendingCarryHardFailed && !flushLiveQueue() && !flushLiveQueue()) pendingCarryHardFailed = true;
+    if (!pendingCarryHardFailed) {
+      const isStaleContextNudge = (text: string): boolean =>
+        text.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || text.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
+      const carried: QueuedMessage[] = [];
+      for (const m of flushedRaw) {
+        if (isStaleContextNudge(m.text)) {
+          // A stale emergency redirect is durable (has onDeliver) — resolve its record now, same as
+          // carryPendingToSuccessor's own flushed loop would, so it never dangles as unresolved. The
+          // ordinary nudge is non-durable (no onDeliver) — nothing to resolve, just drop it.
+          if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ } }
+          continue;
+        }
+        carried.push(m);
+      }
+      const carriedDurable = durableRaw.filter((rec) => {
+        const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
+        return text === null || !isStaleContextNudge(text);
+      });
+      try {
+        pendingCarryFailedRefs = this.carryPendingToSuccessor(oldManagerId, freshId, carried, carriedDurable).failedRefs;
+      } catch (e) {
+        // carryPendingToSuccessor no longer throws as a whole in normal operation (every per-record
+        // failure is independently try/caught internally) — this is a defensive backstop only.
+        console.error(`[recycle] carryPendingToSuccessor threw unexpectedly for ${oldManagerId.slice(0, 8)} -> ${freshId.slice(0, 8)}:`, (e as Error).message);
+        pendingCarryHardFailed = true;
+      }
+    }
+    // A hard failure (the read/flush/call itself threw) OR any individual message that didn't transfer
+    // both name this step — `pendingCarryFailedRefs` is reported separately (failedMessageRefs) for the
+    // per-message detail, but the step-level name belongs in `failedSteps` alongside the other 8 either way.
+    if (pendingCarryHardFailed || pendingCarryFailedRefs.length > 0) failedSteps.push("pendingQueueCarry");
+    return pendingCarryFailedRefs;
   }
 
   /**
@@ -13926,53 +14007,9 @@ export class SessionService {
     // remains the real parent of its live workers, so carrying worker reports to a successor that can't
     // act on them strands those reports on the wrong owner.
     const workersStepFailed = failedSteps.includes("workers");
-    let durableRaw: OrchestrationEvent[] = [];
-    let flushedRaw: QueuedMessage[] = [];
-    let pendingCarryHardFailed = false;
-    let pendingCarryFailedRefs: string[] = [];
-    if (!workersStepFailed) {
-      const readDurableQueue = (): boolean => {
-        try { durableRaw = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId); return true; }
-        catch (e) { console.error(`[recycle] reading the predecessor's unresolved durable queue failed for ${oldManagerId.slice(0, 8)}:`, (e as Error).message); return false; }
-      };
-      if (!readDurableQueue() && !readDurableQueue()) pendingCarryHardFailed = true;
-      const flushLiveQueue = (): boolean => {
-        try { flushedRaw = this.pty.flushPending(oldManagerId); return true; }
-        catch (e) { console.error(`[recycle] flushing the predecessor's pending stdin queue failed for ${oldManagerId.slice(0, 8)}:`, (e as Error).message); return false; }
-      };
-      if (!pendingCarryHardFailed && !flushLiveQueue() && !flushLiveQueue()) pendingCarryHardFailed = true;
-      if (!pendingCarryHardFailed) {
-        const isStaleContextNudge = (text: string): boolean =>
-          text.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || text.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
-        const carried: QueuedMessage[] = [];
-        for (const m of flushedRaw) {
-          if (isStaleContextNudge(m.text)) {
-            // A stale emergency redirect is durable (has onDeliver) — resolve its record now, same as
-            // carryPendingToSuccessor's own flushed loop would, so it never dangles as unresolved. The
-            // ordinary nudge is non-durable (no onDeliver) — nothing to resolve, just drop it.
-            if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ } }
-            continue;
-          }
-          carried.push(m);
-        }
-        const carriedDurable = durableRaw.filter((rec) => {
-          const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
-          return text === null || !isStaleContextNudge(text);
-        });
-        try {
-          pendingCarryFailedRefs = this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable).failedRefs;
-        } catch (e) {
-          // carryPendingToSuccessor no longer throws as a whole in normal operation (every per-record
-          // failure is independently try/caught internally) — this is a defensive backstop only.
-          console.error(`[recycle] carryPendingToSuccessor threw unexpectedly for ${oldManagerId.slice(0, 8)} -> ${fresh.id.slice(0, 8)}:`, (e as Error).message);
-          pendingCarryHardFailed = true;
-        }
-      }
-      // A hard failure (the read/flush/call itself threw) OR any individual message that didn't transfer
-      // both name this step — `pendingCarryFailedRefs` is reported separately (failedMessageRefs) for the
-      // per-message detail, but the step-level name belongs in `failedSteps` alongside the other 8 either way.
-      if (pendingCarryHardFailed || pendingCarryFailedRefs.length > 0) failedSteps.push("pendingQueueCarry");
-    }
+    // @decision dfc3b014 — extracted to `attemptPendingQueueCarry` so `reattemptManagerOwnershipTransfer`'s
+    // own retry of a still-halted handoff shares this EXACT logic rather than a second copy.
+    const pendingCarryFailedRefs = this.attemptPendingQueueCarry(oldManagerId, fresh.id, workersStepFailed, failedSteps);
 
     // @decision f1969787 — `recycle_complete` ALWAYS carries `failedSteps` (present only when non-empty)
     // so `reparentedWorkers: 0` can never again be confused with "the predecessor had no workers."
@@ -14043,7 +14080,9 @@ export class SessionService {
           `${strandedWakeIds.length ? `Still yours: wake(s) ${strandedWakeIds.map((id) => id.slice(0, 8)).join(", ")}. ` : ""}` +
           `${pendingCarryFailedRefs.length ? `${pendingCarryFailedRefs.length} queued message(s) also did not transfer and remain yours to deliver. ` : ""}` +
           `${skippedCarryNoteForOld}` +
-          `Everything else transferred correctly to your successor.`);
+          `Everything else transferred correctly to your successor. Call recycle_reattempt to retry the ` +
+          `handoff once your successor has reached SessionStart — it will settle normally and retire you ` +
+          `if everything clears, or reclaim the fleet back onto you if your successor has since died.`);
       } catch (e) {
         console.error(`[recycle] notifying predecessor ${oldManagerId.slice(0, 8)} of its failed ownership transfer failed:`, (e as Error).message);
       }
@@ -14055,7 +14094,8 @@ export class SessionService {
           `${strandedWakeIds.length ? `Wake(s) ${strandedWakeIds.map((id) => id.slice(0, 8)).join(", ")} also remain your predecessor's. ` : ""}` +
           `${pendingCarryFailedRefs.length ? `${pendingCarryFailedRefs.length} queued message(s) also did not reach you and remain your predecessor's to deliver. ` : ""}` +
           `${skippedCarryNoteForFresh}` +
-          `Coordinate with your predecessor directly if you need any of this.`);
+          `Coordinate with your predecessor directly if you need any of this — your predecessor can call ` +
+          `recycle_reattempt to retry the handoff and settle this normally.`);
       } catch (e) {
         console.error(`[recycle] notifying successor ${fresh.id.slice(0, 8)} of its predecessor's failed ownership transfer failed:`, (e as Error).message);
       }
@@ -14071,6 +14111,122 @@ export class SessionService {
     });
 
     return { ...fresh, processState: "live" };
+  }
+
+  /**
+   * Re-attempt a HALTED manager recycle's still-split ownership handoff (the `recycle_reattempt` tool) —
+   * the predecessor's own remedy for the `recycleManager` halt branch above, which never retries on its
+   * own. Self-scoped: `predecessorId` must be the caller's own session. `handoffNote` mirrors `recycle_me`'s
+   * own `continuationPrompt` — delivered to the successor once ownership is whole (see the `resolved`
+   * branch below); required even though only that branch consumes it, so a caller never discovers a blank
+   * note was useless only after everything else already succeeded.
+   *
+   * Three branches depending on the named successor's health, all reusing EXISTING machinery:
+   *  - successor confirmed DEAD and NOT durably resumable: a manual RECLAIM (not a retry) via the same
+   *    `recoverFleetAfterFailedRecycleSuccessor` the in-memory halt watch uses.
+   *  - successor confirmed DEAD but durably resumable (Code Review MAJOR): REFUSE rather than reclaim — a
+   *    successor that crashed after capturing a real engine id + transcript is exactly what the crash-
+   *    recovery watchdog (live) or `resumeFleetOnBoot` (after a restart) will bring back on its own;
+   *    reclaiming here would stamp it permanently dead (`unlinkAndArchiveDeadRecycleSuccessor`) and lose
+   *    whatever context it held forever, the asymmetry `reconcileHaltedRecycleSuccessorsEarly`'s own
+   *    `isDurablyResumable(fresh)` check already avoids on the boot path — this mirrors it live.
+   *  - successor alive + ready: a forward retry of `attemptManagerOwnershipTransfer` +
+   *    `attemptPendingQueueCarry`, then — once clean — settles forward, retiring the predecessor.
+   *
+   * @decision dfc3b014 — never AWAIT `settleRecycleHandoff` in the `resolved` branch — it hard-stops the
+   *  CALLER's own pty, so the promised response could never reach a caller that no longer exists to
+   *  receive it; file the resolution marker (never swallowed) and hand off BEFORE firing it unawaited.
+   */
+  async reattemptManagerOwnershipTransfer(predecessorId: string, handoffNote: string): Promise<
+    | { outcome: "resolved"; reparentedWorkers: number; successorId: string }
+    | { outcome: "still-split"; failedSteps: string[]; successorId: string }
+    | { outcome: "reclaimed"; successorId: string }
+  > {
+    if (!handoffNote || !handoffNote.trim()) throw new Error("handoffNote must not be blank");
+    const predecessor = this.db.getSession(predecessorId);
+    if (!predecessor || predecessor.role !== "manager") throw new Error("not a manager session");
+    if (predecessor.processState !== "live") throw new Error("recycle_reattempt: this session is not live");
+    const successor = currentHaltedSuccessor(this.db, predecessorId);
+    if (!successor) {
+      throw new Error("recycle_reattempt: you are not a halted recycle predecessor with an unresolved ownership-transfer handoff");
+    }
+    if (!this.pty.isAlive(successor.id)) {
+      if (isDurablyResumable(successor)) {
+        // Code Review MAJOR: a resumable-down successor is NOT a reclaim target — see this method's own
+        // doc for why (mirrors reconcileHaltedRecycleSuccessorsEarly's own isDurablyResumable(fresh) gate).
+        // Code Review ROUND 3: "wait for its recovery" is a dead end when nothing will actually attempt
+        // one — after an intentional human stop, with crash recovery exhausted/disabled, or after a
+        // restart (the boot reconcile phases don't cover this specific shape). Check the SAME eligibility
+        // predicate the live watchdog itself consults before promising a recovery that may never come.
+        if (isCrashRecoveryEligible(this.db, this.control, successor)) {
+          throw new Error("recycle_reattempt: your successor is down but resumable — wait for its automatic recovery, then retry");
+        }
+        throw new Error(`recycle_reattempt: your successor is down and resumable, but nothing will recover it automatically — escalate: a human must resume successor ${successor.id.slice(0, 8)}, then retry`);
+      }
+      // Not a retry at all — the successor is genuinely gone, so reclaim whatever it held, exactly like
+      // `watchHaltedRecycleSuccessor` would have done had its own window not already closed (it stops
+      // watching the instant `hasReachedReady` is observed, and never watches again after that).
+      this.recoverFleetAfterFailedRecycleSuccessor(predecessorId, successor.id, "manager");
+      return { outcome: "reclaimed", successorId: successor.id };
+    }
+    if (!this.pty.hasReachedReady(successor.id)) {
+      throw new Error("recycle_reattempt: your successor hasn't reached SessionStart yet — try again shortly");
+    }
+    const { reparentedWorkers, failedSteps } = this.attemptManagerOwnershipTransfer(predecessorId, successor.id);
+    const workersStepFailed = failedSteps.includes("workers");
+    const pendingCarryFailedRefs = this.attemptPendingQueueCarry(predecessorId, successor.id, workersStepFailed, failedSteps);
+    if (failedSteps.length > 0 || pendingCarryFailedRefs.length > 0) {
+      this.bestEffortPostSpawn("recording the recycle_reattempt_failed event", successor.id, () => {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: successor.id, workerSessionId: predecessorId, kind: "recycle_reattempt_failed",
+          detail: { successorId: successor.id, gen: successor.gen, failedSteps, failedMessageRefs: pendingCarryFailedRefs },
+        });
+      });
+      return { outcome: "still-split", failedSteps, successorId: successor.id };
+    }
+    // Clean. File the resolution marker FIRST, before anything irreversible — a failure here must refuse
+    // the whole call (never stop the predecessor without it), since currentHaltedSuccessor would otherwise
+    // keep reporting this lineage as unresolved forever against a predecessor that's no longer live to fix it.
+    try {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: successor.id, workerSessionId: predecessorId, kind: "recycle_ownership_transfer_resolved",
+        detail: { successorId: successor.id, gen: successor.gen },
+      });
+    } catch (e) {
+      throw new Error(`recycle_reattempt: ownership transfer succeeded but recording the resolution failed (${(e as Error).message}) — you were NOT stopped; retry`);
+    }
+    // Hand the successor the handoff BEFORE stopping the predecessor — mirrors recycle_me's own kickoff
+    // framing, correcting its kickoff's now-true "your predecessor's live workers have been re-parented to
+    // you" claim with the fact that ownership is now FULLY whole, not just partially.
+    this.enqueueDurableNudge(successor.id, "manager",
+      `[loom:recycle-reattempt-resolved] your predecessor ${predecessorId.slice(0, 8)}'s ownership handoff to you is now fully resolved — everything that was split has transferred, and your predecessor is being retired. Its handoff:\n\n${handoffNote}`,
+      null,
+      {
+        // kind defaults to "warning" — matches recycleManager's own sibling halt-branch nudges to the
+        // same two parties, a system-relayed recycle-lifecycle notice, not agent-authored direction.
+        // Code Review ROUND 3: the ownership transfer + resolution marker above are already durable and
+        // unaffected by this nudge's own fate — but a `dispatched:false` here means the handoff text itself
+        // never landed anywhere, not even durably, so record that narrowly rather than letting it vanish
+        // into a console line only.
+        onOutcome: (outcome) => {
+          if (outcome.dispatched) return;
+          this.bestEffortPostSpawn("recording the recycle_reattempt_handoff_undelivered event", successor.id, () => {
+            this.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(),
+              managerSessionId: successor.id, workerSessionId: predecessorId, kind: "recycle_reattempt_handoff_undelivered",
+              detail: { successorId: successor.id, handoffNote },
+            });
+          });
+        },
+      });
+    // Fire-and-forget (Code Review MAJOR) — awaiting here would stop THIS CALLER before its own response
+    // ever returns. The successor is already confirmed ready, so this only costs the fixed flush-delay floor.
+    void this.settleRecycleHandoff({ oldId: predecessorId, freshId: successor.id, role: "manager" }).catch((e) => {
+      console.error(`[recycle-reattempt] settle failed for manager ${predecessorId.slice(0, 8)} -> ${successor.id.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+    });
+    return { outcome: "resolved", reparentedWorkers, successorId: successor.id };
   }
 
   /**

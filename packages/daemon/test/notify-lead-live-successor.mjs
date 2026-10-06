@@ -47,8 +47,11 @@ commitAll(repo, "init", "-c user.email=notify-lead@loom -c user.name=notify-lead
 const now = new Date().toISOString();
 const db = new Db();
 db.insertProject({ id: "pA", name: "Project A", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+db.insertProject({ id: "pB", name: "Project B (halted predecessor)", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertAgent({ id: "agentAssist", projectId: "pA", name: "Assistant", startupPrompt: "Assistant", position: 0, profileId: null });
 db.insertAgent({ id: "agentMgr", projectId: "pA", name: "Manager", startupPrompt: "Manager", position: 0, profileId: null });
+db.insertAgent({ id: "agentAssistB", projectId: "pB", name: "Assistant", startupPrompt: "Assistant", position: 0, profileId: null });
+db.insertAgent({ id: "agentMgrB", projectId: "pB", name: "Manager", startupPrompt: "Manager", position: 0, profileId: null });
 
 const seedSession = (id, projectId, agentId, role, extra = {}) => db.insertSession({
   id, projectId, agentId, engineSessionId: null, title: null, cwd: repo,
@@ -58,6 +61,21 @@ const seedSession = (id, projectId, agentId, role, extra = {}) => db.insertSessi
 seedSession("ASSIST_A", "pA", "agentAssist", "assistant");
 seedSession("MGR_A_OLD", "pA", "agentMgr", "manager"); // the recycling predecessor — stays "live" during settle
 seedSession("MGR_A_NEW", "pA", "agentMgr", "manager", { recycledFrom: "MGR_A_OLD", gen: 1 }); // its already-live successor
+
+// Card dfc3b014 — pB: a genuinely still-halted predecessor (live) whose successor has since DIED, with a
+// matching recycle_ownership_transfer_failed event. A separate project from pA so this doesn't interfere
+// with scenario (2)'s mutation of MGR_A_OLD's processState below.
+seedSession("ASSIST_B", "pB", "agentAssistB", "assistant");
+seedSession("MGR_B_OLD", "pB", "agentMgrB", "manager");
+db.insertSession({
+  id: "MGR_B_NEW", projectId: "pB", agentId: "agentMgrB", engineSessionId: null, title: null, cwd: repo,
+  processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "manager", parentSessionId: null, gen: 1, recycledFrom: "MGR_B_OLD",
+});
+db.appendEvent({
+  id: "halt-pb", ts: now, managerSessionId: "MGR_B_NEW", workerSessionId: "MGR_B_OLD", taskId: null,
+  kind: "recycle_ownership_transfer_failed", detail: { recycledFrom: "MGR_B_OLD", gen: 1, failedSteps: ["wakes"] },
+});
 
 class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.enqueued = []; }
@@ -110,8 +128,18 @@ try {
   check("(2) delivered to the (only live) manager", host.enqueued.length === 1 && host.enqueued[0].id === "MGR_A_NEW");
   check("(2) the response names it as targetSessionId", stable.targetSessionId === "MGR_A_NEW");
 
+  // ===== (3) Card dfc3b014 — a live, genuinely still-halted predecessor is reachable (its successor is DEAD) ====
+  const assistBClient = await connect(orch.buildServer("ASSIST_B", "assistant"));
+  const bCall = async (name, args) => parse(await assistBClient.callTool({ name, arguments: args }));
+  const haltedSend = await bCall("notify_lead", { text: "status update while my manager is halted" });
+  check("(3) delivers live (the predecessor is a valid target — its dead successor is not)", haltedSend.deliveryStatus === "delivered-live" && !haltedSend.error);
+  check("(3) delivered to the PREDECESSOR (MGR_B_OLD), never the dead successor",
+    host.enqueued.some((e) => e.id === "MGR_B_OLD") && !host.enqueued.some((e) => e.id === "MGR_B_NEW"));
+  check("(3) the response names the predecessor as targetSessionId", haltedSend.targetSessionId === "MGR_B_OLD");
+  await assistBClient.close();
+
   console.log(failures === 0
-    ? "\n✅ ALL PASS — notify_lead resolves the project's LIVE successor manager over a still-live recycling predecessor, and a normal single-live-manager relay is unaffected."
+    ? "\n✅ ALL PASS — notify_lead resolves the project's LIVE successor manager over a still-live recycling predecessor, a normal single-live-manager relay is unaffected, and a live genuinely-halted predecessor (dead successor, matching halt event) is reachable instead of boarding."
     : `\n❌ ${failures} check(s) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 } catch (e) {
