@@ -29,9 +29,9 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { splitGateSteps } from "../orchestration/gate-runner.js";
-import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, HARNESS_ID_SCHEMA } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, HARNESS_ID_SCHEMA, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
-import { createAgentCore, cloneAgentCore, cloneSourceFieldError, reservedProjectManagerProfileError, reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
+import { createAgentCore, cloneAgentCore, cloneSourceFieldError, reservedProjectManagerProfileError, reservedProjectAgentBoundToProfile, nonReservedElevatedProfileError, nonReservedAgentBoundToProfile } from "../agents/clone-core.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe, currentColumns } from "../tasks/columns.js";
@@ -1345,7 +1345,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "agent_create",
       {
-        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human-authored) profileId as the agent's rig — you can only assign a profile a human already created, never mint one (a non-existent profileId is rejected). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job) — but a profile carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST): binding one across projects is never allowed through this tool.",
+        description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human-authored) profileId as the agent's rig — you can only assign a profile a human already created, never mint one (a non-existent profileId is rejected). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job) — but a profile carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST): binding one across projects is never allowed through this tool. An elevated/locked-role profile OTHER than \"assistant\" is also REJECTED if `projectId` is NOT a reserved/system project — those roles are confined to the Lead's or Setup Assistant's own home (see docs/decisions/ad098631).",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string(),
@@ -1363,7 +1363,7 @@ export class PlatformMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. An elevated/locked-role profileId (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profileId carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. An elevated/locked-role profileId (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profileId carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST). An elevated/locked-role profileId OTHER than \"assistant\" is also REJECTED if the agent's project is NOT a reserved/system project — those roles are confined to the Lead's or Setup Assistant's own home (see docs/decisions/ad098631). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -1412,6 +1412,9 @@ export class PlatformMcpRouter {
           // @decision ced4285e — reassignment-reachable twin of createAgentCore's reserved-project guard.
           const reservedErr = reservedProjectManagerProfileError(db.getProject(resolved.projectId), newProfile);
           if (reservedErr) return ok({ error: reservedErr });
+          // @decision ad098631 — reassignment-reachable twin of createAgentCore's non-reserved guard.
+          const nonReservedErr = nonReservedElevatedProfileError(db.getProject(resolved.projectId), newProfile);
+          if (nonReservedErr) return ok({ error: nonReservedErr });
         }
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
@@ -1443,7 +1446,11 @@ export class PlatformMcpRouter {
           "field (see agentAssignableProfileError in profiles/validate.ts) — human-only, via the Profiles " +
           "UI / REST. 404 (\"source agent not found\") if sourceAgentId is unknown; \"project not found\" if " +
           "targetProjectId is unknown (same as agent_create); \"profile not found\" is impossible here (the " +
-          "source's profileId was already validated when the source agent itself was created/updated).",
+          "source's profileId was already validated when the source agent itself was created/updated). " +
+          "ALSO REFUSED if the source agent's profile role is setup/workspace-auditor (or any other " +
+          "locked role except assistant) and targetProjectId is NOT a reserved/system project — " +
+          "createAgentCore's own confinement check (see docs/decisions/ad098631) backstops this for every " +
+          "role that check's own early role-check above doesn't already cover.",
         inputSchema: strictShape({
           sourceAgentId: z.string(),
           targetProjectId: z.string(),
@@ -1472,7 +1479,9 @@ export class PlatformMcpRouter {
           "portfolio of similar repos) without N hand-written agent_clone round-trips. Each entry in " +
           "`targets` is applied INDEPENDENTLY through the exact same agent_clone core (same validation, " +
           "same least-privilege operator/platform/auditor-role guard, same REJECTION of a human-only-field-" +
-          "carrying source profile regardless of role — see agentAssignableProfileError in profiles/validate.ts) " +
+          "carrying source profile regardless of role — see agentAssignableProfileError in profiles/validate.ts, " +
+          "and the same reserved-project confinement for every other locked role except assistant — see " +
+          "docs/decisions/ad098631) " +
           "— a bad entry (unknown targetProjectId) surfaces its own { error } and does NOT block the " +
           "other targets; nothing is transactional. " +
           "Returns one result per target, in the given order: { targetProjectId, agent } on success or " +
@@ -2030,7 +2039,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. A `role` CHANGE is REJECTED outright if the stored profile carries any of those human-set capabilities (card 05153988) — carrying e.g. browserTesting onto a role nobody reviewed it for (changing a QA-Tester-shaped rig to \"assistant\") is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. A `role` CHANGE is REJECTED outright if the stored profile carries any of those human-set capabilities (card 05153988) — carrying e.g. browserTesting onto a role nobody reviewed it for (changing a QA-Tester-shaped rig to \"assistant\") is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. Conversely, flipping `role` to any OTHER elevated/locked role (platform/auditor/workspace-auditor/operator/setup — \"assistant\" exempt) is REJECTED if this profile is already bound to an agent OUTSIDE a reserved/system project (see docs/decisions/ad098631). 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
@@ -2061,6 +2070,14 @@ export class PlatformMcpRouter {
             return ok({ error: `cannot set role to "manager": this profile is bound to agent "${stranding.agent.name}" (${stranding.agent.id}) in reserved/system project "${stranding.project.name}" (${stranding.project.id}) — a manager session can never start there (see the session-start reserved-home guard); only a human may do this.` });
           }
         }
+        // @decision ad098631 — the inverse route: flipping INTO a locked role other than "assistant"
+        // can strand an agent already bound to this profile OUTSIDE every reserved project.
+        if (v.value.role != null && v.value.role !== existing.role && v.value.role !== "assistant" && LOCKED_PROFILE_ROLES.has(v.value.role)) {
+          const stranding = nonReservedAgentBoundToProfile(db, profileId);
+          if (stranding) {
+            return ok({ error: `cannot set role to "${v.value.role}": this profile is bound to agent "${stranding.agent.name}" (${stranding.agent.id}) in non-reserved project "${stranding.project.name}" (${stranding.project.id}) — role "${v.value.role}" is confined to a reserved/system project; only a human may do this.` });
+          }
+        }
         db.updateProfile(profileId, v.value);
         return ok(profileFields(db.getProfile(profileId)));
       },
@@ -2069,7 +2086,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profile carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST). A manager-role profile is REJECTED if the target agent lives in a reserved/system project — a manager session can never start there.",
+        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create). An elevated/locked-role profile (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profile carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST). A manager-role profile is REJECTED if the target agent lives in a reserved/system project — a manager session can never start there. Conversely, an elevated/locked-role profile OTHER than \"assistant\" is REJECTED if the target agent does NOT live in a reserved/system project — those roles are confined to the Lead's or Setup Assistant's own home (see docs/decisions/ad098631); \"assistant\" is exempt (real per-project companions are the documented, routine use).",
         inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
@@ -2084,6 +2101,9 @@ export class PlatformMcpRouter {
         // @decision ced4285e — reassignment-reachable twin of createAgentCore's reserved-project guard.
         const reservedErr = reservedProjectManagerProfileError(db.getProject(agent.projectId), profile);
         if (reservedErr) return ok({ error: reservedErr });
+        // @decision ad098631 — reassignment-reachable twin of createAgentCore's non-reserved guard.
+        const nonReservedErr = nonReservedElevatedProfileError(db.getProject(agent.projectId), profile);
+        if (nonReservedErr) return ok({ error: nonReservedErr });
         db.updateAgent(agent.id, { profileId });
         return ok(agentFields(db.getAgent(agent.id)));
       },

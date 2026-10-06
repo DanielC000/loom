@@ -20,9 +20,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (c) agent_clone_batch clones one source into MANY target projects in one call, each entry
 //       independent (a bad target's error doesn't block the others), same least-privilege guard applies
 //       per-entry.
-//   (d) agent_create/agent_update: assigning an elevated-role profileId directly is UNCHANGED (still
-//       allowed — administering the Lead's own rigs is this surface's job), but card a06650d2 adds a NEW
-//       rejection for a profileId carrying connections/capabilities/vaultWrite, on both tools.
+//   (d) agent_create/agent_update: assigning an elevated-role profileId directly is allowed when the
+//       TARGET agent's project is a reserved/system project — administering the Lead's own rigs is this
+//       surface's job — but card a06650d2 adds a rejection for a profileId carrying
+//       connections/capabilities/vaultWrite regardless of project, and card ad098631 ADDS a rejection for
+//       an elevated/locked profileId (other than "assistant") when the target project is NOT reserved —
+//       dedicated reserved-vs-ordinary coverage for every write site lives in
+//       reserved-home-elevated-bind-guard.mjs; this file only needs enough to prove (d)'s field check
+//       still composes correctly with the new project check.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-agent-clone.mjs
 import fs from "node:fs";
@@ -67,6 +72,9 @@ const db = new Db();
 db.insertProject({ id: "pSrc", name: "Source", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertProject({ id: "pA", name: "Sibling A", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertProject({ id: "pB", name: "Sibling B", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+// Card ad098631: an elevated/locked-role profileId is now confined to a reserved/system project — this
+// fixture's own (d) regression section needs one to prove that confinement without changing (a)/(b)/(c).
+db.insertProject({ id: "pReserved", name: "Reserved Home", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
 
 db.insertProfile({ id: "profQA", name: "QA Tester", role: "worker", description: "qa rig", allowDelta: [], skills: null, model: null, icon: "🧪", browserTesting: true });
 db.insertProfile({ id: "profPlatform", name: "Platform Rig", role: "platform", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🛡️" });
@@ -246,30 +254,41 @@ try {
   // profileId directly — administering the Lead's own elevated rigs is this surface's job
   // (allowElevatedRoles:true, per the 3de74275 decision record's amendment) — but a profile carrying
   // connections/capabilities/vaultWrite is now REJECTED regardless of role, on both tools.
-  const createdElevDirect = await call("agent_create", { projectId: "pA", name: "DirectElevated", profileId: "profPlatform" });
-  check("(d) agent_create: assigning an elevated profileId DIRECTLY is still allowed on this surface (role check lifted)",
+  // Card ad098631: that "still allowed" claim is now conditional on the TARGET project being reserved —
+  // the elevated bind this fixture exercises for the field-check regression below must target pReserved,
+  // never pA, or it would be caught by the NEW reserved-project confinement instead of proving anything
+  // about the field check; the dedicated reserved-vs-ordinary coverage lives in
+  // reserved-home-elevated-bind-guard.mjs, not here.
+  const createdElevDirect = await call("agent_create", { projectId: "pReserved", name: "DirectElevated", profileId: "profPlatform" });
+  check("(d) agent_create: assigning an elevated profileId DIRECTLY is still allowed on this surface into a reserved project (role check lifted)",
     createdElevDirect.profileId === "profPlatform" && !createdElevDirect.error);
+  const createdElevOrdinary = await call("agent_create", { projectId: "pA", name: "DirectElevatedOrdinary", profileId: "profPlatform" });
+  check("(d) agent_create: REJECTS the SAME elevated profileId directly into a NON-reserved project (card ad098631)",
+    typeof createdElevOrdinary.error === "string" && /reserved/i.test(createdElevOrdinary.error) && !createdElevOrdinary.id);
   const createdVaultWrite = await call("agent_create", { projectId: "pA", name: "DirectVaultWrite", profileId: "profVaultWrite" });
   check("(d) agent_create: REJECTS a vaultWrite-carrying profileId even though the role check is lifted here",
     typeof createdVaultWrite.error === "string" && /vaultWrite/i.test(createdVaultWrite.error) && !createdVaultWrite.id);
-  const updatedElevDirect = await call("agent_update", { agentId: created.id, profileId: "profAuditor" });
-  check("(d) agent_update: assigning an elevated profileId DIRECTLY is still allowed on this surface (role check lifted)",
+  const updatedElevDirect = await call("agent_update", { agentId: createdElevDirect.id, profileId: "profAuditor" });
+  check("(d) agent_update: assigning an elevated profileId DIRECTLY is still allowed on this surface onto an agent in a reserved project (role check lifted)",
     updatedElevDirect.profileId === "profAuditor" && !updatedElevDirect.error);
-  const updatedVaultWrite = await call("agent_update", { agentId: created.id, profileId: "profVaultWrite" });
-  check("(d) agent_update: REJECTS a vaultWrite-carrying profileId even though the role check is lifted here",
+  const updatedElevOrdinary = await call("agent_update", { agentId: created.id, profileId: "profAuditor" });
+  check("(d) agent_update: REJECTS the SAME elevated profileId directly onto an agent in a NON-reserved project (card ad098631)",
+    typeof updatedElevOrdinary.error === "string" && /reserved/i.test(updatedElevOrdinary.error));
+  const updatedVaultWrite = await call("agent_update", { agentId: createdElevDirect.id, profileId: "profVaultWrite" });
+  check("(d) agent_update: REJECTS a vaultWrite-carrying profileId even though the role+reserved checks pass",
     typeof updatedVaultWrite.error === "string" && /vaultWrite/i.test(updatedVaultWrite.error));
   check("(d) agent_update: the rejected vaultWrite patch left the agent's profile UNCHANGED (still profAuditor)",
-    db.getAgent(created.id)?.profileId === "profAuditor");
+    db.getAgent(createdElevDirect.id)?.profileId === "profAuditor");
   // Card 1f52bc75: representative coverage for the 3 newly-checked field members (documentConversion) —
   // same shape as vaultWrite immediately above.
   const createdDocConversion = await call("agent_create", { projectId: "pA", name: "DirectDocConversion", profileId: "profDocConversion" });
   check("(d) agent_create: REJECTS a documentConversion-carrying profileId even though the role check is lifted here",
     typeof createdDocConversion.error === "string" && /documentConversion/i.test(createdDocConversion.error) && !createdDocConversion.id);
-  const updatedDocConversion = await call("agent_update", { agentId: created.id, profileId: "profDocConversion" });
+  const updatedDocConversion = await call("agent_update", { agentId: createdElevDirect.id, profileId: "profDocConversion" });
   check("(d) agent_update: REJECTS a documentConversion-carrying profileId even though the role check is lifted here",
     typeof updatedDocConversion.error === "string" && /documentConversion/i.test(updatedDocConversion.error));
   check("(d) agent_update: the rejected documentConversion patch left the agent's profile UNCHANGED (still profAuditor)",
-    db.getAgent(created.id)?.profileId === "profAuditor");
+    db.getAgent(createdElevDirect.id)?.profileId === "profAuditor");
 
   await client.close();
 } finally {
@@ -279,6 +298,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — agent_clone provisions a clone via the SAME createAgentCore path as agent_create (name/startupPrompt/profileId carry over, nameOverride/promptPatch replace their field), agent_clone_batch clones one source into many targets independently (a bad entry doesn't block the others), the least-privilege guard rejects cloning a platform/auditor-profiled OR a connections/capabilities/vaultWrite-carrying agent (single AND batch), and agent_create/agent_update still allow an elevated-role profileId directly but now reject a connections/capabilities/vaultWrite-carrying one (card a06650d2)."
+  ? "\n✅ ALL PASS — agent_clone provisions a clone via the SAME createAgentCore path as agent_create (name/startupPrompt/profileId carry over, nameOverride/promptPatch replace their field), agent_clone_batch clones one source into many targets independently (a bad entry doesn't block the others), the least-privilege guard rejects cloning a platform/auditor-profiled OR a connections/capabilities/vaultWrite-carrying agent (single AND batch), and agent_create/agent_update still allow an elevated-role profileId directly INTO A RESERVED PROJECT but reject one carrying connections/capabilities/vaultWrite regardless of project (card a06650d2) or landing in a NON-reserved project at all (card ad098631 — see reserved-home-elevated-bind-guard.mjs for the dedicated reserved-vs-ordinary coverage across every write site)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

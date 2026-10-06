@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Agent, Profile, Project } from "@loom/shared";
 import type { Db } from "../db.js";
 import { isPlatformProfile } from "../profiles/seed.js";
-import { agentAssignableProfileError } from "../profiles/validate.js";
+import { agentAssignableProfileError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { agentCreatePromptWarning } from "./promptLint.js";
 import { isLoomHomeOrAncestor } from "../vault/versioner.js";
 
@@ -35,6 +35,31 @@ export function reservedProjectManagerProfileError(
 ): string | null {
   if (managerSessionBarredFrom(project) && profile?.role === "manager") {
     return "cannot bind a manager-role profile to an agent in a project a manager session can never start in (a reserved/system project, or one whose repoPath is the workspace home or an ancestor of it) — only a human may do this.";
+  }
+  return null;
+}
+
+// @decision ad098631 — every LOCKED_PROFILE_ROLES role except "assistant" is confined to a
+// reserved/system project; never exclude another role here without re-checking every seeder.
+export function nonReservedElevatedProfileError(
+  project: Pick<Project, "reserved"> | undefined,
+  profile: Pick<Profile, "role"> | null | undefined,
+): string | null {
+  const role = profile?.role;
+  if (role != null && role !== "assistant" && LOCKED_PROFILE_ROLES.has(role) && project?.reserved !== true) {
+    return `cannot bind profile: role "${role}" is confined to a reserved/system project (e.g. the Platform Lead's or Setup Assistant's own home) — it may not be bound to an agent anywhere else; only a human may do this.`;
+  }
+  return null;
+}
+
+// @decision ad098631 — the INVERSE of reservedProjectAgentBoundToProfile: finds an agent ALREADY bound
+// to this profile that lives OUTSIDE every reserved project — for profile_update's flip-into-a-locked-
+// role branch, the same hazard shape ced4285e's "route 2" closed for a flip into "manager".
+export function nonReservedAgentBoundToProfile(db: Db, profileId: string): { agent: Agent; project: Project } | null {
+  for (const project of db.listAllProjects()) {
+    if (project.reserved === true) continue;
+    const hit = db.listAgents(project.id).find((a) => a.profileId === profileId);
+    if (hit) return { agent: hit, project };
   }
   return null;
 }
@@ -86,6 +111,10 @@ export function createAgentCore(
   // (above) so create-time and reassign-time checks cannot drift apart.
   const reservedErr = reservedProjectManagerProfileError(project, profile);
   if (reservedErr) return { ok: false, error: reservedErr };
+  // @decision ad098631 — unconditional (no opts bypass it), so this ALSO covers cloneAgentCore's own
+  // callers (agent_clone/agent_clone_batch AND the companion auto-clone) with no separate wiring.
+  const nonReservedErr = nonReservedElevatedProfileError(project, profile);
+  if (nonReservedErr) return { ok: false, error: nonReservedErr };
   const agent: Agent = {
     id: randomUUID(), projectId, name,
     startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,

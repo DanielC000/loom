@@ -27,7 +27,13 @@ conversion, permission-allowlist additions, connections/capability grants, vault
 harness a rig spawns under. You scaffold a profile and rebind an agent to it, but the human sets any of
 those in the UI. Don't try to route one of them through the tool; it names the field and refuses. Every
 other profile field (role, name, description, skills, model, icon, and the restrict-only flags) is
-genuinely yours to set.
+genuinely yours to set. **You may bind an elevated/locked-role rig (platform/auditor/workspace-auditor/
+operator/setup) to an agent, but only within a reserved/system project** (your own home, or the setup
+home) — the same tool refuses that bind into an ordinary project, by design: those rigs administer a
+standing home, never an arbitrary project. A companion ("assistant" role) is the one exception — it's
+meant to be provisioned per-project. `agent_clone`/`agent_clone_batch` are for dispersing an ORDINARY
+(non-elevated) rig across sibling projects — they're stricter than direct assignment on an elevated role,
+not a way around the confinement above.
 This is the highest blast-radius seat in Loom; treat it like the human's own hands. Hold the capability, but reach for it **deliberately**, never casually, and
 prefer the smallest action that achieves the goal.
 

@@ -87,3 +87,27 @@ A later review (card `c8f1d9b7`, full-review finding `486d4238`) found that `clo
 
 - Do not read this amendment as inviting `cloneAgentCore`/`clonedProfileRoleError` to grow an `allowElevatedRoles` opt-out for the Lead's own callers — the reasoning above is why that was deliberately NOT done; if a future card wants to revisit it, it needs to weigh the shared-core risk above explicitly, not just copy the pattern from `createAgentCore`.
 - Do not restate this amendment's reasoning as a reason to also tighten `agent_create`/`agent_update`/`profile_assign` to match clone — those three staying permissive is the untouched, standing ruling from "Fix round 2" above; this amendment only explains clone's own asymmetry, it does not reopen that ruling.
+
+## Amendment (card `ad098631`) — `allowElevatedRoles` widening the ROLE check is not the same as widening WHERE
+
+This record's "Fix round 2" establishes that `allowElevatedRoles: true` lifts `agentAssignableProfileError`'s
+ROLE branch for the Platform Lead's `agent_create`/`agent_update`/`profile_assign`, reasoning that
+"administering elevated rigs... is its legitimate job." That reasoning is about WHICH roles the Lead may
+bind, not WHERE — nothing it says, or the surrounding code before this amendment, confined such a bind to
+the Lead's own reserved home. A checkpoint on card `ad098631` found the gap reachable at five write sites
+(the three above, plus `profile_update`'s role-flip branch and `agent_clone`/`agent_clone_batch`'s
+unguarded `"setup"`/`"workspace-auditor"` roles) and fixed it with a new, separate predicate,
+`nonReservedElevatedProfileError` (`agents/clone-core.ts`) — confining every `LOCKED_PROFILE_ROLES` role
+except `"assistant"` to a `reserved:true` project. See `docs/decisions/ad098631-confine-elevated-profile-binds-to-reserved-projects.md`
+for the full write-site list, why `"assistant"` is excluded (structural, not policy — the companion
+auto-clone's own create path depends on it), and the deliberate "which reserved project" limitation left
+open.
+
+### Do not (this amendment)
+
+- Do not read `allowElevatedRoles` as ever having implied a reserved-project confinement — it never checked
+  WHERE, only the role's own lock status; the confinement is `ad098631`'s own, separate predicate.
+- Do not fold `nonReservedElevatedProfileError`'s check into `agentAssignableProfileError` itself — the
+  latter has no project parameter today and mixing a project-scoped check into a project-blind predicate
+  would be the same kind of drift `ced4285e`'s "Predicate divergence" section warns about for a different
+  pair of checks.
