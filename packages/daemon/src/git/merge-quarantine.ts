@@ -129,6 +129,34 @@ function collectPendingIndices(pred: (p: PendingUnresolvedQuarantine) => boolean
   return pendingUnresolvedQuarantines.reduce<number[]>((acc, p, i) => { if (pred(p)) acc.push(i); return acc; }, []);
 }
 
+/** Every `pendingUnresolvedQuarantines` index (excluding `excludeIndices`) whose own path currently
+ *  resolves and whose `canonicalRepoLockKey` equals `key` — the SAME tier-3 predicate
+ *  {@link activeMergeQuarantineFor}'s own three-tier cascade already trusts for graduation, applied here
+ *  to absorb a SIBLING pending entry that the winning match never catches on its own identity (card
+ *  `8a1bc2ef`): two separately-registered repo paths bound to ONE physical repo (card `7673d096` — e.g. a
+ *  project at a repo's toplevel and another at one of its subdirs) collapse onto the same canonical key
+ *  once both resolve, but each keeps its OWN `directPathIdentity`, so neither tier 1 nor tier 2 of that
+ *  cascade — nor a bare `activeQuarantines.get(key)` hit, nor `enterMergeQuarantine`'s own
+ *  `directPathIdentity`-only pending match — ever sees the other as a match. Selects indices ONLY — every
+ *  caller must still route the result through {@link consumeMatchedPendingsIntoArmedEntry}, never splice
+ *  or union anything here directly. */
+function collectCrossTierSiblingIndices(key: string, excludeIndices: number[]): number[] {
+  return collectPendingIndices((p) => isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key)
+    .filter((i) => !excludeIndices.includes(i));
+}
+
+/** `true` iff `repoPath` currently resolves AND its OWN freshly-recomputed `canonicalRepoLockKey` equals
+ *  `key` — i.e. `repoPath` is GENUINELY, currently verified to BE the repo at `key`, never merely "armed
+ *  there" (card `8a1bc2ef`, round 2 — Code Review repro): an entry can occupy `key` via PASS 1's own
+ *  degraded dual-arm fallback (its OWN `repoPath` unresolvable at boot, so `canonicalRepoLockKey` walked
+ *  up to an ENCLOSING repo and dual-armed there) without `repoPath` ever having been confirmed to
+ *  actually BE that enclosing repo. Absorbing a cross-tier sibling into such a receiver would merge a
+ *  genuinely unrelated, still-pending quarantine into one that isn't verified to be at that key at all —
+ *  gate every cross-tier absorb INTO an already-armed/already-raised entry on this check first. */
+function isKeyVerifiedFor(repoPath: string, key: string): boolean {
+  return isRepoPathCurrentlyResolvable(repoPath) && canonicalRepoLockKey(repoPath) === key;
+}
+
 export const MERGE_QUARANTINE_DIR = path.join(LOOM_HOME, "merge-quarantines");
 
 /** Hash a raw canonical-repo-lock KEY directly (never a repoPath) — the primitive every other
@@ -304,6 +332,10 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOn
 /**
  * Delete `sourceFile` (a latch basename previously loaded from disk — a stale/legacy/pending source,
  * never a full path) ONLY IF it is NOT the same file `writtenEntry` was just durably written under.
+ * Returns `true` on a genuine success (deleted, ENOENT/already-gone, or a no-op skip because it IS the
+ * fresh write target) and `false` only when an unlink was actually attempted and failed (e.g. EBUSY) —
+ * card `8a1bc2ef`: the caller must fold a `false` into `orphanLatchFiles` rather than silently swallow
+ * it, or the surviving file goes untracked (see {@link consumeMatchedPendingsIntoArmedEntry}'s own doc).
  *
  * @decision 54054c01 (Code Review round 3, CRITICAL) — for a repo bound at its own git toplevel, the old
  * and current key algorithms compute the IDENTICAL value, so a stale source's name can equal the file a
@@ -312,10 +344,15 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOn
  * Shared by graduation, `enterMergeQuarantine`'s merge-into-pending path, and PASS 1's migrate branch (see
  * docs/decisions/54054c01-clear-lifts-every-key-an-entry-was-armed-under.md for the full repro).
  */
-function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQuarantineEntry): void {
+function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQuarantineEntry): boolean {
   const writtenFile = path.basename(quarantinePathFor(writtenEntry.repoPath));
-  if (sourceFile === writtenFile) return; // the "stale" source IS the file we just wrote — nothing to delete
-  try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, sourceFile)); } catch { /* best-effort */ }
+  if (sourceFile === writtenFile) return true; // the "stale" source IS the file we just wrote — nothing to delete
+  try {
+    fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, sourceFile));
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT"; // already gone is a genuine success, never a fold-worthy failure
+  }
 }
 
 /**
@@ -340,6 +377,13 @@ function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQu
  * per-file no-op, looped). On FAILURE, every matched `sourceFile` (skipping only one that already equals
  * the fresh write target) is folded into the armed entry's `orphanLatchFiles` instead — so a raw
  * clear-by-id of ANY of their stale hashes keeps them, never destroying the quarantine's only durable copy.
+ *
+ * @decision 8a1bc2ef (item 2) — a per-file delete failure (EBUSY) on an otherwise-successful write is
+ * folded into `orphanLatchFiles` too, like the whole-write failure branch — see the decision record for
+ * the untracked-file/fail-closed-reboot repro this closes.
+ *
+ * @decision 8a1bc2ef (item 1) — `armedKeys` is UNIONED and armed at every one of those keys, never
+ * overwritten to `[key]` alone — see the decision record for the dual-arm stranding this closes.
  */
 function consumeMatchedPendingsIntoArmedEntry(
   indices: number[],
@@ -353,17 +397,26 @@ function consumeMatchedPendingsIntoArmedEntry(
   if (extra) unioned = unionQuarantineEntries(unioned, extra);
   const sourceFiles = matched.map((p) => p.sourceFile);
   const strippedOrphanLatchFiles = unioned.orphanLatchFiles?.filter((f) => !sourceFiles.includes(f));
-  let armed: MergeQuarantineEntry = { ...unioned, resolvedKey: key, armedKeys: [key], orphanLatchFiles: strippedOrphanLatchFiles };
-  activeQuarantines.set(key, armed);
+  const armedKeys = [...new Set([...(unioned.armedKeys ?? []), key])];
+  let armed: MergeQuarantineEntry = { ...unioned, resolvedKey: key, armedKeys, orphanLatchFiles: strippedOrphanLatchFiles };
+  for (const k of armedKeys) activeQuarantines.set(k, armed);
   const writeSucceeded = writeMergeQuarantineLatch(armed);
   if (writeSucceeded) {
-    for (const sourceFile of sourceFiles) deleteSourceLatchIfSuperseded(sourceFile, armed);
+    const failedToDelete = sourceFiles.filter((sourceFile) => !deleteSourceLatchIfSuperseded(sourceFile, armed));
+    if (failedToDelete.length > 0) {
+      armed = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), ...failedToDelete])] };
+      for (const k of armedKeys) activeQuarantines.set(k, armed);
+      if (!writeMergeQuarantineLatch(armed)) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] graduated ${armed.repoPath} but could NOT re-persist it after ${failedToDelete.length} stale source file(s) (${failedToDelete.join(", ")}) failed to unlink — those file(s) stay on disk, UNTRACKED by this entry's own bookkeeping in THIS process; a restart may re-arm this quarantine from them (fail-closed, never open, but investigate the unlink failure).`);
+      }
+    }
   } else {
     const freshWriteTarget = path.basename(quarantinePathFor(armed.repoPath));
     const toFold = sourceFiles.filter((f) => f !== freshWriteTarget);
     if (toFold.length > 0) {
       armed = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), ...toFold])] };
-      activeQuarantines.set(key, armed);
+      for (const k of armedKeys) activeQuarantines.set(k, armed);
     }
   }
   return { armed, matched, writeSucceeded };
@@ -439,6 +492,22 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // `existing` may be armed under a SECOND key too (its own resolvedKey) — update every one of those
     // slots to this rebuilt object, not just `key` (round 2 finding 2).
     for (const k of existing.armedKeys?.length ? existing.armedKeys : [key]) activeQuarantines.set(k, entry);
+    // @decision 8a1bc2ef (round 2, Code Review) — only absorb into `entry` when IT is genuinely
+    // key-verified, never when `existing` merely occupies `key` via PASS 1's degraded dual-arm fallback —
+    // see the decision record for the nested-repo repro this guard closes.
+    //
+    // @decision 8a1bc2ef — absorb any SIBLING pending entry sharing this exact canonical key (card
+    // 7673d096) before persisting — this branch otherwise never looks at pendingUnresolvedQuarantines at
+    // all, see the decision record for the stranding-behind-the-already-armed-key repro this closes.
+    const siblingIndices = isKeyVerifiedFor(entry.repoPath, key) ? collectCrossTierSiblingIndices(key, []) : [];
+    if (siblingIndices.length > 0) {
+      const { writeSucceeded } = consumeMatchedPendingsIntoArmedEntry(siblingIndices, key, entry);
+      if (!writeSucceeded) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now (absorbed ${siblingIndices.length} sibling pending latch(es)) — the durable latch failed to write; a later boot can still recover it from the sibling(s)' own still-present source file(s).`);
+      }
+      return token;
+    }
     // @decision 92c645cc — safe to sweep: `entry.tokens` is `[...existing.tokens, token]`, a visible
     // superset of whatever `existing` (this process's own authoritative record for this key) already
     // held, so no older tmp for this key can carry a token this write doesn't already carry forward.
@@ -453,12 +522,21 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
   // same reason and same fix shape as `activeMergeQuarantineFor`'s own lazy-graduation cascade: a second
   // (or later) same-identity pending entry here was left permanently stranded otherwise.
   const pendingIndices = collectPendingIndices((p) => directPathIdentity(p.entry.repoPath) === identityForPendingMatch);
-  if (pendingIndices.length > 0) {
+  // @decision 8a1bc2ef — ALSO absorb a sibling pending entry sharing this exact canonical key, even when
+  // `repoPath` itself has no pending entry of its own — see the decision record for why the "brand new
+  // entry" branch below would otherwise strand it exactly like the pending-merge branch used to.
+  //
+  // @decision 8a1bc2ef (round 2, Code Review) — only when `repoPath` ITSELF currently resolves — `key` is
+  // computed from `repoPath` above, so an unresolvable `repoPath` makes `key` a DEGRADED (walked-up)
+  // value never actually verified to be `repoPath`'s own; see the decision record for the repro.
+  const siblingIndices = isRepoPathCurrentlyResolvable(repoPath) ? collectCrossTierSiblingIndices(key, pendingIndices) : [];
+  const allPendingIndices = siblingIndices.length > 0 ? [...pendingIndices, ...siblingIndices] : pendingIndices;
+  if (allPendingIndices.length > 0) {
     const fresh: MergeQuarantineEntry = { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token] };
     // @decision 188b145f (round 3, Delta Code Review f61b7f6e) — route through the SAME shared helper
     // `activeMergeQuarantineFor` uses, never a second inline copy: this branch used to splice/fold ONLY
     // on a SUCCESSFUL write, stranding every matched pending entry and its sourceFile on a FAILED one.
-    const { matched: consumed, writeSucceeded } = consumeMatchedPendingsIntoArmedEntry(pendingIndices, key, fresh);
+    const { matched: consumed, writeSucceeded } = consumeMatchedPendingsIntoArmedEntry(allPendingIndices, key, fresh);
     if (!writeSucceeded) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now (merged with ${consumed.length} pending latch(es)) — the durable latch failed to write, so the pending latch(es)' own source file(s) (${consumed.map((p) => p.sourceFile).join(", ")}) are now tracked as owned by this entry's own orphanLatchFiles rather than deleted; a later boot can still recover from it.`);
@@ -776,7 +854,19 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
 export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry | undefined {
   const key = canonicalRepoLockKey(repoPath);
   const direct = activeQuarantines.get(key);
-  if (direct || pendingUnresolvedQuarantines.length === 0) return direct;
+  if (pendingUnresolvedQuarantines.length === 0) return direct;
+  if (direct) {
+    // @decision 8a1bc2ef (round 2, Code Review) — only absorb into `direct` when IT is genuinely
+    // key-verified, never when it merely occupies `key` via PASS 1's degraded dual-arm fallback — see the
+    // decision record for the nested-repo repro this guard closes.
+    if (!isKeyVerifiedFor(direct.repoPath, key)) return direct;
+    // @decision 8a1bc2ef — a sibling pending entry (card 7673d096) can share this exact key without ever
+    // matching the identity that originally armed `direct` — absorb it now, or this fast path never
+    // looks at `pendingUnresolvedQuarantines` again for this key. See the decision record for the repro.
+    const siblingIndices = collectCrossTierSiblingIndices(key, []);
+    if (siblingIndices.length === 0) return direct;
+    return consumeMatchedPendingsIntoArmedEntry(siblingIndices, key, direct).armed;
+  }
   const identity = directPathIdentity(repoPath);
   // @decision 188b145f — collect EVERY identity-matching index at the winning tier, never just the first
   // (mirrors `clearMergeQuarantineLatchFile`'s/`clearMergeQuarantineByRecordedPath`'s own `.filter(...)`
@@ -807,7 +897,13 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
   // repo always hits `direct` above and never looks at `pendingUnresolvedQuarantines` again). This happens
   // UNCONDITIONALLY, in-memory, regardless of whether the durable write succeeds — mirroring PASS 1's own
   // migrate branch, enforcement for THIS process must not wait on disk I/O succeeding.
-  const { armed, matched: consumed, writeSucceeded } = consumeMatchedPendingsIntoArmedEntry(indices, key);
+  //
+  // @decision 8a1bc2ef — ALSO absorb any OTHER pending entry sharing this exact canonical key, even one
+  // that never matched at the winning tier's own identity (e.g. a toplevel-bound sibling's own pending
+  // entry when THIS query graduated via a subdir's identity instead) — see the decision record.
+  const siblingIndices = collectCrossTierSiblingIndices(key, indices);
+  const allIndices = siblingIndices.length > 0 ? [...indices, ...siblingIndices] : indices;
+  const { armed, matched: consumed, writeSucceeded } = consumeMatchedPendingsIntoArmedEntry(allIndices, key);
   if (!writeSucceeded) {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] lazily re-resolved ${consumed.length} pending unverifiable quarantine entr${consumed.length === 1 ? "y" : "ies"} for ${armed.repoPath} but could NOT durably persist it under its now-known key — still enforced in THIS process, but the ORIGINAL file(s) (${consumed.map((p) => p.sourceFile).join(", ")}) are now tracked as owned by this entry's own orphanLatchFiles rather than deleted; a later boot can still recover it.`);
