@@ -57,12 +57,53 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const GIT_ID_ARGV = ["-c", "user.email=unionkc@loom", "-c", "user.name=unionkc"];
 const git = (repo, args) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
 
-// Kept SMALL so the whole suite settles in seconds: `unionMergeTimeoutFloorMs` forces
-// `mergeTimeoutMs = Math.max(timeoutMs, floor) = SMALL_MS` (both pinned to the same value), and
-// `killGraceMs` defaults to that SAME value inside `withTimeoutKillingChild` — so one failed attempt's
-// worst case is ~2×SMALL_MS, and the one bounded retry's worst case is ~4×SMALL_MS.
-const SMALL_MS = 1200;
-const DEPS = { timeoutMs: SMALL_MS, unionMergeTimeoutFloorMs: SMALL_MS };
+// Card ad72086b (2026-10-06): a real in-gate run (op 4304c43e) saw the [no-retry] case's confirmed-kill
+// timeout misclassified as UNCONFIRMED — "exceeded 1200ms, killed, but did not die within 1200ms —
+// giving up" — under ordinary host load (CPU ~49%, other workers' own targeted tests sharing the box).
+// Root cause (verified directly, reproduced below): on win32, `spawnCanonicalGitTree`'s close handler
+// treats a tree-kill as confirmed only once `killGateProcessTree`'s own `taskkill /T /F` subprocess has
+// been spawned, scheduled, and awaited to completion — a REAL child process, subject to the SAME OS
+// scheduling delay as everything else on a contended host. The outer `withTimeoutKillingChild` give-up
+// timer fires at a fixed `ms + killGraceMs` measured from this call's own start, independent of how long
+// that confirmation round-trip actually takes — so a kill-confirm window tight enough to keep a
+// quiet-host suite fast leaves near-zero slack for taskkill's own real-world latency once the host is
+// even moderately busy.
+//
+// `KILL_CONFIRM_WINDOW_MS` is the ONE lever this card widens — `unionMergeTimeoutFloorMs` forces
+// `mergeTimeoutMs = Math.max(timeoutMs, floor) = KILL_CONFIRM_WINDOW_MS` (both pinned to the same value),
+// and `killGraceMs` defaults to that SAME value inside `withTimeoutKillingChild` — so one failed
+// attempt's worst case is ~2×KILL_CONFIRM_WINDOW_MS. Deliberately NOT a single constant every other wait
+// in the file scales off of (a first attempt at this fix raised one `SMALL_MS` shared by the kill window
+// AND every hook's own artificial sleep duration, which made the whole file blow its 120s default
+// per-file budget under a full, scripts-touching gate — see this card's own history/worker_report for
+// that incident). `HOOK_OVERRUN_MS` below is a SEPARATE, fixed margin the slow-hook fixtures must outlast
+// the kill timer by, independent of how large `KILL_CONFIRM_WINDOW_MS` needs to be for robustness.
+//
+// RE-PRODUCED (not just theorized): a synthetic CPU-contention run (28 busy-loop processes on a 16-core
+// host) turned this same give-up-too-early shape into a 5/5 failure rate at the old 1200ms window,
+// including GREEN-1 itself (not just NO-RETRY) and the GREEN-1 positive control (a real, unkilled git
+// merge) missing its own generous settle window. Sized from this card's own moderate-load measurements
+// (a more realistic ~50%-CPU synthetic load, matching the incident's reported ~49% CPU — see this card's
+// worker_report for the full standalone + under-load timing counts against the file's 120s budget).
+const KILL_CONFIRM_WINDOW_MS = 3_000;
+const HOOK_OVERRUN_MS = 3_000;
+// Every slow-hook fixture below runs this many ticks of this size — total duration
+// (HOOK_TICKS × HOOK_TICK_MS) exceeds KILL_CONFIRM_WINDOW_MS by HOOK_OVERRUN_MS, so the real kill always
+// lands mid-hook rather than after it would have finished naturally. Ticks stay frequent (console.log on
+// every one) well under KILL_CONFIRM_WINDOW_MS so simple-git's own idle `block` timeout (this file's own
+// header comment) never mistakes the hook for hung before the REAL kill timer gets a chance to fire.
+const HOOK_TICKS = 10;
+const HOOK_TICK_MS = Math.ceil((KILL_CONFIRM_WINDOW_MS + HOOK_OVERRUN_MS) / HOOK_TICKS);
+const HOOK_TOTAL_MS = HOOK_TICKS * HOOK_TICK_MS;
+const DEPS = { timeoutMs: KILL_CONFIRM_WINDOW_MS, unionMergeTimeoutFloorMs: KILL_CONFIRM_WINDOW_MS };
+// A fully `gitFactory`-mocked scenario spawns no real child at all — `killableCanonicalRaw` takes the
+// plain-`withTimeout` branch, never `withTimeoutKillingChild`, so none of these six scenarios (RETRY,
+// ALLOWRETRY-FALSE, QUIT-FAILURE, UNREADABLE-MERGE-HEAD, PRECONDITION-FALSE-A/B) exercises the real
+// win32-taskkill robustness this card widens `KILL_CONFIRM_WINDOW_MS` for. Reusing that (now large) value
+// for them only pads the suite's wall-clock cost for nothing — a small, fixed, independent timeout
+// resolves the SAME mocked promises just as deterministically.
+const MOCK_TIMEOUT_MS = 500;
+const MOCK_DEPS = { timeoutMs: MOCK_TIMEOUT_MS, unionMergeTimeoutFloorMs: MOCK_TIMEOUT_MS };
 const BRANCH = "loom/union-kc-test";
 
 // A clean canonical repo + ONE worker worktree, with canonical main advanced past the worktree's fork
@@ -154,8 +195,8 @@ const tag = `${process.pid}-${Date.now()}`;
 {
   const { repo, wt } = makeRepoAndWorktree(`g1-${tag}`);
   const counterFile = path.join(repo, ".attempt-counter");
-  // Long enough to outlive the kill-timer (SMALL_MS) comfortably, short enough the whole suite stays fast.
-  installAlwaysSlowPreMergeCommitHook(repo, 10, Math.round(SMALL_MS * 0.4), counterFile);
+  // Outlives KILL_CONFIRM_WINDOW_MS's own kill-timer by HOOK_OVERRUN_MS — see this file's own header.
+  installAlwaysSlowPreMergeCommitHook(repo, HOOK_TICKS, HOOK_TICK_MS, counterFile);
   const preHead = git(wt, ["rev-parse", "HEAD"]).trim();
   const result = await mergeMainIntoWorktree(repo, wt, DEPS, undefined, BRANCH);
   console.log(`[green-1] info: result=${JSON.stringify(result)}`);
@@ -180,14 +221,13 @@ const tag = `${process.pid}-${Date.now()}`;
   // SHAPE directly (a bare, un-killed race against a real git child spawned via `node:child_process.spawn`
   // with no kill call at all) on a SEPARATE repo/worktree — never historical dead code — so this stays
   // meaningful even though the actual pre-fix `worktrees.ts` is long gone from the tree.
-  const hookTotalMs = 10 * Math.round(SMALL_MS * 0.4); // tracks installAlwaysSlowPreMergeCommitHook's own ticks × tickMs above
-  const settleWindowMs = hookTotalMs + 3000; // safety margin for process/hook-spawn overhead
+  const settleWindowMs = HOOK_TOTAL_MS + 3000; // safety margin for process/hook-spawn overhead
   const discriminated = await assertNeverWithControl({
     label: "[green-1] no orphaned commit lands LATER either, even once the hook's own full natural duration has played out",
     check: () => git(wt, ["rev-parse", "HEAD"]).trim() !== preHead,
     positiveControl: async () => {
       const { repo: cRepo, wt: cWt } = makeRepoAndWorktree(`g1disc-${tag}`);
-      installAlwaysSlowPreMergeCommitHook(cRepo, 10, Math.round(SMALL_MS * 0.4));
+      installAlwaysSlowPreMergeCommitHook(cRepo, HOOK_TICKS, HOOK_TICK_MS);
       const cPreHead = git(cWt, ["rev-parse", "HEAD"]).trim();
       const cMainSha = git(cRepo, ["rev-parse", "HEAD"]).trim();
       // The pre-round-1 hazard's own shape: a real git child, never killed — exactly what a bare
@@ -243,9 +283,23 @@ const tag = `${process.pid}-${Date.now()}`;
 {
   const { repo, wt } = makeRepoAndWorktree(`g2-${tag}`);
   const markerName = "escaped-descendant.marker";
-  // Comfortably past SMALL_MS's kill-timer + its own give-up grace window (killGraceMs defaults to
-  // SMALL_MS too, so give-up fires at ~2×SMALL_MS) — the escaped descendant must still be alive then.
-  const holdMs = 2 * SMALL_MS + 1500;
+  // Comfortably past KILL_CONFIRM_WINDOW_MS's own kill-timer + its own give-up grace window (killGraceMs
+  // defaults to that SAME value, so give-up fires at ~2×KILL_CONFIRM_WINDOW_MS) — the escaped descendant
+  // must still be alive then.
+  //
+  // Card ad72086b (2026-10-06): GREEN2_TRAILING_BUFFER_MS is a SEPARATE race from KILL_CONFIRM_WINDOW_MS
+  // itself — it must also outlast the SECOND attempt's own real git reads below (rev-parse HEAD, a
+  // merge-base check, hasConfiguredGitIdentity's two `git config` calls), each a real subprocess spawn,
+  // before the escaped descendant's natural exit lets the real confirmation arrive and auto-clear the
+  // quarantine out from under that second attempt's own quarantine check. REPRODUCED on a quiet host (no
+  // synthetic load) at the OLD 1500ms buffer: "a second merge attempt on the SAME canonical repo is
+  // refused by the quarantine" (and its three sibling checks) went RED once in 5 standalone runs — the old
+  // buffer left too little margin for those few real subprocess spawns to land before the descendant's own
+  // exit. Widened to a fixed 10s buffer (independent of KILL_CONFIRM_WINDOW_MS, which only governs the
+  // FIRST call's own give-up timing, never this trailing race) — 5/5 green standalone + 5/5 green under
+  // synthetic load after widening (see this card's worker_report for the counts).
+  const GREEN2_TRAILING_BUFFER_MS = 10_000;
+  const holdMs = 2 * KILL_CONFIRM_WINDOW_MS + GREEN2_TRAILING_BUFFER_MS;
   installDoubleForkedPreMergeCommitHook(repo, markerName, holdMs, 10_000);
   const result = await mergeMainIntoWorktree(repo, wt, DEPS, undefined, BRANCH);
   console.log(`[green-2] info: result=${JSON.stringify(result)}`);
@@ -282,8 +336,15 @@ const tag = `${process.pid}-${Date.now()}`;
   // same documented Windows/MSYS unreliability, confirmation may never arrive in-process at all, in which
   // case a human clear is the documented remedy (already asserted above) — so a timeout here is reported,
   // not failed.
-  const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: 15_000 });
-  console.log(`[green-2] info: quarantine auto-cleared within 15s poll: ${autoCleared} (best-effort — see note above)`);
+  // Card ad72086b: deliberately a SMALL, fixed cap, independent of holdMs's own (much larger) trailing
+  // buffer above — this line is informational only (never asserted), so it must never be the thing that
+  // makes this file blow its per-file budget. At GREEN2_TRAILING_BUFFER_MS=10s this poll will usually
+  // report `false` (the real auto-clear lands a few seconds after this window closes) — that is an
+  // accepted, honest trade against keeping the file fast, not a regression: the clear itself is NEVER
+  // asserted, only informationally logged.
+  const autoClearPollMs = 3_000;
+  const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: autoClearPollMs });
+  console.log(`[green-2] info: quarantine auto-cleared within ${autoClearPollMs}ms poll: ${autoCleared} (best-effort — see note above)`);
 }
 
 // ── GREEN 3 — a hook that is slow enough to trigger the kill-timer, but whose own work (the merge commit
@@ -292,7 +353,7 @@ const tag = `${process.pid}-${Date.now()}`;
 //    never a timing race against a pre-commit hook. ─────────────────────────────────────────────────────
 {
   const { repo, wt } = makeRepoAndWorktree(`g3-${tag}`);
-  installSlowPostMergeHook(repo, 10, Math.round(SMALL_MS * 0.4));
+  installSlowPostMergeHook(repo, HOOK_TICKS, HOOK_TICK_MS);
   const mainSha = git(repo, ["rev-parse", "HEAD"]).trim();
   const result = await mergeMainIntoWorktree(repo, wt, DEPS, undefined, BRANCH);
   console.log(`[green-3] info: result=${JSON.stringify(result)}`);
@@ -363,7 +424,7 @@ function makeOnceHangingMergeGitFactory() {
 {
   const { repo, wt } = makeRepoAndWorktree(`retry-${tag}`);
   const mainSha = git(repo, ["rev-parse", "HEAD"]).trim();
-  const result = await mergeMainIntoWorktree(repo, wt, { ...DEPS, gitFactory: makeOnceHangingMergeGitFactory() }, undefined, BRANCH);
+  const result = await mergeMainIntoWorktree(repo, wt, { ...MOCK_DEPS, gitFactory: makeOnceHangingMergeGitFactory() }, undefined, BRANCH);
   console.log(`[retry] info: result=${JSON.stringify(result)}`);
   check("[retry] the first attempt's timeout is retried once and the retry lands", result.ok === true);
   check("[retry] the landed mainSha is the real main tip", result.ok === true && result.mainSha === mainSha);
@@ -376,7 +437,7 @@ function makeOnceHangingMergeGitFactory() {
 {
   const { repo, wt } = makeRepoAndWorktree(`noretry-${tag}`);
   const counterFile = path.join(repo, ".attempt-counter");
-  installAlwaysSlowPreMergeCommitHook(repo, 10, Math.round(SMALL_MS * 0.4), counterFile);
+  installAlwaysSlowPreMergeCommitHook(repo, HOOK_TICKS, HOOK_TICK_MS, counterFile);
   // Pre-dirty an UNRELATED tracked file (untouched by either branch's or main's own changes, so the merge
   // itself is not blocked by it) — `merge --abort` only reverts what the merge touched, so this survives.
   fs.writeFileSync(path.join(wt, "untouched.txt"), "dirtied before the merge attempt\n");
@@ -415,7 +476,7 @@ function makeOnceHangingMergeGitFactory() {
 //    retry, failing after exactly ONE attempt instead. ───────────────────────────────────────────────────
 {
   const { repo, wt } = makeRepoAndWorktree(`noretryflag-${tag}`);
-  const result = await mergeMainIntoWorktree(repo, wt, { ...DEPS, gitFactory: makeOnceHangingMergeGitFactory(), allowRetry: false }, undefined, BRANCH);
+  const result = await mergeMainIntoWorktree(repo, wt, { ...MOCK_DEPS, gitFactory: makeOnceHangingMergeGitFactory(), allowRetry: false }, undefined, BRANCH);
   console.log(`[allowretry-false] info: result=${JSON.stringify(result)}`);
   check("[allowretry-false] the SAME scenario the RETRY case proves DOES retry and land instead fails after one attempt when allowRetry:false", result.ok === false);
   check("[allowretry-false] it is NOT a quarantine (the kill itself was confirmed, not unconfirmed)", result.quarantined !== true);
@@ -453,7 +514,7 @@ function makeQuitFailureGitFactory(mainSha) {
 }
 {
   const mainSha = "a".repeat(40);
-  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...DEPS, gitFactory: makeQuitFailureGitFactory(mainSha) }, undefined, BRANCH);
+  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...MOCK_DEPS, gitFactory: makeQuitFailureGitFactory(mainSha) }, undefined, BRANCH);
   console.log(`[quit-failure] info: result=${JSON.stringify(result)}`);
   check("[quit-failure] a landed merge whose --quit cleanup fails for a non-quarantine reason is NOT silently reported ok:true", result.ok === false);
   check("[quit-failure] it is NOT reported as a quarantine (the --quit failure was ordinary, not kill-unconfirmed)", result.quarantined !== true);
@@ -493,7 +554,7 @@ function makeUnreadableMergeHeadGitFactory(mainSha) {
 }
 {
   const mainSha = "b".repeat(40);
-  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...DEPS, gitFactory: makeUnreadableMergeHeadGitFactory(mainSha) }, undefined, BRANCH);
+  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...MOCK_DEPS, gitFactory: makeUnreadableMergeHeadGitFactory(mainSha) }, undefined, BRANCH);
   console.log(`[unreadable-merge-head] info: result=${JSON.stringify(result)}`);
   check("[unreadable-merge-head] a landed merge whose post-kill MERGE_HEAD read itself fails is NOT silently reported ok:true (RED on fa694c5c)", result.ok === false);
   check("[unreadable-merge-head] it is NOT reported as a quarantine (the read failure was an ordinary timeout, not kill-unconfirmed)", result.quarantined !== true);
@@ -534,7 +595,7 @@ function makePreconditionFalseGitFactory(mainSha, { mergeHeadSha, headSecondPare
   const mainSha = "c".repeat(40);
   const foreignSha = "d".repeat(40);
   const factory = makePreconditionFalseGitFactory(mainSha, { mergeHeadSha: foreignSha, headSecondParentSha: foreignSha });
-  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...DEPS, gitFactory: factory }, undefined, BRANCH);
+  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...MOCK_DEPS, gitFactory: factory }, undefined, BRANCH);
   console.log(`[precondition-false-a] info: result=${JSON.stringify(result)}`);
   check("[precondition-false-a] MERGE_HEAD belonging to an unrelated merge is never --quit'd", !factory.wasQuitCalled());
   check("[precondition-false-a] reports a loud ok:false (the leftover was never cleared)", result.ok === false);
@@ -548,7 +609,7 @@ function makePreconditionFalseGitFactory(mainSha, { mergeHeadSha, headSecondPare
   const mainSha = "e".repeat(40);
   const foreignSha = "f".repeat(40);
   const factory = makePreconditionFalseGitFactory(mainSha, { mergeHeadSha: mainSha, headSecondParentSha: foreignSha });
-  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...DEPS, gitFactory: factory }, undefined, BRANCH);
+  const result = await mergeMainIntoWorktree("Z:\\mock\\repo", "Z:\\mock\\worktree", { ...MOCK_DEPS, gitFactory: factory }, undefined, BRANCH);
   console.log(`[precondition-false-b] info: result=${JSON.stringify(result)}`);
   check("[precondition-false-b] a HEAD^2 mismatch is never --quit'd", !factory.wasQuitCalled());
   check("[precondition-false-b] reports a loud ok:false (the leftover was never cleared)", result.ok === false);
