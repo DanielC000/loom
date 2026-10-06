@@ -22440,7 +22440,8 @@ export class SessionService {
     betweenRemovalAndDelete?: () => void;
     /**
      * @decision e34d475c — never call `deleteBranch` when the branch is confirmed gone
-     * (`expectedBranchTip` undefined); only Pass A's cleanup-only caller sets this, never `finalizeMerge`.
+     * (`expectedBranchTip` undefined). Set by Pass A's cleanup-only caller since round 5, and by
+     * `finalizeMerge`'s own call too since card ed2d878e — both callers set it now.
      */
     skipDeleteWhenBranchGone?: boolean;
     /** Card e34d475c (round 5, NIT): lets the cleanup-only caller log under `[reconcile]` instead of
@@ -22449,8 +22450,13 @@ export class SessionService {
      *  unchanged for that caller. */
     logPrefix?: string;
     /** Test-only seam (card e34d475c, round 5): a `gitFactory` for THIS method's own `listCheckedOutBranches`/
-     *  `deleteBranch` calls only — lets a test spy on (or stub) exactly the git surface this tail drives,
-     *  without touching `gcWorktreeDir`'s own git ops. Omitted in production (both callers), unchanged. */
+     *  `deleteBranch` calls — lets a test spy on (or stub) exactly the git surface this tail drives,
+     *  without touching `gcWorktreeDir`'s own git ops. Always `undefined` in production: Pass A's
+     *  cleanup-only caller threads its own `gitDeps.gitFactory` through unconditionally, but that
+     *  resolves to `undefined` outside a test harness; `finalizeMerge`'s own call never passes this key
+     *  at all. The `resolveGitRef` read on the CAS-refused (`!deleted`) path below does NOT take this
+     *  seam — it always uses the real git client, by design (a test spying on this seam only ever sees
+     *  the `listCheckedOutBranches`/`deleteBranch` calls, never that follow-up read). */
     gitFactory?: BoundedGitDeps["gitFactory"];
   }): Promise<{
     nestedRepoBlock?: { paths: string[]; truncated: boolean };
@@ -22518,7 +22524,8 @@ export class SessionService {
       try { branchStillCheckedOut = (await listCheckedOutBranches(args.repoPath, { timeoutMs: this.gitOpMs, gitFactory: args.gitFactory })).has(args.branch); } catch { branchStillCheckedOut = true; }
     }
     // @decision e34d475c — `skipDeleteWhenBranchGone` opts OUT of `deleteBranch` entirely once the
-    // branch is confirmed gone; only the cleanup-only caller sets it, never `finalizeMerge`.
+    // branch is confirmed gone; the cleanup-only caller sets it since round 5, and `finalizeMerge`'s own
+    // call sets it too since card ed2d878e.
     const skipGoneBranchDelete = !!args.skipDeleteWhenBranchGone && !args.expectedBranchTip;
     if (!nestedRepoBlock && !dirtyWorktreeRetained && args.expectedBranchTip && branchStillCheckedOut) {
       // `git update-ref -d` (the CAS below) — unlike `branch -D` — DELETES a branch that is still checked out in a live
@@ -22692,6 +22699,8 @@ export class SessionService {
       projectId: args.projectId, taskId: args.taskId,
       forceRemoveWorktree: args.forceRemoveWorktree,
       expectedBranchTip: args.expectedBranchTip,
+      // @decision ed2d878e — never let this call attempt deleteBranch on a confirmed-gone ref.
+      skipDeleteWhenBranchGone: true,
       onWorktreeRetainedDirty: args.onWorktreeRetainedDirty,
       onBranchRetained: args.onBranchRetained,
       betweenRemovalAndDelete: () => {

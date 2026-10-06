@@ -79,12 +79,26 @@ function makeStuckRemoveDir() {
 // `git branch -D` is NEVER attempted against a branch already confirmed gone — the standing destructive
 // call this card exists to remove. Delegates every OTHER git op to the real git (the squash lookup +
 // cleanup path still need a genuinely working git), so only the delete-attempt shape is ever recorded.
+//
+// Card ed2d878e, item 2 (Code Review de9506c6 minor): the gone-branch fixtures above never actually
+// exercise `finalizeWorktreeAndBranch`'s own `listCheckedOutBranches`/`deleteBranch` calls at all (both
+// are gated on `expectedBranchTip`, which is undefined precisely because the branch is already gone) —
+// so `branchDeleteAttempts.length === 0` passing proves nothing about whether this spy is even WIRED to
+// this tail's git calls; it would pass just as vacuously if a future change dropped `gitFactory:
+// args.gitFactory` from the cleanup-only call site entirely. `worktreeListCalls`/`updateRefDeleteCalls`
+// below are the positive control: the BRANCHPRESENT fixture (own-row retry, branch genuinely present at
+// its landed tip — so `expectedBranchTip` IS set) proves the SAME spy instance genuinely sees
+// `listCheckedOutBranches`' `git worktree list --porcelain` call for real.
 const branchDeleteAttempts = [];
+const worktreeListCalls = [];
+const updateRefDeleteCalls = [];
 const deleteBranchSpyFactory = (repoPath, blockTimeoutMs) => {
   const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
   return {
     raw: async (args) => {
       if (Array.isArray(args) && args[0] === "branch" && args[1] === "-D") branchDeleteAttempts.push({ repoPath, args });
+      if (Array.isArray(args) && args[0] === "worktree" && args[1] === "list") worktreeListCalls.push({ repoPath, args });
+      if (Array.isArray(args) && args[0] === "update-ref" && args[1] === "-d") updateRefDeleteCalls.push({ repoPath, args });
       return real.raw(args);
     },
   };
@@ -261,6 +275,30 @@ try {
   check("(nested-blocked) still exactly ONE merge_done", db.listEventsForWorker(NB.tagWorkerId).filter((e) => e.kind === "merge_done").length === 1);
   check("(nested-blocked) no worker_retired filed", db.listEventsForWorker(NB.tagWorkerId).every((e) => e.kind !== "worker_retired"));
 
+  // ===================== BRANCHPRESENT (card ed2d878e, item 2 — POSITIVE CONTROL for the spy itself) ===
+  // Own-row retry, branch genuinely PRESENT at its landed tip, worktree left exactly as
+  // `setupLandedWorker` created it (no stray file, no nested repo) — so `expectedBranchTip` IS set and
+  // `finalizeWorktreeAndBranch` actually reaches its own `listCheckedOutBranches` call (gated on
+  // `expectedBranchTip` being truthy) via the SAME `deleteBranchSpyFactory` the gone-branch fixtures
+  // above use. This is NOT the "genuinely removable worktree" fixture Round 4's own note below still
+  // defers to `pass-a-own-row-cleanup-deletes-branch.mjs` — this one only needs the spy to see a REAL
+  // call, regardless of whether the delete itself proceeds or is skipped (this file's `removeDir` always
+  // fails clean, so the worktree is retained either way; what matters is that `worktreeListCalls` is no
+  // longer empty).
+  const BP = await setupLandedWorker("branchpresent");
+  db.insertTask({ id: BP.tagTaskId, projectId: BP.tagProjId, title: "PASTUCK-BRANCHPRESENT", body: "", columnKey: "done", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: BP.tagWorkerId, projectId: BP.tagProjId, agentId: BP.tagAgentId, engineSessionId: null, title: null, cwd: BP.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: BP.tagMgrId, taskId: BP.tagTaskId, worktreePath: BP.worktreePath, branch: BP.branch });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: BP.tagMgrId, workerSessionId: BP.tagWorkerId, taskId: BP.tagTaskId, kind: "merge_request", detail: { branch: BP.branch, filesChanged: 1, tip: BP.branch, repoKey: null } });
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: BP.tagMgrId, workerSessionId: BP.tagWorkerId, taskId: BP.tagTaskId, kind: "merge_done", detail: { branch: BP.branch, repoKey: null } });
+  check("(branch-present pre) branch genuinely exists at its landed tip", tryRevParse(BP.tagRepo, `refs/heads/${BP.branch}`) !== null);
+  check("(branch-present pre) the spy has NOT yet seen a `worktree list` call for this repo (isolating what THIS boot adds)",
+    worktreeListCalls.every((c) => c.repoPath !== BP.tagRepo));
+  await sessions.reconcileOrchestrationOnBoot(new Set(), { gitFactory: deleteBranchSpyFactory });
+  check("(branch-present) POSITIVE CONTROL: the spy's gitFactory genuinely saw this tail's own `listCheckedOutBranches` call (`git worktree list --porcelain`) for THIS repo — proving the gone-branch fixtures' `branchDeleteAttempts.length === 0` isn't vacuously true because the spy was never wired to this tail at all",
+    worktreeListCalls.some((c) => c.repoPath === BP.tagRepo));
+  check("(branch-present) still exactly ONE merge_done (no replay)", db.listEventsForWorker(BP.tagWorkerId).filter((e) => e.kind === "merge_done").length === 1);
+  check("(branch-present) no worker_retired filed", db.listEventsForWorker(BP.tagWorkerId).every((e) => e.kind !== "worker_retired"));
+
   // Round 4, MINOR item 2 (own-row retry, branch present at the landed tip, nothing blocking removal) is
   // NOT a fixture in THIS file — this whole file shares ONE SessionService whose `removeDir` ALWAYS
   // reports a clean-reject failure (see `makeStuckRemoveDir`, the file's own point), so a worktree here
@@ -268,8 +306,10 @@ try {
   // branch — that's not "nothing blocking it," it's the SAME retained-worktree shape as DIRTY/
   // NESTEDBLOCKED above, just via a different gcWorktreeDir outcome. See
   // pass-a-own-row-cleanup-deletes-branch.mjs for that fixture, with its own genuinely-removable worktree.
+  // (BRANCHPRESENT above shares that same retained-worktree shape — it exists only to positive-control
+  // the spy, not to re-prove removability.)
 
-  for (const p of [L.tagRepo, LS.tagRepo, M.tagRepo, D.tagRepo, NB.tagRepo]) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ } }
+  for (const p of [L.tagRepo, LS.tagRepo, M.tagRepo, D.tagRepo, NB.tagRepo, BP.tagRepo]) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ } }
 } finally {
   db.close();
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -277,6 +317,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card e34d475c: an own-row landing already finalized (merge_done recorded for this exact task+branch) whose worktree dir can never be removed is retried for CLEANUP ONLY on every boot — never re-retired, never re-finalized, never a duplicate merge_done — while the removal attempt itself keeps firing every single boot, exactly as the stuck-forever case needs. A legacy merge_done with no recorded branch also matches on task alone (both gone- and stuck-worktree legs), while a merge_done for an unrelated task never satisfies this row's own finalize even when it carries no branch to mismatch on. Round 4: a dirty-retained or nested-repo-blocked own-row worktree never has its branch CAS-deleted out from under it."
+  ? "\n✅ ALL PASS — card e34d475c: an own-row landing already finalized (merge_done recorded for this exact task+branch) whose worktree dir can never be removed is retried for CLEANUP ONLY on every boot — never re-retired, never re-finalized, never a duplicate merge_done — while the removal attempt itself keeps firing every single boot, exactly as the stuck-forever case needs. A legacy merge_done with no recorded branch also matches on task alone (both gone- and stuck-worktree legs), while a merge_done for an unrelated task never satisfies this row's own finalize even when it carries no branch to mismatch on. Round 4: a dirty-retained or nested-repo-blocked own-row worktree never has its branch CAS-deleted out from under it. Card ed2d878e item 2: the BRANCHPRESENT fixture positive-controls the spy itself, proving it genuinely sees this tail's listCheckedOutBranches call rather than sitting unwired."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

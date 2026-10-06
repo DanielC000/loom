@@ -178,10 +178,14 @@ reintroduced by the round-4 unification: every boot over a permanently stuck dir
 ref with nothing left to delete.
 
 **Fix:** `finalizeWorktreeAndBranch` takes a new `skipDeleteWhenBranchGone` flag, set ONLY by Pass A's
-cleanup-only caller — when true and `expectedBranchTip` is undefined, the whole `deleteBranch` call (and
-its preceding `listCheckedOutBranches` read) is skipped entirely, not just made idempotent.
-`finalizeMerge` never sets this flag, so its own gone-branch behaviour (still calling `deleteBranch`,
-which swallows an already-missing ref) is byte-identical to before this round. The cleanup-only call
+cleanup-only caller — when true and `expectedBranchTip` is undefined, the whole `deleteBranch` call is
+skipped entirely, not just made idempotent. (Its preceding `listCheckedOutBranches` read is already
+gated on `expectedBranchTip` being truthy on its own, independent of this flag — never reached either
+way once the branch is confirmed gone.)
+`finalizeMerge` never sets this flag (as of this round), so its own gone-branch behaviour (still calling
+`deleteBranch`, which swallows an already-missing ref) is byte-identical to before this round.
+**Superseded by card `ed2d878e`:** `finalizeMerge`'s own call now sets this flag too — see that card's
+own decision record for why. The cleanup-only call
 site also now passes `logPrefix: "[reconcile]"` (NIT: the shared tail previously logged every Pass A
 warning under the manager-facing `[finalizeMerge]` prefix) and a test-only `gitFactory` seam threaded
 from `reconcileOrchestrationOnBoot`'s existing `gitDeps` param (card `6ee48e4d`).
