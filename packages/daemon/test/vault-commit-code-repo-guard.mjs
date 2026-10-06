@@ -67,21 +67,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       underlying predicate by touching the geometry — that decision belongs to 7c1d6dbf, not here.
 // Run after build: node test/vault-commit-code-repo-guard.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
 import { stripComments } from "./_strip-comments.mjs";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-crg-home-${Date.now()}-${process.pid}`);
-fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+useOwnLoomHome("loom-crg-home-"); // card ad21ff1f (Code Review): was a raw mkdirSync with no cleanup, leaking %TEMP%/loom-crg-home-* dirs
 
 const { Db } = await import("../dist/db.js");
 const {
-  commitVault, startVaultVersioners, setCodeRepoGuardProvider,
+  commitVault, startVaultVersioners, setCodeRepoGuardProvider, isOperationalVaultDir,
 } = await import("../dist/vault/versioner.js");
 const { writeVaultFile, createVaultFile } = await import("../dist/vault/writer.js");
+const { WORKTREES_DIR } = await import("../dist/paths.js");
+fs.mkdirSync(WORKTREES_DIR, { recursive: true }); // card cc684616 test (16) needs it to exist for a real worktree inside it
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -410,6 +410,7 @@ function toEntry(p) {
     check("(9) a loud, specific warning names the refusal", warnings.some((w) => w.includes("[vault-versioner]") && w.includes("a09b81a0")));
   } finally {
     for (const v of versioners ?? []) { try { await v.stop(); } catch { /* best-effort */ } }
+    db.close(); // card ad21ff1f (Code Review): was left open, EBUSY-blocking useOwnLoomHome's own cleanup of loom.db
   }
 }
 
@@ -663,6 +664,162 @@ function toEntry(p) {
     result14c.committed === true,
   );
   check("(14c) KNOWN HOLE: ...so P14c's real source IS auto-committed today (must become NO new commit once fixed)", commitCount(C14c) === before14c + 1);
+}
+
+// ===================== (15) card cc684616: a vault inside a LINKED WORKTREE of the registered repo's own MAIN checkout =====================
+{
+  const mainCheckout15 = path.join(root, "cc-main-15");
+  initRepo(mainCheckout15);
+  fs.writeFileSync(path.join(mainCheckout15, "src.ts"), "export const x = 1;\n");
+  git(mainCheckout15, "add src.ts");
+  git(mainCheckout15, "commit -m init");
+
+  const linkedWorktree15 = path.join(root, "cc-worktree-15");
+  git(mainCheckout15, `worktree add "${linkedWorktree15}" -b cc684616-wt-15`);
+
+  const vaultDir15 = path.join(linkedWorktree15, "notes");
+  fs.mkdirSync(vaultDir15);
+  // An unrelated, genuinely uncommitted code file sitting elsewhere in the SAME worktree — `git add .`
+  // from the vault's own auto-commit would stage the WHOLE working tree if the collision guard missed
+  // this, sweeping it in too (the exact reviewer-reported symptom).
+  fs.writeFileSync(path.join(linkedWorktree15, "uncommitted-code.ts"), "export const leaked = true;\n");
+
+  const project15 = { id: "p-cc684616-15", repoPath: mainCheckout15, vaultPath: vaultDir15, vaultOnly: false, repos: [] };
+  setCodeRepoGuardProvider({ snapshot: () => [toEntry(project15)], recordEvent: () => {} });
+
+  fs.writeFileSync(path.join(vaultDir15, "note.md"), "# a real vault edit\n");
+  const before15 = commitCount(linkedWorktree15);
+  // Matches the REAL call shape: VaultVersioner.commit()/flushSync() call commitVault with the
+  // ALREADY-RESOLVED governing root (the linked worktree's own toplevel), never the raw vaultPath — see
+  // (1d)'s own comment for why the raw-path call shape can never exercise the collision check at all.
+  const result15 = await commitVault(linkedWorktree15, "loom: auto-commit (should be refused — vault in a linked worktree)");
+  check("(15) a vault inside a LINKED WORKTREE of the registered repo's own main checkout is refused", result15.committed === false && result15.blockedReason === "code-repo-collision");
+  check("(15) ...and no new commit landed", commitCount(linkedWorktree15) === before15);
+  check("(15) ...and the unrelated uncommitted code file was NOT swept in", !git(linkedWorktree15, "log --all --name-only --pretty=format:").includes("uncommitted-code.ts"));
+}
+
+// ===================== (15b) reverse direction: the registered repoPath IS a linked worktree; vault in the MAIN checkout =====================
+{
+  const mainCheckout15b = path.join(root, "cc-main-15b");
+  initRepo(mainCheckout15b);
+  fs.writeFileSync(path.join(mainCheckout15b, "src.ts"), "export const x = 1;\n");
+  git(mainCheckout15b, "add src.ts");
+  git(mainCheckout15b, "commit -m init");
+
+  const workerWorktree15b = path.join(root, "cc-worker-worktree-15b");
+  git(mainCheckout15b, `worktree add "${workerWorktree15b}" -b cc684616-wt-15b`);
+
+  // The registered project's repoPath is the WORKTREE itself, not the main checkout.
+  const vaultDir15b = path.join(mainCheckout15b, "notes");
+  fs.mkdirSync(vaultDir15b);
+
+  const project15b = { id: "p-cc684616-15b", repoPath: workerWorktree15b, vaultPath: vaultDir15b, vaultOnly: false, repos: [] };
+  setCodeRepoGuardProvider({ snapshot: () => [toEntry(project15b)], recordEvent: () => {} });
+
+  fs.writeFileSync(path.join(vaultDir15b, "note.md"), "# a real vault edit\n");
+  const before15b = commitCount(mainCheckout15b);
+  const result15b = await commitVault(mainCheckout15b, "loom: auto-commit (should be refused — registered repoPath is a worktree)");
+  check("(15b) a vault in the MAIN checkout collides when the registered repoPath IS a linked worktree of it", result15b.committed === false && result15b.blockedReason === "code-repo-collision");
+  check("(15b) ...and no new commit landed", commitCount(mainCheckout15b) === before15b);
+}
+
+// ===================== (15c) registered repoPath IS a linked worktree; vault in a DIFFERENT worktree of the SAME repo =====================
+{
+  const mainCheckout15c = path.join(root, "cc-main-15c");
+  initRepo(mainCheckout15c);
+  fs.writeFileSync(path.join(mainCheckout15c, "src.ts"), "export const x = 1;\n");
+  git(mainCheckout15c, "add src.ts");
+  git(mainCheckout15c, "commit -m init");
+
+  const workerWorktreeA15c = path.join(root, "cc-worker-a-15c");
+  git(mainCheckout15c, `worktree add "${workerWorktreeA15c}" -b cc684616-wt-a-15c`);
+  const workerWorktreeB15c = path.join(root, "cc-worker-b-15c");
+  git(mainCheckout15c, `worktree add "${workerWorktreeB15c}" -b cc684616-wt-b-15c`);
+
+  // registered project's repoPath is worktree A; the vault lives in worktree B — a DIFFERENT working
+  // tree of the SAME physical repo, neither one the main checkout.
+  const vaultDir15c = path.join(workerWorktreeB15c, "notes");
+  fs.mkdirSync(vaultDir15c);
+
+  const project15c = { id: "p-cc684616-15c", repoPath: workerWorktreeA15c, vaultPath: vaultDir15c, vaultOnly: false, repos: [] };
+  setCodeRepoGuardProvider({ snapshot: () => [toEntry(project15c)], recordEvent: () => {} });
+
+  fs.writeFileSync(path.join(vaultDir15c, "note.md"), "# a real vault edit\n");
+  const before15c = commitCount(workerWorktreeB15c);
+  const result15c = await commitVault(workerWorktreeB15c, "loom: auto-commit (should be refused — sibling worktree of a registered worktree repoPath)");
+  check("(15c) a vault in one worktree collides when the registered repoPath is a DIFFERENT worktree of the SAME repo", result15c.committed === false && result15c.blockedReason === "code-repo-collision");
+  check("(15c) ...and no new commit landed", commitCount(workerWorktreeB15c) === before15c);
+}
+
+// ===================== (15d) NEGATIVE CONTROL: an UNRELATED repo's own worktree must NOT collide =====================
+{
+  const unrelatedMain15d = path.join(root, "cc-unrelated-main-15d");
+  initRepo(unrelatedMain15d);
+  fs.writeFileSync(path.join(unrelatedMain15d, "other.ts"), "export const y = 1;\n");
+  git(unrelatedMain15d, "add other.ts");
+  git(unrelatedMain15d, "commit -m init");
+  const unrelatedWorktree15d = path.join(root, "cc-unrelated-wt-15d");
+  git(unrelatedMain15d, `worktree add "${unrelatedWorktree15d}" -b cc684616-unrelated-wt-15d`);
+
+  // The REGISTERED project's own repoPath is a totally SEPARATE repo, sharing nothing with the unrelated
+  // worktree above. The vault sits inside the unrelated worktree.
+  const registeredRepo15d = path.join(root, "cc-registered-15d");
+  initRepo(registeredRepo15d);
+  fs.writeFileSync(path.join(registeredRepo15d, "reg.ts"), "export const z = 1;\n");
+  git(registeredRepo15d, "add reg.ts");
+  git(registeredRepo15d, "commit -m init");
+
+  const vaultDir15d = path.join(unrelatedWorktree15d, "notes");
+  fs.mkdirSync(vaultDir15d);
+
+  const project15d = { id: "p-cc684616-15d", repoPath: registeredRepo15d, vaultPath: vaultDir15d, vaultOnly: false, repos: [] };
+  setCodeRepoGuardProvider({ snapshot: () => [toEntry(project15d)], recordEvent: () => {} });
+
+  fs.writeFileSync(path.join(vaultDir15d, "note.md"), "# a real vault edit in an unrelated worktree\n");
+  const before15d = commitCount(unrelatedWorktree15d);
+  const result15d = await commitVault(unrelatedWorktree15d, "loom: auto-commit (should SUCCEED — unrelated repo)");
+  check("(15d) NEGATIVE CONTROL: a vault in an UNRELATED repo's own worktree does NOT collide", result15d.committed === true);
+  check("(15d) ...and the commit actually landed", commitCount(unrelatedWorktree15d) === before15d + 1);
+}
+
+// ===================== (16) card cc684616: evaluation ORDER — Loom's own WORKTREES_DIR operational refusal =====================
+// Loom's own worker worktrees ARE linked worktrees of a registered repo, so this card's new common-dir
+// widening could in principle race the pre-existing operational-dir refusal for a vault bound at/under
+// WORKTREES_DIR. Verified directly (see this test's own two checks): isOperationalVaultDir fires on
+// WORKTREES_DIR itself (pre-existing, unaffected by this card) but — BOTH before and after this card's
+// fix — does NOT independently recognize a path merely INSIDE one specific worker worktree UNDER
+// WORKTREES_DIR (a descendant, not an ancestor, and it carries none of the two content markers either).
+// That shape was previously UNCAUGHT by either mechanism (the exact bug this card fixes); after this fix
+// it is correctly refused via the collision guard — "code-repo-collision", not "operational-dir". This
+// is a SAFE outcome (the auto-commit is still refused), just not the "operational" label a different
+// mental model of WORKTREES_DIR coverage might expect — recorded here as the actual, verified behavior
+// rather than assumed.
+{
+  check("(16) isOperationalVaultDir(WORKTREES_DIR itself) is true — pre-existing, unaffected by this card", isOperationalVaultDir(WORKTREES_DIR));
+
+  const mainCheckout16 = path.join(root, "cc-main-16");
+  initRepo(mainCheckout16);
+  fs.writeFileSync(path.join(mainCheckout16, "src.ts"), "export const x = 1;\n");
+  git(mainCheckout16, "add src.ts");
+  git(mainCheckout16, "commit -m init");
+
+  // A real linked worktree placed DIRECTLY under WORKTREES_DIR — the same layout createWorktree() uses
+  // for a Loom worker's own worktree.
+  const workerShapedWorktree16 = path.join(WORKTREES_DIR, "cc684616-fake-worker-16");
+  git(mainCheckout16, `worktree add "${workerShapedWorktree16}" -b cc684616-fake-worker-branch-16`);
+
+  check("(16) isOperationalVaultDir does NOT independently flag a path merely inside WORKTREES_DIR (pre-existing scope, not this card's)", !isOperationalVaultDir(workerShapedWorktree16));
+
+  const vaultDir16 = path.join(workerShapedWorktree16, "notes");
+  fs.mkdirSync(vaultDir16);
+  const project16 = { id: "p-cc684616-16", repoPath: mainCheckout16, vaultPath: vaultDir16, vaultOnly: false, repos: [] };
+  setCodeRepoGuardProvider({ snapshot: () => [toEntry(project16)], recordEvent: () => {} });
+
+  fs.writeFileSync(path.join(vaultDir16, "note.md"), "# a real vault edit\n");
+  const before16 = commitCount(workerShapedWorktree16);
+  const result16 = await commitVault(workerShapedWorktree16, "loom: auto-commit (should be refused — vault at a worker-worktree-shaped path)");
+  check("(16) a vault at a worker-worktree-shaped path under WORKTREES_DIR is refused (via the collision guard, not operational-dir)", result16.committed === false && result16.blockedReason === "code-repo-collision");
+  check("(16) ...and no new commit landed", commitCount(workerShapedWorktree16) === before16);
 }
 
 setCodeRepoGuardProvider(undefined); // leave no provider registered for any later test in the SAME process

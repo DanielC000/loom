@@ -10,7 +10,7 @@ import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv } from "../git/bounded.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
-import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, resolveGitToplevelSync } from "../git/repo-lock.js";
+import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -666,6 +666,45 @@ function isCanonicallyAtOrUnder(candidateKey: string, rootKey: string): boolean 
 }
 
 /**
+ * Canonicalize by git COMMON-DIR identity (any worktree of the SAME physical repo resolves to the SAME
+ * key), as opposed to `canonicalRepoLockKey`'s TOPLEVEL-only keying (a linked worktree's own `.git` FILE
+ * keys differently from its main checkout's `.git` directory).
+ *
+ * @decision cc684616 — this key is strictly ADDITIVE: never replace `canonicalRepoLockKey`'s keying with
+ * it, and never drop the existing toplevel check in {@link collidesByToplevelOrCommonDir} below.
+ *
+ * Reuses the existing, unmodified {@link resolveGitMainCheckoutRootSync}; `null` means "not inside a git
+ * repo", never a wildcard match.
+ */
+function canonicalCommonDirKey(repoPath: string): string | null {
+  const root = resolveGitMainCheckoutRootSync(repoPath);
+  if (root === null) return null;
+  return process.platform === "win32" ? root.toLowerCase() : root;
+}
+
+/**
+ * Whether `candidateRawPath` collides with the commitPath under EITHER the existing toplevel at-or-under
+ * rule ({@link isCanonicallyAtOrUnder}, unchanged) OR the two share the SAME git common-dir identity
+ * ({@link canonicalCommonDirKey} — any worktree of the SAME physical repo).
+ *
+ * `candidateKey`/`keyToplevel` are the ALREADY-canonicalized `canonicalRepoLockKey` results the caller has
+ * on hand (avoids recomputing them). `keyCommon` is the commitPath's OWN common-dir key, ALSO precomputed
+ * once by the caller (never per-candidate — see the hoist note on `checkCodeRepoCollision`) — only the
+ * CANDIDATE's own common-dir key is computed fresh here, and only after the toplevel check misses.
+ */
+function collidesByToplevelOrCommonDir(
+  candidateRawPath: string,
+  candidateKey: string,
+  keyToplevel: string,
+  keyCommon: string | null,
+): boolean {
+  if (isCanonicallyAtOrUnder(candidateKey, keyToplevel)) return true;
+  if (keyCommon === null) return false; // commitPath isn't inside a git repo at all — no common-dir identity to share
+  const candidateCommon = canonicalCommonDirKey(candidateRawPath);
+  return candidateCommon !== null && candidateCommon === keyCommon;
+}
+
+/**
  * @decision a09b81a0 — round 3, owner ruling on request `8d6fea89` (option A): a repo that is itself some
  * project's vault root is exempt from the collision refusal below, EVEN IF it is also registered as some
  * OTHER project's own `repoPath`.
@@ -708,13 +747,16 @@ function isCanonicallyAtOrUnder(candidateKey: string, rootKey: string): boolean 
  * Cheap and git-free, like {@link isCanonicallyAtOrUnder} itself — pure path comparison over the SAME
  * snapshot `checkCodeRepoCollision` already holds, never a per-candidate git-toplevel probe.
  */
-function isRecognizedVaultRoot(key: string, entries: CodeRepoGuardEntry[]): boolean {
+function isRecognizedVaultRoot(key: string, keyCommon: string | null, entries: CodeRepoGuardEntry[]): boolean {
   for (const entry of entries) {
     if (!entry.vaultPath) continue;
     const vaultKey = canonicalRepoLockKey(entry.vaultPath);
     if (!isCanonicallyAtOrUnder(vaultKey, key)) continue; // this entry's vault isn't even located at/under `key`
     const ownCandidates = [entry.repoPath, ...entry.repos.map((r) => r.path)].filter(Boolean);
-    const ownCodeAtRisk = ownCandidates.some((c) => isCanonicallyAtOrUnder(canonicalRepoLockKey(c), key));
+    // @decision cc684616 — ALSO at risk when a candidate is a different WORKTREE of the SAME physical
+    // repo `commitPath` resolves to (common-dir match), not just toplevel-at-or-under — see
+    // collidesByToplevelOrCommonDir. `keyCommon` is the caller's already-hoisted commitPath common-dir key.
+    const ownCodeAtRisk = ownCandidates.some((c) => collidesByToplevelOrCommonDir(c, canonicalRepoLockKey(c), key, keyCommon));
     if (ownCodeAtRisk) continue; // this project's OWN code (if any) is ALSO under `key` — can't vouch for it
     return true; // a genuinely separate project's real vault lives at/under `key` — safe to treat as notes
   }
@@ -745,14 +787,19 @@ function isRecognizedVaultRoot(key: string, entries: CodeRepoGuardEntry[]): bool
 function checkCodeRepoCollision(commitPath: string): CodeRepoCollision | null {
   if (!codeRepoGuard) return null;
   const key = canonicalRepoLockKey(commitPath);
+  // @decision cc684616 — HOISTED: commitPath's own common-dir key is INVARIANT across this call; compute
+  // it ONCE, never per-candidate — see the decision record for the UNC/SMB-share cost this avoids.
+  const keyCommon = canonicalCommonDirKey(commitPath);
   const entries = codeRepoGuard.snapshot();
-  if (isRecognizedVaultRoot(key, entries)) return null;
+  if (isRecognizedVaultRoot(key, keyCommon, entries)) return null;
   for (const entry of entries) {
     const candidates = [entry.repoPath, ...entry.repos.map((r) => r.path)];
     for (const candidate of candidates) {
       if (!candidate) continue;
       const candidateKey = canonicalRepoLockKey(candidate);
-      if (!isCanonicallyAtOrUnder(candidateKey, key)) continue;
+      // @decision cc684616 — ALSO collides when `candidate` is a different WORKTREE of the SAME
+      // physical repo `commitPath` resolves to, not just toplevel-at-or-under.
+      if (!collidesByToplevelOrCommonDir(candidate, candidateKey, key, keyCommon)) continue;
       const isOwnRepoPath = candidate === entry.repoPath;
       if (isOwnRepoPath && entry.vaultOnly && canonicalRepoLockKey(entry.repoPath) === canonicalRepoLockKey(entry.vaultPath)) continue;
       return { collidesWithProjectId: entry.id, collidesWithRepoPath: candidate };
