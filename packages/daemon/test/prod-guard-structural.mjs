@@ -11,9 +11,12 @@
 //
 //   (A) POSITIVE CONTROL — a `new Db()` fixture, invoked bare (no LOOM_TEST/LOOM_HOME/LOOM_PORT) with
 //       its entry INSIDE test/, must ABORT before ever opening a db file.
-//   (B) NEGATIVE CONTROL — the exact same fixture, invoked bare, with its entry OUTSIDE test/ (the
-//       production-boot shape: no test marker, not under test/) must OPEN NORMALLY — proving the fix
-//       does not touch the real daemon's own boot path.
+//   (B) the exact same fixture, invoked bare, with its entry OUTSIDE test/ (no test marker, not under
+//       test/) ALSO now aborts — card 0a03059e: that "no marker, not under test/" shape is also exactly
+//       what an uncommitted ad-hoc script looks like, which is the incident this later card fixes. The
+//       real daemon boot is unaffected by THIS entry-dir check either way: it always had its own, separate
+//       distinguishing signal (an explicit `declareDaemonProcess()` call) — see prod-db-default-refuse.mjs
+//       for the full declare/opt-in behavior this structural check now sits alongside, not in place of.
 //   (C) SURGICAL CHECK — the fixture invoked from INSIDE test/ again, but this time with a properly
 //       isolated LOOM_HOME, must also OPEN NORMALLY — proving the structural check only blocks the
 //       real prod path, not every invocation from inside test/.
@@ -74,17 +77,17 @@ function bareEnv(decoyHome, extra = {}) {
   check("(A) no db file was ever created under the decoy home", !fs.existsSync(dbFile));
 }
 
-// --- (B) NEGATIVE CONTROL: bare invocation, entry OUTSIDE test/ -> must open normally (prod-boot shape) ---
+// --- (B) bare invocation, entry OUTSIDE test/ -> ALSO now aborts (card 0a03059e) ---
 {
   const decoyHome = makeDecoyHome(true);
   const outsideCopy = path.join(mkdtempManaged("loom-guard-outside-"), "bare-default-db-open.mjs");
   fs.copyFileSync(fixtureInsideTestDir, outsideCopy);
   const result = spawnSync(process.execPath, [outsideCopy], { env: bareEnv(decoyHome), encoding: "utf8" });
   const dbFile = path.join(decoyHome, ".loom", "loom.db");
-  check("(B) the SAME bare invocation, entry OUTSIDE test/, opens normally (no test marker, not under test/)",
-    result.status === 0 && /^OPENED/m.test(result.stdout || ""));
-  check("(B) a real db file WAS created (proves the production-boot path is unaffected by this fix)",
-    fs.existsSync(dbFile));
+  check("(B) the SAME bare invocation, entry OUTSIDE test/, now ALSO aborts (card 0a03059e's default-refuse)",
+    result.status === 1 && /THREW:refusing to open the prod DB/.test(result.stdout || ""));
+  check("(B) no db file was created either (this entry-dir check and the default-refuse guard agree)",
+    !fs.existsSync(dbFile));
 }
 
 // --- (C) SURGICAL CHECK: entry INSIDE test/ again, but properly isolated (own LOOM_HOME) -> opens fine ---
@@ -103,6 +106,6 @@ function bareEnv(decoyHome, extra = {}) {
 try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a completely bare `node test/*.mjs` invocation (no env at all) can no longer open prod; the real (non-test) boot path is unaffected."
+  ? "\n✅ ALL PASS — a completely bare `node test/*.mjs` invocation (no env at all) can no longer open prod; neither can a bare invocation outside test/ (see prod-db-default-refuse.mjs for why the real daemon boot still can)."
   : `\n${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

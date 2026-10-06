@@ -7,7 +7,7 @@ import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, LOOPBACK_SECRET_PATH, isUsagePol
 import { installCrashHandlers, installEpipeTolerantStdio, hadCrashLogAtBoot as computeHadCrashLogAtBoot } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { HANDLED_SIGNALS, makeBootShutdownStub } from "./boot-shutdown-stub.js";
-import { Db } from "./db.js";
+import { Db, declareDaemonProcess } from "./db.js";
 import { startGatewayListeners, type RemoteEndpointRef } from "./gateway/remote-listener.js";
 import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
 import { sweepDeadSessions, watchClaudeProjects, watchCodexSessions } from "./sessions/liveness.js";
@@ -137,6 +137,9 @@ async function main(): Promise<void> {
   // AFTER `db`/`platformOverride` are available, uses the fully-resolved `resolved.backup` instead.
   const bootBackupCfg = resolveBackupConfig();
   if (bootBackupCfg.enabled) await takeBackup({ reason: "boot", keep: bootBackupCfg.keep });
+  // @decision 0a03059e — this is the ONE legitimate call site; never add a second one, and never
+  // replace it with an env var the daemon sets on itself.
+  declareDaemonProcess();
   const db = new Db();
   dbForShutdown = db; // lets the boot-safe shutdown stub registered above best-effort close it
   // Card a09b81a0 (round 2): wire the code-repo-collision guard HERE, immediately after `db` opens and

@@ -17,8 +17,23 @@ import { isValidCredentialEnvVarName } from "./keys/credentialSessionEnv.js";
  * The REAL production database — `~/.loom/loom.db`, independent of any LOOM_HOME override. A worker
  * once wiped this by running a daemon integration test with no env set (the test's bare `new Db()`
  * opened it and DELETE'd everything). This is the last-line backstop against that class of accident.
+ * Deliberately the RAW, unresolved path — {@link normalizeForProdDbCompare} is what both sides of the
+ * comparison go through, at compare time, not here.
  */
-const REAL_PROD_DB = path.resolve(path.join(os.homedir(), ".loom", "loom.db"));
+const REAL_PROD_DB_PATH = path.join(os.homedir(), ".loom", "loom.db");
+
+/**
+ * Canonicalize a path for comparison against {@link REAL_PROD_DB_PATH}: resolve through the real
+ * filesystem (`realpathSync.native`, which follows a symlink/junction/subst/8.3 alias to its real
+ * target) when the path exists, else fall back to a plain `path.resolve` — then, on win32 ONLY, fold
+ * case, since Windows paths are case-insensitive but a bare string compare is not (card 45fba6cf: a
+ * differently-cased LOOM_HOME, or an explicit `--db`/constructor path typed in a different case, must
+ * still be recognized as the same real prod DB).
+ */
+function normalizeForProdDbCompare(p: string): string {
+  const resolved = realpathOrResolve(p);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
 
 /** True when this process is marked as a test run (the test guard / `test:daemon` wrapper sets these). */
 export function inTestMode(): boolean {
@@ -53,21 +68,43 @@ function realpathOrResolve(p: string): string {
   }
 }
 
+// @decision 0a03059e — this flag must stay a code-only call from index.ts, never an ambient env var:
+// an ad-hoc script's environment must never be able to self-declare as the daemon.
+let daemonProcessDeclared = false;
+
+/** Call once, before the daemon's own `new Db()` — the one legitimate way to flip the flag above. */
+export function declareDaemonProcess(): void {
+  daemonProcessDeclared = true;
+}
+
 /**
- * Prod-guard: REFUSE to open the real prod DB from under a test marker OR from what looks like a
- * direct test-file invocation (see {@link looksLikeDirectTestInvocation} — the structural half of this
- * check, which needs no caller-set marker at all). A hermetic test sets LOOM_HOME=<temp> so DB_PATH
- * resolves to a throwaway db and this is a no-op; only a stray default-path `new Db()` with no
- * isolation trips it. The prod daemon (entry script is `dist/index.js`, never under `test/`, and never
- * carries a test marker) is unaffected either way.
+ * Prod-guard chokepoint: decide whether THIS process may open {@link REAL_PROD_DB_PATH}. A test marker
+ * (or what looks like a direct test-file invocation) always refuses with no override; failing that,
+ * either the daemon's own declaration or an explicit CODE opt-in allows it; anything else refuses by
+ * default. Deliberately NO env-var opt-in (card 45fba6cf): `<LOOM_HOME>/.env` is loaded into the
+ * daemon's own env, and every spawned agent session inherits `process.env` — an env var would let one
+ * operator setting it once re-expose the real DB to every ad-hoc script in every agent session.
  */
-function assertNotProdDbInTest(file: string): void {
-  if ((inTestMode() || looksLikeDirectTestInvocation()) && path.resolve(file) === REAL_PROD_DB) {
+function assertProdDbOpenAllowed(file: string, allowProdDb?: boolean): void {
+  if (normalizeForProdDbCompare(file) !== normalizeForProdDbCompare(REAL_PROD_DB_PATH)) return;
+
+  if (inTestMode() || looksLikeDirectTestInvocation()) {
     throw new Error(
       "refusing to open the prod DB (~/.loom/loom.db) from a daemon test (LOOM_TEST/NODE_ENV=test, or a " +
         "direct `node test/*.mjs` invocation) — set LOOM_HOME=<temp> so tests get an isolated database",
     );
   }
+
+  if (daemonProcessDeclared) return;
+  if (allowProdDb === true) return;
+
+  throw new Error(
+    "refusing to open the prod DB (~/.loom/loom.db) — this process never declared itself the daemon " +
+      "boot and never opted in. If this IS the real daemon boot, call declareDaemonProcess() before " +
+      "opening Db. If this is a deliberate, one-off script against the live DB, pass { allowProdDb: true } " +
+      "to the Db constructor — and set LOOM_HOME=<temp> instead if you did not actually mean to touch " +
+      "the live database.",
+  );
 }
 import type {
   Project, Agent, AgentListItem, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
@@ -2577,8 +2614,8 @@ export class Db {
    * that triggered it.
    */
   sessionChangeListener?: (id: string) => void;
-  constructor(file = DB_PATH) {
-    assertNotProdDbInTest(file);
+  constructor(file = DB_PATH, opts?: { allowProdDb?: boolean }) {
+    assertProdDbOpenAllowed(file, opts?.allowProdDb);
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     // @decision 825e4a79 — defense-in-depth for FUTURE writes only; never add an automatic VACUUM here

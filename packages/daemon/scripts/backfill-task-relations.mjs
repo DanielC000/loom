@@ -230,7 +230,9 @@ async function main() {
   }
 
   const { Db } = await import(dist("db.js"));
-  const db = new Db(file);
+  // isLive here only after --allow-live + a verified backup above (card 0a03059e's prod-db-default-refuse
+  // guard requires an explicit opt-in to open the real DB; this script's own gating above IS that decision).
+  const db = new Db(file, { allowProdDb: isLive });
   const report = await backfill(db, { write: flag("--write"), samples: Number(val("--samples") ?? 10) });
   if (flag("--json")) { console.log(JSON.stringify(report, null, 2)); return; }
   console.log(`mode: ${report.mode}${report.mode === "dry-run" ? " (nothing persisted)" : ""}   db: ${file}`);
