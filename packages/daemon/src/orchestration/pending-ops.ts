@@ -167,6 +167,13 @@ export type AttachResult<T> =
   | { settled: true; ok: false; error: unknown; freshMint?: FreshMintInfo; cacheHit?: CacheHitInfo }
   | { settled: false; op: PendingOpView; freshMint?: FreshMintInfo };
 
+/** @decision 94725dcb — never cast/`any` a production `attach()` call to dodge the required `owner`
+ *  param; `undefined` at runtime is reachable only from untyped test scaffolding, never a sanctioned
+ *  production escape hatch. */
+export type OwnerCheck =
+  | { exempt: true; reason: string }
+  | { isOwner: (existing: PendingOpView | undefined) => boolean; refuse: (existing: PendingOpView | undefined) => unknown };
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -420,6 +427,23 @@ export class PendingOpRegistry {
     return true;
   }
 
+  /** @decision 94725dcb — `undefined` is the ONLY value treated as "no check requested" (the untyped-test
+   *  permissive path); a present-but-malformed `owner` fails closed same as a real `isOwner() === false`. */
+  private evaluateOwner(owner: OwnerCheck | undefined, existing: PendingOpView | undefined): { allowed: true } | { allowed: false; error: unknown } {
+    if (owner === undefined) return { allowed: true };
+    // Card 94725dcb CR (M3/N1): `in` throws TypeError on a non-object RHS (null, a string, a number) —
+    // guard BEFORE either `in` check, or a malformed-but-not-object owner crashes the caller instead of
+    // hitting the documented fail-closed refusal below.
+    if (typeof owner !== "object" || owner === null) {
+      return { allowed: false, error: new Error("PendingOpRegistry.attach(): malformed owner check — not an object; refusing by default") };
+    }
+    if ("exempt" in owner && owner.exempt === true) return { allowed: true };
+    if ("isOwner" in owner && typeof owner.isOwner === "function" && typeof owner.refuse === "function") {
+      return owner.isOwner(existing) ? { allowed: true } : { allowed: false, error: owner.refuse(existing) };
+    }
+    return { allowed: false, error: new Error("PendingOpRegistry.attach(): malformed owner check — neither a valid {exempt:true,...} nor {isOwner,refuse} shape; refusing by default") };
+  }
+
   /**
    * Attach to (or start) the op for `key`. NO entry exists yet AND no live retained result for `key` either
    * → `run()` is invoked exactly once, SYNCHRONOUSLY registering the entry BEFORE `run()`'s first internal
@@ -550,8 +574,17 @@ export class PendingOpRegistry {
    */
   async attach<T>(
     key: string, kind: PendingOpKind, managerSessionId: string, waitMs: number, run: (opId: string) => Promise<T>,
-    onSettledAfterPending?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }, opId: string) => void,
-    opts?: {
+    // @decision 94725dcb — never give `opts`/`onSettledAfterPending` their `?` back: `owner` (last
+    // param, required) needs them non-optional first, or TS blocks a required param after an optional one.
+    //
+    // Both dropped `?` (now `X | undefined`, not optional) SOLELY so `owner` below can be a genuinely
+    // REQUIRED TypeScript parameter — every existing production caller already passes both, so this is a
+    // type-only change with no runtime effect for them. Untyped `.mjs` test callers are NOT tsc-checked
+    // and can still omit any trailing argument exactly as before (JS supplies `undefined` for an omitted
+    // param regardless of its TS annotation) — this is what makes `owner === undefined` reachable ONLY
+    // from that untyped path, never from a `tsc`-checked caller.
+    onSettledAfterPending: ((outcome: { ok: true; value: T } | { ok: false; error: unknown }, opId: string) => void) | undefined,
+    opts: {
       retainMs?: number;
       classifyOutcome?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => PendingOpOutcome;
       bypassRetained?: boolean;
@@ -604,9 +637,16 @@ export class PendingOpRegistry {
        *  here, push the terminal nudge there" sees its own durable state already updated by the time the
        *  nudge goes out. */
       onSettle?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }, opId: string) => void;
-    },
+    } | undefined,
+    owner: OwnerCheck,
   ): Promise<AttachResult<T>> {
     let e = this.entries.get(key) as Entry<T> | undefined;
+    // OWNER CHECK — RUNNING ENTRY (card 94725dcb): decided before racing `waitMs` at all, so an
+    // unauthorized caller is refused immediately rather than after waiting.
+    if (e) {
+      const decision = this.evaluateOwner(owner, projectView(e));
+      if (!decision.allowed) return { settled: true, ok: false, error: decision.error };
+    }
     if (!e) {
       // RETENTION-WINDOW DEDUPE (card 33172f01): no RUNNING entry for `key` — this could be a genuinely
       // fresh call, OR an accidental duplicate re-confirm landing WHILE the prior op's settled result is
@@ -649,6 +689,11 @@ export class PendingOpRegistry {
       const priorVerdict = opts?.retainVerdictUntilSuperseded ? this.untilSupersededVerdicts.get(key) : undefined;
       if (priorVerdict && !opts?.bypassRetained) {
         if (opts?.identityOptional || priorVerdict.identity === opts?.verdictIdentity) {
+          // OWNER CHECK — UNTIL-SUPERSEDED HIT (card 94725dcb): `existing` is `undefined` here by
+          // construction — this cache stores no `managerSessionId` (see OwnerCheck's own doc / the
+          // decision record's named limitation). Harmless for every caller today, which doesn't consult it.
+          const decision = this.evaluateOwner(owner, undefined);
+          if (!decision.allowed) return { settled: true, ok: false, error: decision.error };
           // CACHE-HIT ANNOUNCEMENT (card 4aedde84 — the mirror of the FRESH-MINT REASON below): this branch
           // is a genuine cache hit — no run() invocation happens on this call at all — so the result is
           // tagged `cacheHit` instead of leaving the caller to infer "nothing ran" from the ABSENCE of
@@ -666,12 +711,24 @@ export class PendingOpRegistry {
       // own doc for the expiry/NEVER_CACHED_OUTCOMES/usability logic it now owns.
       const retainedHit = (untilSupersededMiss || opts?.bypassRetained) ? undefined : this.usableRetainedHit<T>(key, opts?.isRetainedResultUsable);
       if (retainedHit) {
+        // OWNER CHECK — TTL RETAINED HIT (card 94725dcb): `retainedHit` IS a `PendingOpView` (RetainedView
+        // extends it), so a caller whose check depends on the existing op's own owner (spawn/revive) gets
+        // real data here — this is what closes 656e326f's Round 2 bug for a settled-but-attachable view.
+        const decision = this.evaluateOwner(owner, retainedHit);
+        if (!decision.allowed) return { settled: true, ok: false, error: decision.error };
         // CACHE-HIT ANNOUNCEMENT (card 4aedde84) — same reasoning as the untilSupersededVerdicts hit
         // above: this TTL'd retained-view hit is also a genuine cache hit, no run() invocation this call.
         const cacheHit: CacheHitInfo = { identity: retainedHit.identity };
         return retainedHit.rawOutcome.ok
           ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T, cacheHit }
           : { settled: true, ok: false, error: retainedHit.rawOutcome.error, cacheHit };
+      }
+      // OWNER CHECK — FRESH MINT (card 94725dcb): nothing exists to serve, `existing` is `undefined`.
+      // confirmWorkerMergeTracked's own check fires here unconditionally (it ignores `existing`), matching
+      // 656e326f's original "refuse even with nothing in flight" behavior.
+      {
+        const decision = this.evaluateOwner(owner, undefined);
+        if (!decision.allowed) return { settled: true, ok: false, error: decision.error };
       }
       // FRESH-MINT REASON (card 615967c5 — the cached-verdict-legibility fix): reaching this line means
       // BOTH cache reads above missed, so a genuinely new op is about to run — record WHY, purely for

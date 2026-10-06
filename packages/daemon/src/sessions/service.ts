@@ -87,7 +87,7 @@ import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, app
 import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
-import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
+import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView, type OwnerCheck } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn, type CapQueueCancelResult } from "../orchestration/cap-queue.js";
 import { readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
@@ -8531,12 +8531,10 @@ export class SessionService {
     // uses) rather than trusting the cached value's own frozen fields. Hoisted into a shared const (card
     // 656e326f, Round 2) so BOTH the ownership guard below and attach() itself apply the identical rule.
     const isRetainedResultUsable = (value: Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }) => this.spawnResultStillUsable(value);
-    // OWNERSHIP PRE-CHECK (card 656e326f): a taskless key is unique per call, so this never finds
-    // anything for it (always passes through). A real taskRef's key is shared daemon-wide — refuse an
-    // attach to another manager's lineage's in-flight/still-usable-retained op before it ever reaches
-    // attach(), reusing attach()'s own usable-vs-miss rule via `isRetainedResultUsable` above.
-    const guard = this.foreignSpawnGuard(managerSessionId, taskRef, key, isRetainedResultUsable);
-    if (guard) return guard;
+    // OWNERSHIP CHECK (card 656e326f, unified into attach() itself by 94725dcb): a taskless key is unique
+    // per call, so this never finds anything for it (always passes through). A real taskRef's key is
+    // shared daemon-wide — attach() refuses an attach to another manager's lineage's in-flight/
+    // still-usable-retained op by feeding this predicate exactly what it's about to serve.
     return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
@@ -8584,6 +8582,7 @@ export class SessionService {
         // the window with nothing usable cached always mints a genuinely fresh attempt.
         retainErrors: false,
       },
+      this.spawnOwnerCheck(managerSessionId, taskRef),
     );
   }
 
@@ -8603,12 +8602,11 @@ export class SessionService {
     const collision = { settled: true as const, ok: false as const, error: new Error(`worker_revive: a different spawn (a plain worker_spawn or another revive) on card '${(opts.taskId ?? "").trim()}' is in flight or holds it — wait for it, or read worker_list`) };
     const live = this.pendingOps.peek(key);
     if (live && live.state === "running" && !this.reviveInFlightKeys.has(key)) return collision;
-    // OWNERSHIP PRE-CHECK (card 656e326f): same key space as spawnWorkerTracked — refuse an attach to
-    // another manager's lineage's in-flight/still-usable-retained op before it ever reaches attach(),
-    // via the SAME `isRetainedResultUsable` shared below with attach() itself.
+    // OWNERSHIP CHECK (card 656e326f, unified into attach() itself by 94725dcb): same key space as
+    // spawnWorkerTracked, same predicate — refuses an attach to another manager's lineage's in-flight/
+    // still-usable-retained op.
     const isRetainedResultUsable = (value: ReviveResult) => this.spawnResultStillUsable(value);
-    const guard = this.foreignSpawnGuard(managerSessionId, (opts.taskId ?? "").trim(), key, isRetainedResultUsable);
-    if (guard) return guard;
+    const taskRef = (opts.taskId ?? "").trim();
     const r = await this.pendingOps.attach<ReviveResult>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       async () => {
@@ -8621,6 +8619,7 @@ export class SessionService {
         isRetainedResultUsable,
         retainErrors: false,
       },
+      this.spawnOwnerCheck(managerSessionId, taskRef),
     );
     if (r.settled && r.ok && r.value.revivedFrom !== opts.workerSessionId) return collision;
     return r;
@@ -8697,23 +8696,20 @@ export class SessionService {
   }
 
   /** @decision 656e326f — the SAME `isRetainedResultUsable` predicate `spawnWorkerTracked`/
-   *  `reviveWorkerTracked` pass to `pendingOps.attach()`, shared from one place so their matching
-   *  `foreignSpawnGuard` call can never silently diverge from it. */
+   *  `reviveWorkerTracked` pass to `pendingOps.attach()`, shared from one place so their `isOwner`
+   *  closure (card 94725dcb) can never silently diverge from it. */
   private spawnResultStillUsable(value: { taskId?: string | null; id: string }): boolean {
     return value.taskId != null && this.db.liveSessionIdForTask(value.taskId) === value.id;
   }
 
-  /** @decision 656e326f — refuse only an op `pendingOps.attach()` would ITSELF still treat as attachable
-   *  (via `peekAttachable`, never the raw `peek()`) — else a settled op whose cached worker has since
-   *  exited/been reassigned false-refuses an unrelated manager's genuinely fresh spawn. */
-  private foreignSpawnGuard<T extends { taskId?: string | null; id: string }>(
-    managerSessionId: string, taskRef: string, key: string, isRetainedResultUsable: (value: T) => boolean,
-  ): { settled: true; ok: false; error: Error } | undefined {
-    const existing = this.pendingOps.peekAttachable<T>(key, { isRetainedResultUsable });
-    if (existing && !this.sameManagerLineage(managerSessionId, existing.managerSessionId)) {
-      return { settled: true, ok: false, error: new ForeignSpawnInFlightError(taskRef, existing.opId, existing.state === "running") };
-    }
-    return undefined;
+  /** @decision 94725dcb (CR M4) — the ONE place spawnWorkerTracked/reviveWorkerTracked build their
+   *  `owner` arg, so the two can never silently diverge the way `foreignSpawnGuard`'s doc already
+   *  warned about for its own predecessor logic. */
+  private spawnOwnerCheck(managerSessionId: string, taskRef: string): OwnerCheck {
+    return {
+      isOwner: (existing) => !existing || this.sameManagerLineage(managerSessionId, existing.managerSessionId),
+      refuse: (existing) => new ForeignSpawnInFlightError(taskRef, existing!.opId, existing!.state === "running"),
+    };
   }
 
   /** @decision 05c36bf4 — re-resolves the settle-nudge target AT SETTLE TIME, never at attach()-call
@@ -20111,6 +20107,14 @@ export class SessionService {
           this.db.settlePendingGateOp(opId, verdict);
         },
       },
+      // OWNER EXEMPTION (card 94725dcb): buildBatchDedupeKey embeds rootOf(managerSessionId) and
+      // rootOf(every resolved candidate workerSessionId); every candidate must EXACTLY belong to the
+      // caller (the per-candidate loop at the top of this method) before the key is even computed, so no
+      // foreign-lineage caller can ever reach attach() with a colliding key. Proved (not merely asserted)
+      // by merge-batch-foreign-candidate-refused-before-attach.mjs, which spies on pendingOps.attach and
+      // asserts it is never called for a foreign-lineage caller — if that per-candidate check is ever
+      // loosened, THAT test goes red, not this exemption silently becoming false.
+      { exempt: true, reason: "proved by merge-batch-foreign-candidate-refused-before-attach.mjs — see docs/decisions/94725dcb-*.md" },
     );
   }
 
@@ -21324,6 +21328,14 @@ export class SessionService {
           pruneGateSpillsClassified(this.db);
         },
       },
+      // OWNER CHECK (card 94725dcb): ignores `existing` by design — this unifies the SAME hoisted
+      // 656e326f lineage check (still kept at the top of this method for its own side-effect-gating
+      // reasons; see the decision record) into attach()'s own enforcement, so attach-reachable paths
+      // (an already-running op, a TTL retained hit, or the until-superseded verdict cache) get it too.
+      {
+        isOwner: () => this.sameManagerLineage(managerSessionId, this.db.getSession(workerSessionId)?.parentSessionId),
+        refuse: () => new NotYourWorkerError(),
+      },
     ).finally(() => { if (!mgStarted) mgRes?.release(); }); // a reject before run(), or a dedupe/cache hit: the factory never ran, so nothing will settle this reservation
     // @decision 615967c5 — folds this call's own freshly-resolved identity onto a genuine fresh mint (a
     // cache hit is untouched), closing the cached-verdict legibility gap: a re-gate from a moved base used
@@ -22113,6 +22125,10 @@ export class SessionService {
           pruneGateSpillsClassified(this.db);
         },
       },
+      // OWNER EXEMPTION (card 94725dcb): the "gate" kind has no separate owning manager — key
+      // (gate:<workerSessionId>) and caller (the worker's own session, passed as managerSessionId above)
+      // are the same entity by construction; there is no cross-session ownership to check.
+      { exempt: true, reason: "gate kind: key and caller are the same worker session by construction — see docs/decisions/94725dcb-*.md" },
     );
     if (!result.settled) {
       // STALENESS CHECK (card 50c1e0d0): compare the running op's own start stamp (recorded by `run()`

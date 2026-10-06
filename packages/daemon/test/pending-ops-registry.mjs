@@ -1274,6 +1274,112 @@ const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.
   }
 }
 
+// --- OWNER (card 94725dcb): the required `owner` param — runtime half of the TS-required/
+  // runtime-permissive split (the TS half is proved separately in
+  // pending-op-registry-owner-required-typecheck.mjs, since tsc enforcement can't be exercised from
+  // this untyped harness). `owner` is the LAST positional argument. ---
+
+  // (owner-omitted) an untyped caller that omits `owner` entirely (exactly what every OTHER test in
+  // this file does) gets the pre-this-card permissive behavior — no check at all.
+  {
+    const reg = new PendingOpRegistry();
+    const r = await reg.attach("own1", "spawn", "mgr1", 200, async () => ({ ok: true }));
+    check("(owner-omitted) owner undefined ⇒ permissive — the call succeeds exactly as before this card existed", r.settled === true && r.ok === true && r.value.ok === true);
+  }
+
+  // (owner-exempt) an explicit exemption behaves identically to omitting it.
+  {
+    const reg = new PendingOpRegistry();
+    const r = await reg.attach("own2", "spawn", "mgr1", 200, async () => ({ ok: true }), undefined, undefined, { exempt: true, reason: "test" });
+    check("(owner-exempt) {exempt:true} ⇒ permissive, same as omitting owner", r.settled === true && r.ok === true && r.value.ok === true);
+  }
+
+  // (owner-refuses) a real isOwner/refuse pair that returns false refuses BEFORE run() is ever invoked.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const refusal = new Error("not your op");
+    const r = await reg.attach("own3", "spawn", "mgr1", 200, async () => { calls++; return { ok: true }; }, undefined, undefined, { isOwner: () => false, refuse: () => refusal });
+    check("(owner-refuses) isOwner() === false ⇒ refused with the caller's own error, run() never invoked", r.settled === true && r.ok === false && r.error === refusal && calls === 0);
+  }
+
+  // (owner-allows) the mirror positive control: isOwner() === true lets the mint proceed normally —
+  // proves (owner-refuses) isn't vacuously green because attach() always refuses regardless of the predicate.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r = await reg.attach("own4", "spawn", "mgr1", 200, async () => { calls++; return { ok: true }; }, undefined, undefined, { isOwner: () => true, refuse: () => new Error("should never be called") });
+    check("(owner-allows) [negative control] isOwner() === true lets the fresh mint proceed — run() DID execute", r.settled === true && r.ok === true && r.value.ok === true && calls === 1);
+  }
+
+  // (owner-malformed) a present-but-malformed owner (neither a valid {exempt:true,...} nor
+  // {isOwner,refuse} shape) fails closed, same polarity as a real refusal — `undefined` is the ONLY
+  // value treated as "no check requested".
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r = await reg.attach("own5", "spawn", "mgr1", 200, async () => { calls++; return { ok: true }; }, undefined, undefined, { bogus: true });
+    check("(owner-malformed) a malformed owner object fails closed (refused), never silently permissive", r.settled === true && r.ok === false && calls === 0);
+  }
+
+  // (owner-running) the RUNNING-entry branch: a second attach() call to an already-in-flight op is
+  // also gated by the SAME owner check, with the real op's PendingOpView handed to isOwner as `existing`.
+  {
+    const reg = new PendingOpRegistry();
+    const deferred = new Promise(() => {}); // never settles within this test
+    void reg.attach("own6", "spawn", "mgr1", 10, () => deferred, undefined, undefined, { exempt: true, reason: "mint" });
+    await waitUntil(() => reg.peek("own6")?.state === "running", { label: "own6 running" });
+    let sawExisting;
+    const r = await reg.attach("own6", "spawn", "mgr1", 10, () => deferred, undefined, undefined, { isOwner: (existing) => { sawExisting = existing; return false; }, refuse: () => new Error("foreign") });
+    check("(owner-running) the running-entry attach is refused by the SAME owner mechanism", r.settled === true && r.ok === false);
+    check("(owner-running) isOwner received the REAL running op's own PendingOpView, not undefined", sawExisting !== undefined && sawExisting.state === "running" && sawExisting.opId !== undefined);
+  }
+
+  // (owner-null / owner-primitive) card 94725dcb CR N1: `in` throws on a non-object RHS — a null or
+  // primitive owner must fail closed via the documented refusal, never crash the caller.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r = await reg.attach("own7", "spawn", "mgr1", 200, async () => { calls++; return { ok: true }; }, undefined, undefined, null);
+    check("(owner-null) a literal null owner fails closed (refused, no throw), never treated as the undefined permissive path", r.settled === true && r.ok === false && calls === 0);
+  }
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r = await reg.attach("own8", "spawn", "mgr1", 200, async () => { calls++; return { ok: true }; }, undefined, undefined, "bogus");
+    check("(owner-primitive) a primitive (string) owner fails closed (refused, no throw)", r.settled === true && r.ok === false && calls === 0);
+  }
+
+  // (owner-retained-refuses) card 94725dcb CR M2: a TTL-RETAINED hit is also gated — `existing` carries
+  // the real settled PendingOpView (RetainedView extends it), so a caller whose check depends on the
+  // cached op's own owner gets real data here, unlike the until-superseded case below.
+  {
+    const reg = new PendingOpRegistry();
+    const usable = () => true;
+    await reg.attach("own9", "spawn", "mgr1", 200, async () => ({ id: "w1", ok: true }), undefined, { retainMs: 200, isRetainedResultUsable: usable }, { exempt: true, reason: "mint" });
+    let sawExisting;
+    const refusal = new Error("foreign-retained");
+    const r = await reg.attach("own9", "spawn", "mgr1", 200, async () => ({ id: "w2", ok: true }), undefined, { retainMs: 200, isRetainedResultUsable: usable }, { isOwner: (existing) => { sawExisting = existing; return false; }, refuse: () => refusal });
+    check("(owner-retained-refuses) a TTL-retained hit is refused by the SAME owner mechanism", r.settled === true && r.ok === false && r.error === refusal);
+    check("(owner-retained-refuses) isOwner received the REAL retained PendingOpView (state done), not undefined", sawExisting !== undefined && sawExisting.state === "done" && sawExisting.opId !== undefined);
+  }
+
+  // (owner-until-superseded-refuses) card 94725dcb CR M2: the UNTIL-SUPERSEDED cache is also gated, but
+  // — the documented limitation this card's own record names — that cache stores no managerSessionId at
+  // all, so `existing` is ALWAYS undefined here even though something real is cached.
+  {
+    const reg = new PendingOpRegistry();
+    const classify = (outcome) => (outcome.ok ? "landed" : "unknown");
+    const mintOpts = { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify };
+    await reg.attach("own10", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, mintOpts, { exempt: true, reason: "mint" });
+    await waitUntil(() => reg.peek("own10") === undefined, { label: "own10 TTL display view expired — forces the NEXT call to hit the until-superseded cache, not the TTL one" });
+    let sawExisting = "unset";
+    const refusal = new Error("foreign-until-superseded");
+    const r = await reg.attach("own10", "merge", "mgr1", 200, async () => ({ merged: true, opId: "should-not-run" }), undefined, mintOpts, { isOwner: (existing) => { sawExisting = existing; return false; }, refuse: () => refusal });
+    check("(owner-until-superseded-refuses) an until-superseded cache hit is refused by the SAME owner mechanism", r.settled === true && r.ok === false && r.error === refusal);
+    check("(owner-until-superseded-refuses) [documented limitation] isOwner received undefined — this cache stores no managerSessionId", sawExisting === undefined);
+  }
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation and never letting two concurrent rejecting callers mint two concurrent real ops for the same key, and (card e3e40167) opts.onOpMinted fires exactly once per genuinely fresh entry — fast OR slow path, BEFORE run() ever executes, never on a retry or a retained-cache hit — while opts.onSettle fires for EVERY genuine settle (fast or surfaced-pending, unlike onSettledAfterPending which is surfaced-pending-only), strictly BEFORE onSettledAfterPending in the same callback, with the same identity-guard protection against a clobbered/evicted op's late settle. CARD 4aedde84: a settled result served from EITHER cache read (the never-expiring until-superseded map, or the TTL'd retained map) now carries a POSITIVE `cacheHit` field (with the identity it was validated against, when known) instead of leaving the caller to infer a cache hit from freshMint's absence — mutually exclusive with freshMint by construction, absent entirely from the pending shape (a cache hit can never occur on that branch)."
   : `\n❌ ${failures} FAILURE(S).`);
