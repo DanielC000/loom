@@ -81,6 +81,10 @@ try {
   pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr); // recipient BUSY at send time → HELD + persisted
   const r0 = sessions.messageWorker(mgr, wkr, "IDLE REDRIVE TARGET");
   check("(R1) setup: busy recipient → message HELD + persisted", r0.delivered === false && undelivered("IDLE REDRIVE TARGET") === 1);
+  // Captured BEFORE the redrive below — once the fix resolves the record, listUndeliveredQueuedMessages
+  // no longer returns it, so this is the only point this msgId is still readable off the durable row.
+  const heldMsgId = db.listUndeliveredQueuedMessages().find((e) => e.detail.text.includes("IDLE REDRIVE TARGET"))?.detail?.msgId;
+  check("(R1) setup: the held record's msgId is captured", typeof heldMsgId === "string");
 
   // Recipient crashes before draining. On reboot it comes back LIVE, IDLE (not busy), pending EMPTY —
   // the exact condition enqueueStdin's `idleEligible && live.pending.length === 0` immediate branch needs.
@@ -95,6 +99,12 @@ try {
     ptyBoot.immediateDeliveries.some((t) => t.includes("IDLE REDRIVE TARGET")));
   check("(R1) FIX: the durable record resolves immediately, even though onDeliver never fired (the caller resolved it itself)",
     undelivered("IDLE REDRIVE TARGET") === 0);
+  // Card 796221c9 item 2: the SAME `if (r.delivered) { ... }` block also clears the in-flight mark
+  // (`clearRedriveInFlight(msgId)`) — distinct from resolving the durable record above. Deleting ONLY
+  // that one call leaves this mark stuck forever (nothing else clears it on the immediate branch), while
+  // the durable-record check above would still pass unchanged — so it needs its own direct assertion.
+  check("(R1) FIX: the in-flight mark is cleared too, not just the durable record (clearRedriveInFlight actually ran)",
+    sessionsBoot.redriveInFlightByMsgId.has(heldMsgId) === false);
 
   // ===================== (R2) THE FIX HOLDS ACROSS A RESTART — no duplicate on the next boot =====================
   // Simulate the recipient's pty exiting (clears this process's in-flight guard, same as cd390610's real

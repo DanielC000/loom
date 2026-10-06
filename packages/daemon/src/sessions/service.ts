@@ -10385,11 +10385,15 @@ export class SessionService {
    * delivery-marking fault must not disturb the host drain or gate boot). A msgId that was never persisted
    * (immediate delivery) simply records a harmless marker with no queued counterpart. This DOES occur in
    * practice (card 0075e20b, correcting this comment's own prior "onDeliver is only ever attached to a
-   * HELD entry, so that can't occur" claim): `enqueueDurableMessage`'s push-then-drain branch can push an
-   * entry onto `live.pending`, have `drainPending` synchronously drain-and-resolve it (firing `onDeliver`
-   * here) ALL WITHIN THE SAME `enqueueStdin` call, before the caller's own `!r.delivered` check — which
-   * decides whether to persist the `session_message_queued` row in the first place — ever runs. The
-   * resulting orphan `session_message_delivered` marker is harmless BY DESIGN: every reader of the durable
+   * HELD entry, so that can't occur" claim) — on CLAUDE, via `enqueueDurableMessage`'s push-then-drain
+   * branch: it can push an entry onto `live.pending`, have `drainPending` synchronously drain-and-resolve
+   * it (firing `onDeliver` here) ALL WITHIN THE SAME `enqueueStdin` call, before the caller's own
+   * `!r.delivered` check — which decides whether to persist the `session_message_queued` row in the first
+   * place — ever runs. CODEX produces the identical orphan marker far more routinely, not merely as a
+   * race: its own immediate branch (`enqueueStdinCodex`) fires `onDeliver` UNCONDITIONALLY on every idle
+   * call (pty/host.ts's `EnqueueResult` doc, decision 2ca18433), so every idle `enqueueDurableMessage`
+   * dispatch to a codex recipient produces one. The resulting orphan `session_message_delivered` marker is
+   * harmless BY DESIGN: every reader of the durable
    * inbox (`listUndeliveredQueuedMessages`/`listUnresolvedQueuedMessagesForWorker`, db.ts) starts from
    * `kind = 'session_message_queued'` and anti-joins against this kind, so a delivered marker with no
    * queued sibling is simply never selected by either. Left as-is (not "fixed") — see this method's own
