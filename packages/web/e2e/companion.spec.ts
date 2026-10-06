@@ -88,7 +88,10 @@ test("card 351e89af: the Chat WS still connects through the loopback guard, and 
 });
 
 test("Manage tab surfaces config (masked), memory, reminders, persona, and proactive-home", async ({ page, loomDaemon }) => {
-  const companion = await loomDaemon.seedCompanion();
+  // This assertion pins the masked read-back's EXACT last-4 characters, so it needs a KNOWN token rather
+  // than the fixture's (card e8282e02) per-call-unique default — pass one explicitly. This is never saved
+  // (no PUT in this test), so it can't collide with another enabled companion's token.
+  const companion = await loomDaemon.seedCompanion({ botToken: "123456:e2e-test-token" });
   await page.goto(`${loomDaemon.baseURL}/companion`);
 
   await page.getByRole("tab", { name: "Manage" }).click();

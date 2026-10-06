@@ -260,6 +260,13 @@ export interface LoomDaemon {
    * assistant session) or `/api/companion/config` (arms the runtime via `reconcile()`) — both would trip
    * this fixture's `[pty] spawn` no-spawn guard. Returns the ids the seeded rows carry, plus the seeded
    * memory/reminder's own names for spec assertions.
+   *
+   * Card e8282e02: `botToken` defaults to a FRESH, per-call unique token (not a shared constant) — so two
+   * calls, in the same spec or across different specs on this shared worker daemon, can never collide at
+   * `checkTokenCollision` (gateway/server.ts) regardless of seeding or cleanup order. Pass `botToken`
+   * explicitly only to deliberately construct a collision (e.g. a negative-control test proving the guard
+   * itself still fires). The row is also tracked for {@link LoomDaemon.deleteSeededCompanionConfigs},
+   * which `autoIsolation` calls after every test — a spec no longer needs its own cleanup for this.
    */
   seedCompanion: (opts?: {
     name?: string;
@@ -470,6 +477,18 @@ export interface LoomDaemon {
    */
   archiveSeededSessions: () => Promise<void>;
   /**
+   * Delete every `companion_config` row seeded by {@link LoomDaemon.seedCompanion} so far, via the real
+   * human-only `DELETE /api/companion/config/:sessionId` route (bearer-gated — carried automatically by
+   * this fixture's global-fetch patch). The `autoIsolation` auto fixture calls this after EVERY test, so
+   * specs no longer need their own afterEach for it: `companion_config` rows outlive session archival
+   * (archiving the session alone leaves the config row — and its enabled bot token — live), and the shared
+   * worker daemon's `checkTokenCollision` guard (gateway/server.ts) refuses ANY later config save that
+   * arms a token an un-cleaned sibling's row still holds. Idempotent (the route returns `{ok:true}`
+   * unconditionally, even for an already-deleted/unknown sessionId) and best-effort, same posture as
+   * {@link LoomDaemon.killSpawnedShells}.
+   */
+  deleteSeededCompanionConfigs: () => Promise<void>;
+  /**
    * Answer (pending → answered) every question seeded by {@link LoomDaemon.seedQuestion} so far, via the real
    * human-only `POST /api/questions/:id/answer` route. The `autoIsolation` auto fixture calls this after EVERY
    * test: a PENDING question stays a GLOBAL "DECISION NEEDED" attention item, so on the SHARED worker daemon it
@@ -518,13 +537,18 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
   // states — the Usage page's Live-occupancy plane counts EVERY non-archived session, not just live ones
   // (the pre-existing companion→usage leak). A seeded PENDING question is a second forward leak: it stays a
   // GLOBAL "DECISION NEEDED" attention item whose toast stack overlays every later page's bottom-right corner
-  // (it navigated a `force`-click on the composer's "Preset prompts" trigger straight into a toast). Archiving
-  // seeded sessions, hard-killing spawned host shells, AND answering seeded questions after each test closes
-  // all three forward leaks centrally. Idempotent: an already-archived / already-killed / already-answered id
-  // is a no-op, so a spec that also cleans up explicitly is harmless.
+  // (it navigated a `force`-click on the composer's "Preset prompts" trigger straight into a toast). A
+  // seeded companion_config row is a FOURTH leak, structurally fixed by card e8282e02: it outlives session
+  // archival, and the shared daemon's `checkTokenCollision` guard refuses ANY later config save that arms a
+  // token an un-cleaned sibling's row still holds — see {@link LoomDaemon.deleteSeededCompanionConfigs}'s
+  // own doc. Archiving seeded sessions, hard-killing spawned host shells, deleting seeded companion configs,
+  // AND answering seeded questions after each test closes all four forward leaks centrally. Idempotent: an
+  // already-archived / already-killed / already-deleted / already-answered id is a no-op, so a spec that
+  // also cleans up explicitly is harmless.
   autoIsolation: [async ({ loomDaemon }, use) => {
     await use();
     await loomDaemon.killSpawnedShells();
+    await loomDaemon.deleteSeededCompanionConfigs();
     await loomDaemon.archiveSeededSessions();
     await loomDaemon.resolveSeededQuestions();
   }, { auto: true }],
@@ -625,6 +649,9 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     // Track every seeded question id so afterEach can answer them off the shared daemon's attention plane — a
     // lingering PENDING question keeps pushing a global "DECISION NEEDED" toast onto every later spec's page.
     const seededQuestionIds: string[] = [];
+    // Card e8282e02: track every seeded companion's sessionId so afterEach can delete its companion_config
+    // row — a row that outlives archival and keeps its (now unique-by-default) bot token enabled.
+    const seededCompanionConfigSessionIds: string[] = [];
 
     const seedProjectMemory: LoomDaemon["seedProjectMemory"] = async (projectId, entries) => {
       const res = await apiPost<{ projectMemoryIds: string[] }>(baseURL, "/internal/test/seed", {
@@ -665,7 +692,11 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
         companionSessions: [{ id: sessionId, projectId: project.id, agentId: agent.id }],
         companionConfigs: [{
           sessionId, enabled: true, name,
-          botToken: opts.botToken ?? "123456:e2e-test-token",
+          // Card e8282e02: a fresh token PER CALL by default — the shared constant this used to default
+          // to is exactly what let one un-cleaned sibling poison every later spec's config save (see
+          // checkTokenCollision, gateway/server.ts). Pass botToken explicitly only to deliberately
+          // construct a collision (e.g. a negative control proving the guard still fires).
+          botToken: opts.botToken ?? `123456:e2e-${randomUUID()}`,
           allowedChatId: opts.allowedChatId ?? "999",
         }],
         companionMemories: [{
@@ -677,6 +708,8 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       // Track for archiveSeededSessions: a seeded companion is a non-archived (exited) session row, so it too
       // counts in a later spec's global "no live sessions" plane if it isn't cleaned up.
       seededSessionIds.push(sessionId);
+      // Track for deleteSeededCompanionConfigs: the companion_config row outlives session archival.
+      seededCompanionConfigSessionIds.push(sessionId);
       return { projectId: project.id, agentId: agent.id, sessionId, memoryName, reminderLabel };
     };
 
@@ -781,6 +814,14 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       await apiPost(baseURL, "/internal/test/seed", { archiveSessions: ids });
     };
 
+    const deleteSeededCompanionConfigs: LoomDaemon["deleteSeededCompanionConfigs"] = async () => {
+      if (seededCompanionConfigSessionIds.length === 0) return;
+      const ids = seededCompanionConfigSessionIds.splice(0); // clear as we delete — the route is idempotent
+      for (const id of ids) {
+        try { await fetch(`${baseURL}/api/companion/config/${id}`, { method: "DELETE" }); } catch { /* best-effort */ }
+      }
+    };
+
     const resolveSeededQuestions: LoomDaemon["resolveSeededQuestions"] = async () => {
       if (seededQuestionIds.length === 0) return;
       const ids = seededQuestionIds.splice(0); // clear as we go — an already-answered / unknown id just 400/404s
@@ -829,7 +870,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, deleteSeededCompanionConfigs, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
