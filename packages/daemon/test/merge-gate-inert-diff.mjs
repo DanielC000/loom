@@ -121,6 +121,20 @@ async function confirmWithTimeout(sessions, mgrId, workerId, timeoutMs) {
 // synchronization point exact regardless of git subprocess speed.
 // Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/10ms-interval budget,
 // still returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
+//
+// Card 39ad0ee8: all three call sites (H/I/J below) used a 10_000ms bound here, and (I) was observed to
+// fail this precondition check under real merge-gate load ("worker2 genuinely reached its own
+// repo-guard-only wait before worker1 landed") in two consecutive full gates (ops d111d8b9, bf9711f8) —
+// not a hang (every stubbed gate call in this file resolves instantly; the time is real git-subprocess
+// work: findLandedSquashCommit + the pre-gate union-merge, per this function's own doc above), just a
+// precondition racing real host contention it doesn't control. Measured (3 concurrent copies of this
+// file, one host, one wave, 2026-10-06): H up to 9296ms (93% of the old 10s bound — thin margin even at
+// this load, confirming H is equally exposed even though only I was the one observed to fail in
+// production), I up to 3629ms, J up to 2890ms. 60_000ms gives >6x the worst observed value across all
+// three, comfortably inside this file's own 300_000ms TEST_TIMEOUT_OVERRIDES entry even in the pathological
+// all-three-exhaust-their-budget case (3 * 60s = 180s < 300s). Raised uniformly for all three sites since
+// they share the identical mechanism and risk — fixing only the one that happened to fail this time would
+// leave the other two on the same thin margin.
 async function waitUntilRepoGuardQueued(sessions, projId, repoPath, timeoutMs) {
   try {
     return await sharedWaitUntil(() => {
@@ -456,7 +470,7 @@ try {
     // Deterministic sync point — see `waitUntilRepoGuardQueued`'s own doc: don't release worker1 until
     // worker2 has GENUINELY reached (and is blocked on) its own repo-guard-only wait, not after a fixed
     // timer that races real git subprocess speed.
-    const worker2Queued = await waitUntilRepoGuardQueued(sessions, H.projId, H.repo, 10000);
+    const worker2Queued = await waitUntilRepoGuardQueued(sessions, H.projId, H.repo, 60000);
     check("(H) worker2 genuinely reached its own repo-guard-only wait before worker1 landed", worker2Queued);
 
     // Card 8142d47c audit of this site: PROVEN SAFE BY CONSTRUCTION, not injection-dependent. `worker2Settled`
@@ -599,7 +613,7 @@ try {
     // without it, worker2's OWN pre-wait union-merge/inert-check could race against worker1's release and
     // land AFTER worker1 already squashed, hitting the pre-existing (pre-ac7aad04) union-merge-conflict
     // path instead of ac7aad04's own reclassification code — the exact thing this scenario exists to test.
-    const worker2Queued = await waitUntilRepoGuardQueued(sessions, I.projId, I.repo, 10000);
+    const worker2Queued = await waitUntilRepoGuardQueued(sessions, I.projId, I.repo, 60000);
     check("(I) worker2 genuinely reached its own repo-guard-only wait before worker1 landed", worker2Queued);
 
     // Card 8142d47c audit of this site: same mechanism and same verdict as (H) above — PROVEN SAFE BY
@@ -726,7 +740,7 @@ try {
     // Deterministic sync point (same helper (H)/(I) use): don't commit to the branch, and don't release
     // the test's own hold, until worker's confirm has GENUINELY reached its own repo-guard-only wait —
     // i.e. it has already captured `inertSkip`/`gateBaseMainHead`/`preWaitBranchHead` and is now blocked.
-    const queued = await waitUntilRepoGuardQueued(sessions, J.projId, J.repo, 10000);
+    const queued = await waitUntilRepoGuardQueued(sessions, J.projId, J.repo, 60000);
     check("(J) worker's confirm genuinely reached its own repo-guard-only wait before we release our hold", queued);
 
     // Card 8142d47c audit of this site: PROVEN SAFE BY CONSTRUCTION, not injection-dependent — the most

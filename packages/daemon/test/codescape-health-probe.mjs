@@ -1565,7 +1565,16 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     healthProbeIntervalMs: 60,
     healthProbeTimeoutMs: 40,
     healthProbeFailureThreshold: 2,
-    restartWindowMs: 1500, // test-only seam: short window so the ceiling trips in ~seconds, not a real hour
+    // Card 39ad0ee8: raised from 1500 — under real host load, one restart cycle (kill -> exit -> real
+    // spawn -> 2 failed 60ms probes -> kill) measured 420-970ms (standalone probe, this exact scenario's
+    // own params, same host, 2026-10-06), so 5 cycles can need up to ~4850ms — already past the old
+    // 1500ms window, making the rate ceiling structurally unreachable under load (observed: 121 spawns in
+    // 60s with giveUp still false). 6000ms gives >1.2x the worst single-cycle-run observed (and >2x a
+    // typical run's ~2.2-2.7s to reach 5 restarts), reproduced GREEN 6/6 times across solo + 3-concurrent-
+    // copy runs of this exact scenario in isolation. Still a test-only seam value, nowhere close to
+    // DEFAULT_RESTART_WINDOW_MS's real 1-hour production default (supervisor.ts) — the test still proves
+    // the ceiling trips in single-digit seconds, not a real hour.
+    restartWindowMs: 6000, // test-only seam: short window so the ceiling trips in ~seconds, not a real hour
     maxRestartsPerWindow: 5, // test-only seam: small ceiling
   });
   const warnings = captureWarnings();

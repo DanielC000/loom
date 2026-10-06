@@ -231,8 +231,20 @@ try {
     db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     let gateCalls = 0;
+    // Card 39ad0ee8: this fixture's own branch identity moves during confirmWorkerMergeTracked's async git
+    // identity resolve (the post-merge hook below commits into the worker's branch mid-admission) — exactly
+    // the case _settle-tracked.mjs's own RE-MINT GUARD doc warns can't be fixed in the shared helper ("a
+    // fixture whose identity the op itself moves should pass a generous per-instance syncAttachBudgetMs ...
+    // so it never degrades in the first place"). Under host load the default 12s SYNC_ATTACH_BUDGET_MS can
+    // legitimately expire before this scenario's (fast, fully-stubbed-gate) real work finishes, degrading the
+    // first call to {settled:false}; the re-poll then finds the op already settled with a moved identity and
+    // mints a second op, which settleTracked correctly treats as a real bug (RED: "re-poll minted a fresh op
+    // ... instead of re-attaching", gate ops d111d8b9/bf9711f8, both load-only). A generous budget (matching
+    // the convention other DI-seam-using tests already use, e.g. batch-merge-finalize-guard-edges.mjs) makes
+    // the first call settle inline instead, closing the gap this scenario can't otherwise avoid.
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
       runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
+      syncAttachBudgetMs: 600_000,
     });
     await sessions.reviewWorkerMerge(mgrId, workerId); // records the review-time tip on merge_request
     fs.writeFileSync(path.join(repo, "main-adv.txt"), "m\n"); commitAll(repo, "chore(test): main advances", GIT_ID);
