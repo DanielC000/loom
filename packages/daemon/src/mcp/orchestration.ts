@@ -38,7 +38,7 @@ import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { buildServedStatus, currentDeployStaleness } from "../served-status.js";
 import { advisoryBuildStamp } from "../deploy-staleness.js";
 import { lineageRootId } from "../sessions/lineage.js";
-import { isSupersededByRecycle, retiredCallerMessage } from "../orchestration/crash-orphaned-workers.js";
+import { isSupersededByRecycle, retiredCallerMessage, currentUnresolvedSettleSuccessor, unresolvedSettleEscalationHint } from "../orchestration/crash-orphaned-workers.js";
 import { resolveResumeDocPath } from "../sessions/resume-doc-notes.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import {
@@ -3940,15 +3940,25 @@ export class OrchestrationMcpRouter {
           "and that failure is reported back in the response's `supersede` field, never silently " +
           "swallowed. You'll get a one-time push nudge into " +
           "your own session when the human answers; call question_pull to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
-          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}.",
+          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}. A recycle predecessor " +
+          "stuck past its own settle timeout (every OTHER fleet tool refused) is let through HERE ONLY, " +
+          "and the response ALSO carries {note} naming the stuck successor + the human action that " +
+          "resolves it — a question you file this way is auto-CANCELLED if that successor later reaches " +
+          "ready on its own, so you don't need to retract it yourself.",
         inputSchema: strictShape(QUESTION_ASK_INPUT_SHAPE),
       },
       async (input) => {
         // @decision 92c20eb9 — a question filed in the settle window keeps session_id = predecessor
         // forever (reparentQuestions is a one-shot UPDATE at recycle time); see that record's own
         // section for what that breaks on the successor's side.
-        const superseded = callerSupersededError();
-        if (superseded) return ok(superseded);
+        // @decision 92c20eb9 — card ca0111a3: question_ask is the ONE tool carved out of the superseded
+        // refusal below, and ONLY for the exact unresolved-settle-timeout window; every other refused
+        // tool stays refused. Never widen this carve-out to any other tool on this surface.
+        const unresolvedSuccessor = currentUnresolvedSettleSuccessor(db, managerSessionId);
+        if (!unresolvedSuccessor) {
+          const superseded = callerSupersededError();
+          if (superseded) return ok(superseded);
+        }
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
         const built = buildQuestionAsk(input, { sessionId: managerSessionId, projectId, db, role });
@@ -3969,7 +3979,12 @@ export class OrchestrationMcpRouter {
         // Card 788ed7f4: filing a Request is a disposition — clear any open "owner message left without a
         // disposition" episode for THIS session, by occurrence alone (no content matching).
         db.clearPendingOwnerMessage(managerSessionId);
-        return ok(supersede !== undefined ? { questionId: question.id, supersede } : { questionId: question.id });
+        const result: { questionId: string; supersede?: typeof supersede; note?: string } = { questionId: question.id };
+        if (supersede !== undefined) result.supersede = supersede;
+        // @decision 92c20eb9 — card ca0111a3: confirm to P why this call was let through and what to
+        // actually put in the ask, reusing the SAME hint text retiredCallerMessage shows it elsewhere.
+        if (unresolvedSuccessor) result.note = unresolvedSettleEscalationHint(unresolvedSuccessor);
+        return ok(result);
       },
     );
 

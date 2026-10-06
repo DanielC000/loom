@@ -222,3 +222,151 @@ dies before ready; the nudge falls through to the still-live predecessor, never 
   out to need one on review — `schedule_create`'s row is agent-keyed (no session_id to go stale at all)
   and `reminder_create` is unreachable by a manager session; both were traced individually and found
   structurally unaffected, for reasons specific to each, not by analogy to question_ask's shape.
+
+## Card ca0111a3 — a settle-timeout escalation carve-out for `question_ask` ONLY, never an automatic reclaim
+
+A THIRD recycle-fleet scenario this card's own supersession fix (and 8ca27cce's extension of it) left
+closed with no remedy: `settleRecycleHandoff` (sessions/service.ts:13274) is only ever reached when
+`attemptManagerOwnershipTransfer` already succeeded — so by the time its TIMEOUT branch fires
+(`recordUnresolvedRecycleOutcome`, service.ts:13466, appending `recycle_fleet_unresolved` with
+`detail.reason:"timeout"`), the predecessor P owns NOTHING: every worker/wake/question/pending-queue row
+already points at the stuck successor S. P stays `isSupersededByRecycle:true` forever (S never confirmed
+reaching SessionStart, and the loop keeps polling past the alert — it never gives up), so every one of the
+15 tools this card and 8ca27cce already refuse stays refused, while S can't act either (it never booted
+far enough to receive its own kickoff). Nobody can drive the fleet until S either boots or dies.
+
+### LEAD DECISION (2026-10-06): no automatic reclaim; one escalation tool only
+
+A reclaim here (pulling the fleet back onto P the way `recoverFleetAfterFailedRecycleSuccessor`,
+service.ts:13411, already does for a CONFIRMED-dead successor) would race `settleRecycleHandoff`'s own
+loop, which is STILL polling in-memory and has no way to learn a reclaim happened out-of-band: its
+ready-branch (service.ts:13289-13298, checked FIRST every iteration) unconditionally calls
+`pty.stop(oldId, "hard")` the moment `hasReachedReady(freshId)` ever fires — stopping P while it
+legitimately re-owns a reclaimed fleet, re-stranding everything a second time (a double-stop/split-brain:
+P dead, S "ready" but owning nothing). `recoverFleetAfterFailedRecycleSuccessor` itself assumes its
+`!isAlive(freshId)` precondition was already confirmed by its caller; calling it from a NEW path while S
+is merely unconfirmed-stuck (not confirmed dead) would violate that contract.
+
+The existing, already-tested, SAFE way to resolve this needs no new reclaim code at all: a human can
+force-stop the stuck successor via the existing `POST /api/sessions/:id/stop` (gateway/server.ts:6004,
+human-only REST, trust-tier.ts:93). The moment that happens, `pty.isAlive(freshId)` flips false and
+`settleRecycleHandoff`'s own loop takes its EXISTING `!isAlive` branch on its very next poll —
+`recoverFleetAfterFailedRecycleSuccessor` fires exactly as it already does for any other dead-successor
+recycle, with zero new reclaim logic. The actual gap is narrower than "P needs to drive the fleet
+directly" — it's "nobody is told to pull that trigger, and P itself can't ask, because `question_ask` is
+one of the ten+ tools already refused."
+
+Fix: a narrow, durable-row-keyed carve-out that opens ONLY `question_ask` (mcp/orchestration.ts, the
+`question_ask` handler) — never any other refused tool — for a predecessor whose current successor's
+LATEST `recycle_fleet_*` event is `recycle_fleet_unresolved` with `detail.reason === "timeout"` and
+`detail.halted !== true` (the halted-watch variant of the SAME event kind,
+`watchHaltedRecycleSuccessor`/service.ts:13337, is explicitly excluded — see below). This is
+`currentUnresolvedSettleSuccessor` (orchestration/crash-orphaned-workers.ts), a predicate DELIBERATELY
+SEPARATE from `currentHaltedSuccessor` (386e4eb5's own "Do not" scopes that one to the
+`recycle_ownership_transfer_failed`/`resolved` event pair only — the two predicates cover disjoint
+recycle-fleet scenarios, never variants of one check). No `gen` check here (unlike
+`currentHaltedSuccessor`): successor ids are always a fresh `randomUUID`, so `detail.deadSuccessorId ===
+fresh.id` alone is unambiguous — `386e4eb5`'s gen+id discriminator exists only because a
+halted-then-reclaimed-then-re-recycled lineage can mint a successor sharing the stale one's `gen` number,
+which has no equivalent here (this predicate's own window closes via a later `recycle_fleet_resolved`/
+`recycle_fleet_recovered` event the moment the lineage moves on, before any such id could collide).
+
+When the carve-out fires, `question_ask`'s own response carries a `note` field (never auto-filed — P
+still decides what to actually ask) naming the successor id and the exact human action that resolves it
+(`unresolvedSettleEscalationHint`, same file) — reused VERBATIM in `retiredCallerMessage`'s refusal text
+for every OTHER still-refused tool, so P learns the one way out the first time it tries anything, not
+only if it already knows to call `question_ask`.
+
+**Human-attention check (manager's own DoD item 4): already wired, no new card needed.**
+`recycle_fleet_unresolved` already classifies as alert class `"worker-crashed"` in
+`companion/attention-push.ts`'s `classify()` (lines 156-158) with its own dedicated line (lines 404-410),
+and `alertWebhook.events` (`orchestration/alert-webhook.ts`) is a human-configurable allowlist with no
+code-level exclusion for this kind — so a human already gets pushed/webhooked on this event today,
+PROVIDED attention-push or `alertWebhook` is configured for the project (matches the nudge text at
+service.ts:13488, unchanged by this card).
+
+**Correction (Code Review round 2, reviewer): NOT symmetric with this card's own original `question_ask`
+trace.** On the ORDINARY settle-window path (the original trace above), `session_id = P` forever is
+CORRECT — the predecessor really is the live thing a human's eventual answer should reach, for however
+long it stays superseded-but-live. On THIS carve-out's resolved-late path specifically, a question P filed
+after the alert is a DIFFERENT shape: its entire content is an instruction to stop a successor that has
+since become the fleet's sole legitimate owner. Leaving it pending would let the human (or the asker
+itself, on the next pull) act on now-wrong advice. Round 2 closes this with an explicit cancel — see below
+— rather than leaving it as an accepted residual.
+
+### Code Review round 2 (file:line-cited fixes, no design change to the LEAD DECISION above)
+
+1. **The predicate was blind to the successor's DURABLE ready latch.** `currentUnresolvedSettleSuccessor`
+   only ever looked at the `recycle_fleet_*` EVENT trail — but `Db.setReachedReady` (db.ts:6049) writes
+   `reached_ready_at` the INSTANT the `onReady` hook fires, strictly before `settleRecycleHandoff`'s own
+   next poll ever observes `hasReachedReady`/appends `recycle_fleet_resolved`. In that gap (up to
+   `RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS`, 15s in production) the predicate still matched the stale
+   unresolved event, so `question_ask` kept telling P to ask a human to stop a successor that was ALREADY
+   ready — and if the human acted on it, the settle loop's ready-branch (checked FIRST, service.ts:13289)
+   would still hard-stop P on its next iteration: the exact double-stop/split-brain the LEAD DECISION
+   above exists to avoid, reached anyway through a stale read instead of a built reclaim. The SAME gap
+   survives a daemon restart with NO event at all (`finishReconcilingRecycleSettles`'s deferred-success
+   branch, service.ts ~13614, reconciles the row but files no `recycle_fleet_*` event). Fixed:
+   `currentUnresolvedSettleSuccessor` (orchestration/crash-orphaned-workers.ts) now checks
+   `fresh.reachedReadyAt != null` FIRST and returns `undefined` immediately when set — a durable,
+   restart-proof signal, independent of whether any event ever gets filed.
+2. **The resolved-late branch now cancels stale escalation questions.** `settleRecycleHandoff`'s
+   ready-branch (service.ts:13289-13314) now captures the alert's own timestamp (`alertedAt`) when it
+   fires, and — once ready resolves the window — calls the new `cancelStaleEscalationQuestions(oldId,
+   freshId, alertedAt)` (service.ts, beside `settleRecycleHandoff`): any of P's questions with
+   `createdAt > alertedAt` can ONLY have been filed through this carve-out (every other path to
+   `question_ask` is refused in that exact window), so each still-`pending` one is cancelled via
+   `cancelQuestionForAgent` (mcp/questionTool.ts) — the SAME `question_cancel` semantics every other cancel
+   path uses: retained history + a reason, never a hard delete. Best-effort per question (one failure is
+   logged and never blocks another, and never throws into the settle loop).
+3. **The hint now tells P to phrase the ask conditionally**, and names the exact stop-route body:
+   `unresolvedSettleEscalationHint` (crash-orphaned-workers.ts) now says to POST `{"mode":"hard"}` (the
+   REST route's `mode` param, gateway/server.ts:6006, defaults to `"graceful"` — a hung/never-ready
+   successor cannot be trusted to respond to the graceful Ctrl-C path) and to tell the human to act ONLY IF
+   the successor still shows not-ready by the time they read the ask — belt-and-suspenders alongside the
+   round-2 predicate fix above, not a substitute for it (the cancel in point 2 is what actually retracts a
+   now-wrong ask; this is what keeps a FRESH ask, read by a slow human, honest too).
+4. **`question_ask`'s own tool description** (mcp/orchestration.ts) now documents the `note` response
+   field and the auto-cancel-on-late-ready behavior from point 2, so an agent reading the tool surface
+   (not just hitting the carve-out live) can tell what it's for. Verified against CLAUDE.md's "Added a
+   FIELD to an existing tool's RESPONSE" trigger: ran the full named surface-test list (17 files:
+   `agent-prompt-lint-surface-drift.mjs`, `agent-prompt-lint.mjs`, `surface-subset.mjs`, `audit-surface.mjs`,
+   `mgmt-surface.mjs`, `operator-surface.mjs`, `setup-surface.mjs`, `user-audit-surface.mjs`,
+   `platform-elevated-surface.mjs`, `platform-mgmt-surface.mjs`, `my-context-gate.mjs`,
+   `event-trigger-mcp-absence.mjs`, `companion-capability-grants.mjs`, `companion-lead-mode.mjs`,
+   `peer-message.mjs`, `task-delete.mjs`, `platform-agent-update.mjs`) — all pass; none of them pins
+   `question_ask`'s own response key set exhaustively, so none needed updating for the additive `note`
+   field itself.
+
+Tests: `packages/daemon/test/recycle-settle-timeout-escalation.mjs` — before-the-alert refusal (negative
+control #1), after-the-alert success + hint text + a representative OTHER tool (`gate_cancel`) still
+refusing but now also hinted, two post-window negative controls (resolved-late: predecessor retired,
+predicate stops matching, AND the stale escalation question is confirmed cancelled with history retained;
+recovered: successor confirmed dead and reclaimed via the EXISTING `!isAlive` path, predicate stops
+matching AND `question_ask` succeeds for the ordinary unsuperseded reason, not via the carve-out), plus
+round-2 coverage for the `halted:true` exclusion, a stale/foreign successor id, and the durable
+`reachedReadyAt` latch forcing the predicate `undefined` even with no superseding event yet.
+
+### Do not
+
+- Do not fold `currentUnresolvedSettleSuccessor` into `currentHaltedSuccessor` or into
+  `isSupersededByRecycle` — they cover disjoint recycle-fleet scenarios, not variants of one check.
+- Do not widen the carve-out beyond `question_ask` — every other refused tool (the original ten,
+  `gate_cancel`/`daemon_restart`/`deploy`/`wake_me`) stays refused in this window; only its TEXT is
+  enriched with the same hint.
+- Do not build an automatic/semi-automatic reclaim for an unconfirmed-stuck successor — see the "LEAD
+  DECISION" section above for the double-stop/split-brain race this would reopen. The only safe trigger is
+  a human-initiated hard-stop of the named successor, which routes through the EXISTING, tested
+  `!pty.isAlive` branch of `settleRecycleHandoff`'s own loop.
+- Do not match `currentUnresolvedSettleSuccessor` against a `recycle_fleet_unresolved` event carrying
+  `detail.halted === true` — that is `watchHaltedRecycleSuccessor`'s OWN alert for the unrelated halted-
+  ownership-transfer scenario (where the predecessor is never superseded in the first place, so this
+  carve-out is structurally never evaluated for it anyway, but the explicit exclusion is the defensive,
+  self-documenting check — never rely solely on the caller-side gate).
+- Do not trust the `recycle_fleet_*` EVENT trail alone to tell whether the successor is still genuinely
+  unresolved (Code Review round 2) — ALWAYS check `fresh.reachedReadyAt` first; the durable latch can be
+  set before the next poll ever files a superseding event, and survives a restart that files none at all.
+- Do not skip cancelling a question filed after the alert on the resolved-late path (Code Review round 2)
+  — it can only have come from this carve-out, and its content is now wrong the instant the successor
+  becomes the fleet's sole live owner. Cancel it via the shared `question_cancel` semantics, never a hard
+  delete, and never let one cancel's failure block another's.

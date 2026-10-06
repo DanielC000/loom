@@ -93,6 +93,7 @@ import { readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 import { mergeConfigOverride, validateAgentProjectConfigOverride, isHumanSetPermissionMode, humanSetPermissionModeRejectionMessage } from "../mcp/platform.js";
 import { appendTaskBodySection, checkTitleHtmlEntities } from "../mcp/tasks.js";
+import { cancelQuestionForAgent } from "../mcp/questionTool.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
 import { resolveLiveSetupHome } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
@@ -13285,6 +13286,7 @@ export class SessionService {
       await new Promise((r) => setTimeout(r, SessionService.RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS));
       const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
       let alerted = false;
+      let alertedAt: string | undefined;
       for (;;) {
         if (this.pty.hasReachedReady(freshId)) {
           try { this.pty.stop(oldId, "hard"); } catch { /* already gone */ }
@@ -13293,6 +13295,9 @@ export class SessionService {
               id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
               kind: "recycle_fleet_resolved", detail: { successorId: freshId },
             });
+            // @decision 92c20eb9 — cancel any still-pending escalation question filed during the
+            // alerted window — its content told a human to stop freshId, now the ready fleet owner.
+            if (alertedAt) this.cancelStaleEscalationQuestions(oldId, freshId, alertedAt);
           }
           return;
         }
@@ -13301,6 +13306,7 @@ export class SessionService {
           return;
         }
         if (!alerted && Date.now() >= deadline) {
+          alertedAt = new Date().toISOString();
           this.recordUnresolvedRecycleOutcome(oldId, freshId, role, "timeout");
           alerted = true;
         }
@@ -13308,6 +13314,26 @@ export class SessionService {
       }
     } finally {
       this.db.clearRecycleSettlePending(oldId);
+    }
+  }
+
+  /**
+   * @decision 92c20eb9 — never skip this cancel for a question filed after `alertedAt` — it can only
+   * have gone through the ca0111a3 escalation carve-out, so it unconditionally told a human to stop a
+   * successor that is now ready and the sole legitimate fleet owner.
+   */
+  private cancelStaleEscalationQuestions(oldId: string, freshId: string, alertedAt: string): void {
+    const stale = this.db.listQuestionsForSession(oldId).filter((q) => q.state === "pending" && q.createdAt > alertedAt);
+    for (const q of stale) {
+      try {
+        const result = cancelQuestionForAgent(this.db, oldId, q.id,
+          `your successor ${freshId} reached SessionStart — it is now the legitimate fleet owner; stopping it would undo that`);
+        if ("error" in result) {
+          console.error(`[recycle] cancelling stale escalation question ${q.id.slice(0, 8)} for ${oldId.slice(0, 8)} failed: ${result.error}`);
+        }
+      } catch (e) {
+        console.error(`[recycle] cancelling stale escalation question ${q.id.slice(0, 8)} for ${oldId.slice(0, 8)} threw: ${(e as Error)?.message ?? e}`);
+      }
     }
   }
 

@@ -134,6 +134,41 @@ export function currentHaltedSuccessor(db: Db, sessionId: string): Session | und
 }
 
 /**
+ * @decision 92c20eb9 — never fold this into {@link currentHaltedSuccessor} or into
+ * `isSupersededByRecycle` — they cover disjoint recycle-fleet scenarios, not variants of one check.
+ * @decision 92c20eb9 — never drop the `reachedReadyAt` check: it can be set before the settle loop's
+ * next poll ever files `recycle_fleet_resolved` (or, across a restart, with no event at all) — trusting
+ * a stale unresolved event in that gap would tell a human to stop the fleet's sole live owner.
+ */
+export function currentUnresolvedSettleSuccessor(db: Db, sessionId: string): Session | undefined {
+  const fresh = db.getSuccessor(sessionId);
+  if (!fresh) return undefined;
+  if (fresh.reachedReadyAt != null) return undefined;
+  const latest = db.listEventsForSession(sessionId)
+    .filter((e) => e.kind === "recycle_fleet_unresolved" || e.kind === "recycle_fleet_resolved" || e.kind === "recycle_fleet_recovered")
+    .at(-1);
+  if (!latest || latest.kind !== "recycle_fleet_unresolved") return undefined;
+  const detail = latest.detail as { deadSuccessorId?: string; reason?: string; halted?: boolean } | undefined;
+  if (detail?.reason !== "timeout" || detail?.halted === true) return undefined;
+  if (fresh.id !== detail?.deadSuccessorId) return undefined;
+  return fresh;
+}
+
+/**
+ * @decision 92c20eb9 — never widen this into an automatic reclaim; only a human-initiated hard-stop of
+ * the named successor is safe (it routes through the existing, tested `!pty.isAlive` reclaim branch
+ * instead of racing `settleRecycleHandoff`'s unconditional ready-branch hard-stop of the predecessor).
+ */
+export function unresolvedSettleEscalationHint(successor: Session): string {
+  return `your successor ${successor.id} has not confirmed reaching SessionStart since the settle ` +
+    `timeout — call question_ask to ask a human to hard-stop it (POST /api/sessions/${successor.id}/stop ` +
+    `with body {"mode":"hard"}, or the Sessions UI's stop action), which will trigger the existing ` +
+    `automatic fleet-reclaim back onto you. Say in your ask that the human should do this ONLY IF your ` +
+    `successor still shows not-ready by the time they act — if it has since become ready, stopping it ` +
+    `would be wrong`;
+}
+
+/**
  * Shared successor-exclusion predicate (card `6859f9e7`): a session with a recycle successor is never a
  * valid automatic resume target — `resume()` refuses it unconditionally without a human
  * `allowSuperseded` override (sessions/service.ts). Used by both `deriveCrashOrphanedManagers` below
@@ -162,7 +197,12 @@ export function isSupersededByRecycle(db: Db, sessionId: string): boolean {
  */
 export function retiredCallerMessage(db: Db, managerSessionId: string): string {
   const successor = db.getSuccessor(managerSessionId);
-  return `you are being retired (recycled); your successor ${successor?.id ?? "(unknown)"} owns the fleet`;
+  const base = `you are being retired (recycled); your successor ${successor?.id ?? "(unknown)"} owns the fleet`;
+  // @decision 92c20eb9 — card ca0111a3: append the same escalation hint question_ask's own carve-out
+  // uses, so a predecessor stuck in the unresolved-settle window learns its one way out the FIRST time it
+  // tries any other refused tool, not only if it happens to already know to call question_ask.
+  const unresolved = currentUnresolvedSettleSuccessor(db, managerSessionId);
+  return unresolved ? `${base}. ${unresolvedSettleEscalationHint(unresolved)}.` : base;
 }
 
 /**
