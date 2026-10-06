@@ -1331,6 +1331,13 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
     }
     degradedDivertsToFlush.length = 0;
   };
+  // @decision 4480b077 (round 2) — the .json migrate-write is DEFERRED to one pass after every file is
+  // read (never mid-loop), so a not-yet-read sibling's own file can't be clobbered before it's read.
+  // Keyed by canonical key; value is the superseded source filenames to delete once that key's write succeeds.
+  const migratedSourcesByKey = new Map<string, string[]>();
+  // @decision 4480b077 (round 2) — every key a DEGRADED entry occupies via its own trusted resolvedKey
+  // (883e29bc) — that key's file is that entry's only durable copy; no write pass below may touch it.
+  const degradedOccupiedKeys = new Set<string>();
 
   // PASS 1 — process EVERY file, never return early.
   for (const f of files) {
@@ -1391,24 +1398,18 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} was filed under a STALE key for ${entry.repoPath} (its canonical key resolution changed) — migrating to ${freshHash}.json so a future clear can find it.`);
           entry = { ...entry, resolvedKey: currentKey };
-          // @decision a6fa60e2 — strip any dangling `f` reference BEFORE the write: on success `f` is
-          // deleted below, so a persisted/armed entry still naming it would falsely "protect" a future,
-          // unrelated file that happens to reuse this name; on failure the catch branch re-adds it.
+          // @decision a6fa60e2 — strip any dangling `f` reference up front: it's about to be collected
+          // for a LATER delete/fold, and a persisted/armed entry still naming it would falsely "protect"
+          // a future, unrelated file that happens to reuse this name.
           if (entry.orphanLatchFiles?.includes(f)) {
             entry = { ...entry, orphanLatchFiles: entry.orphanLatchFiles.filter((name) => name !== f) };
           }
-          if (writeMergeQuarantineLatch(entry)) {
-            // Uses the shared helper too (this branch is only reachable when `freshHash !== hash`, so `f`
-            // can never equal the freshly-written filename here — but sharing the check means that safety
-            // no longer depends on remembering to keep this gate in sync with the other two call sites).
-            deleteSourceLatchIfSuperseded(f, entry);
-          } else {
-            // @decision a6fa60e2 — fold the old filename `f` into orphanLatchFiles here, or a raw
-            // clear-by-id of its stale hash deletes this entry's only durable copy as an "unowned" orphan.
-            entry = { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), f])] };
-            // eslint-disable-next-line no-console
-            console.error(`[merge-quarantine] could not durably persist ${entry.repoPath}'s migrated latch under its new key — the OLD file (${f}) is left in place so nothing is lost; a later boot can retry the migration.`);
-          }
+          // @decision 4480b077 (round 2) — DEFER the write: collect this source under its own target key
+          // for the single post-loop write pass below, instead of writing here mid-loop where a
+          // not-yet-read sibling's own file (or a degraded entry's own backing file) could be clobbered.
+          const migratedList = migratedSourcesByKey.get(currentKey) ?? [];
+          migratedList.push(f);
+          migratedSourcesByKey.set(currentKey, migratedList);
         } else {
           // entry.resolvedKey is guaranteed set here (the no-resolvedKey+unresolvable case is handled, and
           // `continue`d past, above).
@@ -1418,6 +1419,9 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the latch file AS WRITTEN rather than risk migrating/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
           armQuarantineKey(byRepoKey, entry.resolvedKey!, entry);
+          // @decision 4480b077 (round 2) — this entry's own backing file physically lives at
+          // sha(resolvedKey); record it so no write pass below ever writes there.
+          degradedOccupiedKeys.add(entry.resolvedKey!);
           if (currentKey !== entry.resolvedKey) {
             degradedDivertsToFlush.push({ resolvedKey: entry.resolvedKey!, sourceFile: f });
           }
@@ -1520,6 +1524,9 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the tmp file AS WRITTEN rather than risk promoting/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
         armQuarantineKey(byRepoKey, entry.resolvedKey, entry);
+        // @decision 4480b077 (round 2) — same tracking as PASS 1's own degraded branch, shared across
+        // both passes so EITHER one's degraded find protects BOTH write passes below.
+        degradedOccupiedKeys.add(entry.resolvedKey);
         degradedDivertsToFlush.push({ resolvedKey: entry.resolvedKey, sourceFile: f });
         continue;
       }
@@ -1584,11 +1591,80 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
     }
   }
 
+  // @decision 4480b077 (round 3) — WRITE-ALL then DELETE-ALL, never interleaved per key: a stale
+  // migrate SOURCE for one key can physically be a DIFFERENT key's own write TARGET, so an early delete
+  // could destroy a sibling key's write from earlier in this same pass.
+  const writeOutcomesByKey = new Map<string, { unionEntry: MergeQuarantineEntry; succeeded: boolean }>();
+  const writeTargetsThisPass = new Set<string>();
+  for (const [key, sources] of migratedSourcesByKey) {
+    if (degradedOccupiedKeys.has(key)) {
+      // @decision 4480b077 (round 3) — fold every migrating source into the shared in-memory union's
+      // own orphanLatchFiles (no disk write) so a human's ordinary clear sweeps them too — else a
+      // cleared repo's own stale source survives untouched and resurrects its quarantine later.
+      const occupant = byRepoKey.get(key);
+      if (occupant) {
+        const folded: MergeQuarantineEntry = { ...occupant, orphanLatchFiles: [...new Set([...(occupant.orphanLatchFiles ?? []), ...sources])] };
+        for (const k of folded.armedKeys?.length ? folded.armedKeys : [key]) byRepoKey.set(k, folded);
+      }
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] boot found ${sources.length} migrating latch(es) (${sources.join(", ")}) resolving to a key that is ALSO occupied by a DIFFERENT, currently-unresolvable entry's own trusted resolvedKey — refusing to write/overwrite that entry's own backing file. Every migrating source is folded into the shared union's own orphanLatchFiles (never deleted) so a human's ordinary clear of the resolvable side sweeps them too; both sides stay enforced in-memory for this process only until that clear, or until the collision resolves itself (the degraded entry remounts).`);
+      continue;
+    }
+    const unionEntry = byRepoKey.get(key);
+    if (!unionEntry) continue; // defensive — every key here was armed into byRepoKey above
+    const succeeded = writeMergeQuarantineLatch(unionEntry);
+    writeOutcomesByKey.set(key, { unionEntry, succeeded });
+    if (succeeded) writeTargetsThisPass.add(path.basename(quarantinePathFor(unionEntry.repoPath)));
+  }
+  for (const [key, sources] of migratedSourcesByKey) {
+    const outcome = writeOutcomesByKey.get(key);
+    if (!outcome) continue; // degraded-occupied (folded above) or missing union — nothing to delete
+    const { unionEntry, succeeded } = outcome;
+    if (succeeded) {
+      // @decision c870618c — fold any per-source unlink failure into orphanLatchFiles and re-persist,
+      // mirroring consumeMatchedPendingsIntoArmedEntry's own success-branch fold, now for N sources.
+      const failedToDelete: string[] = [];
+      for (const sourceFile of sources) {
+        // @decision 4480b077 (round 3, CRITICAL) — never delete a source whose basename is ALSO a write
+        // target this SAME pass just wrote to for a DIFFERENT key — it is that other key's own freshly
+        // written latch now, not stale residue, even though it started this pass as our own leftover.
+        if (writeTargetsThisPass.has(sourceFile)) {
+          // eslint-disable-next-line no-console
+          console.warn(`[merge-quarantine] migrate source ${sourceFile} for key ${key} is ALSO a write target this pass wrote to for a DIFFERENT key — refusing to delete it (would destroy that other key's freshly-written latch). Left AS WRITTEN; this repo's own entry already migrated correctly under its own key.`);
+          continue;
+        }
+        if (!deleteSourceLatchIfSuperseded(sourceFile, unionEntry)) failedToDelete.push(sourceFile);
+      }
+      if (failedToDelete.length > 0) {
+        const folded: MergeQuarantineEntry = { ...unionEntry, orphanLatchFiles: [...new Set([...(unionEntry.orphanLatchFiles ?? []), ...failedToDelete])] };
+        for (const k of folded.armedKeys?.length ? folded.armedKeys : [key]) byRepoKey.set(k, folded);
+        if (!writeMergeQuarantineLatch(folded)) {
+          // eslint-disable-next-line no-console
+          console.error(`[merge-quarantine] migrated ${folded.repoPath} but could NOT re-persist it after ${failedToDelete.length} stale source file(s) (${failedToDelete.join(", ")}) failed to unlink — those file(s) stay on disk, UNTRACKED by this entry's own bookkeeping in THIS process; a restart may re-arm this quarantine from them (fail-closed, never open, but investigate the unlink failure).`);
+        }
+      }
+    } else {
+      // @decision a6fa60e2 — fold every old filename into orphanLatchFiles, or a raw clear-by-id of any
+      // of their stale hashes deletes this entry's only durable copy as an "unowned" orphan.
+      const folded: MergeQuarantineEntry = { ...unionEntry, orphanLatchFiles: [...new Set([...(unionEntry.orphanLatchFiles ?? []), ...sources])] };
+      for (const k of folded.armedKeys?.length ? folded.armedKeys : [key]) byRepoKey.set(k, folded);
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] could not durably persist ${folded.repoPath}'s migrated latch under its new key — the OLD file(s) (${sources.join(", ")}) are left in place so nothing is lost; a later boot can retry the migration.`);
+    }
+  }
+
   // Write the UNION once per key, then unlink EVERY tmp that contributed to it.
   // @decision 92c645cc (round 2, items 2/2b) — never persist one tmp's own content as the whole story,
   // and never unlink any of them until that superseding write has actually succeeded (bde5d1fe's rule,
   // applied here to a key with more than one surviving tmp instead of just one).
   for (const [key, tmps] of tmpsToUnlinkByKey) {
+    // @decision 4480b077 (round 2) — same guard as PASS 1's own write pass above: never write/overwrite
+    // a key a degraded entry's own trusted resolvedKey occupies.
+    if (degradedOccupiedKeys.has(key)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] recovered ${tmps.length} torn-write tmp(s) resolving to a key that is ALSO occupied by a DIFFERENT, currently-unresolvable entry's own trusted resolvedKey — refusing to promote/overwrite that entry's own backing file. Every tmp is left AS WRITTEN; investigate the collision before this can recover durably.`);
+      continue;
+    }
     const unionEntry = byRepoKey.get(key);
     if (!unionEntry) continue; // defensive — every key here was armed into byRepoKey above
     if (!isRepoPathCurrentlyResolvable(unionEntry.repoPath)) {
