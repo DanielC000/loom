@@ -424,6 +424,12 @@ try {
   // WITHIN the same retention window must NOT be refused — it gets a genuinely fresh spawn instead. Before
   // this fix, `foreignSpawnGuard` consulted the raw, unfiltered `peek()` (no usability filtering at all)
   // and wrongly refused this exact case for up to spawnOpRetainMs after the owner's worker exited.
+  //
+  // LOAD-PROOFING (delta Code Review a503af08): a 500ms window only RED's reliably if the foreign call
+  // actually lands inside it — under load that's not guaranteed, so this block uses a large
+  // spawnOpRetainMs AND a positive witness (a raw `pendingOps.peek()`, bypassing the fix under test) that
+  // the retained done view is still sitting there right before the foreign call — so a false PASS from the
+  // window having already closed can never be mistaken for a genuine one.
   // =============================================================================================
   {
     const P = "msoa-spawn-exited-retain", repo = makeRepo();
@@ -431,7 +437,7 @@ try {
     const taskId = randomUUID();
     db.insertTask({ id: taskId, projectId: P, title: "ts9", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
-    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 500 });
+    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 60_000 });
 
     const owner = await svcRetain.spawnWorkerTracked(`${P}-owner`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     check("(spawn exited-retain) owner's call settles + creates the live worker", owner.settled === true && owner.ok === true);
@@ -442,9 +448,72 @@ try {
     db.setProcessState(owner.value.id, "exited");
     check("(spawn exited-retain) precondition: liveSessionIdForTask no longer resolves to the owner's worker", db.liveSessionIdForTask(taskId) !== owner.value.id);
 
+    // [witness] raw peek() (not peekAttachable — this is deliberately the UNFILTERED view) proves the
+    // retained done entry is genuinely still present right before the foreign call, so a large
+    // spawnOpRetainMs can never silently stop discriminating under load the way a tight 500ms window could.
+    const retainedPeek = svcRetain.pendingOps.peek(`spawn:${taskId}`);
+    check("(spawn exited-retain) [witness] the retained done view for this op is still present right before the foreign call", retainedPeek?.state === "done");
+
     const foreign = await svcRetain.spawnWorkerTracked(`${P}-foreign`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     check("(spawn exited-retain) the unrelated manager is NOT refused — attach() would itself treat this retained hit as a MISS", foreign.settled === true && foreign.ok === true);
     check("(spawn exited-retain) a genuinely FRESH worker was spawned, not the stale cached one", foreign.settled && foreign.ok && foreign.value.id !== owner.value.id);
+    if (foreign.settled && foreign.ok) { worktrees.push([repo, foreign.value.worktreePath]); stopSeamPty(foreign.value.id); }
+  }
+
+  // =============================================================================================
+  // REVIVE (10): THE FALSE-REFUSAL INTEGRATION CASE, mirrored for `reviveWorkerTracked`'s OWN hoisted
+  // `foreignSpawnGuard` call — SPAWN (9) above proves this for `spawnWorkerTracked`'s call; this proves
+  // the identical fix for the SEPARATE call site `reviveWorkerTracked` makes. After the revived worker
+  // exits WHILE the spawn op is still inside its TTL-retained window, an unrelated manager's own
+  // `reviveWorkerTracked` call must NOT be refused — `pendingOps.attach()` would itself treat the cached
+  // hit as a MISS. Uses a large spawnOpRetainMs plus the same raw-`peek()` positive witness as SPAWN (9).
+  // =============================================================================================
+  {
+    const P = "msoa-revive-exited-retain", repo = makeRepo();
+    seedProject(P, repo);
+    const origTaskIdOwner = randomUUID(), origTaskIdForeign = randomUUID(), followUpTaskId = randomUUID();
+    db.insertTask({ id: origTaskIdOwner, projectId: P, title: "feat(x): original landed card (owner)", body: "", columnKey: "done", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+    db.updateTask(origTaskIdOwner, { mergedSha: "abc1234def" });
+    db.insertTask({ id: origTaskIdForeign, projectId: P, title: "feat(y): original landed card (foreign)", body: "", columnKey: "done", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+    db.updateTask(origTaskIdForeign, { mergedSha: "def4321abc" });
+    db.insertTask({ id: followUpTaskId, projectId: P, title: "fix(x): follow-up", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+
+    // A merged "src" worker per manager, so EACH manager's reviveWorkerTracked call has a source it
+    // legitimately owns (reviveWorker refuses a src whose parentSessionId isn't the calling manager).
+    const makeMergedSrc = (suffix, ownerMgrId, origTaskId) => {
+      const OLD_CWD = path.join(os.tmpdir(), `loom-msoa-revive-exited-${suffix}-${process.pid}`);
+      registerForCleanup(OLD_CWD);
+      const ENG = randomUUID();
+      const tpath = engineTranscriptPath(OLD_CWD, ENG);
+      fs.mkdirSync(path.dirname(tpath), { recursive: true });
+      fs.writeFileSync(tpath, JSON.stringify({ type: "user", message: { content: "x" } }) + "\n");
+      const srcId = `${P}-src-${suffix}`;
+      db.insertSession({ id: srcId, projectId: P, agentId: `${P}-dev`, engineSessionId: ENG, title: null, cwd: OLD_CWD, processState: "exited", resumability: "dead", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: ownerMgrId, taskId: origTaskId, worktreePath: OLD_CWD, branch: `loom/old-${suffix}` });
+      db.appendEvent({ id: `ev-${srcId}`, ts: now, managerSessionId: ownerMgrId, workerSessionId: srcId, taskId: origTaskId, kind: "merge_done", detail: { branch: `loom/old-${suffix}` } });
+      return srcId;
+    };
+    const srcId = makeMergedSrc("owner", `${P}-owner`, origTaskIdOwner);
+    const srcIdForeign = makeMergedSrc("foreign", `${P}-foreign`, origTaskIdForeign);
+
+    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 60_000 });
+
+    const owner = await svcRetain.reviveWorkerTracked(`${P}-owner`, { workerSessionId: srcId, taskId: followUpTaskId });
+    check("(revive exited-retain) owner's revive settles + creates the live worker", owner.settled === true && owner.ok === true);
+    worktrees.push([repo, owner.value.worktreePath]);
+    stopSeamPty(owner.value.id);
+    // The revived worker exits (merged/stopped/recycled away) WHILE the spawn op is still inside its
+    // TTL-retained window — the exact gap SPAWN (9) proves for a plain spawn, mirrored here for revive.
+    db.setProcessState(owner.value.id, "exited");
+    check("(revive exited-retain) precondition: liveSessionIdForTask no longer resolves to the revived worker", db.liveSessionIdForTask(followUpTaskId) !== owner.value.id);
+
+    // [witness] raw peek() (not peekAttachable) proves the retained done entry is genuinely still present
+    // right before the foreign call — same discipline as SPAWN (9)'s witness.
+    const retainedPeek = svcRetain.pendingOps.peek(`spawn:${followUpTaskId}`);
+    check("(revive exited-retain) [witness] the retained done view for this op is still present right before the foreign call", retainedPeek?.state === "done");
+
+    const foreign = await svcRetain.reviveWorkerTracked(`${P}-foreign`, { workerSessionId: srcIdForeign, taskId: followUpTaskId });
+    check("(revive exited-retain) the unrelated manager's OWN reviveWorkerTracked call is NOT refused — its foreignSpawnGuard call would itself treat this retained hit as a MISS", foreign.settled === true && foreign.ok === true);
+    check("(revive exited-retain) a genuinely FRESH worker was revived, not the stale cached one", foreign.settled && foreign.ok && foreign.value.id !== owner.value.id && foreign.value.revivedFrom === srcIdForeign);
     if (foreign.settled && foreign.ok) { worktrees.push([repo, foreign.value.worktreePath]); stopSeamPty(foreign.value.id); }
   }
 } finally {

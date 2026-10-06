@@ -58,5 +58,8 @@ implemented; left as-is.
 - Do not have `foreignSpawnGuard` (or any other ownership guard reachable before `attach()`) re-derive its
   own copy of the retained-hit usability decision — call `PendingOpRegistry.peekAttachable` with the SAME
   `isRetainedResultUsable` predicate the matching `attach()` call site uses, or the two can silently drift.
+  `peekAttachable` only answers "running + TTL-retained" — it is NOT valid for a key using
+  `opts.retainVerdictUntilSuperseded`/`opts.bypassRetained` (no visibility into `untilSupersededVerdicts`,
+  identity matching, or a bypass escalation); a guard for such a key needs its own answer to that question.
 - Do not implement "normalise the spawn key to the resolved full task id" — descoped per the above;
   `@decision fb8df559` keeps the raw-taskId dedupe key on purpose.

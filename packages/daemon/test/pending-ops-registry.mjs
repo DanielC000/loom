@@ -558,6 +558,9 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   const reg = new PendingOpRegistry();
   const unusable = (v) => v.ok === false;
   await reg.attach("pa3", "spawn", "mgr1", 200, async () => ({ id: "w2", ok: true }), undefined, { retainMs: 200, isRetainedResultUsable: unusable });
+  // [positive control] the raw, unfiltered peek() still shows the entry retained — proves the
+  // undefined below is peekAttachable's own usability filtering at work, not an absent entry.
+  check("(peekAttachable retained unusable) [positive control] raw peek() still shows the retained entry", reg.peek("pa3")?.state === "done");
   const unusableView = reg.peekAttachable("pa3", { isRetainedResultUsable: unusable });
   check("(peekAttachable retained unusable) returns undefined — attach() would treat this as a MISS too", unusableView === undefined);
 }
@@ -568,6 +571,9 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   const reg = new PendingOpRegistry();
   const classifyCancelled = (outcome) => (outcome.ok && outcome.value.cancelled ? "cancelled" : "merged");
   await reg.attach("pa4", "merge", "mgr1", 200, async () => ({ merged: false, cancelled: true }), undefined, { retainMs: 200, classifyOutcome: classifyCancelled });
+  // [positive control] the raw, unfiltered peek() still shows the entry retained — proves the
+  // undefined below is peekAttachable's own NEVER_CACHED_OUTCOMES filtering, not an absent entry.
+  check("(peekAttachable NEVER_CACHED outcome) [positive control] raw peek() still shows the retained entry", reg.peek("pa4")?.state === "done");
   const cancelledView = reg.peekAttachable("pa4");
   check("(peekAttachable NEVER_CACHED outcome) a 'cancelled' retained entry is never surfaced as attachable", cancelledView === undefined);
 }
@@ -579,6 +585,9 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
 {
   const reg = new PendingOpRegistry();
   await reg.attach("pa5", "spawn", "mgr1", 200, async () => ({ id: "w3", ok: true }), undefined, { retainMs: 20 });
+  // [positive control] before expiry, the raw peek() shows the entry genuinely present — so the
+  // post-expiry undefined below is real eviction, not a call that never had anything to find.
+  check("(peekAttachable expired) [positive control] raw peek() shows the entry present before expiry", reg.peek("pa5")?.state === "done");
   await waitUntil(() => reg.peekAttachable("pa5") === undefined, { label: "pa5 retained view no longer attachable after its retainMs window" });
   check("(peekAttachable expired) a retained entry past its own retainMs window is never surfaced as attachable", reg.peekAttachable("pa5") === undefined);
 }

@@ -341,8 +341,8 @@ export class PendingOpRegistry {
     return usable ? hit : undefined;
   }
 
-  /** @decision 656e326f — read-only: "would `attach()` treat `key` as attachable?", never a raw/possibly-
-   *  stale view the way `peek()` returns one. See the decision record's "Round 2" for why this exists. */
+  /** @decision 656e326f — running + TTL-retained only; not valid for keys using
+   *  retainVerdictUntilSuperseded/bypassRetained. See the decision record's "Round 2" for why this exists. */
   peekAttachable<T>(key: string, opts?: { isRetainedResultUsable?: (value: T) => boolean }): PendingOpView | undefined {
     const e = this.entries.get(key);
     if (e && e.state === "running") return projectView(e);
