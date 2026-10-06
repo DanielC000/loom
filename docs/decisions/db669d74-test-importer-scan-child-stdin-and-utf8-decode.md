@@ -6,17 +6,38 @@ From the `72769424` round-4 delta review: two independent mechanism-level defect
 `scanTestImporterClosureInChildProcess` (`git/worktrees.ts`), fixed together since both touch the same
 child-process plumbing.
 
-**Chunk-split UTF-8 corruption.** Both `scanTestImporterClosureInChildProcess` and `loadHarnessSetExport`
-collected a child's stdout with `child.stdout?.on("data", (d) => { if (out.length < N) out += d; })` — `d`
-is a `Buffer`, and `out += d` implicitly calls `d.toString("utf8")` on EACH chunk independently. A
-multi-byte UTF-8 character whose bytes straddle a chunk boundary (the OS pipe chunks by byte count, never
-by character) decodes as two incomplete fragments, each independently replaced with U+FFFD — silently
-corrupting a discovered-importer path (or a harness-exported name) rather than failing loudly. The fix,
-`collectUtf8Stdout` (exported from `git/worktrees.ts`), calls `stdout.setEncoding("utf8")` before
+**Chunk-split UTF-8 corruption — defense-in-depth on both call sites, not a soundness hole on either.**
+Both `scanTestImporterClosureInChildProcess` and `loadHarnessSetExport` collected a child's stdout with
+`child.stdout?.on("data", (d) => { if (out.length < N) out += d; })` — `d` is a `Buffer`, and `out += d`
+implicitly calls `d.toString("utf8")` on EACH chunk independently. A multi-byte UTF-8 character whose
+bytes straddle a chunk boundary (the OS pipe chunks by byte count, never by character) decodes as two
+incomplete fragments, each independently replaced with U+FFFD.
+
+On the scan path, a corrupted discovered-importer path containing U+FFFD was already caught, not silently
+accepted: `TEST_PATH_SHELL_SAFE_RE` (`git/worktrees.ts:4702`, enforced at the discovered-importer check
+`:5094` and the directly-changed-file check `:5244`) allowlists only `[A-Za-z0-9_.\-/]+`, which excludes
+U+FFFD — so a corrupted path fails that check and the classification returns `notReducible`/`ok:false`,
+taking the full gate rather than running on a corrupted path. The pre-fix bug's real cost on this call
+site was a false "not reducible" (losing the reduction on an otherwise-safe diff whose importer path
+happened to straddle a chunk boundary), never an unsound reduction.
+
+Traced separately for `loadHarnessSetExport` (this card's own DoD, not assumed from the fix's framing):
+the two exports it reads — `NOT_HERMETIC` and `EXCLUDED_DIR_NAMES` (`scripts/test-daemon.mjs:422-424` and
+`:461`) — are static, hand-written ASCII-only string literals (e.g. `"integration-e2e"`, `"fixtures"`),
+never derived from diff content or any other variable-length/non-ASCII input. ASCII characters are
+single-byte in UTF-8, so they can never straddle a chunk boundary the way this bug requires — there was no
+code path by which a real value in either Set could ever contain a byte sequence capable of triggering the
+corruption in the first place. Pre-fix, this call site's chunk-split defect was latent and unreachable, not
+merely unlikely; it had no real effect, confirmed by inspection of both Sets' literal contents rather than
+inferred from the fix's own narrative.
+
+The fix, `collectUtf8Stdout` (exported from `git/worktrees.ts`), calls `stdout.setEncoding("utf8")` before
 attaching the `"data"` listener: Node's `Readable` then decodes through its own `StringDecoder`, which
 buffers a trailing incomplete multi-byte sequence until the next chunk completes it, so a chunk boundary
 can never land mid-character. Both call sites now share this one helper instead of each carrying its own
-copy of the buggy shape.
+copy of the buggy shape — hardening that removes the scan path's false-not-reducible cost and keeps
+`loadHarnessSetExport` on the same shared helper rather than a second copy of a shape that was already
+latent-safe there, not a fix for a live soundness hole on either side.
 
 **Windows argv-length overflow.** `scanTestImporterClosureInChildProcess` passed `roots` (every directly
 changed/deleted test-shaped path in the diff) as `JSON.stringify(roots)`, a single argv element. A diff

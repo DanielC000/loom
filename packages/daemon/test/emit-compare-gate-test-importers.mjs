@@ -49,7 +49,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       pre-fix naive per-chunk decode genuinely corrupts it.
 //   (M) WINDOWS ARGV-LENGTH OVERFLOW → STDIN (card db669d74) — a diff touching enough test files that the
 //       roots payload alone exceeds the Windows ~32767-char command-line limit still finds them all,
-//       because roots now rides the child's stdin, never a JSON argv element.
+//       because roots now rides the child's stdin, never a JSON argv element. WINDOWS-HOST CONTROL: the
+//       ~32767 figure this fixture targets is the Windows COMBINED command-line limit, not a universal
+//       argv ceiling — Linux's per-argument MAX_ARG_STRLEN is 128 KiB, well past this fixture's ~42 KB
+//       payload (logged below), so on a Linux host this control exercises the stdin path without the
+//       pre-fix argv shape ever actually overflowing there.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate-test-importers.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -523,7 +527,11 @@ try {
   //        ~32767-char combined command-line limit must still find them via the real scan, never silently
   //        fail closed. REAL repro: N trivial test files, ALL changed in one commit, so
   //        `roots.length === N` and the pre-fix argv-JSON payload comfortably overflows the limit on its
-  //        own (measured below, not assumed) ──────────────────────────────────────────────────────────────
+  //        own (measured below, not assumed). WINDOWS-HOST CONTROL, NOT A UNIVERSAL ARGV CEILING: this
+  //        fixture's ~42 KB payload sits well under Linux's per-argument MAX_ARG_STRLEN (128 KiB) — on a
+  //        Linux host (e.g. CI's `ubuntu-latest`) the pre-fix argv shape would NOT actually have overflowed
+  //        here, so this scenario proves the stdin path works, not that it was load-bearing there too
+  //        ──────────────────────────────────────────────────────────────
   {
     const M = mk("m");
     initRepo(M);

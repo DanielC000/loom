@@ -17173,8 +17173,11 @@ export class SessionService {
           const moved = !postWaitBranchHead || postWaitBranchHead !== emitComparePreWaitBranchHead
             || !emitCompareAdmissionMainHead || emitCompareAdmissionMainHead !== emitComparePreWaitMainHead;
           if (moved) {
-            // RE-RUN THE WHOLE CALL, NOT JUST THE ELIGIBILITY CHECK — one bounded git-diff read,
-            // the same cost class as the pre-wait call it mirrors.
+            // RE-RUN THE WHOLE CALL, NOT JUST THE ELIGIBILITY CHECK — NOT merely a bounded git-diff
+            // read: since card 72769424, this can also run `foldInTestImporters`'s child-process scan,
+            // bounded by `TEST_IMPORTER_SCAN_TIMEOUT_MS` (git/worktrees.ts), ON TOP of whatever the
+            // re-union above already cost. See the TIMING-PROFILE NOTE ~80 lines above (card db669d74)
+            // for the full admission-window cost accounting.
             //
             // @decision 7183540f — do not re-check eligibility alone while keeping a stale
             //  `emitCompareTestFiles` list — the file LIST, not just the boolean, is what
