@@ -786,9 +786,9 @@ export class TaskMcpRouter {
               "committed:false with committedBlockedReason:'code-repo-collision' means this project's vault " +
               "is configured on top of a registered code repo — fix the project's vaultPath/repoPath " +
               "pairing rather than retrying; 'paused' means an advisory auto-commit pause lease is " +
-              "currently held — it commits on the NEXT CHANGE to this vault after the lease lifts, not " +
-              "automatically the instant the lease expires. Either way the write succeeded but was NOT " +
-              "committed. There is no delete — this tool only ever creates or overwrites.",
+              "currently held — a later tick commits it once the lease lifts, with no further edit " +
+              "needed. Either way the write succeeded but was NOT committed. There is no delete — this " +
+              "tool only ever creates or overwrites.",
             inputSchema: strictShape({ path: z.string(), content: z.string() }),
           },
           async ({ path: relPath, content }) => {

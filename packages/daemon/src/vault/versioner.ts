@@ -1585,9 +1585,16 @@ export class VaultVersioner {
 
   private async commit(): Promise<void> {
     // An agent doing sanctioned git surgery holds an advisory pause lease — sit this tick out rather than
-    // race its staged changes (card 614dfbef). The debounce timer already fired; we simply skip the
-    // commit itself. A future filesystem event (or the next `schedule()`) will retry once the lease lifts.
-    if (isVaultAutoCommitPaused(this.commitPath)) return;
+    // race its staged changes (card 614dfbef). A write that landed WHILE the lease was held already fired
+    // its own fs event, so nothing else will nudge us again on its behalf — re-arm schedule() ourselves
+    // (card 60d706f4) so a later tick retries once the lease lifts. schedule() always clears any existing
+    // timer first, so this never piles up more than the one timer it already holds; the lease's own TTL
+    // is bounded (MAX_VAULT_PAUSE_MS), so even a repeatedly-re-taken lease only extends how long this
+    // retries, never how tight. Skip the re-arm once stopped (watcher cleared by stop()).
+    if (isVaultAutoCommitPaused(this.commitPath)) {
+      if (this.watcher) this.schedule();
+      return;
+    }
     // Route through the shared commit path (at the resolved repo root) so UI writes and auto-commits
     // stay consistent. commitVault re-confirms root === commitPath, so it commits (not backs off) here.
     try { await commitVault(this.commitPath, `loom: auto-commit ${new Date().toISOString()}`); }
