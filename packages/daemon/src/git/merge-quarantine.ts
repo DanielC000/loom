@@ -1483,7 +1483,9 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
     // @decision 92c645cc — gate on a CLEAN, NON-PLACEHOLDER PASS-1 parse, never on `byRepoKey.has(...)`
     // alone: a corrupt-but-hash-matched (or legacy field-less) placeholder also lands in `byRepoKey`, and
     // this tmp may be the ONLY surviving durable copy of the real entry in that shape.
-    if (matchedRepo && cleanlyParsedKeys.has(canonicalRepoLockKey(matchedRepo))) {
+    // @decision 5b40376c — ALSO gate on `matchedRepo` being currently resolvable, or an unresolvable
+    // repo's own tmp residue gets unlinked outright via an unrelated sibling's degraded-key collision.
+    if (matchedRepo && isRepoPathCurrentlyResolvable(matchedRepo) && cleanlyParsedKeys.has(canonicalRepoLockKey(matchedRepo))) {
       // A proper final `.json` for this repo already loaded CLEANLY (and non-placeholder) in PASS 1 —
       // this tmp really is stale residue from an earlier interrupted write; clean it up immediately.
       try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover tmp beside a good final write is harmless */ }

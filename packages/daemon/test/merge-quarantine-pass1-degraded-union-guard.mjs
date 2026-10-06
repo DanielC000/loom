@@ -32,6 +32,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // (SCENARIO residual): a clear of the degraded entry sweeps its diverted pending copy too, and a later
 // direct query for the degraded entry's own identity, once it remounts, still finds its own quarantine.
 //
+// ALSO COVERS card `5b40376c` (the "separate, adjacent finding" 883e29bc itself flagged but did not fix):
+// PASS 1b's OWN, earlier, unrelated `matchedRepo && cleanlyParsedKeys.has(canonicalRepoLockKey(
+// matchedRepo))` short-circuit — reached BEFORE the dual-arm/degraded-divert code this file otherwise
+// covers — unlinked an unresolvable X's own tmp residue OUTRIGHT whenever its degraded, walked-up key
+// happened to match a wholly unrelated, verified sibling's own clean key. Not merely fail-closed (the
+// wrong-attribution 883e29bc's own fix guards against) — fail-OPEN DATA LOSS, with no diverted pending
+// copy ever created to recover it. Fixed by also gating that short-circuit on
+// `isRepoPathCurrentlyResolvable(matchedRepo)` — see docs/decisions/5b40376c-*.md, and scenarios
+// `pass1b-included` / `pass1b-included-convergence` / `pass1b-resolvable-stale-tmp-still-deleted` below.
+//
 // EACH SCENARIO RUNS IN ITS OWN CHILD PROCESS WITH ITS OWN FRESH LOOM_HOME (never shared with any other
 // scenario in this file, or with any other test) — this file is its own driver: run with no args to spawn
 // one child per scenario (collecting pass/fail from each); a child reads `--scenario=<name>` off argv and
@@ -52,7 +62,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const SCENARIOS = [
-  "pass1", "pass1b", "residual", "negative-control-cross-key", "direct-verified-guard",
+  "pass1", "pass1b", "pass1b-included", "pass1b-included-convergence",
+  "pass1b-resolvable-stale-tmp-still-deleted",
+  "residual", "negative-control-cross-key", "direct-verified-guard",
   "clear-x-unmounted", "clear-r-truthful-reporting",
   "stale-armedkeys-no-collateral", "clear-unmasks-different-blocker", "clear-stale-pending-not-blocking",
   "token-clear-identity-drift", "deferred-flush-no-stale-snapshot",
@@ -216,13 +228,17 @@ try {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // SCENARIO pass1b — the SAME shape, but X's latch exists ONLY as a `.json.tmp-<pid>-<hex>` torn-write
     // residue (PASS 1b's own recovery path), never a clean `.json` final. `nested` is deliberately OMITTED
-    // from the registered-repo-paths list passed to reenterMergeQuarantinesAtBoot — including it would
-    // make PASS 1b's EARLIER, unrelated `matchedRepo && cleanlyParsedKeys.has(canonicalRepoLockKey(
-    // matchedRepo))` guard recompute `canonicalRepoLockKey(nested)` fresh (degraded, since nested stays
-    // unresolvable here) = Kr, which IS in cleanlyParsedKeys (T's own clean parse added it) — a DIFFERENT,
-    // adjacent false-positive (reported separately, not fixed by this card) that would silently unlink X's
-    // tmp as "already-superseded stale residue" before ever reaching the dual-arm code this scenario
-    // targets. Omitting it isolates the dual-arm shape this card's fix actually changes.
+    // from the registered-repo-paths list passed to reenterMergeQuarantinesAtBoot — at the time this
+    // scenario was written, including it would have hit PASS 1b's EARLIER, unrelated `matchedRepo &&
+    // cleanlyParsedKeys.has(canonicalRepoLockKey(matchedRepo))` guard, which recomputed
+    // `canonicalRepoLockKey(nested)` fresh (degraded, since nested stays unresolvable here) = Kr, which IS
+    // in cleanlyParsedKeys (T's own clean parse added it) — a DIFFERENT, adjacent false-positive that
+    // would silently unlink X's tmp as "already-superseded stale residue" before ever reaching the
+    // dual-arm code this scenario targets. Card `5b40376c` fixed that adjacent guard (gated it on
+    // `isRepoPathCurrentlyResolvable(matchedRepo)` too), so including `nested` here would no longer
+    // collide — this scenario still omits it deliberately, to keep isolating the dual-arm shape it targets
+    // from that other guard's own behavior, now covered on its own by the `pass1b-included` and
+    // `pass1b-included-convergence` scenarios below.
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const { repo, nested, subdir } = makeRepoWithNestedRepoAndSubdir("p1b");
     const Kx = canonicalRepoLockKey(nested);
@@ -259,6 +275,146 @@ try {
     check("(restart) T's quarantine SURVIVES a fresh boot, with ONLY its own token", !!activeTAfterRestart && (activeTAfterRestart.tokens ?? []).length === 1 && activeTAfterRestart.tokens.includes("t-token"));
 
     fs.renameSync(parkedX, nested);
+  } else if (scenarioName === "pass1b-included") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO pass1b-included — card `5b40376c`. The SAME shape as `pass1b` above, but `nested` (X) IS
+    // included in `registeredRepoPaths` — the exact shape the `pass1b` scenario deliberately dodges.
+    // Pre-fix, PASS 1b's `matchedRepo && cleanlyParsedKeys.has(canonicalRepoLockKey(matchedRepo))` guard
+    // recomputed X's DEGRADED walked-up key (= Kr, since X is unresolvable) and found it in
+    // `cleanlyParsedKeys` (via T's own, wholly unrelated clean parse) — unlinking X's own tmp residue
+    // OUTRIGHT, before the dual-arm/degraded-divert code ever got a chance to run. Not merely fail-closed
+    // (the wrong attribution `pass1b` itself guards against) — fail-OPEN DATA LOSS: X's only durable copy
+    // is gone, with no diverted pending entry left to recover it, not even across a restart.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested, subdir } = makeRepoWithNestedRepoAndSubdir("p1binc");
+    const Kx = canonicalRepoLockKey(nested);
+    const Kr = canonicalRepoLockKey(repo);
+    const xTmpPath = path.join(MERGE_QUARANTINE_DIR, `${oldHashFor(nested)}.json.tmp-999-deadbeef`);
+    const xFinalPath = path.join(MERGE_QUARANTINE_DIR, `${createHash("sha256").update(Kx).digest("hex").slice(0, 24)}.json`);
+    const rFinalPath = path.join(MERGE_QUARANTINE_DIR, `${createHash("sha256").update(Kr).digest("hex").slice(0, 24)}.json`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(xTmpPath, JSON.stringify({
+      repoPath: nested, branch: "x-branch", reason: "X's own prior raise, torn-write tmp residue",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: Kx,
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${oldHashFor(subdir)}.json`), JSON.stringify({
+      repoPath: subdir, branch: "t-branch", reason: "T's own genuinely separate, still-active raise",
+      enteredAt: Date.now(), tokens: ["t-token"],
+    }, null, 2) + "\n");
+
+    const parkedX = path.join(os.tmpdir(), `loom-mqp1dug-parked-p1binc-${freshSfx()}`);
+    fs.renameSync(nested, parkedX);
+    check("(precondition) X is genuinely unresolvable at this boot", !fs.existsSync(nested));
+    check("(precondition) T is genuinely resolvable at this boot", fs.existsSync(subdir));
+
+    reenterMergeQuarantinesAtBoot([repo, nested, subdir]); // `nested` INCLUDED — the shape `pass1b` dodges
+
+    check("*** THE FIX *** X's own tmp residue is NEVER unlinked — it survives on disk", fs.existsSync(xTmpPath));
+    check("(boot) X is never promoted/written to its own final either — it stays PENDING only, no disk write at all", !fs.existsSync(xFinalPath));
+    const activeR = activeMergeQuarantineFor(repo);
+    check("(boot) R reads quarantined via T, the genuinely verified occupant", !!activeR && (activeR.tokens ?? []).includes("t-token"));
+    check("(boot) X's unverified tmp-residue entry is NEVER unioned into T's verified entry", !!activeR && !(activeR.tokens ?? []).includes("x-token"));
+    check("(boot) TWO separate listings at R's key — T's verified entry and X's diverted pending entry, each with only its own token", noListingCrossContamination({ listActiveMergeQuarantines }, Kr, [["t-token"], ["x-token"]]));
+    check("(boot) T's final was actually written", fs.existsSync(rFinalPath));
+    const rFinalContentAfterBoot1 = fs.readFileSync(rFinalPath, "utf8");
+
+    // RESTART-SIM — X still parked/unmounted. Durability check: the loss (if the fix regressed) would be
+    // permanent, not an in-memory artifact of one call; and T's own file must stay BYTE-IDENTICAL —
+    // confirms X's diversion never feeds a write into T's own key (the open 97cff6db class).
+    const fresh1 = await freshBootModule();
+    fresh1.reenterMergeQuarantinesAtBoot([repo, nested, subdir]);
+    check("(restart) X's tmp residue STILL survives — not lost across a restart either", fs.existsSync(xTmpPath));
+    check("(restart) X is still never promoted/written to its own final", !fs.existsSync(xFinalPath));
+    check("(restart) T's final file is BYTE-IDENTICAL to the first boot — no write fed by X's presence/divert", fs.readFileSync(rFinalPath, "utf8") === rFinalContentAfterBoot1);
+    const activeTAfterRestart = fresh1.activeMergeQuarantineFor(subdir);
+    check("(restart) T's quarantine SURVIVES a fresh boot, with ONLY its own token", !!activeTAfterRestart && (activeTAfterRestart.tokens ?? []).length === 1 && activeTAfterRestart.tokens.includes("t-token"));
+    check("(restart) X's diverted pending entry is still reachable via R's own key, with only its own token", noListingCrossContamination({ listActiveMergeQuarantines: fresh1.listActiveMergeQuarantines }, Kr, [["t-token"], ["x-token"]]));
+
+    fs.renameSync(parkedX, nested); // restore for cleanup
+  } else if (scenarioName === "pass1b-included-convergence") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO pass1b-included-convergence — card `5b40376c`. SAME setup as `pass1b-included`, but after
+    // two boots with X parked, X is REMOUNTED (genuinely resolvable again) before a third boot. Proves the
+    // fix doesn't just "stop losing data" — the recovered tmp residue actually CONVERGES once resolvable:
+    // X re-arms under its own TRUE key (Kx), its tmp residue is cleaned up (written to a proper final, then
+    // unlinked) rather than accumulating forever, and T stays completely unaffected throughout.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested, subdir } = makeRepoWithNestedRepoAndSubdir("p1bconv");
+    const Kx = canonicalRepoLockKey(nested);
+    const Kr = canonicalRepoLockKey(repo);
+    const xTmpPath = path.join(MERGE_QUARANTINE_DIR, `${oldHashFor(nested)}.json.tmp-999-deadbeef`);
+    const xFinalPath = path.join(MERGE_QUARANTINE_DIR, `${createHash("sha256").update(Kx).digest("hex").slice(0, 24)}.json`);
+    const rFinalPath = path.join(MERGE_QUARANTINE_DIR, `${createHash("sha256").update(Kr).digest("hex").slice(0, 24)}.json`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(xTmpPath, JSON.stringify({
+      repoPath: nested, branch: "x-branch", reason: "X's own prior raise, torn-write tmp residue",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: Kx,
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${oldHashFor(subdir)}.json`), JSON.stringify({
+      repoPath: subdir, branch: "t-branch", reason: "T's own genuinely separate, still-active raise",
+      enteredAt: Date.now(), tokens: ["t-token"],
+    }, null, 2) + "\n");
+
+    const parkedX = path.join(os.tmpdir(), `loom-mqp1dug-parked-p1bconv-${freshSfx()}`);
+    fs.renameSync(nested, parkedX);
+    reenterMergeQuarantinesAtBoot([repo, nested, subdir]); // boot 1 — X unresolvable
+    check("(boot 1) X's tmp residue survives", fs.existsSync(xTmpPath));
+    const rFinalContentAfterBoot1 = fs.readFileSync(rFinalPath, "utf8");
+
+    const fresh1 = await freshBootModule();
+    fresh1.reenterMergeQuarantinesAtBoot([repo, nested, subdir]); // boot 2 (restart-sim) — still unresolvable
+    check("(boot 2) X's tmp residue still survives", fs.existsSync(xTmpPath));
+
+    fs.renameSync(parkedX, nested); // REMOUNT X — genuinely resolvable from here on
+    check("(precondition) X is genuinely resolvable again", fs.existsSync(nested));
+
+    const fresh2 = await freshBootModule();
+    fresh2.reenterMergeQuarantinesAtBoot([repo, nested, subdir]); // boot 3 (restart-sim) — X now resolvable
+
+    check("*** CONVERGENCE *** X's tmp residue is CLEANED UP once resolvable again (not left accumulating)", !fs.existsSync(xTmpPath));
+    check("*** CONVERGENCE *** X is promoted to a proper final under its OWN true key", fs.existsSync(xFinalPath));
+    const activeXAfterConvergence = fresh2.activeMergeQuarantineFor(nested);
+    check("*** CONVERGENCE *** X's own quarantine is reachable again, with only its own token", !!activeXAfterConvergence && (activeXAfterConvergence.tokens ?? []).includes("x-token"));
+    const activeRAfterConvergence = fresh2.activeMergeQuarantineFor(repo);
+    check("*** CONVERGENCE *** R's own key now reads ONLY via T — X resolves to its own key and no longer collides", !!activeRAfterConvergence && (activeRAfterConvergence.tokens ?? []).includes("t-token") && !(activeRAfterConvergence.tokens ?? []).includes("x-token"));
+    check("*** CONVERGENCE *** T's own final file is still BYTE-IDENTICAL throughout — never touched by X's convergence", fs.readFileSync(rFinalPath, "utf8") === rFinalContentAfterBoot1);
+  } else if (scenarioName === "pass1b-resolvable-stale-tmp-still-deleted") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO pass1b-resolvable-stale-tmp-still-deleted — card `5b40376c`'s NEGATIVE CONTROL. P is
+    // genuinely resolvable throughout (no degraded key involved at all): a clean, non-placeholder final
+    // already exists at P's own current key, plus a stale tmp residue left over at P's own LEGACY hash
+    // (an ordinary interrupted-write leftover, nothing to do with any sibling collision). The new
+    // `isRepoPathCurrentlyResolvable(matchedRepo)` check must NOT change this ordinary case — the early
+    // guard's own original intent ("a proper final for THIS repo already loaded cleanly, this tmp really
+    // is stale residue") still applies exactly as before, since P's own fresh key genuinely matches a key
+    // that parsed cleanly in PASS 1 — never a degraded stand-in for some OTHER repo's key.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const p = path.join(os.tmpdir(), `loom-mqp1dug-p1brs-${freshSfx()}`);
+    fs.mkdirSync(p, { recursive: true });
+    tmpDirs.push(p);
+    fs.writeFileSync(path.join(p, "README.md"), "# pass1b-resolvable-stale-tmp-still-deleted\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: p });
+    commitAll(p, "init", GIT_ID);
+    const Kp = canonicalRepoLockKey(p);
+    const freshHashP = createHash("sha256").update(Kp).digest("hex").slice(0, 24);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${freshHashP}.json`), JSON.stringify({
+      repoPath: p, branch: "p-branch", reason: "P's own clean, current, non-placeholder final",
+      enteredAt: Date.now(), tokens: ["p-token"],
+    }, null, 2) + "\n");
+    const staleTmpPath = path.join(MERGE_QUARANTINE_DIR, `${oldHashFor(p)}.json.tmp-999-feedface`);
+    fs.writeFileSync(staleTmpPath, JSON.stringify({
+      repoPath: p, branch: "p-branch-stale", reason: "an earlier, now-superseded interrupted write",
+      enteredAt: Date.now() - 120_000, tokens: ["p-stale-token"],
+    }, null, 2) + "\n");
+    check("(precondition) P is genuinely resolvable", fs.existsSync(p));
+    check("(precondition) the stale tmp exists before boot", fs.existsSync(staleTmpPath));
+
+    reenterMergeQuarantinesAtBoot([p]); // THE CALL UNDER TEST
+
+    check("*** NEGATIVE CONTROL *** P's genuinely stale tmp residue IS still deleted immediately, unaffected by the resolvability gate", !fs.existsSync(staleTmpPath));
+    const activeP = activeMergeQuarantineFor(p);
+    check("(boot) P's real quarantine is untouched by the (correctly-deleted) stale tmp", !!activeP && (activeP.tokens ?? []).length === 1 && activeP.tokens.includes("p-token"));
   } else if (scenarioName === "residual") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // SCENARIO residual — the two manager-mandated properties for the accepted "diverted pending copy
