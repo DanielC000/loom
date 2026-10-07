@@ -29,7 +29,82 @@
 // helper and the full writeup of the anti-pattern and its two corollaries.
 import os from "node:os";
 import path from "node:path";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+
+// @decision 8c8ee0ee — STRUCTURAL test-spawn registry for pty/host.ts's real-reaper test tripwire
+// (assertReapTargetIsOwnLiveDescendantUnderTest). A live OS pid->ppid walk alone can't recognize a pid
+// this test legitimately spawned but has ALREADY killed before reaping it (dev-server-teardown.mjs's own
+// pattern: kill the root, confirm it's dead, THEN call reapOrphanedDescendants(root.pid) — a dead pid's
+// row is ABSENT from a fresh enumeration, verified empirically, not assumed). This records every pid this
+// test process itself hands to node:child_process spawn/fork/exec/execFile, AND node-pty's own spawn
+// (the REAL claude/codex/shell root-process primitive pty/host.ts actually calls — see "Do not" below
+// for the real-spawn incident this card's own CR found that closed this second gap) — structurally, via
+// a CJS-side monkeypatch of each module's shared exports object. Exposed on `globalThis` (never by
+// import) because pty/host.ts is PRODUCTION source and must never import from packages/daemon/test/ —
+// `globalThis.__LOOM_TEST_SPAWNED_PIDS__` is simply absent in a real daemon process, where the consuming
+// lookup is itself gated behind `inTestMode()` and never runs anyway. No test author has to do anything —
+// every test that imports this file first (the project-wide convention) gets this for free.
+const LOOM_TEST_SPAWNED_PIDS = new Set();
+globalThis.__LOOM_TEST_SPAWNED_PIDS__ = LOOM_TEST_SPAWNED_PIDS;
+
+/**
+ * Wraps `moduleExports[name]` to record its result's own `.pid` into {@link LOOM_TEST_SPAWNED_PIDS},
+ * preserving `this`/argument/return passthrough exactly. `exec`/`execFile` carry `util.promisify.custom`
+ * (a Symbol-keyed own property) so `promisify(exec)` resolves `{stdout, stderr}` instead of the default
+ * single-value convention — a bare reassignment drops it, silently breaking `promisify(cp.exec)` for
+ * every test/production caller in the whole suite (this wrapper sits under EVERY test file). Copies
+ * every own key (string AND symbol) from the original onto the wrapper, individually try/caught so a
+ * non-configurable property (if any) is skipped rather than throwing and breaking the patch itself.
+ */
+function wrapSpawnLikeForTestRegistry(moduleExports, name) {
+  const original = moduleExports[name];
+  const patched = function patchedForTestSpawnRegistry(...args) {
+    const result = original.apply(this, args);
+    // Best-effort bookkeeping ONLY — a registry failure (should never happen for a Set.add(number))
+    // must never prevent the REAL result from reaching the real caller.
+    try {
+      if (result && typeof result.pid === "number") LOOM_TEST_SPAWNED_PIDS.add(result.pid);
+    } catch { /* best-effort */ }
+    return result;
+  };
+  for (const key of Reflect.ownKeys(original)) {
+    if (key === "arguments" || key === "caller") continue; // throw on access for a strict-mode function
+    try {
+      const desc = Object.getOwnPropertyDescriptor(original, key);
+      if (desc) Object.defineProperty(patched, key, desc);
+    } catch { /* best-effort — leave the wrapper's own value for this key */ }
+  }
+  moduleExports[name] = patched;
+}
+
+{
+  const requireHere = createRequire(import.meta.url);
+  const cp = requireHere("node:child_process");
+  for (const name of ["spawn", "fork", "exec", "execFile"]) wrapSpawnLikeForTestRegistry(cp, name);
+  // Re-syncs every BUILTIN module's named ESM exports to the CJS exports object's CURRENT property
+  // values (Node's own documented mechanism, builtins only) — without this, a module that did
+  // `import { spawn } from "node:child_process"` would still hold the ORIGINAL, unpatched binding.
+  syncBuiltinESMExports();
+
+  // @decision 8c8ee0ee (CR, real-spawn incident) — node-pty is NOT a builtin, so syncBuiltinESMExports
+  // above has no effect on it; it needs no equivalent call, though — Node's CJS/ESM interop already gives
+  // a named import of an ordinary (non-builtin) CJS package a LIVE-BINDING getter onto its module.exports
+  // (verified empirically: patching `require("node-pty").spawn` here is visible to pty/host.ts's own
+  // `import { spawn } from "node-pty"`, even though that import resolves at a LATER dynamic `import()`).
+  // Without this, EVERY real-spawn test (a test whose PtyHost subclass deliberately delegates to the REAL
+  // `createPty`/`createCodexPty`/`createShellPty`, which all call node-pty's `spawn` — not
+  // node:child_process's) left its own real root pid completely untracked: once that root died (the
+  // ordinary, ALWAYS-fires onExit reap), neither branch (the dead root has no live-enumeration row, and
+  // it was never in this registry either) could recognize it, and the tripwire wrongly refused the
+  // legitimate, pre-existing real-spawn pattern itself. Best-effort: some environment could plausibly
+  // lack a buildable node-pty; never let a broken/missing native module break every OTHER test's import
+  // of this file.
+  try {
+    const ptyMod = requireHere("node-pty");
+    wrapSpawnLikeForTestRegistry(ptyMod, "spawn");
+  } catch { /* best-effort — see doc above */ }
+}
 
 const REAL_LOOM_HOME = path.resolve(path.join(os.homedir(), ".loom"));
 const OS_TMPDIR = path.resolve(os.tmpdir());

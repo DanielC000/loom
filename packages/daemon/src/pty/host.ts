@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { spawn as spawnProcess } from "node:child_process";
+import { spawn as spawnProcess, execFileSync } from "node:child_process";
 import { CODEX_RESTRICTED_TOOLS_REASON, TRANSCRIPT_ROOT_DENY_ROLES, codexPermissionDenyReason, CodexRoleSpawnRefusedError } from "../profiles/codex-compat.js";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
@@ -4373,6 +4373,77 @@ export function enumerateWin32SweepRows(timeoutMs = 10_000): Promise<OrphanSweep
   });
 }
 
+/** @decision 8c8ee0ee — pure pid→ppid ancestry walk; fails closed on an unknown/self-referential pid or
+ *  a hop-limit exceed, never a false "yes". A dead target has NO row at all — never call this the sole
+ *  check; a caller must also accept a separate "this process spawned it" registry hit as legitimate. */
+export function isDescendantPid(rows: { pid: number; ppid: number }[], targetPid: number, ancestorPid: number, maxHops = 64): boolean {
+  const byPid = new Map<number, number>();
+  for (const r of rows) byPid.set(r.pid, r.ppid);
+  let cur = targetPid;
+  const seen = new Set<number>();
+  for (let i = 0; i < maxHops; i++) {
+    if (seen.has(cur)) return false; // cycle guard
+    seen.add(cur);
+    const ppid = byPid.get(cur);
+    if (ppid === undefined) return false; // not in this snapshot — can't confirm lineage (e.g. already dead)
+    if (ppid === ancestorPid) return true;
+    if (ppid === cur) return false; // self-referential malformed row
+    cur = ppid;
+  }
+  return false; // exceeded maxHops — fail closed, never a false "yes"
+}
+
+/** @decision 8c8ee0ee — bound for {@link assertReapTargetIsOwnLiveDescendantUnderTest}'s own OS
+ *  enumeration. Test-mode only; never reached in production (see that function's own `inTestMode()`
+ *  gate), so a slow CIM/`ps` query only ever makes one test call slower, never hangs anything. */
+const TEST_GUARD_ENUMERATION_TIMEOUT_MS = 5_000;
+
+/** @decision 8c8ee0ee — bound for {@link reapOrphanedDescendants}'s OWN enumeration spawn, which had
+ *  NO timeout at all before this card (unlike {@link enumerateWin32SweepRows}'s existing 10s default) —
+ *  a wedged powershell.exe/ps could hang this fire-and-forget sweep indefinitely. Applies in prod too. */
+const REAP_ENUMERATION_TIMEOUT_MS = 10_000;
+
+/** @decision 8c8ee0ee — reuses WIN32_SWEEP_PS_COMMAND verbatim (never hand-copy it). Synchronous +
+ *  bounded by `timeout` since every guarded caller must stay synchronous. Throws on any failure — a
+ *  caller must treat that as fail-closed (refuse), never as "safe, proceed". */
+function enumerateLivePidPpidRowsForTestGuard(): OrphanSweepRow[] {
+  const out = process.platform === "win32"
+    ? execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { timeout: TEST_GUARD_ENUMERATION_TIMEOUT_MS, encoding: "utf8" })
+    : execFileSync("ps", ["-eo", "pid,ppid"], { timeout: TEST_GUARD_ENUMERATION_TIMEOUT_MS, encoding: "utf8" });
+  return out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null);
+}
+
+/** @decision 8c8ee0ee — was `pid` ever handed to a real spawn by THIS test process? Populated
+ *  structurally by test/_guard.mjs (never a test author), via `globalThis` since this is PRODUCTION
+ *  source and must never import from packages/daemon/test/. Always `undefined` in production. */
+function wasSpawnedByThisTestProcess(pid: number): boolean {
+  const registry = (globalThis as { __LOOM_TEST_SPAWNED_PIDS__?: Set<number> }).__LOOM_TEST_SPAWNED_PIDS__;
+  return registry?.has(pid) ?? false;
+}
+
+/** @decision 8c8ee0ee — THE tripwire: under LOOM_TEST, refuses (log + throw) any target pid that is
+ *  neither a live descendant of `process.pid` nor one this test process spawned. Called first in every
+ *  free function reaching a real OS kill/enumeration by caller-supplied pid; production is unchanged. */
+function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string): void {
+  if (!inTestMode()) return;
+  if (wasSpawnedByThisTestProcess(pid)) return;
+  let rows: OrphanSweepRow[];
+  try {
+    rows = enumerateLivePidPpidRowsForTestGuard();
+  } catch (err) {
+    const msg = `[pty-reap-test-guard] REFUSED ${label}(pid=${pid}): could not enumerate the real OS process table to verify lineage (${(err as Error).message}) — fail-closed under LOOM_TEST`;
+    // eslint-disable-next-line no-console
+    console.error(msg);
+    throw new Error(msg);
+  }
+  if (!isDescendantPid(rows, pid, process.pid)) {
+    const msg = `[pty-reap-test-guard] REFUSED ${label}(pid=${pid}): not a live descendant of this test process (pid=${process.pid}), and this test process never spawned it — a test may only reap/kill a process it itself (transitively) spawned`;
+    // eslint-disable-next-line no-console
+    console.error(msg);
+    throw new Error(msg);
+  }
+}
+
 /** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant a torn-down root escapes
  * node-pty's containment into (a backgrounded `pnpm dev` vite server — six stale servers observed live);
  * enumerates the whole process list (a dead root breaks taskkill /T) with a `seen`-pid guard for reuse.
@@ -4385,6 +4456,7 @@ export function enumerateWin32SweepRows(timeoutMs = 10_000): Promise<OrphanSweep
  * guard; the pre-existing onExit sweep always omits it (unchanged behavior). Win32 is the only
  * enumeration that populates a row's own creation time — POSIX's own filter stays a permanent no-op. */
 export function reapOrphanedDescendants(rootPid: number, rootCreationTime: number | null = null): void {
+  assertReapTargetIsOwnLiveDescendantUnderTest(rootPid, "reapOrphanedDescendants");
   if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
     // eslint-disable-next-line no-console
     console.log(`[pty-reap] root=${rootPid}: skipped (not a reapable root pid)`);
@@ -4414,15 +4486,33 @@ export function reapOrphanedDescendants(rootPid: number, rootCreationTime: numbe
     ? spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { stdio: ["ignore", "pipe", "ignore"] })
     : spawnProcess("ps", ["-eo", "pid,ppid"], { stdio: ["ignore", "pipe", "ignore"] });
   let out = "";
+  let settled = false;
   cmd.stdout?.on("data", (d) => { out += d; });
+  // @decision 8c8ee0ee — bounded (mirrors enumerateWin32SweepRows's own timer): a wedged powershell.exe/ps
+  // used to hang this fire-and-forget sweep (and its pending handle) indefinitely.
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    try { cmd.kill(); } catch { /* best-effort */ }
+    // eslint-disable-next-line no-console
+    console.error(`[pty-reap] root=${rootPid}: enumeration helper timed out after ${REAP_ENUMERATION_TIMEOUT_MS}ms — found/killed NOTHING (fail-closed, best-effort, never throws)`);
+  }, REAP_ENUMERATION_TIMEOUT_MS);
   // Card 7d58a1aa: mirrors the same fix reapProcessesRootedInWorktree already got (decision
   // sha:16b7c38c) — an enumeration-helper spawn failure used to be silent, indistinguishable from
   // "nothing needed killing". Still best-effort, still never throws past this handler.
   cmd.on("error", (err) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
     // eslint-disable-next-line no-console
     console.error(`[pty-reap] root=${rootPid}: enumeration helper failed to spawn — found/killed NOTHING (best-effort, never throws): ${err.message}`);
   });
-  cmd.on("close", () => sweep(out));
+  cmd.on("close", () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    sweep(out);
+  });
 }
 
 /**
@@ -4807,6 +4897,7 @@ function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> 
  *  spawned too), `SIGKILL` on posix — mirrors {@link killRemoveChild}'s posture (unconditional, immediate,
  *  best-effort — an already-gone pid is a silent no-op). */
 function killProcessById(pid: number): void {
+  assertReapTargetIsOwnLiveDescendantUnderTest(pid, "killProcessById");
   if (process.platform === "win32") {
     try { spawnProcess("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
   }
@@ -4817,6 +4908,7 @@ function killProcessById(pid: number): void {
  *  above (a deliberate WHOLE-SUBTREE kill, accepted risk sha:d8395f4e), this kills ONLY `pid` — no `/T` —
  *  since the identity/respawn guards feeding it verify the ROOT alone, never its descendants. */
 function killSingleProcessById(pid: number): void {
+  assertReapTargetIsOwnLiveDescendantUnderTest(pid, "killSingleProcessById");
   if (process.platform === "win32") {
     try { spawnProcess("taskkill", ["/pid", String(pid), "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
   }
