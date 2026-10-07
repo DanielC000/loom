@@ -21,15 +21,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // structural invariant, `assertQuarantineIdentityInvariantTestOnly`, catches the NEXT same-identity
 // spread-replace site a future change might add, but does NOT catch everything (see its own doc).
 //
-// KNOWN OPEN RESIDUAL (CR 0a408575, "M-1"), NOT fixed by this file — tracked on card a2f381dc: a union
-// performed by `armQuarantineKey` (merge-quarantine.ts:316-320) at a key AFTER `flushDegradedDiverts()`
-// has already pushed a pending reference for that SAME key (reached at :1913, :1921-1924, :1825, and
-// :2017-2020) leaves that already-flushed pending reference pointing at the PRE-union object — even when
-// both sides are the SAME logical identity (e.g. a ghost X plus its own torn `h(Kx).json.tmp` residue,
-// no sibling involved at all). This still produces a double report, stable across boots, pre-existing on
-// main, and not exercised by any scenario in this file.
+// Site 3 (a2f381dc, M-1 — CR 0a408575): `armQuarantineKey`'s OWN internal union, for the SAME identity
+// read twice (a ghost X's own final `.json` plus its own torn `.json.tmp-<pid>` residue, no sibling
+// involved at all), still orphaned an already-flushed pending reference — the union's exclusion from
+// `replaceEntryEverywhere` is now IDENTITY-CONDITIONAL (compare against the union's own resulting
+// identity, never the raw second input) rather than absolute. `round4-G2`'s own two-identity shape
+// (merge-quarantine-migrate-source-owner-durable.mjs) stays excluded either way.
 //
-// See docs/decisions/fd189d91-pending-latch-id-collision.md's "Item (d) + a2f381dc" section.
+// Also m-3 (a2f381dc): the boot RETURN VALUE deduped only `byRepoKey.values()`, then concatenated the
+// pending side unconditionally — a self-divert entry (same object, both structures) came back twice in
+// the raw return array even though `listActiveMergeQuarantines()` itself reported it once.
+//
+// See docs/decisions/fd189d91-pending-latch-id-collision.md's "Item (d) + a2f381dc" section, and
+// docs/decisions/a2f381dc-same-identity-union-repoint-and-boot-return-dedupe.md for M-1/M-2/m-3.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-identity-split-sync.mjs
 import fs from "node:fs";
@@ -54,6 +58,10 @@ const SCENARIOS = [
   "pass2-trigger-order-b",
   "pass2-trigger-3boot-count-stable",
   "pass2-trigger-act-after-reboot-clear-by-path",
+  "armqk-union-trigger-age-order-a",
+  "armqk-union-trigger-age-order-b",
+  "armqk-union-trigger-3boot-count-stable",
+  "m3-boot-return-self-divert-dedupe",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -72,10 +80,11 @@ if (!scenarioArg) {
     }
   }
   console.log(failedScenarios === 0
-    ? "\n✅ ALL SCENARIOS PASS — every spread-replace site in reenterMergeQuarantinesAtBoot re-points BOTH "
-      + "byRepoKey and pendingUnresolvedQuarantines through ONE chokepoint; a logical quarantine is never "
-      + "reported twice via two non-reference-equal objects, from either trigger site."
-    : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board cards fd189d91 (item d) and a2f381dc.`);
+    ? "\n✅ ALL SCENARIOS PASS — every spread-replace site AND armQuarantineKey's own identity-conditional "
+      + "union re-point BOTH byRepoKey and pendingUnresolvedQuarantines through ONE chokepoint; a logical "
+      + "quarantine is never reported twice via two non-reference-equal objects; the boot return value "
+      + "dedupes across both structures in one Set."
+    : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board cards fd189d91 (item d) and a2f381dc (M-1/m-3).`);
   process.exit(failedScenarios === 0 ? 0 : 1);
 }
 
@@ -185,8 +194,82 @@ function makePass2TriggerFixture(tag) {
   return { xHost, xGhost, registered: [xHost] };
 }
 
+/**
+ * SITE 3 fixture (a2f381dc, M-1). Ghost X (resolvedKey: Kx, never exists) with its OWN final latch at
+ * `sha(Kx).json` PLUS its own torn `sha(Kx).json.tmp-<digits>` residue — the SAME identity, read twice,
+ * no sibling involved. `jsonOlder` controls which source's own `enteredAt` is earlier (the union's own
+ * tie-break pick) — the fix must hold regardless, since both sources share one repoPath to begin with.
+ */
+function makeArmQkUnionTriggerFixture(tag, jsonOlder) {
+  const xHost = makeGitRepo(`${tag}-xhost`);
+  const kx = canonicalRepoLockKey(xHost);
+  const xGhost = path.join(os.tmpdir(), `loom-mqiss-armqk-xghost-${tag}-${freshSfx()}`); // never exists
+  check(`(precondition, ${tag}) X never exists at all`, !fs.existsSync(xGhost));
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const jsonPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kx)}.json`);
+  const tmpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kx)}.json.tmp-424242`);
+  const jsonEnteredAt = jsonOlder ? Date.now() - 120_000 : Date.now() - 30_000;
+  const tmpEnteredAt = jsonOlder ? Date.now() - 60_000 : Date.now() - 180_000;
+  fs.writeFileSync(jsonPath, JSON.stringify({
+    repoPath: xGhost, branch: "x-branch", reason: `X's own final latch (${tag})`,
+    enteredAt: jsonEnteredAt, tokens: [`token-x-json-${tag}`], resolvedKey: kx,
+  }, null, 2) + "\n");
+  fs.writeFileSync(tmpPath, JSON.stringify({
+    repoPath: xGhost, branch: "x-branch", reason: `X's own torn tmp residue (${tag})`,
+    enteredAt: tmpEnteredAt, tokens: [`token-x-tmp-${tag}`], resolvedKey: kx,
+  }, null, 2) + "\n");
+  return { xHost, xGhost, registered: [xHost] };
+}
+
 try {
-  if (scenarioName === "phase0-trigger-order-a" || scenarioName === "phase0-trigger-order-b") {
+  if (scenarioName === "armqk-union-trigger-age-order-a" || scenarioName === "armqk-union-trigger-age-order-b") {
+    const jsonOlder = scenarioName.endsWith("order-a");
+    const tag = jsonOlder ? "aqa" : "aqb";
+    const { xHost, registered } = makeArmQkUnionTriggerFixture(tag, jsonOlder);
+    reenterMergeQuarantinesAtBoot(registered);
+    const entries = listActiveMergeQuarantines();
+    const xReports = entries.filter((e) => (e.tokens ?? []).includes(`token-x-json-${tag}`) || (e.tokens ?? []).includes(`token-x-tmp-${tag}`));
+    check(`*** THE FIX (site 3, M-1) *** X's quarantine is reported EXACTLY once (found ${xReports.length})`, xReports.length === 1);
+    assertInvariant({ assertQuarantineIdentityInvariantTestOnly }, `site3-${tag}`);
+    clearMergeQuarantine(xHost);
+  } else if (scenarioName === "armqk-union-trigger-3boot-count-stable") {
+    const { xHost, registered } = makeArmQkUnionTriggerFixture("aqstab", true);
+    reenterMergeQuarantinesAtBoot(registered);
+    const countAfter = (mod) => mod.listActiveMergeQuarantines().filter((e) =>
+      (e.tokens ?? []).includes("token-x-json-aqstab") || (e.tokens ?? []).includes("token-x-tmp-aqstab")).length;
+    const boot1Count = countAfter({ listActiveMergeQuarantines });
+    assertInvariant({ assertQuarantineIdentityInvariantTestOnly }, "boot1");
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot(registered);
+    const boot2Count = countAfter(boot2);
+    assertInvariant(boot2, "boot2");
+
+    const boot3 = await freshBootModule();
+    boot3.reenterMergeQuarantinesAtBoot(registered);
+    const boot3Count = countAfter(boot3);
+    assertInvariant(boot3, "boot3");
+
+    check(`*** 3-BOOT STABILITY (M-1) *** X's report count stays 1 across 3 boots (boot1=${boot1Count}, boot2=${boot2Count}, boot3=${boot3Count})`, boot1Count === 1 && boot2Count === 1 && boot3Count === 1);
+    boot3.clearMergeQuarantine(xHost);
+  } else if (scenarioName === "m3-boot-return-self-divert-dedupe") {
+    // m-3: assert the RAW boot RETURN VALUE, not listActiveMergeQuarantines(), reports a self-divert
+    // entry (armed in byRepoKey AND present by reference in pendingUnresolvedQuarantines via its own
+    // degraded divert) exactly once.
+    const xHost = makeGitRepo("m3-xhost");
+    const kx = canonicalRepoLockKey(xHost);
+    const xGhost = path.join(os.tmpdir(), `loom-mqiss-m3xghost-${freshSfx()}`); // never exists
+    check("(precondition) X never exists at all", !fs.existsSync(xGhost));
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kx)}.json`), JSON.stringify({
+      repoPath: xGhost, branch: "x-branch", reason: "X degraded-occupies xHost's own key (m3)",
+      enteredAt: Date.now() - 120_000, tokens: ["token-x-m3"], resolvedKey: kx,
+    }, null, 2) + "\n");
+    const bootReturn = reenterMergeQuarantinesAtBoot([xHost]);
+    const xMatches = bootReturn.filter((e) => (e.tokens ?? []).includes("token-x-m3"));
+    check(`*** THE FIX (m-3) *** the boot RETURN VALUE reports X exactly once (found ${xMatches.length})`, xMatches.length === 1);
+    clearMergeQuarantine(xHost);
+  } else if (scenarioName === "phase0-trigger-order-a" || scenarioName === "phase0-trigger-order-b") {
     const orderA = scenarioName.endsWith("order-a");
     const tag = orderA ? "p0a" : "p0b";
     const { xHost, xGhost, teamB, registered } = makePhase0TriggerFixture(tag, orderA);

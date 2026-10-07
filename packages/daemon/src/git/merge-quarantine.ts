@@ -310,13 +310,18 @@ function replaceEntryEverywhere(byRepoKey: Map<string, MergeQuarantineEntry>, ol
  *  @decision 54054c01 — set the final armed object at EVERY key in its OWN armedKeys, not just `key` — a
  *  union can inherit a key from an already-dual-armed `prior`, which would otherwise keep pointing stale.
  *
- *  @decision fd189d91 — deliberately does NOT route through {@link replaceEntryEverywhere}: `prior` and
- *  `entry` can be TWO DIFFERENT IDENTITIES sharing one key, never "the same entry, rebuilt" — doing so
- *  regressed a real test (`round4-G2-...-clobbers-degraded-occupant`). See the decision record. */
+ *  @decision fd189d91 — never route unconditionally through {@link replaceEntryEverywhere}: `prior`/
+ *  `entry` can be two different identities sharing one key. See the decision record.
+ *
+ *  @decision a2f381dc — the exclusion is IDENTITY-CONDITIONAL (compare `prior` against `armed`, not
+ *  `entry`), never absolute — see the decision record for the M-1 fix and why M-2 stays excluded. */
 function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: string, entry: MergeQuarantineEntry): MergeQuarantineEntry {
   const prior = byRepoKey.get(key);
   const merged = prior ? unionQuarantineEntries(prior, entry) : entry;
   const armed: MergeQuarantineEntry = { ...merged, armedKeys: [...new Set([...(merged.armedKeys ?? []), key])] };
+  if (prior && directPathIdentity(prior.repoPath) === directPathIdentity(armed.repoPath)) {
+    replaceEntryEverywhere(byRepoKey, prior, armed);
+  }
   for (const k of armed.armedKeys ?? [key]) byRepoKey.set(k, armed);
   return armed;
 }
@@ -1192,12 +1197,13 @@ export function listActiveMergeQuarantines(): MergeQuarantineEntry[] {
  * module's own guard, `no-src-testonly-import-guard.mjs`, keeps a `packages/daemon/src/**` file from
  * ever importing it).
  *
- * ⚠️ NOT actually true of every reachable fixture (CR 0a408575, "M-2") — valid only for a fixture with
- * no "losing" union identity. A degraded X at Kx with an OLDER stale-named sibling S migrating to Kx is a
- * KNOWN, pre-existing, by-design counter-example: Phase 1b's own union names only the winner (S), and
- * `97cff6db`'s original-source push separately adds a SECOND S reference — S is reported twice, X zero
- * times. Calling this on such a fixture correctly reports a violation; that is NOT a sign this check is
- * broken, it is the check doing its job against a case this card's own fix does not reach.
+ * ⚠️ NOT actually true of every reachable fixture: a degraded X at Kx with an OLDER stale-named sibling S
+ * migrating to Kx is a KNOWN, pre-existing, by-design counter-example where S is reported twice and X
+ * zero times. Calling this on such a fixture correctly reports a violation; that is NOT a sign this check
+ * is broken, it is the check doing its job against a case no current fix reaches.
+ *
+ * @decision a2f381dc — the counter-example above (M-2) is accepted and documented, not fixed. See the
+ * decision record.
  *
  * @decision fd189d91 — catches the NEXT spread-replace site that forgets to route through
  * {@link replaceEntryEverywhere}, not just the two this card already found. See the decision record.
@@ -2538,10 +2544,13 @@ function reenterMergeQuarantinesAtBootImpl(
   }
 
   // An entry may be armed under TWO keys (its current key AND its recorded `resolvedKey`, when they
-  // differ) — set `activeQuarantines` under every key, but de-dupe `out` by entry IDENTITY so a caller
-  // never sees the same quarantine reported twice.
+  // differ) — set `activeQuarantines` under every key, but de-dupe `out` by entry IDENTITY, across BOTH
+  // structures in ONE Set, so a caller never sees the same quarantine reported twice.
+  //
+  // @decision a2f381dc — dedupe across BOTH structures in one Set, never `byRepoKey` alone then
+  // concatenated with pending. See the decision record (m-3).
   for (const [key, entry] of byRepoKey) activeQuarantines.set(key, entry);
-  return [...new Set(byRepoKey.values()), ...pendingUnresolvedQuarantines.map((p) => p.entry)];
+  return [...new Set([...byRepoKey.values(), ...pendingUnresolvedQuarantines.map((p) => p.entry)])];
 }
 
 /** Production entry point — no injection seam reachable through this signature at all. */

@@ -73,6 +73,9 @@ const SCENARIOS = [
   "round3-minor4-deferred-corrupt-placeholder-survives-phase3-delete",
   "round4-G1-same-boot-graduation-deletes-sibling-target",
   "round4-G2-recovery-writeback-clobbers-degraded-occupant",
+  // Card a2f381dc (M-1) — the OTHER tie-break ordering for this same collision shape: the degraded
+  // occupant X wins the union instead of sub. See docs/decisions/a2f381dc-same-identity-union-repoint-and-boot-return-dedupe.md.
+  "round4-G2-reversed-occupant-wins-union",
   "round4-finding1b-sub-older",
   "round4-minor2-sub-older",
   "round4-E-sub-older",
@@ -144,7 +147,8 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   reenterMergeQuarantinesAtBoot, reenterMergeQuarantinesAtBootTestOnly, activeMergeQuarantineFor, clearMergeQuarantine, MERGE_QUARANTINE_DIR,
-  listActiveMergeQuarantines, PLACEHOLDER_BRANCH_CORRUPT,
+  listActiveMergeQuarantines, PLACEHOLDER_BRANCH_CORRUPT, assertQuarantineIdentityInvariantTestOnly,
+  quarantineLatchFileIdsFor, clearMergeQuarantineLatchFile,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -1136,6 +1140,110 @@ try {
     check(
       "(no collateral loss) after clearing the UNRELATED X, sub's own quarantine is STILL enforced (its safety-tmp survived every boot untouched)",
       !!subAfterXCleared && (subAfterXCleared.tokens ?? []).includes("token-sub"),
+    );
+    bootFour.clearMergeQuarantine(teamA);
+    bootFour.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round4-G2-reversed-occupant-wins-union") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card a2f381dc (M-1) — the SAME collision shape as round4-G2 above, but with the age order
+    // FLIPPED BACK (X older than sub, the ordering every pre-round-4 degraded test used) — the ordering
+    // round4-G2 itself does NOT cover for armQuarantineKey's own NEW identity-conditional re-point.
+    // With X winning unionQuarantineEntries' own tie-break, armed.repoPath stays X's own identity, so
+    // the fix's condition (directPathIdentity(prior.repoPath) === directPathIdentity(armed.repoPath))
+    // is TRUE and X's own already-flushed pending reference is correctly re-pointed onto the union —
+    // asserted here as "X's own report count is exactly 1" (no split), the same style every other
+    // scenario in this suite uses, since pendingUnresolvedQuarantines is not itself exported.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r4g2rev");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4g2rev-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    // X is now the OLDER side (reversed from round4-G2 above) -- X must win the tie-break.
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's REAL reason -- must survive, undoubled, winning an X-older union tie-break", enteredAt: Date.now() - 240_000, tokens: ["token-x-rev"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    // sub is now the YOUNGER side (reversed from round4-G2 above).
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's own reason (reversed)", enteredAt: Date.now() - 60_000, tokens: ["token-sub-rev"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own separate stale raise (reversed)", enteredAt: Date.now(), tokens: ["token-teamA-rev"],
+    }, null, 2) + "\n");
+
+    // BOOT 1 -- no fault injection, same shape as round4-G2's own boot 1.
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const filesAfterBoot1 = fs.readdirSync(MERGE_QUARANTINE_DIR);
+    const safetyTmpAfterBoot1 = filesAfterBoot1.find((f) => f.includes(hashForKey(ksub)) && f.includes(".tmp-safety-"));
+    check("(positive control) boot 1 created sub's own safety-tmp residue for Ksub", !!safetyTmpAfterBoot1);
+
+    const countAfter = (mod) => mod.listActiveMergeQuarantines().filter((e) => (e.tokens ?? []).includes("token-x-rev")).length;
+    const boot1Count = countAfter({ listActiveMergeQuarantines });
+    // No union has happened yet at boot 1 (that's boot 2, per the comment above) -- X alone, sanity only.
+    check("(sanity) boot1 reports X exactly once (no union yet)", boot1Count === 1);
+
+    // BOOT 2 -- fresh module instance, no fault injection. X is re-read fresh (still unresolvable, still
+    // degraded-occupies Ksub). The safety-tmp recovery read loop re-arms sub's recovered content into
+    // byRepoKey at Ksub, UNIONING with X's own freshly-read entry -- X wins the tie-break (older).
+    const bootTwo = await freshBootModule();
+    bootTwo.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const boot2Count = countAfter(bootTwo);
+
+    const xAfterBoot2 = bootTwo.activeMergeQuarantineFor(x);
+    check(
+      "*** THE FIX (a2f381dc, M-1) *** X's own query resolves to the union, with its real data intact",
+      !!xAfterBoot2 && (xAfterBoot2.tokens ?? []).includes("token-x-rev"),
+    );
+    check(
+      `*** THE FIX (a2f381dc, M-1) *** X's report count is exactly 1 (no split -- boot1=${boot1Count}, boot2=${boot2Count})`,
+      boot1Count === 1 && boot2Count === 1,
+    );
+    const xFileAfterBoot2 = fs.readFileSync(xAtKsubPath, "utf8");
+    check(
+      "(recorded, unchanged from round4-G2) X's own backing file at sha(Ksub).json still carries only X's own content -- the union lives in byRepoKey, the physical final is untouched by this card's fix either way",
+      xFileAfterBoot2.includes("token-x-rev"),
+    );
+
+    const bootThree = await freshBootModule();
+    bootThree.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const boot3Count = countAfter(bootThree);
+    check(
+      `*** 3-BOOT STABILITY (a2f381dc, M-1, reversed order) *** X's report count stays 1 (boot1=${boot1Count}, boot2=${boot2Count}, boot3=${boot3Count})`,
+      boot1Count === 1 && boot2Count === 1 && boot3Count === 1,
+    );
+
+    // CR baecb690, Minor 2 -- clear by ID (not just by repoPath) AFTER the re-point, to prove the
+    // union's own single id lifts X without disturbing sub's own differently-identified pending ref
+    // (the exact ambiguity fd189d91's own id-collision backstop exists to police).
+    const xAfterBoot3 = bootThree.activeMergeQuarantineFor(x);
+    check("(precondition) X is still active going into the id-based clear", !!xAfterBoot3);
+    const xIds = bootThree.quarantineLatchFileIdsFor(xAfterBoot3);
+    check(`(precondition) X resolves to exactly one latch id (found ${xIds.length})`, xIds.length === 1);
+    const clearByIdResult = bootThree.clearMergeQuarantineLatchFile(xIds[0]);
+    check(
+      "*** THE FIX, CLEAR-BY-ID *** clearing X's own id reports wasQuarantined:true",
+      clearByIdResult.ok === true && clearByIdResult.wasQuarantined === true,
+    );
+
+    const bootFour = await freshBootModule();
+    bootFour.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check("*** NO RESURRECTION *** X stays cleared after a further reboot", !bootFour.activeMergeQuarantineFor(x));
+    // CR baecb690, Minor 2 -- this was only LOGGED before, never asserted. Sub's own pending reference
+    // carries a DIFFERENT identity (sub's own repoPath) from X's, and clearMergeQuarantineByKey's own
+    // identity gate (merge-quarantine.ts:937, `directPathIdentity(p.entry.repoPath) !== identity`) is
+    // exactly what keeps it un-swept by a clear scoped to X's own key -- assert it survives, not just log.
+    const subAfterXCleared = bootFour.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX, NO COLLATERAL LOSS *** sub still holds its own token after clearing X by id, then a further reboot",
+      !!subAfterXCleared && (subAfterXCleared.tokens ?? []).includes("token-sub-rev"),
     );
     bootFour.clearMergeQuarantine(teamA);
     bootFour.clearMergeQuarantine(sub);

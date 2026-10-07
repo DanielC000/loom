@@ -225,10 +225,12 @@ for them — only the plain branch's final output changes.
 - Do not trust `oldEntry.armedKeys` as a complete list of where `oldEntry` is stored when replacing it —
   `replaceEntryEverywhere` scans `byRepoKey` by VALUE instead, a structural guarantee rather than an
   inference from bookkeeping that could itself be stale.
-- Do not route `armQuarantineKey`'s own union through `replaceEntryEverywhere` — `prior` there can be a
-  DIFFERENT logical identity than the union's own result (a degraded occupant sharing a key with the
-  sibling that occupies it), and re-pointing its already-flushed pending divert onto the union destroys
-  that occupant's own separately-queryable identity. Measured as a real regression; see above.
+- Do not route `armQuarantineKey`'s own union through `replaceEntryEverywhere` UNCONDITIONALLY — `prior`
+  there can be a DIFFERENT logical identity than the union's own result (a degraded occupant sharing a
+  key with the sibling that occupies it), and re-pointing its already-flushed pending divert onto the
+  union destroys that occupant's own separately-queryable identity. Measured as a real regression; see
+  above. (Card `a2f381dc` later made this exclusion IDENTITY-CONDITIONAL rather than absolute — see that
+  card's own decision record for when re-pointing is safe.)
 
 ## Verification
 
