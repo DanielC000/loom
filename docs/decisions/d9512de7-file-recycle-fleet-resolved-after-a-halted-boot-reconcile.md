@@ -22,13 +22,14 @@ That shape, precisely: a successor that was LIVE (or starting) at the moment of 
 `resumeFleetOnBoot`/`recoverCrashOrphanedWorkers`, and reaching ready within the observer's own bound
 (`RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS`, ~55s) — the same bound that produces the `reason:"timeout"`
 unresolved-alert shape. A successor that had already EXITED before the restart (the
-`reason:"halted-waiting-crash-recovery"` alert shape) is a NAMED RESIDUAL, not covered here: neither boot
-path resumes it — `liveFleetResumeSet` filters `processState === "live"`, and `recoverStaleSessions` only
-takes rows already `live`/`starting`, so an already-exited successor is invisible to both. Only
-`CrashRecoveryWatcher` revives that successor, and its first tick lands at ≥60s (`crashRecoveryWatchMs`,
-a `setInterval` with no immediate tick) — after this card's observer has already given up. For that shape
-the alert stays open exactly as it did before this card; the follow-up is carded at `49107314`
-("fix(sessions): resolve a halted alert when crash recovery revives the successor").
+`reason:"halted-waiting-crash-recovery"` alert shape) was a NAMED RESIDUAL of this card: neither boot
+path resumed it — `liveFleetResumeSet` filters `processState === "live"`, and `recoverStaleSessions` only
+takes rows already `live`/`starting`, so an already-exited successor is invisible to both — and only
+`CrashRecoveryWatcher` revives that successor, whose first tick lands at ≥60s (`crashRecoveryWatchMs`,
+a `setInterval` with no immediate tick), after this card's own observer had already given up. **Closed by
+`49107314`**, which arms this SAME `waitForHaltedSuccessorReadyThenResolve` observer from a second call
+site (`SessionService.resume()`, the one chokepoint every revival path funnels through) instead of
+extending this card's boot-time-only bound — see that record for the fix and its own, narrower residual.
 
 ## The fix
 

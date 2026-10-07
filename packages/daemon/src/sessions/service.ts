@@ -2422,6 +2422,12 @@ export class SessionService {
   private readonly retiredRecycleSuccessorIds = new Set<string>();
 
   /**
+   * @decision 49107314 — freshId -> deadline, never a bare in-flight Set; a later arm EXTENDS this, it
+   * never drops. Owned entirely inside waitForHaltedSuccessorReadyThenResolve — never write it elsewhere.
+   */
+  private readonly haltedSuccessorReadyWaitDeadlines = new Map<string, number>();
+
+  /**
    * Memoizes {@link commitsAheadOfMain} per ARCHIVED worker (card ba41b402 mgr review). Keyed on
    * `${sessionId}:${archivedAt}`, not just `sessionId`: an archived worker's branch is frozen (nothing
    * commits to it again while it stays archived — only a resume, which clears `archivedAt`, could change
@@ -4271,6 +4277,8 @@ export class SessionService {
     // boot that runs BOTH (resumeFleetOnBoot → resume() here, THEN recoverUndeliveredMessagesOnBoot) enqueues
     // each message exactly once. enqueueStdin is ready-gated, so the message holds until the resumed TUI boots.
     this.redriveUndeliveredMessagesForRecipient(session.id);
+    // @decision 49107314 — fire-and-forget; see that record and the method's own doc.
+    this.armHaltedSuccessorReadyObserverIfRevived(session.id);
     return { ...session, processState: "live", busy: false };
   }
 
@@ -4349,6 +4357,8 @@ export class SessionService {
     // this redirect from scratch instead of a harness/engine-id mismatch sweepDeadSessions marks dead.
     this.db.setSessionHarness(session.id, undefined);
     this.recordHarnessRoleForced(session, session.id, forcedDetail, "resume");
+    // @decision 49107314 — fire-and-forget; see that record and waitForHaltedSuccessorReadyThenResolve's doc.
+    this.armHaltedSuccessorReadyObserverIfRevived(session.id);
     return { ...session, harness: undefined, processState: "live", busy: false };
   }
 
@@ -14099,31 +14109,64 @@ export class SessionService {
    * already filed resolved/recovered for this exact pair). Never fabricates a resolution it didn't
    * observe: if the successor never reaches ready within the bound, logs once and leaves the alert open.
    * Every tick's timer is unref'd so a pending wait can never hold the process open.
+   *
+   * @decision 49107314 — ROUND 2 (Code Reviewer b19b191f): a later arm for the SAME freshId EXTENDS the
+   * deadline instead of being dropped — see that record's corrected premise for why a drop is unsafe.
    */
   private async waitForHaltedSuccessorReadyThenResolve(predecessorId: string, freshId: string): Promise<void> {
-    const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
-    for (;;) {
-      // @decision b59d11f6 — mirrors watchHaltedRecycleSuccessor's own first-line stand-down check.
-      if (this.db.listEventsForWorker(predecessorId).some((e) =>
-          e.kind === "recycle_ownership_transfer_resolved" &&
-          (e.detail as { successorId?: string } | undefined)?.successorId === freshId)) return;
-      const unresolved = openUnresolvedRecycleFleetAlert(this.db, predecessorId, freshId);
-      if (!unresolved) return; // another path already filed resolved/recovered for this exact pair
-      if (this.pty.hasReachedReady(freshId)) {
-        this.db.appendEvent({
-          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
-          kind: "recycle_fleet_resolved", detail: { successorId: freshId },
+    const isOwner = !this.haltedSuccessorReadyWaitDeadlines.has(freshId);
+    this.haltedSuccessorReadyWaitDeadlines.set(freshId, Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS);
+    if (!isOwner) return; // a poller for this exact successor is already running and will read the extended deadline
+    try {
+      for (;;) {
+        // @decision b59d11f6 — mirrors watchHaltedRecycleSuccessor's own first-line stand-down check.
+        if (this.db.listEventsForWorker(predecessorId).some((e) =>
+            e.kind === "recycle_ownership_transfer_resolved" &&
+            (e.detail as { successorId?: string } | undefined)?.successorId === freshId)) return;
+        const unresolved = openUnresolvedRecycleFleetAlert(this.db, predecessorId, freshId);
+        if (!unresolved) return; // another path already filed resolved/recovered for this exact pair
+        if (this.pty.hasReachedReady(freshId)) {
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+            kind: "recycle_fleet_resolved", detail: { successorId: freshId },
+          });
+          return;
+        }
+        // Re-read every iteration, never a local const captured once — a later arm (ROUND 2) may have
+        // just pushed this deadline out from underneath this same still-running loop.
+        const deadline = this.haltedSuccessorReadyWaitDeadlines.get(freshId);
+        if (deadline === undefined || Date.now() >= deadline) {
+          console.log(`[halted-recycle-reconcile] successor ${freshId.slice(0, 8)} for predecessor ${predecessorId.slice(0, 8)} never reached ready within the bound — leaving its unresolved alert open`);
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, SessionService.RECYCLE_SUCCESSOR_SETTLE_POLL_MS);
+          t.unref?.();
         });
-        return;
       }
-      if (Date.now() >= deadline) {
-        console.log(`[halted-recycle-reconcile] successor ${freshId.slice(0, 8)} for predecessor ${predecessorId.slice(0, 8)} never reached ready within the bound after boot — leaving its unresolved alert open`);
-        return;
-      }
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, SessionService.RECYCLE_SUCCESSOR_SETTLE_POLL_MS);
-        t.unref?.();
+    } finally {
+      this.haltedSuccessorReadyWaitDeadlines.delete(freshId);
+    }
+  }
+
+  /**
+   * @decision 49107314 — fire-and-forget hook called from BOTH of resume()'s successful-revival return
+   * points (the ordinary --resume path and resumeForcedRoleAsFreshClaude's codex-redirect path). Never
+   * throws into the caller, never awaits, and changes neither resume()'s return value nor its timing —
+   * see the full record for why this call site (not CrashRecoveryWatcher) was chosen and its residual.
+   */
+  private armHaltedSuccessorReadyObserverIfRevived(sessionId: string): void {
+    try {
+      const fresh = this.db.getSession(sessionId);
+      const predecessorId = fresh?.recycledFrom;
+      if (!fresh || !predecessorId) return; // not a recycle successor at all — the common case
+      if (currentHaltedSuccessor(this.db, predecessorId)?.id !== sessionId) return; // not THE current halted successor
+      if (!openUnresolvedRecycleFleetAlert(this.db, predecessorId, sessionId)) return; // no open alert for this exact pair
+      void this.waitForHaltedSuccessorReadyThenResolve(predecessorId, sessionId).catch((e) => {
+        console.error(`[resume] halted-successor ready-wait failed for ${sessionId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
       });
+    } catch (e) {
+      console.error(`[resume] armHaltedSuccessorReadyObserverIfRevived failed for ${sessionId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
     }
   }
 
