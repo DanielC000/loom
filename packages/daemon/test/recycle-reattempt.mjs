@@ -8,15 +8,33 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (R0) REFUSE — a blank `handoffNote` (mirrors recycle_me's own continuationPrompt FAIL SAFE).
 //   (R1) REFUSE — a never-recycled (ordinary) manager is not a halted predecessor.
 //   (R2) REFUSE — a genuinely halted predecessor whose successor hasn't reached SessionStart yet.
-//   (R3a) ROUND 2 (Code Review MAJOR) — REFUSE when the successor is down but DURABLY RESUMABLE (a real
-//        engine id + transcript) — it must be left to the live crash-recovery watchdog or a later
-//        resumeFleetOnBoot, never reclaimed (which would permanently stamp it dead and discard its context).
-//        ROUND 3: when crash recovery IS genuinely eligible (isCrashRecoveryEligible), the refusal text
-//        truthfully says "wait for its automatic recovery, then retry".
-//   (R3a-ii) ROUND 3 — the SAME resumable-down shape, but crash recovery is DISABLED
-//        (crashRecoveryMaxAttempts:0 — the same false isCrashRecoveryEligible returns for an exhausted cap,
-//        a human pause, or a restart whose boot reconcile doesn't cover this shape): still refuses, but now
-//        says "nothing will recover it automatically — escalate: a human must resume successor <id>".
+//   (R3a) card 09b14f15 — RECLAIM when the successor is down with NO completed turn (`turnSeq === 0`,
+//        read off the DB row), even though it reached ready and is durably resumable (a real engine id +
+//        transcript): `isDurablyResumable` alone only proves SessionStart landed, never that anything was
+//        delivered or acted on — there is no real context to lose, so this reclaims unconditionally
+//        instead of promising a wait that may never resolve (the shape ROUND 2/3 below used to refuse on).
+//   (R3a-ii) card 09b14f15 — the successor DID complete a turn (`turnSeq > 0`, real context) and is
+//        durably resumable, but crash recovery will NEVER attempt it (crashRecoveryMaxAttempts:0 — the
+//        same false `willRecoverAutomatically` returns for an exhausted cap, a human pause, or a restart
+//        whose boot reconcile doesn't cover this shape): REFUSES, saying "nothing will recover it
+//        automatically — escalate: a human must resume successor <id>".
+//   (R3a-iii) card 09b14f15 — the successor completed a turn AND a real crash trigger is on record AND
+//        recovery is genuinely eligible: REFUSES, truthfully saying "wait for its automatic recovery, then
+//        retry" — the one case where "wait" is an honest promise.
+//   (R3a-iv) card 09b14f15 — the successor completed a turn (real context) but died from an INTENDED stop
+//        (no trigger was ever filed — `recordUnexpectedExit` never files one for an intended exit):
+//        REFUSES with "escalate", NEVER "wait" — this is the false-resume-promise the card exists to kill;
+//        before this fix, `isCrashRecoveryEligible` alone (which never checks for a trigger) would have
+//        said "wait" here even though nothing would ever come. (R3a-iii)/(R3a-iv) also drive a REAL
+//        `CrashRecoveryWatcher.tick()` and assert whether it actually attempts M2 — "wait"/"escalate" must
+//        be honest, not just the right word in a thrown error.
+//   (R3a-v) CR 7aff6f31 — the successor completed a turn AND a trigger WAS filed, but a LATER
+//        `session_recovered` already closed that episode (no NEW trigger since): REFUSES with "escalate",
+//        proving the position-safe `lastRecovered.index >= lastTrigger.index` check — not merely "a
+//        trigger exists somewhere in history" — is what `willRecoverAutomatically` actually gates on.
+//        (R3a-v-tie) repeats it with the trigger and `session_recovered` forced to an IDENTICAL `ts`
+//        (card bcdea586's own same-millisecond concern), proving array POSITION decides, never a raw `ts`
+//        comparison.
 //   (R3b) RECLAIM — successor down and NOT durably resumable: the worker that DID transfer comes back onto
 //        the predecessor, the predecessor is never stopped, hasSuccessor flips false — and, closing the
 //        "halted-predecessor-can't-recycle" gap, the predecessor can now recycle() again successfully.
@@ -79,6 +97,19 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const { currentHaltedSuccessor, isSupersededByRecycle } = await import("../dist/orchestration/crash-orphaned-workers.js");
+const { recordUnexpectedExit, CrashRecoveryWatcher } = await import("../dist/orchestration/crash-recovery-watcher.js");
+
+/** Drives a REAL CrashRecoveryWatcher.tick() against `db` (mirrors crash-recovery-watcher.mjs's own
+ *  makeEnv recording-stub pattern) and returns the list of session ids it actually attempted to resume —
+ *  proves "wait for its automatic recovery" (or its absence) is an HONEST claim about what the watchdog
+ *  will do, not merely that `reattemptManagerOwnershipTransfer`'s own thrown text used that word. A fresh
+ *  `OrchestrationControl` is fine here — none of these scenarios pause anything. */
+function tickAttempts(db) {
+  const resumes = [];
+  const watcher = new CrashRecoveryWatcher({ db, control: new OrchestrationControl(), resume: (id) => { resumes.push(id); return true; } });
+  watcher.tick();
+  return resumes;
+}
 
 const repo = path.join(os.tmpdir(), `loom-rra-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
@@ -230,7 +261,7 @@ try {
     check("(R2) refuses when the named successor hasn't reached SessionStart yet", threw && /hasn't reached SessionStart/.test(threw.message));
   }
 
-  // ==================== (R3a)/(R3b) successor DOWN — resumable vs not, shared setup helper ====================
+  // ==================== (R3a*)/(R3b) successor DOWN — resumable vs not, shared setup helper ====================
   // Deliberately NOT "dies before ever reaching ready" — that shape is already covered by the EXISTING
   // f349f5cb onExit backstop + the in-process watchHaltedRecycleSuccessor (see
   // recycle-manager-halted-successor-dies.mjs scenario (A)), which races ahead of a manual call and leaves
@@ -238,15 +269,27 @@ try {
   // reached ready — closing watchHaltedRecycleSuccessor's own watch window (it returns and stops watching
   // the instant hasReachedReady is observed) — and only died LATER, same daemon uptime: nothing automatic
   // is watching for that anymore.
-  async function readyThenDiedLater(projectSuffix, { withTranscript, crashRecoveryDisabled = false }) {
+  //
+  // `completedTurn`/`recordTrigger` (card 09b14f15) are two INDEPENDENT axes, deliberately not derived
+  // from "reached ready": `hasReachedReady`/`isDurablyResumable` alone never prove a turn actually ran
+  // (ready can fire, then the successor dies in the kickoff-delivery window before any turn completes) and
+  // never prove a trigger was filed (an intended stop files none). `completedTurn: true` bumps the DB row's
+  // `turnSeq` directly (mirrors worker-never-completed-turn-signal.mjs's own established pattern — the real
+  // onTurnCompleted/incrementTurnSeq chokepoint is production wiring this synthetic harness doesn't drive).
+  // `recordTrigger: true` calls the real `recordUnexpectedExit` AFTER the kill, simulating the production
+  // onExit wiring (index.ts) this harness's own onExit handler deliberately doesn't include, so a test can
+  // choose whether the death looks like a genuine unexpected crash (trigger filed) or an intended stop
+  // (nothing filed) independently of whether a turn ever completed.
+  async function readyThenDiedLater(projectSuffix, { withTranscript, crashRecoveryDisabled = false, completedTurn = false, recordTrigger = false }) {
     const { db, host, sessions } = makeHarness();
     const P = `rra-${projectSuffix}`;
     seedProject(db, P);
     if (crashRecoveryDisabled) {
       // Overwrite with BOTH keys (setProjectConfig REPLACES the whole override) — disables
-      // isCrashRecoveryEligible's own maxAttempts<=0 gate, simulating "nothing will ever recover this
-      // successor automatically" (also covers the exhausted-attempts / human-paused / disabled shapes the
-      // reviewer named — they all resolve through the SAME predicate to the SAME false).
+      // willRecoverAutomatically's own isCrashRecoveryEligible maxAttempts<=0 gate, simulating "nothing
+      // will ever recover this successor automatically" (also covers the exhausted-attempts / human-paused
+      // / disabled shapes the reviewer named — they all resolve through the SAME predicate to the SAME
+      // false).
       db.setProjectConfig(P, { permission: { startupModeCycles: 0 }, orchestration: { crashRecoveryMaxAttempts: 0 } });
     }
     const m1 = sessions.startManager(`${P}-mgr`);
@@ -269,40 +312,128 @@ try {
     const engineSessionId = `eng-${m2.id}`;
     host.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: engineSessionId });
     if (withTranscript) writeFakeTranscript(m2.cwd, engineSessionId);
+    if (completedTurn) db.incrementTurnSeq(m2.id); // a real turn ran — genuine context worth preserving
     await watchPromise; // resolves the instant this loop's own next poll observes ready and returns — no timer
     SessionService.prototype.watchHaltedRecycleSuccessor = originalWatch;
 
     const m2Pty = host.handles.get(m2.id);
     m2Pty.kill(); // the successor dies LATER — nothing is watching for this anymore
     await waitUntil(() => host.isAlive(m2.id) === false);
+    // Simulates the production onExit wiring (index.ts) this harness's own onExit handler doesn't include
+    // — a genuine unintended crash files this; an INTENDED stop never does (recordUnexpectedExit's own
+    // `if (intended) return false` early-out), so a test that wants "no trigger" simply skips this call.
+    if (recordTrigger) recordUnexpectedExit(db, m2.id, false);
     return { db, host, sessions, m1, m2, workerId };
   }
 
-  // ========= (R3a) ROUND 2 — REFUSE: successor down but DURABLY RESUMABLE, crash recovery ELIGIBLE =========
+  // ===== (R3a) card 09b14f15 — RECLAIM: successor down, durably resumable, but NO completed turn =====
+  // Card 09b14f15 CHANGED this scenario's expectation: it used to REFUSE ("wait for its automatic
+  // recovery") on the strength of `isDurablyResumable` (reached ready + a captured engine id/transcript)
+  // alone. That reasoning is exactly what docs/decisions/6e5af155-recycle-successor-down-resumable-event.md
+  // rejected for the sibling settle/watch branches: reaching ready only proves SessionStart landed, never
+  // that any instruction was delivered or acted on. This harness's own `readyThenDiedLater` never
+  // simulates a completed turn unless `completedTurn: true` is passed, so `turnSeq` stays 0 here — exactly
+  // the "no real context" case — and the fix now reclaims unconditionally instead of promising a resume.
   {
-    const { db, host, sessions, m1, m2 } = await readyThenDiedLater("r3a", { withTranscript: true });
-    let threw = null;
-    try { await sessions.reattemptManagerOwnershipTransfer(m1.id, "a real handoff"); } catch (e) { threw = e; }
-    check("(R3a) FIX dfc3b014 ROUND 2: refuses a resumable-down successor rather than reclaiming it", threw && /down but resumable/.test(threw.message));
-    check("(R3a) ROUND 3: crash recovery IS eligible (default config) — says so truthfully", threw && /automatic recovery, then retry/.test(threw.message));
-    check("(R3a) ROUND 3: does NOT tell the caller to escalate when recovery is genuinely still pending", threw && !/escalate/.test(threw.message));
-    check("(R3a) M1 was NOT touched by a refused call — still live", host.isAlive(m1.id) === true);
-    check("(R3a) hasSuccessor(M1) is UNCHANGED — nothing was reclaimed/unlinked", db.hasSuccessor(m1.id) === true);
-    check("(R3a) M2 was NOT archived by the refusal", !db.getSession(m2.id)?.archivedAt);
+    const { db, host, sessions, m1, m2, workerId } = await readyThenDiedLater("r3a", { withTranscript: true });
+    check("(R3a pre) hasSuccessor(M1) is STILL true — nothing automatic reclaimed this", db.hasSuccessor(m1.id) === true);
+    const result = await sessions.reattemptManagerOwnershipTransfer(m1.id, "a real handoff");
+    check("(R3a) FIX 09b14f15: RECLAIMS a resumable-but-turnless-down successor (no real context to lose)", result.outcome === "reclaimed" && result.successorId === m2.id);
+    check("(R3a) the worker (which DID transfer) is reclaimed back onto M1", db.getSession(workerId)?.parentSessionId === m1.id);
+    check("(R3a) M1 was NEVER stopped — still alive", host.isAlive(m1.id) === true);
+    check("(R3a) hasSuccessor(M1) is now false (M2 unlinked)", db.hasSuccessor(m1.id) === false);
+    check("(R3a) M2 is archived", !!db.getSession(m2.id)?.archivedAt);
   }
 
-  // === (R3a-ii) ROUND 3 — REFUSE: successor down + resumable, but crash recovery will NEVER attempt it ===
+  // === (R3a-ii) card 09b14f15 — REFUSE/escalate: completed a turn, resumable, but recovery is DISABLED ===
+  // Now needs `completedTurn: true` to even reach the wait-vs-escalate choice at all (turnSeq===0 would
+  // reclaim first, per R3a above) — `recordTrigger: true` so a real trigger exists; `willRecoverAutomatically`
+  // still returns false because `crashRecoveryMaxAttempts: 0` makes `isCrashRecoveryEligible` false.
   {
-    const { db, host, sessions, m1, m2 } = await readyThenDiedLater("r3a2", { withTranscript: true, crashRecoveryDisabled: true });
+    const { db, host, sessions, m1, m2 } = await readyThenDiedLater("r3a2", { withTranscript: true, completedTurn: true, recordTrigger: true, crashRecoveryDisabled: true });
     let threw = null;
     try { await sessions.reattemptManagerOwnershipTransfer(m1.id, "a real handoff"); } catch (e) { threw = e; }
-    check("(R3a-ii) FIX ROUND 3: still refuses (never reclaims a resumable successor)", threw && /down and resumable/.test(threw.message));
-    check("(R3a-ii) ROUND 3: truthfully says nothing will recover it automatically", threw && /nothing will recover it automatically/.test(threw.message));
-    check("(R3a-ii) ROUND 3: names the human-escalation remedy, including the successor id", threw && threw.message.includes(`escalate: a human must resume successor ${m2.id.slice(0, 8)}`));
-    check("(R3a-ii) ROUND 3: does NOT dangle the dead-end \"wait for its automatic recovery\" promise", threw && !/automatic recovery, then retry/.test(threw.message));
+    check("(R3a-ii) FIX 09b14f15: still refuses (never reclaims a resumable successor with real context)", threw && /down and resumable/.test(threw.message));
+    check("(R3a-ii) truthfully says nothing will recover it automatically", threw && /nothing will recover it automatically/.test(threw.message));
+    check("(R3a-ii) names the human-escalation remedy, including the successor id", threw && threw.message.includes(`escalate: a human must resume successor ${m2.id.slice(0, 8)}`));
+    check("(R3a-ii) does NOT dangle the dead-end \"wait for its automatic recovery\" promise", threw && !/automatic recovery, then retry/.test(threw.message));
     check("(R3a-ii) M1 was NOT touched by a refused call — still live", host.isAlive(m1.id) === true);
     check("(R3a-ii) hasSuccessor(M1) is UNCHANGED — nothing was reclaimed/unlinked", db.hasSuccessor(m1.id) === true);
     check("(R3a-ii) M2 was NOT archived by the refusal", !db.getSession(m2.id)?.archivedAt);
+  }
+
+  // === (R3a-iii) card 09b14f15 — REFUSE/wait: completed a turn, a real trigger IS on record, eligible ===
+  // The one honest "wait" case: real context (turnSeq>0) AND a genuine recovery will actually run.
+  // Negative control for the turnSeq gate: if it were removed, R3a above would land here instead and this
+  // assertion would still pass vacuously — R3a's own result.outcome checks catch that regression directly.
+  {
+    const { db, host, sessions, m1, m2 } = await readyThenDiedLater("r3a3", { withTranscript: true, completedTurn: true, recordTrigger: true });
+    let threw = null;
+    try { await sessions.reattemptManagerOwnershipTransfer(m1.id, "a real handoff"); } catch (e) { threw = e; }
+    check("(R3a-iii) FIX 09b14f15: refuses and says WAIT when recovery will genuinely run", threw && /automatic recovery, then retry/.test(threw.message));
+    check("(R3a-iii) does NOT tell the caller to escalate when recovery is genuinely still pending", threw && !/escalate/.test(threw.message));
+    check("(R3a-iii) M1 was NOT touched by a refused call — still live", host.isAlive(m1.id) === true);
+    check("(R3a-iii) hasSuccessor(M1) is UNCHANGED — nothing was reclaimed/unlinked", db.hasSuccessor(m1.id) === true);
+    check("(R3a-iii) M2 was NOT archived by the refusal", !db.getSession(m2.id)?.archivedAt);
+    // "WAIT IS TRUTHFUL": drive a REAL CrashRecoveryWatcher.tick() against this SAME db and prove it
+    // actually attempts M2 — not just that the thrown text happened to say the word "wait".
+    check("(R3a-iii) the watchdog's own REAL tick GENUINELY attempts M2 — 'wait' is an honest promise", tickAttempts(db).includes(m2.id));
+  }
+
+  // === (R3a-iv) card 09b14f15 — REFUSE/escalate: completed a turn, but died from an INTENDED stop ===
+  // The card's own motivating defect: real context (turnSeq>0) but NO trigger was ever filed
+  // (`recordTrigger: false`, the default — mirrors an intended human stop, which `recordUnexpectedExit`
+  // never records). Before this fix, `isCrashRecoveryEligible` alone (never checking for a trigger) would
+  // have said "wait" here even though the watchdog's own candidate query would never pick this session up.
+  {
+    const { db, host, sessions, m1, m2 } = await readyThenDiedLater("r3a4", { withTranscript: true, completedTurn: true });
+    let threw = null;
+    try { await sessions.reattemptManagerOwnershipTransfer(m1.id, "a real handoff"); } catch (e) { threw = e; }
+    check("(R3a-iv) FIX 09b14f15: refuses and says ESCALATE, never WAIT, with no trigger on record", threw && /escalate: a human must resume successor/.test(threw.message));
+    check("(R3a-iv) does NOT dangle the dead-end \"wait for its automatic recovery\" promise", threw && !/automatic recovery, then retry/.test(threw.message));
+    check("(R3a-iv) M1 was NOT touched by a refused call — still live", host.isAlive(m1.id) === true);
+    check("(R3a-iv) hasSuccessor(M1) is UNCHANGED — nothing was reclaimed/unlinked", db.hasSuccessor(m1.id) === true);
+    check("(R3a-iv) M2 was NOT archived by the refusal", !db.getSession(m2.id)?.archivedAt);
+    // "ESCALATE IS TRUTHFUL" — the tick genuinely never even considers M2 (no trigger ⇒ it's not even a
+    // candidate, db.listWorkerSessionIdsWithEventKind finds nothing for it).
+    check("(R3a-iv) the watchdog's own REAL tick does NOT attempt M2 — 'escalate' is correctly chosen", !tickAttempts(db).includes(m2.id));
+  }
+
+  // === (R3a-v) CR 7aff6f31 — REFUSE/escalate: an OLD, ALREADY-RESOLVED trigger must not count ===
+  // Position-safe "already recovered" check (mirrors the tick's own bcdea586 fix): a `session_recovered`
+  // recorded AFTER the latest trigger closes that episode. Without this check, `lastTriggerOf` would still
+  // find the stale trigger `readyThenDiedLater`'s own `recordTrigger: true` filed for M2's real death, and
+  // (with nothing else on record to say otherwise) wrongly say "wait" — even though the CURRENT down state
+  // carries no genuinely open trigger of its own. `db.appendEvent` mirrors the tick's own `fileEvent` shape
+  // for a manager (`managerSessionId`/`workerSessionId` both the session's own id, no parent).
+  {
+    const { db, host, sessions, m1, m2 } = await readyThenDiedLater("r3a5", { withTranscript: true, completedTurn: true, recordTrigger: true });
+    db.appendEvent({ id: `${m2.id}-recovered`, ts: new Date().toISOString(), managerSessionId: m2.id, workerSessionId: m2.id, kind: "session_recovered", detail: { afterAttempts: 0 } });
+    let threw = null;
+    try { await sessions.reattemptManagerOwnershipTransfer(m1.id, "a real handoff"); } catch (e) { threw = e; }
+    check("(R3a-v) FIX 7aff6f31: an already-RESOLVED trigger does not count — escalates, never waits", threw && /escalate: a human must resume successor/.test(threw.message));
+    check("(R3a-v) does NOT dangle the dead-end \"wait for its automatic recovery\" promise", threw && !/automatic recovery, then retry/.test(threw.message));
+    check("(R3a-v) M1 was NOT touched by a refused call — still live", host.isAlive(m1.id) === true);
+    check("(R3a-v) hasSuccessor(M1) is UNCHANGED — nothing was reclaimed/unlinked", db.hasSuccessor(m1.id) === true);
+    // "ESCALATE IS TRUTHFUL" here too — the tick itself also treats this episode as already closed.
+    check("(R3a-v) the watchdog's own REAL tick does NOT attempt M2 — the episode really is closed", !tickAttempts(db).includes(m2.id));
+  }
+
+  // === (R3a-v-tie) same-millisecond tie: POSITION decides, never a raw `ts` comparison ===
+  // Card bcdea586's own concern, reproduced directly: two independently-clocked writers CAN legitimately
+  // land on the identical millisecond. Forces the `session_recovered`'s `ts` to be byte-identical to the
+  // trigger's own `ts` (not just "close") and still expects the SAME correct answer — proving the position
+  // check (array index, from ONE ordered `listEventsForWorker` read) is what decides this, not timestamp
+  // ordering, which a tie makes genuinely ambiguous.
+  {
+    const { db, host, sessions, m1, m2 } = await readyThenDiedLater("r3a5t", { withTranscript: true, completedTurn: true, recordTrigger: true });
+    const triggerTs = db.listEventsForWorker(m2.id).at(-1).ts; // the session_died readyThenDiedLater just recorded
+    db.appendEvent({ id: `${m2.id}-recovered-tie`, ts: triggerTs, managerSessionId: m2.id, workerSessionId: m2.id, kind: "session_recovered", detail: { afterAttempts: 0 } });
+    let threw = null;
+    try { await sessions.reattemptManagerOwnershipTransfer(m1.id, "a real handoff"); } catch (e) { threw = e; }
+    check("(R3a-v-tie) a same-millisecond recovered/trigger tie still resolves via POSITION — escalates", threw && /escalate: a human must resume successor/.test(threw.message));
+    check("(R3a-v-tie) does NOT dangle the dead-end \"wait for its automatic recovery\" promise", threw && !/automatic recovery, then retry/.test(threw.message));
+    check("(R3a-v-tie) M1 was NOT touched by a refused call — still live", host.isAlive(m1.id) === true);
   }
 
   // ==================== (R3b) RECLAIM — successor down and NOT durably resumable ====================
@@ -428,6 +559,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — recycle_reattempt refuses a blank handoffNote, a non-halted or not-yet-ready caller, and a resumable-down successor (truthfully naming automatic recovery when it's genuinely pending, or a human-escalation remedy naming the successor when it's not); reclaims onto the predecessor only when the successor is confirmed dead AND not durably resumable (closing the halted-predecessor-can't-recycle gap); and — when the successor is alive+ready — either settles forward (resolution marker filed first and never swallowed, handoff delivered, response returned BEFORE the predecessor is actually stopped, a failed handoff dispatch recorded but never blocking) + files the recycle_ownership_transfer_resolved marker, or, if still failing, leaves the predecessor untouched with an audit-only event and no handoff sent."
+  ? "\n✅ ALL PASS — recycle_reattempt refuses a blank handoffNote and a non-halted or not-yet-ready caller; for a confirmed-dead successor, reclaims onto the predecessor unconditionally when it never completed a turn (turnSeq===0 — no real context to lose, even if durably resumable) or isn't durably resumable at all (closing the halted-predecessor-can't-recycle gap), and otherwise (a completed turn — real context) refuses, choosing truthfully between 'wait for automatic recovery' (a real, still-open, genuinely-eligible trigger — proven by actually driving a real CrashRecoveryWatcher tick) and a human-escalation remedy naming the successor (no trigger at all, or one already closed by a later session_recovered — position-safe, never a raw ts comparison) when nothing will come on its own; and — when the successor is alive+ready — either settles forward (resolution marker filed first and never swallowed, handoff delivered, response returned BEFORE the predecessor is actually stopped, a failed handoff dispatch recorded but never blocking) + files the recycle_ownership_transfer_resolved marker, or, if still failing, leaves the predecessor untouched with an audit-only event and no handoff sent."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

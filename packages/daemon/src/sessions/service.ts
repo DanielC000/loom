@@ -70,7 +70,7 @@ import { currentDeployStaleness } from "../served-status.js";
 import { advisoryBuildStamp, type DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
-import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
+import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatically } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError } from "../git/repo-lock.js";
@@ -14307,16 +14307,21 @@ export class SessionService {
    * note was useless only after everything else already succeeded.
    *
    * Three branches depending on the named successor's health, all reusing EXISTING machinery:
-   *  - successor confirmed DEAD and NOT durably resumable: a manual RECLAIM (not a retry) via the same
-   *    `recoverFleetAfterFailedRecycleSuccessor` the in-memory halt watch uses.
-   *  - successor confirmed DEAD but durably resumable (Code Review MAJOR): REFUSE rather than reclaim — a
-   *    successor that crashed after capturing a real engine id + transcript is exactly what the crash-
-   *    recovery watchdog (live) or `resumeFleetOnBoot` (after a restart) will bring back on its own;
-   *    reclaiming here would stamp it permanently dead (`unlinkAndArchiveDeadRecycleSuccessor`) and lose
-   *    whatever context it held forever, the asymmetry `reconcileHaltedRecycleSuccessorsEarly`'s own
-   *    `isDurablyResumable(fresh)` check already avoids on the boot path — this mirrors it live.
+   *  - successor confirmed DEAD with NO completed turn (`turnSeq === 0`, read off the DB row — never
+   *    in-memory `hasReachedReady`): a manual RECLAIM (not a retry) via the same
+   *    `recoverFleetAfterFailedRecycleSuccessor` the in-memory halt watch uses. Fires unconditionally, even
+   *    when `isDurablyResumable` is true (see the decision note below this list).
+   *  - successor confirmed DEAD with a completed turn (`turnSeq > 0`, real context worth preserving) AND
+   *    durably resumable: REFUSE rather than reclaim, and tell the truth about what happens next —
+   *    `willRecoverAutomatically` (crash-recovery-watcher.ts) decides between "wait for its automatic
+   *    recovery" (a real trigger is on record and the watchdog or `resumeFleetOnBoot` will genuinely act on
+   *    it) and "escalate: a human must resume" (nothing will, e.g. after an intentional stop).
    *  - successor alive + ready: a forward retry of `attemptManagerOwnershipTransfer` +
    *    `attemptPendingQueueCarry`, then — once clean — settles forward, retiring the predecessor.
+   *
+   * @decision 09b14f15 — never treat a bare captured engine id/transcript (`isDurablyResumable`) as real
+   *  context, and never gate the wait-vs-escalate choice on `isCrashRecoveryEligible` alone — it can be
+   *  true with no trigger filed at all. Gate on `turnSeq`/`willRecoverAutomatically` instead.
    *
    * @decision dfc3b014 — never AWAIT `settleRecycleHandoff` in the `resolved` branch — it hard-stops the
    *  CALLER's own pty, so the promised response could never reach a caller that no longer exists to
@@ -14336,21 +14341,25 @@ export class SessionService {
       throw new Error("recycle_reattempt: you are not a halted recycle predecessor with an unresolved ownership-transfer handoff");
     }
     if (!this.pty.isAlive(successor.id)) {
-      if (isDurablyResumable(successor)) {
-        // Code Review MAJOR: a resumable-down successor is NOT a reclaim target — see this method's own
-        // doc for why (mirrors reconcileHaltedRecycleSuccessorsEarly's own isDurablyResumable(fresh) gate).
-        // Code Review ROUND 3: "wait for its recovery" is a dead end when nothing will actually attempt
-        // one — after an intentional human stop, with crash recovery exhausted/disabled, or after a
-        // restart (the boot reconcile phases don't cover this specific shape). Check the SAME eligibility
-        // predicate the live watchdog itself consults before promising a recovery that may never come.
-        if (isCrashRecoveryEligible(this.db, this.control, successor)) {
+      // `successor.turnSeq` is read off the DB row (currentHaltedSuccessor -> db.getSuccessor, a fresh
+      // read above) — never in-memory `hasReachedReady`. `isDurablyResumable` alone only proves a
+      // SessionStart hook landed (a captured engine id + possibly-empty transcript); it is NOT evidence a
+      // turn ever ran, so it's gated here on a real completed turn too.
+      if (isDurablyResumable(successor) && (successor.turnSeq ?? 0) > 0) {
+        // "wait for its recovery" is a dead end when nothing will actually attempt one — after an
+        // intentional human stop, with crash recovery exhausted/disabled, or after a restart (the boot
+        // reconcile phases don't cover this specific shape). `willRecoverAutomatically` checks a real
+        // trigger is on record, not merely that the session is role/cap/pause-eligible.
+        if (willRecoverAutomatically(this.db, this.control, successor)) {
           throw new Error("recycle_reattempt: your successor is down but resumable — wait for its automatic recovery, then retry");
         }
         throw new Error(`recycle_reattempt: your successor is down and resumable, but nothing will recover it automatically — escalate: a human must resume successor ${successor.id.slice(0, 8)}, then retry`);
       }
-      // Not a retry at all — the successor is genuinely gone, so reclaim whatever it held, exactly like
-      // `watchHaltedRecycleSuccessor` would have done had its own window not already closed (it stops
-      // watching the instant `hasReachedReady` is observed, and never watches again after that).
+      // Either no completed turn (turnSeq === 0 — even one that received its kickoff and crashed
+      // mid-first-turn still has no real context to lose) OR not durably resumable at all: this reclaims
+      // unconditionally, exactly like `watchHaltedRecycleSuccessor` would have done had its own window not
+      // already closed (it stops watching the instant `hasReachedReady` is observed, and never watches
+      // again after that): it fails toward the predecessor, which still holds the full context.
       this.recoverFleetAfterFailedRecycleSuccessor(predecessorId, successor.id, "manager");
       return { outcome: "reclaimed", successorId: successor.id };
     }

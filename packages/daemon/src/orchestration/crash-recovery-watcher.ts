@@ -132,6 +132,40 @@ const lastTriggerOf = (
 };
 
 /**
+ * Would the watchdog's own next tick GENUINELY attempt to resume `session` right now — not merely "is it
+ * eligible" ({@link isCrashRecoveryEligible}, which deliberately omits the trigger check for its own two
+ * sanctioned uses — see that function's own doc) but "will anything actually wake it up". Reuses the
+ * tick's OWN {@link lastTriggerOf}/{@link lastOfKind}/{@link isCrashRecoveryEligible} rather than
+ * re-deriving any of their logic, so this and the tick's real gating can never drift apart.
+ *
+ * Deliberately does NOT also check `session_recovery_abandoned` — the tick only ever consults that event
+ * INSIDE its own `attempts >= maxAttempts` branch (to decide whether to re-file it, never whether to
+ * resume: it already `continue`s unconditionally past the cap either way), so the real gate is the cap
+ * itself, which `isCrashRecoveryEligible`'s own `attempts < maxAttempts` already mirrors exactly. A
+ * separate abandoned check here would actively DIVERGE from the tick the moment a human raises the
+ * project's `crashRecoveryMaxAttempts` after an abandonment was recorded: the tick would resume again
+ * (attempts now under the new, higher cap), while a stale abandoned-check here would still say no.
+ *
+ * @decision 09b14f15 — never gate a "wait for automatic recovery" promise on `isCrashRecoveryEligible`
+ *  alone — it returns true even with no trigger filed at all (e.g. an intended stop), which the tick's
+ *  own candidate query would never act on. Use this function instead.
+ */
+export function willRecoverAutomatically(
+  db: Db,
+  control: OrchestrationControl,
+  session: { id: string; role?: SessionRole | null; parentSessionId?: string | null; projectId: string; engineSessionId?: string | null; resumability?: string },
+): boolean {
+  const events = db.listEventsForWorker(session.id);
+  const lastTrigger = lastTriggerOf(events);
+  if (!lastTrigger) return false; // no trigger was ever filed — nothing will ever wake it
+  const lastRecovered = lastOfKind(events, "session_recovered");
+  // Mirrors the tick's own bcdea586 position-safe "already RESOLVED" check (line ~367 below) — never a
+  // raw `.ts` comparison; both reads are drawn from this SAME `events` array.
+  if (lastRecovered && lastRecovered.index >= lastTrigger.index) return false; // this episode is already closed
+  return isCrashRecoveryEligible(db, control, session);
+}
+
+/**
  * Strand backstop: record the DURABLE `worker_report_undelivered` wake trigger when a worker's report
  * reached NO live FIFO. Called from SessionService.workerReport after the framed notify came back
  * `boarded` — `delivered:false` with NO queue position, i.e. the manager's pty isn't alive (it idle-reaped
