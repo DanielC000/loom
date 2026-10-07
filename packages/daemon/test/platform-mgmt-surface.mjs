@@ -483,6 +483,37 @@ try {
   await call("schedule_update", { scheduleId: scAgent.id, kind: "workspace-auditor" });
   check("(acd3c688) CONTROL: a kind change on an already agent-created row stays createdBy:agent", db.getSchedule(scAgent.id)?.createdBy === "agent");
 
+  // ===================== card 08b97966 item 3 (LEAD RULING): an AGENT-originated disabled→enabled
+  // transition on a HUMAN-created schedule ALSO resets createdBy to "agent" (fail-closed) — the SAME
+  // hazard shape as the `kind` reset just above, on a different trigger (re-activating the human bypass
+  // for whatever role/grants the schedule now resolves to). A prompt/cron-only edit, an already-enabled
+  // no-op, or the reverse (enabled→disabled) direction all leave createdBy untouched. =====================
+  db.insertSchedule({ id: "sched-human-enable", agentId: "agentMgr", cron: "0 9 * * *", enabled: false, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "human" });
+  check("(08b97966) setup: the seeded schedule is createdBy:human, disabled", db.getSchedule("sched-human-enable")?.createdBy === "human" && db.getSchedule("sched-human-enable")?.enabled === false);
+  const suEnable = await call("schedule_update", { scheduleId: "sched-human-enable", enabled: true });
+  check("(08b97966) schedule_update: the enable itself still applies", suEnable.enabled === true && !suEnable.error);
+  check("(08b97966) schedule_update: an agent-originated disabled→enabled transition RESETS createdBy to 'agent' (fail-closed)", db.getSchedule("sched-human-enable")?.createdBy === "agent");
+
+  // CONTROL: a prompt-only edit on a DISABLED human-created row (no enabled flip) leaves createdBy alone.
+  db.insertSchedule({ id: "sched-human-noenable", agentId: "agentMgr", cron: "0 9 * * *", enabled: false, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "human" });
+  await call("schedule_update", { scheduleId: "sched-human-noenable", prompt: "new prompt" });
+  check("(08b97966) CONTROL: a prompt-only edit (no enabled flip) leaves a human-created row's createdBy UNTOUCHED", db.getSchedule("sched-human-noenable")?.createdBy === "human");
+
+  // CONTROL: enabled:true on an ALREADY-enabled human row (no real transition) is a no-op for createdBy.
+  db.insertSchedule({ id: "sched-human-already-enabled", agentId: "agentMgr", cron: "0 9 * * *", enabled: true, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "human" });
+  await call("schedule_update", { scheduleId: "sched-human-already-enabled", enabled: true });
+  check("(08b97966) CONTROL: enabled:true on an ALREADY-enabled human row (no real transition) leaves createdBy UNTOUCHED", db.getSchedule("sched-human-already-enabled")?.createdBy === "human");
+
+  // CONTROL: disabled→enabled on an already agent-created row stays createdBy:agent.
+  const scAgentEnable = await call("schedule_create", { agentId: "agentMgr", cron: "0 11 * * *", enabled: false });
+  await call("schedule_update", { scheduleId: scAgentEnable.id, enabled: true });
+  check("(08b97966) CONTROL: disabled→enabled on an already agent-created row stays createdBy:agent", db.getSchedule(scAgentEnable.id)?.createdBy === "agent");
+
+  // CONTROL: the reverse direction (enabled→disabled) never resets provenance either.
+  db.insertSchedule({ id: "sched-human-disable", agentId: "agentMgr", cron: "0 9 * * *", enabled: true, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "human" });
+  await call("schedule_update", { scheduleId: "sched-human-disable", enabled: false });
+  check("(08b97966) CONTROL: enabled→disabled (the reverse direction) leaves a human-created row's createdBy UNTOUCHED", db.getSchedule("sched-human-disable")?.createdBy === "human");
+
   // ===================== (f) template_list / template_apply (onboarding C2, mirrored onto the Lead) =====
   const templates = await call("template_list", {});
   check("(f) template_list: returns both canonical templates", Array.isArray(templates) && templates.length === 2);

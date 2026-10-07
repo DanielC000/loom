@@ -845,9 +845,10 @@ export class SetupMcpRouter {
           agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
           before: beforeFields, after: afterFields, source: "setup",
         });
-        db.updateAgent(agent.id, { profileId });
-        // @decision acd3c688 — agent-surface rebind: reset any human-created schedule's provenance.
+        // @decision acd3c688 — reset BEFORE the rebind (card 08b97966 item 2): a throw must never leave
+        // a landed rebind with an un-reset human schedule still armed.
         resetScheduleProvenanceOnAgentRebind(db, agent.id);
+        db.updateAgent(agent.id, { profileId });
         const updated = agentFields(db.getAgent(agent.id))!;
         return ok(rebindReach ? { ...updated, rebindReach } : updated);
       },

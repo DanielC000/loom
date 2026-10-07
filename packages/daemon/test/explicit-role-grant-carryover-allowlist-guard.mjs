@@ -96,7 +96,27 @@ function walkTsFiles(dir, base = dir) {
 // moved into the wrong one that happens to share that text. Anchoring to the enclosing method closes
 // that: a flag moved to a same-shaped but wrong method now fails its `method` check even though the
 // `mustContain` text still matches.
-const METHOD_DECL_RE = /^  (?:static\s+)?(?:async\s+)?(?:get\s+|set\s+)?(?:private\s+|public\s+|protected\s+)?([A-Za-z_$][\w$]*)\s*\(/;
+//
+// Card 08b97966 item 1: the ORIGINAL regex below hardcoded ONE fixed modifier order (static, then async,
+// then get/set, then private/public/protected) and allowed no generics — so `private async foo(` (order
+// reversed from what it expected) or `foo<T>(` (a generic) silently failed to match at all, meaning the
+// backward scan skipped PAST that declaration line looking for an earlier one that DOES match, and could
+// misattribute a hit to whatever method happens to precede it in the file instead. Proven: moving a
+// `skipGrantCarryoverCheck:true` hit into a new `private async sneakyManagerMint()` placed directly after
+// `recycleManager` was a FALSE GREEN under the old regex — the scan skipped the unrecognized sneaky
+// declaration and misattributed the hit to `recycleManager`, the nearest declaration it COULD match (see
+// the regression case below). `sessions/service.ts` has 33 real `private async` methods today (e.g.
+// `deliverRunWebhook`, `bestEffortPostSpawnResult<T>`) — this was a real blind spot, not a theoretical one.
+// Fix: accept the SAME modifier set in ANY ORDER (zero or more, repeated) plus an optional generic
+// parameter list between the name and `(`.
+// REMAINING, DELIBERATE BLIND SPOTS (this is still a pure text scan, not an AST parse):
+//   - A declaration split across multiple lines (the name/generics/params wrapped before the first `(`).
+//   - A decorator line immediately above the declaration (irrelevant here — this codebase has none).
+//   - An arrow-function class property assigned as a method (e.g. `foo = (x) => {`) — not a `method(...)`
+//     shape at all, so it never matches and the scan keeps walking further back, same as before this fix.
+//   - A method name that itself collides with a modifier keyword (e.g. a method literally named `async`)
+//     — not present anywhere in this codebase today.
+const METHOD_DECL_RE = /^  (?:(?:static|async|get|set|private|public|protected|override)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^(]*>)?\s*\(/;
 function enclosingMethodName(lines, lineIndex) {
   for (let i = lineIndex; i >= 0; i--) {
     const m = METHOD_DECL_RE.exec(lines[i]);
@@ -193,6 +213,55 @@ const skipHits = runAllowlistedScan({ label: "(B) skipGrantCarryoverCheck", re: 
     textOnlyWouldMatch === true);
   check("MINOR-1 regression: the METHOD-ANCHORED matcher correctly REJECTS the moved hit (method \"startManager\" != \"recycleManager\") despite the shared text",
     allowlistMatches(movedHit, recycleManagerEntry) === false);
+}
+
+// ── Card 08b97966 item 1 regression: reproduce the `private async sneakyManagerMint()` FALSE GREEN the
+// pre-fix regex produced, on a REAL fixture run through the REAL scanFor/enclosingMethodName pipeline —
+// then prove the fixed METHOD_DECL_RE (above) closes it. ──────────────────────────────────────────────
+{
+  const fixtureRoot2 = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "loom-erg-guard-methodfix-"));
+  try {
+    const fixtureLines = [
+      "  async recycleManager(oldManagerId, continuationPrompt) {",
+      "    doStuff();",
+      "  }",
+      "",
+      "  private async sneakyManagerMint() {",
+      '    this.resolveAgentSpawn(agent, config, "manager", false, undefined, { skipGrantCarryoverCheck: true });',
+      "  }",
+    ];
+    fs.mkdirSync(path.join(fixtureRoot2, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(fixtureRoot2, "sessions", "service.ts"), fixtureLines.join("\n") + "\n");
+    const hitLineIndex = fixtureLines.findIndex((l) => l.includes("skipGrantCarryoverCheck: true"));
+
+    // The PRE-FIX regex, reconstructed verbatim ONLY to prove what it used to get wrong — never
+    // reinstated as the real matcher (METHOD_DECL_RE, above, is the fixed one in force).
+    const OLD_METHOD_DECL_RE = /^  (?:static\s+)?(?:async\s+)?(?:get\s+|set\s+)?(?:private\s+|public\s+|protected\s+)?([A-Za-z_$][\w$]*)\s*\(/;
+    function oldEnclosingMethodName(lines, lineIndex) {
+      for (let i = lineIndex; i >= 0; i--) {
+        const m = OLD_METHOD_DECL_RE.exec(lines[i]);
+        if (m) return m[1];
+      }
+      return null;
+    }
+
+    check("item-1 regression: the OLD regex FAILS to recognise `private async sneakyManagerMint(` as a method declaration at all",
+      OLD_METHOD_DECL_RE.exec(fixtureLines[4]) === null);
+    check("item-1 regression: PROVEN FALSE GREEN — under the OLD regex the hit is misattributed to \"recycleManager\" (the nearest declaration it COULD match), which would wrongly pass the allowlist",
+      oldEnclosingMethodName(fixtureLines, hitLineIndex) === "recycleManager");
+
+    // Now the REAL (fixed) pipeline, via scanFor/enclosingMethodName, over the identical fixture text.
+    const fixedHits = scanFor(fixtureRoot2, SKIP_CHECK_RE);
+    const fixedHit = fixedHits.find((h) => h.file === "sessions/service.ts");
+    check("item-1 regression: the FIXED regex correctly recognises `private async sneakyManagerMint(` as its own declaration",
+      METHOD_DECL_RE.exec(fixtureLines[4])?.[1] === "sneakyManagerMint");
+    check("item-1 regression: the FIXED pipeline attributes the hit to \"sneakyManagerMint\", NOT \"recycleManager\" — the false GREEN is closed",
+      fixedHit?.method === "sneakyManagerMint");
+    check("item-1 regression: under the fixed attribution, the hit no longer matches the recycleManager allowlist entry (correctly flagged an offender instead of a silent false GREEN)",
+      allowlistMatches(fixedHit, SKIP_CHECK_ALLOWLIST.find((a) => a.method === "recycleManager")) === false);
+  } finally {
+    fs.rmSync(fixtureRoot2, { recursive: true, force: true });
+  }
 }
 
 // ── forwarding sites are NOT flagged (opts?.spawnHumanAuthorized / opts.spawnHumanAuthorized propagate an

@@ -42,7 +42,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       agent_update/profile_assign, Manager assignAgentProfile) — never from REST. A createdBy:"human"
 //       schedule TARGETING the rebound agent is reset to createdBy:"agent" on each of the five; a sibling
 //       human-created schedule targeting a DIFFERENT agent is untouched; REST POST /api/agents/:id leaves
-//       a human-created schedule's provenance alone (human intent stays human intent). See
+//       a human-created schedule's provenance alone (human intent stays human intent). (G-F) card
+//       08b97966 item 2: the reset now runs BEFORE the rebind write at all three profile_assign-shaped
+//       sites (fail-closed) — an injected throw during the reset leaves NO rebind landed, proving the
+//       fail-open shape (rebind lands, reset throws, bypass stays armed) is closed. See
 //       docs/decisions/acd3c688-explicit-role-grant-carryover.md.
 //   (H) RED-FIRST: before trusting any GREEN above, this file's own header documents the manual revert
 //       proof (see the worker's done-report) — the specific checks here were confirmed to FAIL against
@@ -537,6 +540,43 @@ const mkHumanSchedule = (e, id, agentId) => {
   check("(G-E) the rebind itself applied", e.db.getAgent("agent-gse-target").profileId === prof2);
   check("(G-E) a HUMAN REST rebind leaves a createdBy:human schedule's provenance UNTOUCHED (human intent stays human intent)",
     e.db.getSchedule("sched-gse-target")?.createdBy === "human");
+  cleanup(e);
+}
+
+// ---- (G-F) card 08b97966 item 2: reset-before-rebind ordering is ATOMIC in the fail-closed direction —
+// an injected throw during the provenance reset leaves NO rebind landed. The dangerous shape this closes
+// is rebind-lands-then-reset-throws (fail-open: the agent moved but a stale human bypass stays armed on
+// the schedule); proving reset-first means that shape can no longer occur at all (the reset runs BEFORE
+// db.updateAgent, so a throw there never reaches the rebind write). Uses Manager assignAgentProfile
+// (same shape as G-D) for direct access to monkeypatch the real `e.db` instance method. ----
+{
+  const e = mkDb("sched-atomic-manager");
+  const now = e.now;
+  ensureProject(e, "pGSF", "GSF", { reserved: false });
+  const prof1 = mkProfile(e, "prof-gsf-1", { role: "worker" });
+  const prof2 = mkProfile(e, "prof-gsf-2", { role: "worker" });
+  mkAgent(e, "agent-gsf-target", "pGSF", "GSF", prof1);
+  mkHumanSchedule(e, "sched-gsf-target", "agent-gsf-target");
+  e.db.insertSession({
+    id: "MGSF", projectId: "pGSF", agentId: "agent-gsf-target", engineSessionId: null, title: null, cwd: tmpHome,
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager", parentSessionId: null,
+  });
+  const svc = new SessionService(e.db, { enqueueStdin: () => ({ delivered: false }) }, new OrchestrationControl());
+
+  const realUpdateSchedule = e.db.updateSchedule.bind(e.db);
+  e.db.updateSchedule = () => { throw new Error("injected failure (card 08b97966 atomicity test)"); };
+  let caught = null;
+  try { svc.assignAgentProfile("MGSF", "agent-gsf-target", prof2); } catch (ex) { caught = ex; }
+  check("(G-F) an injected throw during the provenance reset DOES throw out of assignAgentProfile", caught instanceof Error);
+  check("(G-F) the REBIND did NOT land (agent still on the OLD profile) — reset-before-rebind closes the fail-open window",
+    e.db.getAgent("agent-gsf-target").profileId === prof1);
+  e.db.updateSchedule = realUpdateSchedule;
+
+  // CONTROL: the identical call, without the injected failure, succeeds end to end.
+  svc.assignAgentProfile("MGSF", "agent-gsf-target", prof2);
+  check("(G-F) CONTROL: without the injected failure, the SAME rebind succeeds", e.db.getAgent("agent-gsf-target").profileId === prof2);
+  check("(G-F) CONTROL: and the provenance reset actually ran", e.db.getSchedule("sched-gsf-target")?.createdBy === "agent");
   cleanup(e);
 }
 

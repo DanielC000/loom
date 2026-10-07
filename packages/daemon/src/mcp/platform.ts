@@ -2136,9 +2136,10 @@ export class PlatformMcpRouter {
           agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
           before: beforeFields, after: afterFields, source: "platform",
         });
-        db.updateAgent(agent.id, { profileId });
-        // @decision acd3c688 — agent-surface rebind: reset any human-created schedule's provenance.
+        // @decision acd3c688 — reset BEFORE the rebind (card 08b97966 item 2): a throw must never leave
+        // a landed rebind with an un-reset human schedule still armed.
         resetScheduleProvenanceOnAgentRebind(db, agent.id);
+        db.updateAgent(agent.id, { profileId });
         const updated = agentFields(db.getAgent(agent.id))!;
         return ok(rebindReach ? { ...updated, rebindReach } : updated);
       },
@@ -3448,7 +3449,12 @@ export class PlatformMcpRouter {
         if (!existing) return ok({ error: "schedule not found", ...nowEcho() });
         const patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null; createdBy?: "human" | "agent" } = {};
         if (typeof name === "string") patch.name = name;
-        if (typeof enabled === "boolean") patch.enabled = enabled;
+        if (typeof enabled === "boolean") {
+          patch.enabled = enabled;
+          // @decision acd3c688 — LEAD RULING (card 08b97966 item 3): an AGENT-originated disabled→enabled
+          // transition on a human-created schedule resets createdBy (fail-closed); any other edit keeps it.
+          if (enabled === true && existing.enabled === false && existing.createdBy === "human") patch.createdBy = "agent";
+        }
         if (kind !== undefined) {
           patch.kind = kind;
           // @decision acd3c688 — an agent-originated kind change on a human-created row resets createdBy.

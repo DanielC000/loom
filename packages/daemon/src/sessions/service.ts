@@ -14919,8 +14919,10 @@ export class SessionService {
       agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
       before: beforeFields, after: afterFields, source: "manager",
     });
-    this.db.updateAgent(agent.id, { profileId });
+    // @decision acd3c688 — reset BEFORE the rebind: a throw must never leave a landed rebind with an
+    // un-reset human schedule still armed (fail-open); the reverse direction only harmlessly over-resets.
     resetScheduleProvenanceOnAgentRebind(this.db, agent.id);
+    this.db.updateAgent(agent.id, { profileId });
     this.auditManage(managerSessionId, "agent_assign_profile", { agentId: agent.id, profileId });
     const updated = this.db.getAgent(agent.id)!;
     return rebindReach ? { ...updated, rebindReach } : updated;
@@ -15168,10 +15170,15 @@ export class SessionService {
     // Resolve the schedule → its agent → that agent's project; reject a schedule outside the caller's
     // project (a missing agent can never match own, so it's rejected too).
     this.requireOwnProject(managerSessionId, this.db.getAgent(schedule.agentId)?.projectId, "schedule_update");
-    const dbPatch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; prompt?: string | null } = {};
+    const dbPatch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; prompt?: string | null; createdBy?: "human" | "agent" } = {};
     // A blank rename is ignored at the DB write path (normalizeScheduleName), so an agent can't wipe a name.
     if (typeof patch.name === "string") dbPatch.name = patch.name;
-    if (typeof patch.enabled === "boolean") dbPatch.enabled = patch.enabled;
+    if (typeof patch.enabled === "boolean") {
+      dbPatch.enabled = patch.enabled;
+      // @decision acd3c688 — LEAD RULING (card 08b97966 item 3): an AGENT-originated disabled→enabled
+      // transition on a human-created schedule resets createdBy (fail-closed); any other edit keeps it.
+      if (patch.enabled === true && schedule.enabled === false && schedule.createdBy === "human") dbPatch.createdBy = "agent";
+    }
     if (patch.prompt !== undefined) dbPatch.prompt = patch.prompt;
     if (typeof patch.cron === "string") {
       try { dbPatch.nextFireAt = nextFireAt(patch.cron, new Date()); } catch { throw new Error("invalid cron expression"); }

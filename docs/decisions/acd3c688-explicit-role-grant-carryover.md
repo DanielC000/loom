@@ -172,8 +172,14 @@ authority either way).
   `"manager", false, undefined` argument-shape text is IDENTICAL to `startManager`'s own
   `resolveAgentSpawn` call (different flag, same shape), so a future flag moved to the wrong method would
   stay allowlisted by text alone. The guard now also anchors each of those three entries to its real
-  ENCLOSING METHOD name (a nearest-preceding-2-space-method-declaration text scan); do not remove that
-  anchor "for simplicity" — it is what the guard's own regression test proves closes the gap.
+  ENCLOSING METHOD name (a nearest-preceding-method-declaration text scan); do not remove that anchor "for
+  simplicity" — it is what the guard's own regression test proves closes the gap. **Correction (round 4,
+  card `08b97966`): "anchors to its real enclosing method" was only as true as the declaration-matching
+  regex underneath it — the original regex missed a `private async`/generic declaration and could
+  misattribute a hit to the WRONG method that happened to precede the unrecognized one (proven with a
+  `private async sneakyManagerMint()` fixture). Fixed; see "Round 4" below for the regex change and its
+  own documented remaining blind spots — don't re-read this bullet as claiming the anchor is now
+  AST-exact.**
 - Do not assert only 1-2 forbidden-key fields in a recycle row-carry test (round 3, CR `bdf6bb0b`
   MINOR 2) — assert the FULL set (connections, capabilities, vaultWrite, browserTesting,
   documentConversion) for each of the three recycle methods, plus `harness` under its OWN rule (role-force
@@ -201,7 +207,9 @@ that agent onto a QA-Tester-shaped `{role: "worker", browserTesting: true}` prof
 or `agent_update` — `agentAssignableProfileError` does not refuse it; the schedule then fires under the
 Scheduler, still carrying the human bypass, spawning a MANAGER session with `browserTesting` — a grant/role
 combination the human never actually chose. Setup's `profile_assign`/`agent_update` and the Platform
-Lead's `agent_update`/`agent_create` share the same gap (same shared validator, no role-match rule).
+Lead's `agent_update`/`profile_assign` share the same gap (same shared validator, no role-match rule).
+(Nit, card `08b97966` item 4: the Platform Lead's `agent_create` does NOT share this gap — a newly-minted
+agent has no schedules yet for a rebind-time reset to touch.)
 
 **RULING: fail closed, same shape as the `schedule_update`/`kind` reset above.** Any AGENT-surface rebind
 of an agent's bound profile — every path that changes `agents.profileId` via an agent-facing MCP tool —
@@ -246,3 +254,64 @@ else. Accepted, not re-derived at fire time.
   unconditionally.
 - Do not add `resetScheduleProvenanceOnAgentRebind` to `gateway/server.ts`'s `POST /api/agents/:id` — a
   human REST rebind is the one case this residual is deliberately accepted for.
+
+## Round 4 (card `08b97966`, non-blocking follow-ups from round-3 CR `2d154a37`)
+
+**Guard regex (item 1):** `explicit-role-grant-carryover-allowlist-guard.mjs`'s `METHOD_DECL_RE` hardcoded
+ONE fixed modifier order (static, then async, then get/set, then private/public/protected) and allowed no
+generics, so `private async foo(` (reversed order) or `foo<T>(` silently failed to match at all —
+`enclosingMethodName`'s backward scan then skipped past the unrecognized declaration and could misattribute
+a hit to an earlier, unrelated method that DOES match. Proven: moving a `skipGrantCarryoverCheck: true` hit
+into a new `private async sneakyManagerMint()` placed after `recycleManager` was a FALSE GREEN — the scan
+misattributed it to `recycleManager`. `sessions/service.ts` has 33 real `private async` methods today, so
+this was a live blind spot, not theoretical. Fixed: the regex now accepts the same modifier set in ANY
+ORDER (zero or more, repeated) plus an optional generic parameter list before `(`. Remaining, deliberate
+blind spots (documented in the guard's own header, not restated here): a declaration split across multiple
+lines, an arrow-function class property used as a "method", and a method literally named after a modifier
+keyword.
+
+**Rebind/reset atomicity (item 2):** the three `profile_assign`-shaped sites (Setup, Platform, the
+manager's `assignAgentProfile`) called `db.updateAgent` BEFORE `resetScheduleProvenanceOnAgentRebind` —
+non-atomic in the dangerous direction: a throw mid-reset left the rebind landed with the stale human-created
+schedule's bypass still armed (fail-open). The two `agent_update` sites already reset first. **Fix: reorder
+all five sites to reset-before-rebind**, matching the two `agent_update` sites — chosen over a
+helper-owned db transaction because (a) it matches existing precedent instead of introducing a new
+transaction-owning abstraction for a two-write pair, and (b) the failure direction it leaves is
+fail-closed and harmless: if `resetScheduleProvenanceOnAgentRebind` throws, `db.updateAgent` never runs
+(no rebind lands at all); if a throw instead happened AFTER the reset but before the rebind in some future
+edit, the only cost is an over-reset schedule for a rebind that never happened — never an armed bypass on
+an agent that actually moved.
+
+**Re-enable ruling (item 3, LEAD RULING):** an AGENT-originated `enabled:false → enabled:true` transition
+on a `createdBy:"human"` schedule re-activates the human bypass for whatever role/grants the schedule's
+`kind` now resolves to — the same shape of hazard as the `kind`-change reset above, on a different trigger.
+**Ruling: the manager's `updateScheduleAsManager` and the Platform Lead's `schedule_update` both reset
+`createdBy` to `"agent"` (fail-closed) when the patch sets `enabled:true` AND the schedule's stored
+`enabled` was `false` AND its `createdBy` was `"human"`.** A prompt-only or cron-only edit, an `enabled:true`
+no-op on an already-enabled row, or an `enabled:false` edit never resets it — only a genuine
+disabled→enabled transition does. The human REST schedule route is unchanged (human intent stays human
+intent, same reasoning as every other exemption in this record). **The reset is only reversible by delete +
+recreate today** — there is no human-facing path to restore a schedule's `createdBy` back to `"human"`
+short of deleting and recreating it, and `createdBy` is not surfaced anywhere in the Schedules UI. This is
+accepted as-is; no UI surfacing `createdBy` is planned from this card.
+
+**Nit (item 4):** see the correction inline above — the Platform Lead's `agent_create` does not share the
+round-3 `browserTesting` rebind gap; a brand-new agent has no schedules yet.
+
+## Do not (round 4)
+
+- Do not widen `METHOD_DECL_RE`'s modifier set or generic-handling further without adding a regression
+  case to the guard's own test file first — the guard is a pure text scan, not an AST parse, and every
+  past fix here was motivated by a PROVEN false GREEN/RED, not a hypothetical gap.
+- Do not revert the three `profile_assign`-shaped sites back to rebind-before-reset "for symmetry" with
+  anything — reset-before-rebind is the fail-closed order; the reverse was the round-4 defect.
+- Do not introduce a db-transaction-owned helper for the rebind+reset pair unless a future change
+  actually needs cross-write atomicity for a reason stronger than this round's — the reorder above was
+  chosen specifically to avoid that abstraction while the failure directions stay asymmetric (over-reset
+  is harmless; the reverse is not).
+- Do not widen the `enabled` re-enable reset to fire on an `enabled:true` no-op (already-enabled row) or
+  on `enabled:false` — it is scoped to the exact `false→true` transition; widening it further resets
+  provenance for edits that never re-activated anything.
+- Do not build a UI surfacing a schedule's `createdBy`, and do not treat "the reset is irreversible via
+  the UI" as a bug to fix — both are accepted, named here deliberately so a future reader doesn't
+  rediscover and re-litigate them.

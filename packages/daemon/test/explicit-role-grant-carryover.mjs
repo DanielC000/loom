@@ -18,6 +18,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - `schedule_update`'s `kind` change resets a human-created row's `createdBy` to "agent" (fail-closed)
 //     — tested in platform-mgmt-surface.mjs, NOT below (round 3 NIT: this header previously said
 //     "covered below", which was wrong).
+// ROUND 4 (card 08b97966, non-blocking follow-ups): `updateScheduleAsManager`'s own disabled→enabled
+//     re-enable reset (LEAD RULING, item 3) IS covered below — the manager-surface half of the SAME
+//     ruling that governs the Platform's `schedule_update`, which is tested in platform-mgmt-surface.mjs
+//     (same manager/platform split as the `kind` reset just above). See the decision record's "Round 4"
+//     section for the full ruling + the reset/rebind atomicity fix (tested in agent-profile-rebind-reach.mjs).
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + SessionService driven against a FAKE
 // pty (createPty seam, mirroring recycle-harness-reresolve.mjs's proven harness) + a real temp git repo
@@ -201,6 +206,49 @@ const worktrees = [];
   const newFailEvt = db.listEvents("").find((e) => e.kind === "schedule_fire_failed" && e.detail?.scheduleId === schedId2);
   check("(iii-2) a HUMAN-created schedule targeting the SAME grant-carrying off-role agent fires successfully (one new live manager session, no fresh failure event)",
     liveMgrsAfter === liveMgrsBefore + 1 && !newFailEvt);
+}
+
+// ============== updateScheduleAsManager: agent re-enable resets createdBy (card 08b97966 item 3, LEAD
+// RULING) — an AGENT-originated disabled→enabled transition on a createdBy:"human" schedule resets
+// createdBy to "agent" (fail-closed); a prompt/cron-only edit, an already-enabled no-op, or the reverse
+// (enabled→disabled) direction all leave createdBy untouched. The PLATFORM surface's twin (schedule_update)
+// is tested in platform-mgmt-surface.mjs, mirroring the existing kind-reset split — NOT duplicated here. ==
+{
+  const mgrS = svc.startManager("aWorkerPlain", undefined, { spawnHumanAuthorized: true });
+
+  const schedEnableHuman = "sched-ergc-enable-human";
+  db.insertSchedule({ id: schedEnableHuman, agentId: "aWorkerPlain", cron: "0 9 * * *", enabled: false, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: now, kind: "manager", prompt: null, createdBy: "human" });
+  svc.updateScheduleAsManager(mgrS.id, schedEnableHuman, { enabled: true });
+  check("(sched-enable-1) an AGENT-originated disabled→enabled transition on a human-created schedule RESETS createdBy to agent (fail-closed)",
+    db.getSchedule(schedEnableHuman)?.createdBy === "agent");
+
+  // CONTROL: a prompt-only edit on a DISABLED human-created row (no enabled flip) leaves createdBy alone.
+  const schedPromptHuman = "sched-ergc-prompt-human";
+  db.insertSchedule({ id: schedPromptHuman, agentId: "aWorkerPlain", cron: "0 9 * * *", enabled: false, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: now, kind: "manager", prompt: null, createdBy: "human" });
+  svc.updateScheduleAsManager(mgrS.id, schedPromptHuman, { prompt: "new prompt text" });
+  check("(sched-enable-2) CONTROL: a prompt-only edit (no enabled flip) leaves a human-created schedule's createdBy UNTOUCHED",
+    db.getSchedule(schedPromptHuman)?.createdBy === "human");
+
+  // CONTROL: enabled:true on an ALREADY-enabled human row — no disabled→enabled transition — is a no-op.
+  const schedAlreadyEnabled = "sched-ergc-already-enabled";
+  db.insertSchedule({ id: schedAlreadyEnabled, agentId: "aWorkerPlain", cron: "0 9 * * *", enabled: true, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: now, kind: "manager", prompt: null, createdBy: "human" });
+  svc.updateScheduleAsManager(mgrS.id, schedAlreadyEnabled, { enabled: true });
+  check("(sched-enable-3) CONTROL: enabled:true on an ALREADY-enabled human row (no real transition) leaves createdBy UNTOUCHED",
+    db.getSchedule(schedAlreadyEnabled)?.createdBy === "human");
+
+  // CONTROL: disabled→enabled on an already agent-created row is a no-op for createdBy (stays agent).
+  const schedEnableAgent = "sched-ergc-enable-agent";
+  db.insertSchedule({ id: schedEnableAgent, agentId: "aWorkerPlain", cron: "0 9 * * *", enabled: false, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: now, kind: "manager", prompt: null, createdBy: "agent" });
+  svc.updateScheduleAsManager(mgrS.id, schedEnableAgent, { enabled: true });
+  check("(sched-enable-4) CONTROL: disabled→enabled on an already agent-created row stays createdBy:agent",
+    db.getSchedule(schedEnableAgent)?.createdBy === "agent");
+
+  // CONTROL: the reverse direction (enabled→disabled) never resets provenance either.
+  const schedDisableHuman = "sched-ergc-disable-human";
+  db.insertSchedule({ id: schedDisableHuman, agentId: "aWorkerPlain", cron: "0 9 * * *", enabled: true, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: now, kind: "manager", prompt: null, createdBy: "human" });
+  svc.updateScheduleAsManager(mgrS.id, schedDisableHuman, { enabled: false });
+  check("(sched-enable-5) CONTROL: enabled→disabled (the reverse direction) leaves a human-created row's createdBy UNTOUCHED",
+    db.getSchedule(schedDisableHuman)?.createdBy === "human");
 }
 
 // ============================== recycle: NO grant check — pins the real property instead (round 2) ======
