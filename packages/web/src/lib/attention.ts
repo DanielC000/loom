@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -213,6 +213,22 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     refetchInterval: 15000,
   });
   const activeCodexGaps = activeCodexIsolationGapAlerts(codexGapEventsQuery.data ?? []);
+
+  // Card 7be85378 — CRASH-LOOPED for a session the `all.filter(isCrashLooped)` loop below can never see:
+  // `archiveOnExit` always archives the subject before the watcher's own give-up tick stamps the banner,
+  // so a worker (or a manager/platform with zero live workers) never has its item built by that loop at
+  // all. `session_recovery_abandoned`/`session_recovered` are TWO SEPARATE queries, never one combined
+  // call — see `activeCrashLoopAbandonments`'s own doc for why a shared cap can evict the rarer kind.
+  const crashLoopAbandonedEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "session_recovery_abandoned"],
+    queryFn: () => api.orchestrationEventsByKinds(["session_recovery_abandoned"]),
+    refetchInterval: 15000,
+  });
+  const crashLoopRecoveredEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "session_recovered"],
+    queryFn: () => api.orchestrationEventsByKinds(["session_recovered"]),
+    refetchInterval: 15000,
+  });
 
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
@@ -512,6 +528,32 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — died repeatedly after auto-resume; auto-resume STOPPED. Inspect the log + resume manually.`,
     });
   }
+  // Card 7be85378 — the archived-surviving counterpart to the loop above: every session id already
+  // covered there is excluded inside activeCrashLoopAbandonments itself (the dedupe), so this never
+  // double-renders the same episode.
+  const archivedCrashLoopItems = activeCrashLoopAbandonments(
+    crashLoopAbandonedEventsQuery.data ?? [],
+    crashLoopRecoveredEventsQuery.data ?? [],
+    new Set(all.map((s) => s.id)),
+  );
+  for (const { event: e, sessionId: sid } of archivedCrashLoopItems) {
+    const detail = (e.detail ?? {}) as { role?: string | null; attempts?: number; projectId?: string | null };
+    items.push({
+      key: `cl-${e.id}`, tone: "red", kind: "CRASH-LOOPED", sessionId: sid,
+      // Card 5ced500b — stated directly from the event's own detail: session_recovery_abandoned is
+      // already a DURABLE_AUDIT_EVENT_KINDS member, so db.ts's appendEvent backstop (9f7f2b50) stamps
+      // projectId generically at write time — no daemon change was needed for this card. A row filed
+      // before 9f7f2b50 shipped lacks it and falls back to resolveAttentionProjectId's session-id step.
+      projectId: detail.projectId ?? null,
+      // @decision 7be85378 — a permanently DELETED session's event has no clearing path. Give it the
+      // same dismiss escape hatch CODEX ISOLATION GAP uses for its own no-clear-path case, keyed on the
+      // abandoned event's own ts so a later, separate crash-loop episode mints a different key.
+      dismissKey: `${sid}:${e.ts}`,
+      dismissHint: "Dismiss — hides this crash-loop episode until this session crash-loops again",
+      text: `${detail.role ?? "session"} ${sid.slice(0, 8)} (archived) — died ${detail.attempts ?? "?"}× after ` +
+        `auto-resume; auto-resume STOPPED. Inspect the log + resume manually.`,
+    });
+  }
   for (const s of all.filter(isOrphanedFleet)) {
     items.push({
       key: `of-${s.id}`, tone: "red", kind: "ORPHANED FLEET", sessionId: s.id,
@@ -538,7 +580,10 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   // wiping its dismiss key; the row then reappeared the moment the events landed, so a dismiss never
   // survived a reload. Caught by codex-isolation-gap-attention.spec.ts's post-reload assertion. Any future
   // dismissable kind must add its own source here too.
-  const loaded = sessions.data !== undefined && codexGapEventsQuery.data !== undefined;
+  // Card 7be85378 — the archived-surviving CRASH-LOOPED item is dismissable too; same rule, same two
+  // queries it's built from.
+  const loaded = sessions.data !== undefined && codexGapEventsQuery.data !== undefined
+    && crashLoopAbandonedEventsQuery.data !== undefined && crashLoopRecoveredEventsQuery.data !== undefined;
   const derivableSig = items.filter((it) => it.dismissKey).map((it) => it.dismissKey!).sort().join("\n");
   useEffect(() => {
     if (!loaded) return;

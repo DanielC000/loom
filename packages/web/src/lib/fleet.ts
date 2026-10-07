@@ -252,6 +252,47 @@ export function activeCodexIsolationGapAlerts(events: readonly OrchestrationEven
   return out;
 }
 
+// ── CRASH-LOOP ABANDONMENT, ARCHIVED-SURVIVING (card 7be85378) ─────────────────────────────────────────
+// `attention.ts`'s `all.filter(isCrashLooped)` loop can only ever see a session that's still on the live
+// feed (`api.allSessions` -> `db.listAllSessions`, `WHERE archived_at IS NULL`). `SessionService.
+// archiveOnExit` archives every worker (and any manager/platform with zero live workers) on every exit —
+// including the exit that pushes a crash-loop past its cap — and nothing un-archives it before the
+// watcher's own give-up tick stamps the `[loom:crash-loop]` banner. So for exactly the population this
+// kind exists to warn about, the live-feed-only loop above never builds the item at all.
+// `session_recovery_abandoned` is the durable, role-agnostic event the watcher already files at that
+// give-up — same shape as `claude_boot_dialog_stuck`/`vault_index_lock_stale`/`codex_isolation_gap_
+// disclosed` above, each fed by its own cross-session query for the identical reason (`43084723`). This
+// pairs it against the clearing `session_recovered` (latest-wins per session id, same fold shape as
+// `activeVaultLockAlerts`) and excludes any session id the live feed already covers, so the two
+// derivations never double-render the same episode.
+//
+// @decision 7be85378 — never fold these two kinds into ONE query (the far-more-frequent
+// `session_recovered` can evict a still-active `session_recovery_abandoned` past the shared cap); never
+// add a per-item archived-session fetch to confirm existence first (costed + rejected by `5ced500b`).
+export interface CrashLoopAbandonment { event: OrchestrationEvent; sessionId: string }
+
+export function activeCrashLoopAbandonments(
+  abandonedEvents: readonly OrchestrationEvent[],
+  recoveredEvents: readonly OrchestrationEvent[],
+  liveSessionIds: ReadonlySet<string>,
+): CrashLoopAbandonment[] {
+  const combined = [...abandonedEvents, ...recoveredEvents].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of combined) {
+    if (e.kind !== "session_recovery_abandoned" && e.kind !== "session_recovered") continue;
+    const sessionId = e.workerSessionId ?? e.managerSessionId;
+    if (!sessionId) continue; // can't key a per-session pairing without one — drop defensively
+    latest.set(sessionId, e);
+  }
+  const out: CrashLoopAbandonment[] = [];
+  for (const [sessionId, e] of latest) {
+    if (e.kind !== "session_recovery_abandoned") continue; // a later session_recovered → cleared
+    if (liveSessionIds.has(sessionId)) continue; // already covered by the all-derived loop — no double-render
+    out.push({ event: e, sessionId });
+  }
+  return out;
+}
+
 // ── ATTENTION ITEM → OWNING PROJECT ─────────────────────────────────────────────────────────────────────
 // The ONE resolver behind every project-scoped read of the attention queue: the project Overview's
 // `projAttention` list and Mission Control's per-project `attnByProject` count.

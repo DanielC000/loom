@@ -192,6 +192,10 @@ function cleanup(e) {
   check("(4) after the cap it ESCALATES once (one session_recovery_abandoned), not loops", evKinds(e, "s4", "session_recovery_abandoned").length === 1);
   const ab = evKinds(e, "s4", "session_recovery_abandoned")[0];
   check("(4) the give-up event carries the attempt count + role", ab.detail?.attempts === 3 && ab.detail?.role === "manager");
+  // Card 7be85378 — session_recovery_abandoned is already a DURABLE_AUDIT_EVENT_KINDS member, so db.ts's
+  // appendEvent backstop (9f7f2b50) stamps projectId generically at write time — no fileEvent call-site
+  // change was needed. Pinned here because the web's CRASH-LOOPED fix (card 7be85378) now depends on it.
+  check("(4) the give-up event carries projectId, stamped by appendEvent's durable-audit backstop (9f7f2b50)", ab.detail?.projectId === e.projId);
   const row = e.db.getSession("s4");
   check("(4) crash-loop banner stamped on lastError (role-agnostic Mission-Control surface)", typeof row.lastError === "string" && row.lastError.startsWith("[loom:crash-loop]"));
   // Further ticks must NOT resume again or re-escalate.

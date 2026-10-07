@@ -13,6 +13,7 @@ import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
   activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
+  activeCrashLoopAbandonments,
   resolveAttentionProjectId, attentionItemInProject,
 } from "../src/lib/fleet.ts";
 
@@ -639,6 +640,88 @@ check("an empty-string projectId is treated as absent, not as a project named em
     "the empty projectId is skipped and step 2 answers");
   assert.equal(attentionItemInProject({ projectId: "" }, "", lookupFor()), false,
     "and an empty active project never matches, even against an empty item");
+});
+
+// ── CRASH-LOOP ABANDONMENT (card 7be85378) ─────────────────────────────────────────────────────────────
+// session_recovery_abandoned/session_recovered pairing, same stale/cleared fold shape as
+// activeVaultLockAlerts above, keyed by session id, PLUS the dedupe against a caller-supplied
+// liveSessionIds set (the all.filter(isCrashLooped) loop's own coverage — the all-derived case has no
+// archived-survival problem at all, so this derivation must stay out of its way).
+let clSeq = 0;
+const crashLoopEv = (o = {}) => ({
+  id: `cl-ev-${++clSeq}`,
+  ts: o.ts ?? new Date(clSeq).toISOString(),
+  kind: o.kind ?? "session_recovery_abandoned",
+  workerSessionId: o.workerSessionId ?? "sess-cl-a",
+  managerSessionId: o.managerSessionId ?? "mgr-cl-a",
+  taskId: null,
+  detail: o.detail ?? { role: "worker", attempts: 3, projectId: "proj-cl" },
+});
+const NO_LIVE = new Set();
+
+check("activeCrashLoopAbandonments: a lone abandoned event for an ARCHIVED session surfaces an item", () => {
+  const abandoned = crashLoopEv({ workerSessionId: "sess-cl-1" });
+  const items = activeCrashLoopAbandonments([abandoned], [], NO_LIVE);
+  assert.equal(items.length, 1, "abandoned only, session not live ⇒ item");
+  assert.equal(items[0].sessionId, "sess-cl-1");
+  assert.equal(items[0].event.id, abandoned.id);
+});
+
+check("activeCrashLoopAbandonments: DEDUPE — a session present in liveSessionIds is excluded even with an active abandoned event", () => {
+  const abandoned = crashLoopEv({ workerSessionId: "sess-cl-2" });
+  const items = activeCrashLoopAbandonments([abandoned], [], new Set(["sess-cl-2"]));
+  assert.deepEqual(items, [], "the all.filter(isCrashLooped) loop already covers this session — no double-render");
+});
+
+check("activeCrashLoopAbandonments: CLEAR — a later session_recovered for the same session clears the item", () => {
+  const abandoned = crashLoopEv({ workerSessionId: "sess-cl-3", ts: "2026-01-01T00:00:00.000Z" });
+  const recovered = crashLoopEv({ kind: "session_recovered", workerSessionId: "sess-cl-3", ts: "2026-01-01T00:00:01.000Z" });
+  const items = activeCrashLoopAbandonments([abandoned], [recovered], NO_LIVE);
+  assert.deepEqual(items, [], "abandoned then recovered ⇒ none — covers BOTH auto-recovery-after-reset and a manual resume (resume() routes through the same watcher tick that eventually files session_recovered)");
+});
+
+check("activeCrashLoopAbandonments: a NEW episode (abandoned AFTER a recovered) re-shows", () => {
+  const recovered = crashLoopEv({ kind: "session_recovered", workerSessionId: "sess-cl-4", ts: "2026-01-01T00:00:00.000Z" });
+  const abandoned = crashLoopEv({ workerSessionId: "sess-cl-4", ts: "2026-01-01T00:00:01.000Z" });
+  const items = activeCrashLoopAbandonments([abandoned], [recovered], NO_LIVE);
+  assert.equal(items.length, 1, "recovered then a NEW abandoned ⇒ item — latest wins, in EITHER order in the input arrays");
+  assert.equal(items[0].event.ts, "2026-01-01T00:00:01.000Z");
+});
+
+check("activeCrashLoopAbandonments: unsorted input is sorted internally — order of the arrays passed in doesn't matter", () => {
+  const abandoned = crashLoopEv({ workerSessionId: "sess-cl-5", ts: "2026-01-01T00:00:00.000Z" });
+  const recovered = crashLoopEv({ kind: "session_recovered", workerSessionId: "sess-cl-5", ts: "2026-01-01T00:00:01.000Z" });
+  // Pass the clearing event as if it were fetched/ordered independently of the abandoning one.
+  const items = activeCrashLoopAbandonments([abandoned], [recovered], NO_LIVE);
+  assert.deepEqual(items, [], "still clears — sorted by ts internally, not by argument order");
+});
+
+check("activeCrashLoopAbandonments: independent sessions are tracked separately — one cleared, one still abandoned", () => {
+  const abandonedX = crashLoopEv({ workerSessionId: "sess-cl-x" });
+  const abandonedY = crashLoopEv({ workerSessionId: "sess-cl-y", ts: "2026-01-01T00:00:00.000Z" });
+  const recoveredY = crashLoopEv({ kind: "session_recovered", workerSessionId: "sess-cl-y", ts: "2026-01-01T00:00:01.000Z" });
+  const items = activeCrashLoopAbandonments([abandonedX, abandonedY], [recoveredY], NO_LIVE);
+  assert.equal(items.length, 1, "only the still-abandoned session surfaces");
+  assert.equal(items[0].sessionId, "sess-cl-x");
+});
+
+check("activeCrashLoopAbandonments: an event with neither workerSessionId nor managerSessionId is dropped defensively, never crashes", () => {
+  const malformed = { ...crashLoopEv(), workerSessionId: null, managerSessionId: null };
+  const items = activeCrashLoopAbandonments([malformed], [], NO_LIVE);
+  assert.deepEqual(items, [], "no session id to key on ⇒ dropped, not surfaced");
+});
+
+check("activeCrashLoopAbandonments: an unrelated event kind is ignored", () => {
+  const other = { ...crashLoopEv({ workerSessionId: "sess-cl-6" }), kind: "merge_done" };
+  const items = activeCrashLoopAbandonments([other], [], NO_LIVE);
+  assert.deepEqual(items, [], "a non-crash-loop kind never surfaces here");
+});
+
+check("activeCrashLoopAbandonments: a manager/platform with zero live workers (role-agnostic) surfaces the same way", () => {
+  const abandoned = crashLoopEv({ workerSessionId: "sess-cl-mgr", detail: { role: "manager", attempts: 3, projectId: "proj-cl" } });
+  const items = activeCrashLoopAbandonments([abandoned], [], NO_LIVE);
+  assert.equal(items.length, 1, "the ruling scoped this role-agnostic, not worker-only");
+  assert.equal(items[0].event.detail.role, "manager");
 });
 
 console.log(`\n${pass} passed`);
