@@ -8,8 +8,8 @@ import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
-import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv } from "../git/bounded.js";
-import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
+import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed } from "../git/bounded.js";
+import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
@@ -349,6 +349,19 @@ function messageClassifiedProbeEnv(): Record<string, string | undefined> {
 }
 
 /**
+ * The `GIT_DIR`/`GIT_WORK_TREE`-pinned env for a confirmed vault repo root, shared by {@link
+ * boundedVaultGitAtConfirmedRoot} and (card bf11ac3f) the kill-confirmed add/commit path in `commitVault`'s
+ * merge-eligible branch — ONE place builds this pin so both stay byte-identical on it. See
+ * {@link boundedVaultGitAtConfirmedRoot}'s own doc for why it also strips the transport env-var family.
+ */
+function pinnedVaultGitEnv(confirmedRoot: string): Record<string, string | undefined> {
+  return localReadGitEnv(process.env, {
+    GIT_DIR: path.join(confirmedRoot, ".git"),
+    GIT_WORK_TREE: confirmedRoot,
+  });
+}
+
+/**
  * The REPO-PINNED sibling of {@link boundedVaultGit}: same safety config/unsafe-opt-ins, PLUS
  * `GIT_DIR`/`GIT_WORK_TREE` pinned to `confirmedRoot` via `localReadGitEnv` (which also strips the
  * transport env-var family — `GIT_ASKPASS`/`SSH_ASKPASS`/etc — so an ambiently-set one on the daemon host
@@ -364,13 +377,31 @@ function boundedVaultGitAtConfirmedRoot(
   deps: VaultGitDeps,
 ): { git: BoundedVaultGit; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
-  const pinnedEnv = localReadGitEnv(process.env, {
-    GIT_DIR: path.join(confirmedRoot, ".git"),
-    GIT_WORK_TREE: confirmedRoot,
-  });
+  const pinnedEnv = pinnedVaultGitEnv(confirmedRoot);
   const makeGit = deps.gitFactory
     ?? ((p, ms) => boundedSimpleGit(p, ms, pinnedEnv, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG));
   return { git: makeGit(confirmedRoot, timeoutMs), timeoutMs };
+}
+
+/**
+ * Adapts {@link VaultGitDeps.gitFactory} (if a test injected one) to the narrower 2-arg shape
+ * `killableCanonicalRaw` itself expects for ITS OWN `gitFactory` test-seam param — mirrors `git/writer.ts`'s
+ * `GitWriter.killableGitFactory()`. Returns `undefined` on the real production path, so `killableCanonicalRaw`
+ * spawns a REAL, tree-killable child instead of reusing a test fake that has nothing real to kill.
+ *
+ * `env` is fixed to the confirmed root's own pinned env ({@link pinnedVaultGitEnv}) rather than threaded
+ * from the caller, mirroring how `boundedVaultGitAtConfirmedRoot` always pins it the same way — a test's
+ * fake `gitFactory` receives the SAME pinned env a real call would carry via `killableCanonicalRaw`'s own
+ * `env` param, so a test asserting on the env sees one consistent value regardless of which path it hits.
+ */
+function killableVaultGitFactory(
+  confirmedRoot: string,
+  deps: VaultGitDeps,
+): ((repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">) | undefined {
+  const gf = deps.gitFactory;
+  if (!gf) return undefined;
+  const pinnedEnv = pinnedVaultGitEnv(confirmedRoot);
+  return (repoPath, blockMs) => gf(repoPath, blockMs, pinnedEnv);
 }
 
 /**
@@ -1001,9 +1032,9 @@ export async function commitVault(
     return { committed: false, blockedReason: "code-repo-collision" };
   }
 
-  // @decision 8d49c36c — key this check on the CONFIRMED governing root (vaultPath, at this point), never
-  // a raw/possibly-nested caller argument; re-check again immediately before the commit call below; never
-  // route this through killableCanonicalRaw (drops this module's own VAULT_GIT_SAFETY_CONFIG hook guard).
+  // @decision 8d49c36c — key this check on the CONFIRMED governing root (vaultPath), never a raw/possibly-
+  // nested caller argument; re-check again before the commit call below. The add/commit calls below may
+  // route through killableCanonicalRaw ONLY with VAULT_GIT_SAFETY_ARGS as extraConfigArgs (bf11ac3f).
   const quarantineCheck = assertRepoNotQuarantined(vaultPath);
   if (!quarantineCheck.ok) {
     console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${quarantineCheck.reason}`);
@@ -1053,6 +1084,20 @@ export async function commitVault(
   // Tracks the call in flight so the warn below names WHICH op hit its bound (mirrors flushSync's own
   // `currentOp` tracking) — this is the section covering the actual named hang vector (add/status/commit).
   let currentOp: { label: string; timeoutMs: number } | undefined;
+  // @decision bf11ac3f — hoisted ONCE per call so the add/commit section and the outer lock decision
+  // below never disagree within the same commitVault call; still re-consulted fresh on the next call.
+  const mergeEligible = isCommitPathMergeEligible(vaultPath);
+  // @decision bf11ac3f — kill-confirm + quarantine-on-unconfirmed-kill state, used only when
+  // mergeEligible — see the decision record for why the prior bare withTimeout here was unsafe.
+  let raisedToken: string | undefined;
+  const onTreeDeathSettled = (confirmed: boolean): void => {
+    if (confirmed && raisedToken) clearMergeQuarantineByToken(vaultPath, raisedToken);
+  };
+  const quarantineOnUnconfirmedKill = (e: unknown, label: string): void => {
+    if (treeDeathUnconfirmed(e)) {
+      raisedToken = enterMergeQuarantine(vaultPath, "(vault commit)", unconfirmedKillReason(`vault ${label} could not be confirmed dead after a kill: ${(e as Error)?.message ?? e}`));
+    }
+  };
   const runCommitSequence = async (): Promise<CommitVaultResult> => {
     try {
       // @decision 8d49c36c — visibility only, never a refusal and never built further than a log line: this
@@ -1081,7 +1126,22 @@ export async function commitVault(
         return { committed: false, blockedReason: "paused" };
       }
       currentOp = { label: "git add .", timeoutMs: workTreeTimeoutMs };
-      await withTimeout(workGit.add("."), workTreeTimeoutMs, currentOp.label);
+      // @decision bf11ac3f — merge-eligible (this vault IS a registered project's own repoPath too) goes
+      // through the kill-confirmed path, never the plain withTimeout below — see the decision record.
+      if (mergeEligible) {
+        try {
+          await killableCanonicalRaw(
+            vaultPath, ["add", "."], workTreeTimeoutMs, currentOp.label,
+            killableVaultGitFactory(vaultPath, deps), pinnedVaultGitEnv(vaultPath), onTreeDeathSettled,
+            vaultPath, VAULT_GIT_SAFETY_ARGS,
+          );
+        } catch (e) {
+          quarantineOnUnconfirmedKill(e, currentOp.label);
+          throw e;
+        }
+      } else {
+        await withTimeout(workGit.add("."), workTreeTimeoutMs, currentOp.label);
+      }
       currentOp = { label: "git status", timeoutMs: cheapTimeoutMs };
       const status = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
       if (status.files.length === 0) return { committed: false };
@@ -1101,14 +1161,27 @@ export async function commitVault(
         console.warn(`[vault-versioner] ${vaultPath} skipping commitVault (quarantined mid-call, after add) — ${recheck.reason}`);
         return { committed: false };
       }
-      if (identityConfigured) {
-        await withTimeout(workGit.raw(["commit", "--no-verify", "-m", message]), workTreeTimeoutMs, currentOp.label);
+      const commitArgs = identityConfigured
+        ? ["commit", "--no-verify", "-m", message]
+        : [
+            "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
+            "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
+            "commit", "--no-verify", "-m", message,
+          ];
+      // @decision bf11ac3f — same kill-confirmed branching as the "git add ." call above.
+      if (mergeEligible) {
+        try {
+          await killableCanonicalRaw(
+            vaultPath, commitArgs, workTreeTimeoutMs, currentOp.label,
+            killableVaultGitFactory(vaultPath, deps), pinnedVaultGitEnv(vaultPath), onTreeDeathSettled,
+            vaultPath, VAULT_GIT_SAFETY_ARGS,
+          );
+        } catch (e) {
+          quarantineOnUnconfirmedKill(e, currentOp.label);
+          throw e;
+        }
       } else {
-        await withTimeout(workGit.raw([
-          "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
-          "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
-          "commit", "--no-verify", "-m", message,
-        ]), workTreeTimeoutMs, currentOp.label);
+        await withTimeout(workGit.raw(commitArgs), workTreeTimeoutMs, currentOp.label);
       }
       return { committed: true };
     } catch (err) {
@@ -1130,7 +1203,7 @@ export async function commitVault(
   // quarantine itself (AFTER acquiring the lock, which the pre-check above cannot see) — translate that
   // into commitVault's own established graceful quarantine-backoff shape rather than letting a new throw
   // type escape this function.
-  if (isCommitPathMergeEligible(vaultPath)) {
+  if (mergeEligible) {
     try {
       return await withCanonicalIndexLock(vaultPath, runCommitSequence);
     } catch (err) {

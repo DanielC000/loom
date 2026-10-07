@@ -40,7 +40,7 @@ const ALLOWLIST = {
   "sessions/service.ts": "worktree GC/size probes via boundedGit(); no merge or content judgement",
   "setup/bootstrap.ts": "`git init` of a brand-new project dir; no shared worker-writable .git exists yet",
   "orchestration/restart.ts": "supervisor-liveness ancestry check; reads only",
-  "vault/versioner.ts": "vault auto-commit into the human's OWN notes repo, no worker worktree shares it; execFileSync commit at the end is the same",
+  "vault/versioner.ts": "an ordinary (non-merge-eligible) vault is the human's OWN notes repo, never touched by a worker/merge, so plain boundedSimpleGit is fine there; a merge-eligible shared vault (card bf11ac3f) IS a real canonical repo a worker merge can touch, but that path's own add/commit already route through the shared killableCanonicalRaw — the canonical shape is never left unprotected, only the ordinary-vault construction is off-path",
   "deploy-staleness.ts": "deploy-time staleness diff over the running daemon's own checkout (execFileSync); reads only, not a merge",
   "skills/assets-git-status.ts": "reads the assets tree status for the Skills UI (execFileSync); not a merge",
   "mcp/decisions.ts": "resolves a cited `sha:` anchor via rev-parse --verify (execFileSync); a comment-anchor lookup, not a merge",

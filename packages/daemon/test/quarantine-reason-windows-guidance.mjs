@@ -3,12 +3,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // THE RULE (docs/decisions/b966962b-unconfirmed-kill-windows-msys-hook-guidance.md): every
 // `enterMergeQuarantine(...)` raise for an UNCONFIRMED KILL (git/worktrees.ts, git/batch-merge.ts,
-// git/writer.ts) must route its `reason` argument through the ONE shared helper,
-// `unconfirmedKillReason()` (git/merge-quarantine.ts) — never a hand-built string — so the Windows/MSYS-
-// hook guidance clause can never drift between call sites or be silently omitted at a new one.
+// git/writer.ts, and — card bf11ac3f — vault/versioner.ts's own merge-eligible commit path) must route
+// its `reason` argument through the ONE shared helper, `unconfirmedKillReason()` (git/merge-quarantine.ts)
+// — never a hand-built string — so the Windows/MSYS-hook guidance clause can never drift between call
+// sites or be silently omitted at a new one.
 //
 // THIS FILE drives TWO independent checks, each with its own negative control:
-//   (1) a SOURCE-TEXT scan of the three real call-site files (never dist/** — these are read for the
+//   (1) a SOURCE-TEXT scan of the real call-site files (never dist/** — these are read for the
 //       raw call-site SHAPE, not transpiled behavior) asserting every `enterMergeQuarantine(` call line
 //       also contains `unconfirmedKillReason(` — RED if a call site bypasses the helper.
 //   (2) the real, compiled `unconfirmedKillReason()`/`UNCONFIRMED_KILL_WINDOWS_GUIDANCE` (dist/git/
@@ -26,7 +27,7 @@ useOwnLoomHome("loom-mqwg-");
 requireHermeticEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcGitDir = path.join(__dirname, "..", "src", "git");
+const srcDir = path.join(__dirname, "..", "src");
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 
 let failures = 0;
@@ -56,9 +57,9 @@ function allCallsUseHelper(lines) {
   return lines.length > 0 && lines.every((line) => line.includes("unconfirmedKillReason("));
 }
 
-const CALL_SITE_FILES = ["worktrees.ts", "batch-merge.ts", "writer.ts"];
+const CALL_SITE_FILES = ["git/worktrees.ts", "git/batch-merge.ts", "git/writer.ts", "vault/versioner.ts"];
 for (const file of CALL_SITE_FILES) {
-  const text = fs.readFileSync(path.join(srcGitDir, file), "utf8");
+  const text = fs.readFileSync(path.join(srcDir, file), "utf8");
   const lines = enterMergeQuarantineCallLines(text);
   check(`${file}: found at least one real enterMergeQuarantine(...) call site (scan isn't vacuous)`, lines.length > 0);
   check(`${file}: EVERY enterMergeQuarantine(...) call routes its reason through unconfirmedKillReason(...) (${lines.length} call site(s))`, allCallsUseHelper(lines));

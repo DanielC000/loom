@@ -66,6 +66,14 @@ bare `withTimeout` (never kill-confirmed), so a hung vault commit can itself lea
 that nothing quarantines — the SAME class of gap `d8bb2074` closed for `GitWriter`, left open here for the
 reason above.
 
+**SUPERSEDED by `bf11ac3f`** for `commitVault`'s own merge-eligible branch (a shared vault that is ALSO a
+registered project's own `repoPath`, per `a09b81a0` round 3's vault-root exemption): that card did exactly
+the "properly fixing this" extension described above — `killableCanonicalRaw`/`spawnCanonicalGitTree` gained
+an additive per-call `extraConfigArgs` param, and `commitVault`'s add/commit now carry
+`VAULT_GIT_SAFETY_ARGS` through it when merge-eligible, closing the tracked-follow-up orphan gap for that
+branch. The ordinary (non-merge-eligible) branch, and `flushSync` entirely, are UNCHANGED — this paragraph's
+reasoning still describes why neither of those two routes through `killableCanonicalRaw`.
+
 **`commitVault`'s own pre-existing-staged-residue risk:** its `git add .` is just as capable as
 `GitWriter.commit`'s `add -A` of sweeping an escaped descendant's already-staged residue (left behind by an
 earlier unconfirmed kill, now auto-cleared) into its own next unattended commit. Unlike `GitWriter.commit`
@@ -93,7 +101,10 @@ a deliberate human/agent act") already draws the line the same way.
   actual `git commit` call; the `git add .` call alone can run long enough for one to appear mid-call.
 - Do not route `commitVault`'s (or `flushSync`'s) mutating git calls through `killableCanonicalRaw` without
   first giving it a way to carry this module's own `VAULT_GIT_SAFETY_CONFIG` (hooksPath/fsmonitor/gpgsign/
-  safe.bareRepository) — doing so today silently drops that hook-injection defense.
+  safe.bareRepository) — doing so today silently drops that hook-injection defense. **SUPERSEDED by
+  `bf11ac3f` for `commitVault`'s merge-eligible branch specifically** — it now passes
+  `VAULT_GIT_SAFETY_ARGS` as `killableCanonicalRaw`'s new `extraConfigArgs` param, so this prohibition no
+  longer applies there; it still applies to the ordinary branch and to `flushSync`, which never adopted it.
 - Do not build `commitVault`'s own pre-existing-staged-residue finding into a refusal or a structured field
   — it is a logged-only, unattended-path visibility note by design; the structured, refuse-or-warn decision
   belongs to `GitWriter.commit`'s own human-facing `residue` field, a separate surface.

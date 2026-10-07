@@ -191,6 +191,11 @@ export function withTimeoutKillingChild<T>(
  * `bounded-git-kill-marker-exclusivity.mjs`'s `[confirmed, real marker]` case, which deletes
  * `markConfirmedKill` to confirm this goes RED. Production call sites never pass this — the default is
  * the real `spawn`, byte-identical to before this param existed.
+ *
+ * `extraConfigArgs` (card bf11ac3f), when supplied, is spliced into the raw() closure's argv between
+ * {@link CANONICAL_GIT_CONFIG_ARGS} and the real call args — see that closure below. Per-call, never a
+ * module-level default: the ONE caller that needs it (`vault/versioner.ts`'s own `commitVault`, for its
+ * `VAULT_GIT_SAFETY_ARGS`) passes it explicitly; every other caller omits it and sees byte-identical argv.
  */
 export function spawnCanonicalGitTree(
   repoPath: string,
@@ -199,6 +204,7 @@ export function spawnCanonicalGitTree(
   killGraceMs: number,
   onTreeDeathSettled?: (confirmed: boolean) => void,
   spawnImpl: typeof spawn = spawn,
+  extraConfigArgs?: string[],
 ): Pick<SimpleGit, "raw"> {
   // Cast: simple-git's own `raw` is a heavily overloaded `Response<string>`-returning signature (chainable
   // builder methods included) that a plain `(...args) => Promise<string>` can never structurally satisfy —
@@ -208,7 +214,7 @@ export function spawnCanonicalGitTree(
   // property against the target's real type.
   const raw = (...callArgs: unknown[]): Promise<string> => {
     const rawArgs = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
-    const args = [...CANONICAL_GIT_CONFIG_ARGS, ...rawArgs];
+    const args = [...CANONICAL_GIT_CONFIG_ARGS, ...(extraConfigArgs ?? []), ...rawArgs];
     return new Promise<string>((resolve, reject) => {
       const child = spawnImpl("git", args, {
         cwd: repoPath,
@@ -348,6 +354,13 @@ export function treeDeathConfirmed(e: unknown): boolean {
  * @decision bde5d1fe — RE-CHECKS the quarantine immediately before every call (real or test-seam), never
  * just once at an outer entry. `quarantineRepoPath` (default `repoPath`) is the CANONICAL repo to check
  * when `repoPath` itself is an ephemeral worktree. Throws {@link RepoQuarantinedError} before spawning.
+ *
+ * `extraConfigArgs` (card bf11ac3f): an ADDITIVE, per-call `-c` config-argv extension, forwarded verbatim
+ * to {@link spawnCanonicalGitTree} (see its own doc) — never folded into {@link CANONICAL_GIT_CONFIG_ARGS}
+ * itself, since per-call-class config differences (e.g. `vault/versioner.ts`'s own hooksPath/fsmonitor/
+ * gpgsign/safe.bareRepository neutralisation) must not silently widen onto every OTHER caller. Omitted (the
+ * default) for every existing caller — byte-identical argv. Ignored on the `gitFactory` test-seam branch,
+ * same as `env`/`onTreeDeathSettled` above (a fake `.raw()` builds its own argv, if any).
  */
 export async function killableCanonicalRaw(
   repoPath: string,
@@ -358,13 +371,14 @@ export async function killableCanonicalRaw(
   env?: Record<string, string | undefined>,
   onTreeDeathSettled?: (confirmed: boolean) => void,
   quarantineRepoPath: string = repoPath,
+  extraConfigArgs?: string[],
 ): Promise<string> {
   const quarantineCheck = assertRepoNotQuarantined(quarantineRepoPath);
   if (!quarantineCheck.ok) throw new RepoQuarantinedError(quarantineCheck.reason);
   if (gitFactory) return withTimeout(gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
   const controller = new AbortController();
   return withTimeoutKillingChild(
-    canonicalRaw(spawnCanonicalGitTree(repoPath, env, controller.signal, timeoutMs, onTreeDeathSettled), args),
+    canonicalRaw(spawnCanonicalGitTree(repoPath, env, controller.signal, timeoutMs, onTreeDeathSettled, undefined, extraConfigArgs), args),
     timeoutMs, label, controller,
   );
 }
