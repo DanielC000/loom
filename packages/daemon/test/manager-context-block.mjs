@@ -72,9 +72,17 @@ db.insertAgent({ id: "agentWorker", projectId: "pM", name: "Dev", startupPrompt:
 // caller role) resolves role==="manager" purely from the profile — the fresh-boot gap this DoD covers.
 db.insertProfile({ id: "profMgr", name: "Orchestrator Rig", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertAgent({ id: "agentMgrProfile", projectId: "pM", name: "Profile Orchestrator", startupPrompt: "AGENT_MGR_PROFILE_DOCTRINE", position: 2, profileId: "profMgr" });
-// a live manager so spawnWorker has a parent; worker_spawn validates the taskId is a real, non-terminal task
+// a live manager, recycled by scenario (1b) below — used ONLY for the recycle-successor assertions.
 db.insertSession({
   id: "mgr1", projectId: "pM", agentId: "agentMgr", engineSessionId: null, title: null,
+  cwd: repo, processState: "live", resumability: "unknown", busy: false,
+  createdAt: now, lastActivity: now, lastError: null, role: "manager",
+});
+// a SEPARATE live manager for scenario (2)'s spawnWorker call — card eabe51993 made a recycled
+// manager's own row refuse further spawnWorker calls (it's superseded by its successor even though
+// the row itself stays processState:"live"), so (2) can no longer reuse "mgr1" once (1b) recycles it.
+db.insertSession({
+  id: "mgrW", projectId: "pM", agentId: "agentMgr", engineSessionId: null, title: null,
   cwd: repo, processState: "live", resumability: "unknown", busy: false,
   createdAt: now, lastActivity: now, lastError: null, role: "manager",
 });
@@ -425,7 +433,7 @@ try {
   check("(1f) no-vault manager session is live + role manager", db.getSession(sMNoVault.id).processState === "live" && oMNoVault?.role === "manager");
 
   // ===================== (2) WORKER spawn does NOT get the MANAGER block (card af902717: it DOES now carry its agent brief) =====================
-  const w = await svc.spawnWorker("mgr1", { taskId: taskW, agentId: "agentWorker", kickoffPrompt: "WORKER_KICKOFF" });
+  const w = await svc.spawnWorker("mgrW", { taskId: taskW, agentId: "agentWorker", kickoffPrompt: "WORKER_KICKOFF" });
   workerWorktree = w.worktreePath;
   const oW = optsFor(w.id);
   check("(2) worker spawn opts.startupPrompt carries its agent brief THEN the kickoff", oW?.startupPrompt?.includes("AGENT_WORKER_PROMPT") && oW?.startupPrompt?.includes("WORKER_KICKOFF") && oW.startupPrompt.indexOf("AGENT_WORKER_PROMPT") < oW.startupPrompt.indexOf("WORKER_KICKOFF"));
