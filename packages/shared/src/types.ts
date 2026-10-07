@@ -1931,7 +1931,11 @@ export type OrchestrationEventKind =
   // EXACTLY ONCE per row, gated on `Db.markCredentialUndeliverableNotified` (never re-fires on a later
   // spawn/resume for the same row — see that method's own doc). `detail` carries { deliveredCredentialId,
   // projectId, credentialEnvVar, reason: "reserved-name" }.
-  | "credential_undeliverable";
+  | "credential_undeliverable"
+  // @decision 8c70e33c — an audit-only record of which instruction file a session loaded; filed for
+  // every role, deliberately excluded from EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/
+  // ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS. See record for the full payload/scope/filing rationale.
+  | "instructions_loaded";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -1981,6 +1985,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   credential_revoked: true,
   vault_autocommit_refused_code_repo: true,
   credential_undeliverable: true,
+  instructions_loaded: true,
   worker_retired: true,
   worker_retirement_lifted: true,
   manager_session_barred: true,

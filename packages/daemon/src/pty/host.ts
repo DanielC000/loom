@@ -3117,6 +3117,12 @@ interface Live {
   // onClaudeBootDialogResolved, exactly once per Live incarnation — see deliverHook's own doc at that call
   // site for why.
   anyHookObserved: boolean;
+  // Card 8c70e33c: dedupes the InstructionsLoaded durable-event write within ONE live incarnation —
+  // keyed on `${file_path}\0${memory_type}\0${load_reason}`, so a compact (load_reason:"compact") or any
+  // other re-load of the SAME file under the SAME reason never files a second row. Lifetime is exactly
+  // this Live object's: a fresh spawn/resume/fork/recycle always gets a brand-new Live (see `killed`'s own
+  // doc above), so this set is implicitly cleared on every one of those — never explicitly reset.
+  instructionsLoadedKeys: Set<string>;
   resumeGateHandled: boolean; // TERMINAL: true once Enter has actually been sent for the resume-from-summary
                               // gate (confirmed-or-given-up) — see resolveResumeGate. Also gates whether
                               // resumeGateScan keeps accumulating (stays false through the whole verify-retry).
@@ -3689,6 +3695,17 @@ export interface PtyHostEvents {
    *  is the one that decides whether there's anything to pair against, so it must stay cheap and never
    *  throw back into deliverHook. */
   onClaudeBootDialogResolved?(sessionId: string): void;
+  /** Card 8c70e33c — onInstructionsLoaded: fires once per (file_path, memory_type, load_reason) the
+   *  engine actually loaded, deduped per Live incarnation by `deliverHook` BEFORE this is ever invoked —
+   *  the implementer never sees a repeat for the same live session. `filePath`/`memoryType`/`loadReason`
+   *  are the CLI's own documented fields (see claude-settings.ts's InstructionsLoaded wiring doc);
+   *  `agentId`/`agentType` are set only for a subagent's own file access (undefined for the main turn).
+   *  Deliberately a MINIMAL payload — see this interface's own file header discussion in card 8c70e33c's
+   *  design checkpoint for why `cwd`/`transcript_path`/`scratchpad_dir`/`prompt_id`/`effort` (all real
+   *  fields the CLI also sends) are NOT threaded through here: the audit question this exists to answer
+   *  ("what instruction content did this session load") doesn't need them. Optional so every existing
+   *  PtyHostEvents implementer (test doubles included) stays byte-identical without providing it. */
+  onInstructionsLoaded?(sessionId: string, info: { filePath: string; memoryType: string; loadReason: string; globs?: string[]; triggerFilePath?: string; parentFilePath?: string; agentId?: string; agentType?: string }): void;
   /** @decision b987f086 — onCodexUnsupportedCapability: two independent reasons (a stdio-only MCP server;
    *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended — and never relied
    *  on alone, since profiles/validate.ts's save-time rejection can't catch a profile that predates it. */
@@ -5157,6 +5174,7 @@ export class PtyHost {
       startupCycleInFlight: false,
       sessionStartObserved: false,
       anyHookObserved: false,
+      instructionsLoadedKeys: new Set(),
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: false,
       bootScan: "",
@@ -5400,6 +5418,7 @@ export class PtyHost {
       mcpToken: "", // a shell mounts no MCP server; unreachable anyway (verifyMcpToken's own gate never matches "")
       sessionStartObserved: true, // a shell never reaches deliverHook/markReady at all; inert placeholder
       anyHookObserved: true, // a shell has no hook relay; inert placeholder, same convention as sessionStartObserved
+      instructionsLoadedKeys: new Set(), // a shell never reaches deliverHook; inert placeholder, same convention
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -6625,6 +6644,7 @@ export class PtyHost {
       mcpToken: "", // a canned entry mounts no MCP server; unreachable anyway (verifyMcpToken's own gate never matches "")
       sessionStartObserved: true, // a canned entry never reaches deliverHook/markReady at all; inert placeholder
       anyHookObserved: true, // a canned entry has no hook relay; inert placeholder, same convention as sessionStartObserved
+      instructionsLoadedKeys: new Set(), // a canned entry never reaches deliverHook; inert placeholder, same convention
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -7172,8 +7192,13 @@ export class PtyHost {
     // the frame-splice detector below. `tool_name`/`agent_id`/`agent_type` (card cd0c7fee): PreToolUse's
     // own common+conditional input fields — see tool-attribution.ts's doc for the exact source quotes.
     // Narrow BY CHOICE, same established pattern as the other extra fields here — extend, don't widen to
-    // `unknown`.
-    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number; prompt?: string; tool_name?: string; agent_id?: string; agent_type?: string; tool_use_id?: string },
+    // `unknown`. `file_path`/`memory_type`/`load_reason`/`globs`/`trigger_file_path`/`parent_file_path`
+    // (card 8c70e33c): InstructionsLoaded's own conditional input fields, confirmed against the real
+    // installed CLI's own hook-input builder — it ALSO merges `agent_id`/`agent_type` (above) onto this
+    // event for a subagent's own file access, plus several common base fields (session_id, transcript_path,
+    // cwd, scratchpad_dir, prompt_id, permission_mode, effort) this daemon deliberately does NOT read or
+    // store for this event (see the InstructionsLoaded case below for why).
+    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number; prompt?: string; tool_name?: string; agent_id?: string; agent_type?: string; tool_use_id?: string; file_path?: string; memory_type?: string; load_reason?: string; globs?: string[]; trigger_file_path?: string; parent_file_path?: string },
   ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
@@ -7237,6 +7262,25 @@ export class PtyHost {
         const counts = this.subagentDrift.recordStop(sessionId);
         // eslint-disable-next-line no-console
         console.log(`[subagent-drift] ${sessionId} stops=${counts.stops} confirmedSubagent=${counts.confirmedSubagent} live=${counts.live} blindWhileLive=${counts.blindWhileLive}`);
+        break;
+      }
+      case "InstructionsLoaded": {
+        // Card 8c70e33c: an audit trail of exactly which instruction content a session actually loaded —
+        // observability-only (the CLI's own doc: "does not support blocking"), never gating anything here.
+        // Dedupe within this Live incarnation (see `instructionsLoadedKeys`'s own doc on Live) so a
+        // compact or any other re-load of the SAME file under the SAME reason files at most one durable
+        // row — `file_path`/`memory_type`/`load_reason` are the CLI's own documented required fields for
+        // this event (never actually absent in practice), coalesced defensively so a malformed hook body
+        // can never collide two different loads onto the SAME dedupe key.
+        const dedupeKey = `${hook.file_path ?? ""}\0${hook.memory_type ?? ""}\0${hook.load_reason ?? ""}`;
+        if (!live.instructionsLoadedKeys.has(dedupeKey)) {
+          live.instructionsLoadedKeys.add(dedupeKey);
+          this.events.onInstructionsLoaded?.(sessionId, {
+            filePath: hook.file_path ?? "", memoryType: hook.memory_type ?? "", loadReason: hook.load_reason ?? "",
+            globs: hook.globs, triggerFilePath: hook.trigger_file_path, parentFilePath: hook.parent_file_path,
+            agentId: hook.agent_id, agentType: hook.agent_type,
+          });
+        }
         break;
       }
       case "SessionStart":

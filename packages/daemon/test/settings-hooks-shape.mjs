@@ -89,9 +89,11 @@ try {
   // old check-1 label or the card body — see this task's worker_report for the two-lists comparison.
   // Card 661b7d46: PostToolUse is now unconditional too (the decision-records Read group is always
   // wired), so it joins the other always-present events here.
+  // Card 8c70e33c: InstructionsLoaded joins the same unconditional set (no matcher, same posture as
+  // SessionStart/SubagentStart — see that card's own doc in claude-settings.ts).
   const UNCONDITIONAL_EVENTS = [
     "SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "PreToolUse", "SubagentStart", "SubagentStop",
-    "PostToolUse",
+    "PostToolUse", "InstructionsLoaded",
   ];
   for (const event of UNCONDITIONAL_EVENTS) {
     check(`settings.hooks.${event} is present (non-empty groups array) with vaultPath set`,

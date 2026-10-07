@@ -10323,6 +10323,41 @@ export class SessionService {
   }
 
   /**
+   * Card 8c70e33c — the DB-holding implementer for `PtyHostEvents.onInstructionsLoaded`; see that
+   * callback's own doc and docs/decisions/8c70e33c-instructions-loaded-audit-event.md for the full
+   * scope/payload/filing rationale. `deliverHook` already deduped this call per Live incarnation, so
+   * every invocation here is a genuinely NEW (file_path, memory_type, load_reason) — no further dedupe
+   * needed. Fires for every role; filed under the same single-session convention as
+   * `handleCodexUnsupportedCapability`/`handleClaudeBootDialogResolved`.
+   */
+  handleInstructionsLoaded(sessionId: string, info: { filePath: string; memoryType: string; loadReason: string; globs?: string[]; triggerFilePath?: string; parentFilePath?: string; agentId?: string; agentType?: string }): void {
+    // Card 8c70e33c, Code Review fix — this runs SYNCHRONOUSLY inside deliverHook's switch (PtyHost's
+    // doc on its own sibling callbacks: "must stay cheap and never throw back into deliverHook"). A
+    // throwing `db.getSession`/`db.appendEvent` (busy/closed DB, a constraint) must never propagate out
+    // through /internal/hook for what is, start to finish, an observability-only event. Log session id +
+    // error message only — never the file path (the shared, cross-tenant daemon-output.log rule).
+    try {
+      const s = this.db.getSession(sessionId);
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+        workerSessionId: sessionId, taskId: s?.taskId ?? null,
+        kind: "instructions_loaded",
+        detail: {
+          filePath: info.filePath, memoryType: info.memoryType, loadReason: info.loadReason,
+          ...(info.globs !== undefined ? { globs: info.globs } : {}),
+          ...(info.triggerFilePath !== undefined ? { triggerFilePath: info.triggerFilePath } : {}),
+          ...(info.parentFilePath !== undefined ? { parentFilePath: info.parentFilePath } : {}),
+          ...(info.agentId !== undefined ? { agentId: info.agentId } : {}),
+          ...(info.agentType !== undefined ? { agentType: info.agentType } : {}),
+        },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[instructions-loaded] ${sessionId} handleInstructionsLoaded threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
+  /**
    * @decision b987f086 — fired ONCE per spawn (fresh/resume/fork/recycle each re-evaluate and may fire
    * again); this is a spawn-time report, never a retry ladder like `onCodexSubmitUnconfirmed`'s.
    */

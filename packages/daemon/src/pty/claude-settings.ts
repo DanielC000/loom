@@ -248,6 +248,12 @@ export function writeSessionSettings(
     // live-count drift cross-check (SubagentDriftTracker).
     SubagentStart: [hookCmd],
     SubagentStop: [hookCmd],
+    // Card 8c70e33c: fires once per instruction file (CLAUDE.md/AGENTS.md/rule) the engine actually loads —
+    // at session start AND on a later file-access-triggered nested discovery — never per-turn (see
+    // deliverHook's own InstructionsLoaded case for what's done with it). Unconditional, no matcher, same
+    // posture as SessionStart/SubagentStart above — every role gets this, observability-only (the CLI's own
+    // doc: "does not support blocking").
+    InstructionsLoaded: [hookCmd],
   };
   const postToolUse: unknown[] = [];
   // Card 5244adc2: wire the decision-records Read hook only when this project could possibly have

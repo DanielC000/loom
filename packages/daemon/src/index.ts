@@ -471,6 +471,11 @@ async function main(): Promise<void> {
     // PtyHostEvents.onClaudeBootDialogResolved's own doc). `sessions` decides whether there's an unpaired
     // claude_boot_dialog_stuck to pair against; see SessionService.handleClaudeBootDialogResolved's own doc.
     onClaudeBootDialogResolved: (sessionId) => sessions.handleClaudeBootDialogResolved(sessionId),
+    // Card 8c70e33c: an instruction file actually loaded — `sessions` (forward reference, same pattern as
+    // onClaudeBootDialogResolved above) is the DB-holding implementer that appends the durable
+    // `instructions_loaded` event. See PtyHostEvents.onInstructionsLoaded's own doc / docs/decisions/
+    // 8c70e33c-instructions-loaded-audit-event.md / SessionService.handleInstructionsLoaded's own doc.
+    onInstructionsLoaded: (sessionId, info) => sessions.handleInstructionsLoaded(sessionId, info),
     // Card b987f086: a codex spawn declared a capability (a stdio MCP server, or codescape) this harness
     // structurally cannot mount — `sessions` (forward reference, same pattern as onCodexBootStuck above)
     // decides how to record the durable event + fail loud to the recipient AND the sender/manager. See

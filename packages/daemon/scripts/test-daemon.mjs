@@ -444,6 +444,10 @@ export const NOT_HERMETIC = new Set([
   // 60s+120s poll budget — materially longer wall-clock than the other real-spawn files) — proof-once,
   // manual-only, not scheduled. Run manually per its own header comment; re-run after a `claude` CLI
   // upgrade, same re-measure posture as every other real-spawn file in this list.
+  "instructions-loaded-real-spawn", // card 8c70e33c: one real, authenticated `claude` process, one real
+  // model turn — same cost/flake rationale as the real-spawn files above — proof-once, manual-only, not
+  // scheduled. Run manually per its own header comment; re-run after a `claude` CLI upgrade (the
+  // InstructionsLoaded hook's own existence/field names are an engine behavior, not Loom's own code).
 ]);
 
 // Directories that are established non-test containers under test/ — never descended into by the
