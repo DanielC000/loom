@@ -32,6 +32,19 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = mkdtempManaged("loom-mtenv-");
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 849acf9b: PART 2's real claude spawn below reaches ensureTrustedResilient -> ensureTrusted
+// (host.ts) unconditionally, which writes a trust entry into whatever claudeJsonPath() resolves to. Left
+// unredirected, that landed in the OWNER'S REAL ~/.claude.json on every run. Redirect CLAUDE_CONFIG_DIR
+// (claudeJsonPath() honors it directly) AND HOME/USERPROFILE (belt-and-suspenders —
+// discoverProjectMcpServerNames, also called from ensureTrusted, walks up from cwd to os.homedir() for
+// ~/.mcp.json) to this test's own temp root BEFORE the ../dist import, same convention as
+// trust-lock.mjs/claude-config-worktree-prune.mjs. Harmless for PART 1/3/4 (PART 3 is codex-only —
+// createCodexPty never reaches ensureTrusted at all — and PART 1/4 never spawn a real claude process).
+const claudeConfigDir = path.join(tmpHome, "claude-config");
+fs.mkdirSync(claudeConfigDir, { recursive: true });
+process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+process.env.HOME = tmpHome;
+process.env.USERPROFILE = tmpHome;
 
 const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();
@@ -39,9 +52,24 @@ requireHermeticEnv();
 const { PtyHost, buildSpawnEnv } = await import("../dist/pty/host.js");
 const { MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 const { ensureDirs, WORKTREES_DIR } = await import("../dist/paths.js");
+const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
 
 ensureDirs();
 registerForCleanup(WORKTREES_DIR);
+
+// Assert the redirect actually took before PART 2's real claude spawn below can reach ensureTrusted. A
+// dropped/broken redirect fails HERE, by name, and this file ABORTS rather than falling through to a
+// real spawn that would write the owner's real ~/.claude.json.
+{
+  const resolvedClaudeJsonPath = path.resolve(claudeJsonPath());
+  const expectedClaudeJsonPath = path.resolve(path.join(claudeConfigDir, ".claude.json"));
+  check("claudeJsonPath() resolves under this test's own temp CLAUDE_CONFIG_DIR, never the real ~/.claude.json",
+    resolvedClaudeJsonPath === expectedClaudeJsonPath);
+  if (resolvedClaudeJsonPath !== expectedClaudeJsonPath) {
+    console.log(`\n❌ ${failures} FAILURE(S) — refusing to proceed: claudeJsonPath() does not resolve under this test's own CLAUDE_CONFIG_DIR, so PART 2's real claude spawn below would reach the OWNER'S REAL ~/.claude.json. Aborting before any real spawn.`);
+    await finishAndExit(1);
+  }
+}
 
 // =====================================================================================================
 // PART 1 — buildSpawnEnv scrubs an inherited LOOM_MCP_TOKEN from the DAEMON's own process env

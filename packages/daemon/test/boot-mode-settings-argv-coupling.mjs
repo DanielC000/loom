@@ -44,11 +44,39 @@ process.env.LOOM_HOME = tmpHome;
 // preflight.mjs): resolveExecutable passes an absolute path through unchanged, so this makes createPty's
 // real spawn launch a real (harmless) node.exe process instead of a real `claude`.
 process.env.LOOM_CLAUDE_BIN = process.execPath;
+// Card 849acf9b: createPty's real spawn path reaches ensureTrustedResilient → ensureTrusted
+// unconditionally (host.ts), which writes a trust entry for `opts.cwd` into whatever claudeJsonPath()
+// resolves to. Left unredirected, that landed in the OWNER'S REAL ~/.claude.json on every run (612+
+// leaked `loom-bmsac-*` keys found by a read-only grep — see this card's worker_report). Redirect
+// CLAUDE_CONFIG_DIR (claudeJsonPath() honors it directly) AND HOME/USERPROFILE (belt-and-suspenders —
+// discoverProjectMcpServerNames, also called from ensureTrusted, walks up from cwd to os.homedir() for
+// ~/.mcp.json) to this test's own temp root BEFORE the ../dist import, same convention as
+// trust-lock.mjs/claude-config-worktree-prune.mjs.
+const claudeConfigDir = path.join(tmpHome, "claude-config");
+fs.mkdirSync(claudeConfigDir, { recursive: true });
+process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+process.env.HOME = tmpHome;
+process.env.USERPROFILE = tmpHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { ensureDirs, WORKTREES_DIR, SETTINGS_DIR } = await import("../dist/paths.js");
+const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
 ensureDirs();
 registerForCleanup(WORKTREES_DIR); // sibling of LOOM_HOME, created by production ensureDirs()
+
+// Assert the redirect actually took before any real spawn can reach ensureTrusted. This runs BEFORE
+// host.spawn() below by construction, so a dropped/broken redirect fails HERE, by name, and this file
+// ABORTS rather than falling through to a real spawn that would write the owner's real ~/.claude.json.
+{
+  const resolvedClaudeJsonPath = path.resolve(claudeJsonPath());
+  const expectedClaudeJsonPath = path.resolve(path.join(claudeConfigDir, ".claude.json"));
+  check("claudeJsonPath() resolves under this test's own temp CLAUDE_CONFIG_DIR, never the real ~/.claude.json",
+    resolvedClaudeJsonPath === expectedClaudeJsonPath);
+  if (resolvedClaudeJsonPath !== expectedClaudeJsonPath) {
+    console.log(`\n❌ ${failures} FAILURE(S) — refusing to proceed to a real spawn: claudeJsonPath() does not resolve under this test's own CLAUDE_CONFIG_DIR, so a real spawn below would reach the OWNER'S REAL ~/.claude.json. Aborting before host.spawn().`);
+    await finishAndExit(1);
+  }
+}
 
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new PtyHost(events);

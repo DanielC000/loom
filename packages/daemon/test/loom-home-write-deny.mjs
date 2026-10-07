@@ -489,9 +489,37 @@ if (process.platform !== "win32") {
   console.log("SKIP  loom-home-write-deny.mjs part 3 — the LOOM_CLAUDE_BIN real-node.exe-substitution technique this file uses was only established/verified on Windows; see transcript-root-deny-chokepoint.mjs's own header for the same gap.");
 } else {
   process.env.LOOM_CLAUDE_BIN = process.execPath;
+  // Card 849acf9b: the real spawns below reach ensureTrustedResilient -> ensureTrusted (host.ts)
+  // unconditionally, which writes a trust entry into whatever claudeJsonPath() resolves to. Left
+  // unredirected, that landed in the OWNER'S REAL ~/.claude.json on every run. Redirect CLAUDE_CONFIG_DIR
+  // (claudeJsonPath() honors it directly) AND HOME/USERPROFILE (belt-and-suspenders —
+  // discoverProjectMcpServerNames, also called from ensureTrusted, walks up from cwd to os.homedir() for
+  // ~/.mcp.json) to this test's own temp root BEFORE the ../dist import, same convention as
+  // trust-lock.mjs/claude-config-worktree-prune.mjs.
+  const claudeConfigDir = path.join(tmpHome, "claude-config");
+  fs.mkdirSync(claudeConfigDir, { recursive: true });
+  process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+
   const { PtyHost } = await import("../dist/pty/host.js");
   const { SETTINGS_DIR, WORKTREES_DIR } = await import("../dist/paths.js");
+  const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
   registerForCleanup(WORKTREES_DIR); // sibling of LOOM_HOME, created by production ensureDirs()
+
+  // Assert the redirect actually took before any real spawn below can reach ensureTrusted. A
+  // dropped/broken redirect fails HERE, by name, and this file ABORTS rather than falling through to a
+  // real spawn that would write the owner's real ~/.claude.json.
+  {
+    const resolvedClaudeJsonPath = path.resolve(claudeJsonPath());
+    const expectedClaudeJsonPath = path.resolve(path.join(claudeConfigDir, ".claude.json"));
+    check("claudeJsonPath() resolves under this test's own temp CLAUDE_CONFIG_DIR, never the real ~/.claude.json",
+      resolvedClaudeJsonPath === expectedClaudeJsonPath);
+    if (resolvedClaudeJsonPath !== expectedClaudeJsonPath) {
+      console.log(`\n❌ ${failures} FAILURE(S) — refusing to proceed: claudeJsonPath() does not resolve under this test's own CLAUDE_CONFIG_DIR, so PART 3's real spawns below would reach the OWNER'S REAL ~/.claude.json. Aborting before any real spawn.`);
+      await finishAndExit(1);
+    }
+  }
 
   const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
   const host = new PtyHost(events);

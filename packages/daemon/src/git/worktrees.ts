@@ -4421,6 +4421,16 @@ export const STATIC_GUARD_REPO_PATHS = [
   // harness-adapter-claude-literal-guard.mjs above: a source-TEXT property neither the reduced gate nor
   // the emit-compare transpile-identity check can see.
   "packages/daemon/test/no-src-testonly-import-guard.mjs",
+  // Card 849acf9b: a corpus-wide, comment-stripped scan of packages/daemon/test/*.mjs asserting every test
+  // that reaches the REAL `ensureTrusted`/`ensureTrustedResilient` (pty/claude-config.ts) — a direct call,
+  // or a real (unsubclassed/super-delegating) `PtyHost.createPty()` via the `LOOM_CLAUDE_BIN` real-process-
+  // substitution technique — redirects `CLAUDE_CONFIG_DIR` (or `HOME`+`USERPROFILE`) BEFORE that call, so it
+  // can never reach the owner's real `~/.claude.json`. Same ground as `createworktree-loom-home-guard.mjs`/
+  // `merge-quarantine-loom-home-guard.mjs` above: a NEW test file reintroducing this shape is a source-TEXT
+  // property neither the reduced gate nor the emit-compare transpile-identity check can see. Exempts
+  // `scripts/test-daemon.mjs`'s own `NOT_HERMETIC` set — see the guard's own header for why those files are
+  // a documented, different (surgically self-cleaning, manual-only) case.
+  "packages/daemon/test/ensure-trusted-config-dir-redirect-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
