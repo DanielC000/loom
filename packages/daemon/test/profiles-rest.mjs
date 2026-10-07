@@ -33,6 +33,44 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-prest-${Date.now()}-${proce
 process.env.LOOM_PORT = String(PORT);
 const LOOM_HOME = process.env.LOOM_HOME;
 fs.mkdirSync(LOOM_HOME, { recursive: true });
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// Card 042a4312: the daemon this file spawns below (env: { ...process.env, ... }) inherits whatever
+// CLAUDE_CONFIG_DIR/HOME/USERPROFILE are set in THIS process's env at spawn time. Before card 2365cc22
+// added LOOM_SUPPRESS_FIRST_RUN_LAUNCH below, a fresh LOOM_HOME with zero ordinary projects at boot (true
+// here, until this test seeds its own project further down) unconditionally fired the real Setup
+// Assistant first-run auto-launch (setup/first-run.ts) — a REAL `claude` spawn whose cwd resolves to
+// SETUP_HOME_PATH, which is LOOM_HOME itself (setup/seed.ts) — i.e. this file's own `loom-prest-*` temp
+// dir. That spawn reached createPty's unconditional `ensureTrustedAndReportDegrade` (host.ts), writing a
+// trust entry keyed on that `loom-prest-*` path into whatever claudeJsonPath() resolved to — the OWNER'S
+// REAL ~/.claude.json, since nothing here redirected it. A read-only grep of the real file found 970
+// leaked `loom-prest-*` keys accumulated this way before LOOM_SUPPRESS_FIRST_RUN_LAUNCH closed the live
+// trigger (card 2365cc22, 2026-10-04) — this redirect is the belt-and-suspenders fix so that, even if the
+// suppression flag is ever removed or some OTHER first-run-adjacent spawn path appears, this file still
+// cannot reach the real file. Same convention as the already-fixed siblings (boot-mode-settings-argv-
+// coupling.mjs et al., card 849acf9b): CLAUDE_CONFIG_DIR (claudeJsonPath() honors it directly) AND
+// HOME/USERPROFILE (belt-and-suspenders — discoverProjectMcpServerNames, also called from ensureTrusted,
+// walks up from cwd to os.homedir() for ~/.mcp.json) — set BEFORE the daemon spawn below, so the child's
+// `...process.env` spread inherits the redirect.
+const claudeConfigDir = path.join(LOOM_HOME, "claude-config");
+fs.mkdirSync(claudeConfigDir, { recursive: true });
+process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+process.env.HOME = LOOM_HOME;
+process.env.USERPROFILE = LOOM_HOME;
+const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
+{
+  const resolvedClaudeJsonPath = path.resolve(claudeJsonPath());
+  const expectedClaudeJsonPath = path.resolve(path.join(claudeConfigDir, ".claude.json"));
+  check("claudeJsonPath() resolves under this test's own temp CLAUDE_CONFIG_DIR, never the real ~/.claude.json",
+    resolvedClaudeJsonPath === expectedClaudeJsonPath);
+  if (resolvedClaudeJsonPath !== expectedClaudeJsonPath) {
+    console.log(`\n❌ FAILURE — refusing to proceed: claudeJsonPath() does not resolve under this test's own CLAUDE_CONFIG_DIR, so the daemon spawned below would risk reaching the OWNER'S REAL ~/.claude.json. Aborting before the daemon spawn.`);
+    process.exit(1);
+  }
+}
+
 requireHermeticEnv({ port: true });
 console.log(`profiles-rest: ownDaemon=${ownDaemon} PORT=${PORT} LOOM_HOME=${LOOM_HOME}`);
 
@@ -43,9 +81,6 @@ fs.mkdirSync(REPO_DIR, { recursive: true });
 fs.writeFileSync(path.join(REPO_DIR, "README.md"), "# profiles-rest test\n");
 execSync(`git init -q`, { cwd: REPO_DIR });
 commitAll(REPO_DIR, "init", "-c user.email=prest@loom -c user.name=prest");
-
-let failures = 0;
-const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 // The gateway's loopback write guard (card 4ff9a073, 2026-08-07) requires an
 // `Authorization: Bearer <loopback secret>` header on every non-GET /api/* request — set once the
 // daemon has booted (below) and the secret file is readable. GET is never guarded, so `loopbackToken`
