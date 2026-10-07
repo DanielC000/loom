@@ -983,6 +983,16 @@ export type OrchestrationEventKind =
   // REPORT_RESOLVED_EVENT_KINDS — same reasoning as `codex_auto_commit` above: an audit-only marker, not
   // a worker/manager lifecycle signal any of those four track.
   | "process_survived_kill"
+  // Card 5b97da80: `ensureTrusted` degraded to writing the ~/.claude.json trust flags WITHOUT the
+  // cross-process trust lock — its acquire attempt gave up (the lock stayed held by a confirmed-alive
+  // holder, or an unexpected FS error), so the write proceeded unlocked (a possible-clobber risk, never
+  // a refused/delayed spawn). Filed by `SessionService.handleTrustLockDegraded` (consumes
+  // `PtyHostEvents.onTrustLockDegraded`). `detail` carries {reason} — the same human-readable string
+  // `withTrustLock` already logs via `console.warn`. Deliberately NOT added to EVENT_TRIGGER_EVENT_KINDS/
+  // GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS — same reasoning as
+  // `process_survived_kill` above: an audit-only marker, not a worker/manager lifecycle signal any of
+  // those four track.
+  | "trust_lock_degraded"
   // Card ba22005b: a daemon-managed, fleet-shared background server child was recycled because its own
   // OS-sampled memory crossed a human-configured ceiling — a real host-process kill, filed as a
   // forensic/incident record, same bucket as `codex_auto_commit`. WHICH server and WHY stays documented
@@ -2004,6 +2014,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   vault_index_lock_cleared: true,
   profile_grant_reach: true, agent_profile_rebind: true,
   process_survived_kill: true,
+  trust_lock_degraded: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

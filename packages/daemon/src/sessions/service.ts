@@ -10180,6 +10180,21 @@ export class SessionService {
   }
 
   /**
+   * Card 5b97da80 — consumes `PtyHostEvents.onTrustLockDegraded`: ensureTrusted degraded to writing the
+   * ~/.claude.json trust flags WITHOUT the cross-process lock (its acquire attempt gave up). PtyHost has
+   * no DB (same layering boundary as handleProcessSurvivedKill above); this is purely an audit-only
+   * durable record — the write already happened either way, so this never delays or fails the spawn.
+   */
+  handleTrustLockDegraded(sessionId: string, info: { reason: string }): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "trust_lock_degraded", detail: { reason: info.reason },
+    });
+  }
+
+  /**
    * @decision 448f1b4a — deliberately ONE-SHOT: do not add a retry ladder here. A LATE boot-readiness
    * still resolves normally via the onData handler's own composite check.
    */

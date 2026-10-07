@@ -3776,6 +3776,11 @@ export interface PtyHostEvents {
     reason: "identity-unconfirmed" | "force-killed" | "force-kill-unconfirmed" | "check-failed"
       | "pid-now-live-session" | "creation-time-mismatch" | "creation-time-missing";
   }): void;
+  /** Card 5b97da80 — ensureTrusted degraded to writing the ~/.claude.json trust flags WITHOUT the
+   *  cross-process lock (see EnsureTrustedResult's own doc). PtyHost has no DB, same layering boundary
+   *  as onProcessSurvivedKill above; the implementer records a durable event. NEVER delays or fails the
+   *  spawn either way — the trust write already happened (locked or not) before this fires. OPTIONAL. */
+  onTrustLockDegraded?(sessionId: string, info: { reason: string }): void;
 }
 
 /**
@@ -7417,6 +7422,53 @@ export class PtyHost {
   }
 
   /**
+   * Pre-accept the workspace-trust dialog so warmup never blocks. SYNCHRONOUS on the hot path BY
+   * DESIGN — the trust flags MUST be persisted to ~/.claude.json before the pty spawns, else the
+   * unattended `claude` blocks on the trust prompt and never reaches SessionStart (the load-bearing
+   * trust-before-spawn invariant). This cannot move off the hot path à la markitdown.
+   *
+   * Why the bounded cross-process lock inside (claude-config withTrustLock) does NOT freeze the event
+   * loop on an orchestration fan-out: spawn()→createPty()→this→ensureTrustedResilient()→ensureTrusted()
+   * is a fully synchronous call chain (no await), and JS is single-threaded — so two in-process spawns
+   * CANNOT interleave. Each ensureTrusted acquires the O_EXCL lock and releases it (in finally) within
+   * one synchronous call stack before the event loop can start the next spawn, so the lock is NEVER
+   * contended in-process and the sleepSync wait loop is unreachable from a single daemon's own fan-out.
+   * A burst of N first-spawns is N sequential synchronous read-modify-writes (the lock adds only an
+   * uncontended openSync(wx)+rmSync each). The contended path (sleepSync up to trustLockMs) is reachable
+   * ONLY across processes — a second Loom daemon sharing this home, OR the standalone bulk-prune script
+   * (claude-config.ts's pruneDeadWorktreeClaudeConfigEntries, scripts/prune-claude-config-worktree-entries.mjs)
+   * — which is exactly the cross-process clobber the lock exists to prevent; there the bounded best-effort
+   * degrade is correct. Card 5b97da80: a HELD lock is now broken on a confirmed-dead holder pid, or past
+   * a hard age ceiling (see withTrustLock/shouldBreakLock's own doc) — never merely because it's been
+   * held longer than trustLockMs(), which used to break out from under a still-genuinely-alive holder
+   * (a real measured lost-update; see docs/decisions/5b97da80-*.md). The already-trusted fast path is
+   * lock-free and covers the steady state.
+   *
+   * ensureTrustedResilient (card f024f21b) wraps the call above with ONE bounded whole-call retry on a
+   * persistent transient Windows EPERM/EACCES/EBUSY — still fully synchronous, still no await. Per the
+   * reasoning directly above, the contender it's buying time against can NEVER be a sibling in-process
+   * spawn (those can't interleave) — it's an EXTERNAL holder of ~/.claude.json: a live `claude` CLI
+   * session reading/writing its own config, or an AV/indexer. See that function's own doc +
+   * docs/decisions/f024f21b-*.md.
+   *
+   * Extracted to its own method (card 5b97da80, Code Review f82607a6, Minor 3) so a hermetic test can
+   * call it directly — bypassing the real pty spawn entirely — to verify `onTrustLockDegraded` actually
+   * fires. `cwd`/`sessionId` are threaded through rather than `opts` itself so a test needs no other
+   * `SpawnOpts` fields. `createPty` below (card 5b97da80 round 3) calls this as its very first
+   * statement — a source-text wiring check in `trust-lock-incarnation-guard.mjs` pins that call site
+   * directly, since nothing here proves `createPty` still reaches this method.
+   */
+  protected ensureTrustedAndReportDegrade(cwd: string, sessionId: string): void {
+    const trustResult = ensureTrustedResilient(cwd);
+    if (!trustResult.locked) {
+      // Card 5b97da80: the write already happened (locked or not — ensureTrusted never refuses), so
+      // this is purely an observability record, never a reason to delay or fail the spawn.
+      try { this.events.onTrustLockDegraded?.(sessionId, { reason: trustResult.reason ?? "unknown" }); }
+      catch (e) { console.error(`[pty] onTrustLockDegraded handler threw for ${sessionId}; swallowed: ${(e as Error)?.message ?? e}`); }
+    }
+  }
+
+  /**
    * Build the interactive `claude` pty for a session — the spike-validated, gate-free spawn recipe
    * (absolute bin path for the Windows node-pty agent, env scrub of CLAUDECODE/CLAUDE_CODE_*,
    * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
@@ -7435,28 +7487,7 @@ export class PtyHost {
   // so an unthreaded override gets the OLD header-free map, never a literal "undefined" header.
   protected createPty(opts: SpawnOpts, hookToken?: string, mcpToken?: string): IPty {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
-    // Pre-accept the workspace-trust dialog so warmup never blocks. SYNCHRONOUS on the hot path BY
-    // DESIGN — the trust flags MUST be persisted to ~/.claude.json before the pty spawns, else the
-    // unattended `claude` blocks on the trust prompt and never reaches SessionStart (the load-bearing
-    // trust-before-spawn invariant). This cannot move off the hot path à la markitdown.
-    // Why the bounded cross-process lock inside (claude-config withTrustLock) does NOT freeze the event
-    // loop on an orchestration fan-out: spawn()→createPty()→ensureTrustedResilient()→ensureTrusted() is a
-    // fully synchronous call chain (no await), and JS is single-threaded — so two in-process spawns CANNOT
-    // interleave. Each ensureTrusted acquires the O_EXCL lock and releases it (in finally) within one
-    // synchronous call stack before the event loop can start the next spawn, so the lock is NEVER
-    // contended in-process and the sleepSync wait loop is unreachable from a single daemon's own fan-out.
-    // A burst of N first-spawns is N sequential synchronous read-modify-writes (the lock adds only an
-    // uncontended openSync(wx)+rmSync each). The contended path (sleepSync up to trustLockMs) is reachable
-    // ONLY across processes — a second Loom daemon sharing this home — which is exactly the cross-process
-    // clobber the lock exists to prevent; there the bounded 5s best-effort degrade is correct. The
-    // already-trusted fast path is lock-free and covers the steady state.
-    // ensureTrustedResilient (card f024f21b) wraps the call above with ONE bounded whole-call retry on a
-    // persistent transient Windows EPERM/EACCES/EBUSY — still fully synchronous, still no await. Per the
-    // reasoning directly above, the contender it's buying time against can NEVER be a sibling in-process
-    // spawn (those can't interleave) — it's an EXTERNAL holder of ~/.claude.json: a live `claude` CLI
-    // session reading/writing its own config, or an AV/indexer. See that function's own doc +
-    // docs/decisions/f024f21b-*.md.
-    ensureTrustedResilient(opts.cwd);
+    this.ensureTrustedAndReportDegrade(opts.cwd, opts.sessionId);
     // Mirror Loom's managed skills into <cwd>/.claude/skills (project-local; shadow personal). Never
     // let a skills hiccup block a spawn — a session must boot even if skill delivery fails. The Obsidian
     // signal rides opts.sessionEnv (set by obsidianSessionEnv ONLY when obsidian.autoStart is on) — the

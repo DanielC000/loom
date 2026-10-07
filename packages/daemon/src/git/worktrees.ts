@@ -4681,6 +4681,12 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // keeps comments, so a comment-only edit to index.ts containing "installCrashHandlers();" above the real
   // installEpipeTolerantStdio() call would flip this. Same shape as its sibling immediately above.
   "packages/daemon/test/epipe-tolerant-stdio.mjs",
+  // Card 5b97da80 round 3 (Code Review f82607a6): (E) raw-reads real src/pty/host.ts SOURCE and does an
+  // unstripped indexOf("protected createPty(opts: SpawnOpts")-then-windowed-includes("this.ensureTrustedAndReportDegrade(")
+  // check, proving createPty itself still calls that extracted method (the rest of the file tests the
+  // method directly, bypassing createPty, and can't see this wiring on its own). Same raw-scan shape as
+  // its siblings above — a comment-only edit near that call site could defeat it.
+  "packages/daemon/test/trust-lock-incarnation-guard.mjs",
   // Card 9c8ce2b2: extractMaxGenerations() raw-scans real packages/daemon/src/crashlog.ts SOURCE for
   // /CRASHLOG_MAX_GENERATIONS\s*=\s*(\d+)/ — an unanchored, whole-file `.match()` (not `^`/`m`-anchored to
   // a bare `const` line the way anchor-re-parity.mjs's immune shape is). MEASURED: inserting a plausible

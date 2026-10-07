@@ -142,14 +142,20 @@ const main = async () => {
     delete process.env.LOOM_TRUST_LOCK_MS;
   }
 
-  // === (b2) Stale lock (old mtime) → broken and acquired; the write succeeds promptly. ===
+  // === (b2) Stale lock (old mtime, no parseable pid content) → broken and acquired; the write
+  // succeeds promptly. Card 5b97da80: a lock with no parseable holder pid (this one's content,
+  // "crashed-holder", isn't valid {pid} JSON) can ONLY ever be broken via the hard age CEILING
+  // (staleLockCeilingMs — see that function's own doc), never the raw trustLockMs() timeout alone
+  // anymore — so this backdate must clear the CEILING, not just the timeout. ===
   {
     const configDir = path.join(root, "stale");
     fs.mkdirSync(configDir, { recursive: true });
     const isoJson = path.join(configDir, ".claude.json");
     const lockPath = `${isoJson}.loom-lock`;
     fs.writeFileSync(lockPath, "crashed-holder");
-    const old = (Date.now() - 60_000) / 1000; // 60s old (stale vs the 5000ms timeout)
+    // 120s old: with LOOM_TRUST_LOCK_MS=5000 below, the ceiling is max(10*5000, 60_000) = 60_000ms —
+    // double that for a clear, non-boundary margin (not just barely past it).
+    const old = (Date.now() - 120_000) / 1000;
     fs.utimesSync(lockPath, old, old);
     process.env.CLAUDE_CONFIG_DIR = configDir;
     // Generous timeout so the assertion proves a BEHAVIOR (a stale lock is broken on the first

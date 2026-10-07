@@ -455,6 +455,11 @@ async function main(): Promise<void> {
     // event. See PtyHostEvents.onProcessSurvivedKill's own doc / SessionService.handleProcessSurvivedKill's
     // own doc.
     onProcessSurvivedKill: (sessionId, info) => sessions.handleProcessSurvivedKill(sessionId, info),
+    // Card 5b97da80: ensureTrusted degraded to writing the ~/.claude.json trust flags without the
+    // cross-process lock — `sessions` (same no-DB-in-PtyHost layering as onProcessSurvivedKill above)
+    // records the durable event. See PtyHostEvents.onTrustLockDegraded's own doc /
+    // SessionService.handleTrustLockDegraded's own doc.
+    onTrustLockDegraded: (sessionId, info) => sessions.handleTrustLockDegraded(sessionId, info),
     // Card fedef6a0: a codex submit's confirm-or-retry ladder exhausted its retries with no busy-marker
     // sighting since the last Enter write — `sessions` (forward reference, same pattern as
     // onRepeatedToolCall above) decides how to record the durable event + fail loud to the recipient AND

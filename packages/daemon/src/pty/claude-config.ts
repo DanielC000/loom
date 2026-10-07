@@ -235,15 +235,142 @@ function isFullyDecided(cfg: ClaudeCfg, key: string, canonicalKey: string, mcpTo
   return mcpToDisable.every((n) => set.has(n));
 }
 
-/** Cross-process lock timeout AND staleness threshold (ms). Env-overridable for tests. */
+/** Cross-process lock ACQUIRE DEADLINE (ms): how long THIS caller personally waits before giving up
+ *  and degrading. Env-overridable for tests. Card 5b97da80: this used to ALSO serve as the staleness
+ *  threshold (see {@link staleLockCeilingMs} for why that was wrong and what replaced it) — the name
+ *  and doc were corrected to state only what this constant actually governs now. */
 function trustLockMs(): number {
   const n = Number(process.env.LOOM_TRUST_LOCK_MS);
   return Number.isFinite(n) && n > 0 ? n : 5000;
 }
 
+/**
+ * The HARD CEILING a held lock's age must exceed before {@link shouldBreakLock} breaks it regardless of
+ * what the holder-liveness probe says. A backstop, not the normal recovery path (that's a confirmed-dead
+ * pid, no age check needed) — set far above any real measured hold (ensureTrusted/the bulk prune topped
+ * out at ~271ms at 60,000 synthetic entries), so a genuine still-alive holder is never caught by it. No
+ * separate env override: a project needing a bigger ceiling raises `LOOM_TRUST_LOCK_MS`, raising both
+ * numbers together.
+ *
+ * @decision 5b97da80 — never remove this ceiling or make pid-liveness the sole break condition: if the
+ * OS reuses a crashed holder's pid for an unrelated live process before anyone checks, that pid reads
+ * "alive" forever, and without this backstop the lock wedges permanently — worse than the heuristic it replaces.
+ */
+function staleLockCeilingMs(): number {
+  return Math.max(10 * trustLockMs(), 60_000);
+}
+
 /** Synchronous sleep that parks the thread (no busy-spin) — ensureTrusted is sync by contract. */
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Card 5b97da80: the lock file's own content, written at acquire time so a later waiter can identify
+ *  (and liveness-probe) the holder instead of treating the lockfile as an opaque marker. */
+function lockHolderContent(): string {
+  return JSON.stringify({ pid: process.pid, acquiredAt: Date.now() });
+}
+
+/** TEST SEAM: swap the `fs.statSync(path, {bigint:true})` {@link shouldBreakLock} uses to identify a
+ *  lock's filesystem INCARNATION (dev+ino), separate from `__setStatSyncForTest` above (that one feeds
+ *  `classifyPathLiveness`'s unrelated worktree-liveness checks — conflating the two would make a test
+ *  fault-injecting one unintentionally affect the other). Lets a hermetic test simulate a lock being
+ *  released and re-created with a DIFFERENT incarnation between two calls — the exact race dev+ino
+ *  (not mtime alone) exists to catch (Code Review f82607a6, Minor 1). Defaults to the real bigint
+ *  `fs.statSync`; production code never calls the setter. */
+type LockStatSyncFn = (p: string) => fs.BigIntStats;
+let lockStatSyncImpl: LockStatSyncFn = (p) => fs.statSync(p, { bigint: true });
+export function __setLockStatSyncForTest(fn?: LockStatSyncFn): void {
+  lockStatSyncImpl = fn ?? ((p) => fs.statSync(p, { bigint: true }));
+}
+
+/** TEST SEAM: swap the `fs.readFileSync` {@link readLockHolderContent} uses to read a lock's own
+ *  holder-identity content — separate from `__setReadFileSyncForTest` above (that one feeds
+ *  `readCfgFailClosed`'s unrelated `.claude.json` read). Lets a hermetic test simulate the lock's
+ *  content changing (or staying fixed) between the two reads {@link shouldBreakLock} makes. Defaults
+ *  to the real `fs.readFileSync`; production code never calls the setter. */
+type LockContentReadFn = (p: string) => string;
+let lockContentReadImpl: LockContentReadFn = (p) => fs.readFileSync(p, "utf8");
+export function __setLockContentReadForTest(fn?: LockContentReadFn): void {
+  lockContentReadImpl = fn ?? ((p) => fs.readFileSync(p, "utf8"));
+}
+
+/** A lock file's parsed holder-identity content (card 5b97da80). */
+interface LockHolderContent { pid: number; acquiredAt: number }
+
+/** Best-effort parse of a lock file's JSON content (card 5b97da80). Returns `null` for anything that
+ *  isn't a well-formed `{pid:number, acquiredAt:number}` object — a lock written by a pre-fix Loom
+ *  build (an empty marker file), or any other unreadable/malformed content, is UNKNOWN liveness, never
+ *  a confirmed-dead holder (the same "unknown treated like alive, never deleted" conservatism
+ *  {@link classifyPathLiveness} already uses elsewhere in this file). */
+function readLockHolderContent(lockPath: string): LockHolderContent | null {
+  try {
+    const parsed = JSON.parse(lockContentReadImpl(lockPath)) as { pid?: unknown; acquiredAt?: unknown };
+    if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return null;
+    if (typeof parsed.acquiredAt !== "number") return null;
+    return { pid: parsed.pid, acquiredAt: parsed.acquiredAt };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Card 5b97da80: a synchronous, cross-platform liveness probe for a lock's recorded holder pid.
+ * `process.kill(pid, 0)` sends no signal; it only probes existence, and works synchronously on both
+ * POSIX and win32 (verified against a real win32 host: a live pid never throws, pid 999999 throws
+ * ESRCH). `ESRCH` unambiguously means the pid no longer exists — confirmed dead. `EPERM` means the pid
+ * EXISTS but we lack permission to signal it — still alive (e.g. pid 4 "System" on win32, or pid 1
+ * "init" on POSIX as a non-root caller — see `packages/daemon/test/trust-lock-incarnation-guard.mjs`'s
+ * pinned EPERM coverage, Code Review f82607a6 Minor 2). Anything else (including no error at all, i.e.
+ * a live pid) is NOT treated as dead — same "unknown == alive" conservatism as `classifyPathLiveness`.
+ */
+function isPidConfirmedDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/**
+ * Should a HELD lock (one we just failed to acquire with EEXIST) be broken? `stat` must be the
+ * caller's own fresh {@link lockStatSyncImpl} bigint stat of that same lock, taken right before this
+ * call. Two independent break conditions, either is sufficient: (1) the recorded holder pid is
+ * confirmed dead ({@link isPidConfirmedDead}) — detected on the FIRST poll, not only after the lock
+ * ages past some threshold; (2) the lock is older than {@link staleLockCeilingMs} — a hard backstop
+ * against OS pid reuse making condition (1) falsely read "alive" forever. A lock with no parseable
+ * holder content can only ever be broken via condition (2).
+ */
+export function shouldBreakLock(lockPath: string, stat: fs.BigIntStats): boolean {
+  const age = Date.now() - Number(stat.mtimeMs);
+  if (age > staleLockCeilingMs()) return true;
+  const content = readLockHolderContent(lockPath);
+  if (content === null || !isPidConfirmedDead(content.pid)) return false;
+  // @decision 5b97da80 — never trust a dead-pid verdict without re-verifying the SAME lock incarnation:
+  // mtime equality alone does NOT prove it (measured 1064/2000 identical-mtime collisions across
+  // distinct dev+ino on a real NTFS host). Require dev+ino equality AND byte-identical re-read content.
+  let reStat: fs.BigIntStats;
+  try { reStat = lockStatSyncImpl(lockPath); } catch { return false; /* vanished under us */ }
+  if (reStat.dev !== stat.dev || reStat.ino !== stat.ino) return false;
+  const reContent = readLockHolderContent(lockPath);
+  return reContent !== null && reContent.pid === content.pid && reContent.acquiredAt === content.acquiredAt;
+}
+
+/** Open `lockPath` exclusively and write the holder-identity content into it (card 5b97da80). On
+ *  failure the error `code` rides the return (never swallowed) so a caller can classify it — e.g.
+ *  `withTrustLock`'s loop distinguishes a transient Windows error from a genuine `EEXIST` — without a
+ *  second, redundant (and racy: the lock's state could change between two separate open attempts)
+ *  `openSync` call just to recover the code attemptCreateLock already saw. A content-write failure
+ *  AFTER a successful create is swallowed — best-effort diagnostics, never a reason to report the lock
+ *  as not-held when the exclusive create itself already succeeded. */
+function attemptCreateLock(lockPath: string): { ok: true } | { ok: false; code: string } {
+  let fd: number;
+  try { fd = openSyncImpl(lockPath, "wx"); }
+  catch (err) { return { ok: false, code: (err as NodeJS.ErrnoException).code ?? "" }; }
+  try { fs.writeSync(fd, lockHolderContent()); } catch { /* best-effort — we still hold the lock */ }
+  try { fs.closeSync(fd); } catch { /* already gone */ }
+  return { ok: true };
 }
 
 /**
@@ -253,8 +380,8 @@ function sleepSync(ms: number): void {
  *
  * BOUNDED + NEVER-DEADLOCK + NEVER-NEWLY-FATAL (load-bearing — this is on the spawn path):
  * - Acquire with a short retry loop up to `trustLockMs()`.
- * - If the lock is STALE (mtime older than the timeout → the holder crashed without releasing),
- *   break it and retry.
+ * - If the lock looks abandoned ({@link shouldBreakLock} — a confirmed-dead holder, or the hard
+ *   ceiling), break it and retry.
  * - If we still can't acquire within the timeout, proceed best-effort WITHOUT the lock (warn).
  *   Worst case degrades to exactly the pre-lock behavior (a possible clobber) — never a hang.
  * - A transient Windows EPERM/EACCES/EBUSY on the acquire `open` (see transientFsRetryLimit()
@@ -270,60 +397,90 @@ function sleepSync(ms: number): void {
  * acquire+`fn`+release completes within one synchronous call stack before the event loop starts the
  * next spawn. The lock is therefore NEVER contended by this daemon's own (even fan-out) spawns, so
  * the sleepSync retry loop is unreachable in-process; it fires ONLY when another PROCESS holds the
- * lock (a second Loom daemon sharing ~/.claude.json — the cross-process clobber this lock exists to
- * prevent), and there it is bounded by trustLockMs() and degrades best-effort rather than hanging.
+ * lock (a second Loom daemon sharing ~/.claude.json, OR the standalone bulk-prune script — the
+ * cross-process clobber this lock exists to prevent), and there it is bounded by trustLockMs() and
+ * degrades best-effort rather than hanging.
+ * @decision 5b97da80 — do not convert this to an async wait: createPty's own synchronous contract (the
+ * trust write MUST land before the pty spawns) requires this call chain to stay fully synchronous.
  *
  * `opts.requireLock` (card 498452c0 review item 3): when set, a caller that cannot tolerate the
  * best-effort unlocked degrade — a BULK write that deletes many entries at once, where writing unlocked
  * risks clobbering a concurrent writer's own in-flight change — gets `fn` SKIPPED (never called) once
  * the acquire loop above gives up, instead of the ordinary best-effort "run unlocked anyway". The
- * return value reports whether the lock was actually held when (and only when) `fn` ran; a caller that
- * doesn't pass `requireLock` can ignore it — `fn` always runs exactly as before, byte-identical to the
- * pre-498452c0-round-2 behaviour (`ensureTrusted`'s own call is unchanged by this addition).
+ * return's `held` reports whether the lock was actually held when (and only when) `fn` ran; `reason` is
+ * set (card 5b97da80) whenever `held` is false, naming why — a caller that doesn't pass `requireLock`
+ * can ignore both; `fn` always runs exactly as before, byte-identical to the pre-498452c0-round-2
+ * behaviour (`ensureTrusted`'s own call is unchanged by this addition beyond now reading `reason`).
  */
-function withTrustLock(lockPath: string, fn: () => void, opts?: { requireLock?: boolean }): boolean {
+/** Card 5b97da80, Code Review f82607a6 Minor 4: per-process memo of lock INCARNATIONS (dev+ino) already
+ *  waited out to the acquire deadline at least once. Without this, a stuck-but-alive (or unparseable,
+ *  or pid-reused) lock makes EVERY non-fast-path `ensureTrusted` call sleepSync the FULL `trustLockMs()`
+ *  again — up to ~12 whole-daemon event-loop freezes in a spawn burst, where pre-fix only the FIRST
+ *  spawn ever paid that cost. A later call against the SAME incarnation degrades immediately instead of
+ *  re-waiting; a genuinely DIFFERENT incarnation (the holder actually changed) gets its own fresh wait.
+ *  Bounded defensively against unbounded growth over a long daemon lifetime (in practice there is only
+ *  ever one real `.claude.json` lock path and realistically few distinct stuck incarnations ever seen). */
+const knownStuckIncarnations = new Set<string>();
+const MAX_KNOWN_STUCK_INCARNATIONS = 1000;
+function incarnationKey(lockPath: string, dev: bigint, ino: bigint): string { return `${lockPath}:${dev}:${ino}`; }
+/** TEST SEAM: reset the module-level memo above between hermetic test scenarios in the SAME process. */
+export function __clearKnownStuckIncarnationsForTest(): void { knownStuckIncarnations.clear(); }
+
+function withTrustLock(lockPath: string, fn: () => void, opts?: { requireLock?: boolean }): { held: boolean; reason?: string } {
   const timeout = trustLockMs();
   const deadline = Date.now() + timeout;
   let held = false;
   let transientAttempt = 0;
+  let degradeReason: string | undefined;
   try { fs.mkdirSync(path.dirname(lockPath), { recursive: true }); } catch { /* best-effort */ }
   while (true) {
-    try {
-      fs.closeSync(openSyncImpl(lockPath, "wx"));
-      held = true;
-      break;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code ?? "";
-      if (isTransientFsError(code)) {
-        // Windows can throw EPERM/EACCES/EBUSY here instead of EEXIST when our create races another
-        // process's release (rmSync) of this SAME lockfile — reproduced with 12 concurrent writers and
-        // ZERO ambient processes involved, i.e. a real bug, not ambient load. Treating it as a permanent
-        // "odd FS error" used to break out lock-FREE and run the read-modify-write below unlocked — a
-        // genuine clobber. Retry it bounded (same limit/backoff as writeJsonAtomic's rename retry);
-        // only once that budget is exhausted does it fall through to the pre-existing best-effort
-        // (lock-free) degrade below.
-        if (transientAttempt < transientFsRetryLimit()) {
-          sleepSync(Math.min(50, 2 ** transientAttempt));
-          transientAttempt++;
-          continue;
-        }
+    const attempt = attemptCreateLock(lockPath);
+    if (attempt.ok) { held = true; break; }
+    const code = attempt.code;
+    if (isTransientFsError(code)) {
+      // Windows can throw EPERM/EACCES/EBUSY here instead of EEXIST when our create races another
+      // process's release (rmSync) of this SAME lockfile — reproduced with 12 concurrent writers and
+      // ZERO ambient processes involved, i.e. a real bug, not ambient load. Treating it as a permanent
+      // "odd FS error" used to break out lock-FREE and run the read-modify-write below unlocked — a
+      // genuine clobber. Retry it bounded (same limit/backoff as writeJsonAtomic's rename retry);
+      // only once that budget is exhausted does it fall through to the pre-existing best-effort
+      // (lock-free) degrade below.
+      if (transientAttempt < transientFsRetryLimit()) {
+        sleepSync(Math.min(50, 2 ** transientAttempt));
+        transientAttempt++;
+        continue;
       }
-      if (code !== "EEXIST") break; // genuinely unexpected (or exhausted-transient) error → best-effort
-      // Lock is held by someone else. Break it only if it looks stale (crashed holder).
-      try {
-        const age = Date.now() - fs.statSync(lockPath).mtimeMs;
-        if (age > timeout) { try { fs.rmSync(lockPath); } catch { /* lost the race */ } continue; }
-      } catch { continue; /* lock vanished between open and stat → retry immediately */ }
-      if (Date.now() >= deadline) {
-        console.warn(`[claude-config] trust lock ${lockPath} busy after ${timeout}ms — ${
-          opts?.requireLock ? "requireLock set, SKIPPING the write" : "proceeding best-effort (possible clobber)"
-        }`);
-        break;
-      }
-      sleepSync(50);
     }
+    if (code !== "EEXIST") {
+      degradeReason = `trust lock ${lockPath} acquire failed with an unexpected error (${code || "unknown"}) — proceeding best-effort (possible clobber)`;
+      break; // genuinely unexpected (or exhausted-transient) error → best-effort
+    }
+    // Lock is held by someone else. Break it only if it looks abandoned (card 5b97da80 — see
+    // shouldBreakLock's own doc: a confirmed-dead holder, or the hard ceiling).
+    let lockStat: fs.BigIntStats;
+    try { lockStat = lockStatSyncImpl(lockPath); }
+    catch { continue; /* lock vanished between open and stat → retry immediately */ }
+    if (shouldBreakLock(lockPath, lockStat)) { try { fs.rmSync(lockPath); } catch { /* lost the race */ } continue; }
+    const key = incarnationKey(lockPath, lockStat.dev, lockStat.ino);
+    if (knownStuckIncarnations.has(key)) {
+      // Card 5b97da80 Minor 4: this EXACT incarnation already cost a full wait once this process —
+      // degrade immediately rather than paying another whole-daemon sleepSync(trustLockMs()) freeze.
+      degradeReason = `trust lock ${lockPath} is a previously-observed stuck incarnation (dev=${lockStat.dev} ino=${lockStat.ino}) — degrading immediately without re-waiting`;
+      console.warn(`[claude-config] ${degradeReason}`);
+      break;
+    }
+    if (Date.now() >= deadline) {
+      degradeReason = `trust lock ${lockPath} busy after ${timeout}ms — ${
+        opts?.requireLock ? "requireLock set, SKIPPING the write" : "proceeding best-effort (possible clobber)"
+      }`;
+      console.warn(`[claude-config] ${degradeReason}`);
+      if (knownStuckIncarnations.size >= MAX_KNOWN_STUCK_INCARNATIONS) knownStuckIncarnations.clear();
+      knownStuckIncarnations.add(key);
+      break;
+    }
+    sleepSync(50);
   }
-  if (!held && opts?.requireLock) return false; // caller must perform NO write when the lock couldn't be acquired
+  if (!held && opts?.requireLock) return { held: false, reason: degradeReason }; // caller must perform NO write when the lock couldn't be acquired
   try {
     fn();
   } finally {
@@ -331,31 +488,51 @@ function withTrustLock(lockPath: string, fn: () => void, opts?: { requireLock?: 
       try { fs.rmSync(lockPath); } catch { /* already gone */ }
     }
   }
-  return held;
+  return { held, reason: held ? undefined : degradeReason };
 }
 
 /**
- * Non-blocking, SINGLE-ATTEMPT variant of the acquire step above, for a caller that must never sleep or
- * retry (card 498452c0 review item 1b: the per-worktree GC removal hot path). Makes exactly one `wx`
- * create attempt and returns immediately: `true` (and the lock is HELD — the caller owns releasing it
- * via {@link releaseTrustLockOnce}) only on that attempt's bare success; `false` for ANY failure
- * whatsoever — held by someone else, a transient Windows FS error, or anything else. `false` means
+ * Non-blocking variant of the acquire step above, for a caller that must never sleep or loop (card
+ * 498452c0 review item 1b: the per-worktree GC removal hot path). Makes a `wx` create attempt and
+ * returns immediately: `true` (and the lock is HELD — the caller owns releasing it via
+ * {@link releaseTrustLockOnce}) on success; `false` for ANY failure that doesn't recover. `false` means
  * "skip entirely for now", never "proceed unlocked" — unlike {@link withTrustLock}'s own best-effort
  * degrade, a caller of this function must do nothing when it returns false.
+ *
+ * @decision 5b97da80 — ONE bounded extra attempt (never a sleep, never a loop) when the first attempt's
+ * failure is a held lock that {@link shouldBreakLock} judges abandoned (confirmed-dead holder, or past
+ * the hard ceiling). Before this, a crashed holder's lockfile disabled every GC removal forever, with
+ * recovery depending entirely on an UNRELATED `withTrustLock` caller's own stale-break happening to clear
+ * it as a side effect. This still honors the "never sleep or retry" contract: it is a single additional
+ * synchronous attempt, not a retry loop.
  */
 function tryTrustLockOnce(lockPath: string): boolean {
   try { fs.mkdirSync(path.dirname(lockPath), { recursive: true }); } catch { /* best-effort */ }
-  try {
-    fs.closeSync(openSyncImpl(lockPath, "wx"));
-    return true;
-  } catch {
-    return false;
-  }
+  if (attemptCreateLock(lockPath).ok) return true;
+  let lockStat: fs.BigIntStats;
+  try { lockStat = lockStatSyncImpl(lockPath); } catch { return attemptCreateLock(lockPath).ok; /* vanished → one more try */ }
+  if (!shouldBreakLock(lockPath, lockStat)) return false;
+  try { fs.rmSync(lockPath); } catch { return false; /* lost the race */ }
+  return attemptCreateLock(lockPath).ok;
 }
 
 /** Release a lock acquired via {@link tryTrustLockOnce}. Best-effort — never throws. */
 function releaseTrustLockOnce(lockPath: string): void {
   try { fs.rmSync(lockPath); } catch { /* already gone */ }
+}
+
+/** {@link ensureTrusted}'s result (card 5b97da80). `locked:true` means either no write was needed (the
+ *  fast path) or the write ran under the lock — nothing could have raced. `locked:false` means
+ *  ensureTrusted degraded to writing WITHOUT the lock after its acquire attempt gave up (see
+ *  `withTrustLock`'s own doc) — the write still happened (ensureTrusted never refuses: the trust write
+ *  must land before the pty spawns), but it ran unlocked and carries a possible-clobber risk; `reason`
+ *  (always present when `locked` is false) is the human-readable cause, the same text `withTrustLock`
+ *  already logs via `console.warn`. A caller that wants this degrade to be durably OBSERVABLE (rather
+ *  than just a transient log line) records it itself — see `pty/host.ts`'s `createPty` for the one real
+ *  caller that does. */
+export interface EnsureTrustedResult {
+  locked: boolean;
+  reason?: string;
 }
 
 /**
@@ -410,7 +587,7 @@ function releaseTrustLockOnce(lockPath: string): void {
  * Loom. An external `claude` process writing .claude.json honors no Loom lock, so a Loom-vs-external
  * clobber is still possible; we can't lock an uncooperative external writer.
  */
-export function ensureTrusted(dir: string): void {
+export function ensureTrusted(dir: string): EnsureTrustedResult {
   const claudeJson = claudeJsonPath();
   const key = path.resolve(dir).replace(/\\/g, "/");
   // The CLI's OWN read key for the external-import dialog (canonical git root — the main checkout for a
@@ -420,12 +597,12 @@ export function ensureTrusted(dir: string): void {
   const mcpToDisable = discoverProjectMcpServerNames(dir); // [] when none → trust-only, pre-fix behavior
 
   // Fast-path, lock-free: already trusted, the import dialog already decided, AND every discovered MCP
-  // server pre-rejected → no-op (common).
-  if (isFullyDecided(readCfg(claudeJson), key, canonicalKey, mcpToDisable)) return;
+  // server pre-rejected → no-op (common). Nothing was written, so there's nothing that could have raced.
+  if (isFullyDecided(readCfg(claudeJson), key, canonicalKey, mcpToDisable)) return { locked: true };
 
   // A write is needed — serialize it. RE-READ inside the lock: another writer may have changed
   // (or already decided) the config since the fast-path read above.
-  withTrustLock(`${claudeJson}.loom-lock`, () => {
+  const { held, reason } = withTrustLock(`${claudeJson}.loom-lock`, () => {
     const cfg = readCfg(claudeJson);
     if (isFullyDecided(cfg, key, canonicalKey, mcpToDisable)) return;
     cfg.projects ??= {};
@@ -463,6 +640,7 @@ export function ensureTrusted(dir: string): void {
 
     writeJsonAtomic(claudeJson, cfg);
   });
+  return { locked: held, reason };
 }
 
 // Card f024f21b: the gap between an exhausted whole `ensureTrusted()` attempt and the single outer retry
@@ -500,17 +678,18 @@ const ENSURE_TRUSTED_RETRY_MAX_MS = 400;
  * @decision f024f21b — never widen transientFsRetryLimit()/the per-rename backoff to "fix" this; that was
  * already decided against on 53e64114. This is strictly a second whole-call attempt on top of it.
  */
-export function ensureTrustedResilient(dir: string): void {
+export function ensureTrustedResilient(dir: string): EnsureTrustedResult {
   try {
-    ensureTrusted(dir);
+    return ensureTrusted(dir);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? "";
     if (!isTransientFsError(code)) throw err;
     const jitterMs = ENSURE_TRUSTED_RETRY_MIN_MS + Math.random() * (ENSURE_TRUSTED_RETRY_MAX_MS - ENSURE_TRUSTED_RETRY_MIN_MS);
     sleepSync(jitterMs);
     try {
-      ensureTrusted(dir);
+      const result = ensureTrusted(dir);
       console.warn(`[claude-config] ensureTrusted: transient ${code} exhausted its retry budget — whole-call retry succeeded`);
+      return result;
     } catch (err2) {
       const code2 = (err2 as NodeJS.ErrnoException).code ?? "";
       console.warn(`[claude-config] ensureTrusted: transient ${code} exhausted its retry budget — whole-call retry also failed (${code2 || "?"}) — giving up`);
@@ -634,9 +813,11 @@ export function removeClaudeConfigEntryForWorktree(worktreePath: string): void {
       const lockPath = `${claudeJson}.loom-lock`;
       if (!tryTrustLockOnce(lockPath)) {
         // Card f761fdf3 item 2: this used to skip SILENTLY. "caught by a later GC" was false — a later
-        // GC removal only ever matches its OWN worktree's path, never a previously-skipped one — and
-        // tryTrustLockOnce never breaks a stale lock either, so a crashed holder's lockfile would
-        // otherwise silently disable every GC removal forever. Recovery is the owner-run bulk prune
+        // GC removal only ever matches its OWN worktree's path, never a previously-skipped one. Card
+        // 5b97da80: tryTrustLockOnce now DOES recover from a crashed holder (a confirmed-dead pid, or a
+        // lock past the hard age ceiling) via its own bounded extra attempt — a `false` here means the
+        // lock is held by a CONFIRMED-ALIVE holder (correctly left alone), not merely "stale". Recovery
+        // for the alive-holder case is still the owner-run bulk prune
         // (pruneDeadWorktreeClaudeConfigEntries / scripts/prune-claude-config-worktree-entries.mjs), not
         // a later GC.
         console.warn(`[claude-config] trust lock busy — skipped pruning entry for removed worktree ${worktreePath}; recovery is the owner-run bulk prune, not a later GC (a later GC only matches its own worktree's path)`);
@@ -819,7 +1000,7 @@ export function pruneDeadWorktreeClaudeConfigEntries(
   let result = base({ deadCount: dead.length, deadKeysSample, unknownKeys: unknown });
   // Review item 3: the real write must never proceed unlocked — requireLock means `fn` below is simply
   // never called if the acquire loop gives up, and `held` tells us which happened.
-  const held = withTrustLock(`${claudeJson}.loom-lock`, () => {
+  const { held } = withTrustLock(`${claudeJson}.loom-lock`, () => {
     const fresh = readCfgFailClosed(claudeJson);
     if ("error" in fresh) { result = base({ parseError: fresh.error }); return; }
     const freshProjects = fresh.cfg.projects;
