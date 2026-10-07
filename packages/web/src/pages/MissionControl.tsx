@@ -10,7 +10,7 @@ import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
 import { color, font } from "../theme";
 import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, WaveConsumption } from "../components/fleet";
-import { archivedOnlyProjects, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
+import { archivedOnlyProjects, ARCHIVED_ONLY_CAP, resolveAttentionProjectId, type ArchivedOnlyProject } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import { AuditReplayPanel } from "../components/auditReplay";
@@ -158,13 +158,30 @@ export default function MissionControl() {
     return next;
   });
 
-  // Attention items resolved to their owning project (via the item's session id) → a per-project
-  // "needs a human" count for the small summary cards. Reuses the already-derived attention queue.
+  // Attention items resolved to their owning project → a per-project "needs a human" count for the small
+  // summary cards. Reuses the already-derived attention queue, and resolves through the SAME shared
+  // resolver the project Overview's own `projAttention` LIST uses (`attentionItemInProject`, lib/fleet.ts —
+  // its anchor there carries the resolution order and the bound). Single-sourced deliberately: this count
+  // and that list describe the same set, so a divergence here would show as a card reading "3" beside an
+  // Overview listing 2 (card 5ced500b).
+  //
+  // The session lookup spans the live feed PLUS the archived page this page already polls, which is what
+  // makes an ARCHIVED session's item countable at all. No agent↦project fallback is passed: this page
+  // fetches no agents, so a codex-gap row whose session has aged past the 300-row archive page stays
+  // uncounted here — the Overview, which does hold that map, still resolves it.
+  const sessionProjectIndex = new Map<string, string>();
+  const projectNameById = new Map<string, string>();
+  for (const s of [...all, ...archivedItems]) {
+    sessionProjectIndex.set(s.id, s.projectId);
+    projectNameById.set(s.projectId, s.projectName);
+  }
   const attnByProject = new Map<string, number>();
   for (const item of attention) {
-    const sid = item.sessionId ?? item.workerSessionId;
-    const s = sid ? all.find((x) => x.id === sid) : undefined;
-    if (s) attnByProject.set(s.projectName, (attnByProject.get(s.projectName) ?? 0) + 1);
+    const pid = resolveAttentionProjectId(item, { sessionProjectId: (id) => sessionProjectIndex.get(id) });
+    // Keyed by NAME, matching the fleet cards this count renders on. A project with no live or recently-
+    // archived session has no card to show a count on, so an unnameable id is simply skipped.
+    const name = pid ? projectNameById.get(pid) : undefined;
+    if (name) attnByProject.set(name, (attnByProject.get(name) ?? 0) + 1);
   }
 
   // Replay roots: every manager you can replay — LIVE managers first (the wave you're driving, ordered

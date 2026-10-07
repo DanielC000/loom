@@ -251,3 +251,66 @@ export function activeCodexIsolationGapAlerts(events: readonly OrchestrationEven
   }
   return out;
 }
+
+// ── ATTENTION ITEM → OWNING PROJECT ─────────────────────────────────────────────────────────────────────
+// The ONE resolver behind every project-scoped read of the attention queue: the project Overview's
+// `projAttention` list and Mission Control's per-project `attnByProject` count.
+//
+// @decision 5ced500b — never resolve an attention item's project through the LIVE session feed alone
+// (that silently hid every archived session's item from the project Overview), and never read an
+// undefined return as proof the item belongs to no project — the session pages behind it are bounded.
+//
+// RESOLUTION ORDER — first answer wins:
+//   1. `item.projectId` (the item's own source row stated one) — returned IMMEDIATELY, so a FOREIGN
+//      project's id rejects the item outright rather than falling through to a locally-resolvable sid.
+//   2. `item.sessionId ?? item.workerSessionId` via `sessionProjectId` — each caller feeds that lookup
+//      BOTH its live feed and whatever archived page it already polls. The pre-existing path: an item
+//      that resolved before resolves identically.
+//   3. `item.agentId` via `agentProjectId`, for a caller holding an agent↦project map. Omit the lookup
+//      and this step is skipped (Mission Control fetches no agents).
+//
+// Typed structurally rather than as `AttentionItem` because lib/attention.ts imports THIS module, so
+// naming its type here would be a cycle. `AttentionItem` satisfies this shape.
+export interface AttentionProjectFields {
+  /** Authoritative when present — the item's own source row carried a project id. */
+  projectId?: string | null;
+  /** Fallback hint: the agent the item is about, for a caller holding an agent↦project map. */
+  agentId?: string | null;
+  sessionId?: string | null;
+  workerSessionId?: string | null;
+}
+
+export interface AttentionProjectLookup {
+  /** session id → its project id, across every session feed the caller holds (live AND archived). */
+  sessionProjectId?: (sessionId: string) => string | undefined;
+  /** agent id → its project id. Omitted ⇒ step 3 above is skipped. */
+  agentProjectId?: (agentId: string) => string | undefined;
+}
+
+/** The project an attention item belongs to, or undefined when none of the three steps can say. */
+export function resolveAttentionProjectId(
+  item: AttentionProjectFields,
+  lookup: AttentionProjectLookup = {},
+): string | undefined {
+  if (item.projectId) return item.projectId;
+  const sessionId = item.sessionId ?? item.workerSessionId;
+  if (sessionId) {
+    const viaSession = lookup.sessionProjectId?.(sessionId);
+    if (viaSession) return viaSession;
+  }
+  if (item.agentId) {
+    const viaAgent = lookup.agentProjectId?.(item.agentId);
+    if (viaAgent) return viaAgent;
+  }
+  return undefined;
+}
+
+/** `resolveAttentionProjectId` as a predicate — the project Overview's own filter. */
+export function attentionItemInProject(
+  item: AttentionProjectFields,
+  projectId: string | null | undefined,
+  lookup: AttentionProjectLookup = {},
+): boolean {
+  if (!projectId) return false;
+  return resolveAttentionProjectId(item, lookup) === projectId;
+}

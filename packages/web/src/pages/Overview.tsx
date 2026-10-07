@@ -21,6 +21,7 @@ import { Panel, Button, SectionLabel, StatusPill, Badge, Chip, Meter } from "../
 import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
 } from "../components/fleet";
+import { attentionItemInProject } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
 import { MergeGateStrip, MergeGateAttention, mergeGateAttentionCount, useMergeGateStatus } from "../components/mergeGate";
 import { HarnessMixProvider } from "../components/HarnessPicker";
@@ -74,15 +75,33 @@ export default function Overview() {
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
 
-  // Attention items that resolve (via their session id) to THIS project — same item→session resolution
-  // Mission Control's per-project count uses (sessionId for non-merge alerts, workerSessionId for a merge
-  // request; rate-limit items carry neither and so surface globally, not here; their sessions still show
-  // red in the fleet rows below).
-  const projAttention = attention.filter((item) => {
-    const sid = item.sessionId ?? item.workerSessionId;
-    const s = sid ? all.find((x) => x.id === sid) : undefined;
-    return !!s;
-  });
+  // Attention items that resolve to THIS project, via the SHARED resolver Mission Control's per-project
+  // count also uses (`attentionItemInProject`, lib/fleet.ts — its own anchor there carries the resolution
+  // order and the bound). Both lookups below are fed from queries this page ALREADY polls, so scoping
+  // costs no extra request.
+  //
+  // `sessionProjectId` deliberately spans the GLOBAL live feed plus this project's ARCHIVED page, not the
+  // project-filtered `all`: an item whose session has been archived is absent from the live feed entirely,
+  // which is what used to drop it off this board (card 5ced500b). A foreign project's live session still
+  // resolves to its own id and is rejected, exactly as not-finding-it rejected it before.
+  const sessionProjectIndex = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of sessions.data ?? []) m.set(s.id, s.projectId);
+    for (const s of archivedItems) m.set(s.id, s.projectId);
+    return m;
+  }, [sessions.data, archivedItems]);
+  // The agent↦project fallback, for a kind whose event carries no project id (CODEX ISOLATION GAP). Read
+  // off each agent's OWN `projectId` rather than assuming the active one, so the map stays correct if this
+  // query's scoping ever widens.
+  const agentProjectIndex = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of agents.data ?? []) m.set(a.id, a.projectId);
+    return m;
+  }, [agents.data]);
+  const projAttention = attention.filter((item) => attentionItemInProject(item, projectId, {
+    sessionProjectId: (id) => sessionProjectIndex.get(id),
+    agentProjectId: (id) => agentProjectIndex.get(id),
+  }));
   // Pending merges get pulled out of the flat AttentionRow list and rendered as the SAME rich review
   // cards Mission Control's Review queue uses (the shared ReviewQueue component — diff stats, risk
   // badge, top-risk files, Review → / Approve & merge), so the Overview's merge cards match Mission.

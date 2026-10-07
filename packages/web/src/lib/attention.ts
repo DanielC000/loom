@@ -132,6 +132,20 @@ export interface AttentionItem {
   // field from `questionId` (which is also set on the cyan/amber branches, where there's nothing stale to
   // suppress) rather than re-deriving "is this the stale row" from `tone`/`kind` at render time.
   staleQuestionId?: string | null;
+  // Card 5ced500b — the project this item belongs to, set HERE (at the source) whenever the row the item
+  // was built from already carried one: a Request's own `projectId`, a vault-lock event's
+  // `detail.projectId`, or the session row a session-derived kind was iterated from. AUTHORITATIVE for the
+  // project-scoped readers — `resolveAttentionProjectId` (lib/fleet.ts) returns it without consulting any
+  // session lookup, so a project-scoped surface shows the item even when its session has been ARCHIVED and
+  // is therefore absent from the live feed. Left unset for a kind whose source genuinely doesn't know
+  // (today: CODEX ISOLATION GAP, which falls back to `agentId` below).
+  projectId?: string | null;
+  // Card 5ced500b — the AGENT this item is about, the fallback project key for a kind whose source row
+  // carries no project id. Agents are project-scoped in Loom, so a project-scoped reader holding an
+  // agent↦project map can resolve the item from this alone, which is what keeps a CODEX ISOLATION GAP
+  // visible after its short-lived run session has archived out of every bounded session page. Purely a
+  // resolution hint — nothing renders off it.
+  agentId?: string | null;
 }
 
 // The deep-link an attention item's "Open" affordance targets, or null if it has none. A MERGE REQUEST
@@ -294,14 +308,21 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     // the row RE-REDDENS the instant acknowledgedUntil passes, with no separate "cleared" event to miss).
     const snoozed = q.acknowledgedUntil != null && new Date(q.acknowledgedUntil).getTime() > now;
     const stale = q.escalatedAt != null && !snoozed;
+    // Card 5ced500b — `projectId` comes straight off the Request row, so a pending owner Request stays on
+    // its project's Overview even once the asking manager has exited and ARCHIVED (previously it resolved
+    // only through the live session feed and vanished from the owner's primary board). It is the ONLY
+    // project key the ORPHANED branch can ever have: `sessionOrphaned` means that session row is gone for
+    // good, so there is nothing left for a session lookup to find.
     items.push(q.sessionOrphaned
       ? {
           key: `q-${q.id}`, tone: "amber", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
+          projectId: q.projectId,
           text: `${decisionAttentionText(q)} — asking session is gone; may never be consumed`,
         }
       : stale
       ? {
           key: `q-${q.id}`, tone: "red", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
+          projectId: q.projectId,
           // Structural marker for the Snooze affordance (AttentionRow) — set ONLY on this exact branch, so
           // "snooze" never shows on a cyan/amber/orphaned row where there's nothing stale to suppress.
           staleQuestionId: q.id,
@@ -309,6 +330,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
         }
       : {
           key: `q-${q.id}`, tone: "cyan", kind: label, questionId: q.id, sessionId: q.sessionId,
+          projectId: q.projectId,
           text: decisionAttentionText(q),
         });
   }
@@ -360,10 +382,17 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     });
   }
   for (const e of activeVaultLocks) {
-    const detail = (e.detail ?? {}) as { repoPath?: string; command?: string; ageMs?: number };
+    const detail = (e.detail ?? {}) as { repoPath?: string; command?: string; ageMs?: number; projectId?: string };
     const ageMin = typeof detail.ageMs === "number" ? Math.round(detail.ageMs / 60000) : null;
     items.push({
       key: `vl-${e.id}`, tone: "red", kind: "VAULT LOCK STUCK",
+      // Card 5ced500b — this item carries NO session id at all (it keys on `detail.repoPath`; no session
+      // owns a vault watcher), so before this it resolved to no project and showed on NO project Overview,
+      // ever. The daemon has always filed `detail.projectId` alongside repoPath (vault/versioner.ts), so
+      // reading it here is what puts the alert on the one board the owner actually watches. Optional on the
+      // wire: the versioner takes its lockAlert projectId as an optional ctor arg, so a row filed without
+      // one stays global-only rather than being attributed to a guess.
+      projectId: detail.projectId ?? null,
       text: `${detail.repoPath ?? "a vault repo"} — .git/index.lock stuck` +
         `${ageMin !== null ? ` for ~${ageMin}min` : ""}; run: ${detail.command ?? "(see event detail)"}`,
     });
@@ -383,6 +412,14 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       ?? (detail.agentId ? `agent ${detail.agentId.slice(0, 8)}` : `session ${sid.slice(0, 8)}`);
     items.push({
       key: `cig-${e.id}`, tone: "amber", kind: "CODEX ISOLATION GAP", sessionId: sid,
+      // Card 5ced500b — this kind has NO liveness filter by design (card ed0858dc: it reports a
+      // standing CONFIGURATION fact whose remedy outlives the disclosing session), and a codex run is
+      // short-lived, so by the time a human looks the session is usually archived and gone from the live
+      // feed. The event carries no projectId, so the AGENT is the project key — agents are project-scoped,
+      // and the agent's profile harness is the very thing the human must edit anyway. `detail.agentId` can
+      // legitimately be null (the daemon reads it off a session row that may already be gone), in which
+      // case this item falls back to the session lookup and the bound in `resolveAttentionProjectId`'s doc.
+      agentId: detail.agentId ?? null,
       dismissKey: dedupKey,
       dismissHint: "Dismiss — hides this isolation gap until this agent discloses a different set",
       // Deliberately NOT "read-deny protections", and deliberately no "can read those files" clause:
@@ -440,6 +477,12 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const s of all.filter((s) => isRateLimited(s) && s.processState === "live")) {
     items.push({
       key: `r-${s.id}`, tone: "red", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
+      // Card 5ced500b — this row carries `rateLimitSessionId` (the clear/retry action's target), never
+      // `sessionId`, so the old session-id-only resolver found nothing and the item surfaced GLOBALLY only.
+      // A comment on the Overview used to call that deliberate; it wasn't — it described the missing field,
+      // not an intent. The project was in hand the whole time, so it is stated here and the row now reaches
+      // the project board too.
+      projectId: s.projectId,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — resumes ${s.rateLimitedUntil ? new Date(s.rateLimitedUntil).toLocaleTimeString() : "?"}`,
     });
   }
@@ -453,6 +496,9 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   }))) {
     items.push({
       key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", sessionId: s.id,
+      // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
+      // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
+      projectId: s.projectId,
       dismissKey: `${s.id}:${s.lastActivity}`,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — busy, no activity since ${new Date(s.lastActivity).toLocaleTimeString()} (heuristic)`,
     });
@@ -460,12 +506,18 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const s of all.filter(isCrashLooped)) {
     items.push({
       key: `cl-${s.id}`, tone: "red", kind: "CRASH-LOOPED", sessionId: s.id,
+      // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
+      // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
+      projectId: s.projectId,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — died repeatedly after auto-resume; auto-resume STOPPED. Inspect the log + resume manually.`,
     });
   }
   for (const s of all.filter(isOrphanedFleet)) {
     items.push({
       key: `of-${s.id}`, tone: "red", kind: "ORPHANED FLEET", sessionId: s.id,
+      // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
+      // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
+      projectId: s.projectId,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — exited while still owning live worker(s); they are now parentless. Resume this session or reparent/stop them manually.`,
     });
   }

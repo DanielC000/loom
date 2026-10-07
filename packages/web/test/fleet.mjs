@@ -13,6 +13,7 @@ import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
   activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
+  resolveAttentionProjectId, attentionItemInProject,
 } from "../src/lib/fleet.ts";
 
 let pass = 0;
@@ -492,6 +493,152 @@ check("activeCodexIsolationGapAlerts: an unrelated event kind is ignored", () =>
   const other = { ...gapEv({ workerSessionId: "run-l" }), kind: "codex_unsupported_capability" };
   assert.equal(activeCodexIsolationGapAlerts([other]).length, 0,
     "the sibling capability-drop kind is a DIFFERENT signal and never surfaces here");
+});
+
+// -- ATTENTION ITEM -> OWNING PROJECT (card 5ced500b) --------------------------------------------------
+// The resolver both project-scoped readers of the attention queue share: the project Overview's
+// `projAttention` LIST and Mission Control's per-project `attnByProject` COUNT. The defect it fixes is
+// that both used to resolve an item SOLELY through the live session feed (`WHERE archived_at IS NULL`),
+// so an item whose session had archived silently dropped off the project Overview.
+//
+// Every case below names which of the three resolution steps it exercises, and the negative controls are
+// as load-bearing as the positive ones: a resolver that answered "yes, this project" unconditionally
+// would satisfy every PRESENT assertion here forever.
+
+const PROJ = "proj-alpha";
+const OTHER_PROJ = "proj-beta";
+
+/** The two lookups a caller supplies, built from plain maps (exactly how both pages build them). */
+const lookupFor = (sessions = {}, agents = {}) => ({
+  sessionProjectId: (id) => sessions[id],
+  agentProjectId: (id) => agents[id],
+});
+
+// -- STEP 1: an explicit projectId off the item's own source row ---------------------------------------
+
+check("step 1 - an explicit projectId resolves with NO session lookup at all", () => {
+  // A VAULT LOCK STUCK item's shape: no sessionId whatsoever, project read off detail.projectId. Before
+  // this card it resolved to nothing and showed on NO project Overview, ever.
+  const item = { kind: "VAULT LOCK STUCK", projectId: PROJ };
+  assert.equal(resolveAttentionProjectId(item, lookupFor()), PROJ);
+  assert.equal(attentionItemInProject(item, PROJ, lookupFor()), true);
+});
+
+check("step 1 - a FOREIGN projectId rejects outright even though the sid WOULD resolve here", () => {
+  // THE PRECEDENCE CONTROL. The item states another project, but its session id is one this reader can
+  // resolve locally. A resolver that fell through to the session lookup would wrongly claim it - which is
+  // exactly the drift that would let the Overview list and the Mission Control count disagree again.
+  const item = { kind: "DECISION NEEDED", projectId: OTHER_PROJ, sessionId: "sess-1" };
+  const lookup = lookupFor({ "sess-1": PROJ });
+  assert.equal(resolveAttentionProjectId(item, lookup), OTHER_PROJ, "the STATED project wins over the lookup");
+  assert.equal(attentionItemInProject(item, PROJ, lookup), false, "so it is rejected for this project");
+  assert.equal(attentionItemInProject(item, OTHER_PROJ, lookup), true, "and accepted for its own");
+});
+
+// -- STEP 2: the session id, spanning the live feed AND the archived page ------------------------------
+
+check("step 2 - a session id resolves via the caller's lookup (the pre-existing path, unchanged)", () => {
+  const item = { kind: "STUCK-BUSY", sessionId: "sess-live" };
+  assert.equal(resolveAttentionProjectId(item, lookupFor({ "sess-live": PROJ })), PROJ);
+});
+
+check("step 2 - an ARCHIVED session's item resolves, which is the whole defect this card fixed", () => {
+  // The caller feeds its archived page into the SAME lookup, so an id absent from the live feed but
+  // present in the archive still resolves. Modelled exactly as both pages build it: one merged map.
+  const item = { kind: "CODEX ISOLATION GAP", sessionId: "sess-archived" };
+  const liveOnly = lookupFor({ "sess-other": PROJ });
+  assert.equal(resolveAttentionProjectId(item, liveOnly), undefined,
+    "NEGATIVE CONTROL / the old behaviour: with the live feed alone it resolves to nothing");
+  const liveAndArchived = lookupFor({ "sess-other": PROJ, "sess-archived": PROJ });
+  assert.equal(resolveAttentionProjectId(item, liveAndArchived), PROJ,
+    "with the archived page folded in, the same item resolves");
+});
+
+check("step 2 - workerSessionId is the fallback when sessionId is absent (MERGE REQUEST's shape)", () => {
+  const item = { kind: "MERGE REQUEST", workerSessionId: "w-1" };
+  assert.equal(resolveAttentionProjectId(item, lookupFor({ "w-1": PROJ })), PROJ);
+  // sessionId WINS when both are present - the non-merge kinds carry sessionId and must not be re-routed.
+  const both = { kind: "MERGE REQUEST", sessionId: "s-1", workerSessionId: "w-1" };
+  assert.equal(resolveAttentionProjectId(both, lookupFor({ "s-1": PROJ, "w-1": OTHER_PROJ })), PROJ);
+});
+
+check("step 2 - a CROSS-PROJECT session rejects (the cross-project negative control)", () => {
+  // A sibling project's live session is resolvable by this reader's GLOBAL feed, and must come back as
+  // ITS OWN project - not as a match here. Pre-card this rejected only because the project-FILTERED feed
+  // never contained it; now it rejects because the resolver answers honestly.
+  const item = { kind: "STUCK-BUSY", sessionId: "sess-beta" };
+  const lookup = lookupFor({ "sess-beta": OTHER_PROJ });
+  assert.equal(resolveAttentionProjectId(item, lookup), OTHER_PROJ);
+  assert.equal(attentionItemInProject(item, PROJ, lookup), false);
+});
+
+// -- STEP 3: the agent-to-project fallback ------------------------------------------------------------
+
+check("step 3 - agentId resolves the project when the session is unresolvable entirely", () => {
+  // A CODEX ISOLATION GAP whose run session has aged past the caller's bounded archive page. Agents are
+  // project-scoped in Loom, so the agent id is still a sound key - and the agent's profile harness is the
+  // very thing the human must edit.
+  const item = { kind: "CODEX ISOLATION GAP", sessionId: "sess-gone", agentId: "agent-7" };
+  assert.equal(resolveAttentionProjectId(item, lookupFor({}, { "agent-7": PROJ })), PROJ);
+});
+
+check("step 3 - the session lookup WINS over agentId when it can answer", () => {
+  const item = { kind: "CODEX ISOLATION GAP", sessionId: "sess-known", agentId: "agent-7" };
+  const lookup = lookupFor({ "sess-known": PROJ }, { "agent-7": OTHER_PROJ });
+  assert.equal(resolveAttentionProjectId(item, lookup), PROJ, "step 2 answers first, so step 3 is not consulted");
+});
+
+check("step 3 - a FOREIGN agent rejects, so the fallback cannot launder a cross-project item in", () => {
+  const item = { kind: "CODEX ISOLATION GAP", sessionId: "sess-gone", agentId: "agent-beta" };
+  const lookup = lookupFor({}, { "agent-beta": OTHER_PROJ });
+  assert.equal(resolveAttentionProjectId(item, lookup), OTHER_PROJ);
+  assert.equal(attentionItemInProject(item, PROJ, lookup), false);
+});
+
+check("step 3 - omitting the agent lookup SKIPS the step rather than throwing (Mission Control's case)", () => {
+  // Mission Control fetches no agents, so it passes no agentProjectId at all. That must degrade to
+  // undefined, never crash the page's whole attention count.
+  const item = { kind: "CODEX ISOLATION GAP", sessionId: "sess-gone", agentId: "agent-7" };
+  assert.equal(resolveAttentionProjectId(item, { sessionProjectId: () => undefined }), undefined);
+  assert.equal(resolveAttentionProjectId(item, {}), undefined, "no lookups at all is also safe");
+  assert.equal(resolveAttentionProjectId(item), undefined, "and the whole argument may be omitted");
+});
+
+// -- THE UNRESOLVABLE CASE + the disclosed bound -------------------------------------------------------
+
+check("an item that matches no step resolves to undefined and belongs to no project", () => {
+  // The disclosed bound: a codex-gap row with a null agentId whose session has rolled past every bounded
+  // archive page. Deliberately NOT closed (that would need a per-item archivedSessionById fetch), so this
+  // asserts the honest answer rather than a guess.
+  const item = { kind: "CODEX ISOLATION GAP", sessionId: "sess-gone", agentId: null };
+  assert.equal(resolveAttentionProjectId(item, lookupFor()), undefined);
+  assert.equal(attentionItemInProject(item, PROJ, lookupFor()), false);
+});
+
+check("an item with no project key of any kind resolves to undefined", () => {
+  assert.equal(resolveAttentionProjectId({ kind: "RATE-LIMITED" }, lookupFor({ x: PROJ })), undefined,
+    "no projectId, no sessionId, no workerSessionId, no agentId => nothing to resolve from");
+});
+
+check("attentionItemInProject rejects a null/undefined active project rather than matching anything", () => {
+  // The Overview renders before `useActiveProject` resolves; a null projectId must not match an item
+  // whose own resolution also came back undefined (undefined === undefined would otherwise be TRUE).
+  const unresolvable = { kind: "CODEX ISOLATION GAP", sessionId: "sess-gone" };
+  assert.equal(attentionItemInProject(unresolvable, null, lookupFor()), false);
+  assert.equal(attentionItemInProject(unresolvable, undefined, lookupFor()), false);
+  assert.equal(attentionItemInProject({ projectId: PROJ }, null, lookupFor()), false);
+});
+
+// -- EMPTY-STRING HYGIENE -----------------------------------------------------------------------------
+
+check("an empty-string projectId is treated as absent, not as a project named empty", () => {
+  // `vault_index_lock_stale` is filed `managerSessionId:""` daemon-global, so an empty string is a shape
+  // that genuinely reaches this code - it must fall through to the session lookup, never match a project.
+  const item = { kind: "VAULT LOCK STUCK", projectId: "", sessionId: "sess-1" };
+  assert.equal(resolveAttentionProjectId(item, lookupFor({ "sess-1": PROJ })), PROJ,
+    "the empty projectId is skipped and step 2 answers");
+  assert.equal(attentionItemInProject({ projectId: "" }, "", lookupFor()), false,
+    "and an empty active project never matches, even against an empty item");
 });
 
 console.log(`\n${pass} passed`);
