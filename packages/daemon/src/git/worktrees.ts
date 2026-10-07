@@ -4414,6 +4414,13 @@ export const STATIC_GUARD_REPO_PATHS = [
   // source-TEXT property the reduced/emit-compare path cannot reason about (a .mjs test file has no
   // compile step), so it could otherwise take the reduced path and never trip a single check.
   "packages/daemon/test/merge-quarantine-loom-home-guard.mjs",
+  // Card fd189d91, item (c): a corpus-wide scan of packages/daemon/src/**/*.ts asserting no production
+  // file imports any export whose name ends in `TestOnly` — a test-only injection seam (e.g.
+  // reenterMergeQuarantinesAtBootTestOnly) is only "structurally unreachable from production" as long as
+  // nothing imports it; this was previously an unchecked claim. Belongs here on the same ground as
+  // harness-adapter-claude-literal-guard.mjs above: a source-TEXT property neither the reduced gate nor
+  // the emit-compare transpile-identity check can see.
+  "packages/daemon/test/no-src-testonly-import-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
