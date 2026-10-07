@@ -5428,6 +5428,16 @@ export async function computeEmitCompareGate(
   // Same lazy-load-and-cache shape as excludedDirNames above, but for the harness's NOT_HERMETIC export —
   // loaded only if a top-level (non-deleted) test/*.mjs path actually reaches the classification below.
   let notHermeticNames: Set<string> | null | undefined;
+  // @decision 758486bc (Code Review round 4) — every lazy-fill site below awaits THIS shared promise,
+  // never `loadExcludedTestDirNames`/`loadNotHermeticNames` directly, so a diff needing both
+  // `excludedDirNames`/`notHermeticNames` still pays for exactly one spawn.
+  let harnessSetExportsPromise: Promise<HarnessSetExportsResult> | undefined;
+  const loadHarnessSetExportsOnce = (): Promise<HarnessSetExportsResult> => {
+    if (harnessSetExportsPromise === undefined) {
+      harnessSetExportsPromise = loadHarnessSetExports(worktreePath, HARNESS_CONFIG_LOAD_TIMEOUT_MS);
+    }
+    return harnessSetExportsPromise;
+  };
   for (const line of entries) {
     const tab = line.indexOf("\t");
     // Card 4def0708: an unparseable line is the same mechanism-failure shape as the git error above — omit.
@@ -5466,7 +5476,7 @@ export async function computeEmitCompareGate(
       const relToTestDir = p.slice(EMIT_COMPARE_TEST_PREFIX.length);
       const dirSegments = relToTestDir.split("/").slice(0, -1);
       if (dirSegments.length > 0) {
-        if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath);
+        if (excludedDirNames === undefined) excludedDirNames = (await loadHarnessSetExportsOnce()).excludedDirNames;
         if (excludedDirNames === null) return notApplicableHere(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`, "harness-config-unavailable");
         if (dirSegments.some((seg) => (excludedDirNames as Set<string>).has(seg))) {
           return notReducible(`${p} sits inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — its consumers outside this diff can't be proven unaffected, so the full gate runs (card 44968963)`);
@@ -5495,7 +5505,7 @@ export async function computeEmitCompareGate(
         // test/ prefix and .mjs suffix), so a top-level file's name here is exactly what `NOT_HERMETIC`
         // keys on; a nested file's name (containing a `/`) can never match a NOT_HERMETIC entry, which is
         // correct — NOT_HERMETIC only ever names test/'s top-level files.
-        if (notHermeticNames === undefined) notHermeticNames = await loadNotHermeticNames(worktreePath);
+        if (notHermeticNames === undefined) notHermeticNames = (await loadHarnessSetExportsOnce()).notHermeticNames;
         if (notHermeticNames === null) return notApplicableHere(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`, "harness-config-unavailable");
         const harnessName = p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length);
         if (notHermeticNames.has(harnessName)) {
@@ -5608,8 +5618,8 @@ export async function computeEmitCompareGate(
   if (changedTestFiles.length > 0 || notHermeticExcluded.length > 0 || deletedTestFiles.length > 0) {
     const folded = await foldInTestImporters(
       worktreePath, changedTestFiles, notHermeticExcluded, deletedTestFiles,
-      async () => { if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath); return excludedDirNames; },
-      async () => { if (notHermeticNames === undefined) notHermeticNames = await loadNotHermeticNames(worktreePath); return notHermeticNames; },
+      async () => { if (excludedDirNames === undefined) excludedDirNames = (await loadHarnessSetExportsOnce()).excludedDirNames; return excludedDirNames; },
+      async () => { if (notHermeticNames === undefined) notHermeticNames = (await loadHarnessSetExportsOnce()).notHermeticNames; return notHermeticNames; },
     );
     if (!folded.ok) {
       return folded.notApplicable ? notApplicableHere(folded.reason, folded.notApplicableKind) : notReducible(folded.reason);
@@ -5722,29 +5732,44 @@ export const HARNESS_CONFIG_LOAD_TIMEOUT_MS = 20_000;
 /** argv[1] of the child is deliberately `process.execPath` (a real, resolvable path that is NOT the script):
  *  test-daemon.mjs's main-module guard realpaths `process.argv[1]` and REFUSES (exit 1) if it can't, so under
  *  `-e` the first user arg must be a real path or loading the script for its exports would never succeed.
- *  Evaluated by the child (`node --input-type=module -e`). Imports the worktree's script, prints ONE JSON
- *  line, and force-exits so a stray timer/handle in the branch's module can't keep the child alive. An
- *  import that never settles (top-level await) makes node itself exit non-zero with no output. */
+ *  Evaluated by the child (`node --input-type=module -e`). Imports the worktree's script ONCE and reads BOTH
+ *  `EXCLUDED_DIR_NAMES` and `NOT_HERMETIC` off that SAME module object — folds what used to be two separate
+ *  child spawns into one (card 758486bc; see {@link loadHarnessSetExports}'s own anchor for why).
+ *  Prints ONE JSON line and force-exits so a stray timer/handle in the branch's module can't keep the child
+ *  alive. An import that never settles (top-level await) makes node itself exit non-zero with no output. */
 const HARNESS_EXPORT_PROBE_SOURCE =
-  "const [url,name]=process.argv.slice(2);" +
-  "import(url).then(m=>{const v=m[name];" +
-  "process.stdout.write(JSON.stringify(v instanceof Set?{ok:true,values:[...v].map(String)}:{ok:false})+'\\n');" +
+  "const [url]=process.argv.slice(2);" +
+  "import(url).then(m=>{" +
+  "const pick=(n)=>{const v=m[n];return v instanceof Set?{ok:true,values:[...v].map(String)}:{ok:false}};" +
+  "process.stdout.write(JSON.stringify({ok:true,EXCLUDED_DIR_NAMES:pick('EXCLUDED_DIR_NAMES'),NOT_HERMETIC:pick('NOT_HERMETIC')})+'\\n');" +
   "process.exit(0)},()=>process.exit(2));";
 
+/** The combined shape {@link loadHarnessSetExports} resolves — BOTH sets read from ONE child
+ *  evaluation of the worktree's harness script. `ok:false` is a MECHANISM failure (spawn error, timeout,
+ *  non-zero exit, unparseable output) — both fields are `null` in that case, same fail-closed default the
+ *  two public wrappers already returned before this card. `ok:true` with an individual field `null` means
+ *  the module loaded fine but that particular export was missing or not a `Set` — also fails closed,
+ *  per-field, unchanged from the pre-758486bc per-export contract. */
+interface HarnessSetExportsResult {
+  ok: boolean;
+  excludedDirNames: Set<string> | null;
+  notHermeticNames: Set<string> | null;
+}
+const HARNESS_SET_EXPORTS_FAIL: HarnessSetExportsResult = { ok: false, excludedDirNames: null, notHermeticNames: null };
+
 /** @decision fca110cf — the worktree's harness config is evaluated in a killable CHILD PROCESS, never an
- *  in-process `import()`: `import()` has no time limit, a sync loop in the branch's module body freezes the
- *  daemon event loop, and the ESM cache is per-URL for the process lifetime (a re-gate of the SAME worktree
- *  after an edit would read the OLD copy, and every gated worktree would leak a module graph). Async spawn
- *  only (never spawnSync); `null` on ANY failure (spawn error, timeout-kill, non-zero exit, bad JSON,
- *  non-`Set` export) — the same fail-closed value the callers already treat as "fail the whole diff closed". */
-function loadHarnessSetExport(
-  worktreePath: string, exportName: string, timeoutMs: number,
-): Promise<Set<string> | null> {
+ *  in-process `import()`. Fails closed to {@link HARNESS_SET_EXPORTS_FAIL} on ANY failure.
+ *
+ *  @decision 758486bc — ALWAYS spawns fresh, no cross-call cache in front of this (round 4 removed one
+ *  that used to sit here — see the decision record for why). */
+function loadHarnessSetExports(
+  worktreePath: string, timeoutMs: number,
+): Promise<HarnessSetExportsResult> {
   return new Promise((resolve) => {
     const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
     let settled = false;
     let child: ChildProcess;
-    const done = (r: Set<string> | null) => {
+    const done = (r: HarnessSetExportsResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -5752,61 +5777,65 @@ function loadHarnessSetExport(
     };
     const timer = setTimeout(() => {
       killRemoveChild(child);
-      done(null);
+      done(HARNESS_SET_EXPORTS_FAIL);
     }, timeoutMs);
     try {
       // Windows: import() needs a file:// URL, never a bare drive-letter path (ERR_UNSUPPORTED_ESM_URL_SCHEME).
-      child = spawn(process.execPath, ["--input-type=module", "-e", HARNESS_EXPORT_PROBE_SOURCE, process.execPath, pathToFileURL(scriptPath).href, exportName], {
+      child = spawn(process.execPath, ["--input-type=module", "-e", HARNESS_EXPORT_PROBE_SOURCE, process.execPath, pathToFileURL(scriptPath).href], {
         cwd: worktreePath, stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
       });
     } catch {
-      done(null);
+      done(HARNESS_SET_EXPORTS_FAIL);
       return;
     }
     // @decision db669d74 — shares {@link collectUtf8Stdout} with the test-importer scan's own child-stdout
     // collector, for the same chunk-split-corruption reason.
     const stdoutAcc = collectUtf8Stdout(child.stdout, 1_000_000);
-    child.on("error", () => done(null));
+    child.on("error", () => done(HARNESS_SET_EXPORTS_FAIL));
     child.on("close", (code) => {
-      if (code !== 0) { done(null); return; }
+      if (code !== 0) { done(HARNESS_SET_EXPORTS_FAIL); return; }
       try {
         const line = stdoutAcc.value.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
-        const parsed = JSON.parse(line) as { ok?: boolean; values?: unknown };
-        done(parsed.ok === true && Array.isArray(parsed.values) ? new Set(parsed.values as string[]) : null);
+        const parsed = JSON.parse(line) as { ok?: boolean; EXCLUDED_DIR_NAMES?: { ok?: boolean; values?: unknown }; NOT_HERMETIC?: { ok?: boolean; values?: unknown } };
+        if (parsed.ok !== true) { done(HARNESS_SET_EXPORTS_FAIL); return; }
+        const extract = (field: { ok?: boolean; values?: unknown } | undefined): Set<string> | null =>
+          field?.ok === true && Array.isArray(field.values) ? new Set(field.values as string[]) : null;
+        done({ ok: true, excludedDirNames: extract(parsed.EXCLUDED_DIR_NAMES), notHermeticNames: extract(parsed.NOT_HERMETIC) });
       } catch {
-        done(null);
+        done(HARNESS_SET_EXPORTS_FAIL);
       }
     });
   });
 }
 
 /** @decision 815b4b30 — loads the REAL `EXCLUDED_DIR_NAMES` Set from the diff's OWN `worktreePath` checkout
- *  (never this daemon's own installed copy, and never a hand-copied list). Evaluated per call in a child
- *  process (see {@link loadHarnessSetExport}), so an edit to the branch's copy is seen on the next call.
+ *  (never this daemon's own installed copy, and never a hand-copied list). Fails closed to `null` on any
+ *  error — a caller getting `null` MUST fail the whole diff closed.
  *
- *  Fails closed
- *  to `null` on any error — never resolve ambiguity to an empty-but-truthy Set; a caller getting `null` MUST
- *  fail the whole diff closed. */
+ *  ALWAYS spawns fresh (card 758486bc — no cross-call cache; see the decision record for why one was tried
+ *  and removed). `computeEmitCompareGate` does NOT call this directly — it shares ONE spawn between this
+ *  export and {@link loadNotHermeticNames} via its own local `loadHarnessSetExportsOnce`; this standalone
+ *  export remains for any OTHER caller (and for tests) that only needs the one set. */
 export function loadExcludedTestDirNames(
   worktreePath: string, timeoutMs: number = HARNESS_CONFIG_LOAD_TIMEOUT_MS,
 ): Promise<Set<string> | null> {
-  return loadHarnessSetExport(worktreePath, "EXCLUDED_DIR_NAMES", timeoutMs);
+  return loadHarnessSetExports(worktreePath, timeoutMs).then((r) => r.excludedDirNames);
 }
 
 /**
  * Card 17cd1f30 — the same reuse shape as {@link loadExcludedTestDirNames} immediately above, applied to
  * the harness's OTHER driftable name set: `NOT_HERMETIC` (scripts/test-daemon.mjs). Loaded from THIS
  * diff's OWN worktree copy of the script (never a hand-copied second list — the precise pattern card
- * 815b4b30 established and forbids re-diverging from). Each call re-evaluates the script in a fresh child
- * process (card fca110cf), so an edit to that set on the same worktree is seen on the very next call — the
- * previous in-process `import()` was cached per-URL and did NOT see it. Same fail-closed contract: `null`
- * on any load/parse error, timeout or a non-`Set` export — a caller that gets `null` MUST fail the whole
- * diff closed, same as the `EXCLUDED_DIR_NAMES` case.
+ * 815b4b30 established and forbids re-diverging from). ALWAYS spawns fresh, same as
+ * {@link loadExcludedTestDirNames} — an edit to this set is seen on the VERY NEXT call, unconditionally,
+ * because there is nothing cached to go stale. Same fail-closed contract: `null` on any load/parse error,
+ * timeout or a non-`Set` export — a caller that gets `null` MUST fail the whole diff closed, same as the
+ * `EXCLUDED_DIR_NAMES` case.
  */
 export function loadNotHermeticNames(
   worktreePath: string, timeoutMs: number = HARNESS_CONFIG_LOAD_TIMEOUT_MS,
 ): Promise<Set<string> | null> {
-  return loadHarnessSetExport(worktreePath, "NOT_HERMETIC", timeoutMs);
+  return loadHarnessSetExports(worktreePath, timeoutMs).then((r) => r.notHermeticNames);
 }
 
 /** @decision bafc68e7 — never re-add a local soundness-predicate/walker/transpile-helper copy here; they

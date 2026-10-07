@@ -58,7 +58,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 
@@ -374,12 +374,55 @@ try {
     console.log(`(H) real-corpus reduced --only= names: ${onlyNames.join(", ")}`);
   }
 
-  // ── (I) EVENT-LOOP NON-BLOCKING (round 4) — the real-corpus scan must run OFF the host event loop: a
-  //        setInterval probe ticking every 20ms observes the max gap between ticks while
-  //        computeEmitCompareGate runs against the real corpus. RED before round 4 (the whole list+read+
-  //        parse scan ran synchronously in-process, freezing every project's HTTP/WS/MCP/PTY traffic for
-  //        its ~9s duration — the probe's own ticks stall right along with it); GREEN after (the scan runs
-  //        in a child process, so the host loop keeps ticking the probe on schedule) ───────────────────────
+  // ── (I) EVENT-LOOP NON-BLOCKING (round 4, bound hardened card 758486bc) — the real-corpus scan must run
+  //        OFF the host event loop: a setInterval probe ticking every 20ms observes the max gap between
+  //        ticks while computeEmitCompareGate runs against the real corpus. RED before round 4 (the whole
+  //        list+read+parse scan ran synchronously in-process, freezing every project's HTTP/WS/MCP/PTY
+  //        traffic for its ~9s duration — the probe's own ticks stall right along with it); GREEN after
+  //        (the scan runs in a child process, so the host loop keeps ticking the probe on schedule).
+  //
+  //        @decision 758486bc — a bare fixed 500ms threshold is not contention-aware: even a CORRECT
+  //        implementation still pays a real, variable `child_process.spawn()` sync cost (Windows
+  //        `CreateProcess`, run on the calling thread) for its own harness-config + scan-child spawns, and
+  //        that cost legitimately spikes under host contention — see the decision record for the
+  //        measurements that motivated this. So the bound here is tied to a CONCURRENT baseline spawn
+  //        sampler instead of a bare constant: a trivial `node -e "process.exit(0)"` child pays the SAME
+  //        OS-level spawn cost under the SAME contention as any real spawn `computeEmitCompareGate` itself
+  //        issues, so it's a content-free, fair, live proxy for "how expensive is spawning something on this
+  //        host right now." The bound is `max(FLOOR, MULTIPLIER × observed baseline max)` — never a bare
+  //        bump to a bigger constant. The baseline sample is captured via TWO performance.now() reads
+  //        bracketing ONLY the synchronous spawn() call itself (never a 'close'-event round-trip — a round-
+  //        trip can't fire until the host loop is free, so it would absorb the very stall it's meant to
+  //        measure against; this was a real, reviewed bug in an earlier version — see the decision record).
+  //
+  //        @decision 758486bc (Code Review round 3) — the sampler itself now runs in an ISOLATED HELPER
+  //        CHILD PROCESS, never on an in-process `setInterval` alongside the probe. Round 2's in-process
+  //        sampler shared this test's own event loop with the probe above: a sample that straddled its own
+  //        `spawn()` call ALSO delayed the probe's next tick right here, so BOTH the printed gap and the
+  //        bound partly reflected the sampler's own cost, not only `computeEmitCompareGate`'s. Moving the
+  //        sampler into its own child means its `spawn()` blocks THAT child's loop, never this process's —
+  //        this process only ever parses cheap stdout lines for each reported sample. See the code below for
+  //        the exact shape; this closes the gap, it is not merely a style change.
+  //
+  //        A GENUINE regression (the scan drifting back onto the event loop for its whole multi-SECOND
+  //        duration) still blows past this bound comfortably, so the check keeps its power to catch the real
+  //        thing it guards — proven below via a behavioral RED (the scan forced in-process in dist).
+  //
+  //        ⚠️ POWER LIMIT, STATED HONESTLY (see the decision record's own "Test power limit" section): with
+  //        the round-2 (synchronous-only, but still IN-PROCESS) baseline sampler, forcing the scan in-process
+  //        over 5 real runs on this host's ambient load produced gap/bound pairs of 18635/500, 18322/500,
+  //        17674/3285, 17937/836, 16815/2224ms — all correctly RED, bound reaching at most ~3.3s (far tighter
+  //        than an earlier, stall-inflated ~10.9s figure from the round-1 sampler). It reliably caught a FULL
+  //        regression back to in-process (~17-20s observed) but could NOT reliably catch a smaller, genuinely
+  //        moderate synchronous regression (on the order of the widest observed bound, roughly ~3s or less)
+  //        introduced under similarly heavy contention — such a regression could fall inside the bound and
+  //        pass unnoticed. ⚠️ These are the ROUND-2 figures, predating the round-3 sampler-isolation fix
+  //        directly above — the isolation removes a source of upward contamination on BOTH the printed gap
+  //        and the bound, so re-measuring under round 3 is expected to differ (see the decision record for
+  //        any later re-measurement); carry this paragraph as "what round 2 showed," not as round 3's own
+  //        number. This remains a narrower, but non-zero, accepted gap in detection power either way — not a
+  //        claim that the bound is tight, and no fixed n is a guarantee of its true ceiling under worse
+  //        contention than any one host showed during measurement. ─────────────────────────────────────────
   {
     const I = mk("i");
     fs.mkdirSync(I.repo, { recursive: true });
@@ -407,14 +450,110 @@ try {
       lastTick = now;
     }, PROBE_PERIOD_MS);
 
-    const t0I = performance.now();
-    const directI = await computeEmitCompareGate(wtI, baseShaI, branchI);
-    const elapsedMsI = performance.now() - t0I;
-    clearInterval(probe);
+    // Baseline spawn sampler, isolated into its own HELPER CHILD PROCESS (round 3, card 758486bc minor;
+    // Code Review round 3 — the printed gap must report PRODUCTION stalls, never the sampler's own).
+    //
+    // @decision 758486bc (Code Review round 2, CRITICAL) — MUST measure ONLY the synchronous cost of the
+    // `spawn(...)` call itself (bracketed by two performance.now() reads in the SAME synchronous tick), never
+    // a round-trip to the child's 'close' event — see the round-2 writeup for the false-PASS this caused.
+    //
+    // Round 2's fix still ran `sampleBaseline()` IN THIS PROCESS, on a `setInterval` alongside the probe
+    // above. But the sampler's own `spawn()` call is ITSELF the exact synchronous, host-contention-sensitive
+    // cost this whole bound exists to account for — so a sample landing mid-call blocks THIS process's event
+    // loop for its own duration, which also delays the probe's next tick right here. The probe's reported
+    // `maxGapMs` therefore partly measured the SAMPLER's own cost, conflated with production's. Isolating the
+    // sampler into a separate child process means its `spawn()` blocks THAT child's loop, never this one —
+    // this process only ever does cheap stdout-line parsing for each reported sample, never a spawn of its
+    // own, so every gap the probe observes here is attributable to `computeEmitCompareGate` alone.
+    const BASELINE_PERIOD_MS = 1500;
+    // @decision 758486bc (Code Review round 4, MINOR 3) — under `node -e "<code>" arg1 arg2`, argv carries
+    // NO placeholder for the eval string itself: `process.argv` is `[execPath, arg1, arg2, ...]`, so the
+    // first real argument this helper is spawned with (BASELINE_PERIOD_MS, below) lands at `argv[1]`, NOT
+    // `argv[2]` — reproduced directly: a bare `node -e "console.log(JSON.stringify(process.argv))" x` logs
+    // `[execPath, "x"]`. The bug (`argv[2]`) read `undefined` ⇒ `Number(undefined)` ⇒ `NaN`, and
+    // `setInterval(sample, NaN)` clamps to Node's minimum delay — a SPAWN STORM (measured: 66 child
+    // spawns in ~2.2s here, vs. the intended ~1-2 samples/sec at 1500ms) that itself contends with the very
+    // scan this sampler exists to measure against, rather than a quiet, periodic baseline probe. Fails LOUD
+    // now (never silently stampedes) if this regresses again.
+    const BASELINE_HELPER_SOURCE =
+      "const{spawn}=require('node:child_process');" +
+      "const{performance}=require('node:perf_hooks');" +
+      "const period=Number(process.argv[1]);" +
+      "if(!(Number.isFinite(period)&&period>0)){process.stderr.write('bad period arg: '+process.argv[1]+'\\n');process.exit(1);}" +
+      "function sample(){" +
+      "const t0=performance.now();" +
+      "const p=spawn(process.execPath,['-e','process.exit(0)'],{stdio:'ignore',windowsHide:true});" +
+      "const d=performance.now()-t0;" + // captured synchronously, immediately after THIS child's spawn() returns
+      "process.stdout.write(JSON.stringify({d})+'\\n');" +
+      "p.on('error',()=>{});p.on('close',()=>{});" + // reap the sampled child — not part of the timing above
+      "}" +
+      "sample();setInterval(sample,period);";
+    const baselineHelper = spawn(process.execPath, ["-e", BASELINE_HELPER_SOURCE, String(BASELINE_PERIOD_MS)], {
+      stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    });
+    baselineHelper.on("error", () => {});
+    let baselineMaxMs = 0;
+    let baselineSamples = 0;
+    let baselineBuf = "";
+    // Code Review round 5 (card 758486bc): a regression in the helper's own source (e.g. the round-4 argv
+    // index bug) must be CAUGHT, not silently absorbed into an uninformative gapBoundMs===FLOOR — capture
+    // its stderr and real exit code so the check below can tell "healthy, still running when we killed it"
+    // (exitCode stays null, killed by our own SIGTERM) apart from "died on its own" (a real, non-null code).
+    let baselineStderr = "";
+    let baselineExitCode = null;
+    baselineHelper.stderr.on("data", (chunk) => { baselineStderr += chunk.toString("utf8"); });
+    baselineHelper.on("exit", (code) => { baselineExitCode = code; });
+    baselineHelper.stdout.on("data", (chunk) => {
+      baselineBuf += chunk.toString("utf8");
+      let idx;
+      while ((idx = baselineBuf.indexOf("\n")) >= 0) {
+        const line = baselineBuf.slice(0, idx);
+        baselineBuf = baselineBuf.slice(idx + 1);
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (typeof parsed.d === "number") {
+            baselineSamples++;
+            if (parsed.d > baselineMaxMs) baselineMaxMs = parsed.d;
+          }
+        } catch { /* a partial/malformed line (chunk split mid-write) — never counted as a sample */ }
+      }
+    });
+
+    let elapsedMsI = 0;
+    let directI;
+    try {
+      const t0I = performance.now();
+      directI = await computeEmitCompareGate(wtI, baseShaI, branchI);
+      elapsedMsI = performance.now() - t0I;
+      // @decision 758486bc — a `setInterval` overdue for the ENTIRE duration of the call above becomes due
+      // the instant this continuation runs, but a plain promise continuation is a MICROTASK: it runs before
+      // libuv's next timers-phase pass, so reading `maxGapMs`/`clearInterval`ing right here would silently
+      // miss exactly the final (and often LARGEST) gap — measured directly: `setImmediate` does NOT force a
+      // fresh timers-phase pass (0 ticks observed), a real `setTimeout(0)` does (correctly observed the full
+      // gap). Never remove this yield or replace it with `setImmediate`/a bare synchronous read.
+      await new Promise((r) => setTimeout(r, 0));
+    } finally {
+      clearInterval(probe);
+      baselineHelper.kill();
+    }
+
+    const BASELINE_MULTIPLIER = 3;
+    const BASELINE_FLOOR_MS = 500;
+    const gapBoundMs = Math.max(BASELINE_FLOOR_MS, BASELINE_MULTIPLIER * baselineMaxMs);
 
     console.log(`(I) real-corpus computeEmitCompareGate elapsed: ${elapsedMsI.toFixed(0)}ms, max event-loop gap observed during the call: ${maxGapMs.toFixed(0)}ms (setInterval probe, period ${PROBE_PERIOD_MS}ms)`);
+    console.log(`(I) baseline spawn sampler: ${baselineSamples} sample(s) (synchronous spawn() cost only, measured in an ISOLATED helper CHILD PROCESS so its own cost never shares this process's event loop with the probe above), max: ${baselineMaxMs.toFixed(0)}ms ⇒ gap bound = max(${BASELINE_FLOOR_MS}ms, ${BASELINE_MULTIPLIER}×baseline) = ${gapBoundMs.toFixed(0)}ms`);
+    // Code Review round 5 (card 758486bc) — MUST run BEFORE the gap check below: a dead/sample-less helper
+    // (e.g. the round-4 argv index bug, which made the helper exit(1) immediately on a NaN period) leaves
+    // baselineMaxMs at its initial 0, so gapBoundMs collapses to the bare FLOOR — an uninformative bound
+    // that can still happen to pass, exactly the false-GREEN this round's review caught (the gate-op
+    // op reverted argv[1]→argv[2] and the test still exited 0, reporting "0 sample(s) … bound = 500ms").
+    // Fail loud here instead, with the helper's own stderr folded into the failure message.
+    check(`(I) baseline sampler is alive and reporting real samples (0 samples or a non-zero helper exit ⇒ the gap bound above is an uninformative floor, not a measurement)${baselineExitCode !== null && baselineExitCode !== 0 ? ` — helper exited with code ${baselineExitCode}, stderr: ${JSON.stringify(baselineStderr.trim())}` : ""}`,
+      baselineSamples > 0 && (baselineExitCode === null || baselineExitCode === 0));
     check("(I) eligible:true", directI.eligible === true);
-    check("(I) ⭐ EVENT-LOOP: max observed gap stays bounded (< 500ms) — the real-corpus scan must run OFF the host event loop, never block it synchronously for its whole multi-second duration", maxGapMs < 500);
+    check(`(I) ⭐ EVENT-LOOP: max observed gap (${maxGapMs.toFixed(0)}ms) stays within the contention-aware bound (${gapBoundMs.toFixed(0)}ms) — the real-corpus scan must run OFF the host event loop, never block it synchronously for its whole multi-second duration`, maxGapMs <= gapBoundMs);
   }
 
   // ── (J) SPAWN EDGE — FULL BASENAME LITERAL (round 4, card 72769424) — spawnerJ.mjs never `import`s
