@@ -75,7 +75,7 @@ import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_D
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
-import { isSupersededByRecycle, currentHaltedSuccessor, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
+import { isSupersededByRecycle, currentHaltedSuccessor, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, RESUME_UNKNOWN_REASON_FALLBACK, type ResumeOneResult } from "../orchestration/resume-nudge.js";
@@ -13456,14 +13456,17 @@ export class SessionService {
       for (;;) {
         if (this.pty.hasReachedReady(freshId)) {
           try { this.pty.stop(oldId, "hard"); } catch { /* already gone */ }
-          if (alerted) {
+          // @decision db4b778c — read the DURABLE log, never this loop's own local `alerted` — a fresh
+          // loop instance spawned elsewhere for this same lineage must not stay blind to it.
+          const unresolved = openUnresolvedRecycleFleetAlert(this.db, oldId, freshId);
+          if (unresolved) {
             this.db.appendEvent({
               id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
               kind: "recycle_fleet_resolved", detail: { successorId: freshId },
             });
             // @decision 92c20eb9 — cancel any still-pending escalation question filed during the
             // alerted window — its content told a human to stop freshId, now the ready fleet owner.
-            if (alertedAt) this.cancelStaleEscalationQuestions(oldId, freshId, alertedAt);
+            this.cancelStaleEscalationQuestions(oldId, freshId, unresolved.ts);
           }
           return;
         }
@@ -13595,6 +13598,16 @@ export class SessionService {
           return;
         }
       } else if (this.pty.hasReachedReady(freshId)) {
+        // @decision db4b778c — file the resolved counterpart when an unresolved alert is still open for
+        // THIS lineage; never cancelStaleEscalationQuestions here (see that card's own record — it would
+        // sweep up an ordinary, unrelated pending question this halted predecessor is fully entitled to).
+        const unresolved = openUnresolvedRecycleFleetAlert(this.db, oldId, freshId);
+        if (unresolved) {
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
+            kind: "recycle_fleet_resolved", detail: { successorId: freshId },
+          });
+        }
         return;
       }
       if (!alerted && Date.now() >= deadline) {

@@ -134,20 +134,41 @@ export function currentHaltedSuccessor(db: Db, sessionId: string): Session | und
 }
 
 /**
+ * Shared scan both functions below build on: the single latest (by ts) `recycle_fleet_*` event filed
+ * under `sessionId`, across every kind in the family — never re-derive this `.filter().at(-1)` shape at
+ * a third call site.
+ */
+function latestRecycleFleetEvent(db: Db, sessionId: string): OrchestrationEvent | undefined {
+  return db.listEventsForSession(sessionId)
+    .filter((e) =>
+      e.kind === "recycle_fleet_unresolved" || e.kind === "recycle_fleet_resolved" ||
+      e.kind === "recycle_fleet_recovered" || e.kind === "recycle_fleet_stranded_across_restart")
+    .at(-1);
+}
+
+/**
  * The event-only half of {@link currentUnresolvedSettleSuccessor}'s match, without its
  * `reachedReadyAt` bypass — lets a caller that already knows `reachedReadyAt` is set still ask the
  * durable trail directly.
  * @decision 92c20eb9 — never re-derive this filter+match independently at a second call site.
  */
 export function latestMatchingUnresolvedSettleEvent(db: Db, sessionId: string, freshId: string): OrchestrationEvent | undefined {
-  const latest = db.listEventsForSession(sessionId)
-    .filter((e) =>
-      e.kind === "recycle_fleet_unresolved" || e.kind === "recycle_fleet_resolved" ||
-      e.kind === "recycle_fleet_recovered" || e.kind === "recycle_fleet_stranded_across_restart")
-    .at(-1);
+  const latest = latestRecycleFleetEvent(db, sessionId);
   if (!latest || latest.kind !== "recycle_fleet_unresolved") return undefined;
   const detail = latest.detail as { deadSuccessorId?: string; reason?: string; halted?: boolean } | undefined;
   if (detail?.reason !== "timeout" || detail?.halted === true) return undefined;
+  if (detail?.deadSuccessorId !== freshId) return undefined;
+  return latest;
+}
+
+/**
+ * @decision db4b778c — like {@link latestMatchingUnresolvedSettleEvent}, but general (no non-halted-only
+ * restriction) and durable rather than an in-memory flag — never re-derive this filter+match elsewhere.
+ */
+export function openUnresolvedRecycleFleetAlert(db: Db, oldId: string, freshId: string): OrchestrationEvent | undefined {
+  const latest = latestRecycleFleetEvent(db, oldId);
+  if (!latest || latest.kind !== "recycle_fleet_unresolved") return undefined;
+  const detail = latest.detail as { deadSuccessorId?: string } | undefined;
   if (detail?.deadSuccessorId !== freshId) return undefined;
   return latest;
 }
