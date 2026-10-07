@@ -1,6 +1,9 @@
-// Board card 97cff6db, round 4, Lead ruling 1: reenterMergeQuarantinesAtBoot's own writeMergeQuarantineLatch
-// references must ALL live inside the ONE boot-write chokepoint (bootWriteLatch) — never a bare call, or
-// an aliased reference (e.g. `const w = writeMergeQuarantineLatch`), anywhere else in that function's body.
+// Board card 97cff6db, round 4, Lead ruling 1: reenterMergeQuarantinesAtBootImpl's own
+// writeMergeQuarantineLatch references must ALL live inside the ONE boot-write chokepoint (bootWriteLatch)
+// — never a bare call, or an aliased reference (e.g. `const w = writeMergeQuarantineLatch`), anywhere else
+// in that function's body. (Card ef651188, round 2: the real body — and this chokepoint — moved from the
+// exported `reenterMergeQuarantinesAtBoot` into a not-exported `...Impl`, so the test-only injection seam
+// could move off the production-facing export entirely; this guard's own target name moved with it.)
 // This is a source-text/AST scan (never an import), because the property under test is "which references
 // exist in the SOURCE", not runtime behavior any black-box test could observe.
 //
@@ -20,7 +23,7 @@
 // file corrupted a manual brace count). The parser's own AST gives exact boundaries and exact identifiers.
 //
 // @decision 97cff6db (round 5) — SCOPE, stated exactly rather than implied: this counts only
-// `writeMergeQuarantineLatch` references INSIDE `reenterMergeQuarantinesAtBoot`'s own function body. It
+// `writeMergeQuarantineLatch` references INSIDE `reenterMergeQuarantinesAtBootImpl`'s own function body. It
 // does NOT see (a) `quarantineAllRegisteredFailClosed` (called from inside that body on a readdir
 // failure, before anything is read — a real boot write site with its own, separate write primitive,
 // never bootWriteLatch), (b) `writeSafetyTmpResidue` (a DIFFERENT write primitive from
@@ -38,7 +41,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SRC_PATH = path.join(__dirname, "..", "src", "git", "merge-quarantine.ts");
 const TARGET_NAME = "writeMergeQuarantineLatch";
-const FN_NAME = "reenterMergeQuarantinesAtBoot";
+const FN_NAME = "reenterMergeQuarantinesAtBootImpl";
 const CHOKEPOINT_NAME = "bootWriteLatch";
 
 let failures = 0;

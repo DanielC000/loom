@@ -363,7 +363,7 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOn
 const SAFETY_TMP_RE = /\.json\.tmp-safety-\d+-[0-9a-f]+$/;
 
 /**
- * Durably write `entry`'s own union as a `.json.tmp-safety-<pid>-<hex>` RESIDUE at `key`'s OWN hash — the
+ * Durably write `entry`'s own union as a `.json.tmp-safety-<pid>-<hex>` RESIDUE at `hash` directly — the
  * SAME tmp-write primitive `writeMergeQuarantineLatch` itself uses (open, write, fsync, close), but
  * deliberately NEVER renamed to the final name. Returns the tmp's own absolute path on success, or
  * `false` (never throws) on failure.
@@ -371,19 +371,25 @@ const SAFETY_TMP_RE = /\.json\.tmp-safety-\d+-[0-9a-f]+$/;
  * @decision 97cff6db — call this BEFORE any write in the same pass could clobber a path this entry's data
  * currently occupies, never after. See the decision record for the repro and why this is the durable floor.
  *
- * @decision 97cff6db (round 3) — `key` is an EXPLICIT parameter, never derived from `entry.repoPath`: a
- * degraded-occupied union can carry the occupant's own unresolvable `repoPath` as its winning identity
- * (`unionQuarantineEntries`'s tie-break), so recomputing the key from that path produces the wrong hash.
+ * @decision ef651188 — extracted so a PENDING entry (no verified key at all) can secure itself at the
+ * hash already embedded in its own `sourceFile`. See the decision record for the mis-attribution residual.
+ *
+ * @decision ef651188 (round 2, CRITICAL 1) — `selfReference`, when true, bakes this tmp's OWN basename
+ * into `entry.orphanLatchFiles` BEFORE writing, so a later boot's recovery read carries the self-reference
+ * from disk alone, never only from the caller's own in-memory re-point. See the decision record.
  */
-function writeSafetyTmpResidue(key: string, entry: MergeQuarantineEntry): string | false {
+function writeSafetyTmpResidueAtHash(hash: string, entry: MergeQuarantineEntry, selfReference = false): string | false {
   let fd: number | undefined;
-  const final = quarantinePathForKey(key);
+  const final = path.join(MERGE_QUARANTINE_DIR, `${hash}.json`);
   const tmp = `${final}.tmp-safety-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
     fd = fs.openSync(tmp, "w");
     const { armedKeys: _armedKeys, ...persistable } = entry;
-    fs.writeSync(fd, JSON.stringify(persistable, null, 2) + "\n");
+    const toPersist = selfReference
+      ? { ...persistable, orphanLatchFiles: [...new Set([...(persistable.orphanLatchFiles ?? []), path.basename(tmp)])] }
+      : persistable;
+    fs.writeSync(fd, JSON.stringify(toPersist, null, 2) + "\n");
     fs.fsyncSync(fd); // durable on disk before this function returns — the whole point of a SAFETY copy
     fs.closeSync(fd);
     fd = undefined;
@@ -394,6 +400,16 @@ function writeSafetyTmpResidue(key: string, entry: MergeQuarantineEntry): string
     console.error(`[merge-quarantine] FAILED to write a safety-tmp residue for ${entry.repoPath} (branch '${entry.branch}') before a risky write: ${(e as Error).message}`);
     return false;
   }
+}
+
+/**
+ * `key`-addressed wrapper of {@link writeSafetyTmpResidueAtHash} for a caller holding a VERIFIED key (a
+ * migrating/degraded-occupied key's own target) — never derive `key` from `entry.repoPath`: a
+ * degraded-occupied union can carry the occupant's own unresolvable `repoPath` as its winning identity
+ * (`unionQuarantineEntries`'s tie-break), so recomputing the key from that path produces the wrong hash.
+ */
+function writeSafetyTmpResidue(key: string, entry: MergeQuarantineEntry): string | false {
+  return writeSafetyTmpResidueAtHash(quarantineHashForKey(key), entry);
 }
 
 /**
@@ -1430,7 +1446,18 @@ function quarantineAllRegisteredFailClosed(registeredRepoPaths: string[], reason
  * @decision 24c0bdba (round 6 BLOCKER 2, round 7 M2 + its residual) — see the decision record for the
  * fail-open-at-boot incident this closes and the two escalating fixes to its own fail-closed sweep.
  */
-export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []): MergeQuarantineEntry[] {
+/**
+ * @decision ef651188 (round 2, nit 3) — NOT exported. The injection seam below must be structurally
+ * unreachable from production (`index.ts` only ever imports {@link reenterMergeQuarantinesAtBoot}, whose
+ * signature has no second parameter at all) rather than merely unused by it — see the decision record.
+ */
+function reenterMergeQuarantinesAtBootImpl(
+  registeredRepoPaths: string[] = [],
+  // @decision ef651188 — TEST-ONLY seam: lets a test push a json-shaped pending entry AFTER Phase 0's
+  // own protection has already run, to prove the bootWriteLatch backstop fires when Phase 0 is bypassed
+  // — a disk layout no real (post-fix) code path can produce. Always undefined in production.
+  testOnlyInjectUnprotectedPending?: PendingUnresolvedQuarantine[],
+): MergeQuarantineEntry[] {
   // @decision 7673d096 — index BOTH the fresh AND the legacy hash per registered repo, or a pre-upgrade
   // corrupt/torn latch falls through to the broad every-repo sweep instead of its own one repo.
   //
@@ -1883,7 +1910,13 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       if (!isRepoPathCurrentlyResolvable(entry.repoPath)) {
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] boot-time SAFETY-TMP residue ${f} for ${entry.repoPath} could NOT be verified against its current key — leaving it AS WRITTEN and deferring to a lazy re-resolve on first query.`);
-        pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+        // @decision ef651188 (round 2, CRITICAL 1) — self-reference `f` here too, at READ time: do not
+        // trust that every safety-tmp's own bytes already carry it (an older tmp written before this fix,
+        // or another call site's write that never bakes one in) — this is the generic backstop.
+        pendingUnresolvedQuarantines.push({
+          entry: { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), f])] },
+          sourceFile: f,
+        });
         continue;
       }
       const currentKey = canonicalRepoLockKey(entry.repoPath);
@@ -2008,7 +2041,41 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
     // must not be allowed to proceed either, or the only source is destroyed anyway (scenario B).
     for (const f of collidingSources) blockedWriteTargets.add(f);
   }
+  // @decision ef651188 (round 2, MAJOR) — exclude a degraded-occupied key's own write target from the
+  // at-risk set below: bootWriteLatch's degradedOccupiedKeys refusal is unconditional, so it is never
+  // actually written this boot. See the decision record.
+  const degradedWriteTargetBasenames = new Set<string>();
+  for (const key of degradedOccupiedKeys) degradedWriteTargetBasenames.add(path.basename(quarantinePathForKey(key)));
+  // @decision ef651188 — a PENDING entry's sourceFile never went through the loop above (it has no
+  // byRepoKey entry) but CAN physically be some OTHER key's write target too. See the decision record.
+  pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.map((p) => {
+    if (!allBootWriteTargets.has(p.sourceFile) || degradedWriteTargetBasenames.has(p.sourceFile)) return p;
+    // A genuinely pending entry has no verified key at all (that's why it's pending) — secure it at
+    // the hash ALREADY embedded in its own at-risk filename, never a recomputed/trusted key.
+    const hash = p.sourceFile.slice(0, -".json".length);
+    // @decision ef651188 (round 2, CRITICAL 1) — selfReference:true bakes the self-reference into the
+    // tmp's OWN persisted bytes, so a later boot's recovery read carries it from disk alone.
+    const safetyTmpPath = writeSafetyTmpResidueAtHash(hash, p.entry, true);
+    if (!safetyTmpPath) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] could not even durably SECURE a PENDING (unresolvable) quarantine's own latch (${p.sourceFile}, for ${p.entry.repoPath}) before a boot write targeting the same filename runs — blocking that colliding write instead; the old source file is left exactly as written, and a later boot can retry.`);
+      blockedWriteTargets.add(p.sourceFile);
+      return p;
+    }
+    // @decision ef651188 — mirrors round 4/5's G1/G1a fix: re-point at the safety-tmp's own unique
+    // name AND self-reference it in orphanLatchFiles, or a later clear can sweep it (sees it unowned).
+    const protectiveSourceFile = path.basename(safetyTmpPath);
+    return {
+      entry: { ...p.entry, orphanLatchFiles: [...new Set([...(p.entry.orphanLatchFiles ?? []), protectiveSourceFile])] },
+      sourceFile: protectiveSourceFile,
+    };
+  });
   fsyncQuarantineDir(); // every safety-tmp above is now durable; safe to let any write below proceed.
+
+  // @decision ef651188 — the test-only injection point itself: deliberately AFTER Phase 0's own
+  // protection has already run, so an injected entry here is exactly as unprotected as a hypothetical
+  // future push site that forgot to route through Phase 0 — see the decision record.
+  if (testOnlyInjectUnprotectedPending) pendingUnresolvedQuarantines.push(...testOnlyInjectUnprotectedPending);
 
   // @decision 97cff6db (round 3, minor 4) — declared HERE, before the deferred-corrupt-tmp placeholder
   // write below, so that write-site's own success is also tracked: phase 3 must never delete a migrate
@@ -2032,9 +2099,20 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
       console.error(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — a DIFFERENT key's only copy of this exact filename could not be secured this boot; ${entry.repoPath} stays enforced in-memory only for this process.`);
       return false;
     }
+    // @decision ef651188 (round 2, nit 4) — check degradedOccupiedKeys BEFORE the pending backstop below:
+    // a degraded-occupied target's own pending reference legitimately keeps this basename (excluded from
+    // Phase 0's protection above), so a refusal here must log the real, more specific reason.
     if (degradedOccupiedKeys.has(targetKey)) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — this key is occupied by a DIFFERENT, currently-unresolvable entry's own trusted resolvedKey; overwriting it would destroy that entry's only backing file. ${entry.repoPath} stays enforced in-memory only for this process.`);
+      return false;
+    }
+    // @decision ef651188 — STRUCTURAL BACKSTOP, not the primary protection: the Phase 0 loop above
+    // already re-points every at-risk pending entry off this exact filename, so this should never fire
+    // post-fix. It exists so a FUTURE push site can't silently reopen the gap this card closes.
+    if (pendingUnresolvedQuarantines.some((p) => p.sourceFile === targetBasename)) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] refusing an UNPROTECTED boot write to ${targetBasename} for ${entry.repoPath} — a PENDING (unresolvable) entry's own sourceFile is STILL this exact filename (Phase 0's pending-protection should have already moved it off — this is the backstop, not the primary fix; see the decision record); ${entry.repoPath} stays enforced in-memory only for this process.`);
       return false;
     }
     if (!entry.placeholder && !isRepoPathCurrentlyResolvable(entry.repoPath)) {
@@ -2367,4 +2445,21 @@ export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []
   // never sees the same quarantine reported twice.
   for (const [key, entry] of byRepoKey) activeQuarantines.set(key, entry);
   return [...new Set(byRepoKey.values()), ...pendingUnresolvedQuarantines.map((p) => p.entry)];
+}
+
+/** Production entry point — no injection seam reachable through this signature at all. */
+export function reenterMergeQuarantinesAtBoot(registeredRepoPaths: string[] = []): MergeQuarantineEntry[] {
+  return reenterMergeQuarantinesAtBootImpl(registeredRepoPaths, undefined);
+}
+
+/**
+ * @decision ef651188 (round 2, nit 3) — TEST-ONLY entry point for the `testOnlyInjectUnprotectedPending`
+ * seam. Never imported by `index.ts`; a test exercising the bootWriteLatch backstop calls this instead of
+ * {@link reenterMergeQuarantinesAtBoot}, whose own signature cannot accept the injection at all.
+ */
+export function reenterMergeQuarantinesAtBootTestOnly(
+  registeredRepoPaths: string[],
+  testOnlyInjectUnprotectedPending: PendingUnresolvedQuarantine[],
+): MergeQuarantineEntry[] {
+  return reenterMergeQuarantinesAtBootImpl(registeredRepoPaths, testOnlyInjectUnprotectedPending);
 }

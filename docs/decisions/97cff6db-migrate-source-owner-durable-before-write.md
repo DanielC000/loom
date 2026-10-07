@@ -10,6 +10,9 @@ branch was WORSE than main in two shapes (G1, G2 below). Round 3 itself replaced
 NOT MERGEABLE by Code Review `b8a7b74f` at commit `cae8e750`. Rounds 1-4's own narratives are kept below,
 compressed, because the counter-examples that killed each are exactly what the next round's design answers.
 
+A SEPARATE gap in this same round-4 Phase 0 at-risk computation — a PENDING entry's own `sourceFile` was
+never treated as at-risk — is fixed under its own card/record: see `docs/decisions/ef651188-pending-entry-sourcefile-at-risk.md`.
+
 ## The bugs (round 1's own framing — all four still accurate as PROBLEM statements)
 
 **Finding 1 (MAIN)** — a sibling key's successful write in the SAME write-all pass can destroy a failed
