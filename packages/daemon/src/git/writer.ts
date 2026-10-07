@@ -350,6 +350,9 @@ export class GitWriter {
    * blocked from touching the repo; always resumed in `finally` so a lease never outlives this call.
    * @decision 237d1899 — the per-op token makes a resume "mine-only" under overlap: never resume a
    * lease by its bare presence — a DIFFERENT still-running op may have re-paused it with a new token.
+   * @decision 6e6b342d — `checkout`/`createBranch`/`commit` must call this from INSIDE their own
+   * `withCanonicalIndexLock` callback, never before the lock; `push()` has no lock to be inside of and
+   * keeps calling this standalone.
    */
   private async withVaultPauseLease<T>(fn: () => Promise<T>): Promise<T> {
     const pauseToken = pauseVaultAutoCommit(this.repoPath);
@@ -380,8 +383,8 @@ export class GitWriter {
     // just the callback passed to it: a quarantine refusal (RepoQuarantinedError) is thrown by the lock
     // itself BEFORE that callback ever runs, so a try/catch nested inside it would never see it.
     try {
-      return await this.withVaultPauseLease(() =>
-        withCanonicalIndexLock(this.repoPath, async () => {
+      return await withCanonicalIndexLock(this.repoPath, () =>
+        this.withVaultPauseLease(async () => {
           const git = this.git(this.localMs);
           // @decision d8bb2074 — kill-confirmed (killableCanonicalRaw), not a bare withTimeout race: an
           // orphaned checkout child must never survive past the lock releasing, and the repo is re-checked
@@ -429,8 +432,8 @@ export class GitWriter {
     // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
     // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
     try {
-      return await this.withVaultPauseLease(() =>
-        withCanonicalIndexLock(this.repoPath, async () => {
+      return await withCanonicalIndexLock(this.repoPath, () =>
+        this.withVaultPauseLease(async () => {
           // @decision d8bb2074 — same kill-confirm + per-call re-check treatment as checkout() above.
           let raisedToken: string | undefined;
           const onTreeDeathSettled = (confirmed: boolean): void => {
@@ -494,8 +497,8 @@ export class GitWriter {
     // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
     // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
     try {
-      return await this.withVaultPauseLease(() =>
-        withCanonicalIndexLock(this.repoPath, async () => {
+      return await withCanonicalIndexLock(this.repoPath, () =>
+        this.withVaultPauseLease(async () => {
           const git = this.git(this.localMs);
           // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
           const status = await withTimeout(git.status(), this.localMs, "git status");

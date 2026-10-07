@@ -20,15 +20,18 @@ confirmed by a repo-wide grep (zero matches for `pauseVaultAutoCommit`/`resumeVa
 ## Fix
 
 `mergeBranch` (the public entry point — `mergeBranchLocked` is private and only ever called from inside
-it, so bracketing here covers both) now calls `pauseVaultAutoCommit(repoPath)` before entering
-`withCanonicalIndexLock`, and `resumeVaultAutoCommit(repoPath, pauseToken)` in a `finally` that wraps the
+it, so bracketing here covers both) called `pauseVaultAutoCommit(repoPath)` before entering
+`withCanonicalIndexLock`, and `resumeVaultAutoCommit(repoPath, pauseToken)` in a `finally` that wrapped the
 lock call and the `RepoQuarantinedError` translation — so a throw out of the lock (including a quarantine
-refusal) never leaves the lease held.
+refusal) never left the lease held. **Superseded by card `6e6b342d`:** the pause/resume bracket now lives
+INSIDE the lock's own callback (taken at admission, resumed in that callback's own `finally`), never
+before `withCanonicalIndexLock` is admitted — see that card's record for why and for the admission-timing
+gap this closes.
 
 Same bracket added to `fastForwardCanonicalMain` (`git/batch-merge.ts`), the batch landing path's own
 canonical mutation point (the `git merge --ff-only` that advances canonical main) — the per-candidate
 cherry-pick landing itself happens in the batch WORKTREE, not the canonical repo, so that part needs no
-bracket; only the fast-forward does.
+bracket; only the fast-forward does. Also moved inside the lock by `6e6b342d`.
 
 ## Does not cover (added by card `a7de9d88`'s Code Review)
 
@@ -51,8 +54,10 @@ add+commit work — narrows the race window but does not close it. Three real ga
   one place every caller converges, so a direct writer call gets the identical protection. Covered by the
   same test above (its vault/writer.ts scenario).
 - **Single-token clobber.** A lease held by one op can be silently cleared by a different op's own
-  `resumeVaultAutoCommit` call before the first op's own mutation finishes. NOT closed here — tracked by
-  sibling card `6e6b342d` (a multi-holder lease, taken inside the canonical lock).
+  `resumeVaultAutoCommit` call before the first op's own mutation finishes. NOT closed here — **CLOSED by
+  sibling card `6e6b342d`** (the lease is now a multi-holder SET, taken inside the canonical lock; see that
+  card's record — this was a lease-bookkeeping honesty fix, not a correctness bug, since the canonical
+  lock already made real mutation-interleaving impossible wherever this lease could matter at all).
 
 See `docs/decisions/a09b81a0-vault-commit-code-repo-guard.md`'s "Round 4: the pause-lease check's
 placement" section for the full design of what actually closes the first two gaps.

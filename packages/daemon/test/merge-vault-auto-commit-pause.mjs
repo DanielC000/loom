@@ -13,12 +13,32 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // right in the middle of the merge's own in-flight mutation. GREEN once `mergeBranch` brackets its own
 // mutation in the same pause/resume lease GitWriter already holds.
 //
-// SCENARIO 2 — a merge refused by a canonical-repo quarantine (`RepoQuarantinedError`, thrown by
-// `withCanonicalIndexLock` BEFORE `mergeBranchLocked` ever runs) still resumes the vault auto-commit pause
-// lease via `finally`. Proven by seeding a FOREIGN pre-existing lease before the quarantined call:
-// pre-fix, `mergeBranch` never touches the lease at all, so the foreign lease survives UNTOUCHED; post-fix,
-// `mergeBranch`'s own pause (on entry) + resume (in `finally`) clears it, since nothing else re-paused
-// after it.
+// SCENARIO 2 (card `6e6b342d` round 2) — a merge whose OWN squash commit genuinely fails AFTER admission
+// (a failing pre-commit hook, not a pre-admission quarantine) still resumes its OWN vault auto-commit
+// pause lease afterward, even though the op's work failed. REWORKED by `6e6b342d`: the pre-`6e6b342d`
+// version of this scenario quarantined the repo BEFORE calling `mergeBranch` at all and seeded a FOREIGN
+// pre-existing lease, relying on `mergeBranch`'s own pause silently CLOBBERING that foreign lease (the
+// very bug `6e6b342d` fixes) as a side channel for detecting "mergeBranch touched the lease". Now that
+// pause lives INSIDE the lock (taken at admission, never before a pre-admission quarantine refusal even
+// reaches the callback) and a second holder's entry can no longer be clobbered, that old setup would just
+// prove "mergeBranch never ran" trivially. This scenario instead observes mergeBranch's OWN entry
+// directly — present (via the real lease file) while its own commit is genuinely blocked post-admission,
+// absent once the call returns (having failed) — without any foreign-lease side channel.
+//
+// ⚠️ DOES NOT prove the resume specifically needs `finally` (Code Review round 2, Minor 1): every failure
+// path reachable here — the failing hook included — makes `mergeBranchLocked` RETURN `{ok:false,...}`
+// normally; it never REJECTS. A plain `resumeVaultAutoCommit()` placed right after the `await`, with no
+// `finally` at all, would pass this exact assertion just as well, since nothing here ever skips past it.
+// Verified directly: injecting a generic thrown `Error` via a fake `gitFactory` (the same seam used
+// successfully below for `fastForwardCanonicalMain`) gets caught internally by `mergeBranchLocked`'s own
+// broad, by-design error handling and converted to a structured `{ok:false, reason: ...}` return — it
+// never escapes as a real rejection anywhere this was probed. `batch-merge-vault-auto-commit-pause.mjs`'s
+// own scenario 2 is where the `finally`-specific claim is actually proven (via a gitFactory failure that
+// DOES genuinely escape `fastForwardCanonicalMain`, confirmed by NC3: removing that file's `finally` and
+// resuming plainly after the `await` makes ITS equivalent assertion go RED) — `mergeBranch` shares the
+// exact same bracket SHAPE (pause at admission, resume in that callback's `finally`), so `finally`'s
+// correctness there is the best available evidence for this file too, just not independently provable
+// here with the seams this codebase currently exposes.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-vault-auto-commit-pause.mjs
 import fs from "node:fs";
@@ -27,10 +47,9 @@ import { execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { pollUntil } from "./_timing-guard.mjs";
 
-// HERMETICITY (card 500fe2df): SCENARIO 2 below calls the real enterMergeQuarantine() directly — a real
-// durable latch write under LOOM_HOME. Isolate BEFORE the dist import below, same as every other hermetic
-// test in this suite.
+// HERMETICITY: same hermetic posture as every other test in this suite.
 useOwnLoomHome("loom-mvac-home-");
 requireHermeticEnv();
 
@@ -38,8 +57,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const distVaultDir = path.join(__dirname, "..", "dist", "vault");
 const { mergeBranch } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
-const { enterMergeQuarantine, clearMergeQuarantine } = await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
-const { VaultVersioner, pauseVaultAutoCommit } = await import(pathToFileURL(path.join(distVaultDir, "versioner.js")).href);
+const { VaultVersioner } = await import(pathToFileURL(path.join(distVaultDir, "versioner.js")).href);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -54,6 +72,9 @@ const VAULT_FIRE_DELAY_MS = 600; // fired well after the squash has staged (near
                                   // the hook's sleep ends.
 const GUARD_MS = 25_000; // this TEST's own patience — see merge-writer-index-lock.mjs's identical constant
                           // for the full sizing rationale (shared shape, same headroom).
+const LEASE_POLL_TIMEOUT_MS = 5_000; // pause now fires at lock admission, essentially immediately for an
+                                      // uncontended repo — well under HOOK_SLEEP_S, so a short poll bound
+                                      // is enough and a miss here means something is genuinely wrong.
 
 const root = fs.realpathSync(mkdtempManaged("loom-mvac-"));
 
@@ -78,6 +99,16 @@ function makeWorktree(repo, branch, file, content, tag) {
 function installHangingHook(repo) {
   const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
   fs.writeFileSync(hookPath, `#!/bin/sh\nif [ -f .git/hang-fired ]; then\n  exit 0\nfi\ntouch .git/hang-fired\nsleep ${HOOK_SLEEP_S}\n`);
+  fs.chmodSync(hookPath, 0o755);
+}
+
+// Same one-shot marker-gated shape as installHangingHook, but EXITS NONZERO after the sleep instead of
+// succeeding — git aborts the commit on a nonzero pre-commit hook, so this produces a REAL, genuine
+// post-admission failure (not a timeout/kill) to prove scenario 2's resume-after-failure against (see
+// this file's own header for why that's a weaker claim than "resume survives a throw").
+function installFailingHook(repo) {
+  const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
+  fs.writeFileSync(hookPath, `#!/bin/sh\nif [ -f .git/hang-fired ]; then\n  exit 0\nfi\ntouch .git/hang-fired\nsleep ${HOOK_SLEEP_S}\nexit 1\n`);
   fs.chmodSync(hookPath, 0o755);
 }
 
@@ -138,43 +169,47 @@ async function scenarioMergeInFlightPausesVault(tag) {
   await versioner.stop();
 }
 
-async function scenarioQuarantinedMergeStillResumes(tag) {
+async function scenarioMutateFailureStillResumes(tag) {
   const repo = makeRepo(tag);
+  const branch = "loom/vault-pause-fail-test";
+  makeWorktree(repo, branch, "file-b.txt", `branch-content-${tag}\n`, tag);
+  installFailingHook(repo);
 
-  // A FOREIGN pre-existing lease, simulating some other in-flight op already holding the pause — lets us
-  // tell "mergeBranch never touched the lease at all" (pre-fix) apart from "mergeBranch paused+resumed its
-  // OWN lease, clearing this one in the process" (post-fix): both leave "no dangling lease of mergeBranch's
-  // OWN making" trivially true, but only the fix actually clears this pre-existing foreign one.
   const leasePath = path.join(repo, ".git", "loom-vault-pause.json");
-  pauseVaultAutoCommit(repo, 60_000);
-  check("[2] precondition: a foreign pre-existing vault-pause lease is in place before the quarantined merge call", fs.existsSync(leasePath));
+  check("[2] precondition: no vault-pause lease exists before the merge starts", !fs.existsSync(leasePath));
 
-  enterMergeQuarantine(repo, "nonexistent-branch", "test: quarantine refusal must still resume the auto-committer");
-  let result;
-  try {
-    result = await mergeBranch(repo, "nonexistent-branch", `Throw Test Card ${tag}`);
-  } finally {
-    clearMergeQuarantine(repo);
-  }
+  // Fire the merge — its squash stages fine (fast), but its own `git commit` hits the failing hook: blocks
+  // for HOOK_SLEEP_S (the observation window below), then the hook exits nonzero and the commit genuinely
+  // fails — a REAL post-admission failure, not a pre-admission quarantine refusal.
+  const mergePromise = mergeBranch(repo, branch, `Mutate Fail Test Card ${tag}`);
 
-  check("[2] the quarantined merge call is refused (never commits anything)", result?.ok === false);
-  check("[2] the refusal names the quarantine", /quarantin/i.test(result?.reason ?? ""));
+  // Poll for the lease's appearance rather than a fixed sleep — pauseVaultAutoCommit now runs as the
+  // FIRST thing inside the lock's own callback (card `6e6b342d`), so this observes mergeBranch's OWN
+  // lease existing WHILE its own commit is still blocked in the failing hook — proving pause fired at
+  // admission and genuinely brackets this (about to fail) attempt, with no foreign lease involved.
+  const leaseAppeared = await pollUntil(() => fs.existsSync(leasePath), { timeoutMs: LEASE_POLL_TIMEOUT_MS });
+  check("[2] the vault-pause lease IS held while the merge's own commit is still mid-flight (blocked in the failing hook)", leaseAppeared);
+
+  const result = await Promise.race([mergePromise, guard(GUARD_MS, "merge")]);
+  check("[2] [guard] the merge settled within the test's patience window (not wedged)", result?.__guardFired !== "merge");
+  check("[2] the merge itself reports failure (the hook made the squash commit fail)", result?.ok === false);
   check(
-    "[2] after the quarantined call returns, no vault-pause lease is left stuck — mergeBranch's own pause " +
-    "(on entry) was resumed in `finally`, clearing even the pre-existing foreign lease in the process",
+    "[2] after the failed merge returns, its own pause is resumed despite the failure — no lease left " +
+    "stuck (this is a RETURN-based failure, not a throw — see this file's own header for why that does " +
+    "NOT discriminate `finally` from a plain post-await resume)",
     !fs.existsSync(leasePath),
   );
 }
 
 try {
   await scenarioMergeInFlightPausesVault(`pause-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
-  await scenarioQuarantinedMergeStillResumes(`throw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+  await scenarioMutateFailureStillResumes(`fail-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
 } catch (e) {
   console.error(e);
   failures++;
 }
 
 console.log(failures === 0
-  ? "\nALL PASS — mergeBranch now brackets its canonical-index mutation in the same vault auto-commit pause/resume lease GitWriter already holds, and resume survives a quarantine refusal via `finally`."
+  ? "\nALL PASS — mergeBranch now brackets its canonical-index mutation in the same vault auto-commit pause/resume lease GitWriter already holds, taken at lock admission, and resume survives a genuine post-admission failure (see this file's header for why the `finally`-specific claim is proven in batch-merge-vault-auto-commit-pause.mjs instead)."
   : `\n${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

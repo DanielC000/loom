@@ -915,106 +915,110 @@ export async function fastForwardCanonicalMain(
   repoPath: string, expectedBaseSha: string, targetSha: string, deps: BatchGitDeps = {},
 ): Promise<FastForwardResult> {
   // @decision 87a3c87e — same vault-auto-commit pause bracket as the solo squash path (mergeBranch,
-  // git/worktrees.ts); resume stays in `finally` so a throw never leaves the lease held.
-  const pauseToken = pauseVaultAutoCommit(repoPath);
+  // git/worktrees.ts).
+  // @decision 6e6b342d — pause/resume now live INSIDE the lock callback (taken at admission, resumed in
+  // this callback's own `finally`), never before `withCanonicalIndexLock` is admitted.
   try {
     return await withCanonicalIndexLock(repoPath, async () => {
-      const { git, timeoutMs } = boundedGit(repoPath, deps);
-      // @decision b801bad0 — ONE spawn for BOTH the forfeit sha-check and (when pinned) the branch divert
-      // pre-check: `readHeadShaAndBranch` (git/mainline-watch.ts), not two separate rev-parse/symbolic-ref
-      // calls — see that function's own doc for the exact invocation and why flag order matters here.
-      const entry = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, batch fast-forward check)");
-      if (!entry) return { ok: false, reason: "failed to read canonical HEAD (and checked-out branch)" };
-      const currentMainSha = entry.sha;
-      if (currentMainSha !== expectedBaseSha) {
-        return {
-          ok: false, forfeited: true, currentMainSha,
-          reason: `canonical main advanced (now ${currentMainSha}) since this batch was cut from ${expectedBaseSha} — this batch's gate never validated main's current tree; falling back to a per-branch re-gate`,
-        };
-      }
-      // Pin the checked-out BRANCH too, not just the sha: a same-commit checkout divert (e.g.
-      // GitWriter.createBranch()) defeats the sha-only forfeit check above. Optional: a caller passing no
-      // `expectedBaseBranch` keeps today's sha-only behavior.
-      if (deps.expectedBaseBranch !== undefined && entry.branch !== deps.expectedBaseBranch) {
-        return {
-          ok: false, branchDiverted: true, observedBranch: entry.branch,
-          // Card b801bad0 (fix round 3) — NEVER "falling back to a per-branch re-gate" here: unlike an
-          // ordinary forfeit (above), a branchDiverted refusal runs NO per-candidate fallback at all (the
-          // solo path pins only a sha, never a branch, and would risk landing onto this same stray branch)
-          // — see the caller's own `result.branchDiverted` handling, sessions/service.ts.
-          // Card ba663984 — name BOTH remedies, mirroring the solo squash path's identical pre-squash
-          // refusal wording (`requireCanonicalHead`'s branch check, git/worktrees.ts): restore the checkout,
-          // or — if the observed branch is actually a deliberate mainline rename — reset the project's
-          // mainline baseline via the human-only route (2a6a292a).
-          reason: `canonical repo is checked out on "${entry.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — something diverted the checkout since this batch was cut. Check out "${deps.expectedBaseBranch}" again in the canonical repo and re-confirm; if "${entry.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline first (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only).`,
-        };
-      }
-      if (targetSha === expectedBaseSha) return { ok: true }; // nothing landed on top — no-op fast-forward
-      // @decision bde5d1fe (item 2) — kill-confirmed, same helper + quarantine treatment as the solo
-      // squash commit (mergeBranchLocked): a bare withTimeout here abandoned an orphaned ff-only/post-merge
-      // hook child on timeout, exactly the race 24c0bdba closed everywhere else on this path.
-      let raisedToken: string | undefined;
-      const onTreeDeathSettled = (confirmed: boolean): void => {
-        if (confirmed && raisedToken) clearMergeQuarantineByToken(repoPath, raisedToken);
-      };
-      // @decision b801bad0 — verify the LANDED RESULT after an apparently-successful ff-only (ONE spawn,
-      // same helper as above); refuse on a mismatch rather than report ok:true. Gated ENTIRELY on
-      // `expectedBaseBranch` — unset pays nothing extra here, mirroring `expectedBranchTip`'s contract.
-      const verifyLanded = async (): Promise<FastForwardResult> => {
-        if (deps.expectedBaseBranch === undefined) return { ok: true };
-        const post = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, post-ff verify)");
-        // Card b801bad0 (fix round, Code Review MINOR 2) — a failed RE-READ is NOT a confirmed divert: the
-        // `--ff-only` call above did not throw, so the landing most likely happened and this is only a
-        // verification failure. Typed distinctly (`unverified`, never `branchDiverted`) so the caller can
-        // treat it as "probably landed, could not confirm" rather than a security-relevant divert.
-        if (!post) return { ok: false, unverified: true, mayHaveLanded: true, reason: "fast-forward appeared to succeed but canonical HEAD (and checked-out branch) could not be re-read to verify — the landing likely happened but could not be confirmed" };
-        if (post.sha !== targetSha) {
-          // Card b4080777 (Round 2) — `mayHaveLanded:true`: the `--ff-only` call itself did not throw, so OUR content
-          // was placed on main at that instant; this mismatch means something ELSE advanced main further
-          // before this re-read, not that our own landing never happened.
-          return { ok: false, branchDiverted: true, observedBranch: post.branch, mayHaveLanded: true, reason: `fast-forward appeared to succeed but canonical HEAD reads ${post.sha}, not the expected ${targetSha} — refusing to report success` };
-        }
-        if (post.branch !== deps.expectedBaseBranch) {
-          // Card ba663984 — same two-remedy wording as the pre-ff refusal above.
-          return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward landed on "${post.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — refusing to report success. Restore the canonical checkout to "${deps.expectedBaseBranch}" before any worker_merge_confirm; if "${post.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only) first.` };
-        }
-        return { ok: true };
-      };
+      const pauseToken = pauseVaultAutoCommit(repoPath);
       try {
-        await killableCanonicalRaw(
-          repoPath, ["merge", "--ff-only", targetSha], timeoutMs, "git merge --ff-only (canonical, batch fast-forward)",
-          deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
-        );
-      } catch (e) {
-        if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: `fast-forward refused — canonical repo is quarantined: ${e.message}` };
-        if (treeDeathUnconfirmed(e)) {
-          raisedToken = enterMergeQuarantine(repoPath, "(batch fast-forward)", unconfirmedKillReason("fast-forward merge could not be confirmed dead after a kill"));
-          // @decision d8bb2074 — no HEAD re-read here (an unconfirmed kill means "touch nothing else");
-          // name the already-known target sha so a reader knows main may already be there, not just stalled.
-          // @decision b4080777 — `mayHaveLanded:true`: main may already be at `targetSha` if it landed
-          // before the kill — never a confirmed non-landing.
-          return { ok: false, quarantined: true, mayHaveLanded: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it (canonical main may already be at ${targetSha} if the merge itself landed before the kill); canonical repo may need manual inspection: ${(e as Error).message}` };
+        const { git, timeoutMs } = boundedGit(repoPath, deps);
+        // @decision b801bad0 — ONE spawn for BOTH the forfeit sha-check and (when pinned) the branch divert
+        // pre-check: `readHeadShaAndBranch` (git/mainline-watch.ts), not two separate rev-parse/symbolic-ref
+        // calls — see that function's own doc for the exact invocation and why flag order matters here.
+        const entry = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, batch fast-forward check)");
+        if (!entry) return { ok: false, reason: "failed to read canonical HEAD (and checked-out branch)" };
+        const currentMainSha = entry.sha;
+        if (currentMainSha !== expectedBaseSha) {
+          return {
+            ok: false, forfeited: true, currentMainSha,
+            reason: `canonical main advanced (now ${currentMainSha}) since this batch was cut from ${expectedBaseSha} — this batch's gate never validated main's current tree; falling back to a per-branch re-gate`,
+          };
         }
-        // A hung post-merge hook can outlive the timeout AFTER HEAD already moved — re-verify before
-        // reporting a false failure (mirrors mergeBranchLocked's own post-commit-failure HEAD re-read).
-        let headAfterFailure: string | undefined;
-        let headReadFailed = false;
+        // Pin the checked-out BRANCH too, not just the sha: a same-commit checkout divert (e.g.
+        // GitWriter.createBranch()) defeats the sha-only forfeit check above. Optional: a caller passing no
+        // `expectedBaseBranch` keeps today's sha-only behavior.
+        if (deps.expectedBaseBranch !== undefined && entry.branch !== deps.expectedBaseBranch) {
+          return {
+            ok: false, branchDiverted: true, observedBranch: entry.branch,
+            // Card b801bad0 (fix round 3) — NEVER "falling back to a per-branch re-gate" here: unlike an
+            // ordinary forfeit (above), a branchDiverted refusal runs NO per-candidate fallback at all (the
+            // solo path pins only a sha, never a branch, and would risk landing onto this same stray branch)
+            // — see the caller's own `result.branchDiverted` handling, sessions/service.ts.
+            // Card ba663984 — name BOTH remedies, mirroring the solo squash path's identical pre-squash
+            // refusal wording (`requireCanonicalHead`'s branch check, git/worktrees.ts): restore the checkout,
+            // or — if the observed branch is actually a deliberate mainline rename — reset the project's
+            // mainline baseline via the human-only route (2a6a292a).
+            reason: `canonical repo is checked out on "${entry.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — something diverted the checkout since this batch was cut. Check out "${deps.expectedBaseBranch}" again in the canonical repo and re-confirm; if "${entry.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline first (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only).`,
+          };
+        }
+        if (targetSha === expectedBaseSha) return { ok: true }; // nothing landed on top — no-op fast-forward
+        // @decision bde5d1fe (item 2) — kill-confirmed, same helper + quarantine treatment as the solo
+        // squash commit (mergeBranchLocked): a bare withTimeout here abandoned an orphaned ff-only/post-merge
+        // hook child on timeout, exactly the race 24c0bdba closed everywhere else on this path.
+        let raisedToken: string | undefined;
+        const onTreeDeathSettled = (confirmed: boolean): void => {
+          if (confirmed && raisedToken) clearMergeQuarantineByToken(repoPath, raisedToken);
+        };
+        // @decision b801bad0 — verify the LANDED RESULT after an apparently-successful ff-only (ONE spawn,
+        // same helper as above); refuse on a mismatch rather than report ok:true. Gated ENTIRELY on
+        // `expectedBaseBranch` — unset pays nothing extra here, mirroring `expectedBranchTip`'s contract.
+        const verifyLanded = async (): Promise<FastForwardResult> => {
+          if (deps.expectedBaseBranch === undefined) return { ok: true };
+          const post = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, post-ff verify)");
+          // Card b801bad0 (fix round, Code Review MINOR 2) — a failed RE-READ is NOT a confirmed divert: the
+          // `--ff-only` call above did not throw, so the landing most likely happened and this is only a
+          // verification failure. Typed distinctly (`unverified`, never `branchDiverted`) so the caller can
+          // treat it as "probably landed, could not confirm" rather than a security-relevant divert.
+          if (!post) return { ok: false, unverified: true, mayHaveLanded: true, reason: "fast-forward appeared to succeed but canonical HEAD (and checked-out branch) could not be re-read to verify — the landing likely happened but could not be confirmed" };
+          if (post.sha !== targetSha) {
+            // Card b4080777 (Round 2) — `mayHaveLanded:true`: the `--ff-only` call itself did not throw, so OUR content
+            // was placed on main at that instant; this mismatch means something ELSE advanced main further
+            // before this re-read, not that our own landing never happened.
+            return { ok: false, branchDiverted: true, observedBranch: post.branch, mayHaveLanded: true, reason: `fast-forward appeared to succeed but canonical HEAD reads ${post.sha}, not the expected ${targetSha} — refusing to report success` };
+          }
+          if (post.branch !== deps.expectedBaseBranch) {
+            // Card ba663984 — same two-remedy wording as the pre-ff refusal above.
+            return { ok: false, branchDiverted: true, observedBranch: post.branch, reason: `fast-forward landed on "${post.branch ?? "(detached)"}", not the expected mainline branch "${deps.expectedBaseBranch}" — refusing to report success. Restore the canonical checkout to "${deps.expectedBaseBranch}" before any worker_merge_confirm; if "${post.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only) first.` };
+          }
+          return { ok: true };
+        };
         try {
-          headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-ff-failure verify)")).trim();
-        } catch { headReadFailed = true; } // unknown — fall through to the ordinary failure below
-        if (headAfterFailure === targetSha) return await verifyLanded();
-        // @decision b4080777 — `mayHaveLanded:true` ONLY when the re-read itself failed (`headReadFailed`):
-        // a successful re-read that simply disagrees with `targetSha` IS a confirmed non-landing; a failed
-        // re-read proves nothing either way, the same typing gap `unverified` exists to cover.
-        return { ok: false, mayHaveLanded: headReadFailed, reason: `fast-forward failed: ${(e as Error).message}` };
+          await killableCanonicalRaw(
+            repoPath, ["merge", "--ff-only", targetSha], timeoutMs, "git merge --ff-only (canonical, batch fast-forward)",
+            deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled,
+          );
+        } catch (e) {
+          if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: `fast-forward refused — canonical repo is quarantined: ${e.message}` };
+          if (treeDeathUnconfirmed(e)) {
+            raisedToken = enterMergeQuarantine(repoPath, "(batch fast-forward)", unconfirmedKillReason("fast-forward merge could not be confirmed dead after a kill"));
+            // @decision d8bb2074 — no HEAD re-read here (an unconfirmed kill means "touch nothing else");
+            // name the already-known target sha so a reader knows main may already be there, not just stalled.
+            // @decision b4080777 — `mayHaveLanded:true`: main may already be at `targetSha` if it landed
+            // before the kill — never a confirmed non-landing.
+            return { ok: false, quarantined: true, mayHaveLanded: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it (canonical main may already be at ${targetSha} if the merge itself landed before the kill); canonical repo may need manual inspection: ${(e as Error).message}` };
+          }
+          // A hung post-merge hook can outlive the timeout AFTER HEAD already moved — re-verify before
+          // reporting a false failure (mirrors mergeBranchLocked's own post-commit-failure HEAD re-read).
+          let headAfterFailure: string | undefined;
+          let headReadFailed = false;
+          try {
+            headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-ff-failure verify)")).trim();
+          } catch { headReadFailed = true; } // unknown — fall through to the ordinary failure below
+          if (headAfterFailure === targetSha) return await verifyLanded();
+          // @decision b4080777 — `mayHaveLanded:true` ONLY when the re-read itself failed (`headReadFailed`):
+          // a successful re-read that simply disagrees with `targetSha` IS a confirmed non-landing; a failed
+          // re-read proves nothing either way, the same typing gap `unverified` exists to cover.
+          return { ok: false, mayHaveLanded: headReadFailed, reason: `fast-forward failed: ${(e as Error).message}` };
+        }
+        return await verifyLanded();
+      } finally {
+        resumeVaultAutoCommit(repoPath, pauseToken);
       }
-      return await verifyLanded();
     });
   } catch (e) {
     if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
     throw e;
-  } finally {
-    resumeVaultAutoCommit(repoPath, pauseToken);
   }
 }
 

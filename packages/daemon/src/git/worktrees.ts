@@ -7282,16 +7282,22 @@ export async function mergeBranch(
   // BEFORE mergeBranchLocked ever runs; catch it here and translate to this function's own {ok:false,
   // reason} shape rather than letting it escape as an unhandled rejection.
   //
-  // @decision 87a3c87e — never drop this pause/resume bracket, and never move resume out of `finally`.
-  const pauseToken = pauseVaultAutoCommit(repoPath);
+  // @decision 87a3c87e — never drop this pause/resume bracket.
+  // @decision 6e6b342d — pause/resume now live INSIDE the lock callback (taken at admission, resumed in
+  // this callback's own `finally`), never before `withCanonicalIndexLock` is admitted.
   try {
-    return await withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded));
+    return await withCanonicalIndexLock(repoPath, async () => {
+      const pauseToken = pauseVaultAutoCommit(repoPath);
+      try {
+        return await mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded);
+      } finally {
+        resumeVaultAutoCommit(repoPath, pauseToken);
+      }
+    });
   } catch (e) {
     // @decision 8d8fa497 — mirror every in-function quarantine site below: set `quarantined:true` here too.
     if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message, quarantined: true };
     throw e;
-  } finally {
-    resumeVaultAutoCommit(repoPath, pauseToken);
   }
 }
 

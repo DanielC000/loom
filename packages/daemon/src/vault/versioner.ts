@@ -1352,18 +1352,107 @@ function pauseLeasePath(gitDir: string): string {
  *  {@link resumeVaultAutoCommit} so a resume only ever clears the lease IT holds. */
 export type VaultPauseToken = string;
 
+/** One holder's entry in the multi-holder lease set (card `6e6b342d`) — see that function's own doc. */
+interface VaultPauseLeaseEntry { token: string; until: number; }
+
+function isLeaseEntry(v: unknown): v is VaultPauseLeaseEntry {
+  const e = v as Partial<VaultPauseLeaseEntry> | null;
+  return !!e && typeof e.token === "string" && typeof e.until === "number";
+}
+
+/** Thrown by {@link readLeaseEntries} for a TRANSIENT I/O failure reading the lease file (e.g. Windows
+ *  EBUSY/EPERM on a file another process briefly holds open) — distinct from genuine content CORRUPTION
+ *  (bad JSON / wrong shape). {@link pauseVaultAutoCommit} (card `6e6b342d` Minor 3) must tell these apart:
+ *  content corruption safely starts fresh (today's overwrite posture — there was never a trustworthy
+ *  holder set to preserve), but an I/O error reveals NOTHING about what's actually in the file — treating
+ *  it as "empty" would silently DROP every real holder's entry on a purely transient glitch. */
+class LeaseReadIoError extends Error {}
+
+/**
+ * Read the lease set at an already-resolved `gitDir`. A MISSING file reads as "no holders" (`[]`) — the
+ * ordinary case. A file that exists but fails to `JSON.parse`, or parses to something whose `leases` isn't
+ * an array, is CORRUPT — throws a plain `Error`, so callers can tell "no holders" apart from "corrupt,
+ * leave it alone" (card `6e6b342d` — {@link isVaultAutoCommitPaused}/{@link resumeVaultAutoCommit} each
+ * need that distinction to preserve their pre-existing corrupt-file posture). A file that exists but
+ * cannot be READ at all (e.g. a transient Windows EBUSY/EPERM) throws {@link LeaseReadIoError} instead —
+ * a DIFFERENT failure the content checks above can never produce, since they require a successful read
+ * first. An entry failing {@link isLeaseEntry} is dropped rather than failing the whole read — one
+ * malformed holder shouldn't blind the check to every other real one.
+ */
+function readLeaseEntries(gitDir: string): VaultPauseLeaseEntry[] {
+  const p = pauseLeasePath(gitDir);
+  let text: string;
+  try {
+    text = fs.readFileSync(p, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return []; // no file at all — ordinary, ≠ an error
+    throw new LeaseReadIoError((e as Error)?.message ?? String(e));
+  }
+  const raw = JSON.parse(text) as { leases?: unknown };
+  if (!Array.isArray(raw?.leases)) throw new Error("vault pause lease file: \"leases\" is not an array");
+  return raw.leases.filter(isLeaseEntry);
+}
+
+/**
+ * Replace the lease set at `gitDir` with exactly `entries` — ATOMIC (card `6e6b342d`): written to a
+ * sibling `.tmp-<pid>-<uuid>` file first, then `renameSync`'d over the real path, so a crash mid-write
+ * can never leave a torn/partial JSON file for a concurrent reader (`fsync` is deliberately skipped — this
+ * is an advisory, best-effort mechanism; losing the last few ms of a write on a hard power-cut is
+ * acceptable, a torn read is not). An orphaned `.tmp-*` file left by a crash BETWEEN the write and the
+ * rename is harmless — nothing ever reads that path, it just sits unused next to the real lease file.
+ * An empty `entries` REMOVES the file entirely (mirrors the pre-`6e6b342d` single-entry behavior) rather
+ * than writing `{"leases":[]}`, so `fs.existsSync` stays a valid cheap "any holder at all" probe for test
+ * fixtures that still check for the file's bare presence.
+ */
+function writeLeaseEntries(gitDir: string, entries: VaultPauseLeaseEntry[]): void {
+  const p = pauseLeasePath(gitDir);
+  if (entries.length === 0) {
+    try { fs.rmSync(p); } catch { /* already gone */ }
+    return;
+  }
+  const tmp = `${p}.tmp-${process.pid}-${randomUUID()}`;
+  fs.writeFileSync(tmp, JSON.stringify({ leases: entries }));
+  fs.renameSync(tmp, p);
+}
+
 /** @decision 614dfbef — never treat this as a real lock — it only stops VaultVersioner's own commit tick;
  *  nothing else is blocked from touching the repo. Never let a caller request an unbounded pause; clamp
  *  to MAX_VAULT_PAUSE_MS so a mistaken huge duration can't silence auto-commit for good.
  * @decision 237d1899 — never resolve a resume by bare presence of the lease file — always check the
- *  token, or op A's `finally` can clear a lease a different, still-running op B re-paused concurrently. */
+ *  token, or op A's `finally` can clear a lease a different, still-running op B re-paused concurrently.
+ * @decision 6e6b342d — the lease is a multi-holder SET, never a single overwritable entry; a second
+ *  concurrent pauser must never clobber the first's entry out of the file.
+ * @decision 6e6b342d (Minor 3) — a CONTENT corruption safely starts fresh; a transient I/O error
+ *  ({@link LeaseReadIoError}) instead skips the write — this op's own pause fails open rather than
+ *  risking a silent drop of every other holder's entry on a passing glitch. */
 export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VAULT_PAUSE_MS): VaultPauseToken {
   const clamped = Math.max(0, Math.min(durationMs, MAX_VAULT_PAUSE_MS));
   const token = randomUUID();
   try {
     const gitDir = resolveLeaseGitDir(commitPath);
     // No git dir at all → nothing to pause; never create one just to hold the lease (card 40dd6b62).
-    if (gitDir) fs.writeFileSync(pauseLeasePath(gitDir), JSON.stringify({ until: Date.now() + clamped, token }));
+    if (gitDir) {
+      const now = Date.now();
+      let existing: VaultPauseLeaseEntry[] | undefined;
+      try {
+        existing = readLeaseEntries(gitDir);
+      } catch (e) {
+        if (e instanceof LeaseReadIoError) {
+          console.warn(
+            `[vault-versioner] ${commitPath} pauseVaultAutoCommit: transient I/O error reading the lease ` +
+            `file (${e.message}) — refusing to write (would silently drop any other holder's entry); this ` +
+            `op's own pause fails open.`,
+          );
+          existing = undefined; // signal: do not write at all
+        } else {
+          existing = []; // genuine content corruption — safe to start fresh, unchanged from before 6e6b342d
+        }
+      }
+      if (existing !== undefined) {
+        const unexpired = existing.filter((e) => e.until > now);
+        writeLeaseEntries(gitDir, [...unexpired, { token, until: now + clamped }]);
+      }
+    }
   } catch { /* best-effort — never throws into the caller's git-surgery flow */ }
   return token;
 }
@@ -1371,36 +1460,38 @@ export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VA
 /**
  * End an advisory pause early (the surgery finished before the lease would have expired anyway).
  *
- * **Resume-only-if-mine (card 237d1899):** when `token` is passed, the lease is removed ONLY if it still
- * carries that exact token — so op A's `finally` can never delete a lease op B re-paused (with a NEW
- * token) while A was still running; B's protection survives until B itself resumes (or the lease's own
- * TTL expires). `token` is OPTIONAL for back-compat with a caller that never re-paused mid-op (there's
- * only ever one lease to clear) and with direct test setup; every real GitWriter op always passes the
- * token `pauseVaultAutoCommit` gave it. A missing/unreadable/mismatched lease is a harmless no-op either
- * way — best-effort: never throws.
+ * **Resume-only-if-mine (card 237d1899), now by REMOVING one entry from the holder set (card `6e6b342d`)
+ * rather than deleting the whole file:** when `token` is passed, ONLY the entry carrying that exact token
+ * is dropped — any OTHER holder's entry (a different op, still mid-surgery) survives untouched, so op A's
+ * `finally` can never clear a lease op B is still relying on. `token` is OPTIONAL for back-compat with a
+ * caller that never re-paused mid-op and with direct test setup — omitting it clears the WHOLE set
+ * unconditionally (the pre-`6e6b342d` single-entry behavior), so only pass no token when you know you are
+ * the lease's only possible holder. Every real GitWriter/merge/batch-ff op always passes the token
+ * `pauseVaultAutoCommit` gave it. A missing lease file is a no-op. A file that exists but is CORRUPT is
+ * ALSO a no-op that leaves the file untouched — same posture as the pre-`6e6b342d` design (a parse failure
+ * never attempted a write-back either) — best-effort: never throws.
  */
 export function resumeVaultAutoCommit(commitPath: string, token?: VaultPauseToken): void {
   try {
     const gitDir = resolveLeaseGitDir(commitPath);
     if (!gitDir) return; // no git dir — nothing was ever paused here
-    const p = pauseLeasePath(gitDir);
-    if (token !== undefined) {
-      const current = JSON.parse(fs.readFileSync(p, "utf8")) as { token?: string };
-      if (current?.token !== token) return; // a newer op's lease — not mine to remove
-    }
-    fs.rmSync(p);
+    let entries: VaultPauseLeaseEntry[];
+    try { entries = readLeaseEntries(gitDir); } catch { return; } // corrupt — leave it exactly as-is
+    const remaining = token === undefined ? [] : entries.filter((e) => e.token !== token);
+    writeLeaseEntries(gitDir, remaining);
   } catch { /* no lease, unreadable, or already gone — fine */ }
 }
 
-/** Whether an unexpired pause lease exists for `commitPath`. A missing, unreadable, malformed, or expired
- *  lease all read as "not paused" — fail-open toward committing rather than getting silently stuck paused
- *  forever on a corrupt lease file. */
+/** Whether ANY unexpired holder exists for `commitPath`'s lease set. A missing, unreadable, malformed, or
+ *  all-expired lease all read as "not paused" — fail-open toward committing rather than getting silently
+ *  stuck paused forever on a corrupt lease file (unchanged posture from the pre-`6e6b342d` single-entry
+ *  design — see {@link readLeaseEntries} for exactly what counts as "corrupt" here). */
 function isVaultAutoCommitPaused(commitPath: string): boolean {
   try {
     const gitDir = resolveLeaseGitDir(commitPath);
     if (!gitDir) return false;
-    const raw = JSON.parse(fs.readFileSync(pauseLeasePath(gitDir), "utf8"));
-    return typeof raw?.until === "number" && Date.now() < raw.until;
+    const now = Date.now();
+    return readLeaseEntries(gitDir).some((e) => e.until > now);
   } catch { return false; }
 }
 

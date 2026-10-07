@@ -123,11 +123,13 @@ const git = (...args) => execFileSync("git", args, { cwd: root, stdio: ["ignore"
   await versioner.commit();
   check("double-resume is harmless; commit() still works normally after", git("log", "--oneline").trim().split("\n").length === 5);
 
-  // 8. Per-op token (card 237d1899): op A pauses, then op B re-pauses the SAME repo while A's lease is
-  // still held — simulating two overlapping same-repo GitWriter ops (a real reachable race: REST,
-  // Platform, and companion git-push all construct their own GitWriter with no cross-surface mutex). A
-  // finishes first; its resume must NOT clear B's lease, since A no longer holds the CURRENT one (B's
-  // pause overwrote the file with a fresh token). Only B's own resume actually lifts the pause.
+  // 8. Per-op token (card 237d1899) + multi-holder (card 6e6b342d): op A pauses, then op B re-pauses the
+  // SAME repo while A's lease is still held — simulating two overlapping same-repo GitWriter ops (a real
+  // reachable race: REST, Platform, and companion git-push all construct their own GitWriter with no
+  // cross-surface mutex). A finishes first; its resume must NOT clear B's lease — B's own entry sits
+  // alongside A's in the lease SET (never clobbered out by B's pause), and A's resume removes only A's own
+  // entry. Only B's own resume actually lifts the pause (empties the set). See
+  // vault-pause-lease-multi-holder.mjs for the data-level proof that B's entry survives byte-for-byte.
   const tokenA = pauseVaultAutoCommit(root, 60_000);
   const tokenB = pauseVaultAutoCommit(root, 60_000); // B "arrives" while A's lease is still held
   resumeVaultAutoCommit(root, tokenA); // A's cleanup — stale token now, must be a no-op
@@ -192,6 +194,69 @@ const git = (...args) => execFileSync("git", args, { cwd: root, stdio: ["ignore"
 }
 // root's own manual finally-block cleanup loop removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).
+
+// 10. Card 6e6b342d (Minor 3) — a TRANSIENT I/O error reading the lease file (e.g. Windows EBUSY/EPERM on
+// a file briefly open elsewhere) must be told apart from genuine CONTENT corruption: the latter safely
+// starts fresh (overwrite), but the former must NEVER overwrite — doing so would silently drop a real,
+// still-held holder's entry on nothing more than a passing glitch. Injected by monkey-patching the shared
+// `fs.readFileSync` (a live property on the one Node "node:fs" module object both this test and
+// versioner.ts's own `import fs from "node:fs"` resolve to — verified directly: versioner.ts calls
+// `fs.readFileSync(...)` via property access, never a destructured copy, so a patch here is visible there
+// too) to throw an EBUSY-coded error for exactly this repo's own lease path, and nothing else's.
+{
+  const ioRoot = fs.realpathSync(mkdtempManaged("loom-vault-pause-ioerr-"));
+  const gitIo = (...args) => execFileSync("git", args, { cwd: ioRoot, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  gitIo("init");
+  gitIo("config", "user.email", "loom-test@example.com");
+  gitIo("config", "user.name", "loom-test");
+  fs.writeFileSync(path.join(ioRoot, "base.md"), "# base\n");
+  gitIo("add", ".");
+  gitIo("commit", "-m", "base");
+  const ioLeasePath = path.join(ioRoot, ".git", "loom-vault-pause.json");
+
+  // A real holder pauses first — this is the entry an I/O error on a DIFFERENT (B's) pause must never drop.
+  const tokenA10 = pauseVaultAutoCommit(ioRoot, 60_000);
+  const beforeContent = fs.readFileSync(ioLeasePath, "utf8");
+  check("[10] precondition: A's real entry is on disk before the injected I/O error", fs.existsSync(ioLeasePath));
+
+  const origReadFileSync = fs.readFileSync;
+  fs.readFileSync = function (p, ...args) {
+    if (p === ioLeasePath) {
+      const err = new Error("EBUSY: simulated transient I/O error (test injection)");
+      err.code = "EBUSY";
+      throw err;
+    }
+    return origReadFileSync.call(fs, p, ...args);
+  };
+  let tokenB10;
+  try {
+    tokenB10 = pauseVaultAutoCommit(ioRoot, 60_000);
+  } finally {
+    fs.readFileSync = origReadFileSync; // always restore, even if the call above somehow throws
+  }
+  check("[10] pauseVaultAutoCommit is still best-effort — it returns a token even when the I/O error hits", typeof tokenB10 === "string" && tokenB10.length > 0);
+  check(
+    "[10] A's real entry is BYTE-FOR-BYTE untouched after B's pause hit a transient I/O error (no overwrite, no drop)",
+    fs.readFileSync(ioLeasePath, "utf8") === beforeContent,
+  );
+
+  // Behavioral corroboration, not just a file read: a tick must still treat this repo as paused — A's
+  // entry alone must still gate it, exactly as if B's pause attempt had never happened.
+  const versionerIo = new VaultVersioner(ioRoot, 5000);
+  await versionerIo.start();
+  fs.writeFileSync(path.join(ioRoot, "edit-during-io-error.md"), "# edit\n");
+  await versionerIo.commit();
+  check(
+    "[10] behaviorally: VaultVersioner.commit() STILL skips (A's entry alone still gates the tick) after B's I/O-error pause — still only the base commit",
+    gitIo("log", "--oneline").trim().split("\n").length === 1,
+  );
+  await versionerIo.stop();
+
+  // Cleanup — resume whichever tokens were actually taken (B10 may be undefined-but-string from the
+  // best-effort path; resuming a token that was never actually written is a documented harmless no-op).
+  resumeVaultAutoCommit(ioRoot, tokenA10);
+  resumeVaultAutoCommit(ioRoot, tokenB10);
+}
 
 console.log(failures === 0 ? "\nALL PASS — the advisory pause lease is respected by commit() and flushSync(), and self-expires." : `\n${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
