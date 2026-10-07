@@ -22,6 +22,7 @@ import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
+import { removeClaudeConfigEntryForWorktree } from "../pty/claude-config.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
@@ -22977,6 +22978,10 @@ export class SessionService {
         // Purge any leftover gate-timeout breaker streak for this branch (see opts.branch's doc) — the
         // worktree it was tracking is gone, so an abandoned-while-tripped branch can't leak the entry forever.
         if (opts?.branch) this.gateTimeoutStreak.delete(opts.branch);
+        // Card 498452c0: the worktree's own ~/.claude.json trust entry is now dead weight the CLI's trust
+        // check can never reach again — prune it. Best-effort, fire-and-forget, same posture as
+        // fireCodescapeDrop immediately below.
+        removeClaudeConfigEntryForWorktree(worktreePath);
         // Codescape C3: this worktree is GENUINELY gone (never fired for recycleWorker reuse — that path
         // never calls gcWorktreeDir at all) — deregister it. Fire-and-forget, best-effort.
         this.fireCodescapeDrop(codescapeCtx);

@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
+import { normForCompare, containmentForms } from "../git/worktrees.js";
+import { WORKTREES_DIR } from "../paths.js";
 
 /**
  * Resolve Claude's main JSON config file. Honors CLAUDE_CONFIG_DIR (Claude relocates the
@@ -10,7 +12,7 @@ import { resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
  * falling back to ~/.claude.json. Read fresh each call so the env can be set per-process
  * (e.g. an isolated config dir for hermetic tests) without re-importing this module.
  */
-function claudeJsonPath(): string {
+export function claudeJsonPath(): string {
   const dir = process.env.CLAUDE_CONFIG_DIR;
   return dir ? path.join(dir, ".claude.json") : path.join(os.homedir(), ".claude.json");
 }
@@ -270,8 +272,16 @@ function sleepSync(ms: number): void {
  * the sleepSync retry loop is unreachable in-process; it fires ONLY when another PROCESS holds the
  * lock (a second Loom daemon sharing ~/.claude.json — the cross-process clobber this lock exists to
  * prevent), and there it is bounded by trustLockMs() and degrades best-effort rather than hanging.
+ *
+ * `opts.requireLock` (card 498452c0 review item 3): when set, a caller that cannot tolerate the
+ * best-effort unlocked degrade — a BULK write that deletes many entries at once, where writing unlocked
+ * risks clobbering a concurrent writer's own in-flight change — gets `fn` SKIPPED (never called) once
+ * the acquire loop above gives up, instead of the ordinary best-effort "run unlocked anyway". The
+ * return value reports whether the lock was actually held when (and only when) `fn` ran; a caller that
+ * doesn't pass `requireLock` can ignore it — `fn` always runs exactly as before, byte-identical to the
+ * pre-498452c0-round-2 behaviour (`ensureTrusted`'s own call is unchanged by this addition).
  */
-function withTrustLock(lockPath: string, fn: () => void): void {
+function withTrustLock(lockPath: string, fn: () => void, opts?: { requireLock?: boolean }): boolean {
   const timeout = trustLockMs();
   const deadline = Date.now() + timeout;
   let held = false;
@@ -305,12 +315,15 @@ function withTrustLock(lockPath: string, fn: () => void): void {
         if (age > timeout) { try { fs.rmSync(lockPath); } catch { /* lost the race */ } continue; }
       } catch { continue; /* lock vanished between open and stat → retry immediately */ }
       if (Date.now() >= deadline) {
-        console.warn(`[claude-config] trust lock ${lockPath} busy after ${timeout}ms — proceeding best-effort (possible clobber)`);
+        console.warn(`[claude-config] trust lock ${lockPath} busy after ${timeout}ms — ${
+          opts?.requireLock ? "requireLock set, SKIPPING the write" : "proceeding best-effort (possible clobber)"
+        }`);
         break;
       }
       sleepSync(50);
     }
   }
+  if (!held && opts?.requireLock) return false; // caller must perform NO write when the lock couldn't be acquired
   try {
     fn();
   } finally {
@@ -318,6 +331,31 @@ function withTrustLock(lockPath: string, fn: () => void): void {
       try { fs.rmSync(lockPath); } catch { /* already gone */ }
     }
   }
+  return held;
+}
+
+/**
+ * Non-blocking, SINGLE-ATTEMPT variant of the acquire step above, for a caller that must never sleep or
+ * retry (card 498452c0 review item 1b: the per-worktree GC removal hot path). Makes exactly one `wx`
+ * create attempt and returns immediately: `true` (and the lock is HELD — the caller owns releasing it
+ * via {@link releaseTrustLockOnce}) only on that attempt's bare success; `false` for ANY failure
+ * whatsoever — held by someone else, a transient Windows FS error, or anything else. `false` means
+ * "skip entirely for now", never "proceed unlocked" — unlike {@link withTrustLock}'s own best-effort
+ * degrade, a caller of this function must do nothing when it returns false.
+ */
+function tryTrustLockOnce(lockPath: string): boolean {
+  try { fs.mkdirSync(path.dirname(lockPath), { recursive: true }); } catch { /* best-effort */ }
+  try {
+    fs.closeSync(openSyncImpl(lockPath, "wx"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Release a lock acquired via {@link tryTrustLockOnce}. Best-effort — never throws. */
+function releaseTrustLockOnce(lockPath: string): void {
+  try { fs.rmSync(lockPath); } catch { /* already gone */ }
 }
 
 /**
@@ -479,4 +517,323 @@ export function ensureTrustedResilient(dir: string): void {
       throw err2;
     }
   }
+}
+
+// --- Card 498452c0: prune .claude.json entries for Loom worktrees that no longer exist. -----------------
+//
+// Only the PLAIN per-worktree key ensureTrusted writes (see `key` above) is ever a prune candidate. The
+// `canonicalKey` entry (claudeCliProjectKey — the project's MAIN CHECKOUT root) is shared across every
+// worktree of a project and is structurally outside WORKTREES_DIR (worktrees are always a sibling of
+// LOOM_HOME, never nested inside it — see docs/decisions/e1c6ef65-worktrees-dir-lives-outside-loom-home-sibling-not-nested.md),
+// so it can never be classified as worktree-scoped by pathOverlapKind(WORKTREES_DIR, key) below; it is
+// excluded by construction, not by a special case here.
+//
+// ⛔ Owner-facing file (card 498452c0 / request e44d319e): never read, write, or count the REAL
+// ~/.claude.json from a test. Every test exercising these two functions must redirect CLAUDE_CONFIG_DIR
+// (claudeJsonPath() honors it) and, for pruneDeadWorktreeClaudeConfigEntries, pass its own worktreesRoot
+// override — never rely on the real WORKTREES_DIR.
+
+/** TEST SEAM: swap the fs.readFileSync used by readCfgFailClosed — same rationale/shape as
+ *  __setOpenSyncForTest/__setRenameSyncForTest above. Lets a hermetic test deterministically simulate the
+ *  file changing BETWEEN pruneDeadWorktreeClaudeConfigEntries's classification read and its fresh in-lock
+ *  read (e.g. to exercise the count-drop sanity guard) by returning different content on successive
+ *  calls — there is no real await point between those two reads to inject a mutation at from outside.
+ *  Defaults to the real fs.readFileSync; production code never calls the setter. */
+type ReadFileSyncFn = typeof fs.readFileSync;
+let readFileSyncImpl: ReadFileSyncFn = fs.readFileSync;
+export function __setReadFileSyncForTest(fn?: ReadFileSyncFn): void { readFileSyncImpl = fn ?? fs.readFileSync; }
+
+/** TEST SEAM: swap the fs.statSync used by {@link classifyPathLiveness} — same rationale/shape as the
+ *  other seams above. Lets a hermetic test fault-inject an EACCES/EPERM-shaped (non-ENOENT/ENOTDIR)
+ *  stat error on a specific path, deterministically exercising the "unknown, never deleted" branch
+ *  (card 498452c0 review item 2) without needing a real permission-denied directory on disk. Defaults
+ *  to the real fs.statSync; production code never calls the setter. */
+type StatSyncFn = typeof fs.statSync;
+let statSyncImpl: StatSyncFn = fs.statSync;
+export function __setStatSyncForTest(fn?: StatSyncFn): void { statSyncImpl = fn ?? fs.statSync; }
+
+/**
+ * Tri-state existence check for a path that may be about to be DELETED from `.claude.json` because it
+ * looks dead. `fs.existsSync` collapses EVERY stat error (ENOENT, EACCES, a transient Windows glitch, a
+ * permission change, …) to the SAME `false` — indistinguishable from a genuine absence. Card 498452c0
+ * review item 2, repro'd: a non-existent drive root (`fs.existsSync` throwing/returning false for a
+ * reason that has nothing to do with the path being gone) caused EVERY key to be classified dead.
+ *
+ * `"dead"` only for the two codes that unambiguously mean "this path, or a parent segment of it, does
+ * not exist" (`ENOENT`/`ENOTDIR`) — never any other error. `"alive"` when the stat succeeds. `"unknown"`
+ * for anything else (`EACCES`/`EPERM`/a transient FS error/…) — a caller must treat `"unknown"` exactly
+ * like `"alive"` for deletion purposes (never delete), while still being able to report it distinctly as
+ * `unknownKeys` for a human to investigate, rather than silently lumping it in with the confirmed-live set.
+ */
+function classifyPathLiveness(p: string): "dead" | "alive" | "unknown" {
+  try {
+    statSyncImpl(p);
+    return "alive";
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "dead" : "unknown";
+  }
+}
+
+/** Read+parse `.claude.json` WITHOUT readCfg's fail-OPEN-to-`{}` fallback. readCfg's fallback is safe for
+ *  ensureTrusted (which only ever adds ONE new entry on top of whatever it read), but both functions below
+ *  can DELETE many existing entries in one write — reading a corrupt/unreadable file as `{}` and writing
+ *  that back would silently destroy every other project entry in the real file. A genuinely MISSING file
+ *  is reported as `{cfg:{}}` (nothing to prune, not an error — same posture readCfg already has for that
+ *  one case); any other read/parse failure returns `{error}` so every caller aborts with no write. */
+function readCfgFailClosed(claudeJson: string): { cfg: ClaudeCfg } | { error: string } {
+  let raw: string;
+  try {
+    raw = readFileSyncImpl(claudeJson, "utf8") as string;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { cfg: {} };
+    return { error: `could not read ${claudeJson}: ${(err as Error).message}` };
+  }
+  try {
+    return { cfg: JSON.parse(raw) as ClaudeCfg };
+  } catch (err) {
+    return { error: `could not parse ${claudeJson}: ${(err as Error).message}` };
+  }
+}
+
+/**
+ * Remove `worktreePath`'s own `.claude.json` entry — the plain worktree-path key `ensureTrusted` writes
+ * trust/MCP flags under, never `canonicalKey` (see the file header above). Called from the ONE worktree
+ * removal chokepoint (`SessionService.gcWorktreeDir` — see
+ * docs/decisions/dea6728e-gcworktreedir-retries-safely-and-gives-up-past-a-bound.md) once the directory
+ * has ACTUALLY been removed — the entry is now dead weight the CLI's trust-check ancestor walk can never
+ * reach again (it only ever walks a LIVE directory).
+ *
+ * @decision 498452c0 — never move this function's read+match+write back onto `gcWorktreeDir`'s
+ * synchronous call stack, and never reintroduce `pathOverlapKind`/`realpathSync` on the stored-key scan
+ * here: both together measured ~1.8s of frozen daemon per removal against a real ~9.6k-entry file.
+ *
+ * Re-verifies the directory is still absent (via {@link classifyPathLiveness} — review item 2: a
+ * can't-stat path is treated as "alive, don't touch", never as dead) immediately before deleting, so a
+ * respawn that reclaimed this exact path since `gcWorktreeDir`'s removal — now a wider window than before,
+ * since this body runs on a later event-loop turn — is never undone. Best-effort, fire-and-forget: any
+ * error is caught and logged, never thrown — same posture as every other side effect fired from
+ * `gcWorktreeDir`'s own `removed` branch; must never fail or (now) ever reach back into its caller at all.
+ * Fails closed on a malformed/unreadable config (see `readCfgFailClosed`): skip, log, no write — never
+ * risk the real file on a corrupt read.
+ */
+export function removeClaudeConfigEntryForWorktree(worktreePath: string): void {
+  // Item 1(3): defer the whole body off gcWorktreeDir's synchronous call stack. Nothing below this line
+  // runs before this function returns.
+  setImmediate(() => {
+    try {
+      const claudeJson = claudeJsonPath();
+      const lockPath = `${claudeJson}.loom-lock`;
+      if (!tryTrustLockOnce(lockPath)) return; // busy right now — skip; caught by a later GC or bulk prune
+      try {
+        // respawned/reclaimed since, or can't tell — never touch a live-or-unverifiable entry
+        if (classifyPathLiveness(worktreePath) !== "dead") return;
+        const read = readCfgFailClosed(claudeJson);
+        if ("error" in read) {
+          console.warn(`[claude-config] skipped pruning entry for removed worktree ${worktreePath} — ${read.error}`);
+          return;
+        }
+        const cfg = read.cfg;
+        if (!cfg.projects) return;
+        const target = normForCompare(worktreePath);
+        let matched = false;
+        for (const key of Object.keys(cfg.projects)) {
+          // Item 1(2): plain string compare only — NO realpath on stored keys.
+          if (normForCompare(key) === target) {
+            delete cfg.projects[key];
+            matched = true;
+          }
+        }
+        if (matched) writeJsonAtomic(claudeJson, cfg);
+      } finally {
+        releaseTrustLockOnce(lockPath);
+      }
+    } catch (err) {
+      console.warn(`[claude-config] failed to prune .claude.json entry for removed worktree ${worktreePath}: ${(err as Error).message}`);
+    }
+  });
+}
+
+/** Diagnostic sample cap on {@link PruneDeadWorktreeEntriesResult}'s `deadKeysSample` — `deadCount` is
+ *  always the exact count; the sample exists only so a human reading the dry-run output can eyeball a few
+ *  real paths, never as the authoritative total. */
+const DEAD_KEY_SAMPLE_CAP = 50;
+
+/** {@link pruneDeadWorktreeClaudeConfigEntries}'s result. */
+export interface PruneDeadWorktreeEntriesResult {
+  dryRun: boolean;
+  /** Exact count of entries classified as worktree-scoped (strictly under `worktreesRoot`) AND currently
+   *  dead (directory absent) at classification time. Always populated when `parseError` is null. */
+  deadCount: number;
+  /** Capped (see {@link DEAD_KEY_SAMPLE_CAP}) sample of the dead keys — diagnostic only. */
+  deadKeysSample: string[];
+  /** Keys actually deleted from the file. Always empty on a dry run or an aborted/failed real run. */
+  removedKeys: string[];
+  /** Dead-at-classification keys found ALIVE again by the time of the real write (a worktree recreated at
+   *  that exact path in the classification-to-lock window) — reported explicitly, never silently dropped.
+   *  Always empty on a dry run. */
+  recreatedKeys: string[];
+  /** Worktree-scoped keys whose liveness could NOT be determined (a stat error other than ENOENT/ENOTDIR
+   *  — see {@link classifyPathLiveness}, review item 2) at classification time, the in-lock re-verify, or
+   *  both (deduplicated). Never deleted — treated exactly like `alive` for the purposes of this run, but
+   *  reported separately so a human can investigate rather than have it silently fold into "alive". */
+  unknownKeys: string[];
+  /** Set when `.claude.json` could not be read/parsed at all (a genuinely MISSING file is NOT an error —
+   *  see `readCfgFailClosed`). The call always aborts with no write when this is set. */
+  parseError: string | null;
+  /** Set when the call aborted without writing: `"count-drop"` — the fresh in-lock read is missing a key
+   *  that was NOT classified dead by this run (review item 4: a key missing from the fresh read is only
+   *  ever explained by this run's own dead classification; any other missing key means the file was
+   *  truncated/clobbered by something else). `"lock-unavailable"` — the real write requires the
+   *  cross-process lock (review item 3) and it could not be acquired within `trustLockMs()`.
+   *  `"worktrees-root-missing"` — `worktreesRoot` itself doesn't stat as an existing directory (review
+   *  item 2). Never set on a dry run (dry runs never take the lock or examine the root this strictly). */
+  aborted: "count-drop" | "lock-unavailable" | "worktrees-root-missing" | null;
+}
+
+/** One-directional containment against ALREADY-COMPUTED root forms: `child` strictly under one of
+ *  `rootForms` (never equal, and never the REVERSE — a root that happens to sit strictly under `child`,
+ *  i.e. `child` is an ANCESTOR of the root, must not match). Review item 6: the bidirectional
+ *  `pathOverlapKind`'s "nested" also fires on that reverse case, which would wrongly classify an
+ *  ancestor-of-the-root key as worktree-scoped. `rootForms` is hoisted by the caller (one {@link
+ *  containmentForms} call per bulk-prune call, not per key — classifying a large file by re-resolving
+ *  the SAME root's realpath on every one of its keys was measured as the dominant cost of this scan). A
+ *  non-absolute (including empty-string) `child` never matches — a relative/garbage key is never a real
+ *  worktree path to begin with. */
+function isStrictlyUnderRootForms(rootForms: readonly string[], child: string): boolean {
+  if (child === "" || !path.isAbsolute(child)) return false;
+  const childForms = containmentForms(child);
+  for (const c of childForms) for (const r of rootForms) {
+    if (c.startsWith(r + path.sep) && c.length > r.length + 1) return true;
+  }
+  return false;
+}
+
+/**
+ * One-time (and re-runnable) prune of `.claude.json` entries for Loom worktrees whose directory no longer
+ * exists (card 498452c0). `worktreesRoot` defaults to the real `WORKTREES_DIR` but is overridable — same
+ * testability convention `worktreeRemovalRefusal`/`findNestedGitRepos` already use in `git/worktrees.ts`.
+ *
+ * Refuses the WHOLE call up front, before reading `.claude.json` at all, if `worktreesRoot` doesn't stat
+ * as an existing directory (review item 2 — `aborted:"worktrees-root-missing"`): a wrong/typo'd root
+ * could otherwise silently classify nothing (or, via a stat-error misclassification, far too much) with
+ * no signal that the root itself was the problem.
+ *
+ * Classification (`classifyWorktreeScopedKeys`): a stored key is worktree-scoped iff it is absolute AND
+ * {@link isStrictlyUnderRootForms} strictly under `worktreesRoot` — ONE-directional (never the root
+ * itself, never an ancestor of it; review item 6). It is then bucketed dead/alive/unknown by {@link classifyPathLiveness}
+ * (review item 2 — a stat error other than ENOENT/ENOTDIR is `unknown`, never treated as dead). The
+ * `canonicalKey` main-checkout entry (see the file header above) is never nested under `worktreesRoot`
+ * and so is never a candidate.
+ *
+ * `dryRun:true` reads ONCE, lock-free, and never writes — safe because `writeJsonAtomic`'s atomic rename
+ * means a reader always observes a fully-old or fully-new file, never torn (the same reasoning
+ * `ensureTrusted`'s own fast path already relies on).
+ *
+ * `dryRun:false` reuses that same classification read (done OUTSIDE the lock, so the lock is never held
+ * for the cost of scanning every project entry), then takes the lock in REQUIRED mode (review item 3 —
+ * `withTrustLock(..., { requireLock: true })`: a bulk delete must never proceed unlocked, unlike
+ * `ensureTrusted`'s own additive best-effort write) and RE-READS fresh. For each previously-dead key it
+ * re-verifies, INSIDE the lock, that the directory is STILL confirmed absent (alive again ⇒
+ * `recreatedKeys`, never deleted; still unknown ⇒ left alone and folded into `unknownKeys`, never
+ * deleted) and that the key is still present in the fresh read, before deleting it.
+ *
+ * @decision 498452c0 — a key missing from the fresh in-lock read is explained ONLY if THIS run itself
+ * classified it dead; any other missing key aborts with NO write (`aborted:"count-drop"`). Never widen
+ * into a full snapshot-compare, and never let this run's own planned-removal count mask an unrelated drop.
+ *
+ * Fails closed on a malformed/unreadable config at EITHER read (classification or the fresh in-lock read):
+ * `parseError` is set and nothing is ever written — never treat a corrupt/unreadable file as `{}` here (see
+ * `readCfgFailClosed`'s own doc for why that would be catastrophic for a bulk-delete write).
+ */
+export function pruneDeadWorktreeClaudeConfigEntries(
+  opts: { dryRun: boolean; worktreesRoot?: string },
+): PruneDeadWorktreeEntriesResult {
+  const claudeJson = claudeJsonPath();
+  const worktreesRoot = opts.worktreesRoot ?? WORKTREES_DIR;
+  const base = (overrides: Partial<PruneDeadWorktreeEntriesResult> = {}): PruneDeadWorktreeEntriesResult => ({
+    dryRun: opts.dryRun,
+    deadCount: 0,
+    deadKeysSample: [],
+    removedKeys: [],
+    recreatedKeys: [],
+    unknownKeys: [],
+    parseError: null,
+    aborted: null,
+    ...overrides,
+  });
+
+  // Review item 2: refuse up front rather than silently classifying nothing (or, via a stat-error
+  // misclassification, too much) against a root that doesn't actually exist.
+  try {
+    if (!statSyncImpl(worktreesRoot).isDirectory()) {
+      return base({ aborted: "worktrees-root-missing" });
+    }
+  } catch {
+    return base({ aborted: "worktrees-root-missing" });
+  }
+
+  function classifyWorktreeScopedKeys(cfg: ClaudeCfg): { dead: string[]; alive: string[]; unknown: string[] } {
+    const dead: string[] = [];
+    const alive: string[] = [];
+    const unknown: string[] = [];
+    const rootForms = containmentForms(worktreesRoot); // hoisted ONCE — see isStrictlyUnderRootForms's doc
+    for (const key of Object.keys(cfg.projects ?? {})) {
+      if (!isStrictlyUnderRootForms(rootForms, key)) continue; // not a worktree-scoped key at all
+      const liveness = classifyPathLiveness(key);
+      if (liveness === "dead") dead.push(key);
+      else if (liveness === "alive") alive.push(key);
+      else unknown.push(key);
+    }
+    return { dead, alive, unknown };
+  }
+
+  const read = readCfgFailClosed(claudeJson);
+  if ("error" in read) return base({ parseError: read.error });
+  const { dead, unknown } = classifyWorktreeScopedKeys(read.cfg);
+  const deadKeysSample = dead.slice(0, DEAD_KEY_SAMPLE_CAP);
+
+  if (opts.dryRun) return base({ deadCount: dead.length, deadKeysSample, unknownKeys: unknown });
+
+  let result = base({ deadCount: dead.length, deadKeysSample, unknownKeys: unknown });
+  // Review item 3: the real write must never proceed unlocked — requireLock means `fn` below is simply
+  // never called if the acquire loop gives up, and `held` tells us which happened.
+  const held = withTrustLock(`${claudeJson}.loom-lock`, () => {
+    const fresh = readCfgFailClosed(claudeJson);
+    if ("error" in fresh) { result = base({ parseError: fresh.error }); return; }
+    const freshProjects = fresh.cfg.projects;
+
+    const removed: string[] = [];
+    const recreated: string[] = [];
+    const unknownAtReverify: string[] = [];
+    for (const key of dead) {
+      if (!freshProjects || !(key in freshProjects)) continue; // gone from the fresh read — the count-drop check below covers this
+      const liveness = classifyPathLiveness(key); // re-verify AGAIN, right before deleting
+      if (liveness === "alive") { recreated.push(key); continue; }
+      if (liveness === "unknown") { unknownAtReverify.push(key); continue; } // can't confirm dead right now — leave it; a later run re-tries
+      removed.push(key);
+    }
+
+    // @decision 498452c0 — see the function doc above: a missing-from-fresh key is explained only by
+    // THIS run's own dead classification; any other missing key aborts. A concurrent add always passes.
+    const deadSet = new Set(dead);
+    const unexplainedMissing: string[] = [];
+    for (const key of Object.keys(read.cfg.projects ?? {})) {
+      if (freshProjects && key in freshProjects) continue; // still present — fine
+      if (deadSet.has(key)) continue; // expected: this run's own dead classification may vanish benignly
+      unexplainedMissing.push(key);
+    }
+    if (unexplainedMissing.length > 0) {
+      console.warn(`[claude-config] prune aborted — ${unexplainedMissing.length} project entr${unexplainedMissing.length === 1 ? "y" : "ies"} vanished between the classification read and the fresh in-lock read without being classified dead by this run (e.g. ${unexplainedMissing.slice(0, 5).join(", ")}) — file may have been truncated/clobbered externally. No write performed.`);
+      result = base({ deadCount: dead.length, deadKeysSample, unknownKeys: unknown, aborted: "count-drop" });
+      return;
+    }
+
+    for (const key of removed) delete freshProjects![key];
+    if (removed.length > 0) writeJsonAtomic(claudeJson, fresh.cfg);
+    const allUnknown = [...new Set([...unknown, ...unknownAtReverify])];
+    result = { dryRun: false, deadCount: dead.length, deadKeysSample, removedKeys: removed, recreatedKeys: recreated, unknownKeys: allUnknown, parseError: null, aborted: null };
+  }, { requireLock: true });
+  if (!held) return base({ deadCount: dead.length, deadKeysSample, unknownKeys: unknown, aborted: "lock-unavailable" });
+  return result;
 }
