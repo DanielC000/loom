@@ -857,28 +857,35 @@ export function removeClaudeConfigEntryForWorktree(worktreePath: string): void {
  *  real paths, never as the authoritative total. */
 const DEAD_KEY_SAMPLE_CAP = 50;
 
-/** {@link pruneDeadWorktreeClaudeConfigEntries}'s result. */
-export interface PruneDeadWorktreeEntriesResult {
+/** Fields shared by every bulk `.claude.json` prune's result, regardless of which keys it targets
+ *  (worktree-scoped vs temp-test-scoped — card d4580e19). Each mode's own result type adds its own
+ *  `aborted` union on top (a mode-specific abort reason, e.g. `"worktrees-root-missing"`, only ever
+ *  applies to that mode). */
+export interface PruneClaudeConfigEntriesResultBase {
   dryRun: boolean;
-  /** Exact count of entries classified as worktree-scoped (strictly under `worktreesRoot`) AND currently
-   *  dead (directory absent) at classification time. Always populated when `parseError` is null. */
+  /** Exact count of entries classified as candidates by this mode's own predicate AND currently dead
+   *  (directory absent) at classification time. Always populated when `parseError` is null. */
   deadCount: number;
   /** Capped (see {@link DEAD_KEY_SAMPLE_CAP}) sample of the dead keys — diagnostic only. */
   deadKeysSample: string[];
   /** Keys actually deleted from the file. Always empty on a dry run or an aborted/failed real run. */
   removedKeys: string[];
-  /** Dead-at-classification keys found ALIVE again by the time of the real write (a worktree recreated at
-   *  that exact path in the classification-to-lock window) — reported explicitly, never silently dropped.
-   *  Always empty on a dry run. */
+  /** Dead-at-classification keys found ALIVE again by the time of the real write (e.g. a worktree
+   *  recreated at that exact path in the classification-to-lock window) — reported explicitly, never
+   *  silently dropped. Always empty on a dry run. */
   recreatedKeys: string[];
-  /** Worktree-scoped keys whose liveness could NOT be determined (a stat error other than ENOENT/ENOTDIR
-   *  — see {@link classifyPathLiveness}, review item 2) at classification time, the in-lock re-verify, or
-   *  both (deduplicated). Never deleted — treated exactly like `alive` for the purposes of this run, but
+  /** Candidate keys whose liveness could NOT be determined (a stat error other than ENOENT/ENOTDIR — see
+   *  {@link classifyPathLiveness}, review item 2) at classification time, the in-lock re-verify, or both
+   *  (deduplicated). Never deleted — treated exactly like `alive` for the purposes of this run, but
    *  reported separately so a human can investigate rather than have it silently fold into "alive". */
   unknownKeys: string[];
   /** Set when `.claude.json` could not be read/parsed at all (a genuinely MISSING file is NOT an error —
    *  see `readCfgFailClosed`). The call always aborts with no write when this is set. */
   parseError: string | null;
+}
+
+/** {@link pruneDeadWorktreeClaudeConfigEntries}'s result. */
+export interface PruneDeadWorktreeEntriesResult extends PruneClaudeConfigEntriesResultBase {
   /** Set when the call aborted without writing: `"count-drop"` — the fresh in-lock read is missing a key
    *  that was NOT classified dead by this run (review item 4: a key missing from the fresh read is only
    *  ever explained by this run's own dead classification; any other missing key means the file was
@@ -891,6 +898,14 @@ export interface PruneDeadWorktreeEntriesResult {
    *  `"worktrees-root-missing"` — `worktreesRoot` itself doesn't stat as an existing directory (review
    *  item 2). Never set on a dry run (dry runs never take the lock or examine the root this strictly). */
   aborted: "count-drop" | "lock-unavailable" | "worktrees-root-missing" | null;
+}
+
+/** {@link pruneDeadTempTestClaudeConfigEntries}'s result — same shape as the worktree mode's, minus the
+ *  worktree-only `"worktrees-root-missing"` abort reason (this mode has no equivalent up-front root
+ *  check: `os.tmpdir()` is always resolvable). */
+export interface PruneDeadTempTestEntriesResult extends PruneClaudeConfigEntriesResultBase {
+  /** See {@link PruneDeadWorktreeEntriesResult.aborted} — same two reasons, same semantics. */
+  aborted: "count-drop" | "lock-unavailable" | null;
 }
 
 /** One-directional containment against ALREADY-COMPUTED root forms: `child` strictly under one of
@@ -909,6 +924,40 @@ function isStrictlyUnderRootForms(rootForms: readonly string[], child: string): 
     if (c.startsWith(r + path.sep) && c.length > r.length + 1) return true;
   }
   return false;
+}
+
+/** Bucket `cfg`'s project keys into dead/alive/unknown by {@link classifyPathLiveness}, restricted to
+ *  keys `isCandidate` accepts — the one classification shape every bulk-prune mode shares (card
+ *  d4580e19); only `isCandidate` differs between the worktree mode ({@link isStrictlyUnderRootForms})
+ *  and the temp-test mode ({@link isDirectLoomTempKey}). */
+function classifyKeysByPredicate(cfg: ClaudeCfg, isCandidate: (key: string) => boolean): { dead: string[]; alive: string[]; unknown: string[] } {
+  const dead: string[] = [];
+  const alive: string[] = [];
+  const unknown: string[] = [];
+  for (const key of Object.keys(cfg.projects ?? {})) {
+    if (!isCandidate(key)) continue;
+    const liveness = classifyPathLiveness(key);
+    if (liveness === "dead") dead.push(key);
+    else if (liveness === "alive") alive.push(key);
+    else unknown.push(key);
+  }
+  return { dead, alive, unknown };
+}
+
+/** Candidate predicate for the temp-test-entries mode (card d4580e19): `key` is a direct child of
+ *  `tmpRoot` (already {@link normForCompare}-normalized by the caller) — never nested deeper, never
+ *  `tmpRoot` itself — AND its own basename starts with `loom-`. Comparing via `path.dirname` of the
+ *  SAME normalized form `tmpRoot` already uses means a decoy that merely shares a textual prefix with
+ *  `tmpRoot` (a different drive, or a sibling directory whose name happens to start with the same
+ *  characters) is rejected: its normalized dirname is a different string, not an exact match. A
+ *  genuinely differently-cased spelling of the SAME real tmpdir (win32 only) DOES match, by the same
+ *  case-fold `normForCompare` already applies everywhere else in this file. A non-absolute (including
+ *  empty-string) `key` never matches. */
+function isDirectLoomTempKey(tmpRoot: string, key: string): boolean {
+  if (key === "" || !path.isAbsolute(key)) return false;
+  const normKey = normForCompare(key);
+  if (path.dirname(normKey) !== tmpRoot) return false;
+  return path.basename(normKey).startsWith("loom-");
 }
 
 /**
@@ -953,46 +1002,89 @@ export function pruneDeadWorktreeClaudeConfigEntries(
 ): PruneDeadWorktreeEntriesResult {
   const claudeJson = claudeJsonPath();
   const worktreesRoot = opts.worktreesRoot ?? WORKTREES_DIR;
-  const base = (overrides: Partial<PruneDeadWorktreeEntriesResult> = {}): PruneDeadWorktreeEntriesResult => ({
-    dryRun: opts.dryRun,
-    deadCount: 0,
-    deadKeysSample: [],
-    removedKeys: [],
-    recreatedKeys: [],
-    unknownKeys: [],
-    parseError: null,
-    aborted: null,
+
+  // Review item 2: refuse up front rather than silently classifying nothing (or, via a stat-error
+  // misclassification, too much) against a root that doesn't actually exist. Worktree-mode-only — the
+  // temp-test mode has no equivalent (os.tmpdir() is always resolvable).
+  try {
+    if (!statSyncImpl(worktreesRoot).isDirectory()) {
+      return { ...basePruneResult(opts.dryRun), aborted: "worktrees-root-missing" };
+    }
+  } catch {
+    return { ...basePruneResult(opts.dryRun), aborted: "worktrees-root-missing" };
+  }
+
+  const rootForms = containmentForms(worktreesRoot); // hoisted ONCE — see isStrictlyUnderRootForms's doc
+  return pruneClaudeConfigEntriesCore(
+    opts,
+    claudeJson,
+    (cfg) => classifyKeysByPredicate(cfg, (key) => isStrictlyUnderRootForms(rootForms, key)),
+  );
+}
+
+/**
+ * One-time (and re-runnable) prune of `.claude.json` entries left behind by Loom TESTS that reached
+ * `ensureTrusted` without redirecting `CLAUDE_CONFIG_DIR` (card d4580e19; the leak this covers — cards
+ * 849acf9b, 042a4312, c75006c2). `tmpdir` defaults to the real `os.tmpdir()` but is overridable, the same
+ * testability convention `worktreesRoot` above uses.
+ *
+ * Classification ({@link isDirectLoomTempKey}): a stored key is a candidate iff it is absolute, its
+ * {@link normForCompare}-normalized parent is EXACTLY `tmpdir` (a DIRECT child — never nested deeper,
+ * never `tmpdir` itself), and its own basename starts with `loom-`. Bucketed dead/alive/unknown by the
+ * SAME {@link classifyPathLiveness} the worktree mode uses.
+ *
+ * Reuses {@link pruneClaudeConfigEntriesCore} — the SAME lock, the SAME re-verify-absent-before-write
+ * step, and the SAME count-drop sanity guard (card 498452c0) the worktree mode already uses. There is
+ * only ONE write path; this mode never forks a second one.
+ */
+export function pruneDeadTempTestClaudeConfigEntries(
+  opts: { dryRun: boolean; tmpdir?: string },
+): PruneDeadTempTestEntriesResult {
+  const claudeJson = claudeJsonPath();
+  const tmpRoot = normForCompare(opts.tmpdir ?? os.tmpdir());
+  return pruneClaudeConfigEntriesCore(
+    opts,
+    claudeJson,
+    (cfg) => classifyKeysByPredicate(cfg, (key) => isDirectLoomTempKey(tmpRoot, key)),
+  );
+}
+
+/** The {@link PruneClaudeConfigEntriesResultBase} shape with every field zeroed/empty for `dryRun`'s own
+ *  value — the common starting point both bulk-prune modes' early-return and {@link
+ *  pruneClaudeConfigEntriesCore} build their actual result on top of via spread-overrides. */
+function basePruneResult(dryRun: boolean): PruneClaudeConfigEntriesResultBase {
+  return { dryRun, deadCount: 0, deadKeysSample: [], removedKeys: [], recreatedKeys: [], unknownKeys: [], parseError: null };
+}
+
+/**
+ * Shared core of the bulk `.claude.json` prune (card d4580e19): classify once via `classify` (the only
+ * thing that differs between {@link pruneDeadWorktreeClaudeConfigEntries} and {@link
+ * pruneDeadTempTestClaudeConfigEntries} — which stored keys are candidates at all), then — for a real
+ * write — take the lock in REQUIRED mode (review item 3: a bulk delete must never proceed unlocked),
+ * re-read fresh, re-verify each previously-dead key's liveness right before deleting it, and apply the
+ * SAME count-drop sanity guard (card 498452c0) to the WHOLE file (not just this run's own candidate
+ * keys) that a key missing from the fresh read is explained ONLY by this run's own dead classification.
+ *
+ * `dryRun:true` reads ONCE, lock-free, and never writes — safe because `writeJsonAtomic`'s atomic rename
+ * means a reader always observes a fully-old or fully-new file, never torn.
+ *
+ * Fails closed on a malformed/unreadable config at EITHER read: `parseError` is set and nothing is ever
+ * written (see `readCfgFailClosed`'s own doc).
+ */
+function pruneClaudeConfigEntriesCore(
+  opts: { dryRun: boolean },
+  claudeJson: string,
+  classify: (cfg: ClaudeCfg) => { dead: string[]; alive: string[]; unknown: string[] },
+): PruneClaudeConfigEntriesResultBase & { aborted: "count-drop" | "lock-unavailable" | null } {
+  const base = (overrides: Partial<PruneClaudeConfigEntriesResultBase & { aborted: "count-drop" | "lock-unavailable" | null }> = {}) => ({
+    ...basePruneResult(opts.dryRun),
+    aborted: null as "count-drop" | "lock-unavailable" | null,
     ...overrides,
   });
 
-  // Review item 2: refuse up front rather than silently classifying nothing (or, via a stat-error
-  // misclassification, too much) against a root that doesn't actually exist.
-  try {
-    if (!statSyncImpl(worktreesRoot).isDirectory()) {
-      return base({ aborted: "worktrees-root-missing" });
-    }
-  } catch {
-    return base({ aborted: "worktrees-root-missing" });
-  }
-
-  function classifyWorktreeScopedKeys(cfg: ClaudeCfg): { dead: string[]; alive: string[]; unknown: string[] } {
-    const dead: string[] = [];
-    const alive: string[] = [];
-    const unknown: string[] = [];
-    const rootForms = containmentForms(worktreesRoot); // hoisted ONCE — see isStrictlyUnderRootForms's doc
-    for (const key of Object.keys(cfg.projects ?? {})) {
-      if (!isStrictlyUnderRootForms(rootForms, key)) continue; // not a worktree-scoped key at all
-      const liveness = classifyPathLiveness(key);
-      if (liveness === "dead") dead.push(key);
-      else if (liveness === "alive") alive.push(key);
-      else unknown.push(key);
-    }
-    return { dead, alive, unknown };
-  }
-
   const read = readCfgFailClosed(claudeJson);
   if ("error" in read) return base({ parseError: read.error });
-  const { dead, unknown } = classifyWorktreeScopedKeys(read.cfg);
+  const { dead, unknown } = classify(read.cfg);
   const deadKeysSample = dead.slice(0, DEAD_KEY_SAMPLE_CAP);
 
   if (opts.dryRun) return base({ deadCount: dead.length, deadKeysSample, unknownKeys: unknown });
@@ -1016,8 +1108,8 @@ export function pruneDeadWorktreeClaudeConfigEntries(
       removed.push(key);
     }
 
-    // @decision 498452c0 — see the function doc above: a missing-from-fresh key is explained only by
-    // THIS run's own dead classification; any other missing key aborts. A concurrent add always passes.
+    // @decision 498452c0 — a key missing from the fresh in-lock read is explained only by THIS run's
+    // own dead classification; any other missing key aborts. A concurrent add always passes.
     const deadSet = new Set(dead);
     const unexplainedMissing: string[] = [];
     for (const key of Object.keys(read.cfg.projects ?? {})) {

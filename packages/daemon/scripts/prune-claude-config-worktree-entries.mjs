@@ -21,7 +21,16 @@
 //     run against the owner's real config with a mistyped root) — otherwise --apply refuses unless the
 //     root resolves to the real WORKTREES_DIR. To rehearse against a copy, set CLAUDE_CONFIG_DIR to a
 //     directory holding a copy of your real .claude.json AND pass --worktrees-root pointing at a
-//     throwaway directory tree, before running this script with --apply.
+//     throwaway directory tree, before running this script with --apply. Meaningless with
+//     --temp-test-entries — passing both is refused.
+//   * --temp-test-entries (card d4580e19) switches to a SECOND, independent candidate predicate: a key
+//     that resolves DIRECTLY under os.tmpdir(), whose first path segment starts with `loom-`, and whose
+//     directory no longer exists — the leaked entries Loom TESTS wrote by reaching `ensureTrusted`
+//     without redirecting CLAUDE_CONFIG_DIR (cards 849acf9b, 042a4312, c75006c2), never a worktree entry.
+//     It goes through the SAME lock, the SAME re-verify-absent-before-write step, and the SAME count-drop
+//     sanity guard as the default worktree mode (pruneDeadTempTestClaudeConfigEntries reuses the same
+//     write path in pty/claude-config.ts — there is only one). --apply here is just as owner-facing as
+//     the default mode: read the dry-run output first.
 //   * Unlike a sqlite-backed backfill, this does NOT require the daemon to be stopped: every write this
 //     script makes goes through the SAME cross-process advisory lock every live `ensureTrusted` spawn
 //     call already takes on this exact file (in REQUIRED mode for the real write — see
@@ -34,9 +43,11 @@
 //     lock): reports the reason and writes nothing.
 //
 // RUN (repo root, after `pnpm build`):
-//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs                 # dry run (prints counts + sample)
-//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --apply         # actually prunes
-//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --json          # machine-readable result
+//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs                       # dry run, worktree mode (default)
+//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --apply               # actually prunes (worktree mode)
+//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --json                 # machine-readable result
+//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --temp-test-entries    # dry run, leaked-test-entry mode
+//   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --temp-test-entries --apply
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import os from "node:os";
 import path from "node:path";
@@ -45,10 +56,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = (p) => pathToFileURL(path.join(here, "..", "dist", p)).href;
 
-const KNOWN_FLAGS = new Set(["--apply", "--json", "--worktrees-root"]);
+const KNOWN_FLAGS = new Set(["--apply", "--json", "--worktrees-root", "--temp-test-entries"]);
 
 function printUsageAndExit() {
-  console.error("usage: prune-claude-config-worktree-entries.mjs [--apply] [--json] [--worktrees-root <dir>]");
+  console.error("usage: prune-claude-config-worktree-entries.mjs [--apply] [--json] [--worktrees-root <dir> | --temp-test-entries]");
   process.exit(1);
 }
 
@@ -62,12 +73,26 @@ async function main() {
   const flag = (n) => argv.includes(n);
   const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 
-  const { pruneDeadWorktreeClaudeConfigEntries, claudeJsonPath } = await import(dist("pty/claude-config.js"));
-  const { WORKTREES_DIR } = await import(dist("paths.js"));
-
-  const worktreesRootOverride = val("--worktrees-root");
   const apply = flag("--apply");
   const asJson = flag("--json");
+  const tempTestEntries = flag("--temp-test-entries");
+  const worktreesRootOverride = val("--worktrees-root");
+
+  if (tempTestEntries && worktreesRootOverride !== undefined) {
+    console.error("usage: --worktrees-root is a worktree-mode-only rehearsal override — meaningless with --temp-test-entries.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const { pruneDeadWorktreeClaudeConfigEntries, pruneDeadTempTestClaudeConfigEntries, claudeJsonPath } = await import(dist("pty/claude-config.js"));
+
+  if (tempTestEntries) {
+    const result = pruneDeadTempTestClaudeConfigEntries({ dryRun: !apply });
+    printResult({ asJson, claudeJson: claudeJsonPath(), scopeLabel: "tmp root", scopeValue: os.tmpdir(), result });
+    return;
+  }
+
+  const { WORKTREES_DIR } = await import(dist("paths.js"));
 
   // Review item 7: --worktrees-root is a rehearsal override, never a live-run footgun. A dry run always
   // accepts it (nothing is written either way). --apply accepts it when it's a no-op (resolves to the
@@ -100,14 +125,20 @@ async function main() {
   }
 
   const result = pruneDeadWorktreeClaudeConfigEntries({ dryRun: !apply, worktreesRoot });
+  printResult({ asJson, claudeJson: claudeJsonPath(), scopeLabel: "worktrees root", scopeValue: worktreesRoot, result });
+}
 
+/** Shared result printer for both modes — the only differences between them are the scope line
+ *  (`worktrees root` vs `tmp root`) and the worktree-only `"worktrees-root-missing"` abort reason,
+ *  which simply never fires for the temp-test mode's `result.aborted`. */
+function printResult({ asJson, claudeJson, scopeLabel, scopeValue, result }) {
   if (asJson) {
-    console.log(JSON.stringify({ claudeJson: claudeJsonPath(), worktreesRoot, ...result }, null, 2));
+    console.log(JSON.stringify({ claudeJson, [scopeLabel.replace(/ /g, "")]: scopeValue, ...result }, null, 2));
     return;
   }
 
-  console.log(`config file : ${claudeJsonPath()}`);
-  console.log(`worktrees root: ${worktreesRoot}`);
+  console.log(`config file : ${claudeJson}`);
+  console.log(`${scopeLabel}: ${scopeValue}`);
   console.log(`mode        : ${result.dryRun ? "dry-run (nothing written)" : "apply"}`);
 
   if (result.parseError) {
@@ -116,7 +147,7 @@ async function main() {
     return;
   }
   if (result.aborted === "worktrees-root-missing") {
-    console.error(`REFUSED: worktrees root ${worktreesRoot} does not stat as an existing directory. Nothing was read or written.`);
+    console.error(`REFUSED: ${scopeLabel} ${scopeValue} does not stat as an existing directory. Nothing was read or written.`);
     process.exitCode = 1;
     return;
   }
@@ -131,7 +162,7 @@ async function main() {
     return;
   }
 
-  console.log(`dead entries found (worktree directory absent): ${result.deadCount}`);
+  console.log(`dead entries found (directory absent): ${result.deadCount}`);
   if (result.deadKeysSample.length > 0) {
     console.log(`sample (up to ${result.deadKeysSample.length} of ${result.deadCount}):`);
     for (const k of result.deadKeysSample) console.log(`  ${k}`);
@@ -140,7 +171,7 @@ async function main() {
     // Card f761fdf3 item 6c: mirror deadKeysSample's own cap (50) rather than dumping an unbounded list.
     const UNKNOWN_KEYS_PRINT_CAP = 50;
     const shown = result.unknownKeys.slice(0, UNKNOWN_KEYS_PRINT_CAP);
-    console.log(`\nliveness could NOT be determined for ${result.unknownKeys.length} worktree-scoped entr${result.unknownKeys.length === 1 ? "y" : "ies"} (never deleted — investigate manually; showing up to ${UNKNOWN_KEYS_PRINT_CAP}):`);
+    console.log(`\nliveness could NOT be determined for ${result.unknownKeys.length} entr${result.unknownKeys.length === 1 ? "y" : "ies"} (never deleted — investigate manually; showing up to ${UNKNOWN_KEYS_PRINT_CAP}):`);
     for (const k of shown) console.log(`  ${k}`);
   }
 

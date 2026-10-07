@@ -1,5 +1,18 @@
 # 498452c0 — count-drop sanity guard on the dead-worktree `.claude.json` prune
 
+## Narrative (round 3 — shared write core reused by the temp-test-entries mode, card d4580e19)
+
+Card d4580e19 added a second bulk-prune mode (`pruneDeadTempTestClaudeConfigEntries`, `pty/claude-config.ts`)
+that targets a different leak — `.claude.json` entries LOOM TESTS wrote by reaching `ensureTrusted`
+without redirecting `CLAUDE_CONFIG_DIR` (cards 849acf9b, 042a4312, c75006c2), keyed under `os.tmpdir()`
+rather than under a worktrees root. Rather than fork a second read-lock-reread-write implementation, the
+classify-and-write mechanics below (the lock, the re-verify-absent-before-write step, and this guard)
+were factored out into a shared `pruneClaudeConfigEntriesCore`, parameterized only by WHICH stored keys
+are candidates at all (`classifyWorktreeScopedKeys`'s `isStrictlyUnderRootForms` predicate for the
+worktree mode; `isDirectLoomTempKey` — a direct child of `tmpdir` whose basename starts with `loom-` —
+for the temp-test mode). Everything below this guard's own narrative (round 1/2) is unchanged in
+substance for either mode; only the classification predicate differs.
+
 ## Narrative (round 2 — event-loop-stall fix on `removeClaudeConfigEntryForWorktree`)
 
 Round 1 (below) wrongly believed `removeClaudeConfigEntryForWorktree`'s per-GC-removal cost was
