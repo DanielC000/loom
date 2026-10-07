@@ -34,6 +34,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       stopped; the permanently-stranded piece (the wake, which never transferred) is untouched.
 //   (A2) REGRESSION — a halted successor that DOES reach ready is left alone: ownership stays split, the
 //       predecessor is never stopped, no recovery event fires.
+//   (A3) card 6e5af155 (RETRACTED, round 3) — a durably-resumable (real captured engine id) halted
+//       successor that dies before ever reaching ready is STILL reclaimed exactly like (A)'s unresumable
+//       one — see this scenario's own inline comment for the full argument.
 //   (B) ACROSS A BOOT RECONCILE — the identical death-before-ready case, but the daemon restarts before
 //       the in-process watch could ever see it (the successor never captured an engine id at all). The
 //       REAL boot sequence (runBootRecoveryPrefix + finishReconcilingHaltedRecycleSuccessors) reclaims the
@@ -299,6 +302,57 @@ try {
     check("(A2) FIX: hasSuccessor(M1) stays TRUE — nothing resolved the halt", db.hasSuccessor(m1.id) === true);
     check("(A2) FIX: the worker stays on M2 — nothing was wrongly reclaimed", db.getSession(workerId)?.parentSessionId === m2.id);
     check("(A2) no recycle_fleet_recovered event fabricated", db.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 0);
+  }
+
+  // ==================== (A3) card 6e5af155 (RETRACTED, round 3) — a durably-resumable but PRE-READY
+  // halted successor is STILL reclaimed exactly like (A)'s unresumable one ====================
+  // Card 6e5af155 explored leaving a dead-but-resumable halted successor alone instead of reclaiming
+  // whatever DID transfer to it. Round 3 RETRACTED that premise: the kickoff/handoff is delivered only
+  // post-ready (scheduleKickoffGuarantee, pty/host.ts, runs from inside markReady strictly AFTER
+  // live.ready is set), so a successor that died before ever reaching ready — which is ALL this scenario
+  // (and (A)) ever construct — never received any instruction at all; a captured engine id + empty
+  // transcript is not context worth preserving. See docs/decisions/6e5af155-… for the full argument,
+  // including the one PRE-EXISTING (card f1969787, unrelated to this card) ordering wrinkle in
+  // watchHaltedRecycleSuccessor itself (it checks `!isAlive` BEFORE `hasReachedReady`, unlike
+  // settleRecycleHandoff) that in principle lets a GENUINELY ready-then-died successor reach this same
+  // branch too — carded separately as a narrower, out-of-scope follow-up, not exercised here.
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-a3";
+    seedProject(db, P);
+    const m1 = sessions.startManager(`${P}-mgr`);
+    const { workerId } = seedFleet(db, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — forcing a halt, then the durably-resumable successor dies before ready");
+    unstub();
+
+    check("(A3 pre) the recycle HALTED (ownership_transfer_failed event fired)", hasEvent(db, m2.id, "recycle_ownership_transfer_failed"));
+    check("(A3 pre) the worker DID transfer onto M2", db.getSession(workerId)?.parentSessionId === m2.id);
+    check("(A3 pre) the wake is STRANDED on M1 (never transferred)", db.listWakesForSession(m1.id).some((w) => w.id === `${m1.id}-wake`));
+
+    // M2 captures a real engine id + transcript (SessionStart landed) — the ONE difference from (A)'s
+    // own M2, which never captures one at all. Proven true here so this scenario can't be satisfied
+    // vacuously by an unresumable M2 the same way (A) already is.
+    const engineSessionId = `eng-${m2.id}`;
+    db.setEngineSessionId(m2.id, engineSessionId);
+    writeFakeTranscript(m2.cwd, engineSessionId);
+    check("(A3 setup) M2 DOES carry a real engine id — the discriminating setup vs (A)", db.getSession(m2.id)?.engineSessionId === engineSessionId);
+    check("(A3 setup) M2 has NOT reached ready — no kickoff was ever delivered", host.hasReachedReady(m2.id) === false);
+
+    const m2Pty = host.handles.get(m2.id);
+    check("(A3 setup) M2's fake pty handle captured", !!m2Pty);
+    m2Pty.kill(); // dies before ever reaching ready — despite carrying a real engine id
+
+    const settled = await waitUntil(() => hasEvent(db, m1.id, "recycle_fleet_recovered"));
+    check("(A3) FIX (retracted premise): the ORDINARY reclaim fires — a captured engine id alone never earns a leave-alone", settled);
+
+    check("(A3) the worker (which DID transfer) is reclaimed back onto M1 — NOT left stranded on the resumable-but-blank M2", db.getSession(workerId)?.parentSessionId === m1.id);
+    check("(A3) M1 was NEVER stopped — still alive", host.isAlive(m1.id) === true);
+    check("(A3) hasSuccessor(M1) is now false (M2 unlinked, exactly like (A))", db.hasSuccessor(m1.id) === false);
+    check("(A3) M2 IS archived (never left resumable for crash-recovery to resurrect blank)", !!db.getSession(m2.id)?.archivedAt);
+    check("(A3) the never-transferred wake is still on M1, untouched by the reclaim", db.listWakesForSession(m1.id).some((w) => w.id === `${m1.id}-wake`));
+    check("(A3) no recycle_successor_down_resumable event exists — that event kind was retracted with the gate", !hasEvent(db, m1.id, "recycle_successor_down_resumable"));
   }
 
   // ==================== (B) ACROSS A BOOT RECONCILE — successor never captured an engine id ====================

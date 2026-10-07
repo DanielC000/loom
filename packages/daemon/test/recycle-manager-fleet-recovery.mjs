@@ -46,6 +46,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       change — since M2 is the ONLY possible fleet owner here and a later crash-recovery resume of it is
 //       exactly what should re-adopt the workers; touching it would pull the orphaned fleet off the live
 //       rail and overwrite its TRUE `[loom:orphaned-fleet]` banner (@decision 6cd3ce9e) with a false one.
+//   (F) card 6e5af155 (RETRACTED, round 3) — a durably-resumable M2 (a real captured engine id) that dies
+//       before ever reaching ready is STILL reclaimed exactly like (A)'s unresumable M2. Explored, then
+//       retracted, leaving a resumable-but-pre-ready M2 alone: the kickoff/handoff is delivered only
+//       post-ready, so a pre-ready death never carries real context to preserve — see this scenario's own
+//       inline comment and docs/decisions/6e5af155-… for the full structural argument.
 //
 // TIMING DISCIPLINE: every wait below is `waitUntil(predicate)` — polling for an OBSERVABLE terminal
 // signal (the settle loop's own appended event, or `pty.isAlive` flipping) — never a bare fixed sleep
@@ -110,6 +115,8 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
+const { isDurablyResumable } = await import("../dist/sessions/recycle-settle-reconcile.js");
 
 class SeamHost extends createSeamHost(PtyHost) {
   handles = new Map(); // sessionId -> the fake low-level pty object (pid/write/onData/onExit/kill/resize)
@@ -162,6 +169,14 @@ function seedFleet(db, sessions, projectId, managerId) {
 }
 
 const hasEvent = (db, id, kind) => db.listEventsForSession(id).some((e) => e.kind === kind);
+
+/** Writes a real (empty) engine transcript file so `isDurablyResumable` reads true for a session carrying
+ *  this `engineSessionId` (mirrors recycle-reattempt.mjs's own identically-named helper). */
+function writeFakeTranscript(cwd, engineSessionId) {
+  const engineDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(path.resolve(cwd)));
+  fs.mkdirSync(engineDir, { recursive: true });
+  fs.writeFileSync(path.join(engineDir, `${engineSessionId}.jsonl`), "");
+}
 
 try {
   // ==================== (A) MANAGER, RECOVERED ====================
@@ -373,11 +388,63 @@ try {
     check("(E) FIX (m1): M2's resumability is untouched (still resumable — a human/crash-recovery resume can re-adopt the fleet)",
       db.getSession(m2.id)?.resumability !== "dead");
   }
+
+  // ==================== (F) card 6e5af155 (RETRACTED) — a durably-resumable but PRE-READY successor is
+  // reclaimed exactly like an unresumable one ====================
+  // Card 6e5af155 explored leaving a dead-but-"isDurablyResumable" successor alone instead of reclaiming,
+  // reasoning (dfc3b014's own precedent) that a captured engine id means real context worth preserving.
+  // Round 3 investigation RETRACTED that premise for this call site: the kickoff/handoff is delivered
+  // ONLY post-ready (`scheduleKickoffGuarantee` runs from inside `markReady`, strictly AFTER
+  // `live.ready` is set — pty/host.ts), and `hasReachedReady` is checked BEFORE `!isAlive` on every poll
+  // of this very loop, every iteration — so a successor whose ready flag was EVER true is caught by the
+  // ready branch (which stops M1) before the not-alive branch could ever run; the live entry itself is
+  // never deleted on exit (pty/host.ts), so that ready flag, once true, never un-sets itself either. The
+  // not-alive branch can therefore ONLY ever observe a successor that never received its kickoff — there
+  // is no context to preserve, so "isDurablyResumable" (a bare captured engine id + empty transcript) is
+  // never a legitimate reason to leave it alone here. See docs/decisions/6e5af155-… for the full argument.
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmfr-f";
+    seedProject(db, P);
+    const m1 = sessions.startManager(`${P}-mgr`);
+    const { workerId } = seedFleet(db, sessions, P, m1.id);
+
+    const m2 = await sessions.recycleManager(m1.id, "handoff — spawn succeeds, captures a real engine id, then dies before ever reaching ready");
+    check("(F) recycleManager succeeded", !!m2 && m2.id !== m1.id);
+    check("(F) fleet moved onto M2 at recycle time", db.getSession(workerId)?.parentSessionId === m2.id);
+
+    // M2 captures a real engine id + transcript (SessionStart landed) — the ONE difference from scenario
+    // (A)'s own M2, which never captures one at all. isDurablyResumable is deliberately proven true here
+    // so this scenario can't be satisfied vacuously by an unresumable M2 the same way (A) already is.
+    const engineSessionId = `eng-${m2.id}`;
+    db.setEngineSessionId(m2.id, engineSessionId);
+    writeFakeTranscript(m2.cwd, engineSessionId);
+    check("(F setup) M2 IS durably resumable per isDurablyResumable — the discriminating setup vs (A)", isDurablyResumable(db.getSession(m2.id)));
+    check("(F setup) M2 has NOT reached ready — no kickoff was ever delivered", host.hasReachedReady(m2.id) === false);
+
+    const m2Pty = host.handles.get(m2.id);
+    check("(F setup) M2's fake pty handle captured", !!m2Pty);
+    m2Pty.kill(); // dies before ever reaching ready — despite being durably resumable
+
+    const settled = await waitUntil(() => hasEvent(db, m1.id, "recycle_fleet_recovered"));
+    check("(F) FIX (retracted premise): the ORDINARY reclaim fires — resumability alone never earns a leave-alone", settled);
+
+    check("(F) M1 was NEVER stopped — still alive (reclaimed, not stopped)", host.isAlive(m1.id) === true);
+    check("(F) hasSuccessor(M1) is now false (M2 unlinked, exactly like (A))", db.hasSuccessor(m1.id) === false);
+    check("(F) the worker is reclaimed back onto M1 — NOT left stranded on the resumable-but-blank M2", db.getSession(workerId)?.parentSessionId === m1.id);
+    check("(F) M2 IS archived with a clear reason (never left resumable for crash-recovery to resurrect blank)",
+      !!db.getSession(m2.id)?.archivedAt && (db.getSession(m2.id)?.lastError ?? "").includes("[loom:recycle-failed]"));
+    check("(F) M2's resumability IS stamped 'dead' — crash-recovery must never resurrect it as a second owner",
+      db.getSession(m2.id)?.resumability === "dead");
+    const recovered = db.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered");
+    check("(F) exactly one recycle_fleet_recovered event, naming the resumable-but-blank M2", recovered.length === 1 && recovered[0].detail?.deadSuccessorId === m2.id);
+    check("(F) no recycle_successor_down_resumable event exists — that event kind was retracted with the gate", !hasEvent(db, m1.id, "recycle_successor_down_resumable"));
+  }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a manager/platform recycle whose successor dies before SessionStart now recovers the predecessor's fleet (workers/wakes/questions/cap-queue/pending) instead of stranding it, alerts a human either way, never resurrects a fleet onto a predecessor that is itself no longer alive, and the ordinary successful-recycle path is unregressed."
+  ? "\n✅ ALL PASS — a manager/platform recycle whose successor dies before SessionStart now recovers the predecessor's fleet (workers/wakes/questions/cap-queue/pending) instead of stranding it, alerts a human either way, never resurrects a fleet onto a predecessor that is itself no longer alive, the ordinary successful-recycle path is unregressed, and (card 6e5af155, retracted) a durably-resumable PRE-READY successor is reclaimed exactly like an unresumable one — isDurablyResumable alone is never a legitimate reason to leave a dead successor alone, since the kickoff is only ever delivered post-ready."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
