@@ -200,6 +200,18 @@ deny-list before this card (`d78f8217`'s own record: "FAILS OPEN on anything not
 structural guarantee"); losing it entirely on codex is worse in degree, not in kind — still only
 disclosed, not closed, by this card.
 
+## 2127d695 (follow-up) — the parentless-recipient case this mechanism's "nowhere to send it" caveat anticipated
+
+`handleCodexIsolationGapDisclosed`'s `nudged = !alreadyNudged && !!s?.parentSessionId` already anticipated
+a parentless session having nowhere to send its nudge (see this record's own "Do not" item on
+`detail.nudged:true`). Card `2127d695` found the first role where that actually occurs in practice: a
+`"run"` session (`startRun`, `sessions/service.ts`) is parentless by design AND reachable on codex, so its
+`settingsDirReadDeny`/`permissionDeny` disclosures land as a durable `nudged:false` row nobody is pointed
+at — no manager to nudge, and no web UI surfaces this event kind. Ruled legitimate/accepted as-is (not a
+bug, and not fixed on that card) — see `docs/decisions/2127d695-codex-run-sessions.md` for the full ruling,
+the two rejected options, and why a `"run"`-scoped delivery fix was declined in favor of a future,
+UI-surfacing card that benefits every parentless session.
+
 ## Do not
 
 - Do not read `docs/decisions/37310431`'s "Codex harness — no change needed" section as covering anything

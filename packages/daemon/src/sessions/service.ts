@@ -7590,6 +7590,9 @@ export class SessionService {
       connections: [], // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
       vaultWrite: false, // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
       harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude") — card 56e6c046: was resolved but never threaded onto the run session row/spawn
+      // @decision 2127d695 — a codex "run" session is legitimate: do NOT add "run" to TRANSCRIPT_ROOT_DENY_ROLES
+      // (or any other claude-force mechanism) to gate it — "run" never held that set's protection under
+      // either harness. The parentless isolation-gap-nudge residual this leaves is accepted, not a bug.
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.

@@ -21,6 +21,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   3. no quiet role-scoped side effect: `disallowedToolsForRole("run")` is unaffected by harness (it is
 //      keyed on role alone) — confirms DoD item 3 (fixing harness threading must not quietly opt `run`
 //      into the harness-self-scheduling disallow list, which deliberately excludes it).
+//   4. card 2127d695 (today's accepted posture, pinned): "run" is not in TRANSCRIPT_ROOT_DENY_ROLES (not
+//      force-redirected to claude), and a simulated codex_isolation_gap_disclosed for that same parentless
+//      "run" session always carries nudged:false (the disclosure reaches nobody — accepted, not a bug).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-runs-harness-thread.mjs
 import fs from "node:fs";
@@ -38,7 +41,7 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, disallowedToolsForRole, HARNESS_SCHEDULING_TOOLS } = await import("../dist/pty/host.js");
+const { PtyHost, disallowedToolsForRole, HARNESS_SCHEDULING_TOOLS, TRANSCRIPT_ROOT_DENY_ROLES } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -97,6 +100,22 @@ try {
     o?.harness === "codex");
   check("1 NOT persistence-only: the DB session row also pins harness:\"codex\"", db.getSession(session.id).harness === "codex");
   check("1 role is still 'run' (harness threading did not touch role)", o?.role === "run" && db.getSession(session.id).role === "run");
+  check("1 'run' is NOT in TRANSCRIPT_ROOT_DENY_ROLES (card 2127d695's ruling: codex run is legitimate, not force-redirected)",
+    !TRANSCRIPT_ROOT_DENY_ROLES.has("run"));
+
+  // ===================== 1b. card 2127d695: the isolation-gap nudge is a dead end for a parentless 'run' session =====================
+  // "run" sessions have no manager (no parentSessionId) — handleCodexIsolationGapDisclosed only nudges a
+  // recipient when one exists, so a codex "run" session's own settingsDirReadDeny/permissionDeny
+  // disclosure lands as a durable row with nudged:false and reaches nobody. Simulate what a real codex
+  // spawn would report (PtyHost's onCodexIsolationGapDisclosed is a 1:1 passthrough to this exact handler
+  // in production, index.ts) rather than driving a real codex process — matching this file's hermetic
+  // style, and this is the ACCEPTED posture (docs/decisions/2127d695), not a bug to fix here.
+  check("1b 'run' session has no parentSessionId (parentless by design)", db.getSession(session.id).parentSessionId == null);
+  svc.handleCodexIsolationGapDisclosed(session.id, { items: [{ id: "settingsDirReadDeny", reason: "test" }] });
+  const gapEvents = db.listEventsForWorkerKinds(session.id, ["codex_isolation_gap_disclosed"]);
+  check("1b a codex_isolation_gap_disclosed event IS recorded durably for a run session", gapEvents.length === 1);
+  check("1b THE ACCEPTED RESIDUAL: nudged:false — a parentless 'run' session's disclosure reaches nobody",
+    gapEvents[0]?.detail?.nudged === false);
 
   // ===================== 2. regression guard: a PLAIN-agent run has no harness (byte-identical) =====================
   const { session: sPlain } = await svc.startRun({ agentId: "agentPlain", input: { q: 2 }, schema: null });
@@ -121,6 +140,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a run of a codex-pinned agent threads harness onto the actual pty.spawn() call (not just the DB row); a plain-agent run stays byte-identical; 'run' role's harness-scheduling exclusion is unaffected — claude-free, network-free."
+  ? "\n✅ ALL PASS — a run of a codex-pinned agent threads harness onto the actual pty.spawn() call (not just the DB row); a plain-agent run stays byte-identical; 'run' role's harness-scheduling exclusion is unaffected; card 2127d695's posture (codex run legitimate, parentless isolation-gap nudge accepted as a dead end) is pinned — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
