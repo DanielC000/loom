@@ -209,9 +209,16 @@ fifth call site).
 Fixed by mirroring `consumeMatchedPendingsIntoArmedEntry`'s own SUCCESS-branch fold exactly, now for
 N sources per key: on any per-source `false` return, fold every failing source into `orphanLatchFiles`
 (deduped) and re-persist via `writeMergeQuarantineLatch` once. If that re-persist itself fails, a loud log
-names it explicitly and the surviving source(s) stay able to re-arm the quarantine at the next boot —
-today's pre-existing, safe (fail-closed, never open) posture for any failed durable write, not a new risk
-this fix introduces.
+names it explicitly and the surviving source(s) stay able to re-arm the quarantine at the next boot — safe
+(fail-closed, never open) for THIS branch specifically, because the write to the entry's own NEW key has
+already durably succeeded by the time this unlink-fold runs; nothing here risks the entry's own data.
+
+**CORRECTION (card `97cff6db`) — this did NOT generalize to "any failed durable write," and the original
+text above claimed it did.** A *migrate write itself* failing (not this branch's unlink-after-a-successful-
+write) was fail-OPEN whenever a sibling key's own successful write, earlier or later in the SAME pass,
+physically superseded the exact file this entry's "left in place" fallback assumed was still intact — see
+`docs/decisions/97cff6db-migrate-source-owner-durable-before-write.md` for the repro and the fix (a
+safety-tmp residue, written before any such write can run).
 
 ## Verification
 

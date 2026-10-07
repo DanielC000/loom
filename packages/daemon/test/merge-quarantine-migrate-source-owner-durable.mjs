@@ -1,0 +1,1590 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
+// Board card 97cff6db (discovered from 4480b077 round-3 Code Review, reviewer 3ac19e17):
+// reenterMergeQuarantinesAtBoot's write-all pass could land a boot-time write for key Kb on the exact
+// physical file that is ANOTHER key Ka's own migrate SOURCE, regardless of whether Ka's own write to its
+// fresh target had itself succeeded yet. When Ka's own write then failed (an open/write fault — not a
+// rename fault, which already left a recoverable fsync'd tmp), the "old file(s) left in place so nothing
+// is lost" fallback was FALSE the moment a sibling key's successful write had already overwritten that
+// exact file this same pass — a durable fail-OPEN after a reboot (finding 1). The SAME hazard existed at
+// a SECOND write call site, PASS 1b's own tmp-promotion write, which consulted neither
+// migratedSourcesByKey nor writeTargetsThisPass at all (finding 1a). A THIRD variant needed no fault at
+// all: the degraded-occupied skip folds a colliding sibling's migrate source into the DEGRADED occupant's
+// own in-memory orphanLatchFiles only — an ordinary, correct clear of that unrelated degraded entry then
+// deletes the sibling's only durable copy as pure collateral via sweepOrphanLatchFileIfUnreferenced's
+// "nothing references it, delete" check (finding 1b). A MINOR, separate defect: the degraded-occupied
+// fold's own byRepoKey mutation runs AFTER flushDegradedDiverts already snapshotted the pre-fold object
+// into pendingUnresolvedQuarantines, so listActiveMergeQuarantines (Set-deduping by reference, not value)
+// reports the same quarantine twice (Minor 2).
+//
+// ROUND 1's first fix (an inline, per-key safety-tmp write, named indistinguishably from an ordinary
+// tmp) was itself found NOT MERGEABLE by Code Review 85f0f345 at commit 0f324c36: (CRITICAL 1) the
+// safety-tmp was written immediately before a key's OWN write, never before a SIBLING's write that
+// could clobber its source first — a crash at the wrong instant still lost data; (CRITICAL 2) two
+// OTHER boot-time writes (the deferred-corrupt-tmp placeholder, and PASS 2's own orphan-reference
+// writes) were completely ungated and could destroy an unrelated key's still-unprotected source;
+// (MAJOR 3) the "blind-delete is always safe for a safety-tmp" premise was false — PASS 1b's shortcut
+// gates on ANY clean `.json` resolving to a key, not the one true final, so a second, non-colliding
+// stale source for the SAME key made it discard the safety-tmp (and the data it alone held) outright.
+//
+// ROUND 2's fix (current): ONE dedicated phase, before ANY boot write anywhere in this function,
+// computes the complete set of paths the WHOLE boot will write to (every write site — the migrate
+// pass, the tmp-promotion pass, the deferred-corrupt-tmp placeholder, and PASS 2's orphan-reference
+// writes), then durably secures (fsync'd, directory fsync'd) every at-risk migrate source's safety-tmp
+// BEFORE any of those writes runs — closing the ordering hazard. If a safety-tmp write itself fails,
+// every write targeting one of ITS colliding sources is also blocked this boot (`blockedWriteTargets`),
+// never just the at-risk key's own — closing the "protect A but still let B destroy A's source" gap.
+// A safety-tmp is now named distinguishably (`.tmp-safety-<pid>-<hex>`, disjoint by regex from an
+// ordinary `.tmp-<pid>(-<hex>)?` residue) so recovery can tell the two apart BY NAME: an ordinary tmp
+// keeps today's blind-delete-beside-a-clean-final behavior (closing MAJOR 3 — a safety-tmp simply
+// never reaches that code path, regardless of how many other clean sources exist for the same key); a
+// safety-tmp instead ALWAYS unions into its key's final, deleted only once that union is durable.
+//
+// See docs/decisions/97cff6db-migrate-source-owner-durable-before-write.md for the full repro + fix
+// narrative and the RED/GREEN accounting.
+//
+// Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-migrate-source-owner-durable.mjs
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createHash } from "node:crypto";
+import { execSync, execFileSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { commitAll } from "./_git-commit.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const SCENARIOS = [
+  "finding1-migrate-pass-sibling-collision",
+  "finding1a-tmp-promotion-pass-sibling-collision",
+  "finding1b-degraded-skip-clear-destroys-sibling",
+  "minor2-stale-snapshot-double-report",
+  "safety-tmp-recovery-always-unions-into-existing-final",
+  "safety-tmp-crash-after-success-before-delete-is-fail-closed",
+  "round2-A-second-noncolliding-source-defeats-blind-delete-premise",
+  "round2-B-deferred-corrupt-tmp-placeholder-write-ungated",
+  "round2-C-pass2-orphan-placeholder-write-ungated",
+  "round2-D-crash-shaped-no-fault-ordering-hazard",
+  "round3-E-degraded-occupied-source-clobbered",
+  "round3-F-safety-recovery-write-ungated",
+  "round3-minor3-unparseable-safety-tmp-gets-placeholder",
+  "round3-minor4-deferred-corrupt-placeholder-survives-phase3-delete",
+  "round4-G1-same-boot-graduation-deletes-sibling-target",
+  "round4-G2-recovery-writeback-clobbers-degraded-occupant",
+  "round4-finding1b-sub-older",
+  "round4-minor2-sub-older",
+  "round4-E-sub-older",
+  "round4-minor1-safety-recovery-double-report",
+  "round4-minor2-unparseable-safety-tmp-full-fallback",
+  "round4-d163aef5-pass2-degraded-bypass",
+  "round5-G1a-same-boot-clear-then-reboot-destroys-safety-tmp",
+  "round5-G1a-same-boot-clear-then-reboot-sub-older",
+  "round5-minor1-stale-resolvedkey-registration-liveness",
+];
+
+const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
+
+if (!scenarioArg) {
+  // DRIVER MODE — one child per scenario, own fresh LOOM_HOME each (never shared across scenarios).
+  const { LOOM_HOME: _inherited, ...envWithoutLoomHome } = process.env;
+  let failedScenarios = 0;
+  for (const name of SCENARIOS) {
+    console.log(`\n=== SCENARIO ${name} (own process, own LOOM_HOME) ===`);
+    try {
+      execFileSync(process.execPath, [__filename, `--scenario=${name}`], { env: envWithoutLoomHome, stdio: "inherit" });
+      console.log(`--- ${name}: PASS ---`);
+    } catch {
+      console.log(`--- ${name}: FAIL ---`);
+      failedScenarios++;
+    }
+  }
+  console.log(failedScenarios === 0
+    ? "\n✅ ALL SCENARIOS PASS — ONE phase secures every at-risk migrate source's safety-tmp (named "
+      + "distinguishably) before ANY boot write runs, blocking a colliding write outright if that "
+      + "securing itself fails; a degraded-occupied fold protects a colliding sibling's source from an "
+      + "unrelated clear and reports the shared quarantine exactly once; a safety-tmp ALWAYS unions into "
+      + "its final, never blind-deleted like an ordinary stale tmp beside a clean final."
+    : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board card 97cff6db.`);
+  process.exit(failedScenarios === 0 ? 0 : 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// CHILD MODE — below this point, exactly one scenario runs, in its own fresh LOOM_HOME.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+const scenarioName = scenarioArg.slice("--scenario=".length);
+useOwnLoomHome(`loom-mqmsod-${scenarioName}-`);
+requireHermeticEnv();
+
+const distGitDir = path.join(__dirname, "..", "dist", "git");
+const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
+const {
+  reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, clearMergeQuarantine, MERGE_QUARANTINE_DIR,
+  listActiveMergeQuarantines, PLACEHOLDER_BRANCH_CORRUPT,
+} = await import(mergeQuarantineModuleHref);
+const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const GIT_ID = "-c user.email=mqmsod@loom -c user.name=mqmsod";
+const tmpDirs = [];
+const freshSfx = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+function hashForKey(key) {
+  return createHash("sha256").update(key).digest("hex").slice(0, 24);
+}
+
+// P (a repo) with teamA (a plain subdir, no `.git` of its own — collapses onto P's own key Kp) and sub
+// (its OWN SEPARATE nested repo, own `.git`, own real key Ksub != Kp) — same shape as
+// merge-quarantine-pass1-migrate-union.mjs's own `makeRepoWithNestedRepoAndSubdir`.
+function makeRepoWithNestedRepoAndSubdir(tag) {
+  const repo = path.join(os.tmpdir(), `loom-mqmsod-repo-${tag}-${freshSfx()}`);
+  const nested = path.join(repo, "sub");
+  const subdir = path.join(repo, "teamA");
+  fs.mkdirSync(nested, { recursive: true });
+  fs.mkdirSync(subdir, { recursive: true });
+  tmpDirs.push(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), `# ${tag}\n`);
+  execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
+  execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: nested });
+  fs.writeFileSync(path.join(nested, "README.md"), `# nested (${tag})\n`);
+  commitAll(nested, "init", GIT_ID);
+  return { repo, nested, subdir };
+}
+
+function placeStaleBeforeFixed(fixedPath, staleCandidatePath) {
+  fs.writeFileSync(staleCandidatePath, "{}");
+  fs.writeFileSync(fixedPath, "{}");
+  const order = fs.readdirSync(path.dirname(fixedPath));
+  const idxStale = order.indexOf(path.basename(staleCandidatePath));
+  const idxFixed = order.indexOf(path.basename(fixedPath));
+  if (idxStale >= idxFixed) {
+    throw new Error(`expected ${path.basename(staleCandidatePath)} to sort before ${path.basename(fixedPath)}`);
+  }
+}
+
+/** Run `fn` with console.error/console.warn temporarily tee'd into a captured array (still printed to
+ *  the real console too), restoring both unconditionally. Used to assert a specific log line did/did
+ *  NOT fire, since no scenario in this file has needed that until round 5's own Minor 1 liveness test. */
+async function captureConsole(fn) {
+  const lines = [];
+  const realError = console.error;
+  const realWarn = console.warn;
+  console.error = (...args) => { lines.push(String(args[0] ?? "")); realError(...args); };
+  console.warn = (...args) => { lines.push(String(args[0] ?? "")); realWarn(...args); };
+  try {
+    await fn();
+  } finally {
+    console.error = realError;
+    console.warn = realWarn;
+  }
+  return lines;
+}
+
+let bootReimportCounter = 0;
+async function freshBootModule() {
+  bootReimportCounter++;
+  return await import(`${mergeQuarantineModuleHref}?b=${bootReimportCounter}`);
+}
+
+try {
+  if (scenarioName === "finding1-migrate-pass-sibling-collision") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Finding 1 (MAIN). sub's own latch sits at sha(Kp).json — teamA's own correct, eventual migrate
+    // TARGET. teamA ALSO has its own stale-named latch migrating TO sha(Kp).json. Inject a write failure
+    // on sub's OWN fresh target (sha(Ksub).json) — teamA's own write (to the SAME shared file sub's stale
+    // data occupies) succeeds in the SAME pass regardless.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("f1");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason -- must survive", enteredAt: Date.now() - 60_000, tokens: ["token-sub"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own separate stale raise", enteredAt: Date.now(), tokens: ["token-teamA"],
+    }, null, 2) + "\n");
+
+    // The safety-tmp write and the real write use the IDENTICAL tmp-naming scheme (both target
+    // sub's own fresh hash) -- fail only the SECOND matching open (the real write), letting the FIRST
+    // (the safety-tmp) succeed, mirroring the card's own "open/write fault on the real write, not the
+    // safety floor" repro shape.
+    const ksubHash = hashForKey(ksub);
+    const realOpenSync = fs.openSync;
+    let matchCount = 0;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(ksubHash) && p.includes(".tmp-")) {
+        matchCount++;
+        if (matchCount === 2) {
+          throw Object.assign(new Error("EACCES: simulated migrate-write failure for sub"), { code: "EACCES" });
+        }
+      }
+      return realOpenSync(p, ...rest);
+    };
+    try {
+      reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    } finally {
+      fs.openSync = realOpenSync;
+    }
+    check("(positive control) sub's safety-tmp write AND its real write were both attempted (and the second injected to fail)", matchCount >= 2);
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX *** after a real restart, sub's quarantine SURVIVES (recovered from the safety-tmp)",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub"),
+    );
+    const teamAAfterRestart = fresh.activeMergeQuarantineFor(teamA);
+    check("(sanity) teamA's own quarantine is unaffected and still present", !!teamAAfterRestart && (teamAAfterRestart.tokens ?? []).includes("token-teamA"));
+
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+    const after2 = await freshBootModule();
+    after2.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    check("(cleanup) neither quarantine resurrects after both are cleared", !after2.activeMergeQuarantineFor(teamA) && !after2.activeMergeQuarantineFor(sub));
+  } else if (scenarioName === "finding1a-tmp-promotion-pass-sibling-collision") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Finding 1a. SAME shape as finding1, except teamA's own data arrives via a RECOVERED TMP RESIDUE
+    // (PASS 1b's own tmp-promotion write pass) instead of a stale-named FINAL (PASS 1's migrate pass).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("f1a");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason -- must survive", enteredAt: Date.now() - 60_000, tokens: ["token-sub"],
+    }, null, 2) + "\n");
+
+    // teamA has NO proper final at all -- only a tmp residue -- so its only route to sha(Kp).json is
+    // the TMP-PROMOTION write pass, not the ordinary migrate pass.
+    const teamATmpPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-tmp-${freshSfx()}.json.tmp-999999`);
+    fs.writeFileSync(teamATmpPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own recovered-tmp raise", enteredAt: Date.now(), tokens: ["token-teamA"],
+    }, null, 2) + "\n");
+
+    // Same technique as finding1's own scenario: fail only the SECOND matching open (the real write),
+    // letting the safety-tmp write succeed first.
+    const ksubHash = hashForKey(ksub);
+    const realOpenSync = fs.openSync;
+    let matchCount = 0;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(ksubHash) && p.includes(".tmp-")) {
+        matchCount++;
+        if (matchCount === 2) {
+          throw Object.assign(new Error("EACCES: simulated migrate-write failure for sub"), { code: "EACCES" });
+        }
+      }
+      return realOpenSync(p, ...rest);
+    };
+    try {
+      reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    } finally {
+      fs.openSync = realOpenSync;
+    }
+    check("(positive control) sub's safety-tmp write AND its real write were both attempted (and the second injected to fail)", matchCount >= 2);
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (1a) *** after a real restart, sub's quarantine SURVIVES via the tmp-promotion pass's own safety-tmp",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub"),
+    );
+    const teamAAfterRestart = fresh.activeMergeQuarantineFor(teamA);
+    check("(sanity) teamA's own quarantine is unaffected and still present", !!teamAAfterRestart && (teamAAfterRestart.tokens ?? []).includes("token-teamA"));
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "finding1b-degraded-skip-clear-destroys-sibling") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Finding 1b. "No fault needed" -- an ORDINARY, successful clear of the DEGRADED entry X (no write
+    // failure anywhere) used to sweep X's own orphanLatchFiles, which the degraded-skip fold ALSO
+    // populated with Y's own still-pending migrate source -- destroying Y's only durable copy as a side
+    // effect of a clear that was never about Y at all.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqmsod-y1b-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# finding1b Y\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-x1b-never-exists-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `!stale-y1b-${freshSfx()}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token-1b"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's real, genuine reason -- must survive a clear of the UNRELATED degraded entry X",
+      enteredAt: Date.now(), tokens: ["y-token-1b"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, x]);
+    check("(this boot) the stale-y file is still on disk, unresolved (degraded-skip never writes/deletes)", fs.existsSync(yFile));
+
+    // An ORDINARY human clear of X -- the only repo a human operating on this collision would know to
+    // clear directly (Y's own stale latch is invisible under Y's own identity in this scenario).
+    clearMergeQuarantine(x);
+    check(
+      "*** THE FIX (1b) *** clearing the UNRELATED degraded entry X no longer deletes Y's own still-pending migrate source",
+      fs.existsSync(yFile),
+    );
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([y, x]);
+    const yAfterRestart = fresh.activeMergeQuarantineFor(y);
+    check(
+      "*** THE FIX (1b), CONFIRMED *** after restart, Y's quarantine SURVIVES -- no fault/IO error needed to close this",
+      !!yAfterRestart && (yAfterRestart.tokens ?? []).includes("y-token-1b"),
+    );
+    fresh.clearMergeQuarantine(y);
+  } else if (scenarioName === "minor2-stale-snapshot-double-report") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Minor 2. The degraded-skip fold mutates byRepoKey to a NEW object (spread) AFTER
+    // flushDegradedDiverts already pushed the PRE-fold object reference into pendingUnresolvedQuarantines.
+    // listActiveMergeQuarantines Set-dedupes by object identity, so the two different references for
+    // conceptually the SAME quarantine both used to survive the dedupe.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqmsod-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# minor2 Y\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-x-never-exists-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `!stale-y-${freshSfx()}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's real, genuine reason", enteredAt: Date.now(), tokens: ["y-token"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, x]);
+
+    // X is the "older" side of the union (its enteredAt is earlier), so the LIVE shared union's own
+    // repoPath field is X's. THE MINOR 2 FIX: X's own divert (flushDegradedDiverts's pre-fold snapshot)
+    // must be re-pointed to the SAME live object, not left as a second, stale reference — count entries
+    // whose repoPath is X's own: exactly one, never two, is what closes Minor 2 specifically.
+    const list = listActiveMergeQuarantines();
+    const xEntries = list.filter((e) => e.repoPath === x);
+    check(
+      "*** THE FIX (Minor 2) *** X's own shared-union divert is reported EXACTLY ONCE, never twice (the stale pre-fold snapshot is no longer a second, un-collapsed reference)",
+      xEntries.length === 1,
+    );
+    // Y's own NEW protective entry (card 97cff6db finding 1b's own fix) is a DIFFERENT, legitimately
+    // ADDITIVE report -- Y had NO representation at all before that fix, so this is not a duplicate of
+    // X's entry and is reported separately, by design (not itself a thing Minor 2 governs).
+    const yEntries = list.filter((e) => e.repoPath === y);
+    console.log(`REPORT  Y's own additive entry count (from finding 1b's fix, not Minor 2's own scope): ${yEntries.length}`);
+    clearMergeQuarantine(x);
+  } else if (scenarioName === "safety-tmp-recovery-always-unions-into-existing-final") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Lead ruling 2 (round 2): a SAFETY-TMP residue is named distinguishably (`.tmp-safety-<pid>-<hex>`)
+    // so recovery can tell it apart from an ORDINARY stale tmp BY NAME, never by inference. Recovery
+    // ALWAYS unions a safety-tmp into the final for its key -- even when (as here) the final already
+    // exists with a DIFFERENT, newer token the safety-tmp doesn't have -- and deletes it only once that
+    // union is durably re-persisted. This is DELIBERATELY different from an ORDINARY tmp beside a clean
+    // final (still a blind delete -- see merge-quarantine-boot-hardening.mjs's TW-stale scenario,
+    // merge-quarantine-pass1b-clean-parse-gate.mjs's STALE scenario, and
+    // merge-quarantine-pass1-degraded-union-guard.mjs's pass1b-resolvable-stale-tmp-still-deleted): the
+    // two tmp shapes are disjoint by filename pattern precisely so BOTH behaviors can coexist correctly.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const k = path.join(os.tmpdir(), `loom-mqmsod-k-${freshSfx()}`);
+    fs.mkdirSync(k, { recursive: true });
+    tmpDirs.push(k);
+    fs.writeFileSync(path.join(k, "README.md"), "# safety-tmp recovery K\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: k });
+    commitAll(k, "init", GIT_ID);
+    const kk = canonicalRepoLockKey(k);
+    const kHash = hashForKey(kk);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const finalPath = path.join(MERGE_QUARANTINE_DIR, `${kHash}.json`);
+    const safetyTmpPath = path.join(MERGE_QUARANTINE_DIR, `${kHash}.json.tmp-safety-424242-aabbccdd`);
+    fs.writeFileSync(finalPath, JSON.stringify({
+      repoPath: k, branch: "k-branch", reason: "K's current, up-to-date reason", enteredAt: Date.now(), tokens: ["token-new"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(safetyTmpPath, JSON.stringify({
+      repoPath: k, branch: "k-branch", reason: "K's reason as of an earlier safety-tmp write", enteredAt: Date.now() - 60_000, tokens: ["token-old"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([k]);
+
+    check("(cleanup) the recovered safety-tmp residue is gone after processing", !fs.existsSync(safetyTmpPath));
+    const active = activeMergeQuarantineFor(k);
+    check("*** THE FIX (ruling 2) *** the final's NEWER token survived", !!active && (active.tokens ?? []).includes("token-new"));
+    check("*** THE FIX (ruling 2) *** the safety-tmp's OLDER token was UNIONED IN, never silently dropped", !!active && (active.tokens ?? []).includes("token-old"));
+    const persisted = JSON.parse(fs.readFileSync(finalPath, "utf8"));
+    check("*** THE FIX (ruling 2) *** the PERSISTED final (not just in-memory) carries BOTH tokens", (persisted.tokens ?? []).includes("token-new") && (persisted.tokens ?? []).includes("token-old"));
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([k]);
+    const afterRestart = fresh.activeMergeQuarantineFor(k);
+    check("(reboot-sim) both tokens still present reading only the on-disk final", (afterRestart?.tokens ?? []).includes("token-new") && (afterRestart?.tokens ?? []).includes("token-old"));
+    fresh.clearMergeQuarantine(k);
+  } else if (scenarioName === "safety-tmp-crash-after-success-before-delete-is-fail-closed") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Lead condition 3. Document + test the crash window: writeSafetyTmpResidue succeeds, the REAL write
+    // then ALSO succeeds, but the crash lands before this process gets to delete the now-redundant safety
+    // tmp. The NEXT boot must never resurrect anything WRONG from this -- at worst it re-persists a union
+    // that is a harmless superset (an extra, already-stale token folded back in, per the ruling-2 union
+    // fix above) -- fail-CLOSED (sticks around a little longer than strictly needed), never fail-OPEN
+    // (never loses the entry, never un-quarantines it). Manufacture exactly this post-crash state by hand
+    // (both the final AND the safety tmp already on disk, matching what a real crash in that window would
+    // leave) rather than injecting into a live write -- the window itself is just a few instructions wide
+    // and not meaningfully exercisable any other way in a hermetic test.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const k = path.join(os.tmpdir(), `loom-mqmsod-crashwin-${freshSfx()}`);
+    fs.mkdirSync(k, { recursive: true });
+    tmpDirs.push(k);
+    fs.writeFileSync(path.join(k, "README.md"), "# crash-window K\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: k });
+    commitAll(k, "init", GIT_ID);
+    const kk = canonicalRepoLockKey(k);
+    const kHash = hashForKey(kk);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const finalPath = path.join(MERGE_QUARANTINE_DIR, `${kHash}.json`);
+    const crashedSafetyTmpPath = path.join(MERGE_QUARANTINE_DIR, `${kHash}.json.tmp-safety-${process.pid}-deadbeef`);
+    const content = { repoPath: k, branch: "k-branch", reason: "K's real reason, crash-window scenario", enteredAt: Date.now(), tokens: ["token-k-crashwin"] };
+    // The real write succeeded (the final exists) AND the safety tmp (identical content -- it was written
+    // moments before the real write, same boot) survived the crash that landed before its own cleanup.
+    fs.writeFileSync(finalPath, JSON.stringify(content, null, 2) + "\n");
+    fs.writeFileSync(crashedSafetyTmpPath, JSON.stringify(content, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([k]);
+    check("(cleanup) the crash-surviving safety tmp is swept on the next boot", !fs.existsSync(crashedSafetyTmpPath));
+    const active = activeMergeQuarantineFor(k);
+    check(
+      "*** THE FIX (condition 3) *** NEVER FAIL-OPEN -- the quarantine is still fully enforced after this cleanup",
+      !!active && (active.tokens ?? []).includes("token-k-crashwin"),
+    );
+    const persisted = JSON.parse(fs.readFileSync(finalPath, "utf8"));
+    check("(fail-closed, not corrupted) the persisted final still carries the real token", (persisted.tokens ?? []).includes("token-k-crashwin"));
+
+    // And the OTHER half of the crash window: a human legitimately clears K AFTER this -- the leftover
+    // (already-swept, in this run) safety tmp must not be able to resurrect anything on a LATER boot.
+    clearMergeQuarantine(k);
+    const fresh = await freshBootModule();
+    const found = fresh.reenterMergeQuarantinesAtBoot([k]);
+    check("(no resurrection) a legitimately cleared quarantine does not come back", !found.some((e) => e.repoPath === k) && !fresh.activeMergeQuarantineFor(k));
+  } else if (scenarioName === "round2-A-second-noncolliding-source-defeats-blind-delete-premise") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-2 Code Review 85f0f345, CRITICAL/MAJOR 3. sub has TWO stale sources: s1 at sha(Kp).json
+    // (teamA's own correct migrate target -- the usual collision) AND a SECOND, entirely
+    // non-colliding stale source s2 (an ordinary extra raise, named anywhere else). PASS 1b's
+    // "already covered" shortcut gated on `cleanlyParsedKeys` alone, which ANY clean .json resolving to
+    // sub's key populates -- including s2, read well before sub's OWN fresh final is ever written this
+    // boot. On a restart after sub's own migrate write fails, s2's own clean parse made the shortcut
+    // blind-delete sub's safety-tmp (the ONLY surviving copy of s1) before it was ever read, permanently
+    // losing s1. The fix (distinguishable safety-tmp naming, round 2) means this shortcut's own
+    // `tmpFiles` scan never matches a safety-tmp at all, regardless of how many OTHER clean sources
+    // exist for the same key.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r2a");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({ repoPath: sub, branch: "sub-branch", reason: "sub REAL reason s1", enteredAt: Date.now() - 60_000, tokens: ["token-sub-s1"] }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({ repoPath: teamA, branch: "teamA-branch", reason: "teamA", enteredAt: Date.now(), tokens: ["token-teamA"] }, null, 2) + "\n");
+    // sub's SECOND, non-colliding stale source -- a distinct, ordinary raise, never at any target path.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `!stale-sub2-${freshSfx()}.json`), JSON.stringify({ repoPath: sub, branch: "sub-branch-2", reason: "sub second raise s2", enteredAt: Date.now(), tokens: ["token-sub-s2"] }, null, 2) + "\n");
+
+    const ksubHash = hashForKey(ksub);
+    const realOpenSync = fs.openSync;
+    let matchCount = 0;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(ksubHash) && p.includes(".tmp-")) {
+        matchCount++;
+        if (matchCount === 2) throw Object.assign(new Error("EACCES sim"), { code: "EACCES" });
+      }
+      return realOpenSync(p, ...rest);
+    };
+    try { reenterMergeQuarantinesAtBoot([repo, teamA, sub]); } finally { fs.openSync = realOpenSync; }
+    check("(positive control) sub's safety-tmp write AND its real write were both attempted", matchCount >= 2);
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 2, finding A) *** sub's s1 raise SURVIVES restart despite a second, non-colliding stale source",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub-s1"),
+    );
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round2-B-deferred-corrupt-tmp-placeholder-write-ungated") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-2 Code Review 85f0f345, CRITICAL 2 item (a). teamA's only evidence is a CORRUPT torn-write
+    // tmp at its own hash (no real final anywhere for teamA) -- the deferredCorruptTmps resolution's
+    // "no real sibling data" branch fabricates a placeholder for teamA and writes it UNGATED, straight
+    // to teamA's own target, which physically IS sub's own still-present stale source (sha(Kp).json).
+    // This write ran chronologically BEFORE sub ever got a chance to protect itself in the PRE-round-2
+    // code (safety-tmp written inline, inside phase 1a, long after this resolution loop had already
+    // run). Fixed by gating this write on `blockedWriteTargets`/counting it in `allBootWriteTargets` so
+    // Phase 0 secures sub FIRST, and skipping the write outright if sub's own securing failed too.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r2b");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({ repoPath: sub, branch: "sub-branch", reason: "sub REAL reason s1", enteredAt: Date.now() - 60_000, tokens: ["token-sub-s1"] }, null, 2) + "\n");
+    // A CORRUPT torn-write tmp at teamA's OWN hash -- no real final anywhere for teamA.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json.tmp-999999`), "{ torn");
+
+    const ksubHash = hashForKey(ksub);
+    const realOpenSync = fs.openSync;
+    let matchCount = 0;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(ksubHash) && p.includes(".tmp-")) {
+        matchCount++;
+        if (matchCount === 1) throw Object.assign(new Error("EACCES sim"), { code: "EACCES" });
+      }
+      return realOpenSync(p, ...rest);
+    };
+    try { reenterMergeQuarantinesAtBoot([repo, teamA, sub]); } finally { fs.openSync = realOpenSync; }
+    check("(positive control) sub's own safety-tmp write was attempted (and injected to fail)", matchCount >= 1);
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 2, finding B) *** sub's s1 raise SURVIVES -- the deferred-corrupt-tmp placeholder write never clobbered it",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub-s1"),
+    );
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round2-C-pass2-orphan-placeholder-write-ungated") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-2 Code Review 85f0f345, CRITICAL 2 (PASS 2's own share). `repo` and `teamA` share one key
+    // (Kp) and have NO entry of their own from PASS 1/1b (sub's stale data merely happens to be NAMED
+    // at hash(Kp), it is never armed there). An unrelated orphan file makes PASS 2 fabricate a fresh,
+    // UNGATED placeholder for `repo` (the first registeredRepoPath sharing Kp), writing it straight to
+    // quarantinePathFor(repo) == sha(Kp).json == sub's own still-present stale source. Fixed the same
+    // way as finding B: PASS 2's own targets are counted in Phase 0's `allBootWriteTargets`, and this
+    // write is skipped outright (in-memory only) if sub's own securing failed.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r2c");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({ repoPath: sub, branch: "sub-branch", reason: "sub REAL reason s1", enteredAt: Date.now() - 60_000, tokens: ["token-sub-s1"] }, null, 2));
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "ffffffffffffffffffffffff.json"), "{ corrupt orphan");
+
+    const ksubHash = hashForKey(ksub);
+    const realOpenSync = fs.openSync;
+    let matchCount = 0;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(ksubHash) && p.includes(".tmp-")) {
+        matchCount++;
+        throw Object.assign(new Error("EACCES sim"), { code: "EACCES" });
+      }
+      return realOpenSync(p, ...rest);
+    };
+    try { reenterMergeQuarantinesAtBoot([repo, teamA, sub]); } finally { fs.openSync = realOpenSync; }
+    check("(positive control) sub's own write(s) were attempted (and injected to fail)", matchCount >= 1);
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 2, finding C) *** sub's s1 raise SURVIVES -- PASS 2's own orphan-placeholder write never clobbered it",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub-s1"),
+    );
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round2-D-crash-shaped-no-fault-ordering-hazard") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-2 Code Review 85f0f345, CRITICAL 1. NO fault injection at all -- a pure CRASH-shaped repro.
+    // The pre-round-2 code wrote a key's own safety-tmp INLINE, immediately before attempting ITS OWN
+    // real write, inside a single per-key loop over migratedSourcesByKey -- so whichever key's
+    // iteration ran first (readdir/Map insertion order) could complete its ENTIRE write (clobbering the
+    // other's still-present stale source) before the OTHER key's iteration -- and so its own safety-tmp
+    // -- had even started. Snapshot the disk at the EXACT instant sub's safety-tmp open begins (via a
+    // monkeypatched fs.openSync, never throwing -- this is not a fault, just an observation point),
+    // then "crash" by restoring that snapshot and booting fresh. Round 2's fix writes EVERY at-risk
+    // key's safety-tmp in ONE dedicated phase, fully, BEFORE any real write anywhere in this function
+    // runs -- so this snapshot must already show sub's source untouched, regardless of processing order.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r2d");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({ repoPath: sub, branch: "sub-branch", reason: "sub REAL reason s1", enteredAt: Date.now() - 60_000, tokens: ["token-sub-s1"] }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({ repoPath: teamA, branch: "teamA-branch", reason: "teamA", enteredAt: Date.now(), tokens: ["token-teamA"] }, null, 2) + "\n");
+
+    const ksubHash = hashForKey(ksub);
+    const realOpenSync = fs.openSync;
+    let matchCount = 0;
+    let snapDir;
+    let snapContent;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(ksubHash) && p.includes(".tmp-")) {
+        matchCount++;
+        if (matchCount === 1) {
+          // The instant sub's OWN safety-tmp open begins -- snapshot the directory's byte-for-byte state
+          // right here, before letting the real open (and anything after it) proceed.
+          snapDir = path.join(os.tmpdir(), `loom-mqmsod-r2d-snap-${freshSfx()}`);
+          fs.cpSync(MERGE_QUARANTINE_DIR, snapDir, { recursive: true });
+          snapContent = JSON.parse(fs.readFileSync(subAtKpPath, "utf8"));
+        }
+      }
+      return realOpenSync(p, ...rest);
+    };
+    try { reenterMergeQuarantinesAtBoot([repo, teamA, sub]); } finally { fs.openSync = realOpenSync; }
+    check("(positive control) the snapshot was actually taken at sub's own safety-tmp open", matchCount >= 1 && !!snapDir);
+    check(
+      "*** THE FIX (round 2, finding D) *** AT THE INSTANT sub's safety-tmp open begins, sha(Kp).json STILL holds sub's own data (teamA has not written yet)",
+      !!snapContent && (snapContent.tokens ?? []).includes("token-sub-s1"),
+    );
+
+    // "Crash" — restore the snapshot (discard anything written after that instant) and boot fresh.
+    fs.rmSync(MERGE_QUARANTINE_DIR, { recursive: true, force: true });
+    fs.cpSync(snapDir, MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.rmSync(snapDir, { recursive: true, force: true });
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 2, finding D), CONFIRMED *** sub's s1 raise SURVIVES a crash at the exact pre-round-2 ordering hazard",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub-s1"),
+    );
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round3-E-degraded-occupied-source-clobbered") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-3 Code Review b8a7b74f, CRITICAL (repro E, NO fault needed) -- the card's own original
+    // finding (b). X degraded-occupies sub's OWN key Ksub (its recorded resolvedKey). sub's own (only)
+    // latch sits at sha(Kp).json -- the usual collision shape -- and migrates to Ksub. Phase 0's at-risk
+    // computation used to SKIP Ksub entirely because degradedOccupiedKeys.has(Ksub) was true, even
+    // though sub's migrate SOURCE is exactly as at-risk as any other: teamA's own (non-degraded) write
+    // physically lands on that same file regardless, with no fault needed at all.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r3e");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r3e-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded-occupies sub's own key", enteredAt: Date.now() - 120_000, tokens: ["token-x"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason -- must survive X's degraded occupation of Ksub", enteredAt: Date.now() - 60_000, tokens: ["token-sub"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own separate stale raise", enteredAt: Date.now(), tokens: ["token-teamA"],
+    }, null, 2) + "\n");
+
+    // NO fault injection at all -- this is a pure no-fault repro (the card's own original finding (b)).
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const onDiskAfterThisBoot = fs.readdirSync(MERGE_QUARANTINE_DIR).map((f) => fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).join("\n");
+    check("(this boot) sub's own token survives SOMEWHERE on disk (a safety-tmp, since teamA's write clobbers sub's stale location)", onDiskAfterThisBoot.includes("token-sub"));
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 3, finding E) *** after a real restart, sub's quarantine SURVIVES despite its migrate target being degraded-occupied",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub"),
+    );
+
+    fresh.clearMergeQuarantine(x); // an ordinary clear of the UNRELATED degraded entry
+    const after2 = await freshBootModule();
+    after2.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const subAfterClearAndReboot = after2.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 3, finding E), CONFIRMED *** even after clearing the unrelated degraded entry X, sub is STILL quarantined (fail-closed)",
+      !!subAfterClearAndReboot && (subAfterClearAndReboot.tokens ?? []).includes("token-sub"),
+    );
+    after2.clearMergeQuarantine(teamA);
+    after2.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round3-F-safety-recovery-write-ungated") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-3 Code Review b8a7b74f, MAJOR/CRITICAL (repro F). A PRIOR boot's own leftover safety-tmp
+    // residue for teamA's key Kp sits on disk (no proper .json final for teamA anywhere). sub's own
+    // (only) latch ALSO sits at sha(Kp).json (the usual collision -- sub migrates FROM there to its own
+    // key Ksub). The end-of-boot safety-tmp recovery write-back used to consult neither
+    // allBootWriteTargets nor blockedWriteTargets at all, so when sub's own securing fails (fault
+    // injected on sub's own hash), the recovery write-back still went ahead and overwrote sub's only
+    // remaining copy with teamA's recovered data.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r3f");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    // A leftover SAFETY-TMP residue for teamA's key (Kp), from an EARLIER boot -- no proper .json final
+    // for teamA anywhere; this is its only durable representation on disk right now.
+    const teamALeftoverSafetyTmp = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json.tmp-safety-1234-abcdef01`);
+    fs.writeFileSync(teamALeftoverSafetyTmp, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own leftover safety-tmp from an earlier boot", enteredAt: Date.now() - 1_000, tokens: ["token-teamA"],
+    }, null, 2) + "\n");
+    // sub's only latch sits at sha(Kp).json -- the safety-tmp recovery's own eventual write target.
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason -- must survive teamA's recovery write-back", enteredAt: Date.now() - 60_000, tokens: ["token-sub"],
+    }, null, 2) + "\n");
+
+    // Fault: sub's OWN write (its migrate target hash) fails on every matching tmp open.
+    const ksubHash = hashForKey(ksub);
+    const realOpenSync = fs.openSync;
+    let matchCount = 0;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(ksubHash) && p.includes(".tmp-")) {
+        matchCount++;
+        throw Object.assign(new Error("EACCES: simulated failure for sub"), { code: "EACCES" });
+      }
+      return realOpenSync(p, ...rest);
+    };
+    try {
+      reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    } finally {
+      fs.openSync = realOpenSync;
+    }
+    check("(positive control) sub's own write was attempted (and injected to fail)", matchCount >= 1);
+
+    const onDiskAfterThisBoot = fs.readdirSync(MERGE_QUARANTINE_DIR).map((f) => fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).join("\n");
+    check(
+      "*** THE FIX (round 3, finding F) *** with sub's write failing, tok-sub still exists SOMEWHERE on disk (teamA's recovery write-back was BLOCKED, not merely slow)",
+      onDiskAfterThisBoot.includes("token-sub"),
+    );
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 3, finding F), CONFIRMED *** after a real restart (no fault this time), sub is still quarantined",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub"),
+    );
+    const teamAAfterRestart = fresh.activeMergeQuarantineFor(teamA);
+    check("(sanity) teamA's own recovered quarantine is unaffected and still present", !!teamAAfterRestart && (teamAAfterRestart.tokens ?? []).includes("token-teamA"));
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round3-minor3-unparseable-safety-tmp-gets-placeholder") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round 3, MINOR 3. An UNPARSEABLE/corrupt safety-tmp residue, matching a registered repo's own
+    // hash, used to get nothing but a console.error -- no in-memory placeholder at all, unlike the
+    // sibling corrupt-.json/corrupt-tmp handling (deferredCorruptJsons/deferredCorruptTmps), which both
+    // fail CLOSED via a pendingUnresolvedQuarantines placeholder. A genuinely corrupt safety-tmp (never
+    // expected in practice, since Loom writes these itself) left NOTHING enforcing k's quarantine.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const k = path.join(os.tmpdir(), `loom-mqmsod-r3m3-${freshSfx()}`);
+    fs.mkdirSync(k, { recursive: true });
+    tmpDirs.push(k);
+    fs.writeFileSync(path.join(k, "README.md"), "# minor3 K\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: k });
+    commitAll(k, "init", GIT_ID);
+    const kk = canonicalRepoLockKey(k);
+    const kHash = hashForKey(kk);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // A CORRUPT, unparsable safety-tmp -- no proper .json final anywhere for k either.
+    const corruptSafetyTmpPath = path.join(MERGE_QUARANTINE_DIR, `${kHash}.json.tmp-safety-999999-deadbeef`);
+    fs.writeFileSync(corruptSafetyTmpPath, "{ torn safety-tmp, never valid JSON");
+
+    reenterMergeQuarantinesAtBoot([k]);
+    const active = activeMergeQuarantineFor(k);
+    check(
+      "*** THE FIX (round 3, minor 3) *** an unparseable safety-tmp matching a registered repo gets a FAIL-CLOSED placeholder, never silence alone",
+      !!active && active.branch === PLACEHOLDER_BRANCH_CORRUPT,
+    );
+    // activeMergeQuarantineFor's own PRE-EXISTING lazy-graduation tail (unrelated to this fix) durably
+    // persists the pending placeholder as a real final and sweeps the now-superseded safety-tmp residue
+    // the moment it's queried -- confirm that graduation is genuinely DURABLE, not just in-memory.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([k]);
+    const afterRestart = fresh.activeMergeQuarantineFor(k);
+    check(
+      "(durability) after a real restart, k's fail-closed placeholder is still enforced from its own graduated final",
+      !!afterRestart && afterRestart.branch === PLACEHOLDER_BRANCH_CORRUPT,
+    );
+    fresh.clearMergeQuarantine(k);
+  } else if (scenarioName === "round3-minor4-deferred-corrupt-placeholder-survives-phase3-delete") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round 3, MINOR 4. Repo A has ONLY a corrupt, unparsable torn-write tmp residue (no proper .json
+    // final anywhere) -- the deferred-corrupt-tmp "no real sibling data" branch fabricates and writes a
+    // fail-closed PLACEHOLDER for A, landing at quarantinePathFor(A). Repo B's own stale latch happens
+    // to physically sit at THAT SAME filename (the usual hash-collision shape) and migrates away to B's
+    // own (different) target this same boot. Phase 3's delete pass used to have no way to know A's
+    // placeholder write had ALSO just landed on that exact filename, so it deleted it as a "superseded"
+    // migrate source for B -- destroying A's only durable (fail-closed) record moments after it was
+    // written, with no fault involved for B's own write at all.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const repoA = path.join(os.tmpdir(), `loom-mqmsod-r3m4-a-${freshSfx()}`);
+    fs.mkdirSync(repoA, { recursive: true });
+    tmpDirs.push(repoA);
+    fs.writeFileSync(path.join(repoA, "README.md"), "# minor4 A\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: repoA });
+    commitAll(repoA, "init", GIT_ID);
+    const ka = canonicalRepoLockKey(repoA);
+    const kaHash = hashForKey(ka);
+
+    const repoB = path.join(os.tmpdir(), `loom-mqmsod-r3m4-b-${freshSfx()}`);
+    fs.mkdirSync(repoB, { recursive: true });
+    tmpDirs.push(repoB);
+    fs.writeFileSync(path.join(repoB, "README.md"), "# minor4 B\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: repoB });
+    commitAll(repoB, "init", GIT_ID);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // B's own stale latch, deliberately placed AT A's own hash -- the collision this scenario needs.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${kaHash}.json`), JSON.stringify({
+      repoPath: repoB, branch: "b-branch", reason: "B's REAL reason -- its own stale source physically collides with A's hash", enteredAt: Date.now() - 60_000, tokens: ["token-b"],
+    }, null, 2) + "\n");
+    // A's own CORRUPT torn-write tmp -- no real final anywhere for A.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${kaHash}.json.tmp-999999`), "{ torn, no real sibling data for A");
+
+    // NO fault injection at all -- this is a pure no-fault repro of the writeTargetsThisPass gap.
+    reenterMergeQuarantinesAtBoot([repoA, repoB]);
+
+    const aPlaceholderPath = path.join(MERGE_QUARANTINE_DIR, `${kaHash}.json`);
+    check(
+      "*** THE FIX (round 3, minor 4) *** A's freshly-written fail-closed placeholder SURVIVES phase 3's delete pass for B's own superseded migrate source",
+      fs.existsSync(aPlaceholderPath),
+    );
+    if (fs.existsSync(aPlaceholderPath)) {
+      const persisted = JSON.parse(fs.readFileSync(aPlaceholderPath, "utf8"));
+      check("(content) the surviving file is genuinely A's placeholder, not B's stale data", persisted.branch === PLACEHOLDER_BRANCH_CORRUPT);
+    }
+    const activeA = activeMergeQuarantineFor(repoA);
+    check("A's own fail-closed quarantine is enforced", !!activeA && activeA.branch === PLACEHOLDER_BRANCH_CORRUPT);
+    const activeB = activeMergeQuarantineFor(repoB);
+    check("(sanity) B's own data migrated correctly to its own key and is still enforced", !!activeB && (activeB.tokens ?? []).includes("token-b"));
+
+    clearMergeQuarantine(repoA);
+    clearMergeQuarantine(repoB);
+  } else if (scenarioName === "round4-G1-same-boot-graduation-deletes-sibling-target") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-4 Code Review 2b079f86, finding G1. SAME setup as round3-E (X degraded-occupies sub's own
+    // migrate target Ksub; sub's stale source physically collides with teamA's own migrate target
+    // sha(Kp).json). Phase 1b gives sub's migrate source a pending reference whose sourceFile is that
+    // RAW collided filename -- a file teamA's own phase-1a write has ALREADY claimed, this same pass.
+    //
+    // sub's own data is ALSO unconditionally unioned into byRepoKey[Ksub] during PASS 1 itself (the
+    // fall-through arm below the migrate-collection branch) -- so activeQuarantines.get(Ksub) is a REAL
+    // union of X+sub, not X alone, and activeMergeQuarantineFor(sub)'s `direct` fast path returns that
+    // union directly (never touching pendingUnresolvedQuarantines) for as long as X's own union object
+    // still occupies Ksub. The dangerous Phase 1b pending reference only gets GRADUATED (via
+    // consumeMatchedPendingsIntoArmedEntry) once that shared slot is actually vacated -- i.e. ordinary
+    // human clear of the UNRELATED X, in the SAME process (no reboot) -- which deletes activeQuarantines'
+    // Ksub slot, making the NEXT same-process query for sub fall through to the pending-match cascade.
+    // round3-E's/finding1b's own tests never caught this because they always REBOOT before re-querying,
+    // and a reboot's own safety-tmp-recovery read loop (finding E) mints a DIFFERENT, safe pending
+    // reference (pointing at the safety-tmp's own unique filename) that supersedes Phase 1b's dangerous
+    // one before it can ever be graduated. The real hazard needs clear-X-then-query-sub within ONE
+    // process, before any reboot gets a chance to replace the dangerous reference with a safe one.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r4g1");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4g1-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded-occupies sub's own key", enteredAt: Date.now() - 120_000, tokens: ["token-x"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason -- must survive a same-boot graduation", enteredAt: Date.now() - 60_000, tokens: ["token-sub"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's REAL reason -- must survive sub's same-boot graduation deleting its sourceFile", enteredAt: Date.now(), tokens: ["token-teamA"],
+    }, null, 2) + "\n");
+
+    // NO fault injection -- this is a pure no-fault repro. teamA's write lands on sha(Kp).json THIS
+    // pass (phase 1a, before phase 1b ever runs).
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check(
+      "(positive control) teamA's own migrate write landed on sha(Kp).json, the exact file sub's stale source occupied",
+      fs.existsSync(subAtKpPath) && JSON.parse(fs.readFileSync(subAtKpPath, "utf8")).repoPath === teamA,
+    );
+
+    // THE REPRO: clear the UNRELATED X, then query sub -- both WITHIN THE SAME PROCESS (no reboot). The
+    // clear vacates activeQuarantines' shared Ksub slot; the query then falls through to the pending-
+    // match cascade and GRADUATES Phase 1b's own dangerous pending reference via
+    // consumeMatchedPendingsIntoArmedEntry -> deleteSourceLatchIfSuperseded(sourceFile, armed).
+    clearMergeQuarantine(x);
+    const subGraduated = activeMergeQuarantineFor(sub);
+    check("sub's own same-process graduation succeeded", !!subGraduated && (subGraduated.tokens ?? []).includes("token-sub"));
+
+    check(
+      "*** THE FIX (round 4, G1) *** teamA's own live quarantine file SURVIVES sub's same-boot graduation",
+      fs.existsSync(subAtKpPath),
+    );
+    if (fs.existsSync(subAtKpPath)) {
+      const persisted = JSON.parse(fs.readFileSync(subAtKpPath, "utf8"));
+      check("(content) the surviving file is genuinely teamA's data, not deleted/replaced", persisted.repoPath === teamA && (persisted.tokens ?? []).includes("token-teamA"));
+    }
+    const teamAStillActive = activeMergeQuarantineFor(teamA);
+    check("teamA's own quarantine is still enforced after sub's graduation", !!teamAStillActive && (teamAStillActive.tokens ?? []).includes("token-teamA"));
+
+    clearMergeQuarantine(teamA);
+    clearMergeQuarantine(sub);
+    clearMergeQuarantine(x);
+  } else if (scenarioName === "round4-G2-recovery-writeback-clobbers-degraded-occupant") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-4 Code Review 2b079f86, finding G2. BOOT 1: same collision shape as round3-E, but with the
+    // age order FLIPPED (sub OLDER than X, not X older than sub, unlike every pre-round-4 degraded test)
+    // -- this is what makes unionQuarantineEntries' tie-break resolve to sub's own RESOLVABLE identity on
+    // boot 2, which is what lets the recovery write-back's own (pre-existing, unrelated) resolvability
+    // check pass and reach the code that has NO degradedOccupiedKeys check at all (phase 1a and phase 2
+    // both have one; this call site never did). BOOT 2: with X still unresolvable, the end-of-boot
+    // safety-tmp recovery write-back physically overwrites X's OWN backing file (sha(Ksub).json) with
+    // sub's content -- destroying X's real token/reason/branch, no fault needed.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r4g2");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4g2-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    // X is now the YOUNGER side (unlike every pre-round-4 degraded test, which always made X older).
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's REAL reason -- must survive a sub-older union tie-break", enteredAt: Date.now() - 60_000, tokens: ["token-x"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    // sub is now the OLDER side -- this is the flip.
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's own reason", enteredAt: Date.now() - 180_000, tokens: ["token-sub"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own separate stale raise", enteredAt: Date.now(), tokens: ["token-teamA"],
+    }, null, 2) + "\n");
+
+    // BOOT 1 -- no fault injection. Creates sub's own safety-tmp for Ksub (degraded-occupied by X) via
+    // the ordinary collision path; Ksub's real target is never written while X stays degraded.
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const filesAfterBoot1 = fs.readdirSync(MERGE_QUARANTINE_DIR);
+    const safetyTmpAfterBoot1 = filesAfterBoot1.find((f) => f.includes(hashForKey(ksub)) && f.includes(".tmp-safety-"));
+    check("(positive control) boot 1 created sub's own safety-tmp residue for Ksub", !!safetyTmpAfterBoot1);
+    check("(positive control) X's own backing file at sha(Ksub).json is UNTOUCHED after boot 1", fs.readFileSync(xAtKsubPath, "utf8").includes("token-x"));
+
+    // BOOT 2 -- fresh module instance, no fault injection. X is re-read fresh (still unresolvable, still
+    // degraded-occupies Ksub). The safety-tmp recovery read loop re-arms sub's recovered content into
+    // byRepoKey at Ksub, UNIONING with X's own freshly-read entry -- sub wins the tie-break (older).
+    const bootTwo = await freshBootModule();
+    bootTwo.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+
+    const xFileAfterBoot2 = fs.readFileSync(xAtKsubPath, "utf8");
+    check(
+      "*** THE FIX (round 4, G2) *** X's own backing file SURVIVES the recovery write-back (never clobbered with sub's content)",
+      xFileAfterBoot2.includes("token-x") && !xFileAfterBoot2.includes("token-sub"),
+    );
+
+    // Per Lead condition 1: a REFUSAL here must leave X still quarantined after a FURTHER reboot, and
+    // sub's own data must also still be recoverable (the safety-tmp survives, untouched, for next boot).
+    const bootThree = await freshBootModule();
+    bootThree.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const xAfterBoot3 = bootThree.activeMergeQuarantineFor(x);
+    check(
+      "(refusal durability) X is STILL quarantined after a further reboot -- the refusal never silently lifted it",
+      !!xAfterBoot3 && (xAfterBoot3.tokens ?? []).includes("token-x"),
+    );
+    bootThree.clearMergeQuarantine(x);
+    const bootFour = await freshBootModule();
+    bootFour.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const subAfterXCleared = bootFour.activeMergeQuarantineFor(sub);
+    check(
+      "(no collateral loss) after clearing the UNRELATED X, sub's own quarantine is STILL enforced (its safety-tmp survived every boot untouched)",
+      !!subAfterXCleared && (subAfterXCleared.tokens ?? []).includes("token-sub"),
+    );
+    bootFour.clearMergeQuarantine(teamA);
+    bootFour.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round4-finding1b-sub-older") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Reparametrization of finding1b over the OTHER age order (card 97cff6db round 4, Lead condition 6)
+    // -- Y now OLDER than X (every pre-round-4 degraded test, including the original finding1b, made the
+    // degraded occupant X the older side).
+    //
+    // @decision 97cff6db (round 5) — NON-DISCRIMINATING PARITY CHECK, not a regression test: measured
+    // (node packages/daemon/test/merge-quarantine-migrate-source-owner-durable.mjs
+    // --scenario=round4-finding1b-sub-older, source temporarily reverted to the TRUE pre-round-1 parent
+    // 30e7e9b9) GREEN even on code with NONE of card 97cff6db's fixes -- under THIS age order the
+    // original finding1b defect never fires, for a reason not yet root-caused. Kept only to document
+    // this age order's own behavior stays unregressed across every round; see the decision record.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqmsod-r4f1b-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# round4 finding1b Y (sub-older)\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4f1b-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `!stale-r4f1b-y-${freshSfx()}.json`);
+    // FLIPPED: X is now the YOUNGER side; Y is now the OLDER side.
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y (sub-older variant)",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token-1b-so"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's real, genuine reason -- must survive a clear of the UNRELATED degraded entry X (sub-older variant)",
+      enteredAt: Date.now() - 120_000, tokens: ["y-token-1b-so"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, x]);
+    check("(this boot) the stale-y file is still on disk, unresolved (degraded-skip never writes/deletes)", fs.existsSync(yFile));
+
+    clearMergeQuarantine(x);
+    check(
+      "*** FIX (1b) HOLDS UNDER THE OTHER AGE ORDER *** clearing the UNRELATED degraded entry X no longer deletes Y's own still-pending migrate source",
+      fs.existsSync(yFile),
+    );
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([y, x]);
+    const yAfterRestart = fresh.activeMergeQuarantineFor(y);
+    check(
+      "*** FIX (1b) HOLDS UNDER THE OTHER AGE ORDER, CONFIRMED *** after restart, Y's quarantine SURVIVES",
+      !!yAfterRestart && (yAfterRestart.tokens ?? []).includes("y-token-1b-so"),
+    );
+    fresh.clearMergeQuarantine(y);
+  } else if (scenarioName === "round4-minor2-sub-older") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Reparametrization of minor2-stale-snapshot-double-report over the OTHER age order (Lead condition
+    // 6). The ORIGINAL minor2 test relies on X being older (so the shared union's repoPath is X's) --
+    // flip it: Y older than X. The double-report defect was about OBJECT-REFERENCE identity surviving a
+    // mid-pass mutation, not about which side's repoPath wins, so this should hold either way.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqmsod-r4m2-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# round4 minor2 Y (sub-older)\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4m2-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `!stale-r4m2-y-${freshSfx()}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y (sub-older variant)",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token-m2-so"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's real, genuine reason (sub-older variant)", enteredAt: Date.now() - 120_000, tokens: ["y-token-m2-so"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, x]);
+
+    // Filter by TOKEN presence, not repoPath: with Y now older, the shared union's own repoPath field is
+    // Y's (unionQuarantineEntries' tie-break), not X's -- a repoPath-equality filter would report zero
+    // matches for a reason that has nothing to do with the double-report defect Minor 2 actually governs.
+    // The double-report defect is about OBJECT-REFERENCE identity surviving a mid-pass mutation, so any
+    // entry carrying X's own token is the same shared union either way -- count THOSE instead.
+    const list = listActiveMergeQuarantines();
+    const xEntries = list.filter((e) => (e.tokens ?? []).includes("x-token-m2-so"));
+    check(
+      "*** FIX (Minor 2) HOLDS UNDER THE OTHER AGE ORDER *** the shared union carrying X's own token is reported EXACTLY ONCE",
+      xEntries.length === 1,
+    );
+    clearMergeQuarantine(x);
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([y, x]);
+    const yAfterRestart = fresh.activeMergeQuarantineFor(y);
+    check("(sanity) Y's own protective entry still survives under this age order too", !!yAfterRestart && (yAfterRestart.tokens ?? []).includes("y-token-m2-so"));
+    fresh.clearMergeQuarantine(y);
+  } else if (scenarioName === "round4-E-sub-older") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Reparametrization of round3-E over the OTHER age order (Lead condition 6) -- sub older than X.
+    // round3-E's own fix (securing a degraded-occupied migrate source via its OWN sources-only union,
+    // never byRepoKey.get(key)) must hold regardless of which side wins unionQuarantineEntries' own
+    // tie-break, since it deliberately never calls unionQuarantineEntries for X and sub at all.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r4esub");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4esub-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded-occupies sub's own key (sub-older variant)", enteredAt: Date.now() - 60_000, tokens: ["token-x-so"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason (sub-older variant) -- must survive X's degraded occupation of Ksub", enteredAt: Date.now() - 180_000, tokens: ["token-sub-so"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own separate stale raise", enteredAt: Date.now(), tokens: ["token-teamA-so"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const onDiskAfterThisBoot = fs.readdirSync(MERGE_QUARANTINE_DIR).map((f) => fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).join("\n");
+    check("(this boot) sub's own token survives SOMEWHERE on disk under this age order too", onDiskAfterThisBoot.includes("token-sub-so"));
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const subAfterRestart = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** FIX (round 3, finding E) HOLDS UNDER THE OTHER AGE ORDER *** sub's quarantine SURVIVES",
+      !!subAfterRestart && (subAfterRestart.tokens ?? []).includes("token-sub-so"),
+    );
+    fresh.clearMergeQuarantine(x);
+    const after2 = await freshBootModule();
+    after2.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const subAfterClearAndReboot = after2.activeMergeQuarantineFor(sub);
+    check(
+      "*** FIX (round 3, finding E) HOLDS UNDER THE OTHER AGE ORDER, CONFIRMED *** even after clearing the unrelated degraded entry X, sub is STILL quarantined",
+      !!subAfterClearAndReboot && (subAfterClearAndReboot.tokens ?? []).includes("token-sub-so"),
+    );
+    after2.clearMergeQuarantine(teamA);
+    after2.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round4-minor1-safety-recovery-double-report") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-4 Code Review 2b079f86, Minor 1. X degraded-occupies Y's own key Ky (manufactured resolvedKey
+    // collision, same shape as finding1b). A LEFTOVER safety-tmp for Ky (simulating a prior boot's own
+    // securing of Y's data) ALSO sits on disk. PASS 1b's own flushDegradedDiverts used to run BEFORE the
+    // safety-tmp recovery loop had a chance to UNION that leftover residue into byRepoKey[Ky] -- so the
+    // divert captured X's PRE-union entry, a DIFFERENT object (by reference) from the POST-union object
+    // the recovery loop then installs. listActiveMergeQuarantines (Set-dedupes by reference, not value)
+    // reported both -- the identical defect minor2's original test covers for Phase 1b's OWN fold, now
+    // reached through the safety-tmp recovery read loop's own union instead.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqmsod-r4m1-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# round4 minor1 Y\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+    const kyHash = hashForKey(ky);
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4m1-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // X's own divert must be a PASS 1b TMP (never a PASS 1 `.json` final) -- PASS 1's OWN divert flushes
+    // via the FIRST flushDegradedDiverts() call, long before the safety-tmp recovery loop ever runs,
+    // regardless of this fix; only PASS 1b's divert flushes via the SECOND call this fix reorders.
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${kyHash}.json.tmp-424242`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token-m1"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    // A LEFTOVER safety-tmp for Ky, simulating a PRIOR boot's own securing of Y's own data.
+    const leftoverSafetyTmp = path.join(MERGE_QUARANTINE_DIR, `${kyHash}.json.tmp-safety-999999-ab00cd11`);
+    fs.writeFileSync(leftoverSafetyTmp, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's own leftover safety-tmp from an earlier boot",
+      enteredAt: Date.now() - 30_000, tokens: ["y-token-m1"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, x]);
+
+    // Filter by TOKEN presence (age-order-agnostic, same reasoning as round4-minor2-sub-older): any
+    // entry carrying X's own token is the SAME shared union, whichever side's repoPath happens to win.
+    const list = listActiveMergeQuarantines();
+    const xEntries = list.filter((e) => (e.tokens ?? []).includes("x-token-m1"));
+    check(
+      "*** THE FIX (round 4, Minor 1) *** the shared union carrying X's own token (now ALSO unioned with Y's recovered safety-tmp) is reported EXACTLY ONCE",
+      xEntries.length === 1,
+    );
+    if (xEntries.length >= 1) {
+      check("(content) the single reported entry carries BOTH tokens (the union genuinely happened)", (xEntries[0].tokens ?? []).includes("y-token-m1"));
+    }
+    clearMergeQuarantine(x);
+  } else if (scenarioName === "round4-minor2-unparseable-safety-tmp-full-fallback") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-4 Code Review 2b079f86, Minor 2. An unparseable safety-tmp residue used to consult ONLY
+    // hashToRepo before giving up silently -- unlike deferredCorruptJsons/deferredCorruptTmps, which also
+    // try unresolvedClaimantsByHash and ancestorHashToRepo, and finally join the PASS 2 orphan sweep when
+    // nothing matches at all. Exercise the fallback tier that was previously unreachable: TWO
+    // unresolvable registered repos sharing the exact same degraded hash (unresolvedClaimantsByHash).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // W1/W2 — two ABSENT subdirs of a real, UNREGISTERED repo Y (the proven shared-degraded-hash
+    // fixture shape from merge-quarantine-pass1-degraded-key-writes.mjs's own makeYWithTwoAbsentSubdirsAndZ):
+    // both walk up to Y's own toplevel, landing on the SAME degraded key.
+    const y = path.join(os.tmpdir(), `loom-mqmsod-r4m2fb-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# round4 minor2 fallback Y\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const xa = path.join(y, "a"); // deliberately NEVER created
+    const xb = path.join(y, "b"); // deliberately NEVER created
+    check("(precondition) neither claimant exists at all", !fs.existsSync(xa) && !fs.existsSync(xb));
+    const sharedKey = canonicalRepoLockKey(xa);
+    check("(precondition) both unresolvable claimants share one degraded key", canonicalRepoLockKey(xb) === sharedKey);
+    const sharedHash = hashForKey(sharedKey);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const corruptSafetyTmpPath = path.join(MERGE_QUARANTINE_DIR, `${sharedHash}.json.tmp-safety-999999-ab00cd22`);
+    fs.writeFileSync(corruptSafetyTmpPath, "{ torn safety-tmp, never valid JSON, matches NO hashToRepo entry");
+
+    reenterMergeQuarantinesAtBoot([xa, xb]);
+    const activeA = activeMergeQuarantineFor(xa);
+    const activeB = activeMergeQuarantineFor(xb);
+    check(
+      "*** THE FIX (round 4, Minor 2) *** claimant A gets a fail-closed placeholder via unresolvedClaimantsByHash, not silence",
+      !!activeA && activeA.branch === PLACEHOLDER_BRANCH_CORRUPT,
+    );
+    check(
+      "*** THE FIX (round 4, Minor 2) *** claimant B ALSO gets its OWN fail-closed placeholder (per-claimant divert, never just one winner)",
+      !!activeB && activeB.branch === PLACEHOLDER_BRANCH_CORRUPT,
+    );
+    clearMergeQuarantine(xa);
+    clearMergeQuarantine(xb);
+  } else if (scenarioName === "round4-d163aef5-pass2-degraded-bypass") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card d163aef5's Repro C: PASS 2's own orphan re-persist bypassed degradedOccupiedKeys entirely --
+    // its write target came from `existing.repoPath` (X's own, degraded, unresolvable identity),
+    // recomputed FRESH via quarantinePathFor, rather than from Ky (the key actually being iterated).
+    // X degraded-occupies Y's own real key Ky; an UNRELATED corrupt orphan makes PASS 2 run for every
+    // registered repo, including Y. The old code attempted a write for Y using X's OWN union, landing
+    // at X's own-path's FRESH (different, unrelated) canonical hash -- a STRAY file neither Y's nor
+    // X's own real backing file. bootWriteLatch's degradedOccupiedKeys check (keyed on the explicit
+    // `key` parameter, never a repoPath recompute) now refuses the write outright, regardless of where
+    // it would have landed.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqmsod-r4d163-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# round4 d163aef5 Y\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r4d163-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xOwnFreshKey = canonicalRepoLockKey(x); // X's OWN fresh walk -- deliberately DIFFERENT from ky
+    check("(precondition) X's own fresh key differs from Y's real key (the stray-write target, if any, is a THIRD location)", xOwnFreshKey !== ky);
+    const strayPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(xOwnFreshKey)}.json`);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y", enteredAt: Date.now() - 60_000, tokens: ["x-token-d163"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    // An UNRELATED corrupt orphan -- matches NO registered repo at any tier, so PASS 2 runs for everyone.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "eeeeeeeeeeeeeeeeeeeeeeee.json"), "{ corrupt orphan, matches nobody");
+    check("(precondition) no stray file at X's own fresh hash exists yet", !fs.existsSync(strayPath));
+
+    // X (the degraded occupant) is deliberately NOT registered — same convention as every other
+    // degraded-occupant fixture in this file (finding1b/round3-E/G1/G2's own "X"), and matching card
+    // d163aef5's own card body ("registered=[E,Y]" — the occupant, D, was never registered either).
+    // Registering X too would make PASS 2 ALSO process X directly as its own registered repo, creating
+    // an unrelated, self-interfering placeholder at X's own fresh key that confounds this repro.
+    reenterMergeQuarantinesAtBoot([y]);
+
+    check(
+      "*** THE FIX (card d163aef5, Repro C) *** no STRAY file was ever written at X's own fresh (unrelated) hash — PASS 2's write for Y was refused outright, never attempted anywhere",
+      !fs.existsSync(strayPath),
+    );
+    check("(sanity) X's own real backing file is untouched", fs.readFileSync(xFile, "utf8").includes("x-token-d163"));
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([y]);
+    const xAfterRestart = fresh.activeMergeQuarantineFor(x);
+    check(
+      "(refusal durability) X is STILL quarantined after a further reboot — the refusal never silently lifted it",
+      !!xAfterRestart && (xAfterRestart.tokens ?? []).includes("x-token-d163"),
+    );
+    fresh.clearMergeQuarantine(x);
+  } else if (scenarioName === "round5-G1a-same-boot-clear-then-reboot-destroys-safety-tmp") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-5 Code Review e0777155, blocking finding. SAME collision setup as round4-G1 (X degraded-
+    // occupies sub's own key Ksub; sub's stale source physically collides with teamA's own migrate
+    // target sha(Kp).json), but a DIFFERENT sequence: round4-G1's own test clears X then immediately
+    // QUERIES sub in the SAME process -- that query graduates sub's pending reference right away,
+    // durably rewriting its real final BEFORE anything else can matter. This scenario clears X and
+    // deliberately queries NOTHING before a REBOOT -- exposing that the pushed pending reference's own
+    // orphanLatchFiles never self-referenced the safety-tmp it points at, so the SAME clear's own
+    // sweepTmpResidueForHashIfUnreferenced call deletes that safety-tmp as "unreferenced" well before any
+    // reboot ever gets a chance to recover from it.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r5g1a");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r5g1a-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    // X OLDER than sub -- the order the review measured the repro in.
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded-occupies sub's own key", enteredAt: Date.now() - 120_000, tokens: ["token-x-r5g1a"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason -- must survive a same-boot clear of X with NO in-process query before the reboot", enteredAt: Date.now() - 60_000, tokens: ["token-sub-r5g1a"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's REAL reason", enteredAt: Date.now(), tokens: ["token-teamA-r5g1a"],
+    }, null, 2) + "\n");
+
+    // NO fault injection -- teamA's write lands on sha(Kp).json THIS pass (phase 1a, before phase 1b).
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check(
+      "(positive control) teamA's own migrate write landed on sha(Kp).json, the exact file sub's stale source occupied",
+      fs.existsSync(subAtKpPath) && JSON.parse(fs.readFileSync(subAtKpPath, "utf8")).repoPath === teamA,
+    );
+    const safetyTmpAfterBoot1 = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f.includes(hashForKey(ksub)) && f.includes(".tmp-safety-"));
+    check("(positive control) sub's safety-tmp residue was created for Ksub", !!safetyTmpAfterBoot1);
+
+    // THE REPRO: clear the UNRELATED X -- SAME process -- but query NOTHING afterward. No graduation of
+    // sub's own pending reference happens before the process "exits" (the reboot below).
+    clearMergeQuarantine(x);
+    check(
+      "*** THE FIX (round 5) *** sub's safety-tmp residue SURVIVES a same-boot clear of the UNRELATED X with no intervening query",
+      !!safetyTmpAfterBoot1 && fs.existsSync(path.join(MERGE_QUARANTINE_DIR, safetyTmpAfterBoot1)),
+    );
+
+    // REBOOT -- a fresh module instance, re-reading everything from disk. X's own file is gone (cleared);
+    // nothing degraded-occupies Ksub any more, so a surviving safety-tmp recovers sub DIRECTLY this boot.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const subAfterReboot = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 5), CONFIRMED *** after a REBOOT following the same-boot clear of X (no query in between), sub's quarantine SURVIVES",
+      !!subAfterReboot && (subAfterReboot.tokens ?? []).includes("token-sub-r5g1a"),
+    );
+    const teamAAfterReboot = fresh.activeMergeQuarantineFor(teamA);
+    check("(sanity) teamA's own quarantine is still enforced after the reboot", !!teamAAfterReboot && (teamAAfterReboot.tokens ?? []).includes("token-teamA-r5g1a"));
+
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round5-G1a-same-boot-clear-then-reboot-sub-older") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Reparametrization attempt of round5-G1a over the OTHER age order (card 97cff6db's own round-4 "Do
+    // not test ONLY the age order where the degraded occupant is older" rule) -- sub now OLDER than X.
+    //
+    // @decision 97cff6db (round 5) — NON-DISCRIMINATING PARITY CHECK, not a regression test for THIS
+    // fix: measured (blocking fix alone reverted, round 5's other two fixes left in place) GREEN either
+    // way. Root cause, traced via listActiveMergeQuarantines(): because `sub` ITSELF is a resolvable
+    // registered repo whose own stale-key content ALSO gets armed directly into byRepoKey[Ksub] (the
+    // ordinary stale-key migration arm every resolvable repo goes through, PASS 1's own fall-through at
+    // "armedEntry = armQuarantineKey(byRepoKey, currentKey, entry)"), byRepoKey[Ksub] already holds a
+    // REAL union of X's and sub's data by the end of boot 1 -- unlike the X-older variant, this is not
+    // "occupant = X alone". unionQuarantineEntries' own tie-break then makes the shared entry's
+    // `repoPath` equal `sub` (sub wins, being older) -- and X's own `degradedDivertsToFlush` pending
+    // divert snapshots that SAME post-union value too (round 4 Minor 1's own fix: it snapshots
+    // byRepoKey's post-union state, not a stale pre-union object). So nothing anywhere still carries
+    // `repoPath: x` after boot 1 -- `clearMergeQuarantine(x)` (identity-matched against `directPathIdentity
+    // (entry.repoPath)`) finds NO active or pending entry to clear at all (`wasQuarantined:false`,
+    // confirmed via a direct read of its return value) and is a pure no-op, regardless of which fix is or
+    // isn't present. Under this order there is no operation that clears "the unrelated X" without ALSO
+    // touching sub's own entry (they share one key, one repoPath, one record) -- the hazard this round's
+    // fix closes is specific to the X-older order, where the union's `repoPath` stays `x` and a clear BY
+    // `x`'s OWN identity is a genuinely distinct, reachable operation. Kept only to document this age
+    // order's own (unrelated, pre-existing) behavior stays unregressed; see the decision record.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("r5g1aso");
+    const kp = canonicalRepoLockKey(repo);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) P and sub have genuinely different canonical keys", kp !== ksub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-r5g1aso-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    // FLIPPED: X is now the YOUNGER side; sub is now the OLDER side.
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded-occupies sub's own key (sub-older variant)", enteredAt: Date.now() - 60_000, tokens: ["token-x-r5g1aso"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    const subAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`);
+    placeStaleBeforeFixed(subAtKpPath, staleTeamAPath);
+    fs.writeFileSync(subAtKpPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's own reason (sub-older variant)", enteredAt: Date.now() - 180_000, tokens: ["token-sub-r5g1aso"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own separate stale raise (sub-older variant)", enteredAt: Date.now(), tokens: ["token-teamA-r5g1aso"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check(
+      "(positive control) teamA's own migrate write landed on sha(Kp).json, the exact file sub's stale source occupied",
+      fs.existsSync(subAtKpPath) && JSON.parse(fs.readFileSync(subAtKpPath, "utf8")).repoPath === teamA,
+    );
+    const safetyTmpAfterBoot1 = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f.includes(hashForKey(ksub)) && f.includes(".tmp-safety-"));
+    check("(positive control) sub's safety-tmp residue was created for Ksub", !!safetyTmpAfterBoot1);
+
+    const clearResult = clearMergeQuarantine(x);
+    check(
+      "(parity, non-discriminating — see comment above) clearing X by its own identity is a documented no-op under this age order, not a reachable operation this fix changes",
+      clearResult?.wasQuarantined !== true && fs.existsSync(xAtKsubPath),
+    );
+    check(
+      "(parity) sub's safety-tmp residue is untouched by that no-op clear, under either fix state",
+      !!safetyTmpAfterBoot1 && fs.existsSync(path.join(MERGE_QUARANTINE_DIR, safetyTmpAfterBoot1)),
+    );
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const subAfterReboot = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "(parity, confirmed) after a REBOOT, sub's quarantine (unioned with X's under this order) is still enforced",
+      !!subAfterReboot && (subAfterReboot.tokens ?? []).includes("token-sub-r5g1aso"),
+    );
+    const teamAAfterReboot = fresh.activeMergeQuarantineFor(teamA);
+    check("(sanity) teamA's own quarantine is still enforced after the reboot", !!teamAAfterReboot && (teamAAfterReboot.tokens ?? []).includes("token-teamA-r5g1aso"));
+
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "round5-minor1-stale-resolvedkey-registration-liveness") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-5 Code Review e0777155, Minor 1 (liveness). Phase 0 used to register a migrate key's
+    // allBootWriteTargets entry via quarantinePathFor(e.repoPath) -- a FRESH canonicalRepoLockKey
+    // recompute -- instead of quarantinePathForKey(key), the SAME key bootWriteLatch itself checks
+    // against. teamA is an OLDER, independently-RESOLVABLE repo whose own CORRECTLY-PLACED latch file
+    // (no migration needed) carries a STALE `resolvedKey` field pointing at sub's real key (Ksub) --
+    // dual-arming teamA's entry at BOTH its own true key (Kp) AND Ksub (PASS 1's ordinary dual-arm
+    // fall-through, lines ~1649-1652). sub is a NEWER, separately-resolvable repo whose own latch sits
+    // under a stale-NAMED file that must migrate to its real target, hash(Ksub).json -- which ALSO arms
+    // (and therefore unions) into byRepoKey[Ksub] via the SAME fall-through, since sub's own canonical
+    // key already equals the key it's migrating to. Neither key is degraded-occupied (teamA resolves
+    // fine) -- so Phase 0's migratedSourcesByKey loop for Ksub reads byRepoKey.get(Ksub), the UNION of
+    // teamA+sub whose `repoPath` is teamA's (the OLDER side wins unionQuarantineEntries' tie-break), and
+    // the BUGGY code recomputed quarantinePathFor(teamA) = hash(Kp).json -- the WRONG target. The REAL
+    // write Phase 1a then attempts for key=Ksub was refused by bootWriteLatch as UNANTICIPATED, since
+    // allBootWriteTargets never actually held hash(Ksub).json at all. Fails CLOSED (nothing destroyed),
+    // but sub's quarantine then never durably lands -- a liveness bug, not a data-loss one.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const teamA = path.join(os.tmpdir(), `loom-mqmsod-r5m1-teamA-${freshSfx()}`);
+    fs.mkdirSync(teamA, { recursive: true });
+    tmpDirs.push(teamA);
+    fs.writeFileSync(path.join(teamA, "README.md"), "# round5 minor1 teamA\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: teamA });
+    commitAll(teamA, "init", GIT_ID);
+    const kp = canonicalRepoLockKey(teamA);
+
+    const sub = path.join(os.tmpdir(), `loom-mqmsod-r5m1-sub-${freshSfx()}`);
+    fs.mkdirSync(sub, { recursive: true });
+    tmpDirs.push(sub);
+    fs.writeFileSync(path.join(sub, "README.md"), "# round5 minor1 sub\n");
+    execSync(`git init -q && git config user.email mqmsod@loom && git config user.name mqmsod`, { cwd: sub });
+    commitAll(sub, "init", GIT_ID);
+    const ksub = canonicalRepoLockKey(sub);
+    check("(precondition) teamA and sub have genuinely different canonical keys", kp !== ksub);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // teamA's own latch sits at ITS OWN correct physical location (no migration needed) but carries a
+    // STALE resolvedKey field pointing at sub's key -- the dual-arm trigger.
+    const teamAAtKpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kp)}.json`);
+    fs.writeFileSync(teamAAtKpPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's REAL reason -- own correct key, stale resolvedKey pointing at Ksub",
+      enteredAt: Date.now() - 120_000, tokens: ["token-teamA-r5m1"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+
+    // sub's own latch is a NEWER, stale-NAMED file that must migrate to its real target, hash(Ksub).json.
+    const staleSubPath = path.join(MERGE_QUARANTINE_DIR, `!stale-sub-${freshSfx()}.json`);
+    fs.writeFileSync(staleSubPath, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's REAL reason -- must migrate to its real Ksub target",
+      enteredAt: Date.now() - 60_000, tokens: ["token-sub-r5m1"],
+    }, null, 2) + "\n");
+
+    const subFinalPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    check("(precondition) sub's real target does not exist yet", !fs.existsSync(subFinalPath));
+
+    const bootOneLogs = await captureConsole(() => { reenterMergeQuarantinesAtBoot([teamA, sub]); });
+    check(
+      "*** THE FIX (round 5, Minor 1) *** no UNANTICIPATED boot-write refusal fired on boot 1",
+      !bootOneLogs.some((l) => l.includes("UNANTICIPATED")),
+    );
+    check(
+      "*** THE FIX (round 5, Minor 1) *** the legit write for Ksub landed on boot 1 -- sub's real final exists on disk",
+      fs.existsSync(subFinalPath),
+    );
+    const subQuarantined = activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX (round 5, Minor 1), CONFIRMED *** sub is quarantined at Ksub",
+      !!subQuarantined && (subQuarantined.tokens ?? []).includes("token-sub-r5m1"),
+    );
+
+    const fresh = await freshBootModule();
+    const bootTwoLogs = await captureConsole(() => { fresh.reenterMergeQuarantinesAtBoot([teamA, sub]); });
+    check("(stability) a SECOND boot fires no UNANTICIPATED warning either", !bootTwoLogs.some((l) => l.includes("UNANTICIPATED")));
+    const subAfterReboot = fresh.activeMergeQuarantineFor(sub);
+    check(
+      "(stability) sub is STILL quarantined at Ksub after a second boot",
+      !!subAfterReboot && (subAfterReboot.tokens ?? []).includes("token-sub-r5m1"),
+    );
+    const teamAAfterReboot = fresh.activeMergeQuarantineFor(teamA);
+    check("(sanity) teamA's own quarantine is still enforced after the second boot", !!teamAAfterReboot && (teamAAfterReboot.tokens ?? []).includes("token-teamA-r5m1"));
+
+    fresh.clearMergeQuarantine(teamA);
+    fresh.clearMergeQuarantine(sub);
+  }
+} finally {
+  for (const d of tmpDirs) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+}
+
+console.log(failures === 0
+  ? "\n✅ ALL CHECKS PASS"
+  : `\n❌ ${failures} FAILURE(S).`);
+process.exit(failures === 0 ? 0 : 1);
