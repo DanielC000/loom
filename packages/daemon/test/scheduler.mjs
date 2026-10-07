@@ -651,6 +651,29 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
 // --- PART 2: REST round-trip via the daemon's endpoints ---
 // --- boot the isolated daemon (dist/index.js) — deferred until here so PART 1 stays daemon-free ---
 fs.mkdirSync(LOOM, { recursive: true });
+
+// Card c75006c2 (follow-up to 042a4312/76878a24): same belt-and-suspenders redirect as
+// profiles-rest.mjs — CLAUDE_CONFIG_DIR (claudeJsonPath() honors it directly) + HOME/USERPROFILE
+// (ensureTrusted's ~/.mcp.json walk) set BEFORE the daemon spawn below, so the child inherits it and
+// can never reach the real ~/.claude.json even if LOOM_SUPPRESS_FIRST_RUN_LAUNCH is ever removed or
+// some other first-run-adjacent path appears.
+const claudeConfigDir = path.join(LOOM, "claude-config");
+fs.mkdirSync(claudeConfigDir, { recursive: true });
+process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+process.env.HOME = LOOM;
+process.env.USERPROFILE = LOOM;
+const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
+{
+  const resolvedClaudeJsonPath = path.resolve(claudeJsonPath());
+  const expectedClaudeJsonPath = path.resolve(path.join(claudeConfigDir, ".claude.json"));
+  check("claudeJsonPath() resolves under this test's own temp CLAUDE_CONFIG_DIR, never the real ~/.claude.json",
+    resolvedClaudeJsonPath === expectedClaudeJsonPath);
+  if (resolvedClaudeJsonPath !== expectedClaudeJsonPath) {
+    console.log(`\n❌ FAILURE — refusing to proceed: claudeJsonPath() does not resolve under this test's own CLAUDE_CONFIG_DIR, so the daemon spawned below would risk reaching the OWNER'S REAL ~/.claude.json. Aborting before the daemon spawn.`);
+    process.exit(1);
+  }
+}
+
 // Card 2365cc22: LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — a fresh LOOM_HOME with zero ordinary projects (true
 // here until this test seeds one, below) is exactly the condition that fires the real Setup Assistant
 // first-run auto-launch (setup/first-run.ts) — a REAL claude spawn this test never intends. Measured

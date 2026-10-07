@@ -30,6 +30,32 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-platform-scope-${Date.now()
 process.env.LOOM_PORT = String(PORT);
 const LOOM = process.env.LOOM_HOME;
 fs.mkdirSync(LOOM, { recursive: true });
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// Card c75006c2 (follow-up to 042a4312/76878a24): same belt-and-suspenders redirect as
+// profiles-rest.mjs — CLAUDE_CONFIG_DIR (claudeJsonPath() honors it directly) + HOME/USERPROFILE
+// (ensureTrusted's ~/.mcp.json walk) set BEFORE the daemon spawn below, so the child inherits it and
+// can never reach the real ~/.claude.json even if LOOM_SUPPRESS_FIRST_RUN_LAUNCH is ever removed or
+// some other first-run-adjacent path appears.
+const claudeConfigDir = path.join(LOOM, "claude-config");
+fs.mkdirSync(claudeConfigDir, { recursive: true });
+process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+process.env.HOME = LOOM;
+process.env.USERPROFILE = LOOM;
+const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
+{
+  const resolvedClaudeJsonPath = path.resolve(claudeJsonPath());
+  const expectedClaudeJsonPath = path.resolve(path.join(claudeConfigDir, ".claude.json"));
+  check("claudeJsonPath() resolves under this test's own temp CLAUDE_CONFIG_DIR, never the real ~/.claude.json",
+    resolvedClaudeJsonPath === expectedClaudeJsonPath);
+  if (resolvedClaudeJsonPath !== expectedClaudeJsonPath) {
+    console.log(`\n❌ FAILURE — refusing to proceed: claudeJsonPath() does not resolve under this test's own CLAUDE_CONFIG_DIR, so the daemon spawned below would risk reaching the OWNER'S REAL ~/.claude.json. Aborting before the daemon spawn.`);
+    process.exit(1);
+  }
+}
+
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const get = async (u) => (await fetch(BASE + u)).json();
 const now = new Date().toISOString();
@@ -84,9 +110,6 @@ async function connect(sessionId) {
 }
 const parse = (res) => JSON.parse(res.content[0].text);
 const call = async (c, name, args) => parse(await c.callTool({ name, arguments: args }));
-
-let failures = 0;
-const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- temp dirs for the repo guardrail: one real git repo, one plain (non-git) dir ---
 const gitRepo = path.join(os.tmpdir(), `loom-plat-repo-${Date.now()}-${process.pid}`);

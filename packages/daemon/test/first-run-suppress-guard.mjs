@@ -25,18 +25,46 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // Empty today — no such file exists yet (verified: grepped every real-daemon-spawning file for
 // "firstRun"/"first-run"/"Setup Assistant"; none reference it). Add a file here ONLY after confirming
 // its whole purpose is testing that exact spawn, with a comment naming the card.
+//
+// SECOND, RELATED CHECK (card c75006c2, DoD-2) — same site detector, a DIFFERENT belt-and-suspenders
+// precondition: every real-daemon-spawn site found above must ALSO redirect `claudeJsonPath()`'s target
+// (`process.env.CLAUDE_CONFIG_DIR`, or BOTH `process.env.HOME`+`process.env.USERPROFILE`) textually
+// BEFORE that spawn. WHY A SEPARATE BELT: the SUPPRESS flag above closes the live trigger (the daemon
+// never calls maybeAutoLaunchSetup -> ensureTrusted at all), but this is the backstop for IF that flag is
+// ever removed/regresses — `ensureTrusted` fires INSIDE the spawned daemon's own process, one level
+// further removed than ensure-trusted-config-dir-redirect-guard.mjs's own (A)/(B) triggers can see (that
+// guard's documented gap (iii): a test that never calls `ensureTrusted`/`.spawn(` ITSELF, only spawns the
+// real daemon that does). REDIRECT_EXEMPT below is this check's OWN allowlist, distinct from
+// FIRST_RUN_LAUNCH_TEST_ALLOWLIST above: board-consistency.mjs and skills-e2e.mjs each intentionally spawn
+// ONE real, authenticated `claude` session as their actual test subject — forcing this redirect onto them
+// breaks that real spawn (MEASURED, card c75006c2: a freshly-redirected, un-onboarded CLAUDE_CONFIG_DIR
+// makes the real `claude` CLI itself get stuck in its OWN first-run before it ever reaches a ready state —
+// SessionStart never fires, board-consistency.mjs's agent never produced its SAW= marker within its own
+// 150s timeout, while the unmodified file passes cleanly). Each already carries its OWN documented,
+// surgical, single-entry add/remove around the real ~/.claude.json instead (same contract
+// ensure-trusted-config-dir-redirect-guard.mjs's NOT_HERMETIC exemption describes, for the same reason);
+// LOOM_SUPPRESS_FIRST_RUN_LAUNCH is their real protection. Add a file to REDIRECT_EXEMPT only after
+// confirming that same shape: a real, intentional, credentialed claude spawn plus its own cleanup.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const FIRST_RUN_LAUNCH_TEST_ALLOWLIST = new Set([
   // (currently empty — see header)
+]);
+
+// See header's "SECOND, RELATED CHECK" for why this is a separate allowlist from the one above.
+const CLAUDE_CONFIG_DIR_REDIRECT_EXEMPT = new Set([
+  "board-consistency.mjs",
+  "skills-e2e.mjs",
 ]);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const __filename = fileURLToPath(import.meta.url);
 const TEST_DIR = __dirname;
 const SELF = path.basename(__filename);
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -95,6 +123,42 @@ function findRealDaemonSpawnSites(text) {
   return sites;
 }
 
+// Mirrors ensure-trusted-config-dir-redirect-guard.mjs's own CLAUDE_CONFIG_DIR_SET_RE/HOME_SET_RE/
+// USERPROFILE_SET_RE (read there for the full rationale) — duplicated locally rather than imported
+// because that file is a standalone runnable guard with its own top-level process.exit(), unsafe to
+// import as a module (no `invokedDirectly`-style guard, unlike fixed-wait-witness-guard.mjs).
+const CLAUDE_CONFIG_DIR_SET_RE = /\bprocess\.env\.CLAUDE_CONFIG_DIR\s*=(?!=)/;
+const HOME_SET_RE = /\bprocess\.env\.HOME\s*=(?!=)/;
+const USERPROFILE_SET_RE = /\bprocess\.env\.USERPROFILE\s*=(?!=)/;
+
+/** 0-based index of the first line in `text` carrying a CLAUDE_CONFIG_DIR (or HOME+USERPROFILE pair)
+ *  redirect assignment, or -1 if none. A comment line (its trimmed text starting with `//` or `*`) is
+ *  BLANKED, never dropped, so line numbers stay 1:1 with the raw text findRealDaemonSpawnSites already
+ *  scans — a narrower, line-prefix-only exclusion than the shared stripComments() helper (which drops
+ *  lines, shifting indices). Named gap: a `/* ... *\/` block comment spanning multiple lines is not
+ *  tracked, so a redirect mentioned inside one could false-pass; none of this corpus's real files do
+ *  that (hand-verified, card c75006c2). */
+function firstRedirectLineIndex(text) {
+  const lines = text.split("\n").map((l) => (/^\s*(\/\/|\*)/.test(l) ? "" : l));
+  let cfgDir = -1, home = -1, userProfile = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (cfgDir < 0 && CLAUDE_CONFIG_DIR_SET_RE.test(lines[i])) cfgDir = i;
+    if (home < 0 && HOME_SET_RE.test(lines[i])) home = i;
+    if (userProfile < 0 && USERPROFILE_SET_RE.test(lines[i])) userProfile = i;
+  }
+  const homePair = home >= 0 && userProfile >= 0 ? Math.max(home, userProfile) : -1;
+  if (cfgDir >= 0 && homePair >= 0) return Math.min(cfgDir, homePair);
+  if (cfgDir >= 0) return cfgDir;
+  return homePair;
+}
+
+/** True iff `text` redirects CLAUDE_CONFIG_DIR (or HOME+USERPROFILE) strictly before `site.lineNo`
+ *  (1-based, as returned by findRealDaemonSpawnSites). */
+function hasRedirectBeforeSite(text, site) {
+  const redirectLine0 = firstRedirectLineIndex(text);
+  return redirectLine0 >= 0 && redirectLine0 < site.lineNo - 1;
+}
+
 // ── Prove the detector can FAIL before trusting any zero it reports on the real corpus (standing
 // verification posture): a synthetic specimen shaped exactly like the real incident, RED before the
 // fix, GREEN after — then a negative control proving the "dist" + "index.js" requirement is load-bearing
@@ -115,20 +179,92 @@ const unrelatedSites = findRealDaemonSpawnSites(SPECIMEN_UNRELATED_SPAWN);
 check("negative control: an unrelated process.execPath spawn (no \"dist\"/\"index.js\") is never mistaken for a real daemon spawn (found " + unrelatedSites.length + ")",
   unrelatedSites.length === 0);
 
+// ── Same specimen family, for the SECOND check (CLAUDE_CONFIG_DIR/HOME+USERPROFILE redirect) ──
+check("sanity (RED specimen, redirect check): SPECIMEN_NO_FLAG has no redirect anywhere, so it is flagged",
+  specimenNoFlagSites.length === 1 && !hasRedirectBeforeSite(SPECIMEN_NO_FLAG, specimenNoFlagSites[0]));
+
+const SPECIMEN_REDIRECT_BEFORE = 'process.env.CLAUDE_CONFIG_DIR = cfgDir;\n' + SPECIMEN_WITH_FLAG;
+const specimenRedirectBeforeSites = findRealDaemonSpawnSites(SPECIMEN_REDIRECT_BEFORE);
+check("sanity (GREEN specimen, redirect check): CLAUDE_CONFIG_DIR set BEFORE the spawn is correctly recognized as fixed",
+  specimenRedirectBeforeSites.length === 1 && hasRedirectBeforeSite(SPECIMEN_REDIRECT_BEFORE, specimenRedirectBeforeSites[0]));
+
+const SPECIMEN_REDIRECT_AFTER = SPECIMEN_WITH_FLAG + '\nprocess.env.CLAUDE_CONFIG_DIR = cfgDir;';
+const specimenRedirectAfterSites = findRealDaemonSpawnSites(SPECIMEN_REDIRECT_AFTER);
+check("sanity (order matters, redirect check): CLAUDE_CONFIG_DIR set AFTER the spawn is still flagged",
+  specimenRedirectAfterSites.length === 1 && !hasRedirectBeforeSite(SPECIMEN_REDIRECT_AFTER, specimenRedirectAfterSites[0]));
+
+const SPECIMEN_REDIRECT_HOME_PAIR_BEFORE = 'process.env.HOME = h;\nprocess.env.USERPROFILE = h;\n' + SPECIMEN_WITH_FLAG;
+const specimenRedirectHomePairSites = findRealDaemonSpawnSites(SPECIMEN_REDIRECT_HOME_PAIR_BEFORE);
+check("sanity (HOME+USERPROFILE pair, redirect check): the pair BEFORE the spawn is recognized as fixed too (not just CLAUDE_CONFIG_DIR)",
+  specimenRedirectHomePairSites.length === 1 && hasRedirectBeforeSite(SPECIMEN_REDIRECT_HOME_PAIR_BEFORE, specimenRedirectHomePairSites[0]));
+
+const SPECIMEN_REDIRECT_HOME_ONLY = 'process.env.HOME = h;\n' + SPECIMEN_WITH_FLAG;
+const specimenRedirectHomeOnlySites = findRealDaemonSpawnSites(SPECIMEN_REDIRECT_HOME_ONLY);
+check("sanity (HOME alone, redirect check): HOME without USERPROFILE is NOT enough (both required for the pair form)",
+  specimenRedirectHomeOnlySites.length === 1 && !hasRedirectBeforeSite(SPECIMEN_REDIRECT_HOME_ONLY, specimenRedirectHomeOnlySites[0]));
+
+const SPECIMEN_REDIRECT_IN_COMMENT = '// process.env.CLAUDE_CONFIG_DIR = cfgDir;\n' + SPECIMEN_WITH_FLAG;
+const specimenRedirectInCommentSites = findRealDaemonSpawnSites(SPECIMEN_REDIRECT_IN_COMMENT);
+check("sanity (commented-out redirect, redirect check): a redirect assignment inside a // comment line is never mistaken for a real one",
+  specimenRedirectInCommentSites.length === 1 && !hasRedirectBeforeSite(SPECIMEN_REDIRECT_IN_COMMENT, specimenRedirectInCommentSites[0]));
+
+// ── Real-corpus RED→GREEN control (DoD-2, card c75006c2): the ACTUAL profiles-rest.mjs content from
+// before/at the fix commit 76878a24 (card 042a4312) — not a synthetic reconstruction — must flip exactly
+// as the fix intends: RED on the parent revision (no redirect at all), GREEN at 76878a24 itself (the
+// redirect landed). Best-effort: a shallow clone without this history reports a clearly-labelled SKIP
+// rather than a false failure, mirroring fixed-wait-witness-guard-selftest.mjs's own posture. ──
+{
+  const TARGET = "packages/daemon/test/profiles-rest.mjs";
+  let preFix = null, postFix = null;
+  try {
+    preFix = execFileSync("git", ["show", `76878a24^:${TARGET}`], { cwd: REPO_ROOT, encoding: "utf8" });
+    postFix = execFileSync("git", ["show", `76878a24:${TARGET}`], { cwd: REPO_ROOT, encoding: "utf8" });
+  } catch (e) {
+    check(`Real-corpus RED→GREEN control: SKIPPED — could not \`git show 76878a24[^]:${TARGET}\` in this checkout (${e.message}); not a claim either way`, true);
+  }
+  if (preFix !== null && postFix !== null) {
+    const preSites = findRealDaemonSpawnSites(preFix);
+    check("RED control: 76878a24^'s profiles-rest.mjs (before the fix) has exactly one real-daemon-spawn site",
+      preSites.length === 1);
+    if (preSites.length === 1) {
+      check("RED control: 76878a24^ (before the fix) has NO redirect before the spawn — flagged",
+        !hasRedirectBeforeSite(preFix, preSites[0]));
+    }
+    const postSites = findRealDaemonSpawnSites(postFix);
+    check("GREEN control: 76878a24's profiles-rest.mjs (the fix itself) has exactly one real-daemon-spawn site",
+      postSites.length === 1);
+    if (postSites.length === 1) {
+      check("GREEN control: 76878a24 (the fix itself) has the redirect BEFORE the spawn — clean",
+        hasRedirectBeforeSite(postFix, postSites[0]));
+    }
+  }
+}
+
 // ── Real corpus scan ──
 const files = walkTestFiles();
 const violations = [];
+const redirectViolations = [];
 let sitesSeen = 0;
+let redirectSitesSeen = 0;
 
 for (const file of files) {
   const text = fs.readFileSync(path.join(TEST_DIR, file), "utf8");
   const sites = findRealDaemonSpawnSites(text);
   if (sites.length === 0) continue;
   sitesSeen += sites.length;
-  if (FIRST_RUN_LAUNCH_TEST_ALLOWLIST.has(file)) continue;
-  for (const site of sites) {
-    if (!site.optsText.includes("LOOM_SUPPRESS_FIRST_RUN_LAUNCH")) {
-      violations.push({ file, lineNo: site.lineNo });
+  if (!FIRST_RUN_LAUNCH_TEST_ALLOWLIST.has(file)) {
+    for (const site of sites) {
+      if (!site.optsText.includes("LOOM_SUPPRESS_FIRST_RUN_LAUNCH")) {
+        violations.push({ file, lineNo: site.lineNo });
+      }
+    }
+  }
+  if (!CLAUDE_CONFIG_DIR_REDIRECT_EXEMPT.has(file)) {
+    redirectSitesSeen += sites.length;
+    for (const site of sites) {
+      if (!hasRedirectBeforeSite(text, site)) {
+        redirectViolations.push({ file, lineNo: site.lineNo });
+      }
     }
   }
 }
@@ -147,7 +283,16 @@ check(`every real-daemon-spawn site sets LOOM_SUPPRESS_FIRST_RUN_LAUNCH in that 
   violations.length === 0);
 for (const v of violations) console.log(`  MISSING-FIRST-RUN-SUPPRESS  ${v.file}:${v.lineNo}`);
 
+// Population sanity for the SECOND check (card c75006c2) — same reasoning as above, scoped to the
+// files this check actually applies to (outside CLAUDE_CONFIG_DIR_REDIRECT_EXEMPT).
+check(`sanity: the real corpus has at least one genuine real-daemon-spawn site outside the redirect exemption (found ${redirectSitesSeen} across ${files.length - CLAUDE_CONFIG_DIR_REDIRECT_EXEMPT.size} eligible files)`,
+  redirectSitesSeen > 0);
+
+check(`every non-exempt real-daemon-spawn site redirects CLAUDE_CONFIG_DIR (or HOME+USERPROFILE) BEFORE that spawn, so ensureTrusted firing inside the spawned daemon can never reach the owner's real ~/.claude.json (found ${redirectViolations.length} violation(s); ${CLAUDE_CONFIG_DIR_REDIRECT_EXEMPT.size} exempted)`,
+  redirectViolations.length === 0);
+for (const v of redirectViolations) console.log(`  MISSING-CLAUDE-CONFIG-DIR-REDIRECT  ${v.file}:${v.lineNo}`);
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every real dist/index.js spawn in packages/daemon/test/*.mjs sets LOOM_SUPPRESS_FIRST_RUN_LAUNCH, so the real Setup Assistant first-run auto-launch can never fire a real claude spawn under an ordinary test run."
+  ? "\n✅ ALL PASS — every real dist/index.js spawn in packages/daemon/test/*.mjs sets LOOM_SUPPRESS_FIRST_RUN_LAUNCH (so the real Setup Assistant first-run auto-launch can never fire a real claude spawn under an ordinary test run), and every non-exempt one also redirects CLAUDE_CONFIG_DIR/HOME+USERPROFILE before spawning (so even a regressed suppress flag could never reach the owner's real ~/.claude.json)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
