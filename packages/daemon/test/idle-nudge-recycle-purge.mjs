@@ -65,7 +65,8 @@ function makeFakePty(sessionId) {
     writes,
   };
 }
-class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} }
+class TestPtyHost extends PtyHost { sweepOrphanedDescendants(_rootPid) {}
+createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; } }
 
 // Mirrors index.ts's ACTUAL onBusy/onExit wiring: falling busy edge notifies, rising edge purges (finding
 // 2e3a8e6f); onExit retires the row. `sessions` is assigned after `host` is constructed — same

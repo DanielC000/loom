@@ -76,7 +76,8 @@ const fakePty = () => {
   return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit(cb) { exitCb = cb; return { dispose() {} }; }, kill() { const cb = exitCb; exitCb = null; cb?.({ exitCode: 0 }); }, resize() {} };
 };
 class SeamHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) { this.capture.push({ ...opts, viaCodex: false }); return fakePty(); }
   createCodexPty(opts) { this.capture.push({ ...opts, viaCodex: true }); return fakePty(); }

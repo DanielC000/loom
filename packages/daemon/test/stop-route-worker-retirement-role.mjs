@@ -47,6 +47,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // stop therefore settles within the SAME synchronous call the route handler makes.
 const exitCbs = new Map();
 class TestPtyHost extends PtyHost {
+  sweepOrphanedDescendants(_rootPid) {}
   createPty(opts) {
     const writes = [];
     return {
@@ -59,7 +60,7 @@ class TestPtyHost extends PtyHost {
       writes,
     };
   }
-  reapExitedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
 }
 
 const db = new Db(path.join(TMP, "loom.db"));

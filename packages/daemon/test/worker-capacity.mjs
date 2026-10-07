@@ -65,7 +65,8 @@ const db = new Db();
 // even though this test drives worker exit directly via db.setProcessState rather than kill(); a fake pty
 // whose onExit can't receive a callback at all is the exact shape onexit-discard-guard.mjs polices.
 class SeamHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   createPty() {
     let exitCb = null;
     return {

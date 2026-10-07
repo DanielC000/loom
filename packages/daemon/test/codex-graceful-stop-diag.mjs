@@ -65,7 +65,8 @@ function makeFakePty() {
 }
 
 class FakeCodexHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   constructor(events) {
     super(events);
     this.fakeCodexPtys = new Map();

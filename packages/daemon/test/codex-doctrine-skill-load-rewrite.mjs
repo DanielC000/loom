@@ -139,7 +139,8 @@ function makeFakePty() {
   };
 }
 class FakeCodexHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   constructor(ev) { super(ev); this.ptys = new Map(); this.kickoffs = new Map(); }
   createCodexPty(opts) { const f = makeFakePty(); this.ptys.set(opts.sessionId, f); return f; }
   enqueueStdin(sessionId, text, ...rest) { this.kickoffs.set(sessionId, text); return { queued: true }; }

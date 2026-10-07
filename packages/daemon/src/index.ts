@@ -450,6 +450,11 @@ async function main(): Promise<void> {
     // record the durable event + fail loud to the recipient AND the sender. See
     // PtyHostEvents.onRepeatedToolCall's own doc / SessionService.handleRepeatedToolCall's own doc.
     onRepeatedToolCall: (sessionId, info) => sessions.handleRepeatedToolCall(sessionId, info),
+    // Card 2897acc4: a session's OS process survived a kill/exit Loom believed would end it — `sessions`
+    // (forward reference, same pattern as its siblings above) records the durable `process_survived_kill`
+    // event. See PtyHostEvents.onProcessSurvivedKill's own doc / SessionService.handleProcessSurvivedKill's
+    // own doc.
+    onProcessSurvivedKill: (sessionId, info) => sessions.handleProcessSurvivedKill(sessionId, info),
     // Card fedef6a0: a codex submit's confirm-or-retry ladder exhausted its retries with no busy-marker
     // sighting since the last Enter write — `sessions` (forward reference, same pattern as
     // onRepeatedToolCall above) decides how to record the durable event + fail loud to the recipient AND

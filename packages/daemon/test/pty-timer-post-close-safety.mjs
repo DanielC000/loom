@@ -86,7 +86,8 @@ function makeFixedFakePty() {
 async function runScenario(label, { stopBeforeClose }) {
   const db = new FakeDb();
   let caught = null;
-  class TestHost extends PtyHost { createPty() { return makeFixedFakePty(); } reapExitedDescendants(_rootPid) {} }
+  class TestHost extends PtyHost { sweepOrphanedDescendants(_rootPid) {}
+  createPty() { return makeFixedFakePty(); } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; } }
   const host = new TestHost({
     onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onExit() {},
     onBusy(id, busy) { try { db.setBusy(id, busy); } catch (e) { caught = e; } },

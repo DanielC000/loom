@@ -80,7 +80,8 @@ function makeFakePty(sessionId) {
     writes,
   };
 }
-class TestPtyHost extends PtyHost { createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} }
+class TestPtyHost extends PtyHost { sweepOrphanedDescendants(_rootPid) {}
+createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; } }
 
 /** Fabricates a fake engine transcript so resume()'s engineTranscriptExists check passes — genuinely
  *  existing, mirrors resume-refuses-retired-recycle-successor.mjs's own fixture. */

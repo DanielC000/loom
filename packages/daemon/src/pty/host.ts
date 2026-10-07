@@ -12,7 +12,7 @@ import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_D
 import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
-import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, unlinkSessionSettings, mcpTokenRidesEnv, withSettingsDirDenyForSpawn, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
+import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, unlinkSessionSettings, mcpTokenRidesEnv, withSettingsDirDenyForSpawn, toCliPermissionMode, sessionSettingsPath, type CliPermissionMode } from "./claude-settings.js";
 import { ensureTrustedResilient } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
@@ -1507,6 +1507,22 @@ const GRACEFUL_STOP_RETRY_MS = Number(process.env.LOOM_GRACEFUL_RETRY_MS) || 2_0
 const GRACEFUL_STOP_KILL_MS = Number(process.env.LOOM_GRACEFUL_KILL_MS) || 6_000;
 
 /**
+ * Card 2897acc4: how long to wait after issuing a hard-kill (`stop(hard)`, graceful-stop's own stage-3
+ * kill, or codex's sibling kill) before checking whether the root process is actually gone —
+ * `verifyRootDeadOrForceKill`'s own post-kill re-verify. NOT a measured bound (unlike GRACEFUL_STOP_*
+ * above, which came from an observed probe); a deliberate, env-overridable settle window so a check that
+ * lands a few hundred ms too early doesn't mistake "still tearing down" for "the kill had no effect".
+ */
+const ROOT_REAP_KILL_VERIFY_DELAY_MS = Number(process.env.LOOM_ROOT_REAP_KILL_VERIFY_DELAY_MS) || 1_000;
+
+/**
+ * Card 2897acc4 (CR round 2, MAJOR/LEAD RULING): a reused pid's OS-reported creation time must postdate
+ * our own recorded spawn time by no more than this much slack before `verifyRootDeadOrForceKill` trusts
+ * it as "genuinely the process we spawned" — clock-skew/rounding margin, not a measured bound.
+ */
+const CREATION_TIME_SLACK_MS = Number(process.env.LOOM_ROOT_REAP_CREATION_TIME_SLACK_MS) || 5_000;
+
+/**
  * Settle window for `interruptForRedirect`: after writing the single Esc that cancels a busy worker's
  * in-flight generation, wait this long for the engine to unwind back to an idle prompt before we
  * SYNCHRONOUSLY clear the (now stale) busy and drain the freshly-enqueued redirect as the next turn. An
@@ -2668,6 +2684,9 @@ interface Live {
   // grant changed AFTER the running process last (re)read its tool surface — i.e. whether a respawn is
   // still pending to apply it.
   startedAt: number;
+  // @decision 2897acc4 — this pid's own /proc/<pid>/stat `starttime` (boot-relative ticks), captured
+  // async right after spawn; null until resolved, or always off-Linux. See verifyRootDeadOrForceKill's own doc.
+  startTicksLinux: number | null;
   logStream: fs.WriteStream;
   // Flips true the first time logStream emits 'error' (see attachLogErrorGuard) — degrades THIS
   // session's log-writing to a no-op for the rest of its life. A WriteStream auto-destroys on error,
@@ -3267,6 +3286,8 @@ export interface CodexLive {
   alive: boolean;
   killed: boolean;
   startedAt: number;
+  // @decision 2897acc4 — same field + same contract as `Live.startTicksLinux` — see that field's doc.
+  startTicksLinux: number | null;
   logStream: fs.WriteStream;
   logBroken: boolean;
   busy: boolean;
@@ -3746,6 +3767,14 @@ export interface PtyHostEvents {
       msSinceSecondSigint: number | null;
       engineSessionIdCaptureEndReason?: "exhausted" | "died-mid-capture" | "capture-not-attempted" | null;
     };
+  }): void;
+  /** @decision 2897acc4 — a session's OS process survived a kill/exit Loom believed would end it; PtyHost
+   *  has no DB, so the implementer records a durable `process_survived_kill` event. OPTIONAL. */
+  onProcessSurvivedKill?(sessionId: string, info: {
+    pid: number; trigger: RootReapTrigger; identityConfirmed: boolean; forceKilled: boolean; dead: boolean;
+    identity: "confirmed" | "mismatch" | "unreadable";
+    reason: "identity-unconfirmed" | "force-killed" | "force-kill-unconfirmed" | "check-failed"
+      | "pid-now-live-session" | "creation-time-mismatch" | "creation-time-missing";
   }): void;
 }
 
@@ -4239,57 +4268,145 @@ export function detectDefaultShell(): string {
   return process.env.SHELL || "/bin/bash";
 }
 
+/** @decision 2897acc4 — one row from {@link reapOrphanedDescendants}'s own lightweight enumeration: the
+ *  parent chain plus (win32 only — POSIX always `null`) this row's OS-reported creation time, epoch-ms.
+ *  `creationTime: null` means unavailable, never "created at epoch 0". */
+export interface OrphanSweepRow { pid: number; ppid: number; creationTime: number | null; }
+
+/** @decision 2897acc4 — a stale parent-pid link (the OS reused a dead process's pid before Windows
+ *  updated the child's own reported parent) must never be walked or killed: drop any child whose own
+ *  creation time predates `rootCreationTime`, when both are known; keep today's unconditional walk otherwise.
+ *
+ * @decision 2897acc4 (round 6, item 3) — a LIVE, non-self-referential row AT `rootPid` itself (the OS
+ * reused the just-freed root) aborts the WHOLE walk, not just that one row — every "descendant" found via
+ * a stale root is equally suspect. */
+export function computeOrphanSweepPlan(
+  rows: OrphanSweepRow[], rootPid: number, rootCreationTime: number | null = null,
+): { toKill: number[]; skippedStale: number; abortedRootPidLive: boolean } {
+  if (rows.some((row) => row.pid === rootPid && row.ppid !== row.pid)) {
+    return { toKill: [], skippedStale: 0, abortedRootPidLive: true };
+  }
+  const byParent = new Map<number, OrphanSweepRow[]>();
+  for (const row of rows) {
+    if (row.pid === row.ppid) continue; // guard a malformed/self-referential row
+    let list = byParent.get(row.ppid);
+    if (!list) { list = []; byParent.set(row.ppid, list); }
+    list.push(row);
+  }
+  const seen = new Set<number>();
+  const stack = [rootPid];
+  const toKill: number[] = [];
+  let skippedStale = 0;
+  while (stack.length) {
+    const p = stack.pop()!;
+    if (seen.has(p)) continue; // bounds the walk to each pid at most once — breaks any parent-map cycle
+    seen.add(p);
+    for (const child of byParent.get(p) ?? []) {
+      if (rootCreationTime != null && child.creationTime != null && child.creationTime < rootCreationTime) {
+        skippedStale++;
+        continue;
+      }
+      toKill.push(child.pid);
+      stack.push(child.pid);
+    }
+  }
+  return { toKill, skippedStale, abortedRootPidLive: false };
+}
+
+/** @decision 2897acc4 — converts the win32 sweep's raw .NET `DateTime.Ticks` integer (culture-invariant,
+ *  never a locale-dependent date STRING) to epoch-ms; the sentinel `"0"` (an unreadable `CreationDate`)
+ *  maps to `null`, never a bogus epoch-0 (1970) creation time. Exported for a hermetic unit test. */
+export function parseWin32SweepTicks(raw: string): number | null {
+  const ticks = Number(raw);
+  if (!Number.isFinite(ticks) || ticks <= 0) return null;
+  const DOTNET_UNIX_EPOCH_TICKS = 621355968000000000; // new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).Ticks
+  const TICKS_PER_MS = 10_000;
+  return Math.round((ticks - DOTNET_UNIX_EPOCH_TICKS) / TICKS_PER_MS);
+}
+
+/** @decision 2897acc4 — parses ONE line of {@link reapOrphanedDescendants}'s own lightweight enumeration
+ *  output (`pid,ppid` or win32's `pid,ppid,ticks`); `null` for a non-matching line (never thrown — the
+ *  caller filters). Exported for a hermetic unit test. */
+export function parseOrphanSweepLine(line: string): OrphanSweepRow | null {
+  const m = line.trim().match(/^(\d+)[,\s]+(\d+)(?:[,\s]+(-?\d+))?$/);
+  if (!m) return null;
+  return { pid: Number(m[1]), ppid: Number(m[2]), creationTime: m[3] !== undefined ? parseWin32SweepTicks(m[3]) : null };
+}
+
+/** @decision 2897acc4 (round 6, item 1) — must be `.ToUniversalTime().Ticks`, never bare `.Ticks` (a
+ *  LOCAL-kind value {@link parseWin32SweepTicks} below wrongly treats as UTC). One constant:
+ *  {@link enumerateWin32SweepRows} must never hand-copy a drifting duplicate of it. */
+const WIN32_SWEEP_PS_COMMAND =
+  "Get-CimInstance Win32_Process | ForEach-Object { $t = 0; if ($_.CreationDate) { $t = $_.CreationDate.ToUniversalTime().Ticks }; \"$($_.ProcessId),$($_.ParentProcessId),$t\" }";
+
+/** @decision 2897acc4 (round 6, item 1) — read-only, kills nothing: lets a real-spawn test cross-check this
+ *  enumeration's reported creationTime against `checkRootSurvival`'s independent one for the same real pid. */
+export function enumerateWin32SweepRows(timeoutMs = 10_000): Promise<OrphanSweepRow[]> {
+  return new Promise((resolve, reject) => {
+    const cmd = spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { cmd.kill(); } catch { /* best-effort */ }
+      reject(new Error(`enumerateWin32SweepRows: powershell.exe timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    cmd.stdout?.on("data", (d) => { out += d; });
+    cmd.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+    cmd.on("close", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null));
+    });
+  });
+}
+
 /** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant a torn-down root escapes
  * node-pty's containment into (a backgrounded `pnpm dev` vite server — six stale servers observed live);
  * enumerates the whole process list (a dead root breaks taskkill /T) with a `seen`-pid guard for reuse.
  *
  * @decision d634cd2e — never spawn the enumeration helper for `rootPid <= 1`, a non-integer, or a
  * pid equal to `process.pid`/`process.ppid` — a bad root must never reach a sweep that SIGKILLs every
- * process the runner user owns. */
-export function reapOrphanedDescendants(rootPid: number): void {
+ * process the runner user owns.
+ *
+ * @decision 2897acc4 — `rootCreationTime` (optional) feeds {@link computeOrphanSweepPlan}'s stale-pid
+ * guard; the pre-existing onExit sweep always omits it (unchanged behavior). Win32 is the only
+ * enumeration that populates a row's own creation time — POSIX's own filter stays a permanent no-op. */
+export function reapOrphanedDescendants(rootPid: number, rootCreationTime: number | null = null): void {
   if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
     // eslint-disable-next-line no-console
     console.log(`[pty-reap] root=${rootPid}: skipped (not a reapable root pid)`);
     return;
   }
   const sweep = (out: string): void => {
-    const byParent = new Map<number, number[]>();
-    for (const line of out.split("\n")) {
-      const m = line.trim().match(/^(\d+)[,\s]+(\d+)$/);
-      if (!m) continue;
-      const pid = Number(m[1]);
-      const ppid = Number(m[2]);
-      if (pid === ppid) continue; // guard a malformed/self-referential row
-      let list = byParent.get(ppid);
-      if (!list) { list = []; byParent.set(ppid, list); }
-      list.push(pid);
+    const rows = out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null);
+    const { toKill, skippedStale, abortedRootPidLive } = computeOrphanSweepPlan(rows, rootPid, rootCreationTime);
+    if (abortedRootPidLive) {
+      // Round 6, item 3: logged once, exactly here — the one place this abort is ever observable.
+      // eslint-disable-next-line no-console
+      console.log(`[pty-reap] root=${rootPid}: ABORTED — a live, unrelated process now occupies the root pid itself (pid reuse) — not sweeping any "descendant"`);
+      return;
     }
-    const seen = new Set<number>();
-    const stack = [rootPid];
-    let found = 0;
     let killed = 0;
     let alreadyGone = 0;
-    while (stack.length) {
-      const p = stack.pop()!;
-      if (seen.has(p)) continue; // bounds the walk to each pid at most once — breaks any parent-map cycle
-      seen.add(p);
-      for (const child of byParent.get(p) ?? []) {
-        found++;
-        try { process.kill(child, "SIGKILL"); killed++; } catch { alreadyGone++; /* already gone */ }
-        stack.push(child);
-      }
+    for (const pid of toKill) {
+      try { process.kill(pid, "SIGKILL"); killed++; } catch { alreadyGone++; /* already gone */ }
     }
     // Card 7d58a1aa: the only place this backstop's outcome is ever observable — previously this
     // function logged nothing on any path, so a sweep that found/killed nothing was byte-identical
     // from outside to a clean successful sweep.
     // eslint-disable-next-line no-console
-    console.log(`[pty-reap] root=${rootPid}: found=${found} killed=${killed} alreadyGone=${alreadyGone}`);
+    console.log(`[pty-reap] root=${rootPid}: found=${toKill.length} killed=${killed} alreadyGone=${alreadyGone}${skippedStale > 0 ? ` skippedStale=${skippedStale}` : ""}`);
   };
   const cmd = process.platform === "win32"
-    ? spawnProcess("powershell.exe", [
-        "-NoProfile", "-NonInteractive", "-Command",
-        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }",
-      ], { stdio: ["ignore", "pipe", "ignore"] })
+    ? spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { stdio: ["ignore", "pipe", "ignore"] })
     : spawnProcess("ps", ["-eo", "pid,ppid"], { stdio: ["ignore", "pipe", "ignore"] });
   let out = "";
   cmd.stdout?.on("data", (d) => { out += d; });
@@ -4314,6 +4431,12 @@ export interface WorktreeProcess {
   exePath: string | null;
   cwd: string | null;
   commandLine: string | null;
+  /** @decision 2897acc4 — a command-line match alone can't tell "genuinely the process I started" from
+   *  "the OS reused this pid for a later one"; `null` means unavailable, never "unknown == now". */
+  creationTime: number | null;
+  /** @decision 2897acc4 — boot-relative ticks, Linux `/proc/<pid>/stat` only; `null` elsewhere (win32,
+   *  the macOS/`/proc`-less `ps` fallback). See `Live.startTicksLinux`'s own doc for why this, not `creationTime`, is what Linux's guard 2 actually compares. */
+  creationTicks: number | null;
 }
 
 /** Injectable process lister for {@link reapProcessesRootedInWorktree} (defaults to the real OS
@@ -4355,21 +4478,172 @@ export function processRootedInWorktree(proc: WorktreeProcess, worktreePath: str
   return matches(proc.exePath) || matches(proc.cwd) || matches(proc.commandLine);
 }
 
+/** @decision 2897acc4 — `ps`'s `lstart` ctime-style string parses via `Date.parse` under the default
+ *  (English) locale; best-effort/locale-fragile by nature, `null` (never a guess) on anything else. See
+ *  the record for the exact format assumed. Exported for a hermetic unit test. */
+export function parsePsLstartTimestamp(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const ms = Date.parse(trimmed);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** @decision 2897acc4 — parses ONE `ps -axwwo pid=,lstart=,command=` line. NEVER drops a row for failing
+ *  to parse the `lstart` sub-field (sha:16b7c38c's fail-open family: a dropped row could hide a real
+ *  survivor) — degrades to `creationTime:null` instead. Hermetic-test-exported. */
+export function parsePsPidLstartCommandLine(line: string): { pid: number; creationTime: number | null; commandLine: string } | null {
+  const outer = /^\s*(\d+)\s+(.*)$/.exec(line);
+  if (!outer) return null;
+  const pid = Number(outer[1]);
+  const rest = outer[2] ?? "";
+  const inner = /^([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(rest);
+  if (!inner) return { pid, creationTime: null, commandLine: rest };
+  return { pid, creationTime: parsePsLstartTimestamp(inner[1] ?? ""), commandLine: inner[2] ?? "" };
+}
+
+/** @decision 2897acc4 — `/proc`-less POSIX (macOS) falls back to `ps`, never silently returns `[]`
+ *  (that used to read identical to "everything confirmed gone" — the sha:16b7c38c silent-collapse).
+ *
+ * Round 3 (M7): self-bounded + self-killing on `timeoutMs`, mirroring {@link enumerateProcessesWin32}'s
+ * own posture — before this round a wedged `ps` could hang this call (and therefore
+ * {@link checkRootSurvival}/{@link reapProcessesRootedInWorktree}) indefinitely on whatever POSIX host
+ * reaches this fallback. `-ww` (unlimited output width) so the `command` column is never truncated —
+ * BSD `ps` (macOS) truncates it to terminal width by default when not given `-w` at least once, and GNU
+ * `ps` (Linux, reachable here only when `/proc` itself is unavailable) accepts the same flag. Also now
+ * requests `lstart` (M1) so `creationTime` is populated on this platform too, via
+ * {@link parsePsPidLstartCommandLine} — previously `null` unconditionally, leaving `verifyRootDeadOrForceKill`'s
+ * guard 2 a permanent no-op here.
+ */
+async function enumerateProcessesPosixViaPs(timeoutMs: number): Promise<WorktreeProcess[]> {
+  return new Promise((resolve, reject) => {
+    const cmd = spawnProcess("ps", ["-axwwo", "pid=,lstart=,command="], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let errOut = "";
+    let settled = false;
+    const finish = (result: WorktreeProcess[]) => { if (settled) return; settled = true; clearTimeout(timer); resolve(result); };
+    const fail = (err: Error) => { if (settled) return; settled = true; clearTimeout(timer); reject(err); };
+    const timer = setTimeout(() => {
+      try { cmd.kill(); } catch { /* already gone */ }
+      const err: Error & { timedOut?: boolean } = new Error(`posix enumeration fallback (ps) produced no result within ${timeoutMs}ms — force-killed the helper (pid ${cmd.pid ?? "?"})`);
+      err.timedOut = true;
+      fail(err);
+    }, timeoutMs);
+    cmd.stdout?.on("data", (d) => { out += d; });
+    cmd.stderr?.on("data", (d) => { errOut += d; });
+    cmd.on("error", (err) => fail(new Error(`posix enumeration fallback (ps) failed to spawn: ${err.message}`)));
+    cmd.on("close", (code) => {
+      if (settled) return;
+      const procs: WorktreeProcess[] = [];
+      for (const line of out.split("\n")) {
+        const parsed = parsePsPidLstartCommandLine(line);
+        if (!parsed) continue;
+        procs.push({ pid: parsed.pid, exePath: null, cwd: null, commandLine: parsed.commandLine || null, creationTime: parsed.creationTime, creationTicks: null });
+      }
+      // A live host always has at least the `ps` process itself (mirrors sha:266afe3f's win32 reasoning)
+      // — zero rows, or a non-zero exit with nothing parsed, is anomalous, never "nothing running".
+      if (procs.length === 0) {
+        fail(new Error(`posix enumeration fallback (ps) produced no usable rows (exit ${code}): ${errOut.trim() || "(no stderr)"}`));
+        return;
+      }
+      finish(procs);
+    });
+  });
+}
+
+/** `sysconf(_SC_CLK_TCK)` — the unit `/proc/<pid>/stat`'s `starttime` field (below) is counted in.
+ *  Universally 100 on every mainstream Linux distro/arch this daemon targets (glibc hardcodes
+ *  `USER_HZ=100` on x86/x86_64/ARM/ARM64) — an ACCEPTED approximation, not independently verified
+ *  per-host (no `sysconf` binding exists from pure JS without a native addon). `CREATION_TIME_SLACK_MS`
+ *  (5s) absorbs a small skew but not a wildly different HZ; a host with one would misjudge guard 2's
+ *  threshold proportionally, same accepted-risk posture as this file's other platform approximations. */
+const LINUX_CLK_TCK = 100;
+
+/** @decision 2897acc4 (round 3, M1) — parses `/proc/<pid>/stat`'s `starttime` field (22nd, 1-indexed) —
+ *  clock ticks since boot. The `comm` field (2nd) is parenthesized and can itself contain spaces/parens,
+ *  so this scans to the LAST `)` before splitting the remainder on whitespace (the standard defensive
+ *  idiom for this file). Exported for a hermetic unit test. Returns `null` on anything that doesn't look
+ *  like a real stat line. */
+export function parseProcStatStarttimeTicks(stat: string): number | null {
+  const closeParen = stat.lastIndexOf(")");
+  if (closeParen === -1) return null;
+  const fields = stat.slice(closeParen + 1).trim().split(/\s+/);
+  // Every field AFTER `comm)` is stat-field 3 (`state`) onward; starttime is field 22, i.e. index 22-3=19.
+  const starttime = fields[19];
+  if (starttime === undefined) return null;
+  const n = Number(starttime);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** @decision 2897acc4 (round 3, M1) — `/proc/uptime`'s first field (seconds since boot), used to convert
+ *  a `starttime` tick count (above) into an epoch-ms `creationTime`. Exported for a hermetic unit test. */
+export function parseProcUptimeSeconds(uptime: string): number | null {
+  const m = /^\s*([\d.]+)/.exec(uptime);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Ticks are boot-relative, so comparing `checkTicks` (observed now) against `spawnTicks` (captured once
+// at spawn) needs no `Date.now()` on either side — unlike the ms-epoch shape this replaces, which
+// re-derived `creationTime` fresh at EVERY check (`Date.now() - uptime`) and compared it against
+// `owner.startedAt` (a Date.now() from a DIFFERENT instant, spawn time): a wall-clock step in between
+// (e.g. an NTP correction) makes THAT comparison false for the genuinely same, still-alive process —
+// the exact S1 shape this card exists to catch, silently defeated by the very guard meant to confirm it.
+/** @decision 2897acc4 — pure; exported for a hermetic parser-level unit test. Default slack mirrors the
+ *  existing `CREATION_TIME_SLACK_MS`, expressed in ticks via `LINUX_CLK_TCK`. */
+export function linuxStartTicksConsistent(spawnTicks: number, checkTicks: number, slackTicks = Math.round((CREATION_TIME_SLACK_MS / 1000) * LINUX_CLK_TCK)): boolean {
+  return checkTicks <= spawnTicks + slackTicks;
+}
+
+/** @decision 2897acc4 — best-effort single-pid `/proc/<pid>/stat` read, Linux-only; `null` on ANY
+ *  failure (gone/denied/non-Linux) degrades guard 2 toward "unreadable", never toward the retired ms check. */
+async function readLinuxStartTicks(pid: number): Promise<number | null> {
+  if (process.platform !== "linux") return null;
+  try {
+    return parseProcStatStarttimeTicks(await fs.promises.readFile(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** @decision 2897acc4 — fire-and-forget, never awaited on the spawn hot path: populates
+ *  `live.startTicksLinux` once the single-pid read above resolves (or stays `null` on any failure). */
+function armLinuxStartTicks(live: Live | CodexLive): void {
+  readLinuxStartTicks(live.pid).then((ticks) => { live.startTicksLinux = ticks; }).catch(() => {});
+}
+
 /** Real POSIX process enumerator: walk `/proc/<pid>` reading `exe`/`cwd` (symlinks) and `cmdline` (NUL-
  *  joined argv). Any per-pid read failure (permission denied, or the pid exited mid-scan) is swallowed —
- *  that pid is simply reported with whatever fields DID resolve, or omitted if none did. */
-async function enumerateProcessesPosix(_timeoutMs: number): Promise<WorktreeProcess[]> {
+ *  that pid is simply reported with whatever fields DID resolve, or omitted if none did. If `/proc`
+ *  itself is unavailable (macOS), falls back to {@link enumerateProcessesPosixViaPs} instead of
+ *  returning `[]` — see that function's own doc.
+ *
+ * Round 3 (M1): also reads `/proc/<pid>/stat`'s `starttime` (converted to epoch-ms via a single
+ * `/proc/uptime` boot-time read, shared across every pid this call enumerates) to populate `creationTime`
+ * — previously `null` unconditionally here too, leaving `verifyRootDeadOrForceKill`'s guard 2 a permanent
+ * no-op on Linux. A failed boot-time read, or a failed per-pid stat read, degrades that ONE row's
+ * `creationTime` to `null` (guard 2 stays a no-op for it, exactly as before this round) rather than
+ * failing the whole enumeration.
+ */
+async function enumerateProcessesPosix(timeoutMs: number): Promise<WorktreeProcess[]> {
   let entries: string[];
   try {
     entries = await fs.promises.readdir("/proc");
   } catch {
-    return [];
+    return enumerateProcessesPosixViaPs(timeoutMs);
   }
+  let bootTimeMs: number | null = null;
+  try {
+    const uptimeSeconds = parseProcUptimeSeconds(await fs.promises.readFile("/proc/uptime", "utf8"));
+    if (uptimeSeconds != null) bootTimeMs = Date.now() - uptimeSeconds * 1000;
+  } catch { /* creationTime stays null below for every row */ }
   const procs: WorktreeProcess[] = [];
   await Promise.all(entries.filter((e) => /^\d+$/.test(e)).map(async (pidStr) => {
     let exePath: string | null = null;
     let cwd: string | null = null;
     let commandLine: string | null = null;
+    let creationTime: number | null = null;
+    let creationTicks: number | null = null;
     try { exePath = await fs.promises.readlink(`/proc/${pidStr}/exe`); } catch { /* gone/denied */ }
     try { cwd = await fs.promises.readlink(`/proc/${pidStr}/cwd`); } catch { /* gone/denied */ }
     try {
@@ -4377,7 +4651,16 @@ async function enumerateProcessesPosix(_timeoutMs: number): Promise<WorktreeProc
       const joined = raw.split("\0").filter(Boolean).join(" ");
       if (joined) commandLine = joined;
     } catch { /* gone/denied */ }
-    if (exePath || cwd || commandLine) procs.push({ pid: Number(pidStr), exePath, cwd, commandLine });
+    // Round 4 (item 2): `creationTicks` is read UNCONDITIONALLY, independent of whether `bootTimeMs`
+    // resolved — it needs no boot-time anchor at all, which is exactly what makes it safe to compare
+    // against `Live.startTicksLinux` (both boot-relative, no `Date.now()` on either side). `creationTime`
+    // (ms) stays a SEPARATE, best-effort derivative of it, kept only for non-Linux-aware callers.
+    try {
+      const stat = await fs.promises.readFile(`/proc/${pidStr}/stat`, "utf8");
+      creationTicks = parseProcStatStarttimeTicks(stat);
+      if (creationTicks != null && bootTimeMs != null) creationTime = bootTimeMs + (creationTicks / LINUX_CLK_TCK) * 1000;
+    } catch { /* gone/denied — creationTime/creationTicks stay null for this row */ }
+    if (exePath || cwd || commandLine) procs.push({ pid: Number(pidStr), exePath, cwd, commandLine, creationTime, creationTicks });
   }));
   return procs;
 }
@@ -4413,7 +4696,18 @@ export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
     exePath: (r["ExecutablePath"] as string | null) ?? null,
     cwd: null,
     commandLine: (r["CommandLine"] as string | null) ?? null,
+    creationTime: parseWin32CimDate(r["CreationDate"]),
+    creationTicks: null, // ticks-domain reading is Linux-only; win32 uses the CIM CreationDate above
   }));
+}
+
+/** @decision 2897acc4 — `ConvertTo-Json` renders a CIM `[DateTime]` as the legacy Json.NET
+ *  `"\/Date(<epoch-ms>)\/"` form, verified live — never a plain ISO string a naive `new Date()` parse
+ *  would silently misread as `Invalid Date`. Returns `null` on anything else, never a guess. */
+function parseWin32CimDate(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const m = /^\/Date\((\d+)\)\/$/.exec(value);
+  return m ? Number(m[1]) : null;
 }
 
 /** Cap (bytes) on the captured stderr tail kept for diagnostics from a failing win32 CIM query — mirrors
@@ -4437,14 +4731,14 @@ export function classifyWin32EnumerationClose(stdout: string, stderrTail: string
   }
 }
 
-/** @decision sha:459e9dab — queries ExecutablePath+CommandLine (never cwd, unavailable via win32 CIM);
- * SELF-BOUNDED — arms its own timer and force-kills its `powershell.exe` child itself, unlike the outer
- * caller race which only stops the CALLER waiting (UTF8-forced + loud-on-failure per sha:16b7c38c/266afe3f). */
+/** @decision sha:459e9dab — queries ExecutablePath+CommandLine+CreationDate (never cwd, unavailable via
+ * win32 CIM); SELF-BOUNDED — arms its own timer and force-kills its `powershell.exe` child itself, unlike
+ * the outer caller race which only stops the CALLER waiting (per sha:16b7c38c/266afe3f). */
 function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> {
   return new Promise((resolve, reject) => {
     const cmd = spawnProcess("powershell.exe", [
       "-NoProfile", "-NonInteractive", "-Command",
-      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress",
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine,CreationDate) | ConvertTo-Json -Compress",
     ], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     const stderrChunks: Buffer[] = [];
@@ -4514,6 +4808,16 @@ function killProcessById(pid: number): void {
   try { process.kill(pid, "SIGKILL"); } catch { /* already gone / no permission */ }
 }
 
+/** @decision 2897acc4 — `verifyRootDeadOrForceKill`'s own kill seam: unlike {@link killProcessById}
+ *  above (a deliberate WHOLE-SUBTREE kill, accepted risk sha:d8395f4e), this kills ONLY `pid` — no `/T` —
+ *  since the identity/respawn guards feeding it verify the ROOT alone, never its descendants. */
+function killSingleProcessById(pid: number): void {
+  if (process.platform === "win32") {
+    try { spawnProcess("taskkill", ["/pid", String(pid), "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* already gone / no permission */ }
+}
+
 /** Reject after `ms` — bounds {@link reapProcessesRootedInWorktree}'s (possibly-retried, see
  *  {@link enumerateWithRetry}) enumerate step so a wedged/slow helper (a hung `powershell.exe`, an
  *  unreadable `/proc`) can never block worktree teardown indefinitely, even one that ignores the
@@ -4562,6 +4866,85 @@ async function enumerateWithRetry(enumerate: ProcessEnumerator, timeoutMs: numbe
   // Unreachable in practice (the loop above always returns or throws), kept only so TS sees every path
   // settle without needing a non-null assertion on `lastErr`.
   throw lastErr;
+}
+
+/**
+ * @decision 2897acc4 — never force-kill a "still alive" root process by bare pid match alone; a reused
+ * pid can belong to an unrelated live process, so this command-line check is the one identity gate.
+ *
+ * Round 3 (CR dd39877b, M1): a BARE sessionId substring match also hits the session's own hook-relay
+ * CHILD processes — every lifecycle hook spawns `node hook-relay.mjs <sessionId> <port> <hookToken>`
+ * (`claude-settings.ts`'s hook command, see `writeSessionSettings`), so the id lands on a non-root
+ * process's command line on EVERY real session, not as a rare edge case; an agent's own shell command
+ * could carry it too. Match something only the ROOT process itself ever carries instead: claude's
+ * `--settings <path>` argument is `sessionSettingsPath(sessionId)` — a path whose FILENAME embeds the
+ * id, written unconditionally for every real claude spawn and passed to no other process. Codex has no
+ * `--settings` flag; its root instead always carries its own `-c mcp_servers.<id>.url=.../mcp/<sessionId>`
+ * (or `/mcp-run/<sessionId>` for a `run`-role session) config argument (`mcpServersToCodexArgs`) — never
+ * forwarded to any child codex spawns, since codex itself has no hook-relay-shaped lifecycle child.
+ */
+export function commandLineMatchesSession(commandLine: string | null, sessionId: string): boolean {
+  if (!commandLine) return false;
+  return commandLine.includes(sessionSettingsPath(sessionId))
+    || commandLine.includes(`/mcp/${sessionId}`)
+    || commandLine.includes(`/mcp-run/${sessionId}`);
+}
+
+export interface RootSurvivalCheck {
+  foundAlive: boolean;
+  identityConfirmed: boolean;
+  enumerationFailed: boolean;
+  /** The found row's own OS-reported creation time (see `WorktreeProcess.creationTime`'s doc); `null`
+   *  when not alive, unavailable on this platform, or the check failed. */
+  creationTime: number | null;
+  /** @decision 2897acc4 — the found row's own boot-relative ticks (see `WorktreeProcess.creationTicks`'s
+   *  doc); `null` under the same conditions as `creationTime`, plus always off-Linux. */
+  creationTicks: number | null;
+}
+
+/**
+ * Async, bounded, best-effort: is `rootPid` still alive on the OS right now, and if so, does its command
+ * line confirm it is genuinely `sessionId`'s own process? Reuses the SAME enumerator
+ * {@link reapProcessesRootedInWorktree} already uses (one short-lived helper process on win32, a `/proc`
+ * read on POSIX) via {@link enumerateWithRetry} — same cost shape, same timeout/retry/failure
+ * classification. Never throws: an enumeration failure is reported via `enumerationFailed`, never
+ * silently folded into "not alive" (that would be the exact silent-collapse `sha:16b7c38c` closed for the
+ * worktree reaper — a broken enumerator must never look identical to a genuinely dead process).
+ * `enumerate` is an injectable seam for hermetic tests only — production never passes it.
+ */
+export async function checkRootSurvival(
+  rootPid: number, sessionId: string, timeoutMs = 5_000, enumerate?: ProcessEnumerator,
+): Promise<RootSurvivalCheck> {
+  const enumerator = enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
+  try {
+    const { procs } = await enumerateWithRetry(enumerator, timeoutMs);
+    const row = procs.find((p) => p.pid === rootPid);
+    if (!row) return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null, creationTicks: null };
+    return { foundAlive: true, identityConfirmed: commandLineMatchesSession(row.commandLine, sessionId), enumerationFailed: false, creationTime: row.creationTime, creationTicks: row.creationTicks };
+  } catch (err) {
+    console.error(`[pty-reap] root=${rootPid} sessionId=${sessionId}: survival-check enumeration FAILED — treating as unconfirmed, never killing on a failed check: ${(err as Error).message}`);
+    return { foundAlive: false, identityConfirmed: false, enumerationFailed: true, creationTime: null, creationTicks: null };
+  }
+}
+
+/** Which call site asked {@link PtyHost.verifyRootDeadOrForceKill} to confirm — carried onto the
+ *  `process_survived_kill` durable event (`PtyHostEvents.onProcessSurvivedKill`) so a reader can tell a
+ *  false pty-exit apart from a kill that silently didn't register. */
+export type RootReapTrigger = "exit-reap" | "hard-stop" | "recycle-predecessor";
+
+export interface RootReapResult {
+  pid: number;
+  /** True iff we are CONFIDENT the process is gone — either it was already gone, or we force-killed it
+   *  and a re-check confirmed it. False for every other outcome (including an unconfirmed enumeration). */
+  dead: boolean;
+  /** null when there was nothing to check (dead on the first check) or the check itself failed. */
+  identityConfirmed: boolean | null;
+  forceKilled: boolean;
+  checkFailed: boolean;
+  /** @decision 2897acc4 — the CALLER-FACING verdict a consumer (`recycleWorker`) gates on, never
+   *  re-derived from `dead`/`identityConfirmed`/`checkFailed` by hand. "mismatch" covers EVERY shape
+   *  where our TRACKED predecessor is gone, including a respawn that now owns the pid instead. */
+  identity: "confirmed" | "mismatch" | "unreadable";
 }
 
 /**
@@ -5094,6 +5477,7 @@ export class PtyHost {
       alive: true,
       killed: false,
       startedAt: Date.now(),
+      startTicksLinux: null, // armed async, right after this.live.set below
       logStream: openSessionLogStream(opts.sessionId, spawnLogReason),
       logBroken: false,
       busy: false,
@@ -5189,6 +5573,7 @@ export class PtyHost {
       role: opts.role ?? null,
     };
     this.live.set(opts.sessionId, live);
+    armLinuxStartTicks(live);
     // Card 019d2e7a — carry any attached viewer across the respawn. `findAnyLive` rather than `outgoing`
     // above: that one is deliberately `this.live`-only (it exists to clear claude-specific timers), while
     // a viewer can equally be sitting in a codex entry this session is respawning away from. Done after
@@ -5298,7 +5683,7 @@ export class PtyHost {
       // containment — the durable backstop for board card 621ef252. Fires on EVERY exit path, including
       // an unexpected crash that never went through stop(). Routed through the `reapExitedDescendants`
       // seam (card d634cd2e), not the free function directly — see that method's own doc.
-      this.reapExitedDescendants(live.pid);
+      this.reapExitedDescendants(live.pid, opts.sessionId, live);
       // Card aed28554: bound the subagent-drift `live` leak (a SubagentStart with no matching SubagentStop
       // would otherwise strand `live > 0` for this session forever) to the session's own lifetime — see
       // SubagentDriftTracker.evict's own doc. Fires on EVERY exit path, same as the cleanup above.
@@ -5425,6 +5810,7 @@ export class PtyHost {
       alive: true,
       killed: false,
       startedAt: Date.now(),
+      startTicksLinux: null, // a shell is never a verifyRootDeadOrForceKill target — never armed
       logStream: openSessionLogStream(opts.id, "shell spawn"),
       logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
@@ -5790,6 +6176,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true, killed: false, startedAt: Date.now(),
+      startTicksLinux: null, // armed async, right after this.liveCodex.set below
       logStream: openSessionLogStream(opts.sessionId, isCodexResumeSpawn ? "codex resume" : "codex fresh spawn"),
       logBroken: false,
       busy: false,
@@ -5814,6 +6201,7 @@ export class PtyHost {
       submitOutstanding: false, // set true by submitCodex, cleared by CASE 2 — see the field's own doc
     };
     this.liveCodex.set(opts.sessionId, live);
+    armLinuxStartTicks(live);
     this.adoptSubscribers(previousLive, live); // card 019d2e7a — see spawn()'s own call site
     attachLogErrorGuard(opts.sessionId, live);
 
@@ -6079,7 +6467,7 @@ export class PtyHost {
         for (const w of waiters) w(false);
       }
       live.pending.length = 0;
-      this.reapExitedDescendants(live.pid);
+      this.reapExitedDescendants(live.pid, opts.sessionId, live);
       this.toolAttribution.forget(opts.sessionId);
       this.repeatedCalls.forget(opts.sessionId);
       // Card 176bdb0c: diagnostic-only — see `secondSigintWrittenAt`'s own doc. Computed unconditionally
@@ -6504,7 +6892,12 @@ export class PtyHost {
    * up the two-Ctrl+C sequence in case a wedged codex process doesn't respond to either.
    */
   private stopCodex(sessionId: string, live: CodexLive, mode: StopMode): void {
-    if (!live.alive) return;
+    if (!live.alive) {
+      // Card 2897acc4 (CR round 2, Q7): same defensive backstop as claude's stop() — a prior FALSE exit
+      // signal can leave `alive` false while the OS process is genuinely still alive.
+      if (mode === "hard") this.scheduleRootVerify(sessionId, live.pid, "hard-stop", live);
+      return;
+    }
     live.stopping = true;
     live.pending.length = 0;
     // Card 7c2a6dc0: mirror claude's own `stop()` (see that method's own doc) — a still-outstanding
@@ -6519,6 +6912,8 @@ export class PtyHost {
     if (mode === "hard") {
       live.killed = true;
       live.pty.kill();
+      // Card 2897acc4 (S2), codex mirror of claude's own stop() hard branch — see its own comment.
+      this.scheduleRootVerify(sessionId, live.pid, "hard-stop", live);
       return;
     }
     // Card 176bdb0c: fresh diagnostic state for THIS stop attempt — see `secondSigintWrittenAt`'s own doc.
@@ -6537,7 +6932,27 @@ export class PtyHost {
       console.log(`[pty] ${sessionId} codex graceful stop: still live after ${GRACEFUL_STOP_KILL_MS}ms — escalating to hard kill`);
       live.killed = true;
       live.pty.kill();
+      // Card 2897acc4 (S2): same post-kill verification as the hard branch above.
+      this.scheduleRootVerify(sessionId, live.pid, "hard-stop", live);
     }, GRACEFUL_STOP_KILL_MS);
+  }
+
+  /** Shared by every hard-kill call site (claude's `stop()`/`escalateGracefulStop`, codex's `stopCodex`):
+   *  fire a bounded, delayed {@link verifyRootDeadOrForceKill} after a kill — never let a crashed check
+   *  become a second failure mode on top of whatever stop/exit is already in flight. */
+  private scheduleRootVerify(sessionId: string, rootPid: number, trigger: RootReapTrigger, liveRef: Live | CodexLive): void {
+    // eslint-disable-next-line no-console
+    console.log(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: root-verify scheduled in ${ROOT_REAP_KILL_VERIFY_DELAY_MS}ms`);
+    // @decision 2897acc4 (round 3, nit) — unref'd: this timer's own firing is a best-effort diagnostic
+    // follow-up, never something the process should stay alive JUST to run (mirrors every other bounded
+    // best-effort timer in this file, e.g. the win32 CIM enumerator's own self-timeout).
+    const timer = setTimeout(() => {
+      this.verifyRootDeadOrForceKill(sessionId, rootPid, trigger, liveRef).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: root-verify crashed: ${(err as Error).message}`);
+      });
+    }, ROOT_REAP_KILL_VERIFY_DELAY_MS);
+    timer.unref?.();
   }
 
   /**
@@ -6651,6 +7066,7 @@ export class PtyHost {
       alive: true,
       killed: false,
       startedAt: Date.now(),
+      startTicksLinux: null, // a canned entry is never a verifyRootDeadOrForceKill target — never armed
       logStream: openSessionLogStream(opts.id, "canned test seed"),
       logBroken: false,
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
@@ -6779,8 +7195,210 @@ export class PtyHost {
    * d634cd2e: harmless on a Windows dev box, but a real pid 4242 on Linux CI is plausible). That fixture
    * is the ONE place this is overridden to a no-op — see its own doc comment.
    */
-  protected reapExitedDescendants(rootPid: number): void {
-    reapOrphanedDescendants(rootPid);
+  /** @decision 2897acc4 — the free-function OS-wide SIGKILL sweep {@link reapExitedDescendants} calls,
+   *  pulled into its OWN seam — unlike that method, a test may override JUST this one to a no-op (never
+   *  the real sweep against a fabricated pid) while still exercising the real verify-call wiring below. */
+  protected sweepOrphanedDescendants(rootPid: number, rootCreationTime: number | null = null): void {
+    reapOrphanedDescendants(rootPid, rootCreationTime);
+  }
+
+  /**
+   * Injectable seam for the post-exit orphan-descendant reap (board card 621ef252), called from BOTH
+   * `onExit` handlers instead of the free {@link reapOrphanedDescendants} function directly. Defaults to
+   * calling the real reaper, so production and every existing subclass that doesn't override this — e.g.
+   * `dev-server-teardown.mjs`'s own local `TestPtyHost`, which deliberately wires a REAL spawned
+   * process's pid through this exact `onExit` path to prove the real reap works end to end — stay
+   * byte-equivalent to the old unconditional call. `test/_seam-host-fixture.mjs`'s shared fake pty (used
+   * by ~279 test files) returns a fixed, fictional `pid: 4242` and its `kill()` fires this file's REAL
+   * `onExit` callback — without this seam, every one of those tests would run a real OS-wide
+   * process-tree enumeration + SIGKILL sweep against whatever pid 4242 happens to be on the host (card
+   * d634cd2e: harmless on a Windows dev box, but a real pid 4242 on Linux CI is plausible). That fixture
+   * is the ONE place this is overridden to a no-op — see its own doc comment.
+   */
+  protected reapExitedDescendants(rootPid: number, sessionId: string, liveRef: Live | CodexLive): void {
+    this.sweepOrphanedDescendants(rootPid);
+    // Card 2897acc4 (S1): node-pty's own exit notification is not always true — confirm the root itself
+    // is actually gone, independent of that signal, rather than trusting it the way the descendant sweep
+    // above (unchanged, see its own doc) always has. Fire-and-forget: never let a crashed check become a
+    // second failure mode on top of whatever exit just happened.
+    this.verifyRootDeadOrForceKill(sessionId, rootPid, "exit-reap", liveRef).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=exit-reap: root-verify crashed (never affects the exit path itself): ${(err as Error).message}`);
+    });
+  }
+
+  /** Injectable seam used by {@link verifyRootDeadOrForceKill} for the OS enumeration step — overridden
+   *  in `test/_seam-host-fixture.mjs` (same reasoning as {@link reapExitedDescendants}'s own doc: the
+   *  fixture's fictional pid can collide with a real host pid). Defaults to the real, bounded check. */
+  protected probeRootSurvival(rootPid: number, sessionId: string): Promise<RootSurvivalCheck> {
+    return checkRootSurvival(rootPid, sessionId);
+  }
+
+  /** Injectable seam used by {@link verifyRootDeadOrForceKill} for the actual OS kill — overridden
+   *  alongside {@link probeRootSurvival} in the shared test fixture. Defaults to the real, SINGLE-process
+   *  (never `/T`) OS kill — see {@link killSingleProcessById}'s own doc for why (round 3, M2). */
+  protected killRoot(pid: number): void {
+    killSingleProcessById(pid);
+  }
+
+  /** @decision 2897acc4 — the platform `verifyRootDeadOrForceKill`'s guard 2 branches on; overridable
+   *  (mirrors `resolveMcpTokenRidesEnv`) so a hermetic test can force the Linux branch on any real host. */
+  protected resolveRootReapPlatform(): NodeJS.Platform {
+    return process.platform;
+  }
+
+  /** @decision 2897acc4 — never trust a cached owner for `pid`; scan both live maps fresh on every call,
+   *  so a respawn between the original kill and this check is always visible.
+   *
+   * Round 3 (M4): only an ALIVE entry counts as a current owner — a dead session stays in these maps with
+   * `alive:false` (never removed) rather than evicted, so a bare `pid` match used to also match a STALE
+   * dead entry that merely happens to share this pid number from a past life, wrongly reading as "a
+   * respawn got here first" (guard 1 below) when nothing live actually owns the pid.
+   */
+  private findLiveEntryByPid(pid: number): Live | CodexLive | undefined {
+    for (const l of this.live.values()) if (l.pid === pid && l.alive) return l;
+    for (const l of this.liveCodex.values()) if (l.pid === pid && l.alive) return l;
+    return undefined;
+  }
+
+  /**
+   * @decision 2897acc4 — confirm `rootPid` is genuinely dead, or force-kill it, but ONLY once
+   * {@link probeRootSurvival}'s command-line identity check confirms the still-alive process really is
+   * `sessionId`'s own — never a bare pid match (card `3216b7f9`'s pid-reuse hazard, folded in here).
+   *
+   * Called from every kill/exit path: `reapExitedDescendants`, `stop()`'s hard branch (incl. its own
+   * `!live.alive` early-return backstop), `escalateGracefulStop`'s stage 3, `stopCodex`'s mirrors, and
+   * `SessionService.recycleWorker`'s predecessor teardown — one place this logic lives, rather than
+   * re-derived per call site.
+   *
+   * `expectedOwner` is the `Live`/`CodexLive` object reference captured AT THE ORIGINAL KILL INSTANT (not
+   * re-derived later) — CR round 2's MAJOR/LEAD-RULING finding: a bare command-line match cannot tell
+   * "genuinely the process we killed" from "the SAME session resumed onto a pid Windows just freed" (an
+   * identical settings/mcp-config path either way). Before ever killing, this checks whether the pid is
+   * CURRENTLY owned by a DIFFERENT live object than `expectedOwner` (a respawn, of this session or any
+   * other) and, when the OS can supply it, whether the row's own creation time postdates `expectedOwner`'s
+   * recorded spawn time by more than `CREATION_TIME_SLACK_MS` — either one refuses the kill. Internal call
+   * sites capture their own `live`/`CodexLive` reference at kill time and pass it explicitly; external
+   * callers (recycleWorker) that have no such reference may omit it, falling back to whatever
+   * `findAnyLive(sessionId)` resolves to at call time — a materially smaller window than the scheduled
+   * (1s+) internal paths, since nothing else should be resuming that same predecessor concurrently.
+   *
+   * COST (CR round 2, finding 6 — corrected; the prior wording understated this): on the happy path
+   * (root already gone), ONE bounded OS-process enumeration (same shape `reapProcessesRootedInWorktree`
+   * already pays — a single short-lived helper process on win32, a `/proc` read on POSIX) — this IS a
+   * genuinely NEW enumeration, on top of (never replacing) `reapOrphanedDescendants`'s own pre-existing
+   * one, so every exit now costs 2 enumerations where it used to cost 1. A hard stop that also naturally
+   * reaches `onExit` (the common case — the plain kill usually succeeds on its own) costs up to 3: one
+   * from the hard-stop's own scheduled verify, plus the subsequent exit-reap path's own 2. The rare
+   * escalation branch (root found alive AND confirmed ours) adds one MORE enumeration (the post-kill
+   * re-verify), wherever it fires, plus `ROOT_REAP_KILL_VERIFY_DELAY_MS` of wall-clock. Always async;
+   * every call site below is either fire-and-forget off the pty event loop or already off a background
+   * poll — never awaited on a hot synchronous path.
+   */
+  async verifyRootDeadOrForceKill(
+    sessionId: string, rootPid: number, trigger: RootReapTrigger, expectedOwner?: Live | CodexLive,
+  ): Promise<RootReapResult> {
+    // @decision 2897acc4 (round 3, nit) — mirrors reapOrphanedDescendants' own d634cd2e root-pid guard: a
+    // bad rootPid must never reach a kill this method's own callers all eventually gate on.
+    if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: refusing — not a reapable root pid`);
+      return { pid: rootPid, dead: false, identityConfirmed: null, forceKilled: false, checkFailed: true, identity: "unreadable" };
+    }
+    const owner = expectedOwner ?? this.findAnyLive(sessionId);
+    const check = await this.probeRootSurvival(rootPid, sessionId);
+    if (check.enumerationFailed) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: survival check failed — UNCONFIRMED (never force-killing on a failed check)`);
+      this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: false, forceKilled: false, dead: false, identity: "unreadable", reason: "check-failed" });
+      return { pid: rootPid, dead: false, identityConfirmed: null, forceKilled: false, checkFailed: true, identity: "unreadable" };
+    }
+    if (!check.foundAlive) {
+      // eslint-disable-next-line no-console
+      console.log(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: confirmed gone (no survivor)`);
+      // Vacuously "mismatch": nothing was found to confirm an identity against, so our TRACKED instance is
+      // gone either way — `recycleWorker`'s gate only checks `identity==="confirmed"`, never reached here.
+      return { pid: rootPid, dead: true, identityConfirmed: null, forceKilled: false, checkFailed: false, identity: "mismatch" };
+    }
+    if (!check.identityConfirmed) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: STILL ALIVE but identity NOT confirmed (pid reuse, or an unrelated process) — NOT killing`);
+      this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: false, forceKilled: false, dead: false, identity: "mismatch", reason: "identity-unconfirmed" });
+      return { pid: rootPid, dead: false, identityConfirmed: false, forceKilled: false, checkFailed: false, identity: "mismatch" };
+    }
+    // CR round 2 guard 1: the pid is currently owned by a DIFFERENT live object than the one we killed —
+    // a respawn (this session's own resume, or an unrelated session) got there first. Never kill it.
+    const currentOwner = this.findLiveEntryByPid(rootPid);
+    if (owner && currentOwner && currentOwner !== owner) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but pid now belongs to a DIFFERENT live session (a respawn got there first) — NOT killing`);
+      // Round 3 (M5): "mismatch", not "confirmed" — the pid IS occupied, but by something that is
+      // provably NOT our own tracked predecessor (a prior round's comment wrongly called this a
+      // "confirmed same-session survivor"; recycleWorker's gate used to refuse on it for exactly that
+      // reason, and must instead proceed, since the original predecessor is the one that's gone).
+      this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "pid-now-live-session" });
+      return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+    }
+    // Round 3 (M3): on win32, a CIM row's CreationDate should ALWAYS parse (parseWin32CimDate returns
+    // null only on a malformed/absent value — an enumeration anomaly, not legitimate "no data"). A null
+    // here must refuse like guard 2's own mismatch below, never silently skip straight to killing. POSIX
+    // is unaffected: a per-pid /proc or ps read can legitimately fail to produce a creationTime for THIS
+    // one row (see enumerateProcessesPosix/ViaPs's own docs) — that narrower, expected gap stays covered
+    // by guard 1 alone, exactly as before this round.
+    if (owner && this.resolveRootReapPlatform() === "win32" && check.creationTime == null) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the OS gave no creation time to cross-check (win32 enumeration anomaly) — NOT killing`);
+      this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "unreadable", reason: "creation-time-missing" });
+      return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "unreadable" };
+    }
+    // CR round 2 guard 2: same hazard, independent signal — the row's own OS creation time postdates when
+    // WE spawned this pid (plus slack). Only checked when the OS actually supplied one; when `owner`
+    // itself is unresolvable, guard 1 alone already decided.
+    // Round 4 (item 2): on Linux this compares in the TICKS domain EXCLUSIVELY, never the ms-epoch
+    // arithmetic in the `else` branch below — that arithmetic re-derives `creationTime` fresh at EVERY
+    // check via `Date.now()`, which a wall-clock step between spawn and check can desync from
+    // `owner.startedAt` (also a `Date.now()`, but from a different instant) — see
+    // `linuxStartTicksConsistent`'s own doc. When either side's ticks are unavailable, this does NOT fall
+    // through to the ms arithmetic — it fails toward "unreadable", per the LEAD's own ruling: a missing
+    // tick-domain signal must never be read as a confirmed "mismatch" derived from the retired check.
+    if (owner && this.resolveRootReapPlatform() === "linux") {
+      if (owner.startTicksLinux == null || check.creationTicks == null) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but Linux ticks are unavailable for an independent cross-check (spawnTicks=${owner.startTicksLinux} checkTicks=${check.creationTicks}) — NOT killing`);
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "unreadable", reason: "creation-time-missing" });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "unreadable" };
+      }
+      if (!linuxStartTicksConsistent(owner.startTicksLinux, check.creationTicks)) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but Linux ticks show this pid started AFTER our own spawn (spawnTicks=${owner.startTicksLinux} checkTicks=${check.creationTicks}) — NOT killing`);
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+      }
+    } else if (owner && check.creationTime != null && check.creationTime > owner.startedAt + CREATION_TIME_SLACK_MS) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the OS reports this pid created AFTER our own spawn (creationTime=${check.creationTime} > spawnedAt=${owner.startedAt}+slack) — NOT killing`);
+      // Round 3 (M5): "mismatch" — same correction as guard 1 above; our tracked predecessor is gone.
+      this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
+      return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+    }
+    // eslint-disable-next-line no-console
+    console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: CONFIRMED alive (identity matched) — force-killing`);
+    this.killRoot(rootPid);
+    await sleepMs(ROOT_REAP_KILL_VERIFY_DELAY_MS);
+    const recheck = await this.probeRootSurvival(rootPid, sessionId);
+    const dead = !recheck.foundAlive && !recheck.enumerationFailed;
+    // Round 4 (item 4): a CONFIRMED force-kill of the root can still leave descendants spawned in the
+    // TOCTOU window between identity confirmation and the kill itself (codex's own codex.exe under its
+    // shim, a shell, an MCP child) — sweep them now, through the SAME seam a test already no-ops (see
+    // that seam's own doc); never the real sweep against a fabricated pid.
+    // Round 4 (item 3): pass the FIRST probe's own creationTime (captured before the kill) as this
+    // sweep's rootCreationTime — the one signal that lets it refuse a stale-pid collision instead of
+    // walking a process that merely inherited rootPid's number long after our root was already freed.
+    if (dead) this.sweepOrphanedDescendants(rootPid, check.creationTime);
+    // eslint-disable-next-line no-console
+    console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: force-kill ${dead ? "CONFIRMED dead" : "outcome UNCONFIRMED — still observed alive after kill"}`);
+    this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: true, dead, identity: "confirmed", reason: dead ? "force-killed" : "force-kill-unconfirmed" });
+    return { pid: rootPid, dead, identityConfirmed: true, forceKilled: true, checkFailed: false, identity: "confirmed" };
   }
 
   /**
@@ -12102,7 +12720,15 @@ export class PtyHost {
       return;
     }
     const live = this.live.get(sessionId);
-    if (!live?.alive) return;
+    if (!live?.alive) {
+      // Card 2897acc4 (CR round 2, Q7): a prior FALSE exit signal (S1) can already have flipped `alive`
+      // false while the OS process is genuinely still alive — in that shape this early return used to be
+      // the end of the story for a hard stop: nothing left to schedule a check against. `live.pid` is
+      // still the last-known pid even though `alive` is false (a claude session's own entry is never
+      // removed from the map on exit), so schedule the SAME verify-or-kill a live hard stop would.
+      if (live && mode === "hard") this.scheduleRootVerify(sessionId, live.pid, "hard-stop", live);
+      return;
+    }
     if ((live.kind === "shell") !== (opts?.shell === true)) return false;
     // A Stop intent must NOT be defeated by a queued inbound turn re-arming busy. Mark the session
     // STOPPING (drainPending/enqueueStdin then refuse to submit a new turn) and CLEAR the held queue,
@@ -12121,6 +12747,9 @@ export class PtyHost {
       // until the async 'exit' event; `killed` closes the write-after-destroy race in that window.
       live.killed = true;
       live.pty.kill(); // TerminateProcess on Windows; node-pty's conpty kill path walks _getConsoleProcessList() to kill the tree (not a Job Object — node-pty@1.1.0 has none)
+      // Card 2897acc4 (S2): a hard stop used to be pure fire-and-forget — nothing ever confirmed the kill
+      // above actually took effect. Verify after a bounded settle window; force-kills + reports if not.
+      this.scheduleRootVerify(sessionId, live.pid, "hard-stop", live);
       return;
     }
     // graceful: double Ctrl-C exits an IDLE claude (resumable, clean) — and for an idle session this is
@@ -12186,6 +12815,8 @@ export class PtyHost {
       // Card bb3d9005 (S1): same ordering as the hard-stop branch above — set BEFORE kill().
       live.killed = true;
       live.pty.kill();
+      // Card 2897acc4 (S2): same post-kill verification as stop()'s own hard branch — see its own comment.
+      this.scheduleRootVerify(sessionId, live.pid, "hard-stop", live);
     }, GRACEFUL_STOP_KILL_MS);
   }
 
@@ -12424,6 +13055,13 @@ export class PtyHost {
    *  `excludePids`. */
   getPid(sessionId: string): number | undefined {
     return this.findAnyLive(sessionId)?.pid;
+  }
+
+  /** @decision 2897acc4 — let an external caller with no live-map access capture its own `expectedOwner`
+   *  BEFORE a kill, for a later {@link verifyRootDeadOrForceKill} call. Pass the result through unchanged
+   *  (object identity, never a copy); undefined only when the session was never spawned. */
+  captureLiveRef(sessionId: string): Live | CodexLive | undefined {
+    return this.findAnyLive(sessionId);
   }
 
   /** Epoch ms of this session's last pty OUTPUT chunk (`Live.lastOutputAt`), or undefined if it isn't

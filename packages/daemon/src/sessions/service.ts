@@ -10147,6 +10147,28 @@ export class SessionService {
   }
 
   /**
+   * Card 2897acc4 — consumes `PtyHostEvents.onProcessSurvivedKill`: a session's OS process was found
+   * alive after a pty exit signal or a hard-stop kill was believed to have ended it. PtyHost has no DB
+   * (same layering boundary as its siblings above); this is purely an audit-only durable record — see
+   * `docs/decisions/2897acc4-command-line-identity-before-force-kill.md` for the mechanism this is the
+   * observability half of. No nudge is enqueued: this fires off the exit/stop path for every session kind
+   * (worker, manager, plain), several of which have no parent to notify, and the whole point is to make a
+   * silent survivor observable in the log/event trail, not to interrupt anyone's turn.
+   */
+  handleProcessSurvivedKill(sessionId: string, info: {
+    pid: number; trigger: string; identityConfirmed: boolean; forceKilled: boolean; dead: boolean; reason: string;
+    identity: string;
+  }): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "process_survived_kill",
+      detail: { pid: info.pid, trigger: info.trigger, identityConfirmed: info.identityConfirmed, forceKilled: info.forceKilled, dead: info.dead, reason: info.reason, identity: info.identity },
+    });
+  }
+
+  /**
    * @decision 448f1b4a — deliberately ONE-SHOT: do not add a retry ladder here. A LATE boot-readiness
    * still resolves normally via the onData handler's own composite check.
    */
@@ -13094,13 +13116,68 @@ export class SessionService {
       // predecessor's real onExit is guaranteed to fire (and reach reconcileNeverStartedRecycleSuccessor)
       // before hasSuccessor(workerSessionId) can read true.
       this.recycleTeardownInFlight.add(workerSessionId);
+      // @decision 2897acc4 — capture pid + live-object BEFORE stop(): the prior version derived both
+      // AFTER the poll, gated behind `isAlive` — node-pty's own onExit flag, which can read false (a
+      // spontaneous false exit) while the OS process survives, skipping the OS-level verify entirely.
+      const predecessorPid = this.pty.getPid(workerSessionId);
+      const predecessorOwner = this.pty.captureLiveRef(workerSessionId);
       this.pty.stop(workerSessionId, "hard");
       for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
         await new Promise((r) => setTimeout(r, 100));
       }
-      if (this.pty.isAlive(workerSessionId)) {
-        // eslint-disable-next-line no-console
-        console.warn(`[recycle] old worker ${workerSessionId} still alive after ~5s; proceeding`);
+      // eslint-disable-next-line no-console
+      console.warn(`[recycle] old worker ${workerSessionId} isAlive=${this.pty.isAlive(workerSessionId)} after ~5s; verifying before proceeding`);
+      // Card 2897acc4: FAIL CLOSED instead of proceeding regardless — never spawn the fresh successor
+      // into the SAME worktree while the predecessor might still be running in it. ALWAYS run the
+      // OS-level verify below, regardless of `isAlive` above — see the capture comment above for why a
+      // false-exit-shaped `isAlive===false` must not skip this. `verifyRootDeadOrForceKill` confirms
+      // the predecessor's own command line before force-killing (never a bare pid match — see
+      // docs/decisions/2897acc4-command-line-identity-before-force-kill.md).
+      const verify = predecessorPid != null
+        ? await this.pty.verifyRootDeadOrForceKill(workerSessionId, predecessorPid, "recycle-predecessor", predecessorOwner)
+        : { pid: null, dead: true, identityConfirmed: null, forceKilled: false, checkFailed: false, identity: "mismatch" as const };
+      // Round 3 (M5): gate on `verify.identity` directly — the caller-facing three-way verdict — rather
+      // than re-deriving one from `dead`/`identityConfirmed`/`checkFailed` by hand. REFUSE only on
+      // "unreadable" (check-failed, or win32's creation-time-missing anomaly — genuinely unknown) or a
+      // CONFIRMED-and-still-alive survivor (`identity==="confirmed" && !dead` — the force-kill-unconfirmed
+      // shape: we tried to kill it and it is STILL alive). PROCEED on "mismatch" — this covers
+      // `identity-unconfirmed` (an unrelated process now holds the pid) AND `pid-now-live-session`/
+      // `creation-time-mismatch` (a respawn now holds the pid under a DIFFERENT object/creation time) —
+      // in every "mismatch" case our TRACKED predecessor is already gone, even though the pid itself may
+      // still be occupied by something else. A prior round's comment here called the latter two shapes a
+      // "confirmed same-session survivor" and refused on them too — that was the bug; PtyHost's own
+      // `identity` field is now the single source of truth so this can't drift from it again.
+      const predecessorMightStillBeOurs = verify.identity === "unreadable" || (verify.identity === "confirmed" && !verify.dead);
+      if (predecessorMightStillBeOurs) {
+        // CR round 2, MINOR (finding 4); round 3 (M6): don't let the predecessor's own in-flight queue —
+        // already destructively flushed above, before we knew we'd refuse — vanish on this throw. Give it
+        // back: the predecessor is exactly the session we just determined might still be alive. Safe even
+        // if it's actually dead (enqueueStdin/requeueQueuedMessage no-op cleanly on a dead session).
+        // `requeueQueuedMessage`'s own `deliveryState` can be "dropped" (e.g. the predecessor turns out to
+        // be genuinely dead after all by the time this runs) — count the ACTUAL successful requeues, never
+        // the attempt count, and record/log any genuine drop so it's never silently lost from the report.
+        let carriedRequeued = 0;
+        let carriedDropped = 0;
+        for (const msg of carried) {
+          const result = this.pty.requeueQueuedMessage(workerSessionId, msg);
+          if (result.deliveryState === "dropped") carriedDropped++;
+          else carriedRequeued++;
+        }
+        if (carriedDropped > 0) {
+          // eslint-disable-next-line no-console
+          console.error(`[recycle] ${workerSessionId}: ${carriedDropped} of ${carried.length} carried pending message(s) could not be requeued onto the (possibly-alive) predecessor — dropped`);
+        }
+        // ALSO give recycle_begin a terminal record — filed under the PREDECESSOR (the one identity
+        // that stays live/queryable here; no successor row was ever created to file it under).
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId, workerSessionId, taskId, kind: "recycle_failed",
+          detail: {
+            recycledFrom: old.id, failedSuccessorId: null, carriedRequeued, carriedDropped,
+            error: `predecessor process (pid ${verify.pid ?? "unknown"}) could not be confirmed dead after a hard stop`,
+          },
+        });
+        throw new Error(`cannot recycle worker ${workerSessionId}: its predecessor process (pid ${verify.pid ?? "unknown"}) could not be confirmed dead after a hard stop — refusing to spawn a successor into the same worktree`);
       }
       // SIBLING SWEEP (incident 35fc823f): the fresh successor reuses this SAME worktree, so retire any OTHER
       // live session bound to the task before respawning — else a stray sibling would run concurrently with

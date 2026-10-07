@@ -81,7 +81,8 @@ function makeFakePty(exitOnCtrlC) {
 // host.spawn() pulls the NEXT queued fake from here (set per-scenario before spawn).
 let nextExitOnCtrlC = Infinity;
 class TestPtyHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   createPty() { return makeFakePty(nextExitOnCtrlC); }
 }
 

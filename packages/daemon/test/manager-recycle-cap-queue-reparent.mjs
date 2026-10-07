@@ -56,7 +56,8 @@ function initRepo(repo) {
 }
 
 class SeamHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   createPty() {
     let exitCb = null;
     return {

@@ -48,7 +48,8 @@ function makeFakeShellPty() {
 
 // Override the ONE shell seam → no real process. (createPty, the Claude seam, is left real but unused.)
 class TestPtyHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   createShellPty() { return makeFakeShellPty(); }
 }
 

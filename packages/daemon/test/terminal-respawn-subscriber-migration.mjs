@@ -63,7 +63,8 @@ function makeFakePty() {
 }
 
 class SeamHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   createPty(_opts) { return makeFakePty(); }
 }
 

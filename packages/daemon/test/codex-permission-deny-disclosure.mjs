@@ -151,7 +151,8 @@ try {
     // the need for a live registered pty entirely; see _seam-host-fixture.mjs's own doc for this pattern.
     const enqueued = [];
     class CaptureHost extends PtyHost {
-      reapExitedDescendants() {}
+      sweepOrphanedDescendants(_rootPid) {}
+      reapExitedDescendants() {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
       enqueueStdin(sessionId, text) { enqueued.push({ sessionId, text }); return { delivered: false, deliveryState: "dropped" }; }
     }
     const host = new CaptureHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

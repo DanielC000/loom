@@ -72,7 +72,8 @@ function makeFakePty() {
   fakes.push(fake);
   return fake;
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } reapExitedDescendants(_rootPid) {} }
+class TestPtyHost extends PtyHost { sweepOrphanedDescendants(_rootPid) {}
+createPty() { return makeFakePty(); } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; } }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);
 

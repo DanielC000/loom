@@ -972,6 +972,17 @@ export type OrchestrationEventKind =
   // audit-only marker, not a lifecycle signal any of those four track; the worker's own turn already
   // registers as activity via its surrounding events regardless of whether this one is counted.
   | "codex_auto_commit"
+  // Card 2897acc4: a session's OS process was found alive after a pty exit signal or a hard-stop kill
+  // was believed to have ended it, filed by `SessionService.handleProcessSurvivedKill` (consumes
+  // `PtyHostEvents.onProcessSurvivedKill`). `detail` carries {pid, trigger, identityConfirmed,
+  // forceKilled, dead, reason} — `trigger` names which call site found it ("exit-reap" | "hard-stop" |
+  // "recycle-predecessor"); `identityConfirmed` is false (never killed) when a command-line check could
+  // not confirm the still-alive pid was genuinely this session's own (a reused pid, or an unrelated
+  // process) — see `docs/decisions/2897acc4-command-line-identity-before-force-kill.md`. Deliberately
+  // NOT added to EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/
+  // REPORT_RESOLVED_EVENT_KINDS — same reasoning as `codex_auto_commit` above: an audit-only marker, not
+  // a worker/manager lifecycle signal any of those four track.
+  | "process_survived_kill"
   // Card ba22005b: a daemon-managed, fleet-shared background server child was recycled because its own
   // OS-sampled memory crossed a human-configured ceiling — a real host-process kill, filed as a
   // forensic/incident record, same bucket as `codex_auto_commit`. WHICH server and WHY stays documented
@@ -1992,6 +2003,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   vault_index_lock_stale: true,
   vault_index_lock_cleared: true,
   profile_grant_reach: true, agent_profile_rebind: true,
+  process_survived_kill: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

@@ -68,7 +68,8 @@ db.insertAgent({ id: "agentPlain", projectId: PROJECT_ID, name: "Plain", startup
 // correct (kill() invokes the tracked callback) but has no way to address one pty by sessionId from
 // outside, which this test needs since it doesn't hold a direct reference to the spawned pty object.
 class SeamHost extends PtyHost {
-  reapExitedDescendants(_rootPid) {}
+  sweepOrphanedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
   constructor(events) { super(events); this.capture = []; this.exitCbs = new Map(); }
   createPty(opts) {
     this.capture.push(opts);

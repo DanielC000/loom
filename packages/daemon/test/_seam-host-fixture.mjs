@@ -45,6 +45,19 @@ export function createSeamHost(PtyHost) {
     // callback, which would otherwise run a real OS-wide process-tree enumeration + SIGKILL sweep against
     // whatever that pid actually is. No-op here instead of running the real reaper. See PtyHost's own
     // `reapExitedDescendants` doc comment for why this is the ONE place that overrides it.
-    reapExitedDescendants(_rootPid) {}
+    reapExitedDescendants(_rootPid, _sessionId) {}
+    // Card 2897acc4: same reasoning as reapExitedDescendants above — `verifyRootDeadOrForceKill` (called
+    // directly by stop()/escalateGracefulStop/stopCodex, not only via reapExitedDescendants) would
+    // otherwise run a real OS-wide enumeration against this fixture's fictional pid too. Report a benign
+    // "already confirmed dead" result so no caller (recycleWorker included) sees anything to escalate.
+    async probeRootSurvival(_rootPid, _sessionId) {
+      return { foundAlive: false, identityConfirmed: false, enumerationFailed: false };
+    }
+    killRoot(_pid) {}
+    // Round 5 (item 1b) — `probeRootSurvival` above always reports "not alive", so `verifyRootDeadOrForceKill`
+    // never reaches its own post-kill `sweepOrphanedDescendants` call from THIS fixture's defaults alone;
+    // this override exists as belt-and-braces for a subclass that overrides probeRootSurvival/killRoot
+    // per scenario (reaching dead:true) without ALSO overriding this seam — never the real OS-wide sweep.
+    sweepOrphanedDescendants(_rootPid) {}
   };
 }

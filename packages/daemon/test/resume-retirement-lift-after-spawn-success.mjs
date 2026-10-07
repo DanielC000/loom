@@ -66,11 +66,12 @@ function makeFakePty(sessionId) {
   };
 }
 class TestPtyHost extends PtyHost {
+  sweepOrphanedDescendants(_rootPid) {}
   createPty(opts) {
     if (opts.sessionId === failSpawnFor) throw new Error("synthetic spawn failure (1b)");
     return makeFakePty(opts.sessionId);
   }
-  reapExitedDescendants(_rootPid) {}
+  reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
 }
 
 /** Fabricates a fake engine transcript so resume()'s engineTranscriptExists check passes — mirrors
