@@ -331,18 +331,23 @@ try {
     const SID = "sess-linux-ticks-ok";
     const PID = 66671;
     const owner = { pid: PID, startedAt: Date.now() - 100_000, startTicksLinux: 1000 };
+    // Round 6 follow-up — the first probe's own creationTime is now a REAL, non-null sentinel (was `null`
+    // before this fix) so the sweep-wiring assertion below is non-vacuous: the Linux branch's OWN identity
+    // check reads `creationTicks`, never `creationTime`, so a `null` here was indistinguishable from a
+    // regression that drops the sweep's second argument entirely (both read back as `null`). This sentinel
+    // is threaded through to `sweepOrphanedDescendants` regardless of which signal guard 2 itself consulted.
+    const LINUX_FIRST_PROBE_CREATION_TIME = 555_444_333;
     host.nextChecks = [
-      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: null, creationTicks: 1000 },
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: LINUX_FIRST_PROBE_CREATION_TIME, creationTicks: 1000 },
       { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null },
     ];
     const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
     check("(11) Linux branch, ticks consistent: killRoot WAS called", host.killedPids.length === 1 && host.killedPids[0] === PID);
     check("(11) Linux branch, ticks consistent: result reports forceKilled + dead, identity 'confirmed'", result.forceKilled === true && result.dead === true && result.identity === "confirmed");
     check("(11) sweepOrphanedDescendants was called exactly once, with the confirmed-dead root's pid", host.sweptPids.length === 1 && host.sweptPids[0] === PID);
-    // Round 6 (item 2) — same wiring pin: the FIRST probe's own creationTime (`null` on the forced Linux
-    // branch, since this branch reads creationTicks instead — still the literal value threaded through,
-    // not dropped).
-    check("(11) sweepOrphanedDescendants received the FIRST probe's own creationTime as its second argument", host.sweptCreationTimes[0] === null);
+    // Round 6 follow-up — same wiring pin as scenarios 2/7/9: the FIRST probe's own creationTime, pinned
+    // to a non-null sentinel above so a dropped second argument (which defaults to `null`) turns this RED.
+    check("(11) sweepOrphanedDescendants received the FIRST probe's own creationTime as its second argument", host.sweptCreationTimes[0] === LINUX_FIRST_PROBE_CREATION_TIME);
   }
   {
     // (12, negative control for 11) ticks INCONSISTENT (a genuine respawn, per linuxStartTicksConsistent's
