@@ -17,6 +17,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       wrong agentId-keyed dedup (agentId is the agent DEFINITION, shared by every session ever spawned
 //       from it, not a recycle lineage) and a `nudged` field that was recorded `true` even when there was
 //       no recipient to actually send to.
+//   (6) Card ed0858dc — the PARENTLESS invariant the web attention surface now reads off these rows
+//       (`managerSessionId === workerSessionId`, since the handler files `parentSessionId ?? sessionId`),
+//       with a negative control proving the id-equality leg is what discriminates, not `nudged` alone.
 // Fully hermetic: a bare `new PtyHost(events)` for (1)-(4), a real Db + SessionService for (5), NO real
 // codex (LOOM_CODEX_BIN points at a nonexistent path — the report fires BEFORE the doomed spawn attempt,
 // mirroring companion-codex-restricted-tools-refusal.mjs's section 3 recipe).
@@ -212,6 +215,42 @@ try {
     const durableManaged = db.listEventsForWorker("w-managed").find((e) => e.kind === "codex_isolation_gap_disclosed");
     check("(5)(iv) its durable event: nudged:true, lineageRootId resolves back to the parentless root", durableManaged?.detail.nudged === true && durableManaged.detail.lineageRootId === parentlessId);
 
+    // ============ (6) THE PARENTLESS INVARIANT A WEB READER NOW DEPENDS ON (card ed0858dc) ============
+    // `web/src/lib/fleet.ts`'s `activeCodexIsolationGapAlerts` surfaces a PARENTLESS session's disclosure
+    // as a human attention item (a run session has no manager, so (5)(iv)'s row above reached NOBODY until
+    // that card). It cannot read `parentSessionId` — it only has the event row — so it derives
+    // parentlessness from `managerSessionId === workerSessionId`, which holds because this handler files
+    // `managerSessionId: s?.parentSessionId ?? sessionId`. That invariant lives HERE, so it is pinned here:
+    // an edit to that fallback would silently blind the UI with nothing else to catch it.
+    //
+    // The predicate below MIRRORS the web helper's two filters (a daemon test cannot import web TS). A
+    // mirror is only worth as much as the equivalence behind it, so it is exercised against the REAL rows
+    // (5) just produced — both polarities — and then against a counterfeit, so the id-equality leg is
+    // proven to be what actually discriminates rather than riding along on `nudged`.
+    const webPredicate = (e) => !!e && e.managerSessionId === e.workerSessionId && e.detail.nudged === false;
+
+    check("(6) the real PARENTLESS row satisfies the web predicate (managerSessionId === workerSessionId, nudged:false)", webPredicate(durableParentless) === true);
+    check("(6) …and it is genuinely the id-equality that holds, not an accident of the fixture", durableParentless.managerSessionId === parentlessId && durableParentless.workerSessionId === parentlessId);
+    check("(6) a real MANAGED row is REJECTED (the manager was nudged — not this surface's job)", webPredicate(durableManaged) === false);
+    check("(6) a real managed row that is lineage-DEDUPED (nudged:false, but it HAD a parent) is also rejected", durable1r.detail.nudged === false && webPredicate(durable1r) === false);
+
+    // NEGATIVE CONTROL — the predicate must go RED on a row whose ONLY defect is the manager id. Without
+    // this, every assertion above would pass on `nudged:false` alone and prove nothing about the id
+    // equality that does the real discriminating (the `nudged` leg cannot tell "nobody to tell" apart from
+    // "already told"). Filed through the SAME `db.appendEvent` writer the handler uses, so the only
+    // difference from the genuine parentless row is the field under test.
+    const counterfeitId = randomUUID();
+    db.appendEvent({
+      id: counterfeitId, ts: new Date().toISOString(),
+      managerSessionId: mgrId, // ← the single mutation: a real parent, where the genuine row has itself
+      workerSessionId: parentlessId, taskId: null,
+      kind: "codex_isolation_gap_disclosed",
+      detail: { ...durableParentless.detail }, // nudged:false and the same item-set, verbatim
+    });
+    const counterfeit = db.listEventsForWorker(parentlessId).find((e) => e.id === counterfeitId);
+    check("(6) NEGATIVE CONTROL: the counterfeit row really was stored with a DIFFERENT managerSessionId and nudged:false", counterfeit?.managerSessionId === mgrId && counterfeit.workerSessionId === parentlessId && counterfeit.detail.nudged === false);
+    check("(6) NEGATIVE CONTROL: the web predicate goes RED on it — so the id-equality leg is load-bearing, not decorative", webPredicate(counterfeit) === false);
+
     db.close();
   }
 } finally {
@@ -219,6 +258,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createCodexPty's isolation-gap report (a SEPARATE signal from capability drops) discloses the SETTINGS_DIR / transcript-root / worker-per-project / permissionDeny read-denies claude's permission.deny chokepoint silently drops on codex, and SessionService routes it correctly: never into the affected session's own turn input, a manager nudge once per (recycle lineage, item-set), a durable event every spawn."
+  ? "\n✅ ALL PASS — createCodexPty's isolation-gap report (a SEPARATE signal from capability drops) discloses the SETTINGS_DIR / transcript-root / worker-per-project / permissionDeny read-denies claude's permission.deny chokepoint silently drops on codex, and SessionService routes it correctly: never into the affected session's own turn input, a manager nudge once per (recycle lineage, item-set), a durable event every spawn — and a PARENTLESS row stays identifiable as one by managerSessionId === workerSessionId, the invariant the web attention surface reads (card ed0858dc)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

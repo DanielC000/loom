@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -102,9 +102,17 @@ export interface AttentionItem {
   tone: Tone;
   kind: string;
   text: string;
-  // Set ONLY on the user-dismissable STUCK-BUSY kind — `${sessionId}:${lastActivity}`. Its presence is
-  // what makes a row dismissable (AttentionRow renders × off it); the actionable kinds leave it unset.
+  // Set on a user-dismissable kind — STUCK-BUSY (`${sessionId}:${lastActivity}`) and CODEX ISOLATION GAP
+  // (`${agent}:${itemsKey}`, card ed0858dc). Its presence is what makes a row dismissable (AttentionRow
+  // renders × off it); the actionable kinds leave it unset.
   dismissKey?: string | null;
+  // The hover title for the × affordance. Optional because the wording is kind-specific ("until the
+  // session acts again" is true of STUCK-BUSY only); omitted ⇒ AttentionRow keeps its STUCK-BUSY default.
+  dismissHint?: string | null;
+  // Card ed0858dc — the full detail behind a row whose one-line `text` can only carry a summary (the
+  // isolation-gap `reason` strings are paragraph-length). Rendered as the row's `title`, i.e. on hover;
+  // never a substitute for `text`, which must stand alone for a reader who never hovers.
+  hoverText?: string | null;
   // STRICTLY a merge-review worker — set ONLY on MERGE REQUEST, whose branch diff opens in the review
   // panel (/review/:workerSessionId). Do NOT overload it as a generic session pointer (it once routed
   // every non-merge alert to a "No diff" merge page — card a16dfafb); use `sessionId` for those.
@@ -178,6 +186,19 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     refetchInterval: 15000,
   });
   const activeVaultLocks = activeVaultLockAlerts(vaultLockEventsQuery.data ?? []);
+
+  // Card ed0858dc — a codex session's DROPPED claude-side isolation/permission protections. The daemon
+  // files this row on every codex spawn but nudges a recipient only when the session HAS a parent, so a
+  // PARENTLESS one (every agent run) reached nobody at all. Its own kind-filtered query for the same
+  // reason as the two above: the row is filed under `parentSessionId ?? sessionId`, so a per-manager
+  // fan-out can never reach it (card 43084723's rule). Polled at the vault-lock cadence, not the 4s
+  // manager cadence — this is a standing configuration fact, not a live incident.
+  const codexGapEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "codex_isolation_gap_disclosed"],
+    queryFn: () => api.orchestrationEventsByKinds(["codex_isolation_gap_disclosed"]),
+    refetchInterval: 15000,
+  });
+  const activeCodexGaps = activeCodexIsolationGapAlerts(codexGapEventsQuery.data ?? []);
 
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
@@ -347,6 +368,33 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
         `${ageMin !== null ? ` for ~${ageMin}min` : ""}; run: ${detail.command ?? "(see event detail)"}`,
     });
   }
+  // Card ed0858dc — a PARENTLESS codex session's dropped claude-side protections, which the daemon
+  // discloses durably but nudges nobody about. activeCodexIsolationGapAlerts (lib/fleet.ts) owns the
+  // filtering/keying rules and carries the decision anchor for what must not be changed here.
+  for (const { event: e, sessionId: sid, dedupKey } of activeCodexGaps) {
+    const detail = (e.detail ?? {}) as { items?: { id?: string; reason?: string }[]; agentId?: string | null };
+    const gapItems = detail.items ?? [];
+    const ids = gapItems.map((i) => i.id).filter((id): id is string => !!id);
+    const n = ids.length;
+    // Prefer the AGENT's name — it's the thing the human then edits — over an opaque id. A run session is
+    // often already archived and gone from `all`, so degrade to the agent id, then to the session itself,
+    // rather than rendering a bare uuid with no label.
+    const agentLabel = all.find((s) => s.id === sid)?.agentName
+      ?? (detail.agentId ? `agent ${detail.agentId.slice(0, 8)}` : `session ${sid.slice(0, 8)}`);
+    items.push({
+      key: `cig-${e.id}`, tone: "amber", kind: "CODEX ISOLATION GAP", sessionId: sid,
+      dismissKey: dedupKey,
+      dismissHint: "Dismiss — hides this isolation gap until this agent discloses a different set",
+      // Deliberately NOT "read-deny protections", and deliberately no "can read those files" clause:
+      // `permissionDeny` is the project's AUTHORED permission.deny rule set, which can deny edits and
+      // commands too, not only reads (codexPermissionDenyReason, daemon profiles/codex-compat.ts). Only
+      // the other three ids are read-denies, so "claude protection(s) not enforced" is the one umbrella
+      // honest for the whole set. The per-item `reason` strings carry the specifics, on hover.
+      text: `${agentLabel} · codex — ${n} claude protection${n === 1 ? "" : "s"} not enforced (${ids.join(", ")}). `
+        + `No manager to warn, so nobody was told. Set this agent's profile harness to "claude" if that isolation matters.`,
+      hoverText: gapItems.map((i) => i.reason).filter((r): r is string => !!r).join("\n\n") || null,
+    });
+  }
   for (const e of latestGiveUpRecovery.values()) {
     const detail = (e.detail ?? {}) as { count?: number; windowMs?: number };
     const windowMin = detail.windowMs ? Math.round(detail.windowMs / 60_000) : null;
@@ -427,10 +475,18 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   const dismissed = useDismissedSet();
   const visible = items.filter((it) => !(it.dismissKey && dismissed.has(it.dismissKey)));
 
-  // Prune stored dismiss keys that no longer match a live STUCK-BUSY item. Gated on real session data
-  // (`sessions.data`) — a still-loading/empty poll yields no derivable keys, which must NOT wipe a valid
-  // dismiss. Keyed on the sorted derivable signature so the effect only fires when that set changes.
-  const loaded = sessions.data !== undefined;
+  // Prune stored dismiss keys that no longer match a derivable dismissable item. Gated on real data — a
+  // still-loading/empty poll yields no derivable keys, which must NOT wipe a valid dismiss. Keyed on the
+  // sorted derivable signature so the effect only fires when that set changes.
+  //
+  // ⚠️ THE GATE MUST NAME EVERY QUERY A DISMISSABLE KIND IS DERIVED FROM, not just the sessions poll.
+  // STUCK-BUSY comes from `sessions` alone, but CODEX ISOLATION GAP (card ed0858dc) comes from its own
+  // events query — and the two resolve independently. With the gate on `sessions` alone, a page load where
+  // sessions landed FIRST ran the prune against an `items` that had no isolation-gap row yet, silently
+  // wiping its dismiss key; the row then reappeared the moment the events landed, so a dismiss never
+  // survived a reload. Caught by codex-isolation-gap-attention.spec.ts's post-reload assertion. Any future
+  // dismissable kind must add its own source here too.
+  const loaded = sessions.data !== undefined && codexGapEventsQuery.data !== undefined;
   const derivableSig = items.filter((it) => it.dismissKey).map((it) => it.dismissKey!).sort().join("\n");
   useEffect(() => {
     if (!loaded) return;

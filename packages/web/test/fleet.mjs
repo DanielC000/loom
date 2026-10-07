@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
-  activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap,
+  activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
 } from "../src/lib/fleet.ts";
 
 let pass = 0;
@@ -357,6 +357,141 @@ check("activeVaultLockAlerts: an unrelated event kind is ignored", () => {
   const other = { ...vaultLockEv({ detail: { repoPath: "/vault/g" } }), kind: "merge_done" };
   const alerts = activeVaultLockAlerts([other]);
   assert.equal(alerts.length, 0, "a non-vault-lock kind never surfaces here");
+});
+
+// ── CODEX ISOLATION GAP (card ed0858dc) ────────────────────────────────────────────────────────────────
+// The daemon files `codex_isolation_gap_disclosed` on every codex spawn that drops a claude-side
+// protection, but nudges a recipient only when the session HAS a parent — so a parentless one (every agent
+// run) reached nobody. These cases pin the two filters that discriminate the real gap from ordinary noise,
+// and the per-(agent, item-set) keying. See @decision ed0858dc (src/lib/fleet.ts) for what must not change.
+//
+// `managerSessionId: o.managerSessionId ?? o.workerSessionId ?? "run-1"` mirrors the daemon's own
+// `s?.parentSessionId ?? sessionId` — so the DEFAULT factory row is the PARENTLESS shape, and a managed row
+// is made by passing a managerSessionId explicitly. Pinned daemon-side (with its own negative control) in
+// packages/daemon/test/codex-permission-deny-disclosure.mjs section (6).
+const GAP_ITEMS = [
+  { id: "settingsDirReadDeny", reason: "claude denies Read() of <LOOM_HOME>/tmp/settings/** for every role" },
+  { id: "permissionDeny", reason: "this project has 2 authored permission.deny rules that codex cannot honour" },
+];
+const gapEv = (o = {}) => ({
+  id: `ev-${++evSeq}`,
+  ts: o.ts ?? new Date(evSeq).toISOString(),
+  kind: o.kind ?? "codex_isolation_gap_disclosed",
+  workerSessionId: o.workerSessionId ?? "run-1",
+  managerSessionId: o.managerSessionId ?? o.workerSessionId ?? "run-1",
+  taskId: o.taskId ?? null,
+  detail: {
+    items: GAP_ITEMS, agentId: "agent-codex", lineageRootId: o.workerSessionId ?? "run-1",
+    itemsKey: "permissionDeny,settingsDirReadDeny", nudged: false,
+    ...(o.detail ?? {}),
+  },
+});
+
+check("activeCodexIsolationGapAlerts: a parentless, un-nudged disclosure surfaces an alert", () => {
+  const ev = gapEv();
+  const alerts = activeCodexIsolationGapAlerts([ev]);
+  assert.equal(alerts.length, 1, "parentless + nudged:false ⇒ item");
+  assert.equal(alerts[0].sessionId, "run-1");
+  assert.equal(alerts[0].event.id, ev.id);
+  assert.equal(alerts[0].dedupKey, "agent-codex:permissionDeny,settingsDirReadDeny");
+});
+
+check("activeCodexIsolationGapAlerts: a MANAGED session's row never surfaces — its manager WAS nudged", () => {
+  const ev = gapEv({ workerSessionId: "w-1", managerSessionId: "mgr-1", detail: { nudged: true } });
+  assert.equal(activeCodexIsolationGapAlerts([ev]).length, 0, "nudged:true ⇒ a manager is the reader, not the human");
+});
+
+// THE discrimination this surface depends on, and the reason `nudged` alone is not enough: a managed
+// worker's SECOND spawn in the same lineage re-files with nudged:false (deduped, not unreachable). Keying
+// on nudged alone would surface it on every subsequent spawn forever — pure noise about a gap whose
+// manager was already told. Only the id equality separates the two causes of nudged:false.
+check("activeCodexIsolationGapAlerts: a MANAGED row with nudged:false (lineage-deduped) is still excluded", () => {
+  const ev = gapEv({ workerSessionId: "w-2", managerSessionId: "mgr-1", detail: { nudged: false } });
+  assert.equal(activeCodexIsolationGapAlerts([ev]).length, 0,
+    "managerSessionId !== workerSessionId ⇒ there WAS a parent; nudged:false here means already-told, not unreachable");
+});
+
+check("activeCodexIsolationGapAlerts: N disclosures from ONE agent collapse to ONE item (latest wins)", () => {
+  const first = gapEv({ workerSessionId: "run-a", ts: "2026-01-01T00:00:00.000Z" });
+  const second = gapEv({ workerSessionId: "run-b", ts: "2026-01-01T00:00:01.000Z" });
+  const third = gapEv({ workerSessionId: "run-c", ts: "2026-01-01T00:00:02.000Z" });
+  const alerts = activeCodexIsolationGapAlerts([third, first, second]); // unsorted on purpose
+  assert.equal(alerts.length, 1, "same (agent, item-set) ⇒ ONE decision, however many runs disclose it");
+  assert.equal(alerts[0].sessionId, "run-c", "the LATEST run is the one the item points at, regardless of array order");
+});
+
+check("activeCodexIsolationGapAlerts: a DIFFERENT item-set for the same agent is its own item", () => {
+  const base = gapEv({ workerSessionId: "run-d" });
+  const wider = gapEv({ workerSessionId: "run-e", detail: { itemsKey: "permissionDeny,settingsDirReadDeny,transcriptRootReadDeny" } });
+  const alerts = activeCodexIsolationGapAlerts([base, wider]);
+  assert.equal(alerts.length, 2, "a newly-disclosed protection is a NEW decision, not a dismissed one");
+});
+
+check("activeCodexIsolationGapAlerts: two DIFFERENT agents never share a key", () => {
+  const a = gapEv({ workerSessionId: "run-f", detail: { agentId: "agent-one" } });
+  const b = gapEv({ workerSessionId: "run-g", detail: { agentId: "agent-two" } });
+  assert.equal(activeCodexIsolationGapAlerts([a, b]).length, 2, "one row per misconfigured agent");
+});
+
+check("activeCodexIsolationGapAlerts: a null agentId degrades to lineageRootId, never a shared key", () => {
+  const a = gapEv({ workerSessionId: "run-h", detail: { agentId: null, lineageRootId: "run-h" } });
+  const b = gapEv({ workerSessionId: "run-i", detail: { agentId: null, lineageRootId: "run-i" } });
+  const alerts = activeCodexIsolationGapAlerts([a, b]);
+  assert.equal(alerts.length, 2, "two null-agent rows must NOT collapse onto one shared key");
+  assert.equal(alerts[0].dedupKey, "run-h:permissionDeny,settingsDirReadDeny");
+});
+
+check("activeCodexIsolationGapAlerts: NO liveness filter — the alert outlives the session that disclosed it", () => {
+  // Unlike activeBootStuckAlerts, this helper takes no liveness predicate at all: an agent run is
+  // typically already over (and archived) by the time anyone looks, and the remedy is a profile-harness
+  // change, not an intervention on the session. A liveness filter would hide every real instance.
+  assert.equal(activeCodexIsolationGapAlerts.length, 1, "takes events only — no liveness predicate parameter exists to pass");
+  const alerts = activeCodexIsolationGapAlerts([gapEv({ workerSessionId: "run-dead" })]);
+  assert.equal(alerts.length, 1, "a long-exited run's gap still surfaces");
+});
+
+// The SUPERSEDE path, and the reason the parentless/nudged test runs AFTER the latest-wins fold rather
+// than inside it. Testing inside the fold would make this alert permanent: the managed row below would be
+// skipped instead of winning its key, so the human item would stay up forever even once the very same
+// (agent, item-set) got routed to a manager.
+check("activeCodexIsolationGapAlerts: a later MANAGED disclosure for the same (agent, item-set) CLEARS the item", () => {
+  const parentless = gapEv({ workerSessionId: "run-m", ts: "2026-01-01T00:00:00.000Z" });
+  const managed = gapEv({ workerSessionId: "w-m", managerSessionId: "mgr-1", detail: { nudged: true }, ts: "2026-01-01T00:00:01.000Z" });
+  assert.equal(activeCodexIsolationGapAlerts([parentless]).length, 1, "control: parentless alone ⇒ item");
+  assert.equal(activeCodexIsolationGapAlerts([parentless, managed]).length, 0,
+    "the latest word on this configuration reached a manager ⇒ the human's copy is handed off");
+});
+
+check("activeCodexIsolationGapAlerts: a later lineage-DEDUPED managed disclosure also clears it", () => {
+  const parentless = gapEv({ workerSessionId: "run-n", ts: "2026-01-01T00:00:00.000Z" });
+  const managed = gapEv({ workerSessionId: "w-n", managerSessionId: "mgr-1", detail: { nudged: false }, ts: "2026-01-01T00:00:01.000Z" });
+  assert.equal(activeCodexIsolationGapAlerts([parentless, managed]).length, 0,
+    "nudged:false on a row that HAD a parent means this lineage already told its manager — addressed either way");
+});
+
+check("activeCodexIsolationGapAlerts: order matters the right way — an OLDER managed row never clears a NEWER gap", () => {
+  const managed = gapEv({ workerSessionId: "w-o", managerSessionId: "mgr-1", detail: { nudged: true }, ts: "2026-01-01T00:00:00.000Z" });
+  const parentless = gapEv({ workerSessionId: "run-o", ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeCodexIsolationGapAlerts([parentless, managed]); // unsorted on purpose
+  assert.equal(alerts.length, 1, "the NEWEST disclosure is unaddressed ⇒ the item stands, whatever the array order");
+  assert.equal(alerts[0].sessionId, "run-o");
+});
+
+check("activeCodexIsolationGapAlerts: a row with no itemsKey is dropped defensively, never crashes", () => {
+  const malformed = gapEv({ workerSessionId: "run-j", detail: { itemsKey: undefined } });
+  assert.equal(activeCodexIsolationGapAlerts([malformed]).length, 0, "no item-set to key on ⇒ dropped, not surfaced");
+});
+
+check("activeCodexIsolationGapAlerts: a row with no workerSessionId cannot establish parentlessness ⇒ dropped", () => {
+  const noWorker = { ...gapEv(), workerSessionId: null, managerSessionId: "run-k" };
+  assert.equal(activeCodexIsolationGapAlerts([noWorker]).length, 0,
+    "parentlessness needs BOTH ids present and equal — a missing one is not defaulted into either answer");
+});
+
+check("activeCodexIsolationGapAlerts: an unrelated event kind is ignored", () => {
+  const other = { ...gapEv({ workerSessionId: "run-l" }), kind: "codex_unsupported_capability" };
+  assert.equal(activeCodexIsolationGapAlerts([other]).length, 0,
+    "the sibling capability-drop kind is a DIFFERENT signal and never surfaces here");
 });
 
 console.log(`\n${pass} passed`);

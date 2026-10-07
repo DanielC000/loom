@@ -133,21 +133,33 @@ export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionItem;
   // by request type (DECISION/SECRET/PERMISSION/INPUT NEEDED), so it can no longer be compared literally.
   const decision = item.questionId != null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`,
+    // `data-*` hooks (card ed0858dc): an e2e assertion on an attention row has to be scoped to the row it
+    // MEANS — the e2e daemon is shared, so a sibling spec's session renders a byte-identical row and a
+    // text-matched locator would pass against the wrong data. Kind + session id make the scope explicit.
+    <div data-testid="attention-row" data-kind={item.kind} data-session-id={item.sessionId ?? item.workerSessionId ?? ""}
+      style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`,
       borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>
       <Dot tone={item.tone} glow={item.tone === "amber"} />
       <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>{item.text}</span>
+      {/* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
+          (the isolation-gap `reason` strings run to a paragraph each) — so hover reveals `hoverText` when
+          a kind supplies it, else the full untruncated `text`. `text` still has to stand alone: a reader
+          who never hovers must get the whole actionable point from the row itself. */}
+      <span data-testid="attention-row-text" title={item.hoverText || item.text}
+        style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>{item.text}</span>
       <span style={{ flex: 1 }} />
       {decision && <DecisionStateChip q={{ state: "pending", answeredAt: null }} now={0} />}
       {item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />}
       {item.staleQuestionId && <SnoozeButton questionId={item.staleQuestionId} />}
       {onOpen && <Button variant={decision ? "primary" : "default"} onClick={onOpen}>{decision ? "Answer →" : "Open"}</Button>}
-      {/* Dismiss — STUCK-BUSY only (passed when item.dismissKey is set). The heuristic false-positives
-          on a legitimately long turn; this hides THIS episode (re-appears on the next one). */}
+      {/* Dismiss — passed whenever item.dismissKey is set. STUCK-BUSY (the heuristic false-positives on a
+          legitimately long turn; this hides THIS episode and it re-appears on the next one) and CODEX
+          ISOLATION GAP (card ed0858dc). The default wording below is STUCK-BUSY's, which is NOT true of
+          every dismissable kind — a kind whose dismiss means something else supplies its own
+          `dismissHint` rather than letting this row describe it wrongly. */}
       {onDismiss && (
         <Button variant="ghost" onClick={onDismiss} aria-label="Dismiss this alert"
-          title="Dismiss — hides this stuck-busy alert until the session acts again"
+          title={item.dismissHint || "Dismiss — hides this stuck-busy alert until the session acts again"}
           style={{ padding: "0 6px", fontSize: 15, lineHeight: 1 }}>×</Button>
       )}
     </div>

@@ -208,3 +208,46 @@ export function activeVaultLockAlerts(events: readonly OrchestrationEvent[]): Or
   }
   return out;
 }
+
+// ── CODEX ISOLATION GAP (card ed0858dc) ─────────────────────────────────────────────────────────────────
+// Surfaces a PARENTLESS codex session's dropped claude-side protections, which the daemon files durably but
+// nudges nobody about. Same one-kind-filtered-fetch shape as `activeBootStuckAlerts` above.
+//
+// @decision ed0858dc — never filter on `detail.nudged` alone, never add a liveness filter, never key per
+// session, keep the surfacing test AFTER the latest-wins fold (never inside it), and do not read the
+// 500-row `listRecentEventsByKinds` window as a cleared bound.
+export interface CodexIsolationGapAlert { event: OrchestrationEvent; sessionId: string; dedupKey: string }
+
+/** The (agent, item-set) this row is about — the actionable unit, see the record. Null ⇒ unkeyable, drop. */
+function codexGapDedupKey(e: OrchestrationEvent): string | null {
+  const detail = (e.detail ?? {}) as { agentId?: string | null; lineageRootId?: string | null; itemsKey?: string };
+  if (!detail.itemsKey) return null; // no item-set to key on (mirrors activeVaultLockAlerts' missing-repoPath drop)
+  return `${detail.agentId ?? detail.lineageRootId ?? e.workerSessionId ?? e.managerSessionId}:${detail.itemsKey}`;
+}
+
+export function activeCodexIsolationGapAlerts(events: readonly OrchestrationEvent[]): CodexIsolationGapAlert[] {
+  // Fold EVERY row of the kind by (agent, item-set) first, THEN test the winner — the same two-phase shape
+  // activeBootStuckAlerts/activeVaultLockAlerts use, and for the same reason: a later row has to be able to
+  // SUPERSEDE an earlier alarm. Here the superseding row is a disclosure for the same (agent, item-set)
+  // that was NOT parentless — i.e. the most recent thing Loom knows about this configuration did reach a
+  // manager, so the human's copy of it has been handed off and should clear. Testing inside the fold
+  // instead would make the alert permanent: a non-qualifying row would be skipped rather than win the key.
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of sorted) {
+    if (e.kind !== "codex_isolation_gap_disclosed") continue;
+    const dedupKey = codexGapDedupKey(e);
+    if (!dedupKey) continue;
+    latest.set(dedupKey, e);
+  }
+  const out: CodexIsolationGapAlert[] = [];
+  for (const [dedupKey, e] of latest) {
+    // Parentlessness needs BOTH ids present AND equal — a row missing `workerSessionId` cannot establish it
+    // either way, so it is dropped rather than defaulted into either answer.
+    const sessionId = e.workerSessionId;
+    if (!sessionId || e.managerSessionId !== sessionId) continue; // it HAD a parent ⇒ a manager is the reader
+    if ((e.detail as { nudged?: boolean } | undefined)?.nudged !== false) continue; // a nudge DID fire ⇒ addressed
+    out.push({ event: e, sessionId, dedupKey });
+  }
+  return out;
+}
