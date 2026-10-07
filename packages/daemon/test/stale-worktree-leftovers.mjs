@@ -218,6 +218,234 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
   fs.rmSync(axisPath, { recursive: true, force: true });
 }
 
+// --- (22) card 04e4262d, GAP-CLOSING CASE: a repoKey REMOVED from the registry (never a "wrong"
+//     registry — simply absent, as if `repos` no longer names it) leaves its secondary-axis leftover
+//     invisible by DEFAULT (today's behavior, unchanged) and visible when the caller opts into
+//     `probeUnregistered: true`.
+{
+  const proj = "projSwlGap";
+  const removedRepoKey = "removed-repo";
+  const cleanPath = resolveWorktreePath(proj, "taskGap-secondary", removedRepoKey);
+  const stalePath = mkStaleAside(cleanPath, 1700000000040);
+  const emptyRegistry = repoKeysByProjectFromProjects([{ id: proj, repos: [] }]); // repoKey REMOVED, not merely unnamed
+
+  const defaultEntries = listStaleAsideWorktrees(WORKTREES_DIR, emptyRegistry);
+  check("(22) NEGATIVE CONTROL: with NO probeUnregistered opt-in (today's default), a removed-repoKey leftover stays invisible", !defaultEntries.find((e) => e.path === stalePath));
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, emptyRegistry, { probeUnregistered: true });
+  const hit = probedEntries.find((e) => e.path === stalePath);
+  check("(22) GAP CLOSED: with probeUnregistered:true, the leftover under the removed repoKey's axis dir IS found", !!hit);
+  check("(22) projectId is correct", hit?.projectId === proj);
+  check("(22) staleSinceMs is parsed from the suffix", hit?.staleSinceMs === 1700000000040);
+
+  const axisPath = path.join(WORKTREES_DIR, proj, removedRepoKey);
+  check("(22) the axis dir ITSELF is never listed (only its leaf child)", !probedEntries.find((e) => e.path === axisPath));
+
+  fs.rmSync(axisPath, { recursive: true, force: true });
+}
+
+// --- (23) card 04e4262d: probeUnregistered OMITTED entirely (not just `false`) behaves exactly like the
+//     default — the exact call shape served-status.ts's polled read uses (no 3rd arg at all).
+{
+  const proj = "projSwlGapOmitted";
+  const removedRepoKey = "removed-repo-2";
+  const cleanPath = resolveWorktreePath(proj, "taskGapOmitted-secondary", removedRepoKey);
+  const stalePath = mkStaleAside(cleanPath, 1700000000041);
+  const entries = listStaleAsideWorktrees(WORKTREES_DIR, repoKeysByProjectFromProjects([{ id: proj, repos: [] }])); // 2-arg call, no opts
+  check("(23) NEGATIVE CONTROL: the 2-arg call shape (opts omitted) stays blind to a removed-repoKey leftover, exactly like served-status.ts's polled read", !entries.find((e) => e.path === stalePath));
+  fs.rmSync(path.join(WORKTREES_DIR, proj, removedRepoKey), { recursive: true, force: true });
+}
+
+// --- (24) MANAGER AMENDMENT 1: a renamed-aside PRIMARY leaf that still holds its OWN `.git` FILE (the
+//     `reclaimWedgedWorktreePathForSpawn` wedge-retry rename has no `!worktreeHasGitLink` precondition,
+//     unlike `createWorktree`'s own rename-aside path) must still be reported — basename match alone,
+//     with no `.git`-presence check at all. True both with and without probeUnregistered.
+{
+  const proj = "projSwlGitLeaf";
+  const cleanPath = resolveWorktreePath(proj, "taskGitLeaf-primary");
+  fs.mkdirSync(cleanPath, { recursive: true });
+  fs.writeFileSync(path.join(cleanPath, ".git"), "gitdir: /some/where/.git/worktrees/taskGitLeaf-primary\n"); // simulates a worktree whose .git link SURVIVED the wedge-retry rename
+  const stalePath = `${cleanPath}.stale-1700000000042`;
+  fs.renameSync(cleanPath, stalePath);
+
+  const defaultEntries = listStaleAsideWorktrees(WORKTREES_DIR);
+  check("(24) AMENDMENT 1: a renamed-aside leaf that still holds its own .git FILE is reported with probeUnregistered OMITTED (today's unchanged behavior)", !!defaultEntries.find((e) => e.path === stalePath));
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(24) AMENDMENT 1: the SAME leaf is still reported with probeUnregistered:true (the .git link is never inspected for a suffix-named candidate)", !!probedEntries.find((e) => e.path === stalePath));
+  check("(24) its .git file is genuinely still present (proving this isn't passing vacuously because the file disappeared)", fs.existsSync(path.join(stalePath, ".git")));
+
+  fs.rmSync(stalePath, { recursive: true, force: true });
+}
+
+// --- (25) card 04e4262d round 4 (Code Review c1929951, M3): the collision backstop now runs
+//     UNCONDITIONALLY — an UNREGISTERED suffix-named dir (e.g. the round-2 "svc.stale-1" collision shape,
+//     but this time for a repoKey that is NOT in the registry at all) holding a LIVE nested task-shaped
+//     worktree underneath must be EXCLUDED even with probeUnregistered OMITTED (the exact call shape
+//     served_status uses). Before round 4 this guard only fired behind probeUnregistered:true, so
+//     served_status could OVERcount relative to the GET listing for exactly this shape.
+{
+  const proj = "projSwlUnregCollision";
+  const dangerousUnregisteredKey = "svc.stale-9001"; // matches STALE_ASIDE_SUFFIX_RE, but NOT in the registry
+  const axisPath = path.join(WORKTREES_DIR, proj, dangerousUnregisteredKey);
+  const liveWorktreePath = resolveWorktreePath(proj, "taskUnregCollision-live", dangerousUnregisteredKey);
+  fs.mkdirSync(liveWorktreePath, { recursive: true });
+  fs.writeFileSync(path.join(liveWorktreePath, ".git"), "gitdir: /some/where/.git/worktrees/taskUnregCollision-live\n"); // a REAL live nested worktree (TASK_KEY_SHAPE_RE name + .git FILE)
+
+  const defaultEntries = listStaleAsideWorktrees(WORKTREES_DIR);
+  check("(25) ROUND 4 FIX: with probeUnregistered OMITTED, the collision backstop now ALSO excludes the axis dir (served_status no longer overcounts relative to GET)", !defaultEntries.find((e) => e.path === axisPath));
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(25) AMENDMENT 1 collision backstop: with probeUnregistered:true, the axis dir is ALSO excluded because it holds a live nested worktree", !probedEntries.find((e) => e.path === axisPath));
+  check("(25) the live worktree beneath it is never itself listed either way", !probedEntries.find((e) => e.path === liveWorktreePath) && !defaultEntries.find((e) => e.path === liveWorktreePath));
+  check("(25) the live worktree is still intact on disk", fs.existsSync(path.join(liveWorktreePath, ".git")));
+
+  fs.rmSync(axisPath, { recursive: true, force: true });
+}
+
+// --- (25b) NEGATIVE CONTROL for (25)'s round-4 unconditional backstop: an UNREGISTERED suffix-named dir
+//     with NO live nested child underneath is still listed as a leftover, with OR without
+//     probeUnregistered — proves (25)'s exclusion isn't a vacuous "every suffix-named entry is now
+//     excluded" regression, but genuinely conditioned on a live nested worktree being found.
+{
+  const proj = "projSwlUnregCollisionNegative";
+  const harmlessUnregisteredKey = "svc.stale-9005"; // matches STALE_ASIDE_SUFFIX_RE, but holds no live child
+  const axisPath = path.join(WORKTREES_DIR, proj, harmlessUnregisteredKey);
+  fs.mkdirSync(axisPath, { recursive: true });
+  fs.writeFileSync(path.join(axisPath, "leftover.txt"), "half-removed orphan content, no live child beneath\n");
+
+  const defaultEntries = listStaleAsideWorktrees(WORKTREES_DIR);
+  check("(25b) NEGATIVE CONTROL: with no live nested child, the axis dir IS still listed with probeUnregistered omitted", !!defaultEntries.find((e) => e.path === axisPath));
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(25b) NEGATIVE CONTROL: and still listed with probeUnregistered:true too", !!probedEntries.find((e) => e.path === axisPath));
+
+  fs.rmSync(axisPath, { recursive: true, force: true });
+}
+
+// --- (26) MANAGER AMENDMENT 2: a non-suffix UNREGISTERED dir holding a `.git` DIRECTORY (not file) at
+//     its own root, PLUS a genuinely stale-shaped `*.stale-<digits>` child, must NOT surface that child —
+//     amendment 2's exact wording ("ANY .git entry, file, dir, or link"). Only meaningful with
+//     probeUnregistered:true (the default never descends into a non-suffix unregistered dir at all).
+{
+  const proj = "projSwlGitDirGuard";
+  const checkoutLikeKey = "checkout-like-dir"; // does NOT match STALE_ASIDE_SUFFIX_RE
+  const checkoutPath = path.join(WORKTREES_DIR, proj, checkoutLikeKey);
+  fs.mkdirSync(path.join(checkoutPath, ".git"), { recursive: true }); // a .git DIRECTORY, not a file — e.g. a nested clone/submodule
+  const misleadingChild = mkStaleAside(path.join(checkoutPath, "nested"), 1700000000043); // genuinely stale-shaped, but sitting inside arbitrary checkout content
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(26) AMENDMENT 2: a non-suffix dir with its OWN .git DIRECTORY is never descended into — the stale-shaped child inside it is NOT surfaced", !probedEntries.find((e) => e.path === misleadingChild));
+  check("(26) the checkout-like dir itself is never listed as a leftover either (its name doesn't match the suffix)", !probedEntries.find((e) => e.path === checkoutPath));
+
+  fs.rmSync(checkoutPath, { recursive: true, force: true });
+}
+
+// --- (30) card 04e4262d round 4 (Code Review c1929951, M1 — HOST-DELETE EXPOSURE): the gap-closing probe
+//     must NEVER descend into a level-2 entry shaped like a PRIMARY task worktree key (12 lowercase hex),
+//     even when its `.git` is missing — that shape can only be a real (if transiently .git-less) task
+//     worktree, never a legitimate repo-axis container. Exact repro from the Code Review: a primary task
+//     worktree missing its `.git` link, holding real content (`src/x`) PLUS a `.stale-<ts>`-suffixed
+//     subdir of its own (`cache.stale-<ts>`). Before this fix, the gap-closing probe listed the inner
+//     leftover as reclaimable (and the POST reclaim call — see (34) below — actually deleted it).
+{
+  const proj = "projSwlTaskKeyGuard";
+  const taskKeyShapedName = "0123456789ab"; // matches TASK_KEY_SHAPE_RE exactly (12 lowercase hex)
+  const primaryPath = path.join(WORKTREES_DIR, proj, taskKeyShapedName);
+  fs.mkdirSync(path.join(primaryPath, "src"), { recursive: true });
+  fs.writeFileSync(path.join(primaryPath, "src", "x"), "real user content\n"); // NO .git — the transiently-missing-link repro
+  const innerStalePath = mkStaleAside(path.join(primaryPath, "cache"), 1700000000060);
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(30) M1 FIX: a task-key-shaped level-2 entry is NEVER descended into — its inner .stale-<ts> child is NOT surfaced", !probedEntries.find((e) => e.path === innerStalePath));
+  check("(30) the primary entry itself is never listed either (its basename isn't suffix-shaped)", !probedEntries.find((e) => e.path === primaryPath));
+  check("(30) real user content is still intact on disk (nothing read it)", fs.existsSync(path.join(primaryPath, "src", "x")));
+
+  fs.rmSync(primaryPath, { recursive: true, force: true });
+}
+
+// --- (30b) NEGATIVE CONTROL for (30): an unregistered, non-suffix, non-task-key-shaped dir (same no-`.git`
+//     shape, but its name does NOT match TASK_KEY_SHAPE_RE) is still probed normally and its genuine inner
+//     leftover IS surfaced — proves the (30) skip is scoped to the task-key shape specifically, not a
+//     blanket "stop probing non-suffix entries" regression.
+{
+  const proj = "projSwlTaskKeyGuardNegative";
+  const nonTaskKeyShapedName = "legacy-container-not-hex"; // does NOT match TASK_KEY_SHAPE_RE
+  const containerPath = path.join(WORKTREES_DIR, proj, nonTaskKeyShapedName);
+  fs.mkdirSync(containerPath, { recursive: true }); // no .git — a real gap-closing candidate
+  const innerStalePath = mkStaleAside(path.join(containerPath, "cache"), 1700000000065);
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(30b) NEGATIVE CONTROL: a non-task-key-shaped container is still probed — its inner leftover IS surfaced", !!probedEntries.find((e) => e.path === innerStalePath));
+
+  fs.rmSync(containerPath, { recursive: true, force: true });
+}
+
+// --- (31) card 04e4262d round 4, M2: the gap-closing probe's own `.git`-entry presence check folds case
+//     ON WIN32 ONLY, mirroring isRegisteredRepoKeyName's platform-conditional fold — a differently-cased
+//     ".GIT" marker must still be recognized as the dir's own git marker (never descended into) on a
+//     real win32 filesystem, where it IS the same container to the OS even though the in-memory Dirent
+//     name comparison is not inherently case-insensitive.
+{
+  const proj = "projSwlGitCaseFold";
+  const upperGitKey = "upperrepo"; // does not match TASK_KEY_SHAPE_RE or STALE_ASIDE_SUFFIX_RE
+  const checkoutPath = path.join(WORKTREES_DIR, proj, upperGitKey);
+  fs.mkdirSync(path.join(checkoutPath, ".GIT"), { recursive: true });
+  const innerStalePath = mkStaleAside(path.join(checkoutPath, "data"), 1700000000061);
+
+  if (process.platform === "win32") {
+    const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+    check("(31) M2 FIX (win32): a differently-cased .GIT entry is still recognized as the dir's own git marker — never descended into", !probedEntries.find((e) => e.path === innerStalePath));
+  } else {
+    console.log("SKIP  (31) the .git case-fold is a win32-only concern — a real POSIX filesystem is case-sensitive, so \".GIT\" genuinely is not \".git\" there and this guard isn't exercised on this platform.");
+  }
+
+  fs.rmSync(checkoutPath, { recursive: true, force: true });
+}
+
+// --- (32) card 04e4262d round 4, M4 test gap: a JUNCTION/SYMLINK planted AT LEVEL 2, named to look like
+//     an unregistered, non-suffix repo-axis container, must be skipped by the gap-closing probe's own
+//     junction guard — never probed through to its real target, regardless of what that target holds.
+{
+  const proj = "projSwlGapJunctionLevel2";
+  const outsideTarget = path.join(path.dirname(WORKTREES_DIR), `swl-gap-junction-l2-target-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  fs.mkdirSync(outsideTarget, { recursive: true });
+  const misleadingTargetChild = path.join(outsideTarget, "nested.stale-1700000000062");
+  fs.mkdirSync(misleadingTargetChild, { recursive: true }); // what a naive descent-through-the-link would find
+  const junctionEntryPath = path.join(WORKTREES_DIR, proj, "not-a-real-container");
+  fs.mkdirSync(path.dirname(junctionEntryPath), { recursive: true });
+  fs.symlinkSync(outsideTarget, junctionEntryPath, process.platform === "win32" ? "junction" : "dir");
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(32) M4 (level-2 junction): a junction planted as an unregistered gap-closing candidate is skipped outright, never probed through to its real target", !probedEntries.find((e) => e.path === misleadingTargetChild));
+  check("(32) the junction entry itself is also never listed (its basename isn't suffix-shaped)", !probedEntries.find((e) => e.path === junctionEntryPath));
+
+  try { fs.rmdirSync(junctionEntryPath); } catch { /* best-effort: unlink the link itself, never recurse through it */ }
+  fs.rmSync(outsideTarget, { recursive: true, force: true });
+}
+
+// --- (33) card 04e4262d round 4, M4 test gap: a JUNCTION/SYMLINK planted at LEVEL 3, named to look like a
+//     stale leftover, INSIDE an unregistered non-suffix gap-closing container, must be skipped — the
+//     existing child-level isLikelyJunctionOrSymlink guard, now proven specifically for the UNREGISTERED
+//     gap-closing branch (previously only proven for the registered-axis case, see test (18) below).
+{
+  const proj = "projSwlGapJunctionLevel3";
+  const containerKey = "legacy-container-l3"; // does NOT match TASK_KEY_SHAPE_RE or STALE_ASIDE_SUFFIX_RE
+  const containerPath = path.join(WORKTREES_DIR, proj, containerKey);
+  fs.mkdirSync(containerPath, { recursive: true }); // no .git — a real gap-closing candidate
+  const outsideTarget = path.join(path.dirname(WORKTREES_DIR), `swl-gap-junction-l3-target-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  fs.mkdirSync(outsideTarget, { recursive: true });
+  fs.writeFileSync(path.join(outsideTarget, "real-file.txt"), "do not touch\n");
+  const junctionChildPath = path.join(containerPath, "child.stale-1700000000063");
+  fs.symlinkSync(outsideTarget, junctionChildPath, process.platform === "win32" ? "junction" : "dir");
+
+  const probedEntries = listStaleAsideWorktrees(WORKTREES_DIR, undefined, { probeUnregistered: true });
+  check("(33) M4 (level-3 junction): a junction named like a stale leftover, inside an unregistered gap-closing container, is skipped — never listed", !probedEntries.find((e) => e.path === junctionChildPath));
+
+  try { fs.rmdirSync(junctionChildPath); } catch { /* best-effort: unlink the link itself, never recurse through it */ }
+  fs.rmSync(containerPath, { recursive: true, force: true });
+  fs.rmSync(outsideTarget, { recursive: true, force: true });
+}
+
 // --- (18) a stale-named junction/symlink is skipped by enumeration and refused by confinement (nit 3c) ---
 {
   const proj = "projSwlJunction";
@@ -463,6 +691,106 @@ try {
     fs.rmSync(liveWorktreePath, { recursive: true, force: true });
     fs.rmSync(axisPath, { recursive: true, force: true });
     db.updateProject("projSwlSvc", { repos: [] });
+  }
+
+  // --- (27) card 04e4262d, GAP CLOSED end-to-end via the REST-facing surfaces: a repoKey is registered,
+  //     a secondary-axis worktree is cut and renamed aside, then the repoKey is REMOVED from `repos`
+  //     (a supported operation) — listStaleWorktreeLeftovers (GET) still finds it, and
+  //     reclaimStaleWorktreeLeftover (POST) still reclaims it.
+  {
+    const removedRepoKey = "swl-removed-repo";
+    db.updateProject("projSwlSvc", { repos: [{ key: removedRepoKey, path: process.env.LOOM_HOME }] });
+    const cleanPath = resolveWorktreePath("projSwlSvc", "taskSvc-removedrepo", removedRepoKey);
+    const stalePath = mkStaleAside(cleanPath, 1700000000050);
+    // Now simulate the registry update that removed the key — same card 04e4262d problem statement.
+    db.updateProject("projSwlSvc", { repos: [] });
+
+    const sessions = new SessionService(db, {}, new OrchestrationControl());
+    const listing = await sessions.listStaleWorktreeLeftovers();
+    const hit = listing.entries.find((e) => e.path === stalePath);
+    check("(27) GAP CLOSED: listStaleWorktreeLeftovers (GET) finds a leftover under a NOW-REMOVED repoKey", !!hit);
+    check("(27) its bytes are measured (the GET surface, unlike served_status, pays that cost deliberately)", typeof hit?.bytes === "number" && hit.bytes >= 0);
+
+    const outcome = await sessions.reclaimStaleWorktreeLeftover(stalePath);
+    check("(27) GAP CLOSED: reclaimStaleWorktreeLeftover (POST) reclaims it", outcome.outcome === "removed");
+    check("(27) the dir is actually gone from disk", !fs.existsSync(stalePath));
+  }
+
+  // --- (28) card 04e4262d: served_status stays a DELIBERATE undercount for this exact gap (approved
+  //     design — the polled surface never opts into probeUnregistered). Proves the two surfaces diverge
+  //     on purpose, not by accident, so a future reader doesn't mistake this for a drifted count.
+  {
+    const removedRepoKey = "swl-removed-repo-2";
+    const baselineStatus = buildServedStatus(db);
+    const baselineCount = baselineStatus.staleWorktreeLeftovers.count;
+
+    db.updateProject("projSwlSvc", { repos: [{ key: removedRepoKey, path: process.env.LOOM_HOME }] });
+    const cleanPath = resolveWorktreePath("projSwlSvc", "taskSvc-servedstatusgap", removedRepoKey);
+    const stalePath = mkStaleAside(cleanPath, 1700000000051);
+    db.updateProject("projSwlSvc", { repos: [] });
+
+    const sessions = new SessionService(db, {}, new OrchestrationControl());
+    const listing = await sessions.listStaleWorktreeLeftovers();
+    check("(28) the GET listing DOES find it (sanity check this scenario is wired the same as (27))", !!listing.entries.find((e) => e.path === stalePath));
+
+    const statusAfter = buildServedStatus(db);
+    check("(28) DELIBERATE UNDERCOUNT: served_status's count is UNCHANGED by the new removed-repoKey leftover, even though the GET listing just found it", statusAfter.staleWorktreeLeftovers.count === baselineCount);
+
+    fs.rmSync(stalePath, { recursive: true, force: true });
+    db.updateProject("projSwlSvc", { repos: [] });
+  }
+
+  // --- (29) MANAGER AMENDMENT 3, RECLAIM SAFETY (TOCTOU): GET lists a collision-shaped, UNREGISTERED
+  //     suffix-named leftover (no live child yet); a live task-shaped worktree child then appears
+  //     underneath it (simulating a respawn claiming that path as a real axis dir); POST's fresh
+  //     re-derivation now excludes it (the collision backstop fires) and REFUSES, leaving the live
+  //     worktree untouched.
+  {
+    const dangerousUnregisteredKey = "svc.stale-9002";
+    const axisPath = path.join(WORKTREES_DIR, "projSwlSvc", dangerousUnregisteredKey);
+    fs.mkdirSync(axisPath, { recursive: true });
+    fs.writeFileSync(path.join(axisPath, "leftover.txt"), "half-removed orphan content\n");
+
+    const sessions = new SessionService(db, {}, new OrchestrationControl());
+    const listing = await sessions.listStaleWorktreeLeftovers();
+    check("(29) GET lists the collision-shaped leftover BEFORE any live child exists under it", !!listing.entries.find((e) => e.path === axisPath));
+
+    // Now a live task-shaped worktree child appears underneath — eligibility changes between GET and POST.
+    const liveChildPath = resolveWorktreePath("projSwlSvc", "taskToctou-live", dangerousUnregisteredKey);
+    fs.mkdirSync(liveChildPath, { recursive: true });
+    fs.writeFileSync(path.join(liveChildPath, ".git"), "gitdir: /some/where/.git/worktrees/taskToctou-live\n");
+
+    const outcome = await sessions.reclaimStaleWorktreeLeftover(axisPath);
+    check("(29) AMENDMENT 3: the POST's fresh re-derivation (with the probe) now excludes this path and REFUSES — never trusting the GET's earlier eligibility", outcome.outcome === "refused");
+    check("(29) card 04e4262d round 4, M4: the refusal reason starts with \"not-found\" — so a future earlier guard in the refusal chain can't satisfy this assertion by returning some OTHER refused reason", (outcome.reason ?? "").startsWith("not-found"));
+    check("(29) the axis dir still exists (never deleted)", fs.existsSync(axisPath));
+    check("(29) the live child underneath it is untouched", fs.existsSync(path.join(liveChildPath, ".git")));
+
+    fs.rmSync(liveChildPath, { recursive: true, force: true });
+    fs.rmSync(axisPath, { recursive: true, force: true });
+  }
+
+  // --- (34) card 04e4262d round 4 (Code Review c1929951, M1), POST-SIDE: the exact repro — a PRIMARY
+  //     task worktree missing its `.git` link, holding real content PLUS a `.stale-<ts>`-suffixed subdir
+  //     of its own — must have its inner leftover REFUSED by reclaimStaleWorktreeLeftover (POST), with a
+  //     "not-found" reason, because the fresh re-derivation (now skipping task-key-shaped entries) never
+  //     lists it as eligible in the first place. Before the M1 fix this call reported "removed" and
+  //     actually deleted the inner dir.
+  {
+    const taskKeyShapedName = "aabbccddeeff"; // matches TASK_KEY_SHAPE_RE exactly (12 lowercase hex)
+    const primaryPath = path.join(WORKTREES_DIR, "projSwlSvc", taskKeyShapedName);
+    fs.mkdirSync(path.join(primaryPath, "src"), { recursive: true });
+    fs.writeFileSync(path.join(primaryPath, "src", "x"), "real user content\n"); // NO .git
+    const innerStalePath = mkStaleAside(path.join(primaryPath, "cache"), 1700000000064);
+
+    const sessions = new SessionService(db, {}, new OrchestrationControl());
+    const outcome = await sessions.reclaimStaleWorktreeLeftover(innerStalePath);
+    check("(34) M1 FIX, POST-SIDE: the exact repro's inner leftover is REFUSED, never deleted", outcome.outcome === "refused");
+    check("(34) the refusal reason starts with \"not-found\" (the fresh re-derivation never listed it as eligible)", (outcome.reason ?? "").startsWith("not-found"));
+    check("(34) real user content is still intact on disk", fs.existsSync(path.join(primaryPath, "src", "x")));
+    check("(34) the inner stale dir itself is also untouched", fs.existsSync(innerStalePath));
+
+    fs.rmSync(primaryPath, { recursive: true, force: true });
   }
 } finally {
   db.close();

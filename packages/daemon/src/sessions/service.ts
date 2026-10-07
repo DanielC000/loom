@@ -24438,7 +24438,7 @@ export class SessionService {
     // explicitly never touches (createWorktree/reclaimWedgedWorktreePathForSpawn rename a half-removed or
     // wedged worktree dir aside, never delete it). Count-only (see listStaleAsideWorktrees's own doc) —
     // byte totals are GET /api/worktrees/stale-leftovers's job, called deliberately, not every boot.
-    const staleAsideLeftovers = listStaleAsideWorktrees(WORKTREES_DIR, staleAsideRepoKeysByProject(this.db));
+    const staleAsideLeftovers = listStaleAsideWorktrees(WORKTREES_DIR, staleAsideRepoKeysByProject(this.db), { probeUnregistered: true });
     if (staleAsideLeftovers.length > 0) {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${staleAsideLeftovers.length} renamed-aside stale worktree dir(s) found under WORKTREES_DIR — never auto-deleted; see GET /api/worktrees/stale-leftovers to review and reclaim.`);
@@ -24602,7 +24602,7 @@ export class SessionService {
    * is the correct place for that cost.
    */
   async listStaleWorktreeLeftovers(): Promise<{ count: number; totalBytes: number; truncated: boolean; entries: StaleWorktreeLeftoverEntry[] }> {
-    const cheap = listStaleAsideWorktrees(WORKTREES_DIR, staleAsideRepoKeysByProject(this.db));
+    const cheap = listStaleAsideWorktrees(WORKTREES_DIR, staleAsideRepoKeysByProject(this.db), { probeUnregistered: true });
     let totalBytes = 0;
     let truncated = false;
     const entries: StaleWorktreeLeftoverEntry[] = [];
@@ -24630,7 +24630,7 @@ export class SessionService {
    */
   async reclaimStaleWorktreeLeftover(requestedPath: string): Promise<StaleAsideReclaimOutcome> {
     const repoKeysByProject = staleAsideRepoKeysByProject(this.db);
-    const fresh = listStaleAsideWorktrees(WORKTREES_DIR, repoKeysByProject);
+    const fresh = listStaleAsideWorktrees(WORKTREES_DIR, repoKeysByProject, { probeUnregistered: true });
     const normTarget = normForCompare(requestedPath);
     const match = fresh.find((e) => normForCompare(e.path) === normTarget);
     if (!match) {

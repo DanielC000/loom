@@ -67,6 +67,78 @@ calls on the SAME path can both pass the live-claimant/confinement checks and bo
 reports accordingly, but the measured size was already read by both before either deleted). Harmless
 double-counting in a human-triggered, singular-reclaim surface — not worth a lock for.
 
+## Round 3 (card `04e4262d`, Code Review `b674e1fb` minor #2) — a narrow, opt-in exception to "do not widen the probe"
+
+Round 1's registry-driven design has a gap: removing a repoKey from a project's `repos` is a supported
+operation, and once removed, its axis dir no longer appears in `repoKeysByProject` — so the level-2 loop
+falls to the primary-leaf fallback, which never matches an (unsuffixed) axis-dir name, and every leftover
+nested one level below it becomes permanently invisible: no `served_status` count, no GET listing, no
+boot warning, and the reclaim POST says "not-found".
+
+This is fixed WITHOUT widening the probe unconditionally (the "Do not" below still holds for the DEFAULT
+case) — `listStaleAsideWorktrees` gained a third, optional `opts.probeUnregistered` parameter, default
+`false`/omitted. `served-status.ts`'s polled call never passes it, so that surface stays byte-identical
+in both output AND cost — it remains a deliberate, accepted undercount for this one edge case, same
+posture as its existing count-vs-bytes split. Boot-reconcile's warning and both the GET listing and POST
+reclaim's fresh re-derivation (`SessionService`) now pass `probeUnregistered: true` — these are exactly
+the "deliberate, not polled" surfaces round 1 already carved byte-measurement out to.
+
+With the flag on, an unregistered level-2 entry gets:
+
+1. **Suffix-named (today's primary-leaf case), unchanged, PLUS a collision backstop that runs
+   UNCONDITIONALLY (round 4 amendment — see below).** The basename-only check is NOT touched — a
+   renamed-aside leaf is reported with no `.git`-presence check at all, because `renameWorktreeDirAside`
+   is a bare rename that never touches contents, and NOT every caller guarantees the leaf had no `.git`
+   link before the rename (`reclaimWedgedWorktreePathForSpawn`'s wedge-retry rename does not share
+   `createWorktree`'s own `!worktreeHasGitLink` precondition). The ONLY addition is: if
+   `findNestedWorktreeLikeChild` (the same shape+`.git`-FILE proof `c994ffeb` established) finds a LIVE
+   nested worktree underneath, the entry is excluded — it's the round-2 "svc.stale-1" collision shape
+   again, just now for a repoKey that is no longer (or never was) registered.
+2. **Non-suffix (the gap-closing case).** Only descended into once proven the entry is not a PRIMARY task
+   worktree key by shape (round 4 amendment — see below) and holds NO `.git` entry of its own — file, dir,
+   or link, readable or not, case-folded on win32 (round 4 amendment): any plain name-presence hit for
+   `.git` in the one bounded `readdirSync` already being done, never a separate stat. A dir that has one is
+   a checkout, a nested clone, or a worktree mid-`git worktree add`, and its content is arbitrary/
+   user-controlled, never a Loom-managed container shape — it is excluded before anything inside it is
+   read. A dir with none is treated exactly like a registered axis dir already was: its children are
+   matched by basename only, and any `.stale-<ts>`-suffixed one is reported.
+
+## Round 4 (card `04e4262d`, Code Review `c1929951`) — a host-delete exposure in the gap-closing probe, plus two smaller fixes
+
+Round 3's gap-closing probe (item 2 above) had a real host-delete exposure: it keyed solely on "does this
+entry have a `.git` entry of its own", with no check that the entry wasn't already a REAL task worktree. A
+PRIMARY task worktree whose `.git` is transiently missing (e.g. a crash mid-`git worktree add`, or a wedge
+in progress) is indistinguishable from a removed/never-registered repo-axis container by that test alone —
+so the probe descended into it and surfaced (and reclaim then deleted) ordinary user content sitting
+inside a live task worktree. Repro: `projR/0123456789ab/{src/x, cache.stale-123}` with no `.git` at
+`projR/0123456789ab/` — `cache.stale-123` was listed, and the reclaim POST reported `"removed"`. The POST's
+live-claimant check (`findLiveSessionClaimingWorktreePath`) is an exact-path match against the session's
+own worktree path (`projR/0123456789ab`), so it never protected a child path one level below.
+
+Fixed in `listStaleAsideWorktrees`'s gap-closing branch: before probing an unregistered, non-suffix level-2
+entry at all, skip it outright if its name matches `TASK_KEY_SHAPE_RE` (the same 12-lowercase-hex shape a
+primary task worktree's basename always is). `validateRepoRegistry` (`projects/repos.ts`) already rejects
+any NEW repoKey of this shape, so going forward this name shape can only ever be a real primary task
+worktree — never a legitimate repo-axis container. The one residual: a repoKey registered BEFORE that
+guard existed (grandfathered via `opts.existingKeys`) could still carry this exact shape; such a key's
+leftovers become permanently undercounted by this probe, same accepted-undercount posture as round 3's own
+`served_status` tradeoff — there is no registry lookup available at this point in the branch (it already
+fell through "not a registered key") to tell the two apart.
+
+Two smaller fixes landed alongside it:
+
+- **The collision backstop (item 1 above) is now unconditional**, not gated behind `probeUnregistered`.
+  Gating it meant `served_status` (which never passes `probeUnregistered`) could OVERcount relative to the
+  GET listing for a suffix-named unregistered entry that collided with a live nested worktree — the GET
+  listing (with the backstop) would exclude it while `served_status` (without it) would still count it.
+  Running the backstop unconditionally is a single extra bounded `readdirSync`, charged only for an entry
+  that already matches the rare `.stale-<ts>` suffix shape — not the per-poll "readdir every live
+  worktree's root content" cost the "Do not" rule below still forbids; that rule is about the UNSUFFIXED
+  gap-closing descent (item 2), not this backstop.
+- **The `.git`-entry presence check in the gap-closing probe now folds case on win32**, mirroring
+  `isRegisteredRepoKeyName`'s own platform-conditional fold — a bare `c.name === ".git"` missed a
+  differently-cased `.GIT` entry even though win32's real filesystem treats it as the same container.
+
 ## Do not
 
 - Do not add byte-size measurement (or any `fs.stat`/`measureDirSize` call) to `listStaleAsideWorktrees`
@@ -74,12 +146,24 @@ double-counting in a human-triggered, singular-reclaim surface — not worth a l
   `served_status`/`deploy-status` read. Put byte totals in a caller that is invoked deliberately instead
   (the REST listing, the reclaim result). A single `lstatSync` per NAME-MATCHED candidate (round 2, item
   4 above) is NOT this — it's bounded by match count, never a scan-wide stat.
-- Do not widen the level-2→level-3 probe to "any entry not matching the stale-leaf regex" — that
-  reintroduces the per-poll readdir-every-live-worktree cost. Only probe an entry that
-  `repoKeysByProject` names as a real registered repoKey for that project.
+- Do not widen the level-2→level-3 probe to "any entry not matching the stale-leaf regex" UNCONDITIONALLY
+  — that reintroduces the per-poll readdir-every-live-worktree cost onto `served-status.ts`'s polled call,
+  which must stay on the default (`repoKeysByProject`-only) path, no `opts.probeUnregistered`, forever.
+  **Round 3** added a narrow, explicitly OPT-IN widening (`opts.probeUnregistered`) for the three
+  deliberately-not-polled callers (boot-reconcile's warning, the GET listing, the POST reclaim's fresh
+  re-derivation) — see Round 3 above for the safety argument. Do not flip that default to `true`, and do
+  not let `served-status.ts` start passing it.
 - Do not go back to checking the basename-shape regex before the registry in the level-2 loop (round 2
   Major, above) — the registry check must run first, or a registered repoKey shaped like `.stale-<ts>`
   is indistinguishable from a real leftover again.
 - Do not let `reclaimStaleAsideWorktreeDir`/`reclaimStaleWorktreeLeftover` rely SOLELY on a fresh
   `listStaleAsideWorktrees()` call having excluded a path — always also call `isRegisteredRepoKeyAxisDir`
   independently before removing anything matching the stale-aside shape.
+- Do not let the gap-closing probe (round 3 item 2) descend into a level-2 entry shaped like a primary
+  task worktree key (`TASK_KEY_SHAPE_RE`) without first checking the registry — round 4's fix is to skip
+  it outright by shape; going back to "probe it like any other non-suffix entry" reopens the host-delete
+  exposure that round found (listing, and then reclaiming, real content from inside a live task worktree
+  whose `.git` link was transiently absent).
+- Do not re-gate the collision backstop (round 3 item 1) behind `opts.probeUnregistered` again — round 4
+  made it unconditional specifically so `served_status` and the GET listing agree on this one shape; see
+  Round 4 above for the overcount it previously caused.

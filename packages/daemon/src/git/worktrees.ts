@@ -1760,7 +1760,14 @@ function isRegisteredRepoKeyName(name: string, keys: ReadonlySet<string> | undef
 export function listStaleAsideWorktrees(
   worktreesRoot: string = WORKTREES_DIR,
   repoKeysByProject?: ReadonlyMap<string, ReadonlySet<string>>,
+  // Card 04e4262d — opt-in only, so an un-opted-in caller (served-status.ts's polled read) stays
+  // byte-identical in both output AND cost.
+  //
+  // @decision ad34efb5 — round 3 amends this record's own "do not widen the probe" rule with a narrow,
+  // explicitly opt-in exception; see that record for the full reasoning.
+  opts: { probeUnregistered?: boolean } = {},
 ): StaleAsideWorktreeEntry[] {
+  const probeUnregistered = opts.probeUnregistered === true;
   const entries: StaleAsideWorktreeEntry[] = [];
   let visited = 0;
   let projectDirs: fs.Dirent[];
@@ -1806,8 +1813,69 @@ export function listStaleAsideWorktrees(
         continue; // a registered repoKey dir is never itself a stale leaf — nothing more to do with it
       }
       const staleSinceMs = parseStaleSinceMs(entry.name);
-      if (staleSinceMs !== null && !isLikelyJunctionOrSymlink(entryPath)) {
+      if (staleSinceMs !== null) {
+        // Unchanged from before card 04e4262d: a renamed-aside leaf is reported purely by its own
+        // basename, with NO `.git`-presence check — `renameWorktreeDirAside` is a bare `fs.renameSync`
+        // that never touches contents, and NOT every caller guarantees the leaf had no `.git` link
+        // before the rename (`createWorktree` does; `reclaimWedgedWorktreePathForSpawn`'s wedge-retry
+        // rename does not — see its own doc). Checking `.git` here would wrongly hide exactly the
+        // leftover this function exists to surface.
+        if (isLikelyJunctionOrSymlink(entryPath)) continue;
+        // Card 04e4262d round 3 Code Review M3 — collision backstop, now UNCONDITIONAL (previously gated
+        // behind the same opt-in as the rest of this probe, which let `served_status` OVERcount relative
+        // to the GET listing for this one shape). One extra bounded `readdirSync` per suffix-named
+        // UNREGISTERED candidate — a rare entry, not the per-poll "readdir every live worktree" cost the
+        // decision record's "do not widen" rule targets. A removed-or-never-registered repoKey axis dir
+        // can itself be named like a leftover (the round-2 "svc.stale-1" collision shape, this time NOT in
+        // the registry) while still holding a LIVE nested worktree one level below.
+        // `findNestedWorktreeLikeChild` is the exact shape+`.git`-FILE proof c994ffeb already established
+        // for this — never "any `.git` entry".
+        if (findNestedWorktreeLikeChild(entryPath)) continue;
         entries.push({ path: entryPath, projectId, staleSinceMs });
+        continue;
+      }
+      if (!probeUnregistered) continue; // today's behavior, byte-identical in output AND cost when off
+      // Card 04e4262d Code Review M1: never descend into an entry shaped like a PRIMARY task worktree key
+      // (12 lowercase hex chars) — `validateRepoRegistry` (projects/repos.ts) rejects any NEW repoKey of
+      // this shape outright, so it can never legitimately be a repo-axis container going forward; the
+      // ONLY way this name shape appears here is as an actual primary task worktree (whose own `.git` may
+      // be transiently absent — e.g. mid-`git worktree add`, or between a wedge-retry rename-aside and its
+      // own completion) or a grandfathered legacy repoKey predating that guard. Descending into either
+      // would list and reclaim real user content from inside a live task worktree (the exact repro: a
+      // primary worktree missing its `.git` link, holding a `.stale-<ts>`-suffixed subdir of its own).
+      // Undercounting a grandfathered legacy repoKey this way is an accepted, narrow tradeoff — it was
+      // already excluded from re-validation on write (existingKeys), and this probe has no way to tell it
+      // apart from a real task worktree without a registry lookup this branch (by construction) already
+      // failed to resolve.
+      if (TASK_KEY_SHAPE_RE.test(entry.name)) continue;
+      // Card 04e4262d — the gap-closing probe: `entry` is neither suffix-shaped nor a currently-registered
+      // repoKey, but it may be a (removed, or never-registered) repo-axis container whose LEAVES are still
+      // worth surfacing. Only ever descend once proven this entry holds NO `.git` entry of its OWN, of any
+      // kind (file, dir, or link, readable or not — a plain name match in the listing below, never a
+      // stat) — a live primary worktree, an ordinary nested clone/submodule, or a worktree mid-`git
+      // worktree add` all have one, and in every one of those cases the rest of its content is arbitrary,
+      // user-controlled checkout content, never a Loom-managed container shape, so it must never be read.
+      if (isLikelyJunctionOrSymlink(entryPath)) continue; // never probe through a planted link
+      let level3: fs.Dirent[];
+      try {
+        level3 = fs.readdirSync(entryPath, { withFileTypes: true });
+      } catch { continue; }
+      // Card 04e4262d Code Review M2: fold case ON WIN32 ONLY (mirrors isRegisteredRepoKeyName's own
+      // platform-conditional fold) — a bare `c.name === ".git"` missed a differently-cased `.GIT` entry on
+      // a real win32 filesystem, which IS the same container to the OS (case-insensitive) even though this
+      // in-memory Dirent-name comparison is not.
+      const hasOwnGitEntry = level3.some((c) => c.name === ".git")
+        || (process.platform === "win32" && level3.some((c) => c.name.toLowerCase() === ".git"));
+      if (hasOwnGitEntry) continue;
+      for (const child of level3) {
+        if (visited >= STALE_ASIDE_SCAN_MAX_ENTRIES) break;
+        visited++;
+        if (!child.isDirectory()) continue;
+        const childPath = path.join(entryPath, child.name);
+        const childStaleSinceMs = parseStaleSinceMs(child.name);
+        if (childStaleSinceMs !== null && !isLikelyJunctionOrSymlink(childPath)) {
+          entries.push({ path: childPath, projectId, staleSinceMs: childStaleSinceMs });
+        }
       }
     }
   }
