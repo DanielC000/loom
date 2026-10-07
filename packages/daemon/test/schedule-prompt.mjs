@@ -179,25 +179,41 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   const svc = new SessionService(db, host, new OrchestrationControl());
   const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 
+  // Card c0a7f564: a MANAGER's composed startupPrompt (unlike auditor/workspace-auditor) runs through
+  // composeManagerStartupPrompt, which calls the real, uncached computeDeployStaleness() on EVERY
+  // startManager call — several real `git` subprocess calls, each bound by deploy-staleness.ts's
+  // hardcoded 1000ms GIT_TIMEOUT_MS. SessionService.startManager never threads a stalenessOverride
+  // through, so this is not injectable from a test at this level. Under ordinary host contention
+  // (measured: 6/10 bare reruns of this file failed before this fix — see this card's worker_report),
+  // one of several per-call git subprocess calls can occasionally miss that timeout on SOME but not
+  // all of the startManager calls below, intermittently inserting/removing a one-line
+  // `[loom:deploy-stale]`/`[loom:deploy-staleness-unknown]` advisory immediately before the
+  // "## Where things live" heading. That's real environmental noise about THIS repo's own git state —
+  // unrelated to what this file actually tests (schedule-prompt composition) — so strip it before any
+  // byte-identical comparison rather than asserting on it.
+  const stripVolatileDeployNote = (s) =>
+    s == null ? s : s.replace(/\[loom:deploy-stale(?:ness-unknown)?\][^\n]*\n\n/g, "");
+  const mgrPrompt = (sid) => stripVolatileDeployNote(optsFor(sid).startupPrompt);
+
   // ===== MANAGER: unset variants are byte-identical to each other =====
-  const mOmitted = optsFor(svc.startManager("agentMgr").id);
-  const mNull = optsFor(svc.startManager("agentMgr", null).id);
-  const mUndef = optsFor(svc.startManager("agentMgr", undefined).id);
-  check("(3) manager: omitted prompt === explicit null (byte-identical)", mOmitted.startupPrompt === mNull.startupPrompt);
-  check("(3) manager: omitted prompt === explicit undefined (byte-identical)", mOmitted.startupPrompt === mUndef.startupPrompt);
-  check("(3) manager: unset composed prompt carries no 'Scheduled task' block", !mOmitted.startupPrompt.includes("Scheduled task"));
+  const mOmitted = mgrPrompt(svc.startManager("agentMgr").id);
+  const mNull = mgrPrompt(svc.startManager("agentMgr", null).id);
+  const mUndef = mgrPrompt(svc.startManager("agentMgr", undefined).id);
+  check("(3) manager: omitted prompt === explicit null (byte-identical)", mOmitted === mNull);
+  check("(3) manager: omitted prompt === explicit undefined (byte-identical)", mOmitted === mUndef);
+  check("(3) manager: unset composed prompt carries no 'Scheduled task' block", !mOmitted.includes("Scheduled task"));
   check("(3) manager: unset composed prompt still carries the 'Where things live' block + own doctrine (untouched by this feature)",
-    mOmitted.startupPrompt.includes("## Where things live") && mOmitted.startupPrompt.includes("AGENT_MGR_DOCTRINE"));
+    mOmitted.includes("## Where things live") && mOmitted.includes("AGENT_MGR_DOCTRINE"));
 
   // ===== MANAGER: prompt SET composes agent-first, custom-prompt-appended =====
-  const mSet = optsFor(svc.startManager("agentMgr", "Review the open PRs.").id);
+  const mSet = mgrPrompt(svc.startManager("agentMgr", "Review the open PRs.").id);
   check("(2) manager: prompt-set startupPrompt is the UNSET composition + the appended block, verbatim (prefix-preserved)",
-    mSet.startupPrompt.startsWith(mOmitted.startupPrompt) && mSet.startupPrompt.length > mOmitted.startupPrompt.length);
+    mSet.startsWith(mOmitted) && mSet.length > mOmitted.length);
   check("(2) manager: prompt-set startupPrompt carries the delimited 'Scheduled task:' block with the custom text",
-    mSet.startupPrompt.includes("---\nScheduled task:\nReview the open PRs."));
+    mSet.includes("---\nScheduled task:\nReview the open PRs."));
   check("(2) manager: agent's own doctrine + 'Where things live' block still precede the custom block",
-    mSet.startupPrompt.indexOf("Where things live") < mSet.startupPrompt.indexOf("AGENT_MGR_DOCTRINE") &&
-    mSet.startupPrompt.indexOf("AGENT_MGR_DOCTRINE") < mSet.startupPrompt.indexOf("Scheduled task"));
+    mSet.indexOf("Where things live") < mSet.indexOf("AGENT_MGR_DOCTRINE") &&
+    mSet.indexOf("AGENT_MGR_DOCTRINE") < mSet.indexOf("Scheduled task"));
 
   // ===== AUDITOR: same contract, but NO 'Where things live' block (manager-only) =====
   const aOmitted = optsFor(svc.startAuditor("agentAud").id);
