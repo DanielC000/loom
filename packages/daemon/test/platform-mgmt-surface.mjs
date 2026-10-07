@@ -465,6 +465,24 @@ try {
   check("schedule_update: invalid cron rejected", (await call("schedule_update", { scheduleId: sc.id, cron: "bogus" })).error === "invalid cron expression");
   check("schedule_update: 404 on an unknown schedule", (await call("schedule_update", { scheduleId: "ghost", enabled: true })).error === "schedule not found");
 
+  // ===================== card acd3c688 round 2: an agent-originated `kind` change on a HUMAN-created
+  // schedule resets createdBy to "agent" (fail-closed) — the Lead's own schedule_update is the one tool
+  // that can change `kind` at all; a human-created row must not go on firing under the human bypass for
+  // a role the human never chose for that kind. =====================
+  db.insertSchedule({ id: "sched-human-kind", agentId: "agentMgr", cron: "0 9 * * *", enabled: true, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "human" });
+  check("(acd3c688) setup: the seeded schedule is createdBy:human", db.getSchedule("sched-human-kind")?.createdBy === "human");
+  const suKind = await call("schedule_update", { scheduleId: "sched-human-kind", kind: "auditor" });
+  check("(acd3c688) schedule_update: the kind change itself still applies", suKind.kind === "auditor" && !suKind.error);
+  check("(acd3c688) schedule_update: an agent-originated kind change RESETS createdBy to 'agent' (fail-closed)", db.getSchedule("sched-human-kind")?.createdBy === "agent");
+  // CONTROL: updating a field OTHER than kind on the same human-created row leaves createdBy untouched.
+  db.insertSchedule({ id: "sched-human-nokind", agentId: "agentMgr", cron: "0 9 * * *", enabled: true, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "human" });
+  await call("schedule_update", { scheduleId: "sched-human-nokind", enabled: false });
+  check("(acd3c688) CONTROL: an update that does NOT touch kind leaves a human-created row's createdBy untouched", db.getSchedule("sched-human-nokind")?.createdBy === "human");
+  // CONTROL: a kind change on an already agent-created row is a no-op for createdBy (stays "agent").
+  const scAgent = await call("schedule_create", { agentId: "agentMgr", cron: "0 10 * * *" });
+  await call("schedule_update", { scheduleId: scAgent.id, kind: "workspace-auditor" });
+  check("(acd3c688) CONTROL: a kind change on an already agent-created row stays createdBy:agent", db.getSchedule(scAgent.id)?.createdBy === "agent");
+
   // ===================== (f) template_list / template_apply (onboarding C2, mirrored onto the Lead) =====
   const templates = await call("template_list", {});
   check("(f) template_list: returns both canonical templates", Array.isArray(templates) && templates.length === 2);

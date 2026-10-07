@@ -1968,6 +1968,9 @@ const SCHEDULE_ADDED_COLUMNS: Record<string, string> = {
   // Deferral observability (card 53edd8d5). Nullable; legacy rows backfill to NULL = not deferred.
   last_deferred_at: "TEXT",
   last_deferred_reason: "TEXT",
+  // @decision acd3c688 — "human" | "agent" provenance, stamped at all 3 insertSchedule call sites.
+  // Nullable; legacy rows backfill to NULL, read as "agent" (fail-closed) by scheduleCreatedByIsHuman.
+  created_by: "TEXT",
 };
 
 /**
@@ -8098,9 +8101,9 @@ export class Db {
   // --- schedules (phase-2 Pillar B) ---
   insertSchedule(s: Schedule): void {
     this.db.prepare(
-      `INSERT INTO schedules (id,name,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind,prompt)
-       VALUES (@id,@name,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt,@kind,@prompt)`,
-    ).run({ ...s, name: scheduleNameForInsert(s.name, s.cron), enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null, kind: s.kind ?? "manager", prompt: normalizeSchedulePrompt(s.prompt) ?? null });
+      `INSERT INTO schedules (id,name,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind,prompt,created_by)
+       VALUES (@id,@name,@agentId,@cron,@enabled,@nextFireAt,@lastFiredAt,@createdAt,@kind,@prompt,@createdBy)`,
+    ).run({ ...s, name: scheduleNameForInsert(s.name, s.cron), enabled: s.enabled ? 1 : 0, lastFiredAt: s.lastFiredAt ?? null, kind: s.kind ?? "manager", prompt: normalizeSchedulePrompt(s.prompt) ?? null, createdBy: s.createdBy ?? null });
   }
   listSchedules(): Schedule[] {
     return (this.db.prepare("SELECT * FROM schedules ORDER BY created_at").all() as Row[]).map(toSchedule);
@@ -8110,7 +8113,7 @@ export class Db {
     return r ? toSchedule(r) : undefined;
   }
   /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
-  updateSchedule(id: string, patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null; lastDeferredAt?: string | null; lastDeferredReason?: string | null }): void {
+  updateSchedule(id: string, patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null; lastDeferredAt?: string | null; lastDeferredReason?: string | null; createdBy?: "human" | "agent" }): void {
     const cols: Record<string, unknown> = {
       // A blank rename normalizes to undefined (omit) — never blanks an existing name (the create/rename
       // surfaces already reject a blank name, so this is the belt-and-suspenders guard).
@@ -8121,6 +8124,9 @@ export class Db {
       last_fired_at: patch.lastFiredAt,
       kind: patch.kind,
       prompt: normalizeSchedulePrompt(patch.prompt),
+      // @decision acd3c688 — an agent-originated kind change resets a human-created row's provenance;
+      // omitted (undefined) for every other updateSchedule caller — byte-identical.
+      created_by: patch.createdBy,
       // Explicit null (not undefined) clears the deferral columns — the caller (Scheduler.start()'s
       // reconcile path) passes null when it advances a DISABLED schedule's stale next_fire_at, so the
       // badge doesn't linger past an episode that ended without a real fire. That same reconcile passes
@@ -10541,6 +10547,7 @@ function toSchedule(r0: unknown): Schedule {
     prompt: (r.prompt as string | null) ?? null,
     lastDeferredAt: (r.last_deferred_at as string) ?? null,
     lastDeferredReason: (r.last_deferred_reason as string) ?? null,
+    createdBy: (r.created_by as Schedule["createdBy"]) ?? null, // legacy rows (pre-acd3c688) → null
   };
 }
 function toWake(r0: unknown): Wake {

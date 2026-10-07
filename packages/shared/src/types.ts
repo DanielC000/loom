@@ -3336,6 +3336,11 @@ export interface Schedule {
   /** The human-readable reason for the current deferral (e.g. "manager cap (3) reached"), paired with
    *  `lastDeferredAt`. null exactly when `lastDeferredAt` is null. */
   lastDeferredReason?: string | null;
+  /**
+   * @decision acd3c688 — provenance, stamped once at creation, never re-derived at fire time. `null`
+   * (a legacy row) is treated the SAME as `"agent"` (fail-closed) — see the decision record.
+   */
+  createdBy?: "human" | "agent" | null;
 }
 
 /**

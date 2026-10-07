@@ -13,6 +13,7 @@ import { expandTilde } from "../paths.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { recordProfileGrantReach, recordAgentProfileRebindReach, grantFieldsOf, setupVisibleGrantReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
+import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS, isHumanSetPermissionMode, humanSetPermissionModeRejectionMessage } from "./platform.js";
@@ -639,6 +640,8 @@ export class SetupMcpRouter {
             agentId: resolved.id, agentName: resolved.name, projectId: resolved.projectId,
             before: beforeFields, after: afterFields, source: "setup",
           });
+          // @decision acd3c688 — agent-surface rebind: reset any human-created schedule's provenance.
+          resetScheduleProvenanceOnAgentRebind(db, resolved.id);
         }
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
@@ -843,6 +846,8 @@ export class SetupMcpRouter {
           before: beforeFields, after: afterFields, source: "setup",
         });
         db.updateAgent(agent.id, { profileId });
+        // @decision acd3c688 — agent-surface rebind: reset any human-created schedule's provenance.
+        resetScheduleProvenanceOnAgentRebind(db, agent.id);
         const updated = agentFields(db.getAgent(agent.id))!;
         return ok(rebindReach ? { ...updated, rebindReach } : updated);
       },

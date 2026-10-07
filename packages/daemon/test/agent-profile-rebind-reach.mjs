@@ -37,9 +37,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (F) Durability: the event survives deleteAgent's cascade — VERIFIED as INERT-but-harmless (the row
 //       is managerSessionId:"" so the session-keyed cascade can never reach it either way; see the
 //       decision record's own correction of this point).
-//   (G) RED-FIRST: before trusting any GREEN above, this file's own header documents the manual revert
+//   (G) card acd3c688 round 3: `resetScheduleProvenanceOnAgentRebind` (orchestration/scheduler.ts),
+//       called from every AGENT-surface rebind site (Setup agent_update/profile_assign, Platform
+//       agent_update/profile_assign, Manager assignAgentProfile) — never from REST. A createdBy:"human"
+//       schedule TARGETING the rebound agent is reset to createdBy:"agent" on each of the five; a sibling
+//       human-created schedule targeting a DIFFERENT agent is untouched; REST POST /api/agents/:id leaves
+//       a human-created schedule's provenance alone (human intent stays human intent). See
+//       docs/decisions/acd3c688-explicit-role-grant-carryover.md.
+//   (H) RED-FIRST: before trusting any GREEN above, this file's own header documents the manual revert
 //       proof (see the worker's done-report) — the specific checks here were confirmed to FAIL against
-//       the pre-fix call sites (no refusal, no rebindReach, no event) before the fix landed.
+//       the pre-fix call sites (no refusal, no rebindReach, no event) before the fix landed. Section (G)'s
+//       own RED-first proof is separate (see its own comment) since it was added in round 3.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-profile-rebind-reach.mjs
 import fs from "node:fs";
@@ -421,8 +429,119 @@ const parseMcp = (res) => JSON.parse(res.content[0].text);
   cleanup(e);
 }
 
+// ===================== (G) card acd3c688 round 3: schedule provenance reset on AGENT-surface rebind ======
+const mkHumanSchedule = (e, id, agentId) => {
+  e.db.insertSchedule({ id, name: id, agentId, cron: "0 9 * * *", enabled: true, nextFireAt: new Date(Date.now() + 86400000).toISOString(), lastFiredAt: null, createdAt: e.now, kind: "manager", prompt: null, createdBy: "human" });
+};
+
+// ---- (G-A) Setup agent_update ----
+{
+  const e = mkDb("sched-setup-agent-update");
+  const client = await mcpClient(new SetupMcpRouter(e.db, {}), "any-caller");
+  const call = (name, args) => client.callTool({ name, arguments: args }).then(parseMcp);
+  const prof1 = mkProfile(e, "prof-gsa-1", { role: "worker" });
+  const prof2 = mkProfile(e, "prof-gsa-2", { role: "worker" });
+  mkAgent(e, "agent-gsa-target", "proj-gsa", "GSA", prof1);
+  mkAgent(e, "agent-gsa-other", "proj-gsa", "GSA", prof1);
+  mkHumanSchedule(e, "sched-gsa-target", "agent-gsa-target");
+  mkHumanSchedule(e, "sched-gsa-other", "agent-gsa-other");
+
+  const res = await call("agent_update", { agentId: "agent-gsa-target", profileId: prof2 });
+  check("(G-A) Setup agent_update: the rebind itself applies with no error", !res.error);
+  check("(G-A) a createdBy:human schedule TARGETING the rebound agent is RESET to createdBy:agent", e.db.getSchedule("sched-gsa-target")?.createdBy === "agent");
+  check("(G-A) a sibling human-created schedule targeting a DIFFERENT agent is UNTOUCHED", e.db.getSchedule("sched-gsa-other")?.createdBy === "human");
+  cleanup(e);
+}
+
+// ---- (G-B) Setup profile_assign ----
+{
+  const e = mkDb("sched-setup-profile-assign");
+  const client = await mcpClient(new SetupMcpRouter(e.db, {}), "any-caller");
+  const call = (name, args) => client.callTool({ name, arguments: args }).then(parseMcp);
+  const prof1 = mkProfile(e, "prof-gsb-1", { role: "worker" });
+  const prof2 = mkProfile(e, "prof-gsb-2", { role: "worker" });
+  mkAgent(e, "agent-gsb-target", "proj-gsb", "GSB", prof1);
+  mkAgent(e, "agent-gsb-other", "proj-gsb", "GSB", prof1);
+  mkHumanSchedule(e, "sched-gsb-target", "agent-gsb-target");
+  mkHumanSchedule(e, "sched-gsb-other", "agent-gsb-other");
+
+  const res = await call("profile_assign", { agentId: "agent-gsb-target", profileId: prof2 });
+  check("(G-B) Setup profile_assign: the rebind itself applies with no error", !res.error);
+  check("(G-B) a createdBy:human schedule TARGETING the rebound agent is RESET to createdBy:agent", e.db.getSchedule("sched-gsb-target")?.createdBy === "agent");
+  check("(G-B) a sibling human-created schedule targeting a DIFFERENT agent is UNTOUCHED", e.db.getSchedule("sched-gsb-other")?.createdBy === "human");
+  cleanup(e);
+}
+
+// ---- (G-C) Platform agent_update + profile_assign ----
+{
+  const e = mkDb("sched-platform-rebind");
+  const client = await mcpClient(new PlatformMcpRouter(e.db, {}), "any-caller");
+  const call = (name, args) => client.callTool({ name, arguments: args }).then(parseMcp);
+  const prof1 = mkProfile(e, "prof-gpc-1", { role: "worker" });
+  const prof2 = mkProfile(e, "prof-gpc-2", { role: "worker" });
+  const prof3 = mkProfile(e, "prof-gpc-3", { role: "worker" });
+  mkAgent(e, "agent-gpc-update", "proj-gpc", "GPC", prof1);
+  mkAgent(e, "agent-gpc-assign", "proj-gpc", "GPC", prof1);
+  mkAgent(e, "agent-gpc-other", "proj-gpc", "GPC", prof1);
+  mkHumanSchedule(e, "sched-gpc-update", "agent-gpc-update");
+  mkHumanSchedule(e, "sched-gpc-assign", "agent-gpc-assign");
+  mkHumanSchedule(e, "sched-gpc-other", "agent-gpc-other");
+
+  const resU = await call("agent_update", { agentId: "agent-gpc-update", profileId: prof2 });
+  check("(G-C) Platform agent_update: the rebind itself applies with no error", !resU.error);
+  check("(G-C) agent_update: a createdBy:human schedule TARGETING the rebound agent is RESET to createdBy:agent", e.db.getSchedule("sched-gpc-update")?.createdBy === "agent");
+
+  const resA = await call("profile_assign", { agentId: "agent-gpc-assign", profileId: prof3 });
+  check("(G-C) Platform profile_assign: the rebind itself applies with no error", !resA.error);
+  check("(G-C) profile_assign: a createdBy:human schedule TARGETING the rebound agent is RESET to createdBy:agent", e.db.getSchedule("sched-gpc-assign")?.createdBy === "agent");
+
+  check("(G-C) a sibling human-created schedule targeting a DIFFERENT (never-rebound) agent is UNTOUCHED", e.db.getSchedule("sched-gpc-other")?.createdBy === "human");
+  cleanup(e);
+}
+
+// ---- (G-D) Manager assignAgentProfile (direct SessionService call) ----
+{
+  const e = mkDb("sched-manager-rebind");
+  const now = e.now;
+  ensureProject(e, "pGSD", "GSD", { reserved: false });
+  const prof1 = mkProfile(e, "prof-gsd-1", { role: "worker" });
+  const prof2 = mkProfile(e, "prof-gsd-2", { role: "worker" });
+  mkAgent(e, "agent-gsd-target", "pGSD", "GSD", prof1);
+  mkAgent(e, "agent-gsd-other", "pGSD", "GSD", prof1);
+  mkHumanSchedule(e, "sched-gsd-target", "agent-gsd-target");
+  mkHumanSchedule(e, "sched-gsd-other", "agent-gsd-other");
+  e.db.insertSession({
+    id: "MGSD", projectId: "pGSD", agentId: "agent-gsd-target", engineSessionId: null, title: null, cwd: tmpHome,
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager", parentSessionId: null,
+  });
+  const svc = new SessionService(e.db, { enqueueStdin: () => ({ delivered: false }) }, new OrchestrationControl());
+
+  svc.assignAgentProfile("MGSD", "agent-gsd-target", prof2);
+  check("(G-D) Manager assignAgentProfile: a createdBy:human schedule TARGETING the rebound agent is RESET to createdBy:agent", e.db.getSchedule("sched-gsd-target")?.createdBy === "agent");
+  check("(G-D) a sibling human-created schedule targeting a DIFFERENT agent is UNTOUCHED", e.db.getSchedule("sched-gsd-other")?.createdBy === "human");
+  cleanup(e);
+}
+
+// ---- (G-E) REST POST /api/agents/:id — NEGATIVE: a human rebind leaves provenance ALONE ----
+{
+  const e = mkDb("sched-rest-rebind");
+  const app = await mkApp(e);
+  const prof1 = mkProfile(e, "prof-gse-1", { role: "worker" });
+  const prof2 = mkProfile(e, "prof-gse-2", { role: "worker" });
+  mkAgent(e, "agent-gse-target", "proj-gse", "GSE", prof1);
+  mkHumanSchedule(e, "sched-gse-target", "agent-gse-target");
+
+  const res = await app.inject({ method: "POST", url: "/api/agents/agent-gse-target", payload: { profileId: prof2 } });
+  check("(G-E) REST POST -> 200", res.statusCode === 200);
+  check("(G-E) the rebind itself applied", e.db.getAgent("agent-gse-target").profileId === prof2);
+  check("(G-E) a HUMAN REST rebind leaves a createdBy:human schedule's provenance UNTOUCHED (human intent stays human intent)",
+    e.db.getSchedule("sched-gse-target")?.createdBy === "human");
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an agent REBIND onto a different, already-existing profile now files an agent_profile_rebind audit event (with a rebindReach response field) on every surface (setup/platform/manager/REST); the manager's agent_assign_profile REFUSES a restrictedTools removal via rebind with no write (its ONLY route to that axis), while Setup/Platform/REST stay audit-only by design (Setup's own round-1 guard was reversed — it was bypassable via profile_update); the event survives deleteAgent's cascade — claude-free, network-free."
+  ? "\n✅ ALL PASS — an agent REBIND onto a different, already-existing profile now files an agent_profile_rebind audit event (with a rebindReach response field) on every surface (setup/platform/manager/REST); the manager's agent_assign_profile REFUSES a restrictedTools removal via rebind with no write (its ONLY route to that axis), while Setup/Platform/REST stay audit-only by design (Setup's own round-1 guard was reversed — it was bypassable via profile_update); the event survives deleteAgent's cascade; and (round 3, card acd3c688) every AGENT-surface rebind resets a createdBy:human schedule targeting that agent to createdBy:agent, never touching a sibling schedule on a different agent or a HUMAN REST rebind — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 cleanupPathSync(tmpHome);
 process.exit(failures === 0 ? 0 : 1);

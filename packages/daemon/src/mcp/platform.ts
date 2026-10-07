@@ -26,6 +26,7 @@ import { resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
+import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler.js";
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { splitGateSteps } from "../orchestration/gate-runner.js";
@@ -1426,6 +1427,8 @@ export class PlatformMcpRouter {
             agentId: resolved.id, agentName: resolved.name, projectId: resolved.projectId,
             before: beforeFields, after: afterFields, source: "platform",
           });
+          // @decision acd3c688 — agent-surface rebind: reset any human-created schedule's provenance.
+          resetScheduleProvenanceOnAgentRebind(db, resolved.id);
         }
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
@@ -2134,6 +2137,8 @@ export class PlatformMcpRouter {
           before: beforeFields, after: afterFields, source: "platform",
         });
         db.updateAgent(agent.id, { profileId });
+        // @decision acd3c688 — agent-surface rebind: reset any human-created schedule's provenance.
+        resetScheduleProvenanceOnAgentRebind(db, agent.id);
         const updated = agentFields(db.getAgent(agent.id))!;
         return ok(rebindReach ? { ...updated, rebindReach } : updated);
       },
@@ -3425,6 +3430,7 @@ export class PlatformMcpRouter {
           nextFireAt: next, lastFiredAt: null, createdAt: new Date().toISOString(),
           kind: kind ?? "manager",
           prompt: prompt ?? null,
+          createdBy: "agent", // the platform MCP surface (card acd3c688)
         };
         db.insertSchedule(schedule);
         return ok(withScheduleTimeEcho(schedule));
@@ -3438,11 +3444,16 @@ export class PlatformMcpRouter {
         inputSchema: strictShape({ scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ scheduleId, cron, enabled, kind, prompt, name }) => {
-        if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found", ...nowEcho() });
-        const patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null } = {};
+        const existing = db.getSchedule(scheduleId);
+        if (!existing) return ok({ error: "schedule not found", ...nowEcho() });
+        const patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null; createdBy?: "human" | "agent" } = {};
         if (typeof name === "string") patch.name = name;
         if (typeof enabled === "boolean") patch.enabled = enabled;
-        if (kind !== undefined) patch.kind = kind;
+        if (kind !== undefined) {
+          patch.kind = kind;
+          // @decision acd3c688 — an agent-originated kind change on a human-created row resets createdBy.
+          if (existing.createdBy === "human") patch.createdBy = "agent";
+        }
         if (prompt !== undefined) patch.prompt = prompt;
         if (typeof cron === "string") {
           try { patch.nextFireAt = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression", ...nowEcho() }); }

@@ -222,6 +222,21 @@ const AGENT_FORBIDDEN_PROFILE_KEY_CARRIED: Record<
 };
 
 /**
+ * Shared by {@link roleChangeCapabilityCarryoverError} and {@link explicitRoleGrantCarryoverError} —
+ * which forbidden-key grants `existing` actually carries, in `AGENT_FORBIDDEN_PROFILE_KEYS` order.
+ */
+function carriedForbiddenGrants(
+  existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>,
+): (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number][] {
+  return AGENT_FORBIDDEN_PROFILE_KEYS.filter((key) => AGENT_FORBIDDEN_PROFILE_KEY_CARRIED[key](existing));
+}
+
+/** Human-readable `key (reason), key (reason), …` for a `carriedForbiddenGrants` result. */
+function describeCarriedGrants(carried: (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number][]): string {
+  return carried.map((k) => `${k} (${AGENT_FORBIDDEN_PROFILE_KEY_REASONS[k]})`).join(", ");
+}
+
+/**
  * @decision 05153988 — refuses an AGENT `profile_update` role CHANGE when the stored profile carries a
  * human-set capability; deliberately includes `browserTesting`, unlike the assign-time checks below.
  */
@@ -231,10 +246,29 @@ export function roleChangeCapabilityCarryoverError(
   existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>,
 ): string | null {
   if ((previousRole ?? null) === (newRole ?? null)) return null; // not a role change
-  const carried = AGENT_FORBIDDEN_PROFILE_KEYS.filter((key) => AGENT_FORBIDDEN_PROFILE_KEY_CARRIED[key](existing));
+  const carried = carriedForbiddenGrants(existing);
   if (carried.length === 0) return null;
-  const reasons = carried.map((k) => `${k} (${AGENT_FORBIDDEN_PROFILE_KEY_REASONS[k]})`).join(", ");
-  return `cannot change role: this profile carries human-set ${reasons} — ask the human to change the role in the Profiles UI`;
+  return `cannot change role: this profile carries human-set ${describeCarriedGrants(carried)} — ask the human to change the role in the Profiles UI`;
+}
+
+/**
+ * @decision acd3c688 — the spawn-time sibling of `roleChangeCapabilityCarryoverError`: refuses an
+ * explicit-role session MINT whose bound profile's own role differs and carries a forbidden-key grant.
+ * `harness` and null→worker are both exempted below — see the decision record for why.
+ */
+export function explicitRoleGrantCarryoverError(
+  profileRole: SessionRole | null | undefined,
+  explicitRole: SessionRole | undefined,
+  existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>,
+): string | null {
+  if (explicitRole === undefined) return null; // no explicit role ⇒ nothing to diverge from (startNew/forcePlain)
+  if ((profileRole ?? null) === explicitRole) return null; // no divergence
+  if (profileRole == null && explicitRole === "worker") return null; // null→worker is not a divergence
+  const carried = carriedForbiddenGrants(existing).filter(
+    (key) => !(key === "harness" && TRANSCRIPT_ROOT_DENY_ROLES.has(explicitRole)),
+  );
+  if (carried.length === 0) return null;
+  return `cannot spawn as role "${explicitRole}": the bound profile's own role is "${profileRole ?? "null"}" and it carries human-set ${describeCarriedGrants(carried)} — ask the human to authorize this spawn, or rebind a profile without them`;
 }
 
 /**

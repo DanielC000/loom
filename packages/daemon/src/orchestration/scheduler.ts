@@ -1,10 +1,32 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
+import type { Schedule } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import { nextFireAt } from "./cron.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 import { isProjectGatedOnPendingOwnerRequest } from "./pending-request-gate.js";
+
+/**
+ * @decision acd3c688 — fail-closed provenance read: a legacy (`null`) `createdBy` is treated the SAME
+ * as `"agent"`, never as `"human"`. See the decision record for the accepted residual this leaves.
+ */
+export function scheduleCreatedByIsHuman(s: Pick<Schedule, "createdBy">): boolean {
+  return s.createdBy === "human";
+}
+
+/**
+ * @decision acd3c688 — any AGENT-surface rebind of an agent's bound profile resets every
+ * `createdBy:"human"` schedule targeting that agent to `"agent"`, fail-closed (never from human REST).
+ * See the decision record for why (browserTesting has no role-match rule).
+ */
+export function resetScheduleProvenanceOnAgentRebind(db: Db, agentId: string): void {
+  for (const s of db.listSchedules()) {
+    if (s.agentId === agentId && s.createdBy === "human") {
+      db.updateSchedule(s.id, { createdBy: "agent" });
+    }
+  }
+}
 
 export interface SchedulerDeps {
   db: Db;
@@ -15,21 +37,23 @@ export interface SchedulerDeps {
    * The optional 2nd arg is the schedule's own `prompt` (appended to the agent's startupPrompt) —
    * undefined/null when unset, so an unset schedule composes byte-identical to today.
    */
-  startManager: (agentId: string, prompt?: string | null) => { id: string };
+  // @decision acd3c688 — the optional 3rd arg carries spawnHumanAuthorized (scheduleCreatedByIsHuman(s)),
+  // bypassing the explicit-role-grant-carryover check ONLY for a schedule stamped createdBy:"human".
+  startManager: (agentId: string, prompt?: string | null, opts?: { spawnHumanAuthorized?: boolean }) => { id: string };
   /**
    * Boots the read-and-file-only Platform Auditor session (P5) — the spawn for a schedule whose
    * `kind` is "auditor". Prod-wired to SessionService.startAuditor; a test injects a recording stub.
    * Optional: a schedule defaults to kind "manager", so a wiring that omits this still drives every
    * legacy (manager) schedule correctly — an auditor schedule then falls back to startManager.
    */
-  startAuditor?: (agentId: string, prompt?: string | null) => { id: string };
+  startAuditor?: (agentId: string, prompt?: string | null, opts?: { spawnHumanAuthorized?: boolean }) => { id: string };
   /**
    * Boots the suggest-only END-USER Workspace Auditor session (B6) — the spawn for a schedule whose
    * `kind` is "workspace-auditor". Prod-wired to SessionService.startWorkspaceAuditor; a test injects a
    * recording stub. Optional, exactly like startAuditor: a wiring that omits it falls back to
    * startManager (so the manager path stays unchanged when the workspace-auditor spawn isn't wired).
    */
-  startWorkspaceAuditor?: (agentId: string, prompt?: string | null) => { id: string };
+  startWorkspaceAuditor?: (agentId: string, prompt?: string | null, opts?: { spawnHumanAuthorized?: boolean }) => { id: string };
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly instead. */
   intervalMs?: number;
   /**
@@ -204,7 +228,7 @@ export class Scheduler {
           s.kind === "workspace-auditor" && this.deps.startWorkspaceAuditor ? this.deps.startWorkspaceAuditor
           : s.kind === "auditor" && this.deps.startAuditor ? this.deps.startAuditor
           : this.deps.startManager;
-        const spawned = startFn(s.agentId, s.prompt);
+        const spawned = startFn(s.agentId, s.prompt, { spawnHumanAuthorized: scheduleCreatedByIsHuman(s) });
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
           managerSessionId: spawned.id, kind: "schedule_fired",

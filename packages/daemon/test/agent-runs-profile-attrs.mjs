@@ -56,6 +56,13 @@ db.insertProfile({ id: "profRun", name: "RunRig", role: null, description: "mode
 db.insertAgent({ id: "agentPinned", projectId: PROJECT_ID, name: "Pinned", startupPrompt: "PINNED_DOCTRINE", position: 0, profileId: "profRun", endpoint: true, ioSchema: null });
 // A plain (no-profile) endpoint agent → the regression guard (byte-identical to before the fix).
 db.insertAgent({ id: "agentPlain", projectId: PROJECT_ID, name: "Plain", startupPrompt: "PLAIN_DOCTRINE", position: 1, profileId: null, endpoint: true, ioSchema: null });
+// Card acd3c688: a grant-carrying OFF-ROLE profile — role "worker" (never "run"), carrying a human-set
+// connections grant — bound to an endpoint agent. startRun's explicit role "run" always diverges from
+// this profile's own role; `resolveAgentSpawn`'s explicit-role-grant-carryover check is deliberately
+// SKIPPED for startRun (it hardcodes every grant field false/absent regardless), so this must neither
+// throw NOR let the grant actually land on the spawned run session.
+db.insertProfile({ id: "profRunGrant", name: "GrantWorkerRig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["c1"] });
+db.insertAgent({ id: "agentGrant", projectId: PROJECT_ID, name: "Grant", startupPrompt: "GRANT_DOCTRINE", position: 2, profileId: "profRunGrant", endpoint: true, ioSchema: null });
 
 // --- fake pty + a PtyHost subclass capturing every SpawnOpts via createPty() ---
 class SeamHost extends createSeamHost(PtyHost) {
@@ -95,6 +102,14 @@ try {
   check("3 plain-agent run: spawn opts.skills is null (deliver all, byte-identical)", (oPlain?.skills ?? null) === null);
   check("3 plain-agent run: DB row skills is null (today's default)", db.getSession(sPlain.id).skills === null);
   check("3 plain-agent run: role still 'run' + loom-run-only MCP", oPlain?.role === "run");
+
+  // ===================== 4. card acd3c688: a grant-carrying off-role profile never leaks its grant =====================
+  const { session: sGrant } = await svc.startRun({ agentId: "agentGrant", input: { q: 3 }, schema: null });
+  const oGrant = optsFor(sGrant.id);
+  check("4 a run under a grant-carrying off-role (worker) profile does NOT throw (the exemption)", !!sGrant);
+  check("4 the spawned run session NEVER carries the profile's connections grant", (db.getSession(sGrant.id).connections ?? []).length === 0);
+  check("4 the spawn opts carry no browser/doc-conversion surface either (every grant field stays hardcoded)", oGrant?.browserTesting === false && oGrant?.documentConversion === false);
+  check("4 role still 'run' (never the profile's 'worker')", oGrant?.role === "run" && db.getSession(sGrant.id).role === "run");
 } finally {
   // GC the disposable run snapshot dirs the test created, then drop the db + temp dirs.
   try { for (const o of host.capture) { if (o.cwd?.startsWith(runSnapshotDir(""))) fs.rmSync(o.cwd, { recursive: true, force: true }); } } catch { /* best-effort */ }
@@ -104,6 +119,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a run honors its agent's profile-resolved model + skills (threaded via resolveAgentSpawn), while role stays 'run' and the MCP surface stays loom-run-ONLY; a plain-agent run drops both (byte-identical) — claude-free, network-free."
+  ? "\n✅ ALL PASS — a run honors its agent's profile-resolved model + skills (threaded via resolveAgentSpawn), while role stays 'run' and the MCP surface stays loom-run-ONLY; a plain-agent run drops both (byte-identical); and a grant-carrying off-role profile never leaks its grant onto the spawned run session (card acd3c688's startRun exemption) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

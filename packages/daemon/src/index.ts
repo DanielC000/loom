@@ -1323,7 +1323,9 @@ async function main(): Promise<void> {
   // card 53edd8d5: `{scheduled:true}` is what pins Session.scheduledSpawn on the spawned row, so ONLY
   // the Scheduler's own manager spawns count against `maxConcurrentManagers` (Db.countLiveScheduledManagers)
   // — every other startManager caller (REST, generic dispatch) omits it and stays unaffected.
-  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt) => sessions.startManager(agentId, prompt, { scheduled: true }), startAuditor: (agentId, prompt) => sessions.startAuditor(agentId, prompt), startWorkspaceAuditor: (agentId, prompt) => sessions.startWorkspaceAuditor(agentId, prompt), intervalMs, maxConcurrentManagers, maxConcurrentAuditors });
+  // @decision acd3c688 — forward the Scheduler's spawnHumanAuthorized opt (derived from the schedule's own
+  // createdBy) alongside the scheduled:true flag; startAuditor/startWorkspaceAuditor forward it as-is.
+  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt, opts) => sessions.startManager(agentId, prompt, { scheduled: true, spawnHumanAuthorized: opts?.spawnHumanAuthorized }), startAuditor: (agentId, prompt, opts) => sessions.startAuditor(agentId, prompt, opts), startWorkspaceAuditor: (agentId, prompt, opts) => sessions.startWorkspaceAuditor(agentId, prompt, opts), intervalMs, maxConcurrentManagers, maxConcurrentAuditors });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);

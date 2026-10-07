@@ -15,7 +15,7 @@ import {
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
-import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError } from "../profiles/validate.js";
+import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError, explicitRoleGrantCarryoverError } from "../profiles/validate.js";
 import { computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
@@ -81,6 +81,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, RESUME_UNKNOWN_REASON_FALLBACK, type ResumeOneResult } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
+import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
 import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision } from "../orchestration/merge-gate-interval.js";
@@ -2992,11 +2993,22 @@ export class SessionService {
   // re-resolve the profile's skills subset on resume/fork/recycle — read the PINNED value off the row.
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
+    // @decision acd3c688 — spawnHumanAuthorized/skipGrantCarryoverCheck gate the explicit-role-grant-carryover
+    // check below; see the decision record for which callers pass which, and why.
+    opts?: { spawnHumanAuthorized?: boolean; skipGrantCarryoverCheck?: boolean },
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined; harnessDefaultSkipped: CodexIncompatibility[] | undefined; harnessRoleForced: { role: SessionRole; agentId: string; profileId: string | null; reason: string } | undefined } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
     const resolved = resolveProfile(agent, profile);
+    if (!opts?.skipGrantCarryoverCheck && !opts?.spawnHumanAuthorized) {
+      const carryoverError = explicitRoleGrantCarryoverError(resolved.role, explicitRole, {
+        connections: resolved.connections, capabilities: resolved.capabilities, vaultWrite: resolved.vaultWrite,
+        harness: resolved.harness ?? undefined, browserTesting: resolved.browserTesting,
+        documentConversion: resolved.documentConversion, allowDelta: resolved.allow,
+      });
+      if (carryoverError) throw new Error(carryoverError);
+    }
     // Layer the profile's allowDelta onto the config allow; an empty delta keeps the SAME config
     // permission reference, so a profile-less spawn is byte-identical to today.
     const layered = resolved.allow.length
@@ -3197,7 +3209,8 @@ export class SessionService {
       // @decision 963462f5 — a forced-plain row must resolve its wanted harness the SAME way its real
       // spawn would (role undefined, profile lookup dropped), or it drifts into `pending` forever (the
       // residual that card closed: this call used to omit forcePlain entirely).
-      const spawn = this.resolveAgentSpawn(agent, config, s.role ?? undefined, this.effectiveForcePlain(s, agent));
+      // @decision acd3c688 — a dry-run read (no spawn effect), not a fresh mint; skip the carryover check.
+      const spawn = this.resolveAgentSpawn(agent, config, s.role ?? undefined, this.effectiveForcePlain(s, agent), undefined, { skipGrantCarryoverCheck: true });
       const wanted = spawn.harness ?? "claude";
       if (current === wanted) continue;
       // A manager/platform-lead lands via RECYCLE, which is row-aware (`recycleHarness`) — ask the same helper.
@@ -3301,7 +3314,8 @@ export class SessionService {
     if (!project) return undefined;
     const config = resolveConfig(project.config);
     const companionName = this.db.getCompanionConfig(sessionId)?.name || undefined;
-    const { startupPrompt } = this.resolveAgentSpawn(agent, config, "assistant", false, companionName);
+    // @decision acd3c688 — compose-only, no spawn; skip the carryover check.
+    const { startupPrompt } = this.resolveAgentSpawn(agent, config, "assistant", false, companionName, { skipGrantCarryoverCheck: true });
     if (!startupPrompt) return undefined;
     const reinjectRecallFramed = buildFramedMemoryRecall(listCompanionMemories(sessionId), (name) => readCompanionMemory(sessionId, name));
     // Card ea648f89/0e08c0b7: stamp the durable digest so this companion's NEXT resume compares against
@@ -3481,7 +3495,7 @@ export class SessionService {
   // @decision 53edd8d5 — a scheduled manager's custom prompt + scheduledSpawn flag are both additive;
   // every non-Scheduler caller stays byte-identical to before either existed. Never fold the Scheduler's
   // own manager-cap budget into the standing human/Lead-spawned fleet's cap — they are separate budgets.
-  startManager(agentId: string, prompt?: string | null, opts?: { scheduled?: boolean }): Session {
+  startManager(agentId: string, prompt?: string | null, opts?: { scheduled?: boolean; spawnHumanAuthorized?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -3489,7 +3503,9 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "manager");
+    // @decision acd3c688 — spawnHumanAuthorized (set ONLY by the human-REST session-start route) bypasses the
+    // explicit-role-grant-carryover check; every other caller (session_spawn, the Scheduler) is checked.
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "manager", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
     // @decision 37e15c26 — round 2: refuse at the RESOLVED role, not the explicit-role call site, so
     // startNew's profile-derived manager role is covered too. See the shared helper's own doc.
     this.refuseManagerIntoReservedHome(role, project);
@@ -3592,7 +3608,7 @@ export class SessionService {
   // @decision 8ddcf787 — create-only, multiple concurrent Leads allowed: a manual Spawn always mints a
   // FRESH platform session, never reusing an already-live one. Never reintroduce a "never two LIVE
   // Leads" singleton short-circuit here — resuming an exited Lead stays an explicit human action.
-  startPlatformLead(agentId: string): Session {
+  startPlatformLead(agentId: string, opts?: { spawnHumanAuthorized?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -3601,7 +3617,9 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "platform");
+    // @decision acd3c688 — spawnHumanAuthorized bypasses the explicit-role-grant-carryover check; today's
+    // only caller is the human-REST session-start route, which passes it.
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "platform", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3683,7 +3701,7 @@ export class SessionService {
    * `prompt` is an OPTIONAL per-schedule custom task description (mirrors startManager) — appended via
    * `appendScheduledPrompt` AFTER the agent's own startupPrompt. Undefined/null ⇒ byte-identical to today.
    */
-  startAuditor(agentId: string, prompt?: string | null): Session {
+  startAuditor(agentId: string, prompt?: string | null, opts?: { spawnHumanAuthorized?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -3691,7 +3709,9 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "auditor");
+    // @decision acd3c688 — spawnHumanAuthorized (human-REST only) bypasses the grant-carryover check; the
+    // Scheduler (schedule_create kind:"auditor") is NOT authorized and stays checked.
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "auditor", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -3759,7 +3779,7 @@ export class SessionService {
    * is a fresh ephemeral session. Do NOT copy startSetup's live-reuse guard here — that would attach a
    * repeated click to a stale, already-finished run.
    */
-  startWorkspaceAuditor(agentId: string, prompt?: string | null): Session {
+  startWorkspaceAuditor(agentId: string, prompt?: string | null, opts?: { spawnHumanAuthorized?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -3767,7 +3787,9 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
+    // @decision acd3c688 — spawnHumanAuthorized (human-REST only) bypasses the grant-carryover check; the
+    // Scheduler (schedule_create kind:"workspace-auditor") is NOT authorized and stays checked.
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "workspace-auditor", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -3848,7 +3870,7 @@ export class SessionService {
   // @decision ad131671 — SINGLETON = "never two LIVE", not "one row ever": reuse an already-LIVE setup
   // session as-is (an EXITED row is fine to leave behind, never resumed here). Never find a reuse
   // candidate without filtering to LIVE first — db.liveSessions already does this.
-  startSetup(agentId: string): Session {
+  startSetup(agentId: string, opts?: { spawnHumanAuthorized?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -3864,7 +3886,9 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "setup");
+    // @decision acd3c688 — spawnHumanAuthorized (today's only caller, the human-REST route) bypasses the
+    // grant-carryover check; today's only caller passes it.
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced } = this.resolveAgentSpawn(agent, config, "setup", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3931,7 +3955,7 @@ export class SessionService {
   // @decision 89d8e17d — create-only, deliberately NOT startSetup's live-reuse guard: a human may want
   // several independent operator sessions live at once. Flag-gated at the CALLER (REST route), never
   // re-checked inside this method — the router's resolveRole is the separate live-read enforcement point.
-  startOperator(agentId: string): Session {
+  startOperator(agentId: string, opts?: { spawnHumanAuthorized?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -3940,7 +3964,9 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'operator' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-operator surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "operator");
+    // @decision acd3c688 — spawnHumanAuthorized (today's only caller, the human-REST route) bypasses the
+    // grant-carryover check; today's only caller passes it.
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "operator", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -4101,8 +4127,9 @@ export class SessionService {
     // rule whenever forcedPlain !== true — sticky-TRUE only, so false and null defer identically); never
     // re-derive inline.
     const agent = this.db.getAgent(session.agentId);
+    // @decision acd3c688 — re-deriving for an EXISTING row's already-pinned role, not a fresh mint.
     const resolvedSpawn = agent
-      ? this.resolveAgentSpawn(agent, config, session.role ?? undefined, this.effectiveForcePlain(session, agent))
+      ? this.resolveAgentSpawn(agent, config, session.role ?? undefined, this.effectiveForcePlain(session, agent), undefined, { skipGrantCarryoverCheck: true })
       : undefined;
     if (forcedRoleFreshStart) {
       return this.resumeForcedRoleAsFreshClaude(session, project, config, agent, resolvedSpawn);
@@ -4340,8 +4367,11 @@ export class SessionService {
     // @decision 1a048349 — `connections`/`vaultWrite` are re-pinned here for a stateless-router reason,
     // not a respawn one: TaskMcpRouter re-resolves them fresh off this ROW on every request, so the row
     // write alone takes effect on the very next tool call — never assume they need the respawn below.
+    // @decision acd3c688 — re-pins an EXISTING assistant-role session (explicitRole always equals its
+    // own current role); human-REST-only trigger (upgrade()/startOne's auto-respawn-on-enable, both
+    // gated per dbba993f) — skip the carryover check.
     const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite } =
-      this.resolveAgentSpawn(agent, config, "assistant");
+      this.resolveAgentSpawn(agent, config, "assistant", false, undefined, { skipGrantCarryoverCheck: true });
     // Card b94fcb72: the row's harness stays pinned, and codex ignores restrictedTools — re-pinning `true` onto a
     // codex row would resume UNrestricted while reading as restricted. Refuse BEFORE any write or pty stop.
     if (restrictedTools === true && session.harness === "codex") throw new Error(CODEX_RESTRICTED_TOOLS_REASON);
@@ -7411,7 +7441,8 @@ export class SessionService {
     const forkPermission = forkAgent
       // forkForcedPlain is only ever null in the OTHER (agent-missing) branch of its own ternary above,
       // so it is always a definite boolean here; `?? false` is a type-level narrowing only, never reached.
-      ? this.resolveAgentSpawn(forkAgent, config, src.role ?? undefined, forkForcedPlain ?? false).permission
+      // @decision acd3c688 — carries the SOURCE row's already-pinned role forward, not a fresh mint.
+      ? this.resolveAgentSpawn(forkAgent, config, src.role ?? undefined, forkForcedPlain ?? false, undefined, { skipGrantCarryoverCheck: true }).permission
       : config.permission;
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
@@ -7506,7 +7537,10 @@ export class SessionService {
     // — card 56e6c046). We thread ONLY model + skills + harness; the run's deliberate differences stay: role
     // is hardcoded "run" below (not the profile role), permission is the VERBATIM boot recipe (config.permission,
     // no allowDelta), browserTesting/documentConversion stay false, and buildMcpServers mounts ONLY loom-run.
-    const { model, skills, harness } = this.resolveAgentSpawn(agent, config, "run");
+    // @decision acd3c688 — skip the carryover check: every AGENT_FORBIDDEN_PROFILE_KEYS field is
+    // hardcoded false/absent on the spawned run session regardless of what the profile resolves, so a
+    // role mismatch here can never actually carry a grant (see the decision record's "run" exemption).
+    const { model, skills, harness } = this.resolveAgentSpawn(agent, config, "run", false, undefined, { skipGrantCarryoverCheck: true });
 
     const now = new Date().toISOString();
     const sessionId = randomUUID();
@@ -12972,7 +13006,9 @@ export class SessionService {
     // no model). Re-resolve from the agent rather than carrying old.* — the agent is already in scope and
     // a profile edit between generations is picked up, no session-row schema migration needed. Agent-missing
     // (deleted) ⇒ bare config.permission + no model, mirroring the resume fallback.
-    const workerSpawn = agent ? this.resolveAgentSpawn(agent, config, "worker") : undefined;
+    // @decision acd3c688 — skip the grant-carryover check: recycle carries every forbidden-key field
+    // forward from `old` below, never from this re-resolve, so it can never widen what the row gets.
+    const workerSpawn = agent ? this.resolveAgentSpawn(agent, config, "worker", false, undefined, { skipGrantCarryoverCheck: true }) : undefined;
     const newGen = (old.gen ?? 0) + 1;
 
     this.db.appendEvent({
@@ -14003,7 +14039,9 @@ export class SessionService {
     // Re-resolve the manager's spawn so the recycled successor keeps the profile's LAYERED allowlist +
     // model pin (mirrors recycleWorker; recycle used to drop them to bare config.permission / no model).
     // Agent-missing ⇒ bare config.permission + no model.
-    const managerSpawn = agent ? this.resolveAgentSpawn(agent, config, "manager") : undefined;
+    // @decision acd3c688 — skip the grant-carryover check: recycle carries every forbidden-key field
+    // forward from `old` below, never from this re-resolve, so it can never widen what the row gets.
+    const managerSpawn = agent ? this.resolveAgentSpawn(agent, config, "manager", false, undefined, { skipGrantCarryoverCheck: true }) : undefined;
     // @decision 8d4b4433 — the harness is RE-RESOLVED here (unlike resume/fork, which stay row-pinned): an
     // `undefined` re-resolve means claude, so a codex→claude flip lands; old.harness only when the agent is gone.
     const { harness: managerHarness, skipped: managerHarnessSkipped, roleForced: managerHarnessAgentMissingForced } = this.recycleHarness(old, managerSpawn, config.permission.deny);
@@ -14405,7 +14443,9 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Re-resolve the Lead's spawn so the successor keeps the profile's LAYERED allowlist + model pin
     // (mirrors recycleManager). Agent-missing ⇒ bare config.permission + no model.
-    const leadSpawn = agent ? this.resolveAgentSpawn(agent, config, "platform") : undefined;
+    // @decision acd3c688 — skip the grant-carryover check: recycle carries every forbidden-key field
+    // forward from `old` below, never from this re-resolve, so it can never widen what the row gets.
+    const leadSpawn = agent ? this.resolveAgentSpawn(agent, config, "platform", false, undefined, { skipGrantCarryoverCheck: true }) : undefined;
     // @decision 8d4b4433 — re-resolved harness, same rule as recycleManager (old.harness only if agent gone).
     const { harness: leadHarness, skipped: leadHarnessSkipped, roleForced: leadHarnessAgentMissingForced } = this.recycleHarness(old, leadSpawn, config.permission.deny);
     const newGen = (old.gen ?? 0) + 1;
@@ -14871,6 +14911,7 @@ export class SessionService {
       before: beforeFields, after: afterFields, source: "manager",
     });
     this.db.updateAgent(agent.id, { profileId });
+    resetScheduleProvenanceOnAgentRebind(this.db, agent.id);
     this.auditManage(managerSessionId, "agent_assign_profile", { agentId: agent.id, profileId });
     const updated = this.db.getAgent(agent.id)!;
     return rebindReach ? { ...updated, rebindReach } : updated;
@@ -15097,6 +15138,7 @@ export class SessionService {
       // platform/human concern — created via the platform tool or REST, never this surface).
       kind: "manager",
       prompt: input.prompt ?? null,
+      createdBy: "agent", // the manager MCP surface (card acd3c688)
     };
     this.db.insertSchedule(schedule);
     this.auditManage(managerSessionId, "schedule_create", { scheduleId: schedule.id, agentId: input.agentId, cron: input.cron });

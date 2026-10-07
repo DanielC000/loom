@@ -4225,6 +4225,14 @@ export const STATIC_GUARD_REPO_PATHS = [
   // literal) the reduced/emit-compare path cannot reason about, so a new grant site could otherwise take
   // the reduced path and never trip a single check.
   "packages/daemon/test/human-authorized-call-site-allowlist-guard.mjs",
+  // Card acd3c688: the sibling corpus-wide, comment-stripped scan for a DIFFERENT bypass flag
+  // (`spawnHumanAuthorized: true`, deliberately a different name from the mechanism above — see the
+  // decision record) — asserting the ONLY six literal grants anywhere in packages/daemon/src are the
+  // six explicit-role start* calls in gateway/server.ts's POST /api/agents/:id/sessions route. Same
+  // ground as its sibling immediately above: a new grant site would silently widen the bypass with no
+  // agent-facing symptom, and this is a source-TEXT property the reduced/emit-compare path cannot reason
+  // about.
+  "packages/daemon/test/explicit-role-grant-carryover-allowlist-guard.mjs",
   // Card 37310431 (round 2): round 1's LOOM_HOME write-deny unioned the static registry with a live
   // `readdirSync` pass, so any new LOOM_HOME-rooted path was automatically caught; round 2 drops that
   // pass (it broke the Platform/Setup homes' own legitimate LOOM_HOME-rooted note writes), so a NEW
