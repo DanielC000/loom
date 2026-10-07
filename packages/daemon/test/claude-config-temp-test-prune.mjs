@@ -4,16 +4,19 @@
 //   - pruneDeadTempTestClaudeConfigEntries (dry-run + real one-time/re-runnable bulk prune)
 //
 // ⛔ OWNER-FACING FILE — this suite NEVER reads, writes, or counts the real ~/.claude.json, and never
-// calls the real os.tmpdir(). It redirects CLAUDE_CONFIG_DIR (claudeJsonPath() honors it) AND passes its
-// own synthetic `tmpdir` override to pruneDeadTempTestClaudeConfigEntries. The real file's prune is
-// OWNER-RUN only, via the CLI script's --temp-test-entries mode — request 576b4442, PENDING as of this
-// test's writing; --apply against the real file must never run from here or from the script's own
-// author outside that approval.
+// passes the real os.tmpdir() into pruneDeadTempTestClaudeConfigEntries. It redirects CLAUDE_CONFIG_DIR
+// (claudeJsonPath() honors it) AND passes its own synthetic `tmpdir` override to that function — like
+// every test in this suite, this file's OWN fixture root is necessarily created somewhere under the real
+// system temp directory (mkdtempManaged below), but that root is never the value this suite hands to the
+// function under test; `tmpRoot`, a dedicated subdirectory of it, is. The real file's prune is OWNER-RUN
+// only, via the CLI script's --temp-test-entries mode — request 576b4442, PENDING as of this test's
+// writing; --apply against the real file must never run from here or from the script's own author
+// outside that approval.
 //
 // Run after build: node test/claude-config-temp-test-prune.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { mkdtempManaged } from "./_tmp-fixture.mjs";
 import {
   pruneDeadTempTestClaudeConfigEntries,
   __setReadFileSyncForTest,
@@ -22,8 +25,7 @@ import {
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const root = path.join(os.tmpdir(), `loom-claude-config-temp-test-prune-test-${Date.now()}-${process.pid}`);
-fs.mkdirSync(root, { recursive: true });
+const root = mkdtempManaged("loom-claude-config-temp-test-prune-");
 
 const saved = { cfg: process.env.CLAUDE_CONFIG_DIR };
 const restoreEnv = () => {
@@ -191,7 +193,6 @@ try {
 } finally {
   __setReadFileSyncForTest();
   restoreEnv();
-  try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0

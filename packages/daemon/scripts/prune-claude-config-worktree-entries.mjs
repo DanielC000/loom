@@ -88,7 +88,7 @@ async function main() {
 
   if (tempTestEntries) {
     const result = pruneDeadTempTestClaudeConfigEntries({ dryRun: !apply });
-    printResult({ asJson, claudeJson: claudeJsonPath(), scopeLabel: "tmp root", scopeValue: os.tmpdir(), result });
+    printResult({ asJson, claudeJson: claudeJsonPath(), scopeLabel: "tmp root", scopeKey: "tmpRoot", scopeValue: os.tmpdir(), result });
     return;
   }
 
@@ -125,15 +125,19 @@ async function main() {
   }
 
   const result = pruneDeadWorktreeClaudeConfigEntries({ dryRun: !apply, worktreesRoot });
-  printResult({ asJson, claudeJson: claudeJsonPath(), scopeLabel: "worktrees root", scopeValue: worktreesRoot, result });
+  printResult({ asJson, claudeJson: claudeJsonPath(), scopeLabel: "worktrees root", scopeKey: "worktreesRoot", scopeValue: worktreesRoot, result });
 }
 
 /** Shared result printer for both modes — the only differences between them are the scope line
  *  (`worktrees root` vs `tmp root`) and the worktree-only `"worktrees-root-missing"` abort reason,
- *  which simply never fires for the temp-test mode's `result.aborted`. */
-function printResult({ asJson, claudeJson, scopeLabel, scopeValue, result }) {
+ *  which simply never fires for the temp-test mode's `result.aborted`. `scopeKey` is the --json key for
+ *  `scopeValue` — passed explicitly rather than derived from `scopeLabel` (a prior version did
+ *  `scopeLabel.replace(/ /g, "")`, which silently lower-cased the whole label — `worktreesRoot` came out
+ *  as `worktreesroot`, `tmpRoot` as `tmproot` — rather than preserving the camelCase JSON key callers
+ *  actually want). */
+function printResult({ asJson, claudeJson, scopeLabel, scopeKey, scopeValue, result }) {
   if (asJson) {
-    console.log(JSON.stringify({ claudeJson, [scopeLabel.replace(/ /g, "")]: scopeValue, ...result }, null, 2));
+    console.log(JSON.stringify({ claudeJson, [scopeKey]: scopeValue, ...result }, null, 2));
     return;
   }
 

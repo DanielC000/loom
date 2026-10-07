@@ -106,6 +106,115 @@ try {
   //        refused runs did no work at all, and the allowed rehearsal run targeted its own separate dir. ===
   check("(invariant) the fake-but-'real' ~/.claude.json was never created by any refused run",
     !fs.existsSync(path.join(fakeHome, ".claude.json")));
+
+  // === 5. CR e0d7eeff item 3 — --temp-test-entries + --worktrees-root together: REFUSED (script :81)
+  //        regardless of --apply — --worktrees-root is a worktree-mode-only rehearsal override and is
+  //        meaningless once --temp-test-entries switches to the OTHER candidate predicate. ===
+  {
+    const bogusRoot5 = path.join(root, "temp-mode-worktrees-root");
+    fs.mkdirSync(bogusRoot5, { recursive: true });
+    const res = runScript(["--temp-test-entries", "--worktrees-root", bogusRoot5]);
+    check("--temp-test-entries + --worktrees-root: REFUSED (exit 1) even with no --apply at all",
+      res.status === 1);
+    check("--temp-test-entries + --worktrees-root: refusal names it a worktree-mode-only rehearsal override",
+      /--worktrees-root is a worktree-mode-only rehearsal override/.test(res.stderr));
+    check("--temp-test-entries + --worktrees-root: no 'mode' line printed (refused before doing any work)",
+      !/^mode\s*:/m.test(res.stdout));
+  }
+
+  // === 6. --temp-test-entries dispatch: a dry run actually runs pruneDeadTempTestClaudeConfigEntries,
+  //        scoped to THIS CHILD's own redirected tmp root — never the real os.tmpdir(). os.tmpdir() reads
+  //        TEMP/TMP (win32) or TMPDIR (posix), so redirecting those for the child is the same convention
+  //        HOME/USERPROFILE already use above for "the real ~/.claude.json". Also exercises item 1's fix
+  //        (the --json key is `tmpRoot`, not the old lower-cased `tmproot`). ===
+  {
+    const fakeTmp6 = path.join(root, "fake-tmpdir");
+    fs.mkdirSync(fakeTmp6, { recursive: true });
+    const configDir6 = path.join(root, "temp-mode-config");
+    fs.mkdirSync(configDir6, { recursive: true });
+    const claudeJson6 = path.join(configDir6, ".claude.json");
+    const keyFor6 = (dir) => path.resolve(dir).replace(/\\/g, "/");
+
+    const deadKeyDir = path.join(fakeTmp6, "loom-dead-abc123"); // never created on disk — dead candidate
+    fs.writeFileSync(claudeJson6, JSON.stringify({ projects: { [keyFor6(deadKeyDir)]: { hasTrustDialogAccepted: true } } }, null, 2));
+
+    const res = runScript(["--temp-test-entries", "--json"], {
+      CLAUDE_CONFIG_DIR: configDir6,
+      TEMP: fakeTmp6, TMP: fakeTmp6, TMPDIR: fakeTmp6,
+    });
+    check("--temp-test-entries dispatch: dry run exits 0", res.status === 0);
+    let parsed6 = null;
+    try { parsed6 = JSON.parse(res.stdout); } catch { /* left null — the check below fails loudly */ }
+    check("--temp-test-entries dispatch: --json output parses", parsed6 !== null);
+    check("--temp-test-entries dispatch: scoped to this child's OWN redirected tmp root, never the real os.tmpdir()",
+      parsed6?.tmpRoot === fakeTmp6);
+    check("--temp-test-entries dispatch: resolved config file sits under the redirected CLAUDE_CONFIG_DIR",
+      parsed6?.claudeJson === claudeJson6);
+    check("--temp-test-entries dispatch: the planted dead loom- key was classified dead",
+      parsed6?.deadCount === 1 && parsed6?.deadKeysSample?.includes(keyFor6(deadKeyDir)));
+    check("--temp-test-entries dispatch: dry run never writes — the planted entry is still on disk",
+      keyFor6(deadKeyDir) in JSON.parse(fs.readFileSync(claudeJson6, "utf8")).projects);
+  }
+
+  // === 7. CR e0d7eeff item 3 — "unknown liveness is never deleted" for temp mode. Not fault-injectable
+  //        through a real spawned child process portably — there is no cross-platform way to force a
+  //        non-ENOENT/ENOTDIR stat() error without touching real host ACLs (and doing so risks leaving a
+  //        locked fixture dir behind). Exercises the EXACT function the script's --temp-test-entries
+  //        dispatch calls, directly, with the SAME `__setStatSyncForTest` seam
+  //        claude-config-worktree-prune.mjs's own "unknown liveness" section (11) already uses for the
+  //        worktree-mode predicate — same guarantee (card 498452c0 review item 2), other predicate. ===
+  {
+    const { pruneDeadTempTestClaudeConfigEntries, __setStatSyncForTest } = await import("../dist/pty/claude-config.js");
+    const fakeTmp7 = path.join(root, "fake-tmpdir-unknown");
+    fs.mkdirSync(fakeTmp7, { recursive: true });
+    const configDir7 = path.join(root, "temp-mode-config-unknown");
+    fs.mkdirSync(configDir7, { recursive: true });
+    const claudeJson7 = path.join(configDir7, ".claude.json");
+    const keyFor7 = (dir) => path.resolve(dir).replace(/\\/g, "/");
+
+    const unknownDir = path.join(fakeTmp7, "loom-unknown-stat");
+    const normalDeadDir = path.join(fakeTmp7, "loom-normal-dead"); // never created — plain dead control
+    fs.writeFileSync(claudeJson7, JSON.stringify({
+      projects: {
+        [keyFor7(unknownDir)]: { hasTrustDialogAccepted: true },
+        [keyFor7(normalDeadDir)]: { hasTrustDialogAccepted: true },
+      },
+    }, null, 2));
+
+    const savedCfg7 = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir7;
+    const realStatSync7 = fs.statSync;
+    __setStatSyncForTest((p, opts) => {
+      if (path.resolve(p) === path.resolve(unknownDir)) {
+        const err = new Error("EACCES: permission denied");
+        err.code = "EACCES";
+        throw err;
+      }
+      return realStatSync7(p, opts);
+    });
+    let dry7, applied7;
+    try {
+      dry7 = pruneDeadTempTestClaudeConfigEntries({ dryRun: true, tmpdir: fakeTmp7 });
+      applied7 = pruneDeadTempTestClaudeConfigEntries({ dryRun: false, tmpdir: fakeTmp7 });
+    } finally {
+      __setStatSyncForTest();
+      if (savedCfg7 === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = savedCfg7;
+    }
+
+    check("temp mode, unknown liveness (dry run): the EACCES key is in unknownKeys, not deadKeysSample",
+      dry7.unknownKeys.includes(keyFor7(unknownDir)) && !dry7.deadKeysSample.includes(keyFor7(unknownDir)));
+    check("temp mode, unknown liveness (dry run): the normal dead key is still classified dead",
+      dry7.deadKeysSample.includes(keyFor7(normalDeadDir)));
+    check("temp mode, unknown liveness (apply): the EACCES key was NOT removed",
+      !applied7.removedKeys.includes(keyFor7(unknownDir)));
+    check("temp mode, unknown liveness (apply): the EACCES key is reported in unknownKeys",
+      applied7.unknownKeys.includes(keyFor7(unknownDir)));
+    check("temp mode, unknown liveness (apply): the normal dead key WAS removed",
+      applied7.removedKeys.includes(keyFor7(normalDeadDir)));
+    const after7 = JSON.parse(fs.readFileSync(claudeJson7, "utf8")).projects;
+    check("temp mode, unknown liveness (apply): the EACCES key still present in the file",
+      keyFor7(unknownDir) in after7);
+  }
 } finally {
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 }

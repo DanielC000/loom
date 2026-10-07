@@ -952,7 +952,11 @@ function classifyKeysByPredicate(cfg: ClaudeCfg, isCandidate: (key: string) => b
  *  characters) is rejected: its normalized dirname is a different string, not an exact match. A
  *  genuinely differently-cased spelling of the SAME real tmpdir (win32 only) DOES match, by the same
  *  case-fold `normForCompare` already applies everywhere else in this file. A non-absolute (including
- *  empty-string) `key` never matches. */
+ *  empty-string) `key` never matches. On win32, `normForCompare` ALSO lower-cases the whole path, so the
+ *  final `startsWith("loom-")` check below runs against an already-lower-cased basename there — i.e. a
+ *  stored key spelled `Loom-abc123` or `LOOM-abc123` still matches on win32 (consistent with every other
+ *  case-fold comparison in this file), while on a case-sensitive platform only a literal `loom-` prefix
+ *  (the exact casing Loom itself writes) ever matches. */
 function isDirectLoomTempKey(tmpRoot: string, key: string): boolean {
   if (key === "" || !path.isAbsolute(key)) return false;
   const normKey = normForCompare(key);
