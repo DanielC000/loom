@@ -131,16 +131,15 @@ or not persisting a plaintext secret readable across sessions in the first place
 deliberately not built here."* No further card is needed for this half — it is already a disclosed,
 carded-separately residual.
 
-**(b) The raw/unresolved `LOOM_HOME` junction-bypass of `SETTINGS_DIR_READ_DENY_RULE`: flagged in code,
-not tracked as a board card or decision record.** `pty/loom-home-deny.ts:9-12`'s own doc comment states it
-directly: *"A raw, unresolved `LOOM_HOME` string — what `SETTINGS_DIR_READ_DENY_RULE` (claude-settings.ts)
-uses today — can be bypassed via a junction/symlink alias; this module deliberately does not repeat that
-gap for the broader write deny."* That is the ONLY place this is written down anywhere in the repo —
+**(b) The raw/unresolved `LOOM_HOME` junction-bypass of `SETTINGS_DIR_READ_DENY_RULE`: FIXED (card
+`f2bb9dbe`).** At the time of this investigation it was flagged only in a source comment
+(`pty/loom-home-deny.ts:9-12`'s own doc), not tracked as a board card or decision record anywhere —
 confirmed via `grep -rn "junction" docs/adr docs/decisions` returning zero hits, and no decision record
-under either store names `SETTINGS_DIR_READ_DENY_RULE`'s own junction exposure (the four docs that DO
-mention `SETTINGS_DIR_READ_DENY_RULE` — `2be634f2`, `37310431`, `a50b8afd`, `ed0757d6` — never raise this
-specific bypass). So: **acknowledged in a source comment, untracked as a card.** Left for the manager to
-card, per the kickoff.
+under either store named `SETTINGS_DIR_READ_DENY_RULE`'s own junction exposure (the four docs that DO
+mention `SETTINGS_DIR_READ_DENY_RULE` — `2be634f2`, `37310431`, `a50b8afd`, `ed0757d6` — never raised this
+specific bypass). Card `f2bb9dbe` closed it: `claude-settings.ts` now resolves `SETTINGS_DIR` through the
+same `canonicalizeExistingPath` helper the write deny uses and denies both the raw and resolved-real
+paths when they differ. See `docs/decisions/f2bb9dbe-settings-dir-read-deny-resolves-junction-alias.md`.
 
 ## 4. Cheap hardening not taken now
 
@@ -170,6 +169,5 @@ was outside the DoD's read-only-investigation scope.
   design that must still hand the real child process the real value to function.
 - Do not read the codex cross-session mcp-config read as untracked — it is explicitly named, with the exact
   quote above, in `docs/decisions/7955458e`'s own "Residual risk" section.
-- Do not assume the `LOOM_HOME` junction-bypass of `SETTINGS_DIR_READ_DENY_RULE` is carded anywhere — as of
-  this record it exists only as the inline doc comment at `pty/loom-home-deny.ts:9-12`; file a card before
-  treating it as tracked.
+- Do not assume the `LOOM_HOME` junction-bypass of `SETTINGS_DIR_READ_DENY_RULE` is still open — it was
+  fixed by card `f2bb9dbe`; see that record for the mechanism and residual.

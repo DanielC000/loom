@@ -3,6 +3,7 @@ import path from "node:path";
 import type { PermissionPolicy } from "@loom/shared";
 import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, COMMENT_ANCHOR_LINT_SCRIPT, PORT } from "../paths.js";
 import { WATCHED_TOOLS } from "./tool-attribution.js";
+import { canonicalizeExistingPath, comparisonKey } from "../projects/repos.js";
 
 /** @decision d15c9f36 — derived from `tool-attribution.ts`'s `WATCHED_TOOLS`, the single source for both
  *  this matcher and `WATCHED_TOOL_NAMES` — widen `WATCHED_TOOLS`, not this string. See record. */
@@ -421,12 +422,41 @@ export function mcpTokenRidesEnv(platform: NodeJS.Platform = process.platform): 
 export const SETTINGS_DIR_READ_DENY_RULE = `Read(${SETTINGS_DIR.replace(/\\/g, "/")}/**)`;
 
 /**
- * Union `SETTINGS_DIR_READ_DENY_RULE` into `permission.deny`, unconditionally — every role, no carve-out.
- * Idempotent; never replaces `.deny`.
+ * SETTINGS_DIR resolved through the SAME junction/symlink-collapsing helper `LOOM_HOME_REAL`
+ * (`pty/loom-home-deny.ts`) uses — `canonicalizeExistingPath` (`projects/repos.ts`) — resolved ONCE at
+ * module load (SETTINGS_DIR never changes at runtime). Safe when the directory doesn't exist yet (a
+ * fresh LOOM_HOME, before the first `ensureDirs()` call has run): `canonicalizeExistingPath` falls back
+ * to the raw, unresolved path on a realpath failure rather than throwing, so this degrades to the old
+ * raw-only rule instead of crashing a spawn.
+ *
+ * @decision f2bb9dbe — `SETTINGS_DIR_READ_DENY_RULE` alone, built from the raw string, can be bypassed
+ * via a junction/symlink alias to LOOM_HOME — see record.
+ */
+export const SETTINGS_DIR_REAL = canonicalizeExistingPath(SETTINGS_DIR).replace(/\\/g, "/");
+
+/**
+ * Every `Read()` rule needed to cover SETTINGS_DIR against a junction/symlink alias — the RAW rule
+ * ({@link SETTINGS_DIR_READ_DENY_RULE}) plus (card f2bb9dbe) a second rule rooted at the RESOLVED real
+ * path ({@link SETTINGS_DIR_REAL}), emitted only when it differs from the raw one (compared via
+ * `comparisonKey`, case-folded on win32) — so an un-aliased LOOM_HOME (the common case) still emits
+ * exactly the one raw rule, byte-identical to before this card.
+ *
+ * @decision f2bb9dbe — see record for why arbitrary Bash code remains an accepted residual this closes
+ * only the tool-dispatch (Read/Glob) path, not a filesystem boundary.
+ */
+export const SETTINGS_DIR_READ_DENY_RULES: readonly string[] =
+  comparisonKey(SETTINGS_DIR_REAL) === comparisonKey(SETTINGS_DIR.replace(/\\/g, "/"))
+    ? Object.freeze([SETTINGS_DIR_READ_DENY_RULE])
+    : Object.freeze([SETTINGS_DIR_READ_DENY_RULE, `Read(${SETTINGS_DIR_REAL}/**)`]);
+
+/**
+ * Union {@link SETTINGS_DIR_READ_DENY_RULES} into `permission.deny`, unconditionally — every role, no
+ * carve-out. Idempotent; never replaces `.deny`.
  *
  * @decision ed0757d6 — see record for why this is role-unconditional, unlike the transcript-root deny.
  */
 export function withSettingsDirDenyForSpawn(permission: PermissionPolicy): PermissionPolicy {
-  if (permission.deny.includes(SETTINGS_DIR_READ_DENY_RULE)) return permission;
-  return { ...permission, deny: [...permission.deny, SETTINGS_DIR_READ_DENY_RULE] };
+  const missing = SETTINGS_DIR_READ_DENY_RULES.filter((r) => !permission.deny.includes(r));
+  if (!missing.length) return permission;
+  return { ...permission, deny: [...permission.deny, ...missing] };
 }

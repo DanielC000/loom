@@ -7,9 +7,11 @@ import { canonicalizeExistingPath, comparisonKey } from "../projects/repos.js";
  * LOOM_HOME, resolved through the SAME junction/symlink-collapsing helper every other path-identity
  * check in this repo uses (`canonicalizeExistingPath` — git/repo-lock.ts, projects/repos.ts,
  * vault/versioner.ts), resolved ONCE at module load (LOOM_HOME never changes at runtime) and forward-
- * slashed to match the CLI's gitignore-style deny-rule syntax on Windows. A raw, unresolved `LOOM_HOME`
- * string — what `SETTINGS_DIR_READ_DENY_RULE` (claude-settings.ts) uses today — can be bypassed via a
- * junction/symlink alias; this module deliberately does not repeat that gap for the broader write deny.
+ * slashed to match the CLI's gitignore-style deny-rule syntax on Windows.
+ *
+ * @decision f2bb9dbe — `claude-settings.ts`'s SETTINGS_DIR read deny no longer repeats the junction/
+ * symlink-alias gap this comment used to name: it now resolves its own real path the same way, via
+ * `SETTINGS_DIR_REAL`/`SETTINGS_DIR_READ_DENY_RULES`. See record.
  */
 export const LOOM_HOME_REAL = canonicalizeExistingPath(LOOM_HOME).replace(/\\/g, "/");
 
