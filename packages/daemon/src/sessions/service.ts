@@ -13526,11 +13526,20 @@ export class SessionService {
    * only, never a disposition change beyond what the branch above already decided. The alert text/reason
    * distinguishes "still booting, fate unknown" from "down but durably resumable, crash recovery is
    * expected to act" — claim only what will actually happen (mirrors decision 6e5af155 round 2's Minor 3).
+   *
+   * @decision b59d11f6 — stand down for good, every tick, once a manual `recycle_reattempt` has resolved
+   * THIS lineage (`detail.successorId === freshId`) — never reclaim after that, even onto a still-alive
+   * or already-stopped predecessor.
    */
   private async watchHaltedRecycleSuccessor(oldId: string, freshId: string): Promise<void> {
     const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
     let alerted = false;
     for (;;) {
+      // @decision b59d11f6 — see this method's own doc above: once resolved FOR THIS LINEAGE,
+      // settleRecycleHandoff owns oldId exclusively; this loop must never again act on freshId's state.
+      if (this.db.listEventsForWorker(oldId).some((e) =>
+        e.kind === "recycle_ownership_transfer_resolved" &&
+        (e.detail as { successorId?: string } | undefined)?.successorId === freshId)) return;
       let waitingForRecovery = false;
       if (!this.pty.isAlive(freshId)) {
         // Read fresh off the DB row every tick — never in-memory hasReachedReady/live state (see doc above).
