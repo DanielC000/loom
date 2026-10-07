@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { spawn, fork, exec, execFile } from "node:child_process";
+import { spawn as spawnPty } from "node-pty";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -74,6 +75,11 @@ await new Promise((resolve) => {
   check("(C) spawn(...) returns a ChildProcess with a real numeric pid", typeof child.pid === "number" && child.pid > 0);
   try { process.kill(child.pid, 0); check("(C) that pid is genuinely alive right after spawn", true); }
   catch { check("(C) that pid is genuinely alive right after spawn", false); }
+  // Card dbbb52db item 4: the wrap's WHOLE PURPOSE (pty/host.ts's real-reaper tripwire registry) is a
+  // side effect the checks above never assert at all — they'd stay green even with the registry
+  // bookkeeping entirely removed. Assert it directly.
+  check("(C) spawn(...)'s pid was recorded into the test-spawn registry (the wrap's actual purpose)",
+    globalThis.__LOOM_TEST_SPAWNED_PIDS__?.has(child.pid) === true);
   child.kill();
 }
 
@@ -92,10 +98,27 @@ await new Promise((resolve) => {
       child.once("message", (msg) => { clearTimeout(timer); resolve(msg === "ready"); });
     });
     check("(D) the forked child's own IPC message was received (fork's channel is genuinely intact)", gotReady === true);
+    // Card dbbb52db item 4: same gap as (C) above — assert the registry side effect directly.
+    check("(D) fork(...)'s pid was recorded into the test-spawn registry (the wrap's actual purpose)",
+      globalThis.__LOOM_TEST_SPAWNED_PIDS__?.has(child.pid) === true);
     child.kill();
   } finally {
     try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
+}
+
+// =======================================================================================================
+// (E) card dbbb52db item 4: node-pty's OWN spawn export is ALSO wrapped (card 8c8ee0ee's CR-found
+// real-spawn fix — node-pty is a completely separate native module, never going through
+// node:child_process) — this file only ever exercised the node:child_process wrap before this item;
+// nothing here would have caught a regression that silently dropped the node-pty wrap.
+// =======================================================================================================
+{
+  const child = spawnPty(process.execPath, ["-e", "setTimeout(() => {}, 2000)"], {});
+  check("(E) node-pty's spawn(...) returns a real numeric pid", typeof child.pid === "number" && child.pid > 0);
+  check("(E) node-pty spawn(...)'s pid was recorded into the test-spawn registry",
+    globalThis.__LOOM_TEST_SPAWNED_PIDS__?.has(child.pid) === true);
+  child.kill();
 }
 
 console.log(failures === 0

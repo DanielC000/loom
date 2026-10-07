@@ -18,6 +18,8 @@ import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { spawn as spawnProcess } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { waitUntil } from "./_wait.mjs";
@@ -60,6 +62,24 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
     isDescendantPid([{ pid: 2, ppid: 1 }, { pid: 3, ppid: 2 }, { pid: 4, ppid: 3 }], 4, 1, /* maxHops */ 1) === false);
   check("(unit, negative) targetPid === ancestorPid is NOT itself 'descendant'",
     isDescendantPid([{ pid: 1, ppid: 0 }], 1, 1) === false);
+  // Card dbbb52db item 2: a stale ppid link — the OS reused a dead process's pid for the CLAIMED PARENT
+  // before the child's own reported ppid field was updated. A genuine child can never have been created
+  // BEFORE its real parent, so a claimed parent whose own creationTime is LATER than the child's own must
+  // be rejected, not walked through.
+  check("(unit, negative) a claimed parent whose creationTime is LATER than the child's own is NOT a descendant (stale/reused ppid link)",
+    isDescendantPid([{ pid: 5, ppid: 1, creationTime: 1000 }, { pid: 1, ppid: 0, creationTime: 2000 }], 5, 1) === false);
+  check("(unit, positive) a normal chain where child.creationTime >= the claimed parent's own still passes (the creation-time gate doesn't eat the legitimate case)",
+    isDescendantPid([{ pid: 5, ppid: 1, creationTime: 2000 }, { pid: 1, ppid: 0, creationTime: 1000 }], 5, 1) === true);
+  // CR bf7350d4 (post-dbbb52db follow-up): the two checks above only ever exercise the ANCESTOR-MATCH
+  // branch's creationTime gate (the child's own hop lands directly on ancestorPid). The MID-HOP gate
+  // (the `parentRow` branch, taken when ppid !== ancestorPid) was never independently exercised — deleting
+  // its two lines left the suite green. A 3-hop chain forces that branch: 7's claimed parent is 5 (not the
+  // ancestor), so 7's creationTime is checked against 5's, not against ancestor 1's.
+  check("(unit, negative) a stale ppid link at a MID-HOP (not the final hop to the ancestor) is NOT a descendant",
+    isDescendantPid(
+      [{ pid: 7, ppid: 5, creationTime: 3000 }, { pid: 5, ppid: 1, creationTime: 4000 }, { pid: 1, ppid: 0, creationTime: 1000 }],
+      7, 1,
+    ) === false);
 }
 
 // Capture every console.log/error line from here on (mirrors pty-exit-reap-seam.mjs's own pattern) —
@@ -82,8 +102,14 @@ try {
     check("(A) reapOrphanedDescendants(SENTINEL_PID) THROWS synchronously", threw instanceof Error);
     check("(A) the thrown message names the refusal + the function + the sentinel pid",
       !!threw && threw.message.includes("REFUSED") && threw.message.includes("reapOrphanedDescendants") && threw.message.includes(String(SENTINEL_PID)));
-    check("(A) no [pty-reap] completion log line for the sentinel pid ever appeared (never enumerated/swept)",
-      !capturedLines.some((l) => l.includes(`[pty-reap] root=${SENTINEL_PID}:`)));
+    // Card dbbb52db item 6: DROPPED the old "(A) no [pty-reap] completion log line ... ever appeared"
+    // check. It ran synchronously, right after the synchronous throw above, before the real sweep's own
+    // async spawn/close machinery could ever have produced that line even if the tripwire were fully
+    // absent — the throw happens before reapOrphanedDescendants ever reaches its spawnProcess call, so
+    // there was no race for this check to resolve either way: it was unfalsifiable in one trial, the
+    // exact fixed-wait-negative-assertion shape the project's own guard polices. The positive-control
+    // block immediately below already proves the capture mechanism genuinely observes a real completion
+    // line when one is produced, so no coverage is lost by removing this vacuous negative check.
   }
 
   // ===================================================================================================
@@ -163,6 +189,77 @@ try {
     }
     check("(D) verifyRootDeadOrForceKill(SENTINEL_PID) rejects — the real killRoot->killSingleProcessById tripwire fired",
       rejected instanceof Error && rejected.message.includes("REFUSED") && rejected.message.includes("killSingleProcessById"));
+  }
+
+  // ===================================================================================================
+  // (behavioral E) card dbbb52db item 1: an ENUMERATION FAILURE always refuses — even for a pid this
+  // test process itself spawned and already killed (the dead-root registry case (B) above, which the
+  // registry ALONE would otherwise accept with no enumeration at all). Proves the fix never falls back
+  // to the old registry-only accept when the OS process table can't be read.
+  // ===================================================================================================
+  let enumFailChild = null;
+  try {
+    enumFailChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const enumFailPid = enumFailChild.pid;
+    const isAlive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+    enumFailChild.kill();
+    await waitUntil(() => !isAlive(enumFailPid), { timeoutMs: 8_000, label: "enumFailChild actually dead" });
+
+    const requireHere = createRequire(import.meta.url);
+    const cp = requireHere("node:child_process");
+    const originalExecFileSync = cp.execFileSync;
+    cp.execFileSync = () => { throw new Error("simulated enumeration failure (card dbbb52db test)"); };
+    syncBuiltinESMExports();
+    let threw = null;
+    try {
+      try { reapOrphanedDescendants(enumFailPid); } catch (err) { threw = err; }
+      check("(E) a registered DEAD pid is still REFUSED when the enumeration itself fails — never falls back to a registry-only accept",
+        threw instanceof Error && threw.message.includes("REFUSED") && threw.message.includes("could not enumerate"));
+    } finally {
+      cp.execFileSync = originalExecFileSync;
+      syncBuiltinESMExports();
+    }
+  } finally {
+    try { enumFailChild?.kill(); } catch { /* already gone */ }
+  }
+
+  // ===================================================================================================
+  // (behavioral F) card dbbb52db item 3: a LOOM_TEST=1 process with NO test-spawn registry at all (e.g. a
+  // dist/index.js daemon spawned BY a test, or a web e2e fixture daemon, neither of which import
+  // test/_guard.mjs) gets a silent, logged REFUSAL — never an uncaught throw that would crash it. The
+  // child script below deliberately does NOT wrap the call in its own try/catch, mirroring the real
+  // production call site (pty onExit -> reapExitedDescendants -> sweepOrphanedDescendants), which doesn't
+  // either — so an old, unconditional throw here would surface as Node's own uncaught-exception exit.
+  // ===================================================================================================
+  {
+    const distHostUrl = pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/pty/host.js")).href;
+    const noRegistryTmp = fs.mkdtempSync(path.join(os.tmpdir(), "loom-no-registry-tripwire-"));
+    const childScript = path.join(noRegistryTmp, "no-registry-child.mjs");
+    try {
+      fs.writeFileSync(childScript,
+        `process.env.LOOM_TEST = "1";\n` +
+        `const { reapOrphanedDescendants } = await import(${JSON.stringify(distHostUrl)});\n` +
+        `const SENTINEL_PID = ${SENTINEL_PID};\n` +
+        `reapOrphanedDescendants(SENTINEL_PID); // deliberately NOT wrapped — mirrors the real onExit call site\n` +
+        `console.log("RESULT:no-throw");\n`);
+      const out = await new Promise((resolve, reject) => {
+        const child = spawnProcess(process.execPath, [childScript], { stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = ""; let stderr = "";
+        child.stdout.on("data", (d) => { stdout += d; });
+        child.stderr.on("data", (d) => { stderr += d; });
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ code, stdout, stderr }));
+      });
+      check("(F) a no-registry LOOM_TEST process does NOT crash (exits 0, never an uncaught exception)", out.code === 0);
+      check("(F) the function returned WITHOUT throwing (refused silently, not via an escaping exception)",
+        out.stdout.includes("RESULT:no-throw"));
+      check("(F) the refusal logged the fixed, greppable no-registry tag, naming the pid + function",
+        out.stderr.includes("[pty-reap-test-guard] REFUSED (no registry)") &&
+        out.stderr.includes(String(SENTINEL_PID)) &&
+        out.stderr.includes("reapOrphanedDescendants"));
+    } finally {
+      try { fs.rmSync(noRegistryTmp, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
   }
 } finally {
   console.log = realLog;

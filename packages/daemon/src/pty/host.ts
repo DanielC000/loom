@@ -4375,19 +4375,32 @@ export function enumerateWin32SweepRows(timeoutMs = 10_000): Promise<OrphanSweep
 
 /** @decision 8c8ee0ee — pure pid→ppid ancestry walk; fails closed on an unknown/self-referential pid or
  *  a hop-limit exceed, never a false "yes". A dead target has NO row at all — never call this the sole
- *  check; a caller must also accept a separate "this process spawned it" registry hit as legitimate. */
-export function isDescendantPid(rows: { pid: number; ppid: number }[], targetPid: number, ancestorPid: number, maxHops = 64): boolean {
-  const byPid = new Map<number, number>();
-  for (const r of rows) byPid.set(r.pid, r.ppid);
+ *  check; a caller must also accept a separate "this process spawned it" registry hit as legitimate.
+ *
+ * @decision dbbb52db — never skip the per-hop creationTime check below: a dead pid's OS-reused ancestor
+ * slot can otherwise walk as a false "yes" before the child's own reported ppid is updated. */
+export function isDescendantPid(
+  rows: { pid: number; ppid: number; creationTime?: number | null }[],
+  targetPid: number, ancestorPid: number, maxHops = 64,
+): boolean {
+  const byPid = new Map<number, { ppid: number; creationTime: number | null }>();
+  for (const r of rows) byPid.set(r.pid, { ppid: r.ppid, creationTime: r.creationTime ?? null });
   let cur = targetPid;
   const seen = new Set<number>();
   for (let i = 0; i < maxHops; i++) {
     if (seen.has(cur)) return false; // cycle guard
     seen.add(cur);
-    const ppid = byPid.get(cur);
-    if (ppid === undefined) return false; // not in this snapshot — can't confirm lineage (e.g. already dead)
-    if (ppid === ancestorPid) return true;
+    const row = byPid.get(cur);
+    if (row === undefined) return false; // not in this snapshot — can't confirm lineage (e.g. already dead)
+    const { ppid, creationTime } = row;
+    if (ppid === ancestorPid) {
+      const ancestorRow = byPid.get(ancestorPid);
+      if (creationTime != null && ancestorRow?.creationTime != null && creationTime < ancestorRow.creationTime) return false;
+      return true;
+    }
     if (ppid === cur) return false; // self-referential malformed row
+    const parentRow = byPid.get(ppid);
+    if (creationTime != null && parentRow?.creationTime != null && creationTime < parentRow.creationTime) return false;
     cur = ppid;
   }
   return false; // exceeded maxHops — fail closed, never a false "yes"
@@ -4421,27 +4434,48 @@ function wasSpawnedByThisTestProcess(pid: number): boolean {
   return registry?.has(pid) ?? false;
 }
 
-/** @decision 8c8ee0ee — THE tripwire: under LOOM_TEST, refuses (log + throw) any target pid that is
- *  neither a live descendant of `process.pid` nor one this test process spawned. Called first in every
- *  free function reaching a real OS kill/enumeration by caller-supplied pid; production is unchanged. */
-function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string): void {
-  if (!inTestMode()) return;
-  if (wasSpawnedByThisTestProcess(pid)) return;
+/** @decision dbbb52db — item 3: does THIS process even have a test-spawn registry at all (existence
+ * only, never pid membership)? False for a LOOM_TEST=1 process that never imported test/_guard.mjs. */
+function hasTestSpawnRegistry(): boolean {
+  return (globalThis as { __LOOM_TEST_SPAWNED_PIDS__?: Set<number> }).__LOOM_TEST_SPAWNED_PIDS__ instanceof Set;
+}
+
+/** @decision dbbb52db — logs unconditionally; THROWS only when `hasRegistry`, else refuses silently
+ * (returns false — caller MUST check it) so a registry-less LOOM_TEST process can never crash here. */
+function refuseReapTarget(label: string, pid: number, reason: string, hasRegistry: boolean): boolean {
+  const tag = hasRegistry ? "REFUSED" : "REFUSED (no registry)";
+  const msg = `[pty-reap-test-guard] ${tag} ${label}(pid=${pid}): ${reason}`;
+  // eslint-disable-next-line no-console
+  console.error(msg);
+  if (hasRegistry) throw new Error(msg);
+  return false;
+}
+
+/** @decision 8c8ee0ee — THE tripwire: under LOOM_TEST, refuses any target pid that is neither a live
+ *  descendant of `process.pid` nor one this test process spawned. Called first in every free function
+ *  reaching a real OS kill/enumeration by caller-supplied pid; production (`!inTestMode()`) is unchanged.
+ *
+ * @decision dbbb52db — returns true/false (refused — caller MUST bail out); never let a registry hit
+ * accept a pid that is CURRENTLY LIVE — only a dead (no live row) registry hit may short-circuit. */
+function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string): boolean {
+  if (!inTestMode()) return true;
+  const hasRegistry = hasTestSpawnRegistry();
   let rows: OrphanSweepRow[];
   try {
     rows = enumerateLivePidPpidRowsForTestGuard();
   } catch (err) {
-    const msg = `[pty-reap-test-guard] REFUSED ${label}(pid=${pid}): could not enumerate the real OS process table to verify lineage (${(err as Error).message}) — fail-closed under LOOM_TEST`;
-    // eslint-disable-next-line no-console
-    console.error(msg);
-    throw new Error(msg);
+    return refuseReapTarget(label, pid,
+      `could not enumerate the real OS process table to verify lineage (${(err as Error).message}) — fail-closed under LOOM_TEST`,
+      hasRegistry);
   }
+  const isLiveNow = rows.some((r) => r.pid === pid);
+  if (!isLiveNow && wasSpawnedByThisTestProcess(pid)) return true;
   if (!isDescendantPid(rows, pid, process.pid)) {
-    const msg = `[pty-reap-test-guard] REFUSED ${label}(pid=${pid}): not a live descendant of this test process (pid=${process.pid}), and this test process never spawned it — a test may only reap/kill a process it itself (transitively) spawned`;
-    // eslint-disable-next-line no-console
-    console.error(msg);
-    throw new Error(msg);
+    return refuseReapTarget(label, pid,
+      `not a live descendant of this test process (pid=${process.pid}), and this test process never spawned it (or it is now live and no longer verifiable as ours) — a test may only reap/kill a process it itself (transitively) spawned`,
+      hasRegistry);
   }
+  return true;
 }
 
 /** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant a torn-down root escapes
@@ -4456,7 +4490,7 @@ function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string
  * guard; the pre-existing onExit sweep always omits it (unchanged behavior). Win32 is the only
  * enumeration that populates a row's own creation time — POSIX's own filter stays a permanent no-op. */
 export function reapOrphanedDescendants(rootPid: number, rootCreationTime: number | null = null): void {
-  assertReapTargetIsOwnLiveDescendantUnderTest(rootPid, "reapOrphanedDescendants");
+  if (!assertReapTargetIsOwnLiveDescendantUnderTest(rootPid, "reapOrphanedDescendants")) return;
   if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
     // eslint-disable-next-line no-console
     console.log(`[pty-reap] root=${rootPid}: skipped (not a reapable root pid)`);
@@ -4897,7 +4931,7 @@ function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> 
  *  spawned too), `SIGKILL` on posix — mirrors {@link killRemoveChild}'s posture (unconditional, immediate,
  *  best-effort — an already-gone pid is a silent no-op). */
 function killProcessById(pid: number): void {
-  assertReapTargetIsOwnLiveDescendantUnderTest(pid, "killProcessById");
+  if (!assertReapTargetIsOwnLiveDescendantUnderTest(pid, "killProcessById")) return;
   if (process.platform === "win32") {
     try { spawnProcess("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
   }
@@ -4908,7 +4942,7 @@ function killProcessById(pid: number): void {
  *  above (a deliberate WHOLE-SUBTREE kill, accepted risk sha:d8395f4e), this kills ONLY `pid` — no `/T` —
  *  since the identity/respawn guards feeding it verify the ROOT alone, never its descendants. */
 function killSingleProcessById(pid: number): void {
-  assertReapTargetIsOwnLiveDescendantUnderTest(pid, "killSingleProcessById");
+  if (!assertReapTargetIsOwnLiveDescendantUnderTest(pid, "killSingleProcessById")) return;
   if (process.platform === "win32") {
     try { spawnProcess("taskkill", ["/pid", String(pid), "/F"], { stdio: "ignore" }); } catch { /* best effort */ }
   }
