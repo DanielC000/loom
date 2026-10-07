@@ -1520,7 +1520,17 @@ const ROOT_REAP_KILL_VERIFY_DELAY_MS = Number(process.env.LOOM_ROOT_REAP_KILL_VE
  * our own recorded spawn time by no more than this much slack before `verifyRootDeadOrForceKill` trusts
  * it as "genuinely the process we spawned" — clock-skew/rounding margin, not a measured bound.
  */
-const CREATION_TIME_SLACK_MS = Number(process.env.LOOM_ROOT_REAP_CREATION_TIME_SLACK_MS) || 5_000;
+export const CREATION_TIME_SLACK_MS = Number(process.env.LOOM_ROOT_REAP_CREATION_TIME_SLACK_MS) || 5_000;
+
+/** @decision 87691385 — two reads of the SAME fixed OS attribute via the SAME query/conversion agree
+ *  EXACTLY (measured maxΔ=0ms/473 pids); 1ms absorbs only rounding — never widen toward a cross-source
+ *  margin. */
+export const ROOT_CREATION_MATCH_TOLERANCE_MS = Number(process.env.LOOM_ROOT_CREATION_MATCH_TOLERANCE_MS) || 1;
+
+/** @decision 87691385 (CR f89d9552 round 3) — `CreateProcess` returns before `startedAt` is ever stamped,
+ *  so the true root's own creation time is ALWAYS `<= startedAt`; this covers rounding only (~2ms), never
+ *  a real margin — round 2's 50ms default was itself too wide. */
+export const ROOT_CREATION_CAPTURE_SLACK_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_SLACK_MS) || 2;
 
 /**
  * Settle window for `interruptForRedirect`: after writing the single Esc that cancels a busy worker's
@@ -2687,6 +2697,9 @@ interface Live {
   // @decision 2897acc4 — this pid's own /proc/<pid>/stat `starttime` (boot-relative ticks), captured
   // async right after spawn; null until resolved, or always off-Linux. See verifyRootDeadOrForceKill's own doc.
   startTicksLinux: number | null;
+  // @decision 87691385 — the pid's own OS-reported creation time (epoch-ms, win32-only), captured async
+  // right after spawn; never `startedAt` — unknown (`null`) must fail an abort decision CLOSED, not open.
+  creationTime: number | null;
   logStream: fs.WriteStream;
   // Flips true the first time logStream emits 'error' (see attachLogErrorGuard) — degrades THIS
   // session's log-writing to a no-op for the rest of its life. A WriteStream auto-destroys on error,
@@ -3288,6 +3301,8 @@ export interface CodexLive {
   startedAt: number;
   // @decision 2897acc4 — same field + same contract as `Live.startTicksLinux` — see that field's doc.
   startTicksLinux: number | null;
+  // @decision 87691385 — same field + same contract as `Live.creationTime` — see that field's doc.
+  creationTime: number | null;
   logStream: fs.WriteStream;
   logBroken: boolean;
   busy: boolean;
@@ -4282,14 +4297,19 @@ export interface OrphanSweepRow { pid: number; ppid: number; creationTime: numbe
  *  updated the child's own reported parent) must never be walked or killed: drop any child whose own
  *  creation time predates `rootCreationTime`, when both are known; keep today's unconditional walk otherwise.
  *
- * @decision 2897acc4 (round 6, item 3) — a LIVE, non-self-referential row AT `rootPid` itself (the OS
- * reused the just-freed root) aborts the WHOLE walk, not just that one row — every "descendant" found via
- * a stale root is equally suspect. */
+ * @decision 87691385 — a LIVE, non-self-referential row AT `rootPid` itself aborts the WHOLE walk UNLESS
+ * positively proven to be our own surviving root (both creation times known and within slack); unknown on
+ * either side, or a later occupant, both abort — fail safe, never fail open. */
 export function computeOrphanSweepPlan(
   rows: OrphanSweepRow[], rootPid: number, rootCreationTime: number | null = null,
 ): { toKill: number[]; skippedStale: number; abortedRootPidLive: boolean } {
-  if (rows.some((row) => row.pid === rootPid && row.ppid !== row.pid)) {
-    return { toKill: [], skippedStale: 0, abortedRootPidLive: true };
+  const liveRootRow = rows.find((row) => row.pid === rootPid && row.ppid !== row.pid);
+  if (liveRootRow) {
+    const provenSameRoot = rootCreationTime != null && liveRootRow.creationTime != null
+      && Math.abs(liveRootRow.creationTime - rootCreationTime) <= ROOT_CREATION_MATCH_TOLERANCE_MS;
+    if (!provenSameRoot) {
+      return { toKill: [], skippedStale: 0, abortedRootPidLive: true };
+    }
   }
   const byParent = new Map<number, OrphanSweepRow[]>();
   for (const row of rows) {
@@ -4339,10 +4359,17 @@ export function parseOrphanSweepLine(line: string): OrphanSweepRow | null {
 }
 
 /** @decision 2897acc4 (round 6, item 1) — must be `.ToUniversalTime().Ticks`, never bare `.Ticks` (a
- *  LOCAL-kind value {@link parseWin32SweepTicks} below wrongly treats as UTC). One constant:
- *  {@link enumerateWin32SweepRows} must never hand-copy a drifting duplicate of it. */
-const WIN32_SWEEP_PS_COMMAND =
-  "Get-CimInstance Win32_Process | ForEach-Object { $t = 0; if ($_.CreationDate) { $t = $_.CreationDate.ToUniversalTime().Ticks }; \"$($_.ProcessId),$($_.ParentProcessId),$t\" }";
+ *  LOCAL-kind value {@link parseWin32SweepTicks} below wrongly treats as UTC). Shared by both the full
+ *  sweep query and {@link win32SweepFilteredCommand}'s single-pid one — one source, never hand-copied. */
+const WIN32_SWEEP_FOREACH_BODY =
+  "$t = 0; if ($_.CreationDate) { $t = $_.CreationDate.ToUniversalTime().Ticks }; \"$($_.ProcessId),$($_.ParentProcessId),$t\"";
+const WIN32_SWEEP_PS_COMMAND = `Get-CimInstance Win32_Process | ForEach-Object { ${WIN32_SWEEP_FOREACH_BODY} }`;
+
+/** @decision 87691385 (CR 376c51de, item 3) — a FILTERED single-pid CIM query, never a full-table scan,
+ *  for the at-spawn root-creation-time capture: shrinks both the per-spawn cost and the capture window. */
+function win32SweepFilteredCommand(pid: number): string {
+  return `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | ForEach-Object { ${WIN32_SWEEP_FOREACH_BODY} }`;
+}
 
 /** @decision 2897acc4 (round 6, item 1) — read-only, kills nothing: lets a real-spawn test cross-check this
  *  enumeration's reported creationTime against `checkRootSurvival`'s independent one for the same real pid. */
@@ -4371,6 +4398,63 @@ export function enumerateWin32SweepRows(timeoutMs = 10_000): Promise<OrphanSweep
       resolve(out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null));
     });
   });
+}
+
+/** @decision 87691385 (CR f89d9552 round 3, MINOR 3a) — true when our OWN diagnostic helper (spawned to
+ *  answer "is `queriedPid` still alive") was itself assigned `queriedPid` — the freed pid's most reachable
+ *  reuse shape. Pure; exported for a hermetic unit test (a real collision can't be forced deterministically). */
+export function isHelperPidCollision(helperPid: number, queriedPid: number): boolean {
+  return helperPid === queriedPid;
+}
+
+/** @decision 87691385 (CR 376c51de, item 3) — single-pid filtered counterpart to
+ *  {@link enumerateWin32SweepRows}, for the at-spawn capture seam. `null` on any failure/timeout/no-row —
+ *  never thrown; the caller (`armWin32RootCreationTime`) already treats a rejection as "unknown". */
+export function enumerateWin32SweepRowForPid(pid: number, timeoutMs = 10_000): Promise<OrphanSweepRow | null> {
+  return new Promise((resolve, reject) => {
+    const cmd = spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", win32SweepFilteredCommand(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+    // @decision 87691385 (round 3, MINOR 3a) — the OS freed `pid` and could hand it straight to THIS
+    // helper; if so, the CIM query would only ever find itself, never the real target — bail immediately.
+    if (cmd.pid != null && isHelperPidCollision(cmd.pid, pid)) {
+      try { cmd.kill(); } catch { /* best-effort */ }
+      resolve(null);
+      return;
+    }
+    let out = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { cmd.kill(); } catch { /* best-effort */ }
+      reject(new Error(`enumerateWin32SweepRowForPid: powershell.exe timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    cmd.stdout?.on("data", (d) => { out += d; });
+    cmd.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+    cmd.on("close", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const rows = out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null);
+      resolve(rows.find((r) => r.pid === pid) ?? null);
+    });
+  });
+}
+
+/** @decision 87691385 — positive-identity check before a captured row is trusted as the root's own
+ *  creation time: requires BOTH `row.ppid === expectedPpid` AND `row.creationTime` no later than
+ *  `startedAt + slackMs`. Pure; `null` on any failed check — never partial trust. */
+export function resolveVerifiedRootCreationTime(
+  row: OrphanSweepRow | null, expectedPpid: number, startedAt: number, slackMs = ROOT_CREATION_CAPTURE_SLACK_MS,
+): number | null {
+  if (!row || row.creationTime == null) return null;
+  if (row.ppid !== expectedPpid) return null;
+  if (row.creationTime > startedAt + slackMs) return null;
+  return row.creationTime;
 }
 
 /** @decision 8c8ee0ee — pure pid→ppid ancestry walk; fails closed on an unknown/self-referential pid or
@@ -4486,9 +4570,9 @@ function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string
  * pid equal to `process.pid`/`process.ppid` — a bad root must never reach a sweep that SIGKILLs every
  * process the runner user owns.
  *
- * @decision 2897acc4 — `rootCreationTime` (optional) feeds {@link computeOrphanSweepPlan}'s stale-pid
- * guard; the pre-existing onExit sweep always omits it (unchanged behavior). Win32 is the only
- * enumeration that populates a row's own creation time — POSIX's own filter stays a permanent no-op. */
+ * @decision 87691385 — `rootCreationTime` (optional) feeds {@link computeOrphanSweepPlan}'s stale-pid
+ * guard AND its live-root abort; the onExit sweep now threads it too (win32 only, `null` elsewhere), per
+ * the record. POSIX's own filter/abort both stay a permanent no-op there (no OS creation-time data). */
 export function reapOrphanedDescendants(rootPid: number, rootCreationTime: number | null = null): void {
   if (!assertReapTargetIsOwnLiveDescendantUnderTest(rootPid, "reapOrphanedDescendants")) return;
   if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
@@ -4500,9 +4584,9 @@ export function reapOrphanedDescendants(rootPid: number, rootCreationTime: numbe
     const rows = out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null);
     const { toKill, skippedStale, abortedRootPidLive } = computeOrphanSweepPlan(rows, rootPid, rootCreationTime);
     if (abortedRootPidLive) {
-      // Round 6, item 3: logged once, exactly here — the one place this abort is ever observable.
+      // @decision 87691385 — logged once, exactly here — the one place this abort is ever observable.
       // eslint-disable-next-line no-console
-      console.log(`[pty-reap] root=${rootPid}: ABORTED — a live, unrelated process now occupies the root pid itself (pid reuse) — not sweeping any "descendant"`);
+      console.log(`[pty-reap] root=${rootPid}: ABORTED — a live process occupies the root pid and is not provably our own surviving root (pid reuse, or unknown) — not sweeping any "descendant"`);
       return;
     }
     let killed = 0;
@@ -5609,6 +5693,7 @@ export class PtyHost {
       killed: false,
       startedAt: Date.now(),
       startTicksLinux: null, // armed async, right after this.live.set below
+      creationTime: null, // armed async (win32 only), right after this.live.set below
       logStream: openSessionLogStream(opts.sessionId, spawnLogReason),
       logBroken: false,
       busy: false,
@@ -5705,6 +5790,7 @@ export class PtyHost {
     };
     this.live.set(opts.sessionId, live);
     armLinuxStartTicks(live);
+    this.armWin32RootCreationTime(live);
     // Card 019d2e7a — carry any attached viewer across the respawn. `findAnyLive` rather than `outgoing`
     // above: that one is deliberately `this.live`-only (it exists to clear claude-specific timers), while
     // a viewer can equally be sitting in a codex entry this session is respawning away from. Done after
@@ -5942,6 +6028,7 @@ export class PtyHost {
       killed: false,
       startedAt: Date.now(),
       startTicksLinux: null, // a shell is never a verifyRootDeadOrForceKill target — never armed
+      creationTime: null, // a shell is never a verifyRootDeadOrForceKill target — never armed
       logStream: openSessionLogStream(opts.id, "shell spawn"),
       logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
@@ -6308,6 +6395,7 @@ export class PtyHost {
       subscribers: new Set(),
       alive: true, killed: false, startedAt: Date.now(),
       startTicksLinux: null, // armed async, right after this.liveCodex.set below
+      creationTime: null, // armed async (win32 only), right after this.liveCodex.set below
       logStream: openSessionLogStream(opts.sessionId, isCodexResumeSpawn ? "codex resume" : "codex fresh spawn"),
       logBroken: false,
       busy: false,
@@ -6333,6 +6421,7 @@ export class PtyHost {
     };
     this.liveCodex.set(opts.sessionId, live);
     armLinuxStartTicks(live);
+    this.armWin32RootCreationTime(live);
     this.adoptSubscribers(previousLive, live); // card 019d2e7a — see spawn()'s own call site
     attachLogErrorGuard(opts.sessionId, live);
 
@@ -7198,6 +7287,7 @@ export class PtyHost {
       killed: false,
       startedAt: Date.now(),
       startTicksLinux: null, // a canned entry is never a verifyRootDeadOrForceKill target — never armed
+      creationTime: null, // a canned entry is never a verifyRootDeadOrForceKill target — never armed
       logStream: openSessionLogStream(opts.id, "canned test seed"),
       logBroken: false,
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
@@ -7347,7 +7437,10 @@ export class PtyHost {
    * is the ONE place this is overridden to a no-op — see its own doc comment.
    */
   protected reapExitedDescendants(rootPid: number, sessionId: string, liveRef: Live | CodexLive): void {
-    this.sweepOrphanedDescendants(rootPid);
+    // @decision 87691385 — never drop this second argument: the shared planner's abort needs the root's
+    // own OS creation time to tell genuine pid reuse apart from our own still-alive root (unknown/null
+    // still fails the abort closed, never silently promotes to "ours").
+    this.sweepOrphanedDescendants(rootPid, liveRef.creationTime);
     // Card 2897acc4 (S1): node-pty's own exit notification is not always true — confirm the root itself
     // is actually gone, independent of that signal, rather than trusting it the way the descendant sweep
     // above (unchanged, see its own doc) always has. Fire-and-forget: never let a crashed check become a
@@ -7363,6 +7456,23 @@ export class PtyHost {
    *  fixture's fictional pid can collide with a real host pid). Defaults to the real, bounded check. */
   protected probeRootSurvival(rootPid: number, sessionId: string): Promise<RootSurvivalCheck> {
     return checkRootSurvival(rootPid, sessionId);
+  }
+
+  /** @decision 87691385 — injectable seam for the at-spawn root-creation-time capture's own OS query,
+   *  same pattern as {@link probeRootSurvival}/{@link sweepOrphanedDescendants}. Defaults to the real,
+   *  filtered, single-pid lookup. */
+  protected captureRootCreationRow(pid: number): Promise<OrphanSweepRow | null> {
+    return enumerateWin32SweepRowForPid(pid);
+  }
+
+  /** @decision 87691385 — fire-and-forget; only a {@link resolveVerifiedRootCreationTime}-approved row
+   *  is trusted. Always routed through {@link captureRootCreationRow}, so a test can drive this through
+   *  the real `spawn()` path. */
+  private armWin32RootCreationTime(live: Live | CodexLive): void {
+    if (process.platform !== "win32") return;
+    this.captureRootCreationRow(live.pid).then((row) => {
+      live.creationTime = resolveVerifiedRootCreationTime(row, process.pid, live.startedAt);
+    }).catch(() => { live.creationTime = null; });
   }
 
   /** Injectable seam used by {@link verifyRootDeadOrForceKill} for the actual OS kill — overridden

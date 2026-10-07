@@ -32,7 +32,10 @@ const {
   PtyHost, commandLineMatchesSession,
   parsePsLstartTimestamp, parsePsPidLstartCommandLine, parseProcStatStarttimeTicks, parseProcUptimeSeconds,
   linuxStartTicksConsistent, computeOrphanSweepPlan, parseWin32SweepTicks, parseOrphanSweepLine,
+  CREATION_TIME_SLACK_MS, ROOT_CREATION_MATCH_TOLERANCE_MS, ROOT_CREATION_CAPTURE_SLACK_MS,
+  resolveVerifiedRootCreationTime, isHelperPidCollision,
 } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // A controllable PtyHost subclass: `probeRootSurvival`/`killRoot` are overridden per scenario below
 // (never the real OS enumerator — see PtyHost's own doc on why that matters for a hermetic test), and
@@ -651,6 +654,280 @@ try {
     check("(h, negative control) a self-referential row at rootPid does NOT trigger the abort", abortedRootPidLive === false);
     check("(h, negative control) the genuine child is still killed", toKill.includes(100));
   }
+
+  // ===================================================================================================
+  // Card 87691385 — THE FAIL-SAFE FLIP: the round-6 abort used to fire on ANY live occupant of rootPid,
+  // which misfires on 2897acc4's own headline case (node-pty's onExit fires false while the real root is
+  // still alive) FAR more often than it catches genuine pid reuse. The fix makes the abort require
+  // POSITIVE evidence the occupant IS our own surviving root (both creation times known and agreeing
+  // EXACTLY, within `ROOT_CREATION_MATCH_TOLERANCE_MS` — CR 376c51de round 2, MAJOR: both sides come from
+  // the SAME CIM query + conversion, so genuine agreement is exact, never the old 5s cross-source slack)
+  // before it proceeds to walk; every other case — including "unknown" — still aborts, same as round 6
+  // did unconditionally. So round 6's own tests (f/g/h above) must keep passing unchanged (verified: they
+  // do), and only the "matching" case newly proceeds.
+  // ===================================================================================================
+
+  // (i) THE FIX ITSELF: a live row at rootPid whose own creationTime AGREES EXACTLY with rootCreationTime
+  // is proven to be our own still-alive root — the walk proceeds and reaps its real children, exactly the
+  // case round 6's unconditional abort used to wrongly suppress.
+  {
+    const rows = [
+      { pid: 1, ppid: 999, creationTime: 10_000 }, // rootPid itself, still alive — OUR OWN root
+      { pid: 100, ppid: 1, creationTime: 20_000 }, // a genuine child
+    ];
+    const { toKill, abortedRootPidLive } = computeOrphanSweepPlan(rows, 1, 10_000);
+    check("(i) a live root with a MATCHING creationTime is NOT aborted", abortedRootPidLive === false);
+    check("(i) its genuine child IS killed (walks and reaps its own children)", toKill.includes(100));
+  }
+
+  // (i, at the tolerance boundary) exactly ROOT_CREATION_MATCH_TOLERANCE_MS apart — still within bounds
+  // (inclusive `<=`), proving the rounding-only tolerance isn't itself off-by-one.
+  {
+    const rows = [{ pid: 1, ppid: 999, creationTime: 10_000 + ROOT_CREATION_MATCH_TOLERANCE_MS }];
+    const { abortedRootPidLive } = computeOrphanSweepPlan(rows, 1, 10_000);
+    check("(i, tolerance boundary) exactly at the tolerance: NOT aborted", abortedRootPidLive === false);
+  }
+
+  // (i, negative control) one ms PAST the tolerance boundary — proves (i) isn't vacuously "always proceeds
+  // now", and that the tolerance is genuinely tight (not the old 5s slack).
+  {
+    const rows = [{ pid: 1, ppid: 999, creationTime: 10_000 + ROOT_CREATION_MATCH_TOLERANCE_MS + 1 }];
+    const { abortedRootPidLive } = computeOrphanSweepPlan(rows, 1, 10_000);
+    check("(i, negative control) one ms past the tolerance boundary: aborted", abortedRootPidLive === true);
+  }
+
+  // (j) a LATER occupant (postdates root + slack — genuine reuse) still aborts — unchanged from (f), pinned
+  // again here under the new discriminating implementation so the two shapes aren't conflated.
+  {
+    const rows = [{ pid: 1, ppid: 999, creationTime: 50_000 }];
+    const { abortedRootPidLive } = computeOrphanSweepPlan(rows, 1, 10_000);
+    check("(j) a later occupant (genuine reuse) still aborts", abortedRootPidLive === true);
+  }
+
+  // (j, CR 376c51de round 2) an occupant a FULL SECOND later — well within the OLD CREATION_TIME_SLACK_MS
+  // (still used elsewhere, e.g. verifyRootDeadOrForceKill's own guard 2), which would have wrongly accepted
+  // it as "ours" — must still abort under the new, tight ROOT_CREATION_MATCH_TOLERANCE_MS. This is the test
+  // the manager's own round-2 ruling explicitly asked for.
+  {
+    const DELTA_MS = 1000;
+    check("(j, root+1000ms) setup: 1000ms is well within the OLD cross-source slack (would have wrongly passed)", DELTA_MS < CREATION_TIME_SLACK_MS);
+    const rows = [{ pid: 1, ppid: 999, creationTime: 10_000 + DELTA_MS }];
+    const { abortedRootPidLive } = computeOrphanSweepPlan(rows, 1, 10_000);
+    check("(j, root+1000ms) an occupant 1000ms later aborts under the new tight tolerance", abortedRootPidLive === true);
+  }
+
+  // (k) rootCreationTime UNKNOWN (null) — e.g. a canned/shell entry, or a win32 arm that never resolved —
+  // with the occupant's own creationTime known: cannot prove it's ours, so it ABORTS (the flip from round
+  // 6, which aborted here too, but unconditionally rather than for a stated reason).
+  {
+    const rows = [{ pid: 1, ppid: 999, creationTime: 10_000 }];
+    const { abortedRootPidLive } = computeOrphanSweepPlan(rows, 1, null);
+    check("(k) rootCreationTime unknown, occupant known: aborts (fail safe)", abortedRootPidLive === true);
+  }
+
+  // (l) POSIX SHAPE — neither side ever carries a creationTime at all (reapOrphanedDescendants's own
+  // POSIX enumeration is `ps -eo pid,ppid`, no time column, by construction) — must still abort, so POSIX
+  // keeps round 6's reuse protection with NO regression back to the pre-round-6 unconditional walk.
+  {
+    const rows = [{ pid: 1, ppid: 999, creationTime: null }];
+    const { abortedRootPidLive } = computeOrphanSweepPlan(rows, 1, null);
+    check("(l) POSIX shape (no creationTime data on either side): aborts (fail safe)", abortedRootPidLive === true);
+  }
+}
+
+// =======================================================================================================
+// Card 87691385 (CR 376c51de round 2, CRITICAL) — `resolveVerifiedRootCreationTime`: the positive-identity
+// predicate that must pass before any captured row is trusted as the root's own creation time. Closes the
+// capture-race: node-pty's conpty.cc frees the root's pid BEFORE JS observes the exit (windowsPtyAgent
+// itself delays the exit event by >=1s), so an unverified capture running in that window could silently
+// record a REUSED process's creation time instead — and the onExit sweep would then treat that reused
+// process's own real children as "ours" and walk/kill them. Empirically verified first (this session, a
+// real conpty spawn via node-pty): a genuine root's CIM-reported ppid IS the daemon's own process.pid, not
+// an intermediary (conhost.exe/OpenConsole.exe) — the anchor this predicate's first check relies on.
+// =======================================================================================================
+{
+  const EXPECTED_PPID = 4242; // this test's own fictional "daemon pid" anchor — never a real spawn here
+  const STARTED_AT = 100_000;
+
+  // (m) THE GENUINE ROOT — correct ppid, creationTime at/before startedAt (+ slack) — returns the value.
+  {
+    const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: STARTED_AT - 10 };
+    const result = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
+    check("(m) the genuine root (correct ppid, creationTime before startedAt): returns the value", result === STARTED_AT - 10);
+  }
+
+  // (n) WRONG PPID — same creationTime as (m), but the row's ppid is NOT the expected daemon pid (the
+  // capture race's own headline shape: the pid got reused by some other, unrelated process tree) — null.
+  {
+    const row = { pid: 1, ppid: EXPECTED_PPID + 1, creationTime: STARTED_AT - 10 };
+    const result = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
+    check("(n) wrong ppid (not the daemon's own pid): returns null", result === null);
+  }
+
+  // (o) A REUSED ROW — correct ppid is irrelevant here; a LATER creationTime (postdates startedAt by more
+  // than slack) means whatever this row is, it cannot be the root we spawned BEFORE stamping startedAt — null.
+  {
+    const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: STARTED_AT + ROOT_CREATION_CAPTURE_SLACK_MS + 1 };
+    const result = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
+    check("(o) a reused row (later creationTime, past slack): returns null", result === null);
+  }
+
+  // (o, boundary) exactly AT the capture slack boundary — still accepted (inclusive `<=`).
+  {
+    const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: STARTED_AT + ROOT_CREATION_CAPTURE_SLACK_MS };
+    const result = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
+    check("(o, boundary) exactly at the capture slack boundary: still accepted", result === STARTED_AT + ROOT_CREATION_CAPTURE_SLACK_MS);
+  }
+
+  // (p, negative control) no row at all (enumeration found nothing, e.g. already dead) — null, never throws.
+  check("(p, negative control) a null row: returns null", resolveVerifiedRootCreationTime(null, EXPECTED_PPID, STARTED_AT) === null);
+
+  // (q, negative control) a row with unknown creationTime (e.g. a CIM read anomaly) — null, never a guess.
+  {
+    const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: null };
+    check("(q, negative control) row.creationTime unknown: returns null", resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT) === null);
+  }
+}
+
+// =======================================================================================================
+// Card 87691385 (CR f89d9552 round 3, MINOR 3a) — `isHelperPidCollision`: the OS freed the target pid and
+// handed it straight to OUR OWN diagnostic helper (the most reachable reuse shape — our own powershell.exe
+// taking the just-freed pid) — a real collision can't be forced deterministically (we don't control what
+// pid the OS assigns our helper), so this is tested as the pure predicate directly.
+// =======================================================================================================
+{
+  check("[isHelperPidCollision] the helper WAS assigned the exact pid being queried: true", isHelperPidCollision(4242, 4242) === true);
+  check("[isHelperPidCollision, negative control] a different helper pid: false", isHelperPidCollision(4243, 4242) === false);
+}
+
+// =======================================================================================================
+// Card 87691385 — the onExit WIRING pin: `PtyHost.reapExitedDescendants` must thread `liveRef.creationTime`
+// through to `sweepOrphanedDescendants`'s second argument, never drop it (which would silently widen every
+// onExit sweep back to "rootCreationTime always unknown" — exactly the defect this card fixes). Drives the
+// REAL `reapExitedDescendants` directly (not no-op'd, unlike `ControllableHost` above, which exists
+// precisely so OTHER scenarios never reach it) — `probeRootSurvival` is overridden to resolve instantly, so
+// the method's own fire-and-forget `verifyRootDeadOrForceKill` tail does no real OS work.
+// =======================================================================================================
+{
+  class WiringHost extends PtyHost {
+    sweptPids = [];
+    sweptCreationTimes = [];
+    createPty() { throw new Error("not used by this file"); }
+    // pty-subclass-reap-seam-guard.mjs requires every bare `extends PtyHost` class to declare this seam —
+    // a deliberate pass-through (not a no-op): sweepOrphanedDescendants/probeRootSurvival/killRoot below
+    // are ALL overridden to safe stubs, so this still runs the REAL reapExitedDescendants body (the thing
+    // under test) with no real OS enumeration/kill ever reachable from it.
+    // This pass-through is safe ONLY because sweepOrphanedDescendants + probeRootSurvival (below) are stubbed.
+    reapExitedDescendants(rootPid, sessionId, liveRef) { return super.reapExitedDescendants(rootPid, sessionId, liveRef); }
+    sweepOrphanedDescendants(rootPid, rootCreationTime = null) { this.sweptPids.push(rootPid); this.sweptCreationTimes.push(rootCreationTime); }
+    async probeRootSurvival() { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null }; }
+    killRoot() { throw new Error("not used by this scenario"); }
+  }
+  const host = new WiringHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onProcessSurvivedKill() {} });
+  const SENTINEL_CREATION_TIME = 777_666_555; // non-null, so a dropped argument (reads back null) is visibly wrong
+  host.reapExitedDescendants(33333, "sess-wiring-pin", { creationTime: SENTINEL_CREATION_TIME, startedAt: Date.now() });
+  check("(onExit wiring) sweepOrphanedDescendants was called exactly once, with the root's pid", host.sweptPids.length === 1 && host.sweptPids[0] === 33333);
+  check("(onExit wiring) sweepOrphanedDescendants received liveRef.creationTime as its second argument", host.sweptCreationTimes[0] === SENTINEL_CREATION_TIME);
+}
+
+// =======================================================================================================
+// Card 87691385 (CR f89d9552 round 3, MAJOR; CR f8d7c90a round 4) — `armWin32RootCreationTime`'s OWN
+// wiring, through the REAL `spawn()`/`spawnCodex()` paths (not a direct unit call, unlike every scenario
+// above) — the gap CR f89d9552 found: a mutation that bypasses `resolveVerifiedRootCreationTime` entirely
+// (`live.creationTime = row?.creationTime ?? null`) left every PRIOR test in this file green, since none
+// of them actually drove `spawn()` far enough to reach this code. (r)/(s)/(t) cover the CLAUDE path; (u)
+// covers the CODEX dispatch (`spawn({harness:"codex"})`) — CR f8d7c90a's own round-4 finding: removing
+// `this.armWin32RootCreationTime(live)` at the codex spawn call site left (r)/(s)/(t) alone green, since
+// none of them ever drive that path. Win32-only (the whole mechanism is gated on `process.platform ===
+// "win32"` and never reaches `captureRootCreationRow` elsewhere); a non-win32 host gets a WARN SKIP,
+// matching `pty-root-reap-win32-ticks-real-spawn.mjs`'s own convention for this file's win32-only coverage.
+// =======================================================================================================
+if (process.platform === "win32") {
+  class CaptureRowHost extends createSeamHost(PtyHost) {
+    capturedPids = [];
+    nextRow = null; // set BEFORE spawn() for each scenario — captureRootCreationRow runs synchronously during spawn()
+    captureRootCreationRow(pid) {
+      this.capturedPids.push(pid);
+      // Store the SAME promise the real method awaits: external code that awaits this identical promise
+      // object resolves strictly AFTER armWin32RootCreationTime's own .then() (attached first, during
+      // spawn()) has already run — same promise, FIFO subscriber order — so the test never races the arm.
+      this.lastCapturePromise = Promise.resolve(this.nextRow);
+      return this.lastCapturePromise;
+    }
+    // (u) below needs spawn()'s codex dispatch to reach the REAL createCodexPty-adjacent spawnCodex path —
+    // createSeamHost(PtyHost) only stubs the claude createPty seam, never codex's own. Mirrors
+    // pty-root-reap-call-site-wiring.mjs's own makeFakeCodexPty shape (fixed pid range, onExit callback
+    // actually tracked — onexit-discard-guard.mjs requires it, not just inert no-op dispose).
+    createCodexPty(opts) {
+      let onExitCb = null;
+      const fake = {
+        pid: 60000 + Math.floor(Math.random() * 10000),
+        write() {}, onData() { return { dispose() {} }; },
+        onExit(cb) { onExitCb = cb; return { dispose() { onExitCb = null; } }; },
+        kill() { const cb = onExitCb; onExitCb = null; cb?.({ exitCode: 0 }); },
+        resize() {},
+      };
+      (this.codexFakes ??= new Map()).set(opts.sessionId, fake);
+      return fake;
+    }
+  }
+  const mkEvents = () => ({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onCodexBootStuck() {} });
+  const spawnOpts = (sessionId) => ({
+    sessionId, cwd: tmpHome,
+    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+    geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+  });
+
+  // (r) a seam returning a WRONG-PPID row -> live.creationTime === null (rejected, never partially trusted).
+  {
+    const host = new CaptureRowHost(mkEvents());
+    host.nextRow = { pid: 4242, ppid: process.pid + 1, creationTime: Date.now() - 60_000 };
+    host.spawn(spawnOpts("sess-capture-wrong-ppid"));
+    await host.lastCapturePromise;
+    check("(r) through the real spawn path: a wrong-ppid row -> live.creationTime === null",
+      host.captureLiveRef("sess-capture-wrong-ppid")?.creationTime === null);
+  }
+
+  // (s) a seam returning a row LATER than startedAt+slack -> live.creationTime === null.
+  {
+    const host = new CaptureRowHost(mkEvents());
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: Date.now() + 60_000 };
+    host.spawn(spawnOpts("sess-capture-too-late"));
+    await host.lastCapturePromise;
+    check("(s) through the real spawn path: a row later than startedAt+slack -> live.creationTime === null",
+      host.captureLiveRef("sess-capture-too-late")?.creationTime === null);
+  }
+
+  // (t) a GENUINE row (correct ppid, safely-in-the-past creationTime) -> stored, not discarded.
+  {
+    const host = new CaptureRowHost(mkEvents());
+    const genuineCreationTime = Date.now() - 60_000;
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: genuineCreationTime };
+    host.spawn(spawnOpts("sess-capture-genuine"));
+    await host.lastCapturePromise;
+    check("(t) through the real spawn path: a genuine row -> stored",
+      host.captureLiveRef("sess-capture-genuine")?.creationTime === genuineCreationTime);
+    check("(t) captureRootCreationRow was called with the real spawned pid (the fixture's own, 4242)",
+      host.capturedPids.length === 1 && host.capturedPids[0] === 4242);
+  }
+
+  // (u) THE CODEX PATH — the SAME wiring, through `spawn()`'s codex dispatch (`harness: "codex"`), never
+  // just the claude path (r)/(s)/(t) exercise. A genuine row -> stored. CR f8d7c90a's own round-4 finding:
+  // `this.armWin32RootCreationTime(live)` was removed at the codex spawn call site and every test here
+  // stayed green until this scenario was added.
+  {
+    const host = new CaptureRowHost(mkEvents());
+    const genuineCreationTime = Date.now() - 60_000;
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: genuineCreationTime };
+    host.spawn({ ...spawnOpts("sess-capture-codex-genuine"), role: "worker", harness: "codex", startupPrompt: undefined });
+    const codexFake = host.codexFakes.get("sess-capture-codex-genuine");
+    await host.lastCapturePromise;
+    check("(u) through the real spawnCodex() path: a genuine row -> stored",
+      host.captureLiveRef("sess-capture-codex-genuine")?.creationTime === genuineCreationTime);
+    check("(u) captureRootCreationRow was called with the real codex-spawned pid", host.capturedPids.includes(codexFake.pid));
+  }
+} else {
+  console.log("WARN  SKIP  armWin32RootCreationTime real-spawn-path wiring tests — win32-only; process.platform !== 'win32' here.");
 }
 
 // =======================================================================================================

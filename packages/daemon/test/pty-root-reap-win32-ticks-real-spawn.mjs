@@ -18,6 +18,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn as spawnPty } from "node-pty";
 import { requireHermeticEnv } from "./_guard.mjs";
 
 let failures = 0;
@@ -38,7 +39,7 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 requireHermeticEnv();
 
-const { enumerateWin32SweepRows, checkRootSurvival } = await import("../dist/pty/host.js");
+const { enumerateWin32SweepRows, checkRootSurvival, enumerateWin32SweepRowForPid, resolveVerifiedRootCreationTime } = await import("../dist/pty/host.js");
 
 try {
   // The SAME real pid (this test's own process) probed by BOTH independent, real PowerShell enumerations
@@ -68,6 +69,40 @@ try {
     // milliseconds) and would blow through this bound by orders of magnitude.
     check(`[THE FIX] the sweep's own creationTime (${selfRow.creationTime}) agrees with checkRootSurvival's (${survival.creationTime}) within 2000ms — delta=${deltaMs}ms`,
       deltaMs <= 2000);
+  }
+
+  // =====================================================================================================
+  // Card 87691385 (CR 376c51de round 2, CRITICAL) — armWin32RootCreationTime's real end-to-end wiring:
+  // a genuine conpty root, spawned by THIS test via node-pty (never a fabricated pid), must be positively
+  // identified by `enumerateWin32SweepRowForPid` + `resolveVerifiedRootCreationTime` together — proving
+  // the filtered single-pid query and the positive-identity predicate are actually wired to each other
+  // against a real OS process, not merely unit-tested in isolation (pty-root-reap-identity.mjs covers the
+  // predicate's own pure logic hermetically; this is the one real-process cross-check). Read-only: this
+  // test never calls any reap/kill function, and cleans up via node-pty's own `kill()` directly.
+  // =====================================================================================================
+  let child = null;
+  try {
+    // Mirrors PtyHost.spawn()'s own real ordering exactly: the OS process is created FIRST (`createPty`),
+    // `startedAt` is stamped only AFTER — never the reverse, which would wrongly expect the OS creation
+    // time to precede a stamp taken before the process even existed.
+    child = spawnPty("cmd.exe", [], { name: "xterm-color", cols: 80, rows: 30, cwd: tmpHome, env: process.env });
+    const startedAt = Date.now();
+    const row = await enumerateWin32SweepRowForPid(child.pid);
+    check("[armWin32RootCreationTime wiring] the filtered single-pid query found the real conpty child's row", row !== null);
+    check("[armWin32RootCreationTime wiring] the row's own creationTime is non-null", row?.creationTime != null);
+    // The empirical anchor this whole predicate rests on: a real conpty-spawned child's CIM-reported
+    // ppid IS the daemon's own process.pid directly (verified this session via a throwaway real-spawn
+    // probe) — never an intermediary like conhost.exe/OpenConsole.exe.
+    check("[armWin32RootCreationTime wiring] the row's ppid is THIS process's own pid (the predicate's anchor)", row?.ppid === process.pid);
+    const verified = resolveVerifiedRootCreationTime(row, process.pid, startedAt);
+    check("[armWin32RootCreationTime wiring] the real predicate POSITIVELY IDENTIFIES the genuine root (non-null)", verified !== null);
+    check("[armWin32RootCreationTime wiring] the accepted value equals the row's own creationTime exactly", verified === row?.creationTime);
+    // Negative control, same real row: a WRONG expected ppid (simulating the capture race's own headline
+    // shape — the pid reused by some other process tree) must be rejected, never partially trusted.
+    check("[armWin32RootCreationTime wiring, negative control] a wrong expected ppid against the SAME real row is rejected (null)",
+      resolveVerifiedRootCreationTime(row, process.pid + 1, startedAt) === null);
+  } finally {
+    try { child?.kill(); } catch { /* best-effort — this is our own spawned process, never a reap/kill seam */ }
   }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }

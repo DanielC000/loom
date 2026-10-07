@@ -54,6 +54,12 @@ export function createSeamHost(PtyHost) {
       return { foundAlive: false, identityConfirmed: false, enumerationFailed: false };
     }
     killRoot(_pid) {}
+    // Card 87691385 (CR f89d9552 round 3, MINOR 2) — the at-spawn root-creation-time capture seam runs a
+    // REAL `powershell.exe` CIM query (measured 600-920ms) on win32 for EVERY spawn through this fixture,
+    // same reasoning as reapExitedDescendants/probeRootSurvival above — never let a hermetic test pay for
+    // (or race) the real OS query against this fixture's fictional pid. Measured impact (this card):
+    // kickoff-readiness-fallback.mjs (13 real spawns through this fixture) 10.974s -> 6.170s with this stub.
+    async captureRootCreationRow(_pid) { return null; }
     // Round 5 (item 1b) — `probeRootSurvival` above always reports "not alive", so `verifyRootDeadOrForceKill`
     // never reaches its own post-kill `sweepOrphanedDescendants` call from THIS fixture's defaults alone;
     // this override exists as belt-and-braces for a subclass that overrides probeRootSurvival/killRoot
