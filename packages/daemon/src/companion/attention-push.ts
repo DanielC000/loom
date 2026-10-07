@@ -403,9 +403,14 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       break;
     case "recycle_fleet_unresolved": {
       const oldStillLive = detail.oldStillLive === true;
-      const reasonClause = detail.reason === "timeout"
-        ? `successor's fate never confirmed — fleet still parented to it${oldStillLive ? "" : ", predecessor also not live"}`
-        : "successor died before SessionStart, predecessor also not live — fleet may be stranded, unowned";
+      // Card 91ac2b79: a halted successor down but durably resumable with a completed turn is a THIRD,
+      // distinct shape — the predecessor is always still live here (the halt branch never stops it) and the
+      // successor DID reach SessionStart, so neither of the other two clauses is accurate for it.
+      const reasonClause = detail.reason === "halted-waiting-crash-recovery"
+        ? "halted successor is down but completed a turn and is durably resumable — awaiting automatic crash recovery (or recycle_reattempt)"
+        : detail.reason === "timeout"
+          ? `successor's fate never confirmed — fleet still parented to it${oldStillLive ? "" : ", predecessor also not live"}`
+          : "successor died before SessionStart, predecessor also not live — fleet may be stranded, unowned";
       line = `${projectName}: manager/Lead recycle unresolved (${reasonClause}) — ${m8}`;
       break;
     }

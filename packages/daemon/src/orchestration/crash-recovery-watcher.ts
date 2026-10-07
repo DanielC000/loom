@@ -149,11 +149,16 @@ const lastTriggerOf = (
  * @decision 09b14f15 — never gate a "wait for automatic recovery" promise on `isCrashRecoveryEligible`
  *  alone — it returns true even with no trigger filed at all (e.g. an intended stop), which the tick's
  *  own candidate query would never act on. Use this function instead.
+ *
+ * @decision 91ac2b79 — `opts.ignorePause` (default false, byte-identical for every existing caller) lets a
+ *  keep-waiting decision ignore a REVERSIBLE human pause rather than treat it like an irreversible reason
+ *  to give up; passed straight through to the one place the pause check lives, {@link isCrashRecoveryEligible}.
  */
 export function willRecoverAutomatically(
   db: Db,
   control: OrchestrationControl,
   session: { id: string; role?: SessionRole | null; parentSessionId?: string | null; projectId: string; engineSessionId?: string | null; resumability?: string },
+  opts?: { ignorePause?: boolean },
 ): boolean {
   const events = db.listEventsForWorker(session.id);
   const lastTrigger = lastTriggerOf(events);
@@ -162,7 +167,7 @@ export function willRecoverAutomatically(
   // Mirrors the tick's own bcdea586 position-safe "already RESOLVED" check (line ~367 below) — never a
   // raw `.ts` comparison; both reads are drawn from this SAME `events` array.
   if (lastRecovered && lastRecovered.index >= lastTrigger.index) return false; // this episode is already closed
-  return isCrashRecoveryEligible(db, control, session);
+  return isCrashRecoveryEligible(db, control, session, opts);
 }
 
 /**
@@ -241,11 +246,16 @@ export function recordUnexpectedExit(db: Db, sessionId: string, intended: boolea
  * auto-recovery re-confirmation worker_reports from that SAME worker). Mirrors the tick's own gates
  * (role/resumability/successor/project-config/pause/attempt-cap) without requiring a trigger to already be
  * filed. Pure DB read, never throws.
+ *
+ * @decision 91ac2b79 — `opts.ignorePause` (default false) skips the pause check only; every other gate
+ *  (role/resumability/superseded/maxAttempts/attempt-cap) still applies. See {@link willRecoverAutomatically}'s
+ *  own doc for why a caller would ever want that.
  */
 export function isCrashRecoveryEligible(
   db: Db,
   control: OrchestrationControl,
   session: { id: string; role?: SessionRole | null; parentSessionId?: string | null; projectId: string; engineSessionId?: string | null; resumability?: string },
+  opts?: { ignorePause?: boolean },
 ): boolean {
   if (!session.role || !RECOVERABLE_ROLES.includes(session.role)) return false;
   if (!session.engineSessionId || session.resumability === "dead") return false;
@@ -254,7 +264,7 @@ export function isCrashRecoveryEligible(
   if (!project) return false;
   const maxAttempts = resolveConfig(project.config).orchestration.crashRecoveryMaxAttempts;
   if (maxAttempts <= 0) return false;
-  if (control.isPaused(session.id) || (session.parentSessionId && control.isPaused(session.parentSessionId))) return false;
+  if (!opts?.ignorePause && (control.isPaused(session.id) || (session.parentSessionId && control.isPaused(session.parentSessionId)))) return false;
   const events = db.listEventsForWorker(session.id);
   const lastRecovered = lastOfKind(events, "session_recovered");
   // Card bcdea586: mechanical adaptation to lastOfKind's new {event,index} shape only — this boundary

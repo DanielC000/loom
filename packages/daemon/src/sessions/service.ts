@@ -13470,28 +13470,100 @@ export class SessionService {
    * predecessor whatever DID transfer if the successor dies before reaching ready. Has NO "reached ready ->
    * stop predecessor" branch, unlike {@link settleRecycleHandoff} — a halted predecessor is never stopped.
    *
-   * Mirrors that method's own unresolved-alert leg (fires once past the same bound if the successor
-   * neither reaches ready nor confirms dead, then keeps watching at the slower cadence) — alert only,
-   * never a disposition change: the predecessor was never stopped either way.
+   * @decision 91ac2b79 — do not reclaim on bare `!isAlive` any more — check `turnSeq`/`isDurablyResumable`/
+   * `willRecoverAutomatically` first, or a successor that genuinely completed a turn gets discarded.
+   *
+   * "Recovers to ready" below means the WATCH LOOP returns (stops watching) — never that M1 is touched;
+   * `recoverFleetAfterFailedRecycleSuccessor` never calls `pty.stop` either.
+   *
+   * `hasReachedReady` (`pty/host.ts`) is a monotonic latch NEVER cleared on a claude session's exit (its
+   * `Live` entry survives with `alive:false`), but this loop checks `!isAlive` BEFORE `hasReachedReady`
+   * every tick — so the only way it ever takes the ready/leave-alone branch is a poll that catches the
+   * successor alive AND ready at once. A successor that reaches ready and dies within a single poll gap
+   * (up to `RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS` once the unresolved alert below has fired) is never
+   * observed in that intermediate state, and the very next tick would otherwise reclaim a successor that
+   * genuinely completed a turn — discarding real, delivered context. Gate on the SAME `turnSeq`/
+   * `isDurablyResumable`/`willRecoverAutomatically` shape `reattemptManagerOwnershipTransfer` already uses
+   * (decision 09b14f15, docs/decisions/09b14f15-recycle-reattempt-false-resume-promise.md), reused directly
+   * rather than forked:
+   *  - row gone, `turnSeq === 0`, or not durably resumable: reclaim exactly as before (no real context).
+   *  - `turnSeq > 0` AND durably resumable AND `willRecoverAutomatically(..., { ignorePause: true })` is
+   *    true: a genuine resume is (or will be) attempted by the real watchdog — do NOT reclaim this tick;
+   *    fall through to the shared alert/sleep tail and re-evaluate fresh next tick. `ignorePause`: a human
+   *    pause is REVERSIBLE and gates new work only, while reclaiming here is NOT reversible (it discards a
+   *    completed turn) — a pause must never end this wait on its own; only the attempt cap, the trigger, or
+   *    a superseded lineage may. No separate latch, so a later re-death or an exhausted/abandoned recovery
+   *    (the predicate flips false) naturally re-enters this same branch on a later iteration — "resume →
+   *    ready" is caught by the existing `hasReachedReady` branch below once alive again, "resume → die
+   *    again" simply re-runs this same check.
+   *  - otherwise (nothing will ever revive it — an intended stop, exhausted attempts, or a superseded
+   *    lineage; NEVER merely "paused" — see `ignorePause` above): reclaim, same as always.
+   *
+   * Race safety: `CrashRecoveryWatcher.tick()`'s own resume path (`orchestration/crash-recovery-watcher.ts`)
+   * is synchronous end to end — it records the attempt, then `resume()` flips `processState` to `"live"`
+   * (this file, the M5 comment) and `PtyHost.spawn()` registers `this.live.set(..., {alive:true,...})`
+   * (`pty/host.ts`), with no `await` anywhere in between. Node's single-threaded event loop means this
+   * `setTimeout`-scheduled poll can only ever observe the state fully BEFORE or fully AFTER that sequence,
+   * never a torn intermediate — so this loop can never reclaim a successor a real resume is actively in the
+   * middle of reviving. The one remaining overlap is a separate reclaim decision racing a concurrent manual
+   * `recycle_reattempt` call reaching the identical conclusion — NOT re-checked via `hasSuccessor(oldId)`:
+   * the pre-existing f349f5cb `reconcileNeverStartedRecycleSuccessor` onExit unlink already nulls
+   * `freshId`'s `recycled_from` for ANY never-reached-ready death, independent of whether a reclaim has
+   * actually happened, so `hasSuccessor(oldId)` is already false long before this branch's ordinary
+   * no-context reclaim and would wrongly short-circuit it every time (measured: scenarios A/A3/B/G/G'/H all
+   * broke). `db.hasWorkerEventKind(freshId, "recycle_successor_retired")` is checked instead, immediately
+   * before committing to reclaim — that event has exactly one write site
+   * (`unlinkAndArchiveDeadRecycleSuccessor`, reached only via a completed
+   * `recoverFleetAfterFailedRecycleSuccessor` call) and so precisely answers "has a full reclaim already
+   * happened for this successor"; if true, the lineage was already resolved by the other path and this loop
+   * simply returns.
+   *
+   * Mirrors `settleRecycleHandoff`'s own unresolved-alert leg (fires once past the same bound if the
+   * successor neither reaches ready nor confirms dead, then keeps watching at the slower cadence) — alert
+   * only, never a disposition change beyond what the branch above already decided. The alert text/reason
+   * distinguishes "still booting, fate unknown" from "down but durably resumable, crash recovery is
+   * expected to act" — claim only what will actually happen (mirrors decision 6e5af155 round 2's Minor 3).
    */
   private async watchHaltedRecycleSuccessor(oldId: string, freshId: string): Promise<void> {
     const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
     let alerted = false;
     for (;;) {
+      let waitingForRecovery = false;
       if (!this.pty.isAlive(freshId)) {
-        this.recoverFleetAfterFailedRecycleSuccessor(oldId, freshId, "manager");
+        // Read fresh off the DB row every tick — never in-memory hasReachedReady/live state (see doc above).
+        const successor = this.db.getSession(freshId);
+        const turnSeq = successor?.turnSeq ?? 0;
+        if (successor && isDurablyResumable(successor) && turnSeq > 0 &&
+            // @decision 91ac2b79 — ignorePause: a human pause is REVERSIBLE; reclaiming a successor that
+            // completed a turn is NOT. Keep waiting through a pause rather than discarding real context
+            // for a reason that can simply be undone.
+            willRecoverAutomatically(this.db, this.control, successor, { ignorePause: true })) {
+          waitingForRecovery = true;
+        } else {
+          // @decision 91ac2b79 — check `recycle_successor_retired` on freshId, never `hasSuccessor(oldId)`
+          // — the pre-existing f349f5cb onExit unlink nulls `recycled_from` for ANY never-reached-ready
+          // successor, independent of a reclaim, which would wrongly short-circuit the real reparent work.
+          if (this.db.hasWorkerEventKind(freshId, "recycle_successor_retired")) return; // already resolved elsewhere (e.g. a concurrent recycle_reattempt) — nothing left to do
+          this.recoverFleetAfterFailedRecycleSuccessor(oldId, freshId, "manager");
+          return;
+        }
+      } else if (this.pty.hasReachedReady(freshId)) {
         return;
       }
-      if (this.pty.hasReachedReady(freshId)) return;
       if (!alerted && Date.now() >= deadline) {
         alerted = true;
         try {
+          const detail = waitingForRecovery
+            ? { deadSuccessorId: freshId, oldStillLive: true, reason: "halted-waiting-crash-recovery", halted: true }
+            : { deadSuccessorId: freshId, oldStillLive: true, reason: "timeout", halted: true };
           this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
-            kind: "recycle_fleet_unresolved", detail: { deadSuccessorId: freshId, oldStillLive: true, reason: "timeout", halted: true },
+            kind: "recycle_fleet_unresolved", detail,
           });
-          this.enqueueDurableNudge(oldId, "manager",
-            `[loom:recycle-failed] your halted recycle's successor ${freshId.slice(0, 8)} never confirmed reaching SessionStart or dying — its fate is unknown; you remain the live owner of whatever did not transfer. Loom recorded this and is still watching.`);
+          const nudgeText = waitingForRecovery
+            ? `[loom:recycle-failed] your halted recycle's successor ${freshId.slice(0, 8)} is down but completed a turn before dying and is durably resumable — Loom's crash-recovery watchdog is expected to resume it automatically; you remain the live owner of whatever did not transfer, and recycle_reattempt remains available once it's back (or if nothing resumes it). Loom recorded this and is still watching.`
+            : `[loom:recycle-failed] your halted recycle's successor ${freshId.slice(0, 8)} never confirmed reaching SessionStart or dying — its fate is unknown; you remain the live owner of whatever did not transfer. Loom recorded this and is still watching.`;
+          this.enqueueDurableNudge(oldId, "manager", nudgeText);
         } catch (e) {
           console.error(`[recycle] recording halted-successor unresolved alert failed for ${oldId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
         }

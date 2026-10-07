@@ -132,6 +132,13 @@ process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS = "40";
 process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_POLL_MS = "15";
 process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS = "3600000";
 process.env.LOOM_MCP_READY_TIMEOUT_MS = "25";
+// Card 91ac2b79's own (A4) scenario resumes M2 directly (sessions.resume) to simulate the real watchdog —
+// a RESUME always carries a non-null resumeModeTarget (sessions/service.ts), which routes SessionStart
+// through cycleToMode's async footer-read machinery; the fake pty never produces footer output, so that
+// machinery can only ever settle via its own bounded fallback (mirrors pty-ready-fallback-ceiling.mjs's
+// own env pattern: MODE_CYCLE_FALLBACK_MS deliberately large, the ABSOLUTE_CEILING the one actually hit).
+process.env.LOOM_MODE_CYCLE_FALLBACK_MS = "60000";
+process.env.LOOM_READY_FALLBACK_ABSOLUTE_CEILING_MS = "200";
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -142,6 +149,28 @@ const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const { runBootRecoveryPrefix } = await import("../dist/sessions/boot-backstop.js");
 const { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers, isSupersededByRecycle } = await import("../dist/orchestration/crash-orphaned-workers.js");
 const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
+const { recordUnexpectedExit, CrashRecoveryWatcher, willRecoverAutomatically } = await import("../dist/orchestration/crash-recovery-watcher.js");
+
+/** Drives a REAL CrashRecoveryWatcher.tick() against `db` (mirrors recycle-reattempt.mjs's own identical
+ *  helper) and returns the list of session ids it actually attempted to resume — proves "waiting for
+ *  automatic recovery" (or its absence) is an HONEST claim about what the watchdog will do, not merely
+ *  that watchHaltedRecycleSuccessor's own gate used the same predicate in isolation. */
+function tickAttempts(db) {
+  const resumes = [];
+  const watcher = new CrashRecoveryWatcher({ db, control: new OrchestrationControl(), resume: (id) => { resumes.push(id); return true; } });
+  watcher.tick();
+  return resumes;
+}
+
+/** Same as tickAttempts, but against a CALLER-SUPPLIED control — so a pause set on it is honoured, unlike
+ *  tickAttempts' own always-fresh (never-paused) OrchestrationControl. (A6) uses this to prove a pause
+ *  genuinely blocks the real watchdog's tick too, not merely this file's own gate in isolation. */
+function tickAttemptsWithControl(db, control) {
+  const resumes = [];
+  const watcher = new CrashRecoveryWatcher({ db, control, resume: (id) => { resumes.push(id); return true; } });
+  watcher.tick();
+  return resumes;
+}
 
 const repo = path.join(os.tmpdir(), `loom-rmhsd-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
@@ -353,6 +382,231 @@ try {
     check("(A3) M2 IS archived (never left resumable for crash-recovery to resurrect blank)", !!db.getSession(m2.id)?.archivedAt);
     check("(A3) the never-transferred wake is still on M1, untouched by the reclaim", db.listWakesForSession(m1.id).some((w) => w.id === `${m1.id}-wake`));
     check("(A3) no recycle_successor_down_resumable event exists — that event kind was retracted with the gate", !hasEvent(db, m1.id, "recycle_successor_down_resumable"));
+  }
+
+  // ==================== (A4) card 91ac2b79 — a GENUINE post-ready crash is WAITED on, not reclaimed ====================
+  // The gap (A3)'s own retraction named as real but out of scope: M2 reaches ready (kickoff delivered) and
+  // THEN dies, all inside one poll gap (no await anywhere between the hook delivery/turnSeq bump and the
+  // kill — mirrors scenario (H)'s own race-simulation technique) — the watch loop's own poll can never have
+  // observed the intermediate alive+ready state. With real context (turnSeq>0) and a genuine recovery
+  // trigger on record, the fix now WAITS instead of reclaiming, then correctly stops watching (never M1)
+  // once the successor is revived and ready again — proven via watchPromise's own resolution, never a
+  // fixed sleep, so the absence of a reclaim event is asserted only once no further iteration can run.
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-a4";
+    seedProject(db, P);
+    // startupModeCycles:0 — markReady must run SYNCHRONOUSLY off the hook below (mirrors (A2)/(G')/(H)).
+    db.setProjectConfig(P, { permission: { startupModeCycles: 0 } });
+    const m1 = sessions.startManager(`${P}-mgr`);
+    const { workerId } = seedFleet(db, P, m1.id);
+
+    let watchPromise;
+    const originalWatch = SessionService.prototype.watchHaltedRecycleSuccessor;
+    SessionService.prototype.watchHaltedRecycleSuccessor = function (...args) {
+      watchPromise = originalWatch.apply(this, args);
+      return watchPromise;
+    };
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — forcing a halt, then the successor reaches ready and dies in the same poll gap");
+    unstub();
+    SessionService.prototype.watchHaltedRecycleSuccessor = originalWatch;
+    check("(A4 pre) the recycle HALTED", hasEvent(db, m2.id, "recycle_ownership_transfer_failed"));
+    check("(A4 setup) the watch was armed and its promise captured", !!watchPromise);
+
+    // Deliver ready + a completed turn, then kill + file a real crash trigger — all with NO await in
+    // between, so the loop's own poll (asleep in its first iteration's setTimeout at this point) can never
+    // have observed the intermediate alive+ready state.
+    const engineSessionId = `eng-${m2.id}`;
+    host.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: engineSessionId });
+    writeFakeTranscript(m2.cwd, engineSessionId);
+    db.incrementTurnSeq(m2.id); // a real turn ran — genuine, delivered context worth preserving
+    check("(A4 setup) M2 reached ready synchronously, with a completed turn", host.hasReachedReady(m2.id) === true && db.getSession(m2.id)?.turnSeq === 1);
+    const m2Pty = host.handles.get(m2.id);
+    m2Pty.kill();
+    recordUnexpectedExit(db, m2.id, false); // the real onExit wiring's own trigger for a genuine unintended crash
+    check("(A4 setup) M2 confirmed dead", host.isAlive(m2.id) === false);
+
+    check("(A4) WAIT IS HONEST: the watchdog's own REAL tick GENUINELY attempts M2", tickAttempts(db).includes(m2.id));
+
+    // Give the REAL watchHaltedRecycleSuccessor loop (armed above, still running, polling every
+    // LOOM_RECYCLE_SUCCESSOR_SETTLE_POLL_MS=15ms) several genuine chances to observe the dead state and
+    // make its OWN decision BEFORE this scenario intervenes with a manual resume() below — without this,
+    // the manual resume() races ahead of the loop's own first post-death poll and the scenario can never
+    // exercise the reclaim-vs-wait fork at all, old code or new (verified: reverting this fix to the old
+    // unconditional reclaim and re-running this file still passed every (A4) check, because resume() ran
+    // before the old loop ever got to react — this wait is what makes the test non-vacuous either way).
+    // The actual proof this guards is NOT timed to this wait — it's the `!hasEvent(...,
+    // "recycle_fleet_recovered")` check far below, anchored to `watchPromise`'s own resolution, which
+    // cannot settle early (sync-early-return) and is unaffected by whether this wait is 60ms or 6000ms.
+    await sleep(60); // 4x LOOM_RECYCLE_SUCCESSOR_SETTLE_POLL_MS (15ms, set above)
+
+    // REGRESSION GUARD (card 91ac2b79, round 2): on the old unconditional-reclaim code, the real watch
+    // loop's first post-death poll — given a genuine chance to run by the sleep above — already reclaimed
+    // AND ARCHIVED M2 by this point, which makes `sessions.resume(m2.id)` below throw "session was
+    // administratively retired". Left unguarded, that throw is UNCAUGHT at module top level: it aborts
+    // this whole file immediately, silently skipping (A5) and every later scenario, which is a FAR worse
+    // failure than a loud, named check here. Detect the regression signal directly first, then only call
+    // resume() when it's actually safe to, so a regression shows up as a named (A4) FAIL and the file keeps
+    // running — never as a crash.
+    const alreadyReclaimed = hasEvent(db, m1.id, "recycle_fleet_recovered") || !!db.getSession(m2.id)?.archivedAt;
+    check("(A4) REGRESSION GUARD: M2 was NOT already reclaimed before the simulated resume (true here means the old unconditional-reclaim bug is back)", !alreadyReclaimed);
+
+    if (!alreadyReclaimed) {
+      // Simulate the real watchdog's resume succeeding: M2 comes back alive and reaches ready again (its
+      // SessionStart hook fires on every resume too, real or fake) — the EXISTING hasReachedReady branch
+      // then stops the WATCH LOOP, never M1 (@decision f1969787 — a halted predecessor is never stopped).
+      // Unlike a FRESH spawn ((A2)'s own synchronous pattern), a RESUME's readiness is not guaranteed
+      // synchronous off a single hook delivery — wait for it (anchored to the observable state, never a
+      // fixed sleep) rather than asserting immediately.
+      sessions.resume(m2.id);
+      check("(A4) M2 is genuinely alive again after the simulated resume", host.isAlive(m2.id) === true);
+      host.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: engineSessionId });
+      const revivedReady = await waitUntil(() => host.hasReachedReady(m2.id) === true);
+      check("(A4) M2 reaches ready again after the simulated resume", revivedReady);
+      await watchPromise; // resolves the instant the loop's own next poll observes alive+ready and returns
+
+      check("(A4) FIX 91ac2b79: the loop never reclaimed across its whole lifetime — no recycle_fleet_recovered event", !hasEvent(db, m1.id, "recycle_fleet_recovered"));
+      check("(A4) FIX: M2 was never archived by the watch — real context was preserved, not discarded", !(db.getSession(m2.id)?.lastError ?? "").includes("[loom:recycle-failed]"));
+      check("(A4) FIX: M1 was NEVER stopped — still alive (ownership stays split, exactly like (A2))", host.isAlive(m1.id) === true);
+      check("(A4) FIX: hasSuccessor(M1) stays true — nothing reclaimed/unlinked", db.hasSuccessor(m1.id) === true);
+      check("(A4) the worker stays on M2 — nothing was wrongly reclaimed", db.getSession(workerId)?.parentSessionId === m2.id);
+    } else {
+      console.log("(A4) SKIPPED the rest of this scenario's checks — M2 was already reclaimed (see the regression guard check above)");
+    }
+  }
+
+  // ==================== (A5) card 91ac2b79 — an INTENDED STOP (no trigger ever filed) still RECLAIMS ====================
+  // Same post-ready-crash shape as (A4) — real context (turnSeq>0), durably resumable — but NO
+  // recordUnexpectedExit call this time, mirroring an intended stop (production's onExit wiring never
+  // files a trigger for one). willRecoverAutomatically correctly says "nothing will ever revive this", so
+  // the fix reclaims exactly as it always did for the no-context case — "wait" must never be promised when
+  // nothing will actually attempt it (the exact false-promise shape 09b14f15 killed for recycle_reattempt).
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-a5";
+    seedProject(db, P);
+    db.setProjectConfig(P, { permission: { startupModeCycles: 0 } });
+    const m1 = sessions.startManager(`${P}-mgr`);
+    const { workerId } = seedFleet(db, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — forcing a halt, then the successor reaches ready and dies from an INTENDED stop");
+    unstub();
+    check("(A5 pre) the recycle HALTED", hasEvent(db, m2.id, "recycle_ownership_transfer_failed"));
+
+    const engineSessionId = `eng-${m2.id}`;
+    host.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: engineSessionId });
+    writeFakeTranscript(m2.cwd, engineSessionId);
+    db.incrementTurnSeq(m2.id);
+    check("(A5 setup) M2 reached ready synchronously, with a completed turn", host.hasReachedReady(m2.id) === true && db.getSession(m2.id)?.turnSeq === 1);
+    const m2Pty = host.handles.get(m2.id);
+    m2Pty.kill(); // an INTENDED stop — no recordUnexpectedExit call, so NO trigger is ever filed
+
+    check("(A5) ESCALATE IS HONEST: the watchdog's own REAL tick does NOT attempt M2 — no trigger exists", !tickAttempts(db).includes(m2.id));
+
+    const settled = await waitUntil(() => hasEvent(db, m1.id, "recycle_fleet_recovered"));
+    check("(A5) FIX 91ac2b79: RECLAIMS despite real context — nothing will ever revive a trigger-less death", settled);
+    check("(A5) the worker (which DID transfer) is reclaimed back onto M1", db.getSession(workerId)?.parentSessionId === m1.id);
+    check("(A5) M1 was NEVER stopped — still alive", host.isAlive(m1.id) === true);
+    check("(A5) hasSuccessor(M1) is now false (M2 unlinked)", db.hasSuccessor(m1.id) === false);
+    check("(A5) M2 IS archived", !!db.getSession(m2.id)?.archivedAt);
+  }
+
+  // ==================== (A6) card 91ac2b79 (LEAD RULING, round 2) — a HUMAN PAUSE never ends the wait ====================
+  // Same genuine post-ready-crash shape as (A4) — real context (turnSeq>0), durably resumable, a real
+  // crash trigger on record — but the global scope is PAUSED at the moment M2 dies. A pause is REVERSIBLE
+  // (it gates new work only) while reclaiming is NOT (it discards a completed turn), so the fix must keep
+  // WAITING through the pause rather than treating it like an exhausted-cap/intended-stop/superseded
+  // reason to give up. Once unpaused, a real tick genuinely attempts M2 and the loop resolves exactly like
+  // (A4) — never reclaiming, never stopping M1.
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-a6";
+    seedProject(db, P);
+    db.setProjectConfig(P, { permission: { startupModeCycles: 0 } });
+    const m1 = sessions.startManager(`${P}-mgr`);
+    const { workerId } = seedFleet(db, P, m1.id);
+
+    let watchPromise;
+    const originalWatch = SessionService.prototype.watchHaltedRecycleSuccessor;
+    SessionService.prototype.watchHaltedRecycleSuccessor = function (...args) {
+      watchPromise = originalWatch.apply(this, args);
+      return watchPromise;
+    };
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — forcing a halt, then the successor reaches ready and dies while the fleet is paused");
+    unstub();
+    SessionService.prototype.watchHaltedRecycleSuccessor = originalWatch;
+    check("(A6 pre) the recycle HALTED", hasEvent(db, m2.id, "recycle_ownership_transfer_failed"));
+    check("(A6 setup) the watch was armed and its promise captured", !!watchPromise);
+
+    sessions.control.pause("global"); // the human pauses the WHOLE fleet before M2 ever dies
+
+    const engineSessionId = `eng-${m2.id}`;
+    host.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: engineSessionId });
+    writeFakeTranscript(m2.cwd, engineSessionId);
+    db.incrementTurnSeq(m2.id); // a real turn ran — genuine, delivered context worth preserving
+    check("(A6 setup) M2 reached ready synchronously, with a completed turn", host.hasReachedReady(m2.id) === true && db.getSession(m2.id)?.turnSeq === 1);
+    const m2Pty = host.handles.get(m2.id);
+    m2Pty.kill();
+    recordUnexpectedExit(db, m2.id, false); // the real onExit wiring's own trigger for a genuine unintended crash
+    check("(A6 setup) M2 confirmed dead", host.isAlive(m2.id) === false);
+
+    // The PAUSE itself blocks the real watchdog's tick (CrashRecoveryWatcher.tick() checks pause too) —
+    // this is expected and correct; it does NOT mean "nothing will ever revive it". Use the SAME shared
+    // control the watch loop itself holds (sessions.control), never tickAttempts' always-fresh one.
+    check("(A6) the real tick does NOT attempt M2 while paused (pause blocks new work fleet-wide, including a resume attempt)",
+      !tickAttemptsWithControl(db, sessions.control).includes(m2.id));
+
+    // BEHAVIOURAL NEGATIVE CONTROL: call the real, exported willRecoverAutomatically directly, against the
+    // EXACT same db/control/successor the watch loop itself is using right now, with and without
+    // ignorePause. Proves the scenario actually exercises the toggle (not vacuous): without it, this
+    // paused successor would flip from "wait" to "nothing will ever revive it" and get reclaimed.
+    const freshSuccessor = db.getSession(m2.id);
+    const withIgnorePause = willRecoverAutomatically(db, sessions.control, freshSuccessor, { ignorePause: true });
+    const withoutIgnorePause = willRecoverAutomatically(db, sessions.control, freshSuccessor);
+    check("(A6) NEGATIVE CONTROL: willRecoverAutomatically(..., {ignorePause:true}) is true while paused",
+      withIgnorePause === true);
+    check("(A6) NEGATIVE CONTROL: the SAME call WITHOUT ignorePause flips to false while paused — proving the toggle, not another gate, is what keeps this scenario waiting",
+      withoutIgnorePause === false);
+
+    // Give the REAL watchHaltedRecycleSuccessor loop several genuine chances to observe the dead (still
+    // paused) state and make its OWN decision BEFORE this scenario intervenes below — mirrors (A4)'s own
+    // wait, same reasoning (including the SAME caveat: this sleep backs nothing directly — a fixed wait
+    // immediately followed by a negative-polarity check is unfalsifiable in one trial and
+    // fixed-wait-negative-guard.mjs correctly rejects that shape; the real proof is anchored to
+    // `watchPromise`'s own resolution, far below, which cannot settle early).
+    await sleep(60); // 4x LOOM_RECYCLE_SUCCESSOR_SETTLE_POLL_MS (15ms, set above)
+
+    // Unpause. The real tick now genuinely attempts M2 — the pause was the only thing standing in the way.
+    sessions.control.resume("global");
+    check("(A6) UNPAUSED: the real tick NOW attempts M2", tickAttemptsWithControl(db, sessions.control).includes(m2.id));
+
+    // REGRESSION GUARD (mirrors (A4)'s own, same reasoning): only call the simulated resume if nothing
+    // reclaimed M2 while we were setting this up — a reclaim would make resume() throw "administratively
+    // retired" and crash the whole file uncaught.
+    const alreadyReclaimed = hasEvent(db, m1.id, "recycle_fleet_recovered") || !!db.getSession(m2.id)?.archivedAt;
+    check("(A6) REGRESSION GUARD: M2 was NOT already reclaimed before the simulated resume", !alreadyReclaimed);
+
+    if (!alreadyReclaimed) {
+      sessions.resume(m2.id);
+      check("(A6) M2 is genuinely alive again after the simulated resume", host.isAlive(m2.id) === true);
+      host.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: engineSessionId });
+      const revivedReady = await waitUntil(() => host.hasReachedReady(m2.id) === true);
+      check("(A6) M2 reaches ready again after the simulated resume", revivedReady);
+      await watchPromise; // resolves the instant the loop's own next poll observes alive+ready and returns
+
+      check("(A6) FIX 91ac2b79 (ruling 4): the loop never reclaimed across its whole lifetime, pause included — no recycle_fleet_recovered event", !hasEvent(db, m1.id, "recycle_fleet_recovered"));
+      check("(A6) FIX: M2 was never archived by the watch — real context was preserved, not discarded", !(db.getSession(m2.id)?.lastError ?? "").includes("[loom:recycle-failed]"));
+      check("(A6) FIX: M1 was NEVER stopped — still alive (ownership stays split)", host.isAlive(m1.id) === true);
+      check("(A6) FIX: hasSuccessor(M1) stays true — nothing reclaimed/unlinked", db.hasSuccessor(m1.id) === true);
+      check("(A6) the worker stays on M2 — nothing was wrongly reclaimed", db.getSession(workerId)?.parentSessionId === m2.id);
+    } else {
+      console.log("(A6) SKIPPED the rest of this scenario's checks — M2 was already reclaimed (see the regression guard check above)");
+    }
   }
 
   // ==================== (B) ACROSS A BOOT RECONCILE — successor never captured an engine id ====================

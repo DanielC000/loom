@@ -706,6 +706,26 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     resolvedLine.includes("Proj Z") && resolvedLine.includes("mgr-1234"));
 }
 
+// --- 23b. Card 91ac2b79: recycle_fleet_unresolved's THIRD reason, "halted-waiting-crash-recovery" — a
+//     halted successor that reached SessionStart, completed a turn, and then died while durably resumable;
+//     the predecessor is ALWAYS still live (the halt branch never stops it) and crash recovery is expected
+//     to resume it automatically. Must get its OWN accurate text — never the "timeout" (fate unknown)
+//     wording, and never the "successor died before SessionStart ... unowned" wording (that branch is
+//     for a case where the predecessor is ALSO not live, which can never be true here). ---
+{
+  const haltedWaitingLine = alertLine(
+    { id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "recycle_fleet_unresolved", detail: { deadSuccessorId: "succ-87654321", oldStillLive: true, reason: "halted-waiting-crash-recovery" } },
+    "worker-crashed", "Proj Z");
+  check("recycle_fleet_unresolved (halted-waiting-crash-recovery) alert line: names the actual expected outcome — durably resumable, awaiting automatic crash recovery",
+    haltedWaitingLine.includes("completed a turn") && haltedWaitingLine.includes("durably resumable") && haltedWaitingLine.includes("awaiting automatic crash recovery"));
+  check("recycle_fleet_unresolved (halted-waiting-crash-recovery) alert line: never the stale 'died before SessionStart ... unowned' wording — the successor DID reach SessionStart and the predecessor IS still live",
+    !haltedWaitingLine.includes("successor died before SessionStart") && !haltedWaitingLine.includes("unowned"));
+  check("recycle_fleet_unresolved (halted-waiting-crash-recovery) alert line: never the 'fate never confirmed' wording either — this fate IS characterized",
+    !haltedWaitingLine.includes("successor's fate never confirmed"));
+  check("recycle_fleet_unresolved (halted-waiting-crash-recovery) alert line: names the project + the predecessor's (8-char) id",
+    haltedWaitingLine.includes("Proj Z") && haltedWaitingLine.includes("mgr-1234"));
+}
+
 // --- 24. Card 08c81809 (Code Review finding 6): recycle_fleet_stranded_across_restart — fired only when
 //     a daemon restart lost the settle loop entirely AND the boot-time reconcile found NO possible
 //     automatic owner (neither the successor nor the predecessor could be resumed). Same worker-crashed
