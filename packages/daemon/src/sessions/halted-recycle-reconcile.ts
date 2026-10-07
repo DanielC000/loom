@@ -1,5 +1,5 @@
 import type { Db } from "../db.js";
-import { currentHaltedSuccessor } from "../orchestration/crash-orphaned-workers.js";
+import { currentHaltedSuccessor, openUnresolvedRecycleFleetAlert } from "../orchestration/crash-orphaned-workers.js";
 import { isDurablyResumable } from "./recycle-settle-reconcile.js";
 
 /**
@@ -11,10 +11,14 @@ export interface HaltedRecycleEarlyResult {
   /** The successor is NOT durably resumable this boot — reparented back onto the predecessor already
    *  (DB-only; `finishReconcilingHaltedRecycleSuccessors` does the rest once SessionService exists). */
   recovered: { predecessorId: string; freshId: string; reparentedWorkers: number }[];
+  /** @decision d9512de7 — a durably-resumable successor with a still-open unresolved alert; never
+   *  resolved from this DB-only check alone. See the full record for why. */
+  pendingResolution: { predecessorId: string; freshId: string }[];
 }
 
 export function reconcileHaltedRecycleSuccessorsEarly(db: Db): HaltedRecycleEarlyResult {
   const recovered: HaltedRecycleEarlyResult["recovered"] = [];
+  const pendingResolution: HaltedRecycleEarlyResult["pendingResolution"] = [];
   for (const predecessorId of db.listWorkerSessionIdsWithEventKind(["recycle_ownership_transfer_failed"])) {
     try {
       // Already resolved (a prior boot's own later phase, or the in-process watch, already reclaimed it) —
@@ -40,7 +44,15 @@ export function reconcileHaltedRecycleSuccessorsEarly(db: Db): HaltedRecycleEarl
       // and ownership simply stays split if that attempt succeeds. A later resume FAILURE here is a known,
       // narrow residual this early-only design accepts (mirrors `reconcileStrandedRecycleSettlesEarly`'s
       // own `deferred`-bucket shape, without that bucket's later-phase fallback — out of scope for this pass).
-      if (isDurablyResumable(fresh)) continue;
+      if (isDurablyResumable(fresh)) {
+        // @decision d9512de7 — record the pair ONLY when an unresolved alert is still genuinely open for
+        // it; most halted lineages resolve via the live watch long before any restart, and arming an
+        // observer for those would be pure waste. See the full record for why this can't be resolved here.
+        if (openUnresolvedRecycleFleetAlert(db, predecessorId, fresh.id)) {
+          pendingResolution.push({ predecessorId, freshId: fresh.id });
+        }
+        continue;
+      }
       // @decision 08c81809 — NEVER RESURRECT: confirm the predecessor is itself a viable destination
       // (mirrors `reconcileStrandedRecycleSettlesEarly`'s own gate) before touching the successor's
       // lineage — a predecessor ALSO unresumable this boot leaves nobody to serve; leave both alone.
@@ -59,5 +71,5 @@ export function reconcileHaltedRecycleSuccessorsEarly(db: Db): HaltedRecycleEarl
       console.error(`[halted-recycle-reconcile] early pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
     }
   }
-  return { recovered };
+  return { recovered, pendingResolution };
 }

@@ -13975,7 +13975,7 @@ export class SessionService {
    * `halted-recycle-reconcile.ts`'s early half): archives it + nudges the predecessor, and — same reason as
    * `finishReconcilingRecycleSettles` — must run BEFORE the resume paths below so they never retry it.
    */
-  finishReconcilingHaltedRecycleSuccessors(early: HaltedRecycleEarlyResult): { recovered: string[] } {
+  finishReconcilingHaltedRecycleSuccessors(early: HaltedRecycleEarlyResult): { recovered: string[]; pendingResolutionArmed: string[] } {
     const recovered: string[] = [];
     for (const { predecessorId, freshId, reparentedWorkers } of early.recovered) {
       try {
@@ -13993,7 +13993,60 @@ export class SessionService {
         console.error(`[halted-recycle-reconcile] later pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
       }
     }
-    return { recovered };
+    // @decision d9512de7 — arm one bounded observer per still-open lineage; see
+    // waitForHaltedSuccessorReadyThenResolve's own doc for why this can't resolve the alert directly here.
+    const pendingResolutionArmed: string[] = [];
+    for (const { predecessorId, freshId } of early.pendingResolution) {
+      pendingResolutionArmed.push(freshId);
+      void this.waitForHaltedSuccessorReadyThenResolve(predecessorId, freshId).catch((e) => {
+        console.error(`[halted-recycle-reconcile] ready-wait failed for predecessor ${predecessorId.slice(0, 8)} -> successor ${freshId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+      });
+    }
+    return { recovered, pendingResolutionArmed };
+  }
+
+  /**
+   * @decision d9512de7 — observes a durably-resumable halted successor until it reaches ready, then
+   * files the matching recycle_fleet_resolved; see the full record for why this can't be filed earlier.
+   *
+   * Bounded, fire-and-forget: reuses RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS/_POLL_MS rather than new
+   * constants. Never stops anything (f1969787), never reclaims, and never calls
+   * cancelStaleEscalationQuestions — db4b778c's own reasoning for omitting that call from
+   * watchHaltedRecycleSuccessor's ready branch applies identically to this same kind of never-superseded
+   * halted predecessor.
+   *
+   * Stands down the instant either (a) a `recycle_ownership_transfer_resolved` event names this exact
+   * freshId (b59d11f6 — a live recycle_reattempt/settleRecycleHandoff has since taken over this lineage
+   * and will file its own resolved event), or (b) the durable alert itself stops matching (another path
+   * already filed resolved/recovered for this exact pair). Never fabricates a resolution it didn't
+   * observe: if the successor never reaches ready within the bound, logs once and leaves the alert open.
+   * Every tick's timer is unref'd so a pending wait can never hold the process open.
+   */
+  private async waitForHaltedSuccessorReadyThenResolve(predecessorId: string, freshId: string): Promise<void> {
+    const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
+    for (;;) {
+      // @decision b59d11f6 — mirrors watchHaltedRecycleSuccessor's own first-line stand-down check.
+      if (this.db.listEventsForWorker(predecessorId).some((e) =>
+          e.kind === "recycle_ownership_transfer_resolved" &&
+          (e.detail as { successorId?: string } | undefined)?.successorId === freshId)) return;
+      const unresolved = openUnresolvedRecycleFleetAlert(this.db, predecessorId, freshId);
+      if (!unresolved) return; // another path already filed resolved/recovered for this exact pair
+      if (this.pty.hasReachedReady(freshId)) {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+          kind: "recycle_fleet_resolved", detail: { successorId: freshId },
+        });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        console.log(`[halted-recycle-reconcile] successor ${freshId.slice(0, 8)} for predecessor ${predecessorId.slice(0, 8)} never reached ready within the bound after boot — leaving its unresolved alert open`);
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, SessionService.RECYCLE_SUCCESSOR_SETTLE_POLL_MS);
+        t.unref?.();
+      });
+    }
   }
 
   /**

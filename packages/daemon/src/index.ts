@@ -1640,8 +1640,11 @@ async function main(): Promise<void> {
   // recycle's unresumable successor must be archived (and its retirement recorded) BEFORE the resume paths
   // below compute their candidate sets, or they'd attempt to resume an archived row for nothing.
   {
-    const { recovered } = sessions.finishReconcilingHaltedRecycleSuccessors(haltedRecycleSettleEarly);
+    const { recovered, pendingResolutionArmed } = sessions.finishReconcilingHaltedRecycleSuccessors(haltedRecycleSettleEarly);
     if (recovered.length) console.log(`[boot] halted-recycle reconcile: ${recovered.length} predecessor(s) recovered their unresumable successor's fleet`);
+    // @decision d9512de7 — observability only: the actual resolved-filing happens later, once each armed
+    // successor is observed to reach ready (or the bound expires) — see waitForHaltedSuccessorReadyThenResolve.
+    if (pendingResolutionArmed.length) console.log(`[boot] halted-recycle reconcile: watching ${pendingResolutionArmed.length} durably-resumable successor(s) with an open unresolved alert for ready`);
   }
 
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
