@@ -27,7 +27,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -22725,12 +22725,22 @@ export class SessionService {
     // the decision record for why one check isn't enough.
     const staleKnowledgeGuard = (): GcOutcomeResult | null => {
       if (!opts?.staleKnowledge) return null;
-      const claimant = this.findLiveSessionClaimingWorktreePath(worktreePath);
-      if (claimant) {
-        this.db.clearWedgedWorktree(worktreePath);
+      const claim = this.findLiveSessionClaimingWorktreePath(worktreePath);
+      if (claim) {
+        const who = claim.claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claim.claimant}`;
+        if (claim.exact) {
+          this.db.clearWedgedWorktree(worktreePath);
+          // eslint-disable-next-line no-console
+          console.warn(`[worktree] ${worktreePath} is now claimed by ${who} — dropping stale wedge-tracking for this path and NOT touching it.`);
+          return { outcome: "reclaimed-by-live-session" };
+        }
+        // @decision 623a7a62 — an OVERLAP (not exact) claimant hit is a structural anomaly, unlike an
+        // exact hit the path is NOT genuinely owned by its claimant, so the entry stays tracked
+        // (needsHuman) rather than being silently dropped.
+        this.db.markWorktreeNeedsHuman(worktreePath);
         // eslint-disable-next-line no-console
-        console.warn(`[worktree] ${worktreePath} is now claimed by ${claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claimant}`} — dropping stale wedge-tracking for this path and NOT touching it.`);
-        return { outcome: "reclaimed-by-live-session" };
+        console.warn(`[worktree] ${worktreePath} OVERLAPS (but is not equal to) the worktree of ${who} — this should be structurally impossible for a worktree path; parking as needsHuman (not dropping its wedge-tracking) so a human can investigate.`);
+        return { outcome: "needs-human-skip" };
       }
       // @decision a5d9c458 — bail if the wedge entry this retry acts on is GONE or SUPERSEDED
       // (a different firstWedgedAt) since it was snapshotted. See opts.wedgeSnapshot's own doc for who
@@ -22864,14 +22874,26 @@ export class SessionService {
   // @decision a5d9c458 — "live" here means processState "live"/"starting", NEVER a bare non-archived
   // filter: an exited-but-resumable worker's row stays non-archived while resumable, so that filter
   // would make the sweep treat every wedged path as permanently claimed by its own dead former owner.
-  private findLiveSessionClaimingWorktreePath(worktreePath: string): string | null {
-    const target = normForCompare(worktreePath);
+  // @decision 623a7a62 — never exact-path equality: use SYMMETRIC overlap (pathOverlapKind) so a target
+  // INSIDE or CONTAINING a live/claimed worktree is refused either way, not just an equal path. The
+  // returned exact-vs-nested distinction matters to staleKnowledgeGuard, the sole caller — see its doc.
+  private findLiveSessionClaimingWorktreePath(worktreePath: string): { claimant: string; exact: boolean } | null {
+    // Hoisted out of both loops below (round 3, Code Review 44cac5fd finding 4) — `worktreePath` is the
+    // one fixed side across every candidate, so its containmentForms() is computed ONCE here rather than
+    // recomputed by pathOverlapKindAgainstForms on every iteration.
+    const targetForms = containmentForms(worktreePath);
     // @decision a5d9c458 — ALSO consult the in-memory in-flight claim set: a spawn claims its
     // target path synchronously before any session row exists (see claimedWorktreePaths' own doc) — a
     // session-row-only check has a blind window there a concurrent staleKnowledge re-check would miss.
-    if (this.claimedWorktreePaths.has(target)) return IN_FLIGHT_SPAWN_CLAIMANT;
+    for (const claimed of this.claimedWorktreePaths) {
+      const kind = pathOverlapKindAgainstForms(targetForms, claimed);
+      if (kind) return { claimant: IN_FLIGHT_SPAWN_CLAIMANT, exact: kind === "exact" };
+    }
     for (const s of this.db.listAllSessions()) {
-      if ((s.processState === "live" || s.processState === "starting") && s.worktreePath && normForCompare(s.worktreePath) === target) return s.id;
+      if ((s.processState === "live" || s.processState === "starting") && s.worktreePath) {
+        const kind = pathOverlapKindAgainstForms(targetForms, s.worktreePath);
+        if (kind) return { claimant: s.id, exact: kind === "exact" };
+      }
     }
     return null;
   }
@@ -22895,7 +22917,7 @@ export class SessionService {
    * @throws if the path is wedge-tracked, a dir still sits there, AND the rename-aside fails (the claim
    * is self-released before throwing — refuse the spawn rather than silently letting `createWorktree`
    * reuse/recut a dir whose state is now unknown); or if a removal is currently IN FLIGHT against this
-   * exact path (see {@link removingWorktreePaths}) — retry shortly rather than racing it.
+   * path, OR a path overlapping it (see {@link removingWorktreePaths}) — retry shortly rather than racing it.
    *
    * @decision a5d9c458 — `release()` is PATH-KEYED, not ref-counted (ROUND 4); see the decision record
    * for the second-claimant risk and why it's safe today.
@@ -22905,11 +22927,13 @@ export class SessionService {
   ): { worktreePath: string; release: () => void } {
     const worktreePath = resolveWorktreePath(projectId, taskId, repoKey);
     const normPath = normForCompare(worktreePath);
-    // @decision a5d9c458 — MUTUAL EXCLUSION: a removal currently in flight against this exact path owns
-    // it until it settles; refuse outright rather than claiming over it (the awaits inside removeWorktree's
-    // own retry loop make a single point-in-time check insufficient).
-    if (this.removingWorktreePaths.has(normPath)) {
-      throw new Error(`${worktreePath}: removal in progress for this path, retry shortly`);
+    // @decision a5d9c458 — MUTUAL EXCLUSION: a removal in flight against an OVERLAPPING path
+    // (pathsOverlap, not exact — card 623a7a62 round 3) owns it until settled; refuse outright rather
+    // than claiming over it — a single point-in-time exact check would be insufficient and asymmetric.
+    for (const removing of this.removingWorktreePaths) {
+      if (pathsOverlap(worktreePath, removing)) {
+        throw new Error(`${worktreePath}: removal in progress for an overlapping path (${removing}), retry shortly`);
+      }
     }
     this.claimedWorktreePaths.add(normPath);
     let released = false;
@@ -24637,11 +24661,12 @@ export class SessionService {
       return { path: requestedPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason: "not-found: no longer (or never) a renamed-aside stale worktree dir" };
     }
     const canonicalPath = match.path;
-    const claimant = this.findLiveSessionClaimingWorktreePath(canonicalPath);
-    if (claimant) {
+    const claim = this.findLiveSessionClaimingWorktreePath(canonicalPath);
+    if (claim) {
+      const who = claim.claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claim.claimant}`;
       // eslint-disable-next-line no-console
-      console.warn(`[worktree] REFUSED to reclaim stale leftover ${canonicalPath} — claimed by ${claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claimant}`} (should be structurally impossible for a .stale-<ts> path; refusing defensively).`);
-      return { path: canonicalPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason: `claimed by ${claimant === IN_FLIGHT_SPAWN_CLAIMANT ? "an in-flight spawn" : `live session ${claimant}`}` };
+      console.warn(`[worktree] REFUSED to reclaim stale leftover ${canonicalPath} — claimed by ${who} (should be structurally impossible for a .stale-<ts> path; refusing defensively).`);
+      return { path: canonicalPath, outcome: "refused", bytesReclaimed: null, sizeTruncated: false, reason: `claimed by ${who}` };
     }
     const reap = this.reapWorktreeProcesses ?? ((p: string) => reapProcessesRootedInWorktree(p));
     try {

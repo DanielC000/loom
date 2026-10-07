@@ -1399,15 +1399,82 @@ function delay(ms: number): Promise<void> {
 const REMOVE_DIR_CLEAN_RETRY_ATTEMPTS = 3;
 const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
 
-/** Normalize for containment comparison: resolved, no trailing separator, case-folded on win32. */
+// Windows extended-length path prefixes, spelled out via concatenation of a single escaped backslash
+// rather than a multi-backslash literal — easier to get right than counting backslashes by eye.
+const WIN32_BACKSLASH = "\\";
+const WIN32_EXTENDED_PREFIX = WIN32_BACKSLASH + WIN32_BACKSLASH + "?" + WIN32_BACKSLASH; // \\?\
+const WIN32_EXTENDED_UNC_PREFIX = WIN32_EXTENDED_PREFIX + "UNC" + WIN32_BACKSLASH; // \\?\UNC\
+
+/** Normalize for containment comparison: resolved, no trailing separator, case-folded on win32 — and, on
+ *  win32, with a Windows extended-length ("\\?\" / "\\?\UNC\") prefix folded to its ordinary drive/UNC
+ *  form FIRST, so a long-path-prefixed form and its plain twin always compare equal. `fs.realpathSync`
+ *  can hand back either form for the exact same path depending on length and the API that produced it;
+ *  every containment check in this file ({@link pathsOverlap}, {@link worktreeRemovalRefusal}) fails
+ *  OPEN — treats the two forms as unrelated paths — without this fold (card `623a7a62` round 3). */
 export function normForCompare(p: string): string {
-  const r = path.resolve(p).replace(/[\\/]+$/, "");
+  let input = p;
+  if (process.platform === "win32") {
+    const upper = input.toUpperCase();
+    if (upper.startsWith(WIN32_EXTENDED_UNC_PREFIX.toUpperCase())) {
+      input = WIN32_BACKSLASH + WIN32_BACKSLASH + input.slice(WIN32_EXTENDED_UNC_PREFIX.length);
+    } else if (upper.startsWith(WIN32_EXTENDED_PREFIX.toUpperCase())) {
+      input = input.slice(WIN32_EXTENDED_PREFIX.length);
+    }
+  }
+  const r = path.resolve(input).replace(/[\\/]+$/, "");
   return process.platform === "win32" ? r.toLowerCase() : r;
 }
 
 /** `child` is strictly below `parent` (never equal). Both already normalized. */
 function isStrictlyUnder(child: string, parent: string): boolean {
   return child.startsWith(parent + path.sep) && child.length > parent.length + 1;
+}
+
+/** Every normalized form of `p` worth comparing for containment: the resolved (`normForCompare`) form
+ *  always, PLUS the realpath-resolved form when `p` actually exists on disk — additive only, so a
+ *  non-existent path still gets its resolved form checked (errs toward refusing, never skipped for
+ *  absence). Shared by {@link worktreeRemovalRefusal} and {@link pathsOverlap} (directly, or via {@link
+ *  pathOverlapKindAgainstForms} when a caller hoists one side's forms out of a loop) so all three compare
+ *  on the SAME realpath+win32-case-fold normalisation. */
+export function containmentForms(p: string): string[] {
+  const out = [normForCompare(p)];
+  try { out.push(normForCompare(fs.realpathSync(p))); } catch { /* absent path: the resolved form alone applies */ }
+  return out;
+}
+
+/**
+ * {@link pathOverlapKind}, but against an already-computed {@link containmentForms} set for the fixed
+ * ("target") side — lets a caller comparing ONE target against MANY candidates (e.g.
+ * `findLiveSessionClaimingWorktreePath`, card `623a7a62` round 3) hoist that side's `containmentForms()`
+ * call out of its loop instead of recomputing it once per candidate. `targetForms`/`other` are NOT
+ * interchangeable the way `pathOverlapKind`'s `a`/`b` are: `targetForms` must already be `other`'s own
+ * containment forms if the caller means to compare `other` against itself, but the overlap test itself
+ * is still symmetric between the two sides' forms.
+ */
+export function pathOverlapKindAgainstForms(targetForms: readonly string[], other: string): "exact" | "nested" | null {
+  const otherForms = containmentForms(other);
+  for (const x of targetForms) for (const y of otherForms) { if (x === y) return "exact"; }
+  for (const x of targetForms) for (const y of otherForms) { if (isStrictlyUnder(x, y) || isStrictlyUnder(y, x)) return "nested"; }
+  return null;
+}
+
+/**
+ * Overlap classification between `a` and `b`: `"exact"` when they resolve to the same path, `"nested"`
+ * when one strictly contains the other (either direction) without being equal, or `null` for no overlap
+ * at all — checked over every {@link containmentForms} pair of both sides, so either side's realpath
+ * form (when it resolves) is compared against both forms of the other. `a`/`b` are interchangeable; this
+ * is deliberately NOT a one-directional "is-contained-by" check — see card `623a7a62`: a removal target
+ * that CONTAINS a live worktree destroys it recursively just as surely as one that sits INSIDE it.
+ */
+export function pathOverlapKind(a: string, b: string): "exact" | "nested" | null {
+  return pathOverlapKindAgainstForms(containmentForms(a), b);
+}
+
+/** The boolean form of {@link pathOverlapKind} — `true` for either an exact or a nested overlap. Most
+ *  callers only need the yes/no answer; a caller that must react differently to an exact hit vs. a
+ *  containment hit (card `623a7a62` round 3) calls {@link pathOverlapKind} directly instead. */
+export function pathsOverlap(a: string, b: string): boolean {
+  return pathOverlapKind(a, b) !== null;
 }
 
 /**
@@ -1420,19 +1487,14 @@ export function worktreeRemovalRefusal(
   repoPaths: readonly string[],
   worktreesRoot: string = WORKTREES_DIR,
 ): string | null {
-  const forms = (p: string): string[] => {
-    const out = [normForCompare(p)];
-    try { out.push(normForCompare(fs.realpathSync(p))); } catch { /* absent path: the resolved form alone applies */ }
-    return out;
-  };
-  const roots = forms(worktreesRoot);
-  const targets = forms(target);
+  const roots = containmentForms(worktreesRoot);
+  const targets = containmentForms(target);
   for (const t of targets) {
     if (!roots.some((r) => isStrictlyUnder(t, r))) return `${target} is not strictly under the worktrees root ${worktreesRoot}`;
   }
   for (const repo of repoPaths) {
     if (!repo) continue;
-    const repoForms = forms(repo);
+    const repoForms = containmentForms(repo);
     for (const t of targets) for (const rp of repoForms) {
       if (t === rp) return `${target} is a registered repo path (${repo})`;
       if (isStrictlyUnder(rp, t)) return `${target} contains the registered repo path ${repo}`;

@@ -38,6 +38,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     still settling against that exact path (including removeWorktree's OWN clean-reject retry delay)
 //     must REFUSE outright, never recreate a fresh worktree there while the old removal is in flight.
 //
+// ROUND 3 (card 623a7a62, Code Review 44cac5fd finding 2) addition:
+// (J) the SAME mutual exclusion as (H), widened to a path that OVERLAPS (not exact-equals) one marked
+//     REMOVING — a respawn's target CONTAINING or CONTAINED BY a removal-in-flight path must refuse too.
+//
 // Card ceeb188b (Code Review of 367d53f6, finding 2 — c994ffeb's own finding 1 fixed createWorktree's
 // OWN reverse check; this is the SAME predicate consulted a second time):
 // (I) reclaimWedgedWorktreePathForSpawn must NOT rename aside a wedge-tracked path that is really a
@@ -337,6 +341,51 @@ try {
     !(sessionsH.removingWorktreePaths && sessionsH.removingWorktreePaths.has(normForCompare(pathH))));
 
   dbH.close();
+
+  // ============================================================================================
+  // (J) card 623a7a62 round 3 (Code Review 44cac5fd finding 2) — the SAME mutual exclusion as (H), but
+  //     for a path that OVERLAPS (not exact-equals) one currently marked REMOVING: a respawn whose own
+  //     target CONTAINS or is CONTAINED BY a path with a removal in flight must refuse too, via
+  //     pathsOverlap, not just an exact-string collision. Pure logic against the in-memory
+  //     removingWorktreePaths set (white-box, same pattern claimedWorktreePaths tests already use) —
+  //     no real removal is driven, so no filesystem setup is needed.
+  // ============================================================================================
+  const taskJ = "mutex-overlap-jjjj-5555";
+  const pathJ = resolveWorktreePath(PROJ, taskJ);
+
+  const dbJ = new Db();
+  const sessionsJ = new SessionService(dbJ, {}, new OrchestrationControl());
+
+  // The REMOVING mark is a DESCENDANT of this spawn's own target (the shape a nested leftover one level
+  // below pathJ would carry).
+  const removingDescendantJ = path.join(pathJ, "nested-leaf.stale-1700000000100");
+  sessionsJ.removingWorktreePaths.add(normForCompare(removingDescendantJ));
+  let threwJ1 = null;
+  try { sessionsJ.reclaimWedgedWorktreePathForSpawn(PROJ, taskJ); } catch (e) { threwJ1 = e; }
+  check("(J) a respawn whose target CONTAINS a path marked REMOVING refuses (throws)",
+    threwJ1 !== null && /removal in progress for an overlapping path/.test(threwJ1.message));
+  sessionsJ.removingWorktreePaths.clear();
+
+  // Reverse direction: the REMOVING mark is an ANCESTOR of this spawn's own target.
+  const removingAncestorJ = path.dirname(pathJ);
+  sessionsJ.removingWorktreePaths.add(normForCompare(removingAncestorJ));
+  let threwJ2 = null;
+  try { sessionsJ.reclaimWedgedWorktreePathForSpawn(PROJ, taskJ); } catch (e) { threwJ2 = e; }
+  check("(J) a respawn whose target is CONTAINED BY a path marked REMOVING refuses too (symmetric)",
+    threwJ2 !== null && /removal in progress for an overlapping path/.test(threwJ2.message));
+  sessionsJ.removingWorktreePaths.clear();
+
+  // Negative control: an unrelated sibling marked REMOVING must NOT block this spawn — the widened check
+  // isn't "refuse everything near a removal".
+  const removingSiblingJ = resolveWorktreePath(PROJ, "mutex-overlap-unrelated-jjjj-6666");
+  sessionsJ.removingWorktreePaths.add(normForCompare(removingSiblingJ));
+  let threwJ3 = null, claimJ3 = null;
+  try { claimJ3 = sessionsJ.reclaimWedgedWorktreePathForSpawn(PROJ, taskJ); } catch (e) { threwJ3 = e; }
+  check("(J) negative control: an unrelated sibling marked REMOVING does NOT block this spawn", threwJ3 === null);
+  claimJ3?.release();
+  sessionsJ.removingWorktreePaths.clear();
+
+  dbJ.close();
 
   // ============================================================================================
   // (I) card ceeb188b — a wedge-tracked path can ALSO be a repo-axis dir holding a REAL, live nested

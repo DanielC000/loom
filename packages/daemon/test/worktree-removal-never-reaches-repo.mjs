@@ -176,6 +176,89 @@ if (typeof refuse === "function") {
   check("(D) negative control: an allowed path stays allowed after the refusals above", refuse(inRoot("proj", "task1"), [nestedRepo], R) === null);
 }
 
+// (J) card 623a7a62 — pathsOverlap, the SYMMETRIC containment predicate findLiveSessionClaimingWorktreePath
+// now uses: equal, descendant, OR ancestor must all overlap (in EITHER argument order — deleting an
+// ancestor destroys a live worktree recursively, just as deleting a descendant does); an unrelated
+// sibling, including a non-existent one, must not.
+const overlap = wt.pathsOverlap;
+check("(J) predicate is exported", typeof overlap === "function");
+if (typeof overlap === "function") {
+  const liveWt = inRoot("proj2", "live-worktree");
+  const liveChild = path.join(liveWt, "child-dir");
+  fs.mkdirSync(liveChild, { recursive: true });
+  const sibling = inRoot("proj2", "sibling-worktree");
+  fs.mkdirSync(sibling, { recursive: true });
+
+  check("(J) equal paths overlap", overlap(liveWt, liveWt) === true);
+  check("(J) a descendant overlaps its ancestor (child-as-first-arg)", overlap(liveChild, liveWt) === true);
+  check("(J) SYMMETRIC: the ancestor-as-first-arg direction ALSO overlaps", overlap(liveWt, liveChild) === true);
+  check("(J) an unrelated sibling does NOT overlap (either order)", overlap(sibling, liveWt) === false && overlap(liveWt, sibling) === false);
+
+  const nonExistentChild = path.join(liveWt, "never-created-leaf");
+  check("(J) a NON-EXISTENT target that would be a child of a live path still overlaps (errs toward refusing)",
+    overlap(nonExistentChild, liveWt) === true && overlap(liveWt, nonExistentChild) === true);
+  const nonExistentSibling = inRoot("proj2", "never-created-sibling");
+  check("(J) a NON-EXISTENT, unrelated sibling does NOT overlap (absence alone isn't containment)",
+    overlap(nonExistentSibling, liveWt) === false);
+
+  if (process.platform === "win32") {
+    check("(J) win32: case-variant forms still overlap", overlap(liveChild.toUpperCase(), liveWt.toLowerCase()) === true);
+  } else {
+    console.log("SKIP  (J-win32) case-insensitive matching is a win32-only guarantee (normForCompare only lowercases on win32) — not exercised on this platform.");
+  }
+
+  let jLinkOk = false;
+  const jLink = inRoot("proj2", "linked-into-live");
+  try { fs.symlinkSync(liveWt, jLink, "junction"); jLinkOk = true; } catch { /* no link privilege */ }
+  if (jLinkOk) {
+    check("(J) a junction/symlink that resolves INTO a live path overlaps (realpath checked)", overlap(jLink, liveWt) === true);
+    fs.unlinkSync(jLink); // drop the link itself before cleanup can walk it
+  } else console.log("SKIP  (J) junction case — could not create a junction/symlink on this host");
+
+  // negative control: the predicate is not simply returning true for everything.
+  check("(J) negative control: an unrelated sibling still doesn't overlap after the positives above", overlap(sibling, liveWt) === false);
+}
+
+// (K) card 623a7a62 round 3 — normForCompare folds a Windows extended-length ("\\?\"/"\\?\UNC\") path
+// prefix to its ordinary drive/UNC form, so a long-path-prefixed form and its plain twin compare equal
+// under BOTH pathsOverlap and worktreeRemovalRefusal (both share containmentForms). win32-only; realpath
+// can hand back either form for the exact same path depending on length, and before this fix the two
+// forms compared as unrelated paths, failing the containment check OPEN.
+if (process.platform === "win32") {
+  const BS = "\\"; // spelled out via a single escaped backslash, not a multi-backslash literal
+  const EXT_PREFIX = BS + BS + "?" + BS; // \\?\
+  const EXT_UNC_PREFIX = EXT_PREFIX + "UNC" + BS; // \\?\UNC\
+
+  const kParent = inRoot("proj3", "k-parent");
+  fs.mkdirSync(kParent, { recursive: true });
+  const kChild = path.join(kParent, "k-child");
+  fs.mkdirSync(kChild, { recursive: true });
+  const kExtendedParent = EXT_PREFIX + kParent;
+  check("(K) an extended-length-prefixed (\\\\?\\) ancestor overlaps its plain descendant",
+    overlap(kChild, kExtendedParent) === true);
+  check("(K) ...and the reverse argument order", overlap(kExtendedParent, kChild) === true);
+
+  const uncPlain = BS + BS + "k3test-server" + BS + "k3test-share" + BS + "some" + BS + "dir";
+  const uncExtended = EXT_UNC_PREFIX + "k3test-server" + BS + "k3test-share" + BS + "some" + BS + "dir";
+  check("(K) the \\\\?\\UNC\\ extended form overlaps its plain \\\\server\\share twin",
+    overlap(uncPlain, uncExtended) === true && overlap(uncExtended, uncPlain) === true);
+
+  const kRepo = nestedRepo; // real, existing registered repo path from section (D)
+  const kRepoExtended = EXT_PREFIX + kRepo;
+  check("(K) the repo-root guard refuses a \\\\?\\-prefixed registered repo path (target plain, registry extended)",
+    refuse(kRepo, [kRepoExtended], R) !== null);
+  check("(K) ...and the reverse direction (target \\\\?\\-prefixed, registry plain)",
+    refuse(kRepoExtended, [kRepo], R) !== null);
+
+  // negative control: an unrelated extended-prefixed sibling must NOT overlap.
+  const kSibling = inRoot("proj3", "k-sibling");
+  fs.mkdirSync(kSibling, { recursive: true });
+  check("(K) negative control: an extended-prefixed, UNRELATED sibling does not overlap",
+    overlap(EXT_PREFIX + kSibling, kParent) === false);
+} else {
+  console.log("SKIP  (K) Windows extended-length path prefix folding is a win32-only concern — not exercised on this platform.");
+}
+
 db.close?.();
 if (failures) { console.error(`\n${failures} check(s) FAILED`); process.exit(1); }
 console.log("\nall checks passed");

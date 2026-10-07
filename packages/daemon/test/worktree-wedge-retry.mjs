@@ -208,6 +208,135 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   fs.rmSync(N.repo, { recursive: true, force: true });
 }
 
+// --- (child-of-live) card 623a7a62 — a wedge entry whose path sits INSIDE a live session's worktree
+//     (a descendant) must survive a sweep tick untouched too, not just an exact-path match. This is the
+//     hazard class card 04e4262d round 4 found: a child path one level below a live worktree was
+//     reachable and got deleted because the old claimant check was exact-path only. ---
+{
+  const db = new Db();
+  const CL = { projId: `wwr-cl-proj-${sfx}`, agentId: `wwr-cl-top-${sfx}`, liveId: `wwr-cl-live-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-childlive-${sfx}`) };
+  initRepo(CL.repo);
+  CL.liveWorktreePath = leftoverDir("childlive-parent", sfx);
+  CL.childPath = path.join(CL.liveWorktreePath, "nested-leaf.stale-1700000000099");
+  fs.mkdirSync(CL.childPath, { recursive: true });
+  fs.writeFileSync(path.join(CL.childPath, "leftover.txt"), "nested leftover inside a live worktree\n");
+  // The wedge entry targets the CHILD path, never the live worktree root itself.
+  db.recordWorktreeWedgeAttempt(CL.childPath, CL.repo, "simulated wedge on a path nested inside a live worktree");
+  db.insertProject({ id: CL.projId, name: "WWR-childlive", repoPath: CL.repo, vaultPath: CL.repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: CL.agentId, projectId: CL.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: CL.liveId, projectId: CL.projId, agentId: CL.agentId, engineSessionId: null, title: null, cwd: CL.liveWorktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", worktreePath: CL.liveWorktreePath });
+
+  let removeDirCallsForCL = 0;
+  const sessionsCL = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === CL.childPath) removeDirCallsForCL++; return killableRemoveDir(target, ms); },
+  });
+  await sessionsCL.sweepWedgedWorktreesOnce();
+  check("(child-of-live) the sweep NEVER attempted removal against a path nested inside a live worktree", removeDirCallsForCL === 0);
+  check("(child-of-live) the nested content SURVIVED the sweep tick untouched", fs.existsSync(path.join(CL.childPath, "leftover.txt")));
+  // Round 3 (card 623a7a62, Code Review 44cac5fd finding 1): an OVERLAP (not exact) claimant hit is a
+  // structural anomaly — the entry now stays TRACKED and is parked needsHuman, never silently dropped.
+  check("(child-of-live) the wedge-tracking entry stays TRACKED (not dropped) and is parked needsHuman",
+    db.getWedgedWorktree(CL.childPath)?.needsHuman === true);
+
+  db.close();
+  fs.rmSync(CL.liveWorktreePath, { recursive: true, force: true });
+  fs.rmSync(CL.repo, { recursive: true, force: true });
+}
+
+// --- (ancestor-of-live) card 623a7a62 — a wedge entry whose path CONTAINS a live session's worktree
+//     (an ancestor) must ALSO survive untouched — removing it would delete the live worktree recursively. ---
+{
+  const db = new Db();
+  const AL = { projId: `wwr-al-proj-${sfx}`, agentId: `wwr-al-top-${sfx}`, liveId: `wwr-al-live-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-ancestorlive-${sfx}`) };
+  initRepo(AL.repo);
+  AL.ancestorPath = leftoverDir("ancestorlive-parent", sfx);
+  AL.liveWorktreePath = path.join(AL.ancestorPath, "live-child-worktree");
+  fs.mkdirSync(AL.liveWorktreePath, { recursive: true });
+  fs.writeFileSync(path.join(AL.liveWorktreePath, "live-worker-content.txt"), "live worker's real content, nested under the wedge target\n");
+  // The wedge entry targets the ANCESTOR (the parent dir) of the live worktree.
+  db.recordWorktreeWedgeAttempt(AL.ancestorPath, AL.repo, "simulated wedge on a path that CONTAINS a live worktree");
+  db.insertProject({ id: AL.projId, name: "WWR-ancestorlive", repoPath: AL.repo, vaultPath: AL.repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: AL.agentId, projectId: AL.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: AL.liveId, projectId: AL.projId, agentId: AL.agentId, engineSessionId: null, title: null, cwd: AL.liveWorktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", worktreePath: AL.liveWorktreePath });
+
+  let removeDirCallsForAL = 0;
+  const sessionsAL = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === AL.ancestorPath) removeDirCallsForAL++; return killableRemoveDir(target, ms); },
+  });
+  await sessionsAL.sweepWedgedWorktreesOnce();
+  check("(ancestor-of-live) the sweep NEVER attempted removal against a path CONTAINING a live worktree", removeDirCallsForAL === 0);
+  check("(ancestor-of-live) the live worktree's content SURVIVED the sweep tick untouched", fs.existsSync(path.join(AL.liveWorktreePath, "live-worker-content.txt")));
+  // Round 3 (card 623a7a62): an OVERLAP (not exact) claimant hit stays TRACKED, parked needsHuman.
+  check("(ancestor-of-live) the wedge-tracking entry stays TRACKED (not dropped) and is parked needsHuman",
+    db.getWedgedWorktree(AL.ancestorPath)?.needsHuman === true);
+
+  db.close();
+  fs.rmSync(AL.ancestorPath, { recursive: true, force: true });
+  fs.rmSync(AL.repo, { recursive: true, force: true });
+}
+
+// --- (sibling-of-live) negative control (card 623a7a62) — a wedge entry whose path is a SIBLING of a
+//     live worktree (neither contains nor is contained by it) must still be removed normally; the
+//     widened symmetric check must not become "refuse everything near a live session". ---
+{
+  const db = new Db();
+  const SL = { projId: `wwr-sl-proj-${sfx}`, agentId: `wwr-sl-top-${sfx}`, liveId: `wwr-sl-live-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-siblinglive-${sfx}`) };
+  initRepo(SL.repo);
+  SL.worktreePath = leftoverDir("siblinglive-wedge", sfx);
+  SL.liveWorktreePath = leftoverDir("siblinglive-live", sfx);
+  db.recordWorktreeWedgeAttempt(SL.worktreePath, SL.repo, "simulated wedge, unrelated sibling of a live worktree");
+  db.insertProject({ id: SL.projId, name: "WWR-siblinglive", repoPath: SL.repo, vaultPath: SL.repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: SL.agentId, projectId: SL.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: SL.liveId, projectId: SL.projId, agentId: SL.agentId, engineSessionId: null, title: null, cwd: SL.liveWorktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", worktreePath: SL.liveWorktreePath });
+
+  let removeDirCallsForSL = 0;
+  const sessionsSL = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === SL.worktreePath) removeDirCallsForSL++; return killableRemoveDir(target, ms); },
+  });
+  await sessionsSL.sweepWedgedWorktreesOnce();
+  check("(sibling-of-live) an unrelated sibling IS still removed (the symmetric check isn't over-broad)", !fs.existsSync(SL.worktreePath));
+  check("(sibling-of-live) removeDir was actually invoked", removeDirCallsForSL > 0);
+  check("(sibling-of-live) the live worktree itself is untouched", fs.existsSync(SL.liveWorktreePath));
+
+  db.close();
+  fs.rmSync(SL.liveWorktreePath, { recursive: true, force: true });
+  fs.rmSync(SL.repo, { recursive: true, force: true });
+}
+
+// --- (nonexistent-child-of-live) card 623a7a62 — a wedge entry whose path doesn't exist ON DISK but
+//     WOULD be a descendant of a live session's worktree must still be refused — containment is checked
+//     before any fs existence check on the target, and errs toward refusing rather than silently
+//     proceeding just because the target itself happens to be gone. ---
+{
+  const db = new Db();
+  const NE = { projId: `wwr-ne-proj-${sfx}`, agentId: `wwr-ne-top-${sfx}`, liveId: `wwr-ne-live-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-nonexistent-${sfx}`) };
+  initRepo(NE.repo);
+  NE.liveWorktreePath = leftoverDir("nonexistent-parent", sfx);
+  // Deliberately NEVER created on disk.
+  NE.childPath = path.join(NE.liveWorktreePath, "never-created-leaf.stale-1700000000097");
+  check("(nonexistent setup) the target path genuinely does not exist on disk", !fs.existsSync(NE.childPath));
+  db.recordWorktreeWedgeAttempt(NE.childPath, NE.repo, "simulated wedge on a non-existent path nested inside a live worktree");
+  db.insertProject({ id: NE.projId, name: "WWR-nonexistent", repoPath: NE.repo, vaultPath: NE.repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: NE.agentId, projectId: NE.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: NE.liveId, projectId: NE.projId, agentId: NE.agentId, engineSessionId: null, title: null, cwd: NE.liveWorktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", worktreePath: NE.liveWorktreePath });
+
+  let removeDirCallsForNE = 0;
+  const sessionsNE = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === NE.childPath) removeDirCallsForNE++; return killableRemoveDir(target, ms); },
+  });
+  await sessionsNE.sweepWedgedWorktreesOnce();
+  check("(nonexistent-child-of-live) removeDir was NEVER invoked against the non-existent nested path", removeDirCallsForNE === 0);
+  check("(nonexistent-child-of-live) the live worktree itself is untouched", fs.existsSync(NE.liveWorktreePath));
+  // Round 3 (card 623a7a62): an OVERLAP (not exact) claimant hit stays TRACKED, parked needsHuman — the
+  // claimant check still ran (not skipped for non-existence), but no longer drops the entry.
+  check("(nonexistent-child-of-live) the wedge-tracking entry stays TRACKED (not dropped) and is parked needsHuman",
+    db.getWedgedWorktree(NE.childPath)?.needsHuman === true);
+
+  db.close();
+  fs.rmSync(NE.liveWorktreePath, { recursive: true, force: true });
+  fs.rmSync(NE.repo, { recursive: true, force: true });
+}
+
 // --- (in-flight-claim) card a5d9c458 ROUND 2 — Code Review ffc2b31b: the staleKnowledge live-claim guard
 //     above (the "(reclaim)" block) can only ever see a SESSION ROW, but spawnWorker/the batch worktree
 //     cut both insert that row only AFTER createWorktree + provisioning return, which can run for a long
@@ -244,6 +373,89 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   db.close();
   fs.rmSync(F.worktreePath, { recursive: true, force: true });
   fs.rmSync(F.repo, { recursive: true, force: true });
+}
+
+// --- (in-flight-child) card 623a7a62 — the SAME child-containment check against the in-memory
+//     claimedWorktreePaths set (an in-flight spawn, no session row yet), not just a session row. ---
+{
+  const db = new Db();
+  const FC = { repo: path.join(os.tmpdir(), `loom-wwr-inflightchild-${sfx}`) };
+  initRepo(FC.repo);
+  FC.claimedWorktreePath = leftoverDir("inflightchild-parent", sfx);
+  FC.childPath = path.join(FC.claimedWorktreePath, "nested-leaf.stale-1700000000098");
+  fs.mkdirSync(FC.childPath, { recursive: true });
+  fs.writeFileSync(path.join(FC.childPath, "leftover.txt"), "nested leftover inside an in-flight-claimed worktree\n");
+  db.recordWorktreeWedgeAttempt(FC.childPath, FC.repo, "simulated wedge, child of an in-flight spawn's claimed path");
+
+  let removeDirCallsForFC = 0;
+  const sessionsFC = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === FC.childPath) removeDirCallsForFC++; return killableRemoveDir(target, ms); },
+  });
+  if (sessionsFC.claimedWorktreePaths) sessionsFC.claimedWorktreePaths.add(normForCompare(FC.claimedWorktreePath));
+  await sessionsFC.sweepWedgedWorktreesOnce();
+  check("(in-flight-child) removeDir was NEVER invoked against a path nested inside the claimed worktree", removeDirCallsForFC === 0);
+  check("(in-flight-child) the nested content SURVIVED the sweep tick untouched", fs.existsSync(path.join(FC.childPath, "leftover.txt")));
+  // Round 3 (card 623a7a62): an OVERLAP (not exact) claimant hit stays TRACKED, parked needsHuman.
+  check("(in-flight-child) the wedge-tracking entry stays TRACKED (not dropped) and is parked needsHuman",
+    db.getWedgedWorktree(FC.childPath)?.needsHuman === true);
+
+  db.close();
+  fs.rmSync(FC.claimedWorktreePath, { recursive: true, force: true });
+  fs.rmSync(FC.repo, { recursive: true, force: true });
+}
+
+// --- (in-flight-ancestor) card 623a7a62 — the in-flight-claim counterpart of (ancestor-of-live): the
+//     wedge target CONTAINS the in-flight spawn's claimed path. ---
+{
+  const db = new Db();
+  const FA = { repo: path.join(os.tmpdir(), `loom-wwr-inflightancestor-${sfx}`) };
+  initRepo(FA.repo);
+  FA.ancestorPath = leftoverDir("inflightancestor-parent", sfx);
+  FA.claimedChildPath = path.join(FA.ancestorPath, "claimed-child-worktree");
+  fs.mkdirSync(FA.claimedChildPath, { recursive: true });
+  fs.writeFileSync(path.join(FA.claimedChildPath, "leftover.txt"), "content nested under the wedge target, claimed by an in-flight spawn\n");
+  db.recordWorktreeWedgeAttempt(FA.ancestorPath, FA.repo, "simulated wedge on a path that CONTAINS an in-flight spawn's claim");
+
+  let removeDirCallsForFA = 0;
+  const sessionsFA = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === FA.ancestorPath) removeDirCallsForFA++; return killableRemoveDir(target, ms); },
+  });
+  if (sessionsFA.claimedWorktreePaths) sessionsFA.claimedWorktreePaths.add(normForCompare(FA.claimedChildPath));
+  await sessionsFA.sweepWedgedWorktreesOnce();
+  check("(in-flight-ancestor) removeDir was NEVER invoked against a path containing the claimed path", removeDirCallsForFA === 0);
+  check("(in-flight-ancestor) the claimed child's content SURVIVED the sweep tick untouched", fs.existsSync(path.join(FA.claimedChildPath, "leftover.txt")));
+  // Round 3 (card 623a7a62): an OVERLAP (not exact) claimant hit stays TRACKED, parked needsHuman.
+  check("(in-flight-ancestor) the wedge-tracking entry stays TRACKED (not dropped) and is parked needsHuman",
+    db.getWedgedWorktree(FA.ancestorPath)?.needsHuman === true);
+
+  db.close();
+  fs.rmSync(FA.ancestorPath, { recursive: true, force: true });
+  fs.rmSync(FA.repo, { recursive: true, force: true });
+}
+
+// --- (in-flight-sibling) negative control (card 623a7a62) — an unrelated sibling of an in-flight
+//     spawn's claimed path must still be removed normally. ---
+{
+  const db = new Db();
+  const FS_ = { repo: path.join(os.tmpdir(), `loom-wwr-inflightsibling-${sfx}`) };
+  initRepo(FS_.repo);
+  FS_.worktreePath = leftoverDir("inflightsibling-wedge", sfx);
+  FS_.claimedWorktreePath = leftoverDir("inflightsibling-claimed", sfx);
+  db.recordWorktreeWedgeAttempt(FS_.worktreePath, FS_.repo, "simulated wedge, unrelated sibling of an in-flight spawn's claim");
+
+  let removeDirCallsForFS = 0;
+  const sessionsFS = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => { if (target === FS_.worktreePath) removeDirCallsForFS++; return killableRemoveDir(target, ms); },
+  });
+  if (sessionsFS.claimedWorktreePaths) sessionsFS.claimedWorktreePaths.add(normForCompare(FS_.claimedWorktreePath));
+  await sessionsFS.sweepWedgedWorktreesOnce();
+  check("(in-flight-sibling) an unrelated sibling IS still removed", !fs.existsSync(FS_.worktreePath));
+  check("(in-flight-sibling) removeDir was actually invoked", removeDirCallsForFS > 0);
+  check("(in-flight-sibling) the claimed worktree itself is untouched", fs.existsSync(FS_.claimedWorktreePath));
+
+  db.close();
+  fs.rmSync(FS_.claimedWorktreePath, { recursive: true, force: true });
+  fs.rmSync(FS_.repo, { recursive: true, force: true });
 }
 
 // --- (entry-superseded) card a5d9c458 ROUND 2 — a wedge entry that gets CLEARED and RE-RECORDED (a
