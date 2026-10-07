@@ -8,7 +8,7 @@
 // CLAUDE_CONFIG_DIR (claudeJsonPath() honors it) AND HOME/USERPROFILE (belt-and-suspenders), and passes
 // its own synthetic `worktreesRoot` override to pruneDeadWorktreeClaudeConfigEntries so it never consults
 // the real WORKTREES_DIR either. The real file's prune is OWNER-RUN only, via a separate script (not this
-// test) — request e44d319e, still pending as of this writing.
+// test) — request e44d319e, approved.
 //
 // Run after build: node test/claude-config-worktree-prune.mjs
 import fs from "node:fs";
@@ -614,6 +614,69 @@ try {
     check("bulk prune on the 10k-entry file: no abort (this run never contends with anything)", bulkResult.aborted === null);
     check("bulk prune on the 10k-entry file: removed the full synthetic set", bulkResult.removedKeys.length === SYNTHETIC_ENTRY_COUNT - 1);
     console.log(`[timing] removeClaudeConfigEntryForWorktree sync portion: ${syncMs.toFixed(2)}ms | bulk prune (apply, ${SYNTHETIC_ENTRY_COUNT} entries): ${bulkMs.toFixed(2)}ms`);
+  }
+
+  // === 14. Card f761fdf3 item 2 — GC-time removal: a busy trust lock now WARNS LOUDLY instead of
+  //         silently skipping, and the old "caught by a later GC" framing is gone from the message. ===
+  {
+    const busyDir = path.join(worktreesRoot, "proj14", "taskBusy");
+    const busyKey = keyFor(busyDir);
+    writeCfg({ [busyKey]: { hasTrustDialogAccepted: true } }); // directory never created — already "dead"
+
+    const lockPath = `${claudeJson}.loom-lock`;
+    fs.writeFileSync(lockPath, ""); // tryTrustLockOnce makes exactly ONE "wx" attempt — this alone fails it
+
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(" ")); };
+    try {
+      removeClaudeConfigEntryForWorktree(busyDir);
+      await flushGcRemoval();
+    } finally {
+      console.warn = realWarn;
+      try { fs.rmSync(lockPath); } catch { /* best-effort */ }
+    }
+
+    check("lock busy (RED→GREEN for item 2): a warning was actually logged, not a silent skip",
+      warnings.length === 1);
+    check("lock busy: the warning names the owner-run bulk prune as the recovery path",
+      warnings.some((w) => w.includes("owner-run bulk prune")));
+    check("lock busy: the warning does NOT repeat the old false 'caught by a later GC' framing",
+      !warnings.some((w) => /caught by a later GC/.test(w)));
+    check("lock busy: the entry survives untouched (no write happened while the lock was busy)",
+      busyKey in readCfgRaw().projects);
+
+    // Same path, lock now free: the entry IS removed — proves the busy case above is really about the
+    // lock, not some other reason this key would never be removed.
+    removeClaudeConfigEntryForWorktree(busyDir);
+    await flushGcRemoval();
+    check("lock free (control): the SAME entry is removed once the lock is no longer busy",
+      !(busyKey in readCfgRaw().projects));
+  }
+
+  // === 15. Card f761fdf3 item 6a — removeClaudeConfigEntryForWorktree refuses a non-absolute/empty
+  //         worktreePath outright (defense in depth against path.resolve("") landing on the daemon's own
+  //         cwd), rather than ever reaching the stored-key scan with it. ===
+  {
+    const cwdKey = keyFor(process.cwd()); // what an empty-string worktreePath would resolve to
+    writeCfg({ [cwdKey]: { hasTrustDialogAccepted: true } }); // a real entry that WOULD be at risk if "" ever matched
+
+    const warnings15 = [];
+    const realWarn15 = console.warn;
+    console.warn = (...args) => { warnings15.push(args.join(" ")); };
+    try {
+      removeClaudeConfigEntryForWorktree("");
+      await flushGcRemoval();
+      removeClaudeConfigEntryForWorktree("relative/not/absolute");
+      await flushGcRemoval();
+    } finally {
+      console.warn = realWarn15;
+    }
+
+    check("empty worktreePath: refused with a warning, never scheduled any deferred work",
+      warnings15.some((w) => w.includes("refusing a non-absolute/empty worktreePath")));
+    check("empty/relative worktreePath: the cwd-matching entry survives untouched",
+      cwdKey in readCfgRaw().projects);
   }
 } finally {
   __setReadFileSyncForTest();

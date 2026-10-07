@@ -25,9 +25,11 @@ Three independent changes, all load-bearing on their own:
    begin with; that defense was dead weight borrowed from `worktreeRemovalRefusal`'s own, genuinely
    different, threat model).
 3. The lock acquire became a single non-blocking attempt (`tryTrustLockOnce`), never `withTrustLock`'s
-   retry+`sleepSync` loop. Busy ⇒ skip entirely, no write: the next GC removal, or the owner's one-time
-   bulk prune (`pruneDeadWorktreeClaudeConfigEntries`), catches the entry later. This is a best-effort
-   background cleanup, not a correctness-critical write.
+   retry+`sleepSync` loop. Busy ⇒ skip entirely, no write: recovery is the owner-run bulk prune
+   (`pruneDeadWorktreeClaudeConfigEntries`) — a later GC removal only ever matches its own worktree's
+   path, never a previously-skipped one (card f761fdf3 item 2: the skip used to be silent and the old
+   comment's "caught by a later GC" framing was false; the skip is now logged via `console.warn`). This
+   is a best-effort background cleanup, not a correctness-critical write.
 
 Also fixed in round 2 (review item 2): `fs.existsSync` collapses every stat error — ENOENT, EACCES, a
 non-existent drive root, a transient Windows glitch — to the same `false`, indistinguishable from a
@@ -55,10 +57,13 @@ exhausted. In either case, a concurrent unlocked writer could shrink `projects` 
 read and the fresh in-lock read by more than this call itself intends to remove — e.g. a truncated or
 otherwise clobbered file.
 
-The guard: inside the lock, compare the fresh read's `Object.keys(projects).length` against the
-classification read's count. If the drop exceeds the number of keys this call is actually about to delete,
-abort with NO write and report `aborted:"count-drop"` — rather than writing back a file that may already be
-missing content this call never touched.
+The guard (card f761fdf3 item 5: corrected to agree with the "Do not" bullet below): inside the lock, after
+the fresh re-read, check each key the classification read saw. A key missing from the fresh read is
+explained ONLY if THIS run itself classified it dead (it may have been pruned by a concurrent writer for
+the same reason this call would have removed it); any OTHER missing key (alive, or never classified) aborts
+the run with NO write, reporting `aborted:"count-drop"` — rather than writing back a file that may already
+be missing content this call never touched. A concurrent ADD (a key present in the fresh read but not in
+the classification read) is never examined by this check and always passes.
 
 This was a manager-directed addition during 498452c0's design-checkpoint review, chosen specifically as a
 cheap integrity check in place of a full mtime+size (or content-hash) snapshot-compare-and-abort, given that
@@ -83,8 +88,12 @@ the lock + fresh re-read already covers the ordinary race.
   `aborted:"count-drop"` to the caller, the same way a `parseError` does.
 - Do not acquire the real write's lock in `withTrustLock`'s ordinary best-effort mode — a bulk DELETE of
   many entries must never proceed unlocked (review item 3): the real write passes `requireLock:true` and
-  aborts with `aborted:"lock-unavailable"`, no write, if the lock could not be acquired within
-  `trustLockMs()`.
+  aborts with `aborted:"lock-unavailable"`, no write, when the acquire loop gives up without ever holding
+  the lock. Card f761fdf3 item 4 (wording only): this is most commonly a transient FS error
+  (EPERM/EACCES/EBUSY) exhausting its own retry budget, or a non-EEXIST open error — NOT simply "another
+  process is holding the lock". A lock that's merely held and looks STALE (older than `trustLockMs()`) is
+  broken and retried instead of causing this abort (card 5b97da80 owns that stale-break/acquire-deadline
+  behavior; nothing about it changes here).
 - Do not classify a key as worktree-scoped using `pathOverlapKind`'s bidirectional "nested" (review item
   6): that also matches when `worktreesRoot` is strictly under `key` (the root is a DESCENDANT of the
   stored key — an ancestor-of-the-root key), which must never be treated as a worktree-scoped candidate.

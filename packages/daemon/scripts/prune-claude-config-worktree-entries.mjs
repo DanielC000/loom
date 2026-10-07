@@ -28,14 +28,17 @@
 //     pruneDeadWorktreeClaudeConfigEntries's own doc, pty/claude-config.ts), and only ever DELETES a key
 //     whose directory is re-verified absent immediately before the write. It is still a bulk, owner-
 //     facing mutation of a large project-entry file — read the dry-run output before passing --apply.
-//   * Fails closed on a malformed/unreadable config, an unresolvable worktrees root, or a busy lock:
-//     reports the reason and writes nothing.
+//   * Fails closed on a malformed/unreadable config, an unresolvable worktrees root, or an unavailable
+//     cross-process lock (card f761fdf3 item 4: most commonly a transient FS error exhausting its own
+//     retry budget, or a non-EEXIST open error — not necessarily another process genuinely holding the
+//     lock): reports the reason and writes nothing.
 //
 // RUN (repo root, after `pnpm build`):
 //   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs                 # dry run (prints counts + sample)
 //   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --apply         # actually prunes
 //   node packages/daemon/scripts/prune-claude-config-worktree-entries.mjs --json          # machine-readable result
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -68,14 +71,28 @@ async function main() {
 
   // Review item 7: --worktrees-root is a rehearsal override, never a live-run footgun. A dry run always
   // accepts it (nothing is written either way). --apply accepts it when it's a no-op (resolves to the
-  // SAME path the live daemon itself would use) or alongside an explicit CLAUDE_CONFIG_DIR (the plain
-  // signal this is a deliberate rehearsal against a copy) — otherwise it refuses.
+  // SAME path the live daemon itself would use) or when the RESOLVED config path is genuinely NOT the
+  // owner's real ~/.claude.json — otherwise it refuses.
+  //
+  // Card f761fdf3 item 1: compare the RESOLVED claudeJsonPath() against the real ~/.claude.json
+  // (os.homedir()), never "is CLAUDE_CONFIG_DIR merely set" — claudeJsonPath() treats
+  // CLAUDE_CONFIG_DIR="" as UNSET (falls back to the real file), so an env-is-set check alone would wave
+  // through `CLAUDE_CONFIG_DIR= node … --apply --worktrees-root <typo>` straight at the real file.
+  //
+  // @decision f761fdf3 — never compare with a bare path.resolve(...) === path.resolve(...): it's
+  // case-sensitive on win32 and a differently-cased spelling of the real home would wave --apply through
+  // against the real file. Always resolve + lower-case on win32 before comparing.
+  const normalizeForConfigCompare = (p) => {
+    const r = path.resolve(p).replace(/[\\/]+$/, "");
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
   let worktreesRoot = WORKTREES_DIR;
   if (worktreesRootOverride !== undefined) {
     const isNoop = path.resolve(worktreesRootOverride) === path.resolve(WORKTREES_DIR);
-    const isRehearsal = !apply || isNoop || process.env.CLAUDE_CONFIG_DIR !== undefined;
+    const isRealConfig = normalizeForConfigCompare(claudeJsonPath()) === normalizeForConfigCompare(path.join(os.homedir(), ".claude.json"));
+    const isRehearsal = !apply || isNoop || !isRealConfig;
     if (!isRehearsal) {
-      console.error(`REFUSED: --worktrees-root was given with --apply but neither equals the real worktrees root nor has CLAUDE_CONFIG_DIR set — this looks like a live run against the real config with an overridden root, not a rehearsal. Set CLAUDE_CONFIG_DIR to rehearse against a copy, or drop --worktrees-root to prune the real ${WORKTREES_DIR}.`);
+      console.error(`REFUSED: --worktrees-root was given with --apply but neither equals the real worktrees root nor targets a config file other than the real ~/.claude.json — this looks like a live run against the real config with an overridden root, not a rehearsal. Set CLAUDE_CONFIG_DIR to a non-default directory to rehearse against a copy, or drop --worktrees-root to prune the real ${WORKTREES_DIR}.`);
       process.exitCode = 1;
       return;
     }
@@ -104,12 +121,12 @@ async function main() {
     return;
   }
   if (result.aborted === "lock-unavailable") {
-    console.error("REFUSED: could not acquire the cross-process config lock — another writer is busy. Nothing was written. Re-run once the daemon/another prune is idle.");
+    console.error("REFUSED: could not acquire the cross-process config lock — either another writer genuinely holds it, or an internal FS error (not necessarily contention) exhausted its own retry budget. Nothing was written. Re-run once the daemon/another prune is idle.");
     process.exitCode = 1;
     return;
   }
   if (result.aborted === "count-drop") {
-    console.error("REFUSED: a project entry vanished between this run's two reads without being classified dead by this run — the file may have been truncated or clobbered by something else mid-run. Nothing was written. Re-run once you've confirmed the file is stable.");
+    console.error("REFUSED: a project entry vanished between this run's two reads without being classified dead by this run. This can be BENIGN — e.g. a concurrent daemon GC (removeClaudeConfigEntryForWorktree) removed an entry whose worktree was deleted and GC'd in the window between this run's two reads — or it can mean the file was truncated or clobbered by something else mid-run. Nothing was written. Re-run once you've confirmed the file is stable.");
     process.exitCode = 1;
     return;
   }
@@ -120,8 +137,11 @@ async function main() {
     for (const k of result.deadKeysSample) console.log(`  ${k}`);
   }
   if (result.unknownKeys.length > 0) {
-    console.log(`\nliveness could NOT be determined for ${result.unknownKeys.length} worktree-scoped entr${result.unknownKeys.length === 1 ? "y" : "ies"} (never deleted — investigate manually):`);
-    for (const k of result.unknownKeys) console.log(`  ${k}`);
+    // Card f761fdf3 item 6c: mirror deadKeysSample's own cap (50) rather than dumping an unbounded list.
+    const UNKNOWN_KEYS_PRINT_CAP = 50;
+    const shown = result.unknownKeys.slice(0, UNKNOWN_KEYS_PRINT_CAP);
+    console.log(`\nliveness could NOT be determined for ${result.unknownKeys.length} worktree-scoped entr${result.unknownKeys.length === 1 ? "y" : "ies"} (never deleted — investigate manually; showing up to ${UNKNOWN_KEYS_PRINT_CAP}):`);
+    for (const k of shown) console.log(`  ${k}`);
   }
 
   if (!result.dryRun) {

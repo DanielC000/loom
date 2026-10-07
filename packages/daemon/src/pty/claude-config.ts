@@ -618,13 +618,30 @@ function readCfgFailClosed(claudeJson: string): { cfg: ClaudeCfg } | { error: st
  * risk the real file on a corrupt read.
  */
 export function removeClaudeConfigEntryForWorktree(worktreePath: string): void {
+  // Card f761fdf3 item 6a: defense in depth — a non-absolute/empty worktreePath would otherwise
+  // path.resolve("") to the daemon's own cwd and risk a normForCompare match against an unrelated
+  // project entry. The one real caller (gcWorktreeDir) always passes a genuine absolute worktree path;
+  // this is a backstop against that guarantee ever slipping, not a path reachable today.
+  if (worktreePath === "" || !path.isAbsolute(worktreePath)) {
+    console.warn(`[claude-config] removeClaudeConfigEntryForWorktree: refusing a non-absolute/empty worktreePath (${JSON.stringify(worktreePath)})`);
+    return;
+  }
   // Item 1(3): defer the whole body off gcWorktreeDir's synchronous call stack. Nothing below this line
   // runs before this function returns.
   setImmediate(() => {
     try {
       const claudeJson = claudeJsonPath();
       const lockPath = `${claudeJson}.loom-lock`;
-      if (!tryTrustLockOnce(lockPath)) return; // busy right now — skip; caught by a later GC or bulk prune
+      if (!tryTrustLockOnce(lockPath)) {
+        // Card f761fdf3 item 2: this used to skip SILENTLY. "caught by a later GC" was false — a later
+        // GC removal only ever matches its OWN worktree's path, never a previously-skipped one — and
+        // tryTrustLockOnce never breaks a stale lock either, so a crashed holder's lockfile would
+        // otherwise silently disable every GC removal forever. Recovery is the owner-run bulk prune
+        // (pruneDeadWorktreeClaudeConfigEntries / scripts/prune-claude-config-worktree-entries.mjs), not
+        // a later GC.
+        console.warn(`[claude-config] trust lock busy — skipped pruning entry for removed worktree ${worktreePath}; recovery is the owner-run bulk prune, not a later GC (a later GC only matches its own worktree's path)`);
+        return;
+      }
       try {
         // respawned/reclaimed since, or can't tell — never touch a live-or-unverifiable entry
         if (classifyPathLiveness(worktreePath) !== "dead") return;
@@ -684,8 +701,12 @@ export interface PruneDeadWorktreeEntriesResult {
   /** Set when the call aborted without writing: `"count-drop"` — the fresh in-lock read is missing a key
    *  that was NOT classified dead by this run (review item 4: a key missing from the fresh read is only
    *  ever explained by this run's own dead classification; any other missing key means the file was
-   *  truncated/clobbered by something else). `"lock-unavailable"` — the real write requires the
-   *  cross-process lock (review item 3) and it could not be acquired within `trustLockMs()`.
+   *  truncated/clobbered by something else). `"lock-unavailable"` — `withTrustLock`'s acquire loop (review
+   *  item 3) gave up without ever holding the lock. Card f761fdf3 item 4: wording only — this is most
+   *  commonly a transient Windows FS error (EPERM/EACCES/EBUSY) that exhausted its own retry budget, or a
+   *  non-EEXIST open error, NOT simply "another process is holding the lock": a lock that's merely held
+   *  and looks STALE (older than `trustLockMs()`) is broken and retried instead of causing this abort
+   *  (card 5b97da80 owns that stale-break/acquire-deadline behavior; nothing about it changes here).
    *  `"worktrees-root-missing"` — `worktreesRoot` itself doesn't stat as an existing directory (review
    *  item 2). Never set on a dry run (dry runs never take the lock or examine the root this strictly). */
   aborted: "count-drop" | "lock-unavailable" | "worktrees-root-missing" | null;
