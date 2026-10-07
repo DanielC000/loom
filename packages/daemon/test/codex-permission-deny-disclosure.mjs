@@ -153,6 +153,7 @@ try {
     class CaptureHost extends PtyHost {
       sweepOrphanedDescendants(_rootPid) {}
       reapExitedDescendants() {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+      async captureRootCreationRow(_pid) { return null; }
       enqueueStdin(sessionId, text) { enqueued.push({ sessionId, text }); return { delivered: false, deliveryState: "dropped" }; }
     }
     const host = new CaptureHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

@@ -128,6 +128,7 @@ async function endStream(stream) {
   class TestPtyHost extends PtyHost {
     sweepOrphanedDescendants(_rootPid) {}
     reapExitedDescendants() {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+    async captureRootCreationRow(_pid) { return null; }
     createPty() { return makeFakePty(); }
   }
 

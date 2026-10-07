@@ -41,6 +41,7 @@ function makeFakePty() {
 class FakeCodexHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   createCodexPty() { return makeFakePty(); }
 }
 

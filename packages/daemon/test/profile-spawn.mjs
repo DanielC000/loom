@@ -104,6 +104,7 @@ db.insertTask({ id: taskW, projectId: "pP", title: "WORK", body: "", columnKey: 
 class SeamHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   constructor(events) { super(events); this.capture = []; this.failFast = false; }
   createPty(opts) {
     this.capture.push(opts);

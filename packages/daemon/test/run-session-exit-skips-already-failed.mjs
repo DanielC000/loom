@@ -56,6 +56,7 @@ const INJECTED_MESSAGE = "injected post-spawn throw (run-session-exit-skips-alre
 class SeamHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   constructor(events) { super(events); this.exitCbs = new Map(); }
   createPty(opts) {
     const self = this;

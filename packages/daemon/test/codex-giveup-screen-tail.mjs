@@ -41,6 +41,7 @@ function makeFakePty() {
 class FakeCodexHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   constructor(events) { super(events); this.fakeCodexPtys = new Map(); }
   createCodexPty(opts) { const f = makeFakePty(); this.fakeCodexPtys.set(opts.sessionId, f); return f; }
 }

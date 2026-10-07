@@ -147,6 +147,7 @@ const db = new Db();
 class SeamHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   spawnedPrompts = new Map(); // sessionId -> the FULL startupPrompt handed to spawn() — for the full-kickoff assertion (8)
   enqueueLog = []; // {sessionId, text} for every enqueueStdin call — for the autofire-failure notification assertion
   createPty() {

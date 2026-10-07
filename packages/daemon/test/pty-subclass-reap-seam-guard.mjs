@@ -47,9 +47,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // declaration/expression whose `extends` clause is the BARE identifier `PtyHost` (never
 // `createSeamHost(PtyHost)` — a CallExpression heritage clause is structurally a different shape and is
 // already safe, since `createSeamHost`'s returned class carries the override), and asserts that class
-// also declares BOTH a `reapExitedDescendants` member AND a `probeRootSurvival` member (any spelling:
-// method, arrow property, or function-expression property — matched the same way
-// `onexit-discard-guard.mjs` matches `onExit`, since a future subclass could spell it any of those ways).
+// also declares EVERY member named in {@link REQUIRED_OVERRIDES} (`reapExitedDescendants`,
+// `probeRootSurvival`, `captureRootCreationRow` — see that const's own doc for why each is load-bearing),
+// in any spelling: method, arrow property, or function-expression property — matched the same way
+// `onexit-discard-guard.mjs` matches `onExit`, since a future subclass could spell it any of those ways.
 //
 // EXEMPTIONS — a small, individually-justified, hand-reviewed allowlist (same posture as
 // `onexit-discard-guard.mjs`'s KNOWN_ONEXIT_DISCARD_DEBT / `codescape-privacy-guard.mjs`'s
@@ -92,6 +93,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // the pid is never one of a small set of disallowed sentinel values in a test process — not a wider AST
 // pattern here; trying to make the syntactic scan "complete" is explicitly out of scope for this guard.
 //
+// Card ba23990e widened REQUIRED_OVERRIDES a FIFTH way, closing the residual card 87691385 (round 3)
+// deliberately left behind for a follow-up: a bare `extends PtyHost` subclass must now ALSO override
+// `captureRootCreationRow` — the at-spawn win32 root-creation-time capture seam, whose default fires a
+// real `powershell Get-CimInstance -Filter ProcessId=<pid>` query (measured 600-920ms) on EVERY spawn.
+// `test/_seam-host-fixture.mjs`'s shared fake pty already stubs this (see its own doc comment); ~63 OTHER
+// test files define their own bare `extends PtyHost` subclass outside that fixture and still fire the
+// real query on every fake spawn through them — read-only (the fabricated-row predicate rejects it), but
+// real OS load on the gate's hot path. The required stub MUST return `null`, never a fabricated row — a
+// fabricated row could authorize `resolveVerifiedRootCreationTime`'s caller to trust a bogus creation time
+// and wrongly promote a live-root-abort decision (see 87691385's own "Do not" list).
+//
 // Run: node packages/daemon/test/pty-subclass-reap-seam-guard.mjs (no build needed — pure source-text/AST scan)
 import ts from "typescript";
 import fs from "node:fs";
@@ -127,9 +139,10 @@ function getKeyName(member) {
   return null;
 }
 
-/** Required seam overrides — see header for why both are load-bearing (two different hazards, two
- *  different call-site sets). */
-const REQUIRED_OVERRIDES = ["reapExitedDescendants", "probeRootSurvival"];
+/** Required seam overrides — see header for why each is load-bearing (independent hazards, independent
+ *  call-site sets: `reapExitedDescendants`/`probeRootSurvival` gate the OS-wide reap/kill sweep,
+ *  `captureRootCreationRow` (card ba23990e) gates the at-spawn win32 creation-time CIM query). */
+const REQUIRED_OVERRIDES = ["reapExitedDescendants", "probeRootSurvival", "captureRootCreationRow"];
 
 /** Does `cls` declare a member named `memberName`, in any of method / arrow-property /
  *  function-expression-property spelling (mirrors `onexit-discard-guard.mjs`'s member-shape coverage —
@@ -270,43 +283,51 @@ function scanSnippet(text) {
     scanSnippet(`class Fake extends PtyHost { constructor(e) { super(e); } createPty() { return { pid: 4242 }; } isAlive() { return true; } }`).length === 1
   );
   check(
-    "[falsification] a class with ONLY reapExitedDescendants (missing probeRootSurvival) is still flagged, naming the missing one",
+    "[falsification] a class with ONLY reapExitedDescendants + captureRootCreationRow (missing probeRootSurvival) is still flagged, naming the missing one",
     (() => {
-      const hits = scanSnippet(`class Fake extends PtyHost { reapExitedDescendants(_rootPid) {} createPty() { return { pid: 4242 }; } }`);
+      const hits = scanSnippet(`class Fake extends PtyHost { reapExitedDescendants(_rootPid) {} async captureRootCreationRow(_pid) { return null; } createPty() { return { pid: 4242 }; } }`);
       return hits.length === 1 && hits[0].missing.length === 1 && hits[0].missing[0] === "probeRootSurvival";
     })()
   );
   check(
-    "[falsification] a class with ONLY probeRootSurvival (missing reapExitedDescendants, AND — round 5, item 1c — missing sweepOrphanedDescendants too, since it declares probeRootSurvival) is flagged for BOTH",
+    "[falsification, card ba23990e] a class with reapExitedDescendants + probeRootSurvival + sweepOrphanedDescendants (missing ONLY captureRootCreationRow) is flagged, naming the missing one",
+    (() => {
+      const hits = scanSnippet(`class Fake extends PtyHost { reapExitedDescendants(_rootPid) {} async probeRootSurvival(_p, _s) { return { foundAlive: false }; } sweepOrphanedDescendants(_rootPid) {} createPty() { return { pid: 4242 }; } }`);
+      return hits.length === 1 && hits[0].missing.length === 1 && hits[0].missing[0] === "captureRootCreationRow";
+    })()
+  );
+  check(
+    "[falsification] a class with ONLY probeRootSurvival (missing reapExitedDescendants + captureRootCreationRow, AND — round 5, item 1c — missing sweepOrphanedDescendants too, since it declares probeRootSurvival) is flagged for ALL THREE",
     (() => {
       const hits = scanSnippet(`class Fake extends PtyHost { async probeRootSurvival(_p, _s) { return { foundAlive: false }; } createPty() { return { pid: 4242 }; } }`);
-      return hits.length === 1 && hits[0].missing.length === 2 &&
-        hits[0].missing.includes("reapExitedDescendants") && hits[0].missing.includes("sweepOrphanedDescendants");
+      return hits.length === 1 && hits[0].missing.length === 3 &&
+        hits[0].missing.includes("reapExitedDescendants") && hits[0].missing.includes("captureRootCreationRow") &&
+        hits[0].missing.includes("sweepOrphanedDescendants");
     })()
   );
 
   check(
-    "[negative control] clears a class extends PtyHost that DOES override all THREE seams (method) — round 5 widened this from two to three",
-    scanSnippet(`class Fake extends PtyHost { reapExitedDescendants(_rootPid) {} async probeRootSurvival(_p, _s) { return { foundAlive: false }; } sweepOrphanedDescendants(_rootPid) {} createPty() { return { pid: 4242 }; } }`).length === 0
+    "[negative control] clears a class extends PtyHost that DOES override all FOUR seams (method) — card ba23990e widened this from three to four",
+    scanSnippet(`class Fake extends PtyHost { reapExitedDescendants(_rootPid) {} async probeRootSurvival(_p, _s) { return { foundAlive: false }; } sweepOrphanedDescendants(_rootPid) {} async captureRootCreationRow(_pid) { return null; } createPty() { return { pid: 4242 }; } }`).length === 0
   );
   check(
-    "[negative control] clears the arrow-property spelling of all three overrides",
-    scanSnippet(`class Fake extends PtyHost { reapExitedDescendants = (_rootPid) => {}; probeRootSurvival = async (_p, _s) => ({ foundAlive: false }); sweepOrphanedDescendants = (_rootPid) => {}; createPty() { return { pid: 4242 }; } }`).length === 0
+    "[negative control] clears the arrow-property spelling of all four overrides",
+    scanSnippet(`class Fake extends PtyHost { reapExitedDescendants = (_rootPid) => {}; probeRootSurvival = async (_p, _s) => ({ foundAlive: false }); sweepOrphanedDescendants = (_rootPid) => {}; captureRootCreationRow = async (_pid) => null; createPty() { return { pid: 4242 }; } }`).length === 0
   );
   check(
-    "[negative control] clears the function-expression-property spelling of all three overrides",
-    scanSnippet(`class Fake extends PtyHost { reapExitedDescendants = function (_rootPid) {}; probeRootSurvival = async function (_p, _s) { return { foundAlive: false }; }; sweepOrphanedDescendants = function (_rootPid) {}; createPty() { return { pid: 4242 }; } }`).length === 0
+    "[negative control] clears the function-expression-property spelling of all four overrides",
+    scanSnippet(`class Fake extends PtyHost { reapExitedDescendants = function (_rootPid) {}; probeRootSurvival = async function (_p, _s) { return { foundAlive: false }; }; sweepOrphanedDescendants = function (_rootPid) {}; captureRootCreationRow = async function (_pid) { return null; }; createPty() { return { pid: 4242 }; } }`).length === 0
   );
 
   // Round 5 (item 1c) — the NEW rule on its own: a class overriding probeRootSurvival OR killRoot (never
   // touching reapExitedDescendants at all — the exact ControllableHost shape this round fixes) must still
   // override sweepOrphanedDescendants, on EITHER known PtyHost heritage shape.
   check(
-    "[falsification, round 5 item 1c] extends PtyHost (bare), overrides ONLY killRoot, no reapExitedDescendants/probeRootSurvival/sweepOrphanedDescendants at all — flagged for all three",
+    "[falsification, round 5 item 1c] extends PtyHost (bare), overrides ONLY killRoot, no reapExitedDescendants/probeRootSurvival/captureRootCreationRow/sweepOrphanedDescendants at all — flagged for all four",
     (() => {
       const hits = scanSnippet(`class Fake extends PtyHost { killRoot(_pid) {} }`);
-      return hits.length === 1 && hits[0].missing.length === 3 &&
-        ["reapExitedDescendants", "probeRootSurvival", "sweepOrphanedDescendants"].every((m) => hits[0].missing.includes(m));
+      return hits.length === 1 && hits[0].missing.length === 4 &&
+        ["reapExitedDescendants", "probeRootSurvival", "captureRootCreationRow", "sweepOrphanedDescendants"].every((m) => hits[0].missing.includes(m));
     })()
   );
   check(
@@ -385,7 +406,7 @@ for (const file of files) {
   for (const hit of scanFile(file)) newViolations.push(hit);
 }
 
-check(`every "extends PtyHost" subclass outside the exemption list overrides both ${REQUIRED_OVERRIDES.join("+")}, AND every class reaching PtyHost.prototype.reapExitedDescendants directly also overrides sweepOrphanedDescendants (found ${newViolations.length} violation(s), scanned ${files.length} files, ${EXEMPT_FILES.size} exempt)`, newViolations.length === 0);
+check(`every "extends PtyHost" subclass outside the exemption list overrides all of ${REQUIRED_OVERRIDES.join("+")}, AND every class reaching PtyHost.prototype.reapExitedDescendants directly also overrides sweepOrphanedDescendants (found ${newViolations.length} violation(s), scanned ${files.length} files, ${EXEMPT_FILES.size} exempt)`, newViolations.length === 0);
 for (const v of newViolations) {
   console.log(`  MISSING OVERRIDE(S) [${v.missing.join(", ")}]  ${v.file}:${v.line}  class ${v.name}`);
 }

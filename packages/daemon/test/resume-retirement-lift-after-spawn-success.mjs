@@ -72,6 +72,7 @@ class TestPtyHost extends PtyHost {
     return makeFakePty(opts.sessionId);
   }
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
 }
 
 /** Fabricates a fake engine transcript so resume()'s engineTranscriptExists check passes — mirrors

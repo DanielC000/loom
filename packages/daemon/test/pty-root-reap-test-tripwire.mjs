@@ -177,6 +177,7 @@ try {
       async probeRootSurvival(_rootPid, _sessionId) {
         return { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: null };
       }
+      async captureRootCreationRow(_pid) { return null; }
       sweepOrphanedDescendants(_rootPid) { /* never reached: probeRootSurvival always reports alive, so dead stays false */ }
     }
     const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };

@@ -26,7 +26,8 @@ const fake = {
   kill() {}, resize() {},
 };
 class TestPtyHost extends PtyHost { sweepOrphanedDescendants(_rootPid) {}
-createPty() { return fake; } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; } }
+createPty() { return fake; } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+async captureRootCreationRow(_pid) { return null; } }
 const host = new TestPtyHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
 const SID = "sess-repaint-inflight";
 host.spawn({ sessionId: SID, cwd: TMP, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });

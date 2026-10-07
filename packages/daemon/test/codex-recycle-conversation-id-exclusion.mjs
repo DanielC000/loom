@@ -64,6 +64,7 @@ function makeFakePty() {
 class FakeCodexHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   constructor(events) {
     super(events);
     this.fakeCodexPtys = new Map();
@@ -245,6 +246,7 @@ function writeRollout(conversationId, cwd, mtimeMs) {
 class OrderSensitiveFakeCodexHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   constructor(events) {
     super(events);
     this.fakeCodexPtys = new Map();

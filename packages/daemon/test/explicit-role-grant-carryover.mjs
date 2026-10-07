@@ -73,6 +73,7 @@ const fakePty = () => {
 class SeamHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) { this.capture.push({ ...opts }); return fakePty(); }
   stop() {}

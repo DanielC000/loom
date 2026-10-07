@@ -57,6 +57,7 @@ const fakeShellPtys = new Map();
 class TestHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   createCodexPty(opts) {
     const fake = makeFakeCodexPty();
     fakeCodexPtys.set(opts.sessionId, fake);

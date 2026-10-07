@@ -80,6 +80,7 @@ class ControllableHost extends PtyHost {
     }
     return this.nextChecks.shift();
   }
+  async captureRootCreationRow(_pid) { return null; }
   killRoot(pid) { this.killedPids.push(pid); }
 }
 
@@ -821,6 +822,7 @@ try {
     reapExitedDescendants(rootPid, sessionId, liveRef) { return super.reapExitedDescendants(rootPid, sessionId, liveRef); }
     sweepOrphanedDescendants(rootPid, rootCreationTime = null) { this.sweptPids.push(rootPid); this.sweptCreationTimes.push(rootCreationTime); }
     async probeRootSurvival() { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null }; }
+    async captureRootCreationRow(_pid) { return null; }
     killRoot() { throw new Error("not used by this scenario"); }
   }
   const host = new WiringHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onProcessSurvivedKill() {} });

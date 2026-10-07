@@ -85,7 +85,8 @@ function makeFakePty(sessionId) {
   };
 }
 class TestPtyHost extends PtyHost { sweepOrphanedDescendants(_rootPid) {}
-createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; } }
+createPty(opts) { return makeFakePty(opts.sessionId); } reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+async captureRootCreationRow(_pid) { return null; } }
 
 let sessions;
 const events = {

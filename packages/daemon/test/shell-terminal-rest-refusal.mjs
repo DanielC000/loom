@@ -30,6 +30,7 @@ const fakes = [];
 class TestPtyHost extends PtyHost {
   sweepOrphanedDescendants(_rootPid) {}
   reapExitedDescendants(_rootPid) {} async probeRootSurvival(_rootPid, _sessionId) { return { foundAlive: false, identityConfirmed: false, enumerationFailed: false }; }
+  async captureRootCreationRow(_pid) { return null; }
   createShellPty() {
     const writes = []; let exitCb = null; let kills = 0;
     const fake = { pid: 7777, write: (d) => { writes.push(d); }, resize() {}, onData: () => ({ dispose() {} }),
