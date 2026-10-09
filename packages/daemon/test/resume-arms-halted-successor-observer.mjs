@@ -519,8 +519,9 @@ try {
     // margin before D_ext even after the D0-anchored wait below. Pure test PACING ahead of an ACTION (the
     // revival call); the real proof is the D0-vs-D1 comparison right after, which reads the mechanism's own
     // state directly and needs no timing margin at all.
-    // TIMING-GUARD-SAFE: pacing-only sleep; the adjacent checks read the mechanism's state directly (D1 >
-    // D0, isAlive) rather than reasoning about elapsed wall-clock, so the wait's own duration proves nothing.
+    // TIMING-GUARD-SAFE: non-gating-settle-pause — pacing-only sleep; the adjacent checks read the
+    // mechanism's state directly (D1 > D0, isAlive) rather than reasoning about elapsed wall-clock, so the
+    // wait's own duration proves nothing.
     await sleep(900);
     sessions2.resume(m2.id);
     check("(M1) the revival genuinely resumed M2", host2.isAlive(m2.id) === true);

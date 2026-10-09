@@ -43,7 +43,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, sleepPast } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -158,13 +158,13 @@ try {
     check("(D1) NEGATIVE CONTROL: after ONE give-up that successfully requeues, onKickoffGiveUpExhausted has NOT fired",
       !exhaustedLog[SID]);
 
-    // Drain the requeued kickoff (past its hold) — cycle 2's attempt.
-    // TIMING-GUARD-SAFE: HOLD_WAIT is sized past the PINNED LOOM_GIVE_UP_HOLD_MS deadline (HOLD_MS + a
-    // fixed margin) this exact process set via env var above, not a guessed race — the hold is a real
-    // timestamp comparison (`Date.now() < giveUpHeldUntil`) the entry carries, so waiting past the known
-    // deadline deterministically clears it; mirrors kickoff-giveup-exhausted.mjs's own (already-committed,
-    // hence unscanned) identical HOLD_WAIT pattern.
-    await sleep(HOLD_WAIT);
+    // Drain the requeued kickoff (past its hold) — cycle 2's attempt. Card 1584084e: rewritten to
+    // sleepPast's mechanical "exceeds a threshold" proof — HOLD_WAIT is asserted (not just claimed) to
+    // clear the PINNED LOOM_GIVE_UP_HOLD_MS deadline (HOLD_MS) this exact process set via env var above,
+    // not a guessed race — the hold is a real timestamp comparison (`Date.now() < giveUpHeldUntil`) the
+    // entry carries, so waiting past the known deadline deterministically clears it; mirrors
+    // kickoff-giveup-exhausted.mjs's own (already-committed, hence unscanned) identical HOLD_WAIT pattern.
+    await sleepPast(HOLD_WAIT, HOLD_MS, "HOLD_WAIT past LOOM_GIVE_UP_HOLD_MS");
     host.reconcile();
     check("(D1) reconcile drained the requeued kickoff: busy re-armed", busyLog[SID].at(-1) === true);
 

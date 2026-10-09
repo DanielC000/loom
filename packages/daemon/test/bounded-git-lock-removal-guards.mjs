@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { sleepPast } from "./_wait.mjs";
 
 const { removeLeakedCanonicalIndexLockIfSafe, describeLockGiveUp } = await import("../dist/git/worktrees.js");
 
@@ -70,12 +71,14 @@ const lockPathOf = (repo) => path.join(repo, ".git", "index.lock");
   const attemptStartedAt = Date.now();
   const killConfirmedAt = Date.now();
   // Well past the production clock-skew tolerance (50ms) — this must read as a genuinely LATER, foreign
-  // lock, not just noise from Date.now() vs. fs mtime clock skew (measured ~1-2ms on this host).
-  // TIMING-GUARD-SAFE: this wait IS the test's own independent variable, not a race against an
-  // unobservable external event — the scenario under test is "a lock written strictly later than
-  // killConfirmedAt", and separation-by-elapsed-time is the only way to manufacture that deterministically;
-  // there is no condition to poll for instead. 300ms is 6x the 50ms tolerance it must clear.
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  // lock, not just noise from Date.now() vs. fs mtime clock skew (measured ~1-2ms on this host). Card
+  // 1584084e: rewritten from a raw setTimeout + prose comment to sleepPast's mechanical "exceeds a
+  // threshold" proof — 300ms is asserted (not just claimed) to clear worktrees.ts's own
+  // LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS (50ms) with real margin. This wait IS the test's own independent
+  // variable, not a race against an unobservable external event — the scenario under test is "a lock
+  // written strictly later than killConfirmedAt", and separation-by-elapsed-time is the only way to
+  // manufacture that deterministically; there is no condition to poll for instead.
+  await sleepPast(300, 50, "lock mtime past LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS");
   const lp = lockPathOf(repo);
   fs.writeFileSync(lp, ""); // written well AFTER killConfirmedAt — a foreign process's lock, not ours
   const r = await removeLeakedCanonicalIndexLockIfSafe(repo, attemptStartedAt, killConfirmedAt);

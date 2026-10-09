@@ -23,7 +23,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, sleepPast } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -122,18 +122,17 @@ try {
 
   // Let the hold expire, then drain (reconcile). The giveUpGen-tagged HEAD must drain ALONE — FRESH1/
   // FRESH2 must NOT be folded into its redelivery turn even though they're same-sender and adjacent.
-  // TIMING-GUARD-SAFE: this sleep only waits for the KNOWN, PINNED hold precondition to expire
-  // (GIVEUP_TEXT's requeued entry is structurally ineligible to drain before HOLD_MS elapses — pinned
-  // via LOOM_GIVE_UP_HOLD_MS above — and HOLD_WAIT is a fixed +20ms margin past that pinned value, so
-  // it can only ever wait LONGER than required, never shorter, since a setTimeout-based sleep never
-  // fires early). Every assertion below runs SYNCHRONOUSLY right after `host.reconcile()`, with no
+  // Card 1584084e: rewritten to sleepPast's mechanical "exceeds a threshold" proof — this wait only
+  // needs to clear the KNOWN, PINNED hold precondition (GIVEUP_TEXT's requeued entry is structurally
+  // ineligible to drain before HOLD_MS elapses — pinned via LOOM_GIVE_UP_HOLD_MS above), asserted rather
+  // than claimed. Every assertion below runs SYNCHRONOUSLY right after `host.reconcile()`, with no
   // further await in between — drainPending's same-sender-run selection (the `head.giveUpGen ===
   // undefined` gate this test exists to cover) and submit()'s own write decision both happen
   // synchronously inside that one reconcile() call, so nothing any of these checks observe (busyLog,
   // the write stream, `getPending`) can change as a result of anything started AFTER this point. Same
   // reasoning, same pinned constants, as pty-giveup-requeue.mjs's own identical `sleep(HOLD_WAIT);
   // host.reconcile();` site (scenario 2).
-  await sleep(HOLD_WAIT);
+  await sleepPast(HOLD_WAIT, HOLD_MS, "HOLD_WAIT past LOOM_GIVE_UP_HOLD_MS");
   const busyLenBeforeRedrain = busyLog[SID].length;
   host.reconcile();
   check("(1) EXCLUSION: the redrain re-armed busy (GIVEUP_TEXT alone went out)",

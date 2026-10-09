@@ -531,12 +531,13 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
 // (a) RUNNING → the projected view, exactly like peek() would return.
 {
   const reg = new PendingOpRegistry();
-  const slow = async () => { await sleep(50); return { ok: true }; }; // TIMING-GUARD-SAFE: the op's own internal duration, not a wait gating the check below
+  const slow = async () => { await sleep(50); return { ok: true }; }; // TIMING-GUARD-SAFE: scripted-duration-margin — the op's own internal duration, not a wait gating the check below
   const running = reg.attach("pa1", "spawn", "mgr1", 500, slow);
-  // TIMING-GUARD-SAFE: this check is POSITIVE ("still running"), not a negative assertion — a false
-  // "not yet running" read here would FAIL loud (never pass for the wrong reason), and the 10ms pacing
-  // sleep sits well inside the op's own 50ms duration (the same shape as the pre-existing EVICT-ON-SETTLE
-  // block a few dozen lines above, which paces identically against a 50ms op with a 10ms sleep).
+  // TIMING-GUARD-SAFE: scripted-duration-margin — this check is POSITIVE ("still running"), not a negative
+  // assertion — a false "not yet running" read here would FAIL loud (never pass for the wrong reason), and
+  // the 10ms pacing sleep sits well inside the op's own scripted 50ms duration (the same shape as the
+  // pre-existing EVICT-ON-SETTLE block a few dozen lines above, which paces identically against a 50ms op
+  // with a 10ms sleep).
   await sleep(10); // still running
   const runningView = reg.peekAttachable("pa1");
   check("(peekAttachable running) returns the RUNNING op's view", runningView !== undefined && runningView.state === "running");

@@ -56,7 +56,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //
 // EXEMPTIONS: a flagged site clears ONLY by (a) a `// TIMING-GUARD-SAFE: <reason>` comment anywhere in the
 // contiguous `//`-comment block immediately above the wait line (or on the wait line itself), where
-// <reason> is one of the FOUR sanctioned clearing patterns below — the enum is CLOSED on purpose, because
+// <reason> is one of the sanctioned clearing patterns in the shared `_fixed-wait-sanctioned-reasons.mjs`
+// enum (read it there for the current, source-verified set — restating a count here is exactly the kind
+// of copy that drifted stale before, per this card's own history) — the enum is CLOSED on purpose, because
 // an exemption comment is itself a claim, and an open enum would let that claim mean anything — (b) being
 // listed in KNOWN_UNAUDITED_WAITS, or (c) a `// TIMING-GUARD-FALSE-MATCH: <reason>` comment in the same
 // position (card 1c5dda5d). (a)/(b) are both claims about THE WAIT — "this fixed duration is safe despite

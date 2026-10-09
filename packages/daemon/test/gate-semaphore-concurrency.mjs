@@ -236,10 +236,11 @@ const worktrees = [];
   {
     const sem = new GateSemaphore();
     let active = 0, maxActive = 0;
-    // TIMING-GUARD-SAFE: maxActive===2 is not a timing race — each task's active++ runs SYNCHRONOUSLY,
-    // before its own `await sleep(60)`, and both runExclusive calls admit synchronously (cap headroom,
-    // no guard blocking either) before Promise.all ever yields — so both increments are guaranteed to
-    // have run before this line is reached, deterministically, regardless of the sleep's duration.
+    // TIMING-GUARD-SAFE: sync-early-return — maxActive===2 is not a timing race — each task's active++
+    // runs SYNCHRONOUSLY, before its own `await sleep(60)`, and both runExclusive calls admit
+    // synchronously (cap headroom, no guard blocking either) before Promise.all ever yields — so both
+    // increments are guaranteed to have run before this line is reached, deterministically, regardless
+    // of the sleep's duration.
     const task = async () => { active++; maxActive = Math.max(maxActive, active); await sleep(60); active--; return "ok"; };
     const worker1 = { gateType: "worker", projectId: "p", sessionId: "w1", repoPath: "/repo/two-workers" };
     const worker2 = { gateType: "worker", projectId: "p", sessionId: "w2", repoPath: "/repo/two-workers" };

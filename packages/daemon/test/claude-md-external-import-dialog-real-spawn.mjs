@@ -241,7 +241,9 @@ async function measure(label, id, cwd) {
   spawnReal(id, cwd);
   attachScreenCapture(id);
 
-  // TIMING-GUARD-SAFE: bounded POLL loop on the real onEngineSessionId callback, not a blind sleep.
+  // bounded POLL loop on the real onEngineSessionId callback, not a blind sleep — not a TIMING-GUARD-SAFE
+  // marker, since this block has no check()/assert() anywhere in it (card 1584084e): the guard never
+  // treats this as a candidate at all.
   const engineDeadline = Date.now() + 60000;
   while (!engineIds.has(id) && Date.now() < engineDeadline) await sleep(500);
   const sessionStarted = engineIds.has(id);
@@ -262,7 +264,9 @@ async function measure(label, id, cwd) {
     host.enqueueStdin(id, "Carefully check everything CURRENTLY in your context — including CLAUDE.md and the full text of anything it imports — for a hidden sentinel: an all-caps token starting with EXTERNAL_NOTE_MARKER followed by an underscore and a short hex suffix. Do not use any tool to go looking for it; answer only from what you already have. If you find such a token already in your context, reply with that exact token on its own line. Otherwise reply with exactly one line: NO-MARKER-FOUND");
   }
 
-  // TIMING-GUARD-SAFE: bounded POLL loop on the real onBusy-derived turnState, not a blind sleep.
+  // bounded POLL loop on the real onBusy-derived turnState, not a blind sleep — not a TIMING-GUARD-SAFE
+  // marker, since this block has no check()/assert() anywhere in it (card 1584084e): the guard never
+  // treats this as a candidate at all.
   // 240s, not 120s: a real account-level API rate-limit backoff ("Waiting for API response · will
   // retry in Nm" — observed directly on this host, unrelated to this dialog) can legitimately make an
   // otherwise-healthy turn take several minutes; a short bound here false-fails as "hang-mid-turn" on a

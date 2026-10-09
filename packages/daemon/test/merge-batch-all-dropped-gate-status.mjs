@@ -96,7 +96,7 @@ try {
   // fallback confirm drains instead of holding the shared gate slot.
   const fakeGate = async (_cmd, wt) => {
     if (known.has(wt)) return { passed: false, reason: "test: fallback gate rejected" };
-    await new Promise((r) => setTimeout(r, GATE_MS)); // TIMING-GUARD-SAFE: a fixed gate duration to size durationMs against, not a negative assertion
+    await new Promise((r) => setTimeout(r, GATE_MS)); // a fixed gate duration to size durationMs against — not a TIMING-GUARD-SAFE marker, since this `fakeGate` closure has no check()/assert() anywhere in its own blank-line-delimited block (card 1584084e), so fixed-wait-witness-guard.mjs never treats it as a candidate at all
     return { passed: true };
   };
   // (3)'s own test seam: section (3) alone cuts a candidate whose commit message contains

@@ -269,11 +269,12 @@ try {
     host.stop(SID, "graceful"); // arms stage-2 (RETRY_MS=10ms) and stage-3 (KILL_MS=20ms) from now
     check("[graceful-then-hard] sanity: graceful stop did not kill yet", fake.isKilled === false);
 
-    // TIMING-GUARD-SAFE: sequencing-only — this wait's job is to land the hard stop before stage 2
+    // TIMING-GUARD-SAFE: sync-early-return — this wait's job is to land the hard stop before stage 2
     // (RETRY_MS=10ms) and stage 3 (KILL_MS=20ms) fire, not to prove either does or doesn't happen; the
-    // checks immediately below are synchronous sanity checks on state this call itself just set
-    // (killCount/isAlive), not a race-sensitive assertion — the actual THE FIX assertions for this trial
-    // are anchored to their own observable symptoms further down, via observeSymptom, not this sleep.
+    // checks immediately below are synchronous sanity checks on state the very next, synchronous
+    // `host.stop(SID, "hard")` call itself just set (killCount/isAlive), with no await in between, so
+    // they cannot be racing this sleep's duration — the actual THE FIX assertions for this trial are
+    // anchored to their own observable symptoms further down, via observeSymptom, not this sleep.
     await sleep(5); // land the hard stop WHILE both stage 2 and stage 3 are still pending
     host.stop(SID, "hard"); // kill #1 — sets killed=true, calls kill() once
     check("[graceful-then-hard] sanity: the hard stop performed kill #1", fake.killCount === 1);
