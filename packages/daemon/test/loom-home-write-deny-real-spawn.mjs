@@ -235,12 +235,14 @@ try {
   }
 
   const engineDeadline = Date.now() + 30000;
-  // TIMING-GUARD-SAFE: bounded POLL loop on the real onEngineSessionId callback, not a blind sleep.
+  // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+  // (`engineIds.has(SID)`) IS the exact fact the check right below re-reads.
   while (!engineIds.has(SID) && Date.now() < engineDeadline) await sleep(250);
   check("SessionStart captured a real engine session id", engineIds.has(SID));
 
-  // TIMING-GUARD-SAFE: bounded POLL loop on the REAL filesystem state (not the model's own narration) —
-  // exits the instant every expected outcome is observed, or reports whatever the budget left behind.
+  // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition is
+  // re-read, via the SAME `fs.existsSync` calls, by the post-loop checks below (exits the instant every
+  // expected outcome is observed, or reports whatever the budget left behind).
   // 180s (not the more typical 90-120s in this suite): a real run observed the orchestration MCP mount's
   // own initialize/server-discover handshake alone retry for ~100s before the turn's tool calls began.
   const deadline = Date.now() + 180000;

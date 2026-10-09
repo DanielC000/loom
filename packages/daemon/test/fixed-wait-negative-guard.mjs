@@ -131,6 +131,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SANCTIONED_REASONS } from "./_fixed-wait-sanctioned-reasons.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = __dirname;
@@ -161,7 +162,8 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 //     worker in this fixture for a stray reap call to come from, so `reapCalls.includes(W1.worktreePath)
 //     && reapCalls.includes(W2.worktreePath)` (the poll's own condition) and `reapCalls.length === 2` are
 //     the SAME fact once both are observed present.
-const SANCTIONED_REASONS = new Set(["sync-early-return", "sync-probe-no-macrotask", "fully-awaited-completion", "poll-observes-prior-step"]);
+// Card c83983cc: moved to _fixed-wait-sanctioned-reasons.mjs, shared verbatim with fixed-wait-witness-
+// guard.mjs — see that file's own header for why a second copy is the exact defect this card closes.
 
 // CLOSED enum for TIMING-GUARD-FALSE-MATCH — see the EXEMPTIONS note above. Unlike SANCTIONED_REASONS
 // (each a claim about why THE WAIT is safe), each entry here is a claim about why NEG_KEYWORDS fired on a

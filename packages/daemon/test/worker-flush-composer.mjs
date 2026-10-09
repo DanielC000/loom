@@ -281,8 +281,9 @@ try {
 
     {
       const t0 = Date.now();
-      // TIMING-GUARD-SAFE: this is the SAME observed-condition polling loop scenarios (2)/(3)/(4) above
-      // use (card 259c15fa) — it polls for the OBSERVED busy===false transition, bounded by
+      // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+      // (`busyLog[SID].at(-1) !== false`) IS the exact fact the check right below re-reads. The SAME
+      // observed-condition polling loop scenarios (2)/(3)/(4) above use (card 259c15fa), bounded by
       // GIVE_UP_POLL_TIMEOUT_MS, never a fixed sleep asserting completion; give-up's real completion is a
       // chain of setTimeout hops that routinely overshoots a hand-computed sum, which is exactly why this
       // polls the real signal instead of guessing a duration.

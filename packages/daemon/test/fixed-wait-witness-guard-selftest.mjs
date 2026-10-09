@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import { parseAddedLineNumbers, scanFileForUnwitnessedHits, isWaitIdiomLine, blockBounds, computeBlockCommentLines, listUntrackedTestFiles, scanModifiedTrackedTestFiles, listNulBearingTestFiles } from "./fixed-wait-witness-guard.mjs";
 import { sleepPast } from "./_wait.mjs";
 import { mkdtempManaged, cleanupPathSync, unregister } from "./_tmp-fixture.mjs";
+import { SANCTIONED_REASONS } from "./_fixed-wait-sanctioned-reasons.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
@@ -176,6 +177,32 @@ const WINDOWMS_KW = "window" + "Ms";
   const { hits, cleared } = scanFileForUnwitnessedHits("test/comment-specimen.mjs", source, new Set([2, 3, 4, 5]));
   check("GREEN (TIMING-GUARD-SAFE comment): clears the hit, zero hits",
     hits.length === 0 && cleared.length === 1 && cleared[0].reason.startsWith("TIMING-GUARD-SAFE: fully-awaited-completion"));
+}
+
+// ── Card c83983cc: a TIMING-GUARD-SAFE reason OUTSIDE SANCTIONED_REASONS is REJECTED, not silently
+// cleared (the pre-c83983cc behavior — this guard used to accept ANY non-empty reason). RED first (a
+// made-up reason FAILS by name, as its own population — never folded into `hits`, never silently
+// cleared), then GREEN once retagged to a real sanctioned reason — the exact "show it fail, then show it
+// pass" pairing the card asked for.
+{
+  const redSource = [
+    "{",
+    "  // TIMING-GUARD-SAFE: made-up-reason-nobody-reviewed — this is not in SANCTIONED_REASONS",
+    `  await ${SLEEP_KW}(10);`,
+    "  check(\"state reflects the settle\", true);",
+    "}",
+  ].join("\n");
+  const { hits, cleared, badExemptions } = scanFileForUnwitnessedHits("test/bad-exemption-specimen.mjs", redSource, new Set([2, 3, 4, 5]));
+  check("RED: a TIMING-GUARD-SAFE reason outside SANCTIONED_REASONS is REJECTED as a bad exemption, not silently cleared",
+    hits.length === 0 && cleared.length === 0 && badExemptions.length === 1 && badExemptions[0].reason === "made-up-reason-nobody-reviewed");
+
+  check("sanity: the made-up reason really is outside the shared SANCTIONED_REASONS enum (confirms the RED case is testing the right thing)",
+    !SANCTIONED_REASONS.has("made-up-reason-nobody-reviewed"));
+
+  const greenSource = redSource.replace("made-up-reason-nobody-reviewed", "fully-awaited-completion");
+  const greenResult = scanFileForUnwitnessedHits("test/bad-exemption-specimen.mjs", greenSource, new Set([2, 3, 4, 5]));
+  check("GREEN: retagging the SAME site to a real sanctioned reason clears it normally (zero hits, zero bad exemptions)",
+    greenResult.hits.length === 0 && greenResult.badExemptions.length === 0 && greenResult.cleared.length === 1);
 }
 
 // ── DoD-4: windowMs closes 0f744aa4's gap — RED when bare, GREEN when wrapped in positiveControl ────

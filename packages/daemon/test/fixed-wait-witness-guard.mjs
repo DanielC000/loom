@@ -57,13 +57,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //       the property: an author must deliberately WRITE it, which is attested by `003a1080`'s own fix —
 //       `check("(onSurfacedPending repeat) precondition: both calls degraded to pending…", …)` — not
 //       invented for this gate.)
-//   (d) a `TIMING-GUARD-SAFE:`/`TIMING-GUARD-FALSE-MATCH:` comment (same convention `fixed-wait-negative-
-//       guard.mjs` already uses in production — reused here, not reinvented) anywhere in the contiguous
-//       comment block immediately above the wait line, or on the wait line itself. Unlike that guard,
-//       this one does not restrict the reason to a closed enum — the claim being forced here is just "a
-//       human looked at this", not "this fits one of N known-audited shapes", so any non-empty reason is
-//       accepted. This is the gameable half, named honestly in the recommendation doc: it is a forced,
-//       reviewable artifact at the point a reviewer is already looking, not proof of safety.
+//   (d) a `TIMING-GUARD-SAFE:` comment citing one of the SAME closed-enum reasons `fixed-wait-negative-
+//       guard.mjs` requires (card c83983cc — imported from the shared `_fixed-wait-sanctioned-reasons.mjs`,
+//       never a second copy), or a `TIMING-GUARD-FALSE-MATCH:` comment with any non-empty reason, anywhere
+//       in the contiguous comment block immediately above the wait line, or on the wait line itself.
+//       BEFORE card c83983cc this guard accepted ANY non-empty TIMING-GUARD-SAFE reason — an exemption the
+//       negative guard's own closed enum would have REJECTED could still clear this diff-scoped guard on a
+//       newly-added line, which defeated the whole point of forcing a reviewable artifact: the artifact
+//       existed, but its CONTENT was unchecked. A TIMING-GUARD-SAFE reason outside the enum is now reported
+//       as its own named failure (a "bad exemption"), never silently cleared and never silently folded into
+//       an unwitnessed hit — same posture as the negative guard's own `badExemptions` population. The
+//       TIMING-GUARD-FALSE-MATCH half is UNCHANGED by this card and still accepts any non-empty reason —
+//       that marker is a claim about the CLASSIFIER (this was never the right kind of site to begin with),
+//       not a claim about the WAIT, so forcing it through the WAIT-safety enum would conflate two different
+//       claims (see fixed-wait-negative-guard.mjs's own header for why it keeps these separate).
 // A candidate with ZERO check()/assert() calls after it in the block is not reported at all — that is
 // the ordinary settle/pacing-sleep shape this file's own header (`_wait.mjs`) already says most sleeps
 // in this suite are, and is out of scope by design (same as the existing guard's own idiom).
@@ -99,6 +106,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { SANCTIONED_REASONS } from "./_fixed-wait-sanctioned-reasons.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
@@ -135,7 +143,12 @@ const TIMING_GUARD_CALL_RE = /\b(?:observeOnce|assertNeverWithControl)\s*\(/;
 // suspenders documentation of that fact, not a second mechanism: see witness (a) in the header above.
 const SLEEP_PAST_RE = /\bsleepPast\(/;
 const POSITIVE_CONTROL_RE = /\bpositiveControl\s*[:(]/;
-const EXEMPT_RE = /TIMING-GUARD-SAFE:\s*(.+)/;
+// Card c83983cc: restricted to the SAME keyword-shaped capture as fixed-wait-negative-guard.mjs's own
+// EXEMPT_RE — a bare `[a-z-]+` token, not the rest of the line — so the extracted reason is directly
+// comparable against SANCTIONED_REASONS instead of a free-text sentence that would never equal a member
+// of that Set. The free-text explanation after the keyword stays fully readable in the comment itself;
+// only the machine-checked token changes shape.
+const EXEMPT_RE = /TIMING-GUARD-SAFE:\s*([a-z-]+)/;
 const FALSE_MATCH_RE = /TIMING-GUARD-FALSE-MATCH:\s*(.+)/;
 // Same shape as fixed-wait-negative-guard.mjs's own CHECK_OR_ASSERT_RE (matchAll, not a first-match-only
 // `.match()` — card a14717af's fix for that exact under-report class applies here too).
@@ -290,13 +303,20 @@ export function parseAddedLineNumbers(patchText) {
  * BOTH in `addedLineNumbers` (this diff added them) AND immediately followed, in their blank-line block,
  * by at least one check()/assert() call — clearing each such candidate via one of the witnesses in this
  * file's header, or reporting it as an unwitnessed `hit`. Pure and exported for the self-test.
- * @returns {{ hits: Array<{file,lineNo,label}>, cleared: Array<{file,lineNo,reason}> }}
+ *
+ * Card c83983cc: a `TIMING-GUARD-SAFE:` comment whose reason is NOT one of `SANCTIONED_REASONS` no longer
+ * silently clears (the pre-c83983cc behavior — any non-empty reason cleared unconditionally) and is never
+ * folded into `hits` either (the comment IS a reviewed artifact, just citing an unrecognized reason — a
+ * different defect from "no artifact at all"). It is reported as its own `badExemptions` entry, named by
+ * the invalid reason, mirroring fixed-wait-negative-guard.mjs's own `badExemptions` population.
+ * @returns {{ hits: Array<{file,lineNo,label}>, cleared: Array<{file,lineNo,reason}>, badExemptions: Array<{file,lineNo,reason}> }}
  */
 export function scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers) {
   const lines = sourceText.split("\n");
   const commentLines = computeBlockCommentLines(lines);
   const hits = [];
   const cleared = [];
+  const badExemptions = [];
   for (let i = 0; i < lines.length; i++) {
     const lineNo = i + 1;
     if (!addedLineNumbers.has(lineNo)) continue;
@@ -323,7 +343,11 @@ export function scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers) {
       continue;
     }
     const exempt = markerReasonFor(lines, i, EXEMPT_RE);
-    if (exempt) { cleared.push({ file, lineNo, reason: `TIMING-GUARD-SAFE: ${exempt}` }); continue; }
+    if (exempt) {
+      if (!SANCTIONED_REASONS.has(exempt)) { badExemptions.push({ file, lineNo, reason: exempt }); continue; }
+      cleared.push({ file, lineNo, reason: `TIMING-GUARD-SAFE: ${exempt}` });
+      continue;
+    }
     const falseMatch = markerReasonFor(lines, i, FALSE_MATCH_RE);
     if (falseMatch) { cleared.push({ file, lineNo, reason: `TIMING-GUARD-FALSE-MATCH: ${falseMatch}` }); continue; }
     const preconditionMatch = matches.find((m) => PRECONDITION_TOKEN_RE.test(m[2]));
@@ -333,7 +357,7 @@ export function scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers) {
     }
     hits.push({ file, lineNo, label: matches[0][2] });
   }
-  return { hits, cleared };
+  return { hits, cleared, badExemptions };
 }
 
 /** Resolve the base ref to diff against: an explicit override (mirrors LOOM_GATE_OP_ID's threading
@@ -421,8 +445,9 @@ export function listNulBearingTestFiles(testDir, readdirSyncFn = fs.readdirSync,
  * scan uses, and runs the SAME `scanFileForUnwitnessedHits` detection against the result — so an actual
  * violation in an uncommitted edit is CAUGHT (named file + line + label, exactly like a committed hit),
  * while a clean uncommitted edit passes cleanly, same as it should. Same null-vs-`{hits:[],cleared:[],
- * files:[]}` contract as `listUntrackedTestFiles`: `null` means "could not check" (a git hiccup), never a
- * false "found none".
+ * files:[],badExemptions:[]}` contract as `listUntrackedTestFiles`: `null` means "could not check" (a git
+ * hiccup), never a false "found none". `badExemptions` (card c83983cc) carries any `TIMING-GUARD-SAFE:`
+ * reason in the uncommitted diff that isn't in `SANCTIONED_REASONS` — same split as `scanFileForUnwitnessedHits`.
  */
 export function scanModifiedTrackedTestFiles(repoRoot, testGlob, execFileSyncFn = execFileSync) {
   let patch;
@@ -434,6 +459,7 @@ export function scanModifiedTrackedTestFiles(repoRoot, testGlob, execFileSyncFn 
   const addedByFile = parseAddedLineNumbers(patch);
   const hits = [];
   const cleared = [];
+  const badExemptions = [];
   const files = [];
   for (const [file, addedLineNumbers] of addedByFile) {
     if (addedLineNumbers.size === 0) continue;
@@ -444,8 +470,9 @@ export function scanModifiedTrackedTestFiles(repoRoot, testGlob, execFileSyncFn 
     const scanned = scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers);
     hits.push(...scanned.hits);
     cleared.push(...scanned.cleared);
+    badExemptions.push(...scanned.badExemptions);
   }
-  return { hits, cleared, files };
+  return { hits, cleared, files, badExemptions };
 }
 
 async function main() {
@@ -487,19 +514,27 @@ async function main() {
   }
   const allHits = [];
   const allCleared = [];
+  const allBadExemptions = [];
   for (const [file, addedLineNumbers] of addedByFile) {
     if (addedLineNumbers.size === 0) continue;
     const abs = path.join(REPO_ROOT, file);
     if (!fs.existsSync(abs)) continue; // deleted on this branch — nothing to scan
     const sourceText = fs.readFileSync(abs, "utf8");
-    const { hits, cleared } = scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers);
+    const { hits, cleared, badExemptions } = scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers);
     allHits.push(...hits);
     allCleared.push(...cleared);
+    allBadExemptions.push(...badExemptions);
   }
 
   check(`no newly-added fixed-wait-adjacent-to-check() site without a witness (sleepPast / positiveControl / companion check() / TIMING-GUARD comment) — found ${allHits.length}`, allHits.length === 0);
   for (const h of allHits) console.log(`  HIT  ${h.file}:${h.lineNo}  "${h.label}"`);
   for (const c of allCleared) console.log(`  CLEARED  ${c.file}:${c.lineNo}  ${c.reason}`);
+
+  // Card c83983cc: a TIMING-GUARD-SAFE reason outside SANCTIONED_REASONS is its own named failure — never
+  // silently cleared (the pre-fix behavior) and never folded into allHits (the comment IS a reviewed
+  // artifact, just citing an unrecognized reason).
+  check(`every TIMING-GUARD-SAFE exemption on a newly-added line cites one of the ${SANCTIONED_REASONS.size} sanctioned reasons (found ${allBadExemptions.length} invalid)`, allBadExemptions.length === 0);
+  for (const b of allBadExemptions) console.log(`  BAD-EXEMPTION  ${b.file}:${b.lineNo}  reason="${b.reason}" — not in SANCTIONED_REASONS (${[...SANCTIONED_REASONS].join(", ")})`);
 
   // Card 40643460 — SELF-DESCRIBE THE SCANNED POPULATION. A bare "found 0" reads identically whether
   // this diff genuinely added no candidate, or whether the diff-scoped mechanism above simply never had
@@ -538,11 +573,18 @@ async function main() {
   } else {
     for (const h of modifiedScan.hits) console.log(`  UNCOMMITTED HIT  ${h.file}:${h.lineNo}  "${h.label}" (staged/unstaged, not yet committed — commit it to make this the ordinary diff-scoped hit above)`);
     for (const c of modifiedScan.cleared) console.log(`  UNCOMMITTED CLEARED  ${c.file}:${c.lineNo}  ${c.reason}`);
+    for (const b of modifiedScan.badExemptions) console.log(`  UNCOMMITTED BAD-EXEMPTION  ${b.file}:${b.lineNo}  reason="${b.reason}" — not in SANCTIONED_REASONS`);
     check(
       `no uncommitted (staged and/or unstaged) change to a tracked ${TEST_GLOB} file adds a fixed-wait-adjacent-to-check() site without a witness — scanned ${modifiedScan.files.length} modified file(s)` +
         (modifiedScan.files.length > 0 ? ` (${modifiedScan.files.join(", ")})` : "") +
         `, found ${modifiedScan.hits.length}`,
       modifiedScan.hits.length === 0
+    );
+    // Card c83983cc: the same sanctioned-reason restriction applies to an uncommitted TIMING-GUARD-SAFE
+    // tag, not just a committed one — a worker could otherwise dodge the check above by never committing.
+    check(
+      `no uncommitted TIMING-GUARD-SAFE exemption cites a reason outside the ${SANCTIONED_REASONS.size} sanctioned ones — found ${modifiedScan.badExemptions.length} invalid`,
+      modifiedScan.badExemptions.length === 0
     );
   }
 

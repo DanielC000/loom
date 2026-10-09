@@ -57,8 +57,9 @@ try {
     // The underlying reap is still fire-and-forget (sweepWorktreeStrays never awaits it) even though
     // stopWorker itself is now async (card 289f2607, cancelWorkerGateThenSweep) — poll for the reap call
     // landing instead of a blind sleep.
-    // TIMING-GUARD-SAFE: bounded OBSERVED poll on reapCalls, not a single fixed wait — card c976f009
-    // converted the prior blind sleep(50).
+    // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+    // (`reapCalls.some(...)`) IS the exact fact the check right below re-reads. Card c976f009 converted
+    // the prior blind sleep(50) into this observed poll.
     { const d = Date.now() + 2_000; while (!reapCalls.some((c) => c.worktreePath === P.worktreePath) && Date.now() < d) await sleep(5); }
     check("(A) stopWorker triggered the worktree-path reap for the worker's OWN worktree",
       reapCalls.some((c) => c.worktreePath === P.worktreePath));

@@ -165,8 +165,9 @@ try {
   check("(setup precondition) [startRun] the snapshot dir genuinely existed at the instant of the throw (createRunSnapshot ran first)",
     cwdExistedAtThrow === true);
   let gone = false;
-  // TIMING-GUARD-SAFE: bounded poll of a real observable condition (fs.existsSync), not a guessed sleep
-  // duration — the identical, pre-existing shape agent-runs-primitive.mjs's own snapshot-GC polls use.
+  // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+  // (`!fs.existsSync(...)`, captured into `gone`) IS the exact fact the check right below re-reads — the
+  // identical, pre-existing shape agent-runs-primitive.mjs's own snapshot-GC polls use.
   for (let i = 0; i < 40 && !gone; i++) { if (!fs.existsSync(runSnapshotDir(sessionId))) gone = true; else await sleep(25); }
   check("[startRun] the disposable snapshot dir was GC'd immediately by the catch, ahead of the next boot sweep", gone);
 } finally {

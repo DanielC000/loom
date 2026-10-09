@@ -144,7 +144,8 @@ try {
   });
 
   const engineDeadline = Date.now() + 30000;
-  // TIMING-GUARD-SAFE: bounded POLL loop on the real onEngineSessionId callback, not a blind sleep.
+  // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+  // (`engineIds.has(SID)`) IS the exact fact the check right below re-reads.
   while (!engineIds.has(SID) && Date.now() < engineDeadline) await sleep(250);
   check("SessionStart captured a real engine session id", engineIds.has(SID));
 
@@ -154,7 +155,9 @@ try {
   let fired = false;
   while (Date.now() < deadline) {
     if (loadedCalls.some((c) => c.sessionId === SID)) { fired = true; break; }
-    // TIMING-GUARD-SAFE: bounded poll against the real captured onInstructionsLoaded call, not a blind sleep.
+    // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+    // (`fired`, set from the real captured onInstructionsLoaded call) IS the exact fact the check below
+    // re-reads.
     await sleep(1000);
   }
   check("the real installed claude CLI fired a real InstructionsLoaded hook for this session", fired);

@@ -249,11 +249,11 @@ async function verifyRegisteredTools(label, id, cwd, role) {
   spawnReal(id, cwd, role);
 
   const engineDeadline = Date.now() + 30000;
-  // TIMING-GUARD-SAFE: this is a bounded POLL loop, not a blind sleep-then-assert — it re-checks the
-  // real `engineIds` Map (populated by the REAL onEngineSessionId callback, fired only by a genuine
-  // SessionStart hook POST) on every iteration and exits the instant the observable event lands. The
-  // check() below reflects whichever state the loop actually reached (found, or exhausted the budget),
-  // never a guess about how long boot takes — falsifiable in one trial either way.
+  // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+  // (`engineIds.has(id)`, populated by the REAL onEngineSessionId callback, fired only by a genuine
+  // SessionStart hook POST) IS the exact fact the check() below re-reads. The check() reflects whichever
+  // state the loop actually reached (found, or exhausted the budget), never a guess about how long boot
+  // takes — falsifiable in one trial either way.
   while (!engineIds.has(id) && Date.now() < engineDeadline) await sleep(250);
   const engineId = engineIds.get(id);
   check(`${label} SessionStart captured a real engine session id`, !!engineId);
@@ -274,10 +274,11 @@ async function verifyRegisteredTools(label, id, cwd, role) {
     nativeTools = nativeToolNames(rows);
     deferredTools = deferredToolNames(rows);
     if (nativeTools) break;
-    // TIMING-GUARD-SAFE: bounded POLL loop, not a blind sleep-then-assert — it re-reads the REAL
-    // transcript file on disk every iteration (above) and exits the instant the observable
-    // `prompt_snapshot` row actually appears. The check() below reflects whatever the file genuinely
-    // contains at loop exit (found, or budget exhausted), never a guess about API latency.
+    // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+    // (`nativeTools`, re-read from the REAL transcript file on disk every iteration above) IS the exact
+    // fact the check() below re-reads — it exits the instant the observable `prompt_snapshot` row
+    // actually appears, reflecting whatever the file genuinely contains at loop exit (found, or budget
+    // exhausted), never a guess about API latency.
     await sleep(1000);
   }
   check(`${label} the real transcript recorded a prompt_snapshot row with a native tool list`, !!nativeTools);

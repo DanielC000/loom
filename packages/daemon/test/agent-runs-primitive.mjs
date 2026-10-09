@@ -204,10 +204,12 @@ try {
   // polls briefly for the background removal, mirroring the ALREADY-PRESENT async GC poll in section 3
   // above (same shape, same bound) rather than guessing a fixed duration.
   let s3Gone = false;
-  // TIMING-GUARD-SAFE: bounded poll of a real observable condition (fs.existsSync), not a guessed sleep
-  // duration — identical, pre-existing shape to section 3's "disposable snapshot dir is GC'd" poll just
-  // above, which this mirrors for the same async-removal property on the boot-sweep path instead of the
-  // live-teardown path.
+  // TIMING-GUARD-SAFE: fully-awaited-completion — card c83983cc: this loop's OWN exit condition
+  // (`!fs.existsSync(...)`, captured into `s3Gone`) IS the exact fact the check right below re-reads, not
+  // a separate incidental check the window scan happened to pull in — same shape as codescape-supervisor
+  // .mjs's own citation of this reason. Identical, pre-existing shape to section 3's "disposable snapshot
+  // dir is GC'd" poll just above, which this mirrors for the same async-removal property on the
+  // boot-sweep path instead of the live-teardown path.
   for (let i = 0; i < 40 && !s3Gone; i++) { if (!fs.existsSync(runSnapshotDir(s3.id))) s3Gone = true; else await sleep(25); }
   check("4 the interrupted run's snapshot dir was swept (async, backgrounded)", s3Gone);
 
