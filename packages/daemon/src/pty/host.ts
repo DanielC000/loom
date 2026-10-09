@@ -13470,8 +13470,11 @@ export class PtyHost {
   }
 
   /** @decision fcf8a0f8 — `live.stopping` (a `stop()` of either mode is in flight). NOT a reclaim gate —
-   *  archiveOnExit already makes a stopping predecessor's own exit safe; use this only where a caller
-   *  needs "confirmed alive AND not already mid-stop" (e.g. before restoring a processState to "live"). */
+   *  archiveOnExit already makes a stopping predecessor's own exit safe.
+   *
+   *  @decision 1e5dd7c4 — its ONE sanctioned gate use is `reattemptManagerOwnershipTransfer`'s FORWARD-
+   *  transfer pre-check. Never gate settle/reclaim on it — a MONOTONIC latch there permanently misroutes
+   *  any successor ever stopped into the dead-successor branch, destroying its real completed-turn context. */
   isStopping(sessionId: string): boolean {
     return this.findAnyLive(sessionId)?.stopping ?? false;
   }

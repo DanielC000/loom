@@ -13717,6 +13717,9 @@ export class SessionService {
       let alerted = false;
       let alertedAt: string | undefined;
       for (;;) {
+        // @decision 1e5dd7c4 — deliberately NEVER gated on `isStopping(freshId)` (tried, reverted) — it's
+        // a MONOTONIC latch, so gating this would permanently route a ready-and-ever-stopped successor
+        // into the `!isAlive` branch below, destroying its real context instead of leaving it resumable.
         if (this.pty.hasReachedReady(freshId)) {
           try { this.pty.stop(oldId, "hard"); } catch { /* already gone */ }
           // @decision db4b778c — read the DURABLE log, never this loop's own local `alerted` — a fresh
@@ -14946,6 +14949,12 @@ export class SessionService {
     }
     if (!this.pty.hasReachedReady(successor.id)) {
       throw new Error("recycle_reattempt: your successor hasn't reached SessionStart yet — try again shortly");
+    }
+    // @decision 1e5dd7c4 — refuse the FORWARD transfer onto a successor whose own stop() is in flight,
+    // even though isAlive/hasReachedReady both pass — deliberately the OPPOSITE answer from the RECLAIM
+    // branch above (fcf8a0f8); do not "fix" one to match the other.
+    if (this.pty.isStopping(successor.id)) {
+      throw new Error("recycle_reattempt: your successor is currently stopping — wait for it to settle, then retry");
     }
     const { reparentedWorkers, failedSteps } = this.attemptManagerOwnershipTransfer(predecessorId, successor.id);
     const workersStepFailed = failedSteps.includes("workers");

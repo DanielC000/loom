@@ -5425,12 +5425,16 @@ export class OrchestrationMcpRouter {
           "recycle again fresh. If categories are still failing after the retry, you remain live with " +
           "nothing changed about what you still own ({outcome:\"still-split\", failedSteps, successorId}). " +
           "Refuses ({error}) if you aren't a genuinely still-halted predecessor, if your successor exists " +
-          "but hasn't reached SessionStart yet (try again shortly), or if your successor is down but still " +
-          "durably resumable — reclaiming it here would permanently discard its context, so this never " +
-          "does. That refusal names what to actually do next: if crash recovery is genuinely still pending " +
-          "for it, \"wait for its automatic recovery, then retry\"; otherwise (an intentional stop, crash " +
-          "recovery exhausted or disabled, or a restart that didn't cover this shape) \"nothing will " +
-          "recover it automatically — escalate: a human must resume successor <id>, then retry\".",
+          "but hasn't reached SessionStart yet (try again shortly), if your successor has reached " +
+          "SessionStart but its own stop() is currently in flight (wait for it to settle, then retry — " +
+          "proceeding would hand the fleet to a successor guaranteed to exit shortly, stranding it dark " +
+          "until a human resumes it; refusing costs nothing, since you remain the live, untouched owner), " +
+          "or if your successor is down but still durably resumable — reclaiming it here would permanently " +
+          "discard its context, so this never does. That refusal names what to actually do next: if crash " +
+          "recovery is genuinely still pending for it, \"wait for its automatic recovery, then retry\"; " +
+          "otherwise (an intentional stop, crash recovery exhausted or disabled, or a restart that didn't " +
+          "cover this shape) \"nothing will recover it automatically — escalate: a human must resume " +
+          "successor <id>, then retry\".",
         inputSchema: strictShape({ handoffNote: z.string() }),
       },
       async ({ handoffNote }) => {
