@@ -65,6 +65,23 @@ export interface MergeQuarantineEntry {
    *
    *  @decision 54054c01 (Code Review round 2) — see the decision record for the R3 repro this closes. */
   armedKeys?: string[];
+  /** PERSISTED (unlike `armedKeys`) — the distinct `repoPath`(s) of every OTHER raiser whose own token
+   *  got folded into this entry's `tokens` set at RUNTIME, via {@link enterMergeQuarantine}'s own
+   *  `existing` branch, when the raising repoPath's identity differed from the entry's own `repoPath`.
+   *  Lets clear-by-id fail closed instead of guessing which identity a bare id refers to, closing the
+   *  residual {@link canonicalSiblingsFor} always had (it only ever scans
+   *  `pendingUnresolvedQuarantines`, never a sibling absorbed directly into an ACTIVE entry this way).
+   *
+   *  Deliberately narrow: populated ONLY by that one runtime-union call site, never inferred from a
+   *  BOOT-TIME union (`armQuarantineKey`/`unionQuarantineEntries`'s own identity-differing merges) — that
+   *  shape is card `398f476c`'s own, larger identity-model-redesign scope, not this field's job. Every
+   *  other site that copies/rebuilds an entry (`unionQuarantineEntries`, `mergeTokenIntoPendingEntries`,
+   *  `protectDegradedOccupantBeforeDelete`'s own JSON whitelist, every boot-time parse) must carry
+   *  whatever is already here FORWARD, but never originate a new entry here itself.
+   *
+   *  @decision 82032b5c — do not drop this field at any copy/rebuild site; a dropped field silently
+   *  re-opens the clear-by-id hard-delete this exists to refuse. */
+  contributorRepoPaths?: string[];
   /** `true` only for a GENERIC fail-closed/self-heal placeholder this module minted itself (boot-time
    *  dir-scan failure, a corrupt-matched latch/tmp, or an orphan with no entry of its own) — never for a
    *  real, raise-time entry. Unlike `armedKeys`, this IS persisted: it must survive to the NEXT boot, where
@@ -174,9 +191,9 @@ function isKeyVerifiedFor(repoPath: string, key: string): boolean {
  *  shapes produce the SAME id and, per {@link activeMergeQuarantineFor}'s own `direct`-wins-over-siblings
  *  tier, the SAME refusal text.
  *
- *  @decision 9a55fb90 — a non-empty result here means that ambiguity is real right now, for this exact
- *  key. {@link clearMergeQuarantineLatchFile} and {@link assertRepoNotQuarantined} both read it, so the
- *  two can never disagree about when a bare latch id is unsafe to clear by. See the decision record. */
+ *  @decision 9a55fb90 — a non-empty result here means real ambiguity. Read via {@link
+ *  ambiguousIdentitiesFor}/{@link ambiguousIdentitiesForLatchId} — the ONE shared predicate every
+ *  refusal-text caller and clear-by-id itself use, so none can disagree about one given id. */
 function canonicalSiblingsFor(key: string, ownIdentityRepoPath: string): PendingUnresolvedQuarantine[] {
   const ownIdentity = directPathIdentity(ownIdentityRepoPath);
   return pendingUnresolvedQuarantines.filter((p) =>
@@ -185,20 +202,87 @@ function canonicalSiblingsFor(key: string, ownIdentityRepoPath: string): Pending
     directPathIdentity(p.entry.repoPath) !== ownIdentity);
 }
 
-/** {@link canonicalSiblingsFor}, but keyed off a specific OFFERED latch id rather than a bare key — for
- *  an entry armed under MORE than one key, `entry.armedKeys?.[0]` is NOT guaranteed to be the key that
- *  hashes to `latchId`: {@link quarantineLatchFileIdsFor}'s own id list is sorted real-file-first, never
- *  `armedKeys` order, so the two can name different keys. Finding the armed key that actually hashes to
- *  `latchId` keeps every refusal-text caller evaluating the EXACT SAME (key, ownIdentity) predicate input
- *  {@link clearMergeQuarantineLatchFile} itself will use when a human acts on that same offered id — text
- *  and clear-by-id must never be able to disagree about one given id.
+/**
+ * Every OTHER repoPath that makes a bare latch id for `entry` (armed at `key`) ambiguous right now — the
+ * ONE predicate every refusal-text caller (`assertRepoNotQuarantined`, `stillQuarantinedReason`) and the
+ * actual clear-by-id route (`clearMergeQuarantineLatchFile`) all share, so none of them can ever disagree
+ * about the SAME id (9a55fb90's own rule). Two independent collision shapes, kept SEPARATE (never flattened
+ * into one array) because they need DIFFERENT remediation advice — see {@link remediationTextFor}:
+ *  - `siblingRepoPaths` — a resolvable PENDING sibling canonically colliding at `key` ({@link
+ *    canonicalSiblingsFor} — the 9a55fb90 shape). Has its OWN entry (active or pending), so clear-by-path's
+ *    `repoPath` form (`clearMergeQuarantineByRecordedPath`) genuinely clears it.
+ *  - `contributorRepoPaths` — an identity already folded into `entry`'s own token set at RUNTIME ({@link
+ *    MergeQuarantineEntry.contributorRepoPaths} — the 82032b5c shape). Has NO entry of its own at all —
+ *    `clearMergeQuarantineByRecordedPath` matches only an entry's own STORED `repoPath`, so it reports
+ *    `wasQuarantined:false` for a bare contributor (measured directly, round 3 CR `77e22256`). **CORRECTED
+ *    in round 4:** the project-resolved `/clear` route does NOT reliably work for one either —
+ *    `clearMergeQuarantineReporting`/`clearMergeQuarantineByKey` measured a NO-OP for a PENDING entry's
+ *    contributor (that route only ever scans the ACTIVE map) and, for an active RESOLVABLE entry, lifts
+ *    the WHOLE union including the entry's own still-outstanding unconfirmed-kill token with no warning.
+ *    No route reliably clears a bare contributor — see {@link remediationTextFor}'s own doc for the
+ *    single-route text this motivated.
+ * Both empty exactly when a bare id is genuinely safe to act on.
  *
- * @decision 9a55fb90 (round 2, CR e31c5809) — see the decision record for the dual-armed-entry repro this
- * closes; do not go back to a bare `armedKeys?.[0]`. */
-function canonicalSiblingsForLatchId(entry: MergeQuarantineEntry, latchId: string | undefined): PendingUnresolvedQuarantine[] {
-  if (!latchId) return [];
-  const key = entry.armedKeys?.find((k) => quarantineHashForKey(k) === latchId) ?? entry.armedKeys?.[0];
-  return key ? canonicalSiblingsFor(key, entry.repoPath) : [];
+ * @decision 82032b5c (round 3) — never flatten these two back into one array; they need different advice.
+ */
+interface AmbiguousIdentities {
+  siblingRepoPaths: string[];
+  contributorRepoPaths: string[];
+}
+
+function totalAmbiguousCount(a: AmbiguousIdentities): number {
+  return a.siblingRepoPaths.length + a.contributorRepoPaths.length;
+}
+
+function ambiguousIdentitiesFor(key: string, entry: MergeQuarantineEntry): AmbiguousIdentities {
+  return {
+    siblingRepoPaths: canonicalSiblingsFor(key, entry.repoPath).map((p) => p.entry.repoPath),
+    contributorRepoPaths: entry.contributorRepoPaths ?? [],
+  };
+}
+
+/** {@link ambiguousIdentitiesFor}, but keyed off a specific OFFERED latch id — for a dual-armed entry,
+ *  `entry.armedKeys?.[0]` is NOT guaranteed to be the key that hashes to `latchId` ({@link
+ *  quarantineLatchFileIdsFor}'s own id list is sorted real-file-first, never `armedKeys` order), so this
+ *  finds the armed key that actually hashes to `latchId` first, mirroring 9a55fb90's own round 2 fix. */
+function ambiguousIdentitiesForLatchId(entry: MergeQuarantineEntry, latchId: string | undefined): AmbiguousIdentities {
+  const key = latchId ? (entry.armedKeys?.find((k) => quarantineHashForKey(k) === latchId) ?? entry.armedKeys?.[0]) : undefined;
+  return {
+    siblingRepoPaths: key ? canonicalSiblingsFor(key, entry.repoPath).map((p) => p.entry.repoPath) : [],
+    contributorRepoPaths: entry.contributorRepoPaths ?? [],
+  };
+}
+
+/**
+ * THE one shared remediation-text builder every refusal-text site uses — so a future wording change can
+ * never drift between sites. Names EXACTLY ONE route: `clear-by-path` with one of `ownRepoPaths` (the
+ * entry/entries actually armed/matched here) or a listed `siblingRepoPaths` entry — verified to work in
+ * every shape round 4's own re-CR measured (active+resolvable, active+degraded, pending+resolvable,
+ * pending+degraded). Round 3 ALSO named the project-resolved `/clear` route for a contributor; round 4
+ * retracted that — the re-CR measured it a NO-OP for a PENDING entry's contributor
+ * (`clearMergeQuarantineReporting` filters only by `directPathIdentity(entry.repoPath)`, so it never even
+ * finds a pending entry's own contributor) AND, for an active RESOLVABLE entry, that it lifts the WHOLE
+ * union — including the entry's OWN still-outstanding unconfirmed-kill token — with no warning attached
+ * to that sentence. A contributor now gets ONE flat line instead: `clear-by-path` with ITS OWN path does
+ * nothing (verified: matches only an entry's own stored `repoPath`); clearing by the entry's own path
+ * above lifts its token too. No tier/registration branching survives in this text.
+ *
+ * @decision 82032b5c (round 4) — never name a route here without a test driving its real function in
+ * every refusal tier the text appears in; every prior round's own branch-specific route produced a new
+ * text/action mismatch in some OTHER branch the SAME round never tested.
+ */
+function remediationTextFor(ownRepoPaths: string[], ambiguous: AmbiguousIdentities): string {
+  const clearByPathTargets = [...ownRepoPaths, ...ambiguous.siblingRepoPaths];
+  // Round 5 MINOR: clearing lifts every contributor's own folded token too, so the confirm-no-process
+  // clause must cover them, not just the listed clear-by-path targets.
+  const confirmClause = ambiguous.contributorRepoPaths.length === 0
+    ? "under ANY of the listed paths before clearing"
+    : "under ANY of the listed paths, and under every contributor named below, before clearing";
+  const note = `clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify(clearByPathTargets)} — this lifts the WHOLE entry there, including every contributor's own folded-in token and the listed path's own outstanding unconfirmed-kill quarantine, so first confirm no process is still running ${confirmClause}`;
+  if (ambiguous.contributorRepoPaths.length === 0) return note;
+  return `${note}. ${ambiguous.contributorRepoPaths.length} other identit${ambiguous.contributorRepoPaths.length === 1 ? "y" : "ies"} ` +
+    `(${ambiguous.contributorRepoPaths.map((p) => `'${p}'`).join(", ")}) had their own raise folded into this union's token set at runtime — ` +
+    `clear-by-path with a contributor's own path does nothing; clearing by the entry's own path above lifts its token too`;
 }
 
 export const MERGE_QUARANTINE_DIR = path.join(LOOM_HOME, "merge-quarantines");
@@ -321,7 +405,12 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
     ? [...new Set([...(older.orphanLatchFiles ?? []), ...(newer.orphanLatchFiles ?? [])])]
     : undefined;
   const armedKeys = [...new Set([...(older.armedKeys ?? []), ...(newer.armedKeys ?? [])])];
-  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys };
+  // @decision 82032b5c — carry `contributorRepoPaths` forward from BOTH sides (never originate a new
+  // entry here) — see that field's own doc comment for why this call site must not infer one itself.
+  const contributorRepoPaths = older.contributorRepoPaths || newer.contributorRepoPaths
+    ? [...new Set([...(older.contributorRepoPaths ?? []), ...(newer.contributorRepoPaths ?? [])])]
+    : undefined;
+  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys, contributorRepoPaths };
 }
 
 /**
@@ -485,7 +574,11 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOn
     //
     // @decision be79f4d5 (round 3) — "proven superset" is a claim about THIS entry's own history, never
     // about who else references a same-hash tmp — sweep reference-aware, never unconditional-by-hash.
-    if (sweepOtherTmpsOnSuccess) sweepTmpResidueForHashIfUnreferenced(quarantineHashFor(entry.repoPath));
+    //
+    // @decision 82032b5c — hash off `targetKey` when given, mirroring `final` above: recomputing from
+    // `entry.repoPath` instead sweeps (or fails to sweep) at the wrong key whenever that repoPath is
+    // itself unresolvable.
+    if (sweepOtherTmpsOnSuccess) sweepTmpResidueForHashIfUnreferenced(targetKey ? quarantineHashForKey(targetKey) : quarantineHashFor(entry.repoPath));
     return true;
   } catch (e) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already broken; nothing more to close */ } }
@@ -748,6 +841,35 @@ export function unconfirmedKillReason(detail: string): string {
 }
 
 /**
+ * The trailing route clause of {@link UNCONFIRMED_KILL_WINDOWS_GUIDANCE} — derived by slicing the
+ * constant itself at its own last `", then "` marker, never hand-duplicated, so a future wording edit to
+ * the guidance can't silently desync this from what a real raise actually embeds via {@link
+ * unconfirmedKillReason}.
+ */
+const UNCONFIRMED_KILL_ROUTE_CLAUSE = UNCONFIRMED_KILL_WINDOWS_GUIDANCE.slice(UNCONFIRMED_KILL_WINDOWS_GUIDANCE.lastIndexOf(", then "));
+
+/**
+ * Strip exactly {@link UNCONFIRMED_KILL_ROUTE_CLAUSE} — and nothing else — out of an embedded `reason`
+ * string, for a render site that must never name `/clear` (an AMBIGUOUS refusal; see {@link
+ * remediationTextFor}'s own doc for why). Every real unconfirmed-kill raise builds its `reason` via
+ * {@link unconfirmedKillReason}, which unconditionally appends the full guidance — route clause included
+ * — correct for an ORDINARY (non-ambiguous) raise, where naming `/clear` is right, but wrong the instant
+ * that SAME reason string is embedded inside an ambiguous refusal (round 5 CR `14877941`: the ambiguous
+ * branch of `assertRepoNotQuarantined` embeds `q.reason` verbatim, so a real unconfirmed-kill raise's own
+ * guidance still named `/clear` right next to `remediationTextFor`'s own single-route text). Matched
+ * literally against the guidance CONSTANT (never a hand-typed duplicate, and never a loose regex) — a
+ * reason that never carried the clause (not an unconfirmed-kill raise, or a legacy latch whose stored
+ * reason predates this guidance's wording) passes through byte-identical, so this is safe to call
+ * unconditionally wherever an ambiguous refusal embeds a free-text reason.
+ *
+ * @decision 82032b5c (round 5) — never embed a free-text reason in remediation output without stripping
+ * any route it names; a reason built elsewhere can carry a route this call site must not repeat.
+ */
+export function stripUnconfirmedKillRouteClause(reason: string): string {
+  return reason.includes(UNCONFIRMED_KILL_ROUTE_CLAUSE) ? reason.split(UNCONFIRMED_KILL_ROUTE_CLAUSE).join("") : reason;
+}
+
+/**
  * Matches ONLY {@link enterMergeQuarantine}'s own pending-divert filename shape — `pending-<24hex>.json`.
  * Deliberately disjoint, BY A DISTINCT PREFIX, from every other name this module writes: a canonical or
  * legacy key hash is always a BARE `<24hex>.json` with no prefix, and a safety-tmp/ordinary-tmp residue
@@ -851,6 +973,11 @@ function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: st
     tokens,
     orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
       ? parsed.orphanLatchFiles : undefined,
+    // @decision 82032b5c — carry `contributorRepoPaths` forward too, or this protective copy silently
+    // drops the runtime-union provenance the on-disk `final` was carrying, reopening clear-by-id ambiguity
+    // for whatever survives via this copy.
+    contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
+      ? parsed.contributorRepoPaths : undefined,
   };
   const filename = pendingDivertFilenameFor(occupantRepoPath);
   const finalBasename = path.basename(final);
@@ -915,7 +1042,14 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
     ...others.flatMap((p) => p.entry.orphanLatchFiles ?? []),
     ...others.map((p) => p.sourceFile).filter((f) => f !== base.sourceFile),
   ])];
-  const merged: MergeQuarantineEntry = { ...base.entry, tokens, orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined };
+  // @decision 82032b5c — carry `contributorRepoPaths` forward from every matched entry (all matched
+  // entries share ONE identity here, by construction — see this function's own doc — so there is never
+  // a new contributor to originate, only ones already recorded elsewhere to preserve).
+  const contributorRepoPaths = [...new Set(matched.flatMap((p) => p.entry.contributorRepoPaths ?? []))];
+  const merged: MergeQuarantineEntry = {
+    ...base.entry, tokens, orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
+    contributorRepoPaths: contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
+  };
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
   const persisted = writePendingDivertFile(base.sourceFile, merged);
   pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
@@ -956,10 +1090,19 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
   const verified = isRepoPathCurrentlyResolvable(repoPath);
   const existing = verified ? activeQuarantines.get(key) : undefined;
   if (existing) {
-    const entry: MergeQuarantineEntry = { ...existing, tokens: [...existing.tokens, token] };
+    // @decision 82032b5c — record a genuinely DIFFERENT raiser's identity folded in here, so clear-by-id
+    // can fail closed later instead of guessing (canonicalSiblingsFor alone never sees this absorb).
+    const contributorRepoPaths = directPathIdentity(repoPath) !== directPathIdentity(existing.repoPath)
+      ? [...new Set([...(existing.contributorRepoPaths ?? []), repoPath])]
+      : existing.contributorRepoPaths;
+    const entry: MergeQuarantineEntry = { ...existing, tokens: [...existing.tokens, token], contributorRepoPaths };
     // `existing` may be armed under a SECOND key too (its own resolvedKey) — update every one of those
     // slots to this rebuilt object, not just `key` (round 2 finding 2).
-    for (const k of existing.armedKeys?.length ? existing.armedKeys : [key]) activeQuarantines.set(k, entry);
+    const armedKeysForEntry = existing.armedKeys?.length ? existing.armedKeys : [key];
+    // @decision 82032b5c (round 2 CR, CRITICAL) — route through replaceEntryEverywhere, never a bare
+    // per-key `.set()`: `existing` can ALSO be a PENDING 883e29bc boot-diverted twin's own reference,
+    // left stale (and later durably re-written FROM) by a bare `.set()` — see the decision record.
+    replaceEntryEverywhere(activeQuarantines, existing, entry);
     // @decision 8a1bc2ef (round 2, Code Review) — only absorb into `entry` when IT is genuinely
     // key-verified, never when `existing` merely occupies `key` via PASS 1's degraded dual-arm fallback —
     // see the decision record for the nested-repo repro this guard closes.
@@ -979,7 +1122,31 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // @decision 92c645cc — safe to sweep: `entry.tokens` is `[...existing.tokens, token]`, a visible
     // superset of whatever `existing` (this process's own authoritative record for this key) already
     // held, so no older tmp for this key can carry a token this write doesn't already carry forward.
-    if (!writeMergeQuarantineLatch(entry, true, undefined, true)) {
+    //
+    // @decision 82032b5c — write to EVERY key in `armedKeysForEntry`, never `targetKey=undefined` (which
+    // recomputed a FRESH, possibly-degraded `canonicalRepoLockKey(entry.repoPath)` instead of the key(s)
+    // actually in `armedKeys`).
+    //
+    // @decision 82032b5c (round 2 CR, MAJOR) — skip the guard (e1cb7d33: a raise must persist) ONLY for
+    // `key` itself, the raise's own freshly-VERIFIED key. A secondary armed key's CURRENT physical file
+    // may belong to a wholly different, unresolvable identity — see the decision record.
+    //
+    // @decision 82032b5c (round 3 CR, MINOR A) — ALSO gate each secondary key on `entryStillOwnsKey`
+    // first — the SAME predicate the clear loop uses — skipping a stale, no-longer-owned member outright
+    // as belt-and-suspenders on top of the disk-based degraded-occupant guard below.
+    let primaryWriteSucceeded = true;
+    for (const k of armedKeysForEntry) {
+      const isPrimaryKey = k === key;
+      if (!isPrimaryKey && !entryStillOwnsKey(k, entry)) continue;
+      const succeeded = writeMergeQuarantineLatch(entry, true, k, isPrimaryKey);
+      if (isPrimaryKey) {
+        primaryWriteSucceeded = succeeded;
+      } else if (!succeeded) {
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] could not durably write ${repoPath}'s own SECONDARY armed key ${k} — the degraded-occupant guard refused it (a DIFFERENT, currently-unresolvable identity may physically own that key's file right now) or the write otherwise failed; the raise itself still persists via its own primary key ${key}.`);
+      }
+    }
+    if (!primaryWriteSucceeded) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now — the durable latch failed to write (see the error just above), so a daemon restart BEFORE that is fixed would silently LIFT this quarantine instead of re-arming it. Investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
     }
@@ -1062,7 +1229,7 @@ function clearPendingEntryByToken(repoPath: string, token: string): void {
     pendingUnresolvedQuarantines.splice(idx, 1);
     const orphanFilesToSweep = new Set(pending.entry.orphanLatchFiles ?? []);
     for (const k of pending.entry.armedKeys ?? []) {
-      if (!pendingEntryStillOwnsKey(k, pending.entry)) continue;
+      if (!entryStillOwnsKey(k, pending.entry)) continue;
       activeQuarantines.delete(k);
       deleteMergeQuarantineLatchByKey(k);
     }
@@ -1124,10 +1291,13 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   const updated: MergeQuarantineEntry = { ...entry, tokens: remaining };
   // Update EVERY key `entry` is armed under, not just `key` — reference equality breaks the moment an
   // entry is REBUILT elsewhere (a union, an orphan merge), since the rebuilt object stops being `===` the
-  // one still sitting at another of its own keys (round 2 finding 2).
-  for (const k of entry.armedKeys?.length ? entry.armedKeys : [key]) activeQuarantines.set(k, updated);
-  // @decision d4b25feb (round 3) — ALSO re-point any pending entry sharing this EXACT reference
-  // (883e29bc's own boot-diverted twin) — a stale sibling keeps the cleared token; graduation unions it back.
+  // one still sitting at another of its own keys (round 2 finding 2). ALSO re-points any PENDING entry
+  // sharing this exact reference (883e29bc's own boot-diverted twin — d4b25feb round 3).
+  //
+  // @decision 82032b5c (round 3 CR, MINOR A) — route through replaceEntryEverywhere, never a bare per-key
+  // `.set()` — a stale `armedKeys` member can, by now, genuinely belong to a DIFFERENT entry, and a bare
+  // `.set()` silently clobbered that OTHER entry's in-memory slot with `updated`.
+  const armedKeysForEntry = entry.armedKeys?.length ? entry.armedKeys : [key];
   replaceEntryEverywhere(activeQuarantines, entry, updated);
   // @decision bde5d1fe (Code Review of eae23ebe) — a sweep may only run AFTER a durable write of the
   // state that supersedes it has succeeded, never before: sweeping THEN failing this write would leave
@@ -1135,13 +1305,20 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // @decision 92c645cc — `updated.tokens` deliberately DROPS the cleared token, so this call does NOT
   // pass `writeMergeQuarantineLatch`'s own `sweepOtherTmpsOnSuccess` (not a superset write); the sweep
   // below is this call's OWN pre-existing, separate step, unaffected by that flag.
-  if (writeMergeQuarantineLatch(updated, false, key)) {
-    // @decision be79f4d5 (round 4) — reference-aware, same reason as the other two sites: a DIFFERENT,
-    // surviving entry's own same-hash tmp must survive a partial clear here too.
-    sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key));
-  } else {
-    // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath} after a partial clear — the PRE-EXISTING durable state (this repo's own latch file, final or tmp) is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
+  //
+  // @decision 82032b5c (round 2 CR, MAJOR) — write EVERY armed key, guarded by `entryStillOwnsKey`
+  // (checks IDENTITY — same object OR same `directPathIdentity` — never bare `===` alone), now
+  // meaningful since the in-memory update above is itself reference-scoped.
+  for (const k of armedKeysForEntry) {
+    if (!entryStillOwnsKey(k, updated)) continue;
+    if (writeMergeQuarantineLatch(updated, false, k)) {
+      // @decision be79f4d5 (round 4) — reference-aware, same reason as the other two sites: a DIFFERENT,
+      // surviving entry's own same-hash tmp must survive a partial clear here too.
+      sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(k));
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath} at key ${k} after a partial clear — the PRE-EXISTING durable state (this repo's own latch file, final or tmp) is left UNTOUCHED there, so a restart before this is fixed may re-arm with the just-cleared token still counted as outstanding at THAT key (delays the eventual full lift; never a false lift).`);
+    }
   }
 }
 
@@ -1303,18 +1480,20 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string): { kept: boolea
   return { kept: false, referencingRepoPaths: [] };
 }
 
-/** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `pendingEntry` itself — either
- *  the exact same object (the ordinary, still-valid diverted case) or a DIFFERENT object that shares its
- *  own recorded identity (a legitimate rebuild — a union, an orphan merge — of the SAME logical entry).
- *  `false` for anything else: nothing occupies `key` at all, or a WHOLLY UNRELATED entry does — e.g. a
- *  fresh raise that reused a key a now-stale pending snapshot's own `armedKeys` still names (card
- *  883e29bc, round 3, finding 1). Lifting `key` in that case would destroy an unrelated repo's own,
- *  completely unrelated, genuine quarantine — gate EVERY pending-sweep's `armedKeys` lift on this. */
-function pendingEntryStillOwnsKey(key: string, pendingEntry: MergeQuarantineEntry): boolean {
+/** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `entry` itself — either the
+ *  exact same object (the ordinary, still-valid case) or a DIFFERENT object that shares its own recorded
+ *  identity (a legitimate rebuild — a union, an orphan merge — of the SAME logical entry). `false` for
+ *  anything else: nothing occupies `key` at all, or a WHOLLY UNRELATED entry does — e.g. a fresh raise
+ *  that reused a key a now-stale `armedKeys` snapshot still names (card 883e29bc round 3 finding 1 — the
+ *  ORIGINAL, pending-only shape this predicate closed; card 82032b5c round 3 MINOR A generalized it to
+ *  the ACTIVE side too, where a bare per-key `.set()` used to overwrite a genuinely different entry's own
+ *  in-memory slot on a partial clear). Lifting/overwriting `key` when this is `false` would destroy an
+ *  unrelated repo's own, completely unrelated, genuine quarantine — gate every such write on this. */
+function entryStillOwnsKey(key: string, entry: MergeQuarantineEntry): boolean {
   const occupant = activeQuarantines.get(key);
   if (!occupant) return false;
-  if (occupant === pendingEntry) return true;
-  return directPathIdentity(occupant.repoPath) === directPathIdentity(pendingEntry.repoPath);
+  if (occupant === entry) return true;
+  return directPathIdentity(occupant.repoPath) === directPathIdentity(entry.repoPath);
 }
 
 /**
@@ -1377,10 +1556,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
     if (!tiedToThisEntity) return true;
     for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
     // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too, but
-    // ONLY when it still genuinely occupies that key (pendingEntryStillOwnsKey) — a stale snapshot can
+    // ONLY when it still genuinely occupies that key (entryStillOwnsKey) — a stale snapshot can
     // otherwise name a key a wholly unrelated later raise has since reused.
     for (const k of p.entry.armedKeys ?? []) {
-      if (!pendingEntryStillOwnsKey(k, p.entry)) continue;
+      if (!entryStillOwnsKey(k, p.entry)) continue;
       activeQuarantines.delete(k);
       deleteMergeQuarantineLatchByKey(k);
     }
@@ -1517,9 +1696,9 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     for (const p of matchedPending) {
       for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
       // @decision 883e29bc — mirror clearMergeQuarantineByKey's own armedKeys lift, gated the same way
-      // via pendingEntryStillOwnsKey — a key here can belong to someone else entirely by now.
+      // via entryStillOwnsKey — a key here can belong to someone else entirely by now.
       for (const k of p.entry.armedKeys ?? []) {
-        if (!pendingEntryStillOwnsKey(k, p.entry)) continue;
+        if (!entryStillOwnsKey(k, p.entry)) continue;
         activeQuarantines.delete(k);
         deleteMergeQuarantineLatchByKey(k);
       }
@@ -1794,8 +1973,8 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, before: MergeQuaran
   // @decision 9a55fb90 — route the bare-id suggestion through the SAME collision check as
   // assertRepoNotQuarantined, never offer it unconditionally — a collision at this key makes it
   // ambiguous here too.
-  const siblings = canonicalSiblingsForLatchId(after, latchId);
-  const clearByIdSuggestion = siblings.length > 0 ? "" : ` or ${JSON.stringify({ id: latchId })}`;
+  const ambiguousIdentities = ambiguousIdentitiesForLatchId(after, latchId);
+  const clearByIdSuggestion = totalAmbiguousCount(ambiguousIdentities) > 0 ? "" : ` or ${JSON.stringify({ id: latchId })}`;
   return `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`;
 }
 
@@ -1876,16 +2055,19 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision 9a55fb90 — a bare id cannot tell "clear the entry armed here" apart from "clear by the
     // id a DIFFERENT, currently-resolvable canonical owner's own refusal happened to name" — both
     // produce this SAME id and the SAME refusal text. FAIL CLOSED: refuse rather than guess.
-    const canonicalSiblings = canonicalSiblingsFor(activeMatch.key, activeMatch.entry.repoPath);
-    if (canonicalSiblings.length > 0) {
-      const candidates = [activeMatch.entry.repoPath, ...canonicalSiblings.map((p) => p.entry.repoPath)];
+    // @decision 82032b5c — widened to ALSO cover a RUNTIME union (contributorRepoPaths): canonicalSiblingsFor
+    // alone never sees a sibling absorbed directly into this ACTIVE entry via enterMergeQuarantine's own
+    // `existing` branch, which is exactly the 9a55fb90 "known residual" this card closes.
+    const ambiguousIdentities = ambiguousIdentitiesFor(activeMatch.key, activeMatch.entry);
+    const ambiguousCount = totalAmbiguousCount(ambiguousIdentities);
+    if (ambiguousCount > 0) {
+      const namedIdentities = [...ambiguousIdentities.siblingRepoPaths, ...ambiguousIdentities.contributorRepoPaths];
       return {
         ok: false,
-        reason: `latch id '${id}' is ambiguous: it is currently armed by '${activeMatch.entry.repoPath}', but ${canonicalSiblings.length} ` +
-          `other, currently-resolvable repo${canonicalSiblings.length === 1 ? "" : "s"} (${canonicalSiblings.map((p) => `'${p.entry.repoPath}'`).join(", ")}) ` +
-          `also canonically own this exact key right now — a bare id cannot tell which identity you mean to clear, and a refusal naming this id reads IDENTICALLY ` +
-          `whichever one you're actually trying to resolve. Nothing was cleared. Clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify(candidates)} ` +
-          `— that route discriminates correctly and durably protects whichever identity you don't name.`,
+        reason: `latch id '${id}' is ambiguous: it is currently armed by '${activeMatch.entry.repoPath}', but ${ambiguousCount} ` +
+          `other identit${ambiguousCount === 1 ? "y" : "ies"} (${namedIdentities.map((p) => `'${p}'`).join(", ")}) ` +
+          `also canonically collide with this exact key right now, or had their own raise folded into this union's token set at runtime — a bare id cannot tell which identity you mean to clear, and a refusal naming this id reads IDENTICALLY ` +
+          `whichever one you're actually trying to resolve. Nothing was cleared. ${remediationTextFor([activeMatch.entry.repoPath], ambiguousIdentities)}.`,
       };
     }
     const activeIdentity = directPathIdentity(activeMatch.entry.repoPath);
@@ -1913,6 +2095,20 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     return { ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath], ...activeLatchKeptFields };
   }
   if (matchedPending.length > 0) {
+    // @decision 82032b5c (round 2 CR, Minor 5) — a PENDING entry can ALSO carry `contributorRepoPaths`
+    // (e.g. carried forward by `protectDegradedOccupantBeforeDelete`) — fail closed here too, on the SAME
+    // basis the active-match branch above already does (9a55fb90: text and action must never disagree).
+    const pendingContributors = [...new Set(matchedPending.flatMap((p) => p.entry.contributorRepoPaths ?? []))];
+    if (pendingContributors.length > 0) {
+      const matchedRepoPaths = [...new Set(matchedPending.map((p) => p.entry.repoPath))];
+      return {
+        ok: false,
+        reason: `latch id '${id}' matches a PENDING entry whose own token set carries ${pendingContributors.length} ` +
+          `other identit${pendingContributors.length === 1 ? "y" : "ies"} (${pendingContributors.map((p) => `'${p}'`).join(", ")}) ` +
+          `folded in at runtime — a bare id cannot tell which identity you mean to clear. Nothing was cleared. ` +
+          `${remediationTextFor(matchedRepoPaths, { siblingRepoPaths: [], contributorRepoPaths: pendingContributors })}.`,
+      };
+    }
     // A pending entry isn't armed into activeQuarantines under any key — drop ONLY these exact pending
     // entries and their own sourceFiles directly, never a recomputed-key delegation (which could drift
     // onto an unrelated repo's entry the same way the active-entry path used to — round 3).
@@ -2032,19 +2228,32 @@ export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok:
   const latchId = quarantineLatchFileIdsFor(q)[0];
   // @decision 9a55fb90 — a collision at this key makes the bare-id clear option ambiguous; name only
   // the repoPath route (which discriminates correctly) rather than a shortcut that reads equally valid.
-  const siblings = canonicalSiblingsForLatchId(q, latchId);
-  const clearGuidance = siblings.length > 0
-    ? `a human clears it: this latch id is ambiguous right now (${siblings.length} other, currently-resolvable repo${siblings.length === 1 ? "" : "s"} — ` +
-      `${siblings.map((p) => `'${p.entry.repoPath}'`).join(", ")} — also canonically own this exact key), so clear by repoPath instead: ` +
-      `POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })}`
-    : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })} or ${JSON.stringify({ id: latchId })}`;
+  const ambiguousIdentities = ambiguousIdentitiesForLatchId(q, latchId);
+  const ambiguousCount = totalAmbiguousCount(ambiguousIdentities);
+  // @decision 82032b5c (round 4) — the project-resolved `/clear` route is named ONLY in the ORDINARY
+  // (non-ambiguous) branch below, never alongside `remediationTextFor`'s own output — see that
+  // function's own doc for why naming it in the ambiguous case too would reopen a text/action mismatch.
+  const clearGuidance = ambiguousCount > 0
+    ? (() => {
+      const namedIdentities = [...ambiguousIdentities.siblingRepoPaths, ...ambiguousIdentities.contributorRepoPaths];
+      return `a human clears it: this latch id is ambiguous right now (${ambiguousCount} other identit${ambiguousCount === 1 ? "y" : "ies"} — ` +
+        `${namedIdentities.map((p) => `'${p}'`).join(", ")} — also canonically collide with this exact key, or had their own raise folded into this union at runtime), so ${remediationTextFor([q.repoPath], ambiguousIdentities)}`;
+    })()
+    : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })} or ${JSON.stringify({ id: latchId })} ` +
+      `(the project-resolved POST /internal/merge-quarantine/clear works only if a registered project's repo resolves to this entry)`;
+  // Round 5 MAJOR (blocking) — q.reason is embedded verbatim below, and every real unconfirmed-kill raise
+  // builds it via unconfirmedKillReason(), which unconditionally names the single-identity `/clear` route.
+  // That's correct in the ORDINARY branch above (nothing ambiguous to get wrong), but wrong here: naming
+  // `/clear` right next to remediationTextFor's own single-route text reopens the exact text/action
+  // mismatch round 4 closed. Strip ONLY in the ambiguous branch — see stripUnconfirmedKillRouteClause's
+  // own doc.
+  const embeddedReason = ambiguousCount > 0 ? stripUnconfirmedKillRouteClause(q.reason) : q.reason;
   return {
     ok: false,
     reason: `canonical repo is QUARANTINED after an earlier operation's git process tree could not be confirmed dead ` +
-      `(blocking repo '${q.repoPath}', latch id '${latchId}', branch '${q.branch}'${q.opId ? `, op ${q.opId}` : ""}, entered ${new Date(q.enteredAt).toISOString()}): ${q.reason} — ` +
+      `(blocking repo '${q.repoPath}', latch id '${latchId}', branch '${q.branch}'${q.opId ? `, op ${q.opId}` : ""}, entered ${new Date(q.enteredAt).toISOString()}): ${embeddedReason} — ` +
       `refusing further canonical-repo mutations here until that kill is confirmed dead (auto-clears, same process only) ` +
-      `or ${clearGuidance} ` +
-      `(the project-resolved POST /internal/merge-quarantine/clear works only if a registered project's repo resolves to this entry).`,
+      `or ${clearGuidance}.`,
   };
 }
 
@@ -2260,6 +2469,10 @@ function reenterMergeQuarantinesAtBootImpl(
           ? parsed.orphanLatchFiles : undefined,
         resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
         placeholder: parsedIsPlaceholder ? true : undefined,
+        // @decision 82032b5c — carry a persisted `contributorRepoPaths` back in at boot, or clear-by-id's
+        // refusal for a runtime-union entry silently stops working the moment the process restarts.
+        contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
+          ? parsed.contributorRepoPaths : undefined,
       };
       const currentKey = canonicalRepoLockKey(entry.repoPath);
       // A placeholder final must NEVER count as a clean parse for PASS 1b's stale-tmp gate — see that
@@ -2458,6 +2671,9 @@ function reenterMergeQuarantinesAtBootImpl(
           ? parsed.orphanLatchFiles : undefined,
         resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
         placeholder: isPlaceholderEntryShape(parsed) ? true : undefined,
+        // @decision 82032b5c — same carry-forward as PASS 1's own parse above, for a tmp-residue recovery.
+        contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
+          ? parsed.contributorRepoPaths : undefined,
       };
       const currentKey = canonicalRepoLockKey(entry.repoPath);
       // @decision 6237bef6 — mirror PASS 1's own unresolvable/no-resolvedKey gate (card 369b97be): defer
@@ -2559,6 +2775,9 @@ function reenterMergeQuarantinesAtBootImpl(
         orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
           ? parsed.orphanLatchFiles : undefined,
         resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
+        // @decision 82032b5c — same carry-forward as PASS 1/1b's own parses, for a safety-tmp recovery.
+        contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
+          ? parsed.contributorRepoPaths : undefined,
       };
       // @decision fd189d91 — strip `f` here up front, or a plain graduation keeps a dangling reference
       // to this soon-deleted tmp forever (mirrors a6fa60e2/be79f4d5); re-added below where still needed.
