@@ -71,6 +71,11 @@ const ptyStub = {
   getPendingConfirmMs() { return null; },
   getLastMismatchNoticeSuppressed() { return null; },
   getLastPasteTripwireGiveUp() { return null; },
+  // b5e121da added this as a SEPARATE field (lastMismatchPastedContentWrapReplay) read unconditionally
+  // at both worker_list/worker_status response construction — distinct from deriveLastMismatch's own
+  // replay/fusion/unmatched signal below, and no scenario in this file exercises it, so inert null
+  // (mirrors every other getter above that this file's scenarios don't drive).
+  getLastMismatchPastedContentWrapReplay() { return null; },
   // `deriveLastMismatch` (orchestration.ts) picks whichever of replay/fusion/unmatched has the latest
   // `detectedAt` — since each test scenario below only ever seeds ONE kind per worker, routing that one
   // record through whichever getter matches its own `kind` (and returning null from the other two) is

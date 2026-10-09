@@ -13,7 +13,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // manager is still denied reads. WRITE ops (worker_stop/worker_message/worker_redirect) still enforce
 // service.ts's UNCHANGED exact-parent guard, but now self-heal a stale link IN PLACE before reaching it
 // (the fleet-lockout fix, see worker-relink-self-heal.mjs) — so a write on a lineage-owned worker now
-// SUCCEEDS (and repairs the row) instead of being permanently denied.
+// SUCCEEDS (and repairs the row) instead of being permanently denied, PROVIDED the calling manager is
+// itself the fleet's current owner. @decision 92c20eb9 (commit eabe5199, 2026-10-06) narrowed this: a
+// manager that has ITSELF been superseded by a later recycle (it has its own successor) is refused
+// outright on every mutating per-worker tool, and its reads no longer relink a worker backward onto it
+// — see step (3) below for the lineage-internal case this test now also proves.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -132,11 +136,16 @@ check("worker_status(w-other) on NEW (unrelated lineage) denied → 'not your wo
 const txOther = await call("worker_transcript", { workerSessionId: "w-other" });
 check("worker_transcript(w-other) on NEW (unrelated lineage) denied → 'not your worker'", txOther.error === "not your worker");
 
-// ============================ (3) sanity: the ORIGINAL manager can still reach its own worker too ============================
-// w-pred's parent is currently NEW (self-healed by step 1's read). Since OLD shares the SAME lineage
-// root, OLD is just as entitled to it — its own worker_status call self-heals the link right back to OLD
-// (both directions are legitimate within one lineage; only a genuinely unrelated manager is ever denied —
-// see step 2 / worker-relink-self-heal.mjs's scoping assertions for that boundary).
+// ============================ (3) OLD is ITSELF superseded by recycle (OLD -> MID) — reads stay ============
+// available but never relink backward onto a retiring caller, and writes are refused outright ===========
+// @decision 92c20eb9 (commit eabe5199, 2026-10-06, "refuse fleet writes from a manager being retired"):
+// once a manager has a successor (OLD -> MID in this lineage), it is "superseded by recycle" —
+// selfHealWorkerLink skips the relink for it (a read stays available, but never moves the worker's
+// parent back onto the retiring caller) and every mutating per-worker tool (worker_stop included)
+// refuses it outright via callerSupersededError(), naming the successor that now owns the fleet. This
+// supersedes the OLDER "both directions are legitimate within one lineage" assumption this test used to
+// encode — see manager-context-block.mjs's own "(2)" setup comment for the identical production effect
+// on a sibling test (it stopped reusing a since-recycled manager for exactly this reason).
 const routerOld = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));
 const serverOld = routerOld.buildServer("OLD", "manager");
 const [clientTOld, serverTOld] = InMemoryTransport.createLinkedPair();
@@ -144,26 +153,29 @@ await serverOld.connect(serverTOld);
 const clientOld = new Client({ name: "lineage-scope-test-old", version: "0" });
 await clientOld.connect(clientTOld);
 const stOld = JSON.parse((await clientOld.callTool({ name: "worker_status", arguments: { workerSessionId: "w-pred" } })).content[0].text);
-check("worker_status(w-pred) on its ORIGINAL manager OLD still works (self-healed back to OLD)",
-  stOld.id === "w-pred" && stOld.parentSessionId === "OLD");
+check("worker_status(w-pred) on its ORIGINAL manager OLD still reads it (not refused) but does NOT relink back — OLD is superseded by its own successor MID",
+  stOld.id === "w-pred" && stOld.parentSessionId === "NEW");
 const stopOld = JSON.parse((await clientOld.callTool({ name: "worker_stop", arguments: { workerSessionId: "w-pred" } })).content[0].text);
-check("worker_stop(w-pred) on its ORIGINAL manager OLD (exact match now) allowed", stopOld.stopped === true);
+check("worker_stop(w-pred) on its ORIGINAL manager OLD is REFUSED outright — OLD is superseded by recycle, its successor MID owns the fleet",
+  stopOld.error === "you are being retired (recycled); your successor MID owns the fleet");
 await clientOld.close();
 
-// ============================ (4) write ops self-heal a lineage-owned stale link, then succeed ============================
-// (fleet-lockout self-heal — see worker-relink-self-heal.mjs for the dedicated test) — worker_stop's own
-// guard fires FIRST here since w-pred's parent gets relinked to NEW as a side effect of selfHealWorkerLink,
-// so this also proves the relink actually PERSISTS: a plain db.getSession read below confirms it.
+// ============================ (4) a write on the CURRENT fleet owner still succeeds ============================
+// w-pred's parent was never moved off NEW by step (3) above (OLD's read didn't relink it, and OLD's
+// write was refused before ever reaching selfHealWorkerLink) — so there is no stale link left for this
+// write to heal; it proves the simpler, necessary half instead: the manager that genuinely owns the
+// fleet right now (NEW, which has no successor of its own and is therefore never superseded) can still
+// act on a lineage-owned worker. The dedicated self-heal-via-write proof lives in
+// worker-relink-self-heal.mjs.
 const stopPred = await call("worker_stop", { workerSessionId: "w-pred" });
-check("worker_stop(w-pred) on successor NEW self-heals the stale link and succeeds", stopPred.stopped === true);
-check("w-pred's parent_session_id is now NEW (relinked in place, not just tolerated)",
-  db.getSession("w-pred").parentSessionId === "NEW");
+check("worker_stop(w-pred) on the current fleet owner NEW succeeds", stopPred.stopped === true);
+check("w-pred's parent_session_id is still NEW", db.getSession("w-pred").parentSessionId === "NEW");
 
 await client.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_status/worker_transcript scope reads by recycle LINEAGE (a successor manager can see a predecessor's already-exited worker), a write op on a lineage-owned worker self-heals its stale parent link and succeeds, and a genuinely unrelated manager is still denied reads."
+  ? "\n✅ ALL PASS — worker_status/worker_transcript scope reads by recycle LINEAGE (a successor manager can see a predecessor's already-exited worker), a write op on a lineage-owned worker self-heals its stale parent link and succeeds for the fleet's CURRENT owner, a manager superseded by its own later recycle is refused outright on writes and never relinked-back-to on reads, and a genuinely unrelated manager is still denied reads."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

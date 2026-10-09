@@ -111,8 +111,11 @@ try {
 
   // ===================== (4) card f487a493 — spawnWorker against a path marked REMOVING ⇒ refused, nothing leaked =====================
   // reclaimWedgedWorktreePathForSpawn's mutual-exclusion check (round 3, a5d9c458) refuses outright when
-  // this exact path is already marked `removingWorktreePaths` — a removal is genuinely in flight against
-  // it. Proves the refusal's rejection text, AND that nothing it would have claimed is left dangling: the
+  // this exact path OVERLAPS an already-marked `removingWorktreePaths` entry (commit ce2fe5cf, 2026-10-07,
+  // widened the check from an exact-string match to `pathsOverlap` and the rejection text from "for this
+  // path" to "for an overlapping path (<removing>)" to match) — a removal is genuinely in flight against
+  // it (this scenario marks the EXACT same path, which trivially overlaps itself). Proves the refusal's
+  // rejection text, AND that nothing it would have claimed is left dangling: the
   // per-taskId/cap-slot claims spawnWorker itself takes are released via its outer `finally`, and
   // `claimedWorktreePaths` carries no leaked entry for this path afterward (the source's own ordering —
   // the `removingWorktreePaths` check runs BEFORE the `.add()` — is read off worktrees.ts/service.ts
@@ -137,7 +140,7 @@ try {
     svc.removingWorktreePaths.delete(normRemoving); // this test's own injected mark, not the daemon's — clean it up
   }
   check("(4) spawnWorker against a REMOVING-marked path REFUSED (threw) with the rejection text",
-    removingThrew !== null && /removal in progress for this path, retry shortly/.test(removingThrew.message));
+    removingThrew !== null && /removal in progress for an overlapping path \(.*\), retry shortly/.test(removingThrew.message));
   check("(4) inFlightSpawnTaskIds released the taskId (not leaked)", !svc.inFlightSpawnTaskIds.has(taskRemoving));
   check("(4) the per-manager cap slot was released (not leaked)", !svc.inFlightSpawnCountByManager.has("mgrRemoving"));
   check("(4) claimedWorktreePaths carries no leaked claim for this path after the refusal",

@@ -61,6 +61,12 @@ class PtyStub {
   spawn(opts) { this.setLive(opts.sessionId); this.setBusy(opts.sessionId); }
   stop(id) { this.setLive(id, false); }
   isAlive(id) { return this.live.has(id); }
+  // @decision 2897acc4 — recycleWorker now captures these BEFORE stop() to drive its post-stop OS-level
+  // verify. This stub tracks no real OS pid at all, so "no pid" is the contract-faithful answer — it
+  // takes recycleWorker's own "no pid -> proceed" branch (see that decision's "Do not" list, item 4)
+  // without needing a verifyRootDeadOrForceKill stub, exactly matching this test's pre-fe1cdf10 behavior.
+  getPid(_id) { return undefined; }
+  captureLiveRef(_id) { return undefined; }
 }
 
 const db = new Db();
