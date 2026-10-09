@@ -4980,6 +4980,60 @@ async function readPosixPidRecordDeduped(
   }
 }
 
+/** @decision 21f6175c — process-wide in-flight slot for the SINGLE shared `readdir("/proc")` listing —
+ *  no pid key needed (there is exactly one `/proc` directory). Same clear-on-either-settlement posture
+ *  as {@link posixInFlightPidReads}, via {@link joinSingletonPosixRead}. */
+const posixReaddirSlot: { current: Promise<string[]> | null } = { current: null };
+
+/** @decision 21f6175c — process-wide in-flight slot for the SINGLE shared `/proc/uptime` read. */
+const posixUptimeSlot: { current: Promise<number | null> | null } = { current: null };
+
+/** @decision 21f6175c — round 2: a symbol marker (never enumerable via `for...in`/`JSON`/iteration) set
+ *  on a joined-but-possibly-stale listing; `checkRootSurvival` alone reads it. Exported so a test can
+ *  set it on an injected `enumerate`'s own array. */
+export const POSIX_LISTING_JOINED_STALE = Symbol("posixListingJoinedStale");
+
+/** @decision 21f6175c — the non-per-pid counterpart to {@link readPosixPidRecordDeduped}: a single
+ *  shared resource (no pid key), joined by every caller, with a three-way outcome plus whether THIS
+ *  caller joined an already-in-flight read (round 2 — see {@link POSIX_LISTING_JOINED_STALE}). */
+async function joinSingletonPosixRead<T>(
+  slot: { current: Promise<T> | null }, startRead: () => Promise<T>, deadline: number,
+): Promise<
+  | { outcome: "resolved"; value: T; joined: boolean }
+  | { outcome: "rejected"; joined: boolean }
+  | { outcome: "timeout"; joined: boolean }
+> {
+  const joined = slot.current != null;
+  let inFlight = slot.current;
+  if (!inFlight) {
+    try {
+      inFlight = startRead();
+    } catch {
+      // @decision 21f6175c round 2 (nitpick, CR 483b6e0f) — a SYNCHRONOUS throw from `startRead()` must
+      // map to the SAME `{outcome:"rejected"}` shape as a rejected promise, never escape this function's
+      // own async body as an unhandled rejection of a promise nobody awaits until much later (the uptime
+      // read is kicked off but not awaited until after the per-pid loop — see `enumerateProcessesPosix`).
+      return { outcome: "rejected", joined: false };
+    }
+    slot.current = inFlight;
+    const clear = (): void => { if (slot.current === inFlight) slot.current = null; };
+    inFlight.then(clear, clear);
+  }
+  const settled = inFlight.then(
+    (value) => ({ outcome: "resolved" as const, value }),
+    () => ({ outcome: "rejected" as const }),
+  );
+  const remainingMs = Math.max(1, deadline - Date.now());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timedOut = new Promise<{ outcome: "timeout" }>((resolve) => { timer = setTimeout(() => resolve({ outcome: "timeout" }), remainingMs); });
+    const result = await Promise.race([settled, timedOut]);
+    return { ...result, joined };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** @decision 2b7df434 — injectable per-step seam for {@link enumerateProcessesPosix}, so a test can
  *  simulate one pid's read hanging forever (and others resolving normally) without touching a real
  *  filesystem — defaults to the real `fs.promises` calls, byte-identical to the pre-existing behavior. */
@@ -4987,6 +5041,10 @@ export interface PosixEnumerationDeps {
   listProcPids?: () => Promise<string[]>;
   readBootTimeMs?: () => Promise<number | null>;
   readPidRecord?: (pidStr: string) => Promise<PosixPidRecord>;
+  /** @decision 21f6175c — round 2: the ps-based fallback a CONFIRMED readdir rejection takes; defaults
+   *  to the real {@link enumerateProcessesPosixViaPs} (which spawns a real `ps`). Injectable so a test
+   *  can exercise the rejected branch deterministically on every platform without spawning anything. */
+  psFallback?: (timeoutMs: number) => Promise<WorktreeProcess[]>;
 }
 
 /** The real per-pid `/proc` attribute read, unchanged from before this card: four independently
@@ -5027,11 +5085,13 @@ async function readPosixPidRecordReal(pidStr: string): Promise<PosixPidRecord> {
  * `creationTime` to `null` (guard 2 stays a no-op for it, exactly as before this round) rather than
  * failing the whole enumeration.
  *
- * @decision 2b7df434 — a pid whose read is joined-but-unresolved past this call's own bound
- * ({@link readPosixPidRecordDeduped}) gets a synthetic `readUnverified:true` row instead of a second
- * read — pushed unconditionally (bypassing the "only push if some field resolved" rule below), so the pid
- * is never silently absent, which would read as "gone" to a caller like `checkRootSurvival`. Exported
- * (and `deps`-injectable) for a hermetic unit test — see `PosixEnumerationDeps`'s own doc.
+ * @decision 2b7df434 — a pid whose read is joined-but-unresolved past this call's own bound gets a
+ * synthetic `readUnverified:true` row instead of a second read, pushed unconditionally — never silently
+ * absent, which would read as "gone" to a caller like `checkRootSurvival`.
+ *
+ * @decision 21f6175c — the `/proc/uptime` read runs CONCURRENTLY with the per-pid loop, never awaited
+ * sequentially before it — awaiting it first would let a hung read burn the whole deadline before any
+ * per-pid race even starts. `readdir` IS awaited first — it's a genuine prerequisite for that loop.
  */
 export async function enumerateProcessesPosix(timeoutMs: number, deps: PosixEnumerationDeps = {}): Promise<WorktreeProcess[]> {
   // @decision 2b7df434 — captured FIRST, before any await, so every pid below shares this ONE deadline
@@ -5047,26 +5107,57 @@ export async function enumerateProcessesPosix(timeoutMs: number, deps: PosixEnum
     }
   });
   const readPidRecord = deps.readPidRecord ?? readPosixPidRecordReal;
-  let entries: string[];
-  try {
-    entries = await listProcPids();
-  } catch {
-    return enumerateProcessesPosixViaPs(timeoutMs);
+
+  // @decision 21f6175c — started now, joined later (NOT awaited here) — see this function's own doc
+  // comment above for why sequencing matters.
+  const uptimeOutcomePromise = joinSingletonPosixRead(posixUptimeSlot, readBootTimeMs, deadline);
+
+  const readdirOutcome = await joinSingletonPosixRead(posixReaddirSlot, listProcPids, deadline);
+  if (readdirOutcome.outcome === "rejected") {
+    // Unchanged pre-existing behavior: a CONFIRMED readdir failure falls back to the ps-based enumerator
+    // — a BRAND NEW enumeration for this call, never stale, so no POSIX_LISTING_JOINED_STALE marking.
+    return (deps.psFallback ?? enumerateProcessesPosixViaPs)(timeoutMs);
   }
-  const bootTimeMs = await readBootTimeMs();
+  if (readdirOutcome.outcome === "timeout") {
+    // @decision 21f6175c — STILL outstanding past this call's own deadline (possibly hung elsewhere) —
+    // never guess by falling back to ps here (that real read might itself resolve fine a moment later
+    // for another caller); fail THIS call closed instead, tagged exactly like any other timeout-class
+    // enumeration failure so `enumerateWithRetry` (pty/host.ts, the `timedOut` check) and each
+    // consumer's existing `enumerationFailed` catch handle it with zero new code of their own.
+    const err: Error & { timedOut?: boolean } = new Error(
+      `enumerateProcessesPosix: readdir("/proc") did not settle within this call's own deadline (possibly hung) — enumeration incomplete`,
+    );
+    err.timedOut = true;
+    throw err;
+  }
+  const entries = readdirOutcome.value;
+  const listingJoinedStale = readdirOutcome.joined;
+
   const procs: WorktreeProcess[] = [];
-  await Promise.all(entries.filter((e) => /^\d+$/.test(e)).map(async (pidStr) => {
+  const perPidWork = Promise.all(entries.filter((e) => /^\d+$/.test(e)).map(async (pidStr) => {
     const outcome = await readPosixPidRecordDeduped(pidStr, readPidRecord, deadline);
     if (outcome.unverified) {
       procs.push({ pid: Number(pidStr), exePath: null, cwd: null, commandLine: null, creationTime: null, creationTicks: null, ppid: null, readUnverified: true });
       return;
     }
     const { record } = outcome;
-    const creationTime = record.creationTicks != null && bootTimeMs != null ? bootTimeMs + (record.creationTicks / LINUX_CLK_TCK) * 1000 : null;
     if (record.exePath || record.cwd || record.commandLine) {
-      procs.push({ pid: Number(pidStr), exePath: record.exePath, cwd: record.cwd, commandLine: record.commandLine, creationTime, creationTicks: record.creationTicks, ppid: null });
+      // `creationTime` is filled in AFTER both this loop and the uptime read settle (below) — never
+      // computed here, which is exactly what keeps this loop independent of the uptime read's own pace.
+      procs.push({ pid: Number(pidStr), exePath: record.exePath, cwd: record.cwd, commandLine: record.commandLine, creationTime: null, creationTicks: record.creationTicks, ppid: null });
     }
   }));
+
+  const [uptimeOutcome] = await Promise.all([uptimeOutcomePromise, perPidWork]);
+  const bootTimeMs = uptimeOutcome.outcome === "resolved" ? uptimeOutcome.value : null; // rejected/timeout both degrade to null, matching the pre-existing internal-catch behavior
+  if (bootTimeMs != null) {
+    for (const p of procs) {
+      if (p.creationTicks != null) p.creationTime = bootTimeMs + (p.creationTicks / LINUX_CLK_TCK) * 1000;
+    }
+  }
+  // @decision 21f6175c round 2 — this listing may predate this call's own entry; see
+  // POSIX_LISTING_JOINED_STALE's own doc for who reads this and why.
+  if (listingJoinedStale) (procs as WorktreeProcess[] & { [POSIX_LISTING_JOINED_STALE]?: true })[POSIX_LISTING_JOINED_STALE] = true;
   return procs;
 }
 
@@ -5346,7 +5437,16 @@ export async function checkRootSurvival(
       release();
     }
     const row = procs.find((p) => p.pid === rootPid);
-    if (!row) return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null, creationTicks: null, ppid: null };
+    if (!row) {
+      // @decision 21f6175c round 2 — a listing that JOINED an already-in-flight readdir may predate
+      // THIS call's own entry; an absent root under that flag is never a confident "gone" (the fail-
+      // open direction a recycle/kill decision must avoid) — report it like an enumeration failure.
+      if ((procs as WorktreeProcess[] & { [POSIX_LISTING_JOINED_STALE]?: true })[POSIX_LISTING_JOINED_STALE]) {
+        console.error(`[pty-reap] root=${rootPid} sessionId=${sessionId}: absent from a listing that joined an already-in-flight read (may predate this call) — treating as an enumeration failure, never confirmed gone`);
+        return { foundAlive: false, identityConfirmed: false, enumerationFailed: true, creationTime: null, creationTicks: null, ppid: null };
+      }
+      return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null, creationTicks: null, ppid: null };
+    }
     // @decision 2b7df434 — `readUnverified` must report exactly like the catch below (never "gone",
     // never a confirmed match), or recycleWorker's identity==="unreadable" refusal silently stops firing.
     if (row.readUnverified) {
