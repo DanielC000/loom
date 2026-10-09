@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn as spawnProcess } from "node:child_process";
-import { requireHermeticEnv } from "./_guard.mjs";
+import { requireHermeticEnv, enableRootCreationCapture, awaitRootCreationCapture } from "./_guard.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
@@ -62,6 +62,11 @@ const tmpHome = path.join(os.tmpdir(), `loom-devserver-teardown-${Date.now()}-${
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 requireHermeticEnv();
+// @decision 85ae7768 — this file hands REGISTERED roots directly to the real reapOrphanedDescendants
+// sweep (not just a fabricated-data wiring check), so it's exactly the shape the card's filter protects:
+// arm the real capture so a genuine stale-ppid stranger in this run's own OS process table would be
+// filtered, not swept, during these real sweeps.
+enableRootCreationCapture();
 
 const { PtyHost, reapOrphanedDescendants } = await import("../dist/pty/host.js");
 
@@ -138,6 +143,14 @@ try {
   // reapOrphanedDescendants and confirm it (and only it) gets cleaned up via the WMI/CIM (or ps) tree walk.
   {
     const root = spawnRealRoot();
+    // @decision 85ae7768 (CR 85360986, MAJOR) — the capture is async (~560-630ms measured) while
+    // reapOrphanedDescendants reads the registry synchronously; kill/reap the root before this settles
+    // and the filter is silently never armed. Await + assert BEFORE anything else happens to the root.
+    const capturedCreationTime = await awaitRootCreationCapture(root.pid);
+    if (process.platform === "win32") {
+      check("unit: root's creationTime is armed before reap (the filter this card protects)",
+        typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+    }
     grandchildPid = await readGrandchildPid(root);
     grandchildPids.push(grandchildPid);
     check("unit: grandchild is alive right after spawn", isAlive(grandchildPid));
@@ -170,6 +183,14 @@ try {
     // one-shot event, so wiring it after an await risks missing it if the root already exited in the gap.
     // wrapRealRootAsPty only needs `root`, not the grandchild pid, so hoisting costs nothing.
     nextFakePty = wrapRealRootAsPty(root);
+    // @decision 85ae7768 (CR 85360986, MAJOR) — same reasoning as scenario 1: await + assert BEFORE
+    // anything else happens to the root, since host.stop() below kills it well inside the capture's
+    // own ~560-630ms real latency.
+    const capturedCreationTime = await awaitRootCreationCapture(root.pid);
+    if (process.platform === "win32") {
+      check("session: root's creationTime is armed before stop/reap (the filter this card protects)",
+        typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+    }
     grandchildPid = await readGrandchildPid(root);
     grandchildPids.push(grandchildPid);
     host.spawn({ sessionId: SID, cwd: tmpHome, permission: PERM, geometry: GEO, sessionEnv: {} });

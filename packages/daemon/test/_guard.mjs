@@ -48,6 +48,139 @@ import { cleanupPathSync } from "./_tmp-fixture.mjs";
 const LOOM_TEST_SPAWNED_PIDS = new Set();
 globalThis.__LOOM_TEST_SPAWNED_PIDS__ = LOOM_TEST_SPAWNED_PIDS;
 
+// @decision 85ae7768 — companion registry: pid -> the VERIFIED OS creation time captured at registration,
+// via the SAME resolveVerifiedRootCreationTime predicate 87691385 built (never a new, unreviewed check).
+// Closes the "dead registered root" residual (card dbbb52db's own gen-408 triage note, out of scope for
+// 87691385 itself): a test-registered root swept via reapOrphanedDescendants's branch-b path used to
+// always carry rootCreationTime=null, so a stale-ppid child left by an earlier owner of that pid number
+// went unfiltered. See docs/decisions/85ae7768-win32-root-creation-leaf-module.md for why this imports
+// ONLY the side-effect-free `pty/win32-root-creation.js` leaf, never the full `pty/host.js`.
+const LOOM_TEST_SPAWNED_PID_CREATION_TIMES = new Map();
+globalThis.__LOOM_TEST_SPAWNED_PID_CREATION_TIMES__ = LOOM_TEST_SPAWNED_PID_CREATION_TIMES;
+
+// Test-visible counters for the re-entrancy-guard's own regression test (card 85ae7768) — never read by
+// production or by assertReapTargetIsOwnLiveDescendantUnderTest; purely diagnostic/assertable state.
+const CAPTURE_STATS = { started: 0, skippedReentrant: 0, failed: 0 };
+globalThis.__LOOM_TEST_CAPTURE_STATS__ = CAPTURE_STATS;
+
+// @decision 85ae7768 (CR 85360986/165cf2fa) — OFF BY DEFAULT. `node:child_process`'s own `spawn` is also
+// the primitive simple-git (and most test helpers) spawn real `git`/helper processes through — narrowing
+// the capture to ONE spawn kind (see wrapSpawnLikeForTestRegistry's own doc) does NOT bound its cost on
+// its own, since EVERY win32 test that spawns ANYTHING via cp.spawn would otherwise pay the real capture
+// LATENCY (~560-630ms measured on this host — NOT a per-spawn CIM-query estimate; see the record). THE
+// RULE for which tests call `enableRootCreationCapture()` is NOT "does this test's own assertion read a
+// captured creationTime" — it is: opt in any test that hands a REGISTERED root to the real reaper (no
+// injected `deps.enumerate`), since that's exactly the shape the card's filter protects, regardless of
+// what the test happens to check afterward. See docs/decisions/85ae7768-win32-root-creation-leaf-module.md
+// for the full rule, the measured cost on both sides, and why an earlier draft of this comment got it
+// backwards (opted the actual reaper-root files OUT on the wrong reasoning).
+let rootCreationCaptureEnabled = false;
+export function enableRootCreationCapture() { rootCreationCaptureEnabled = true; }
+
+// Lazy + cached: only the FIRST win32 capture pays the dynamic-import cost; every later one reuses the
+// same resolved module. Dynamic, not a static top-level import, so a test file that never spawns
+// anything (the overwhelming majority of this suite) never forces `dist/pty/win32-root-creation.js` to
+// exist — only a test that actually spawns on win32 does.
+let win32RootCreationLeafPromise = null;
+function loadWin32RootCreationLeaf() {
+  if (!win32RootCreationLeafPromise) {
+    win32RootCreationLeafPromise = import("../dist/pty/win32-root-creation.js");
+  }
+  return win32RootCreationLeafPromise;
+}
+
+// @decision 85ae7768 — re-entrancy depth, bracketed SYNCHRONOUSLY around the real
+// `enumerateWin32SweepRowForPid(pid)` call (its own powershell.exe helper spawn happens inside that
+// call's Promise constructor, which the language spec runs synchronously) — never around the whole async
+// settle. Without this, capturing for a real root recurses into capturing for its OWN diagnostic helper's
+// pid, unboundedly: the helper is spawned via this SAME wrapped cp.spawn. A depth guard bracketing only
+// the synchronous window never suppresses a genuinely concurrent, unrelated capture for a different root
+// (JS's single-threaded event loop never interleaves two synchronous windows).
+let captureReentrancyDepth = 0;
+
+// @decision 85ae7768 (CR 85360986, MAJOR) — pid -> the capture's own settlement promise. The capture is
+// genuinely async (measured ~560-630ms on this host, win32 CIM query + helper spawn) while
+// `reapOrphanedDescendants` reads the companion registry SYNCHRONOUSLY — a real-sweep test that kills its
+// root immediately after spawning it races that window and loses almost every time, leaving the filter
+// silently un-armed (the capture settles to null well after the sweep has already run, with no error).
+// `awaitRootCreationCapture` (below) is how a caller actually WAITS for that settlement before
+// proceeding to kill/reap, rather than just hoping the window happened to close in time.
+const PENDING_CAPTURES = new Map();
+
+/**
+ * Fire-and-forget: captures pid's verified OS creation time, win32-only. `registeredAt` must be stamped
+ * AFTER the real spawn call returns (mirrors production's real spawn-then-stamp ordering, 87691385) —
+ * the genuine root's own OS creation time is always `<= registeredAt`, which is what lets
+ * `resolveVerifiedRootCreationTime` trust it.
+ */
+function captureTestRegistryCreationTime(pid, registeredAt) {
+  if (!rootCreationCaptureEnabled) return; // opt-in, card 85ae7768 — see its own doc above.
+  if (process.platform !== "win32") return; // POSIX never carries a creation-time column; stays unpopulated.
+  if (captureReentrancyDepth > 0) { CAPTURE_STATS.skippedReentrant++; return; }
+  CAPTURE_STATS.started++;
+  const capturePromise = loadWin32RootCreationLeaf()
+    .then(({ enumerateWin32SweepRowForPid, resolveVerifiedRootCreationTime }) => {
+      captureReentrancyDepth++;
+      let rowPromise;
+      try {
+        rowPromise = enumerateWin32SweepRowForPid(pid);
+      } finally {
+        captureReentrancyDepth--;
+      }
+      return rowPromise.then((row) => resolveVerifiedRootCreationTime(row, process.pid, registeredAt));
+    })
+    .then((verified) => {
+      // @decision 85ae7768 (CR 165cf2fa) — only the LATEST capture for THIS pid may write. A pid can be
+      // reused within this test process's own lifetime (an old child dies, the OS hands its number to a
+      // brand-new one) and promises don't settle in start order — without this check, a slower OLDER
+      // capture settling after a faster NEWER one could clobber the newer, correct value. `PENDING_
+      // CAPTURES.get(pid)` always holds whichever capture started MOST RECENTLY for this pid (each new
+      // one overwrites the map entry synchronously, at the bottom of this function); comparing it against
+      // `capturePromise` (this very call's own promise, captured by closure) is how this call tells
+      // whether it's still that latest one by the time it finally settles.
+      if (PENDING_CAPTURES.get(pid) === capturePromise) {
+        if (verified != null) LOOM_TEST_SPAWNED_PID_CREATION_TIMES.set(pid, verified);
+        // A NEWER capture settling null means the most recent truth about this pid is "unverified" — an
+        // older capture's stale value (possibly for a since-reused pid) must not keep squatting there.
+        else LOOM_TEST_SPAWNED_PID_CREATION_TIMES.delete(pid);
+      }
+      return verified;
+    })
+    .catch((err) => {
+      CAPTURE_STATS.failed++;
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap-test-guard-capture] REFUSED pid=${pid}: ${err?.message ?? err}`);
+      return null;
+    });
+  PENDING_CAPTURES.set(pid, capturePromise);
+}
+
+// Generous relative to the ~560-630ms measured real latency (CR 85360986) — this bounds a genuinely
+// wedged capture (e.g. a hung powershell.exe), it is not tuned to the common-case timing.
+const AWAIT_ROOT_CREATION_CAPTURE_TIMEOUT_MS = 10_000;
+
+/**
+ * Waits for pid's own capture (if one was ever started) to settle, so a caller can arm-then-assert
+ * BEFORE killing/reaping the pid, instead of racing the capture's real latency blind. Resolves to the
+ * SAME value `LOOM_TEST_SPAWNED_PID_CREATION_TIMES` ends up holding for `pid` (a number, or `null` if the
+ * capture legitimately found nothing to trust) — `null` immediately, no wait at all, when no capture was
+ * ever started for `pid` (capture disabled, POSIX, or never registered). REJECTS — never resolves `null`
+ * — on a real timeout, so a wedged capture is an observable failure, never silently indistinguishable
+ * from a legitimate null result.
+ */
+export function awaitRootCreationCapture(pid, timeoutMs = AWAIT_ROOT_CREATION_CAPTURE_TIMEOUT_MS) {
+  const pending = PENDING_CAPTURES.get(pid);
+  if (!pending) return Promise.resolve(null);
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`awaitRootCreationCapture: pid=${pid} capture did not settle within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Wraps `moduleExports[name]` to record its result's own `.pid` into {@link LOOM_TEST_SPAWNED_PIDS},
  * preserving `this`/argument/return passthrough exactly. `exec`/`execFile` carry `util.promisify.custom`
@@ -56,15 +189,31 @@ globalThis.__LOOM_TEST_SPAWNED_PIDS__ = LOOM_TEST_SPAWNED_PIDS;
  * every test/production caller in the whole suite (this wrapper sits under EVERY test file). Copies
  * every own key (string AND symbol) from the original onto the wrapper, individually try/caught so a
  * non-configurable property (if any) is skipped rather than throwing and breaking the patch itself.
+ *
+ * `captureCreationTime` (card 85ae7768, default false) additionally ROUTES the spawned pid through
+ * {@link captureTestRegistryCreationTime} — ONLY passed `true` for `node:child_process`'s own `spawn`,
+ * the ONE spawn kind this suite ever hands DIRECTLY to `reapOrphanedDescendants`/`sweepOrphanedDescendants`
+ * as a registered root (traced: never `fork`/`exec`/`execFile`, and never node-pty's own spawn — a
+ * node-pty-spawned root already gets its own production-side capture via
+ * `armWin32RootCreationTime`/`live.creationTime`, 87691385). This alone is NOT what keeps the cost off
+ * every other `cp.spawn` caller, though — `simple-git` and most test helpers spawn real processes via this
+ * SAME primitive, so `captureTestRegistryCreationTime`'s own `rootCreationCaptureEnabled` opt-in gate
+ * (see its own doc above) is what actually makes this free by default; the kind-narrowing here only
+ * matters once a test has opted in, to avoid ALSO recursing through `fork`/`exec`/`execFile`/node-pty for
+ * no reason.
  */
-function wrapSpawnLikeForTestRegistry(moduleExports, name) {
+function wrapSpawnLikeForTestRegistry(moduleExports, name, captureCreationTime = false) {
   const original = moduleExports[name];
   const patched = function patchedForTestSpawnRegistry(...args) {
     const result = original.apply(this, args);
+    const registeredAt = Date.now(); // AFTER the real spawn call returns — mirrors production's ordering.
     // Best-effort bookkeeping ONLY — a registry failure (should never happen for a Set.add(number))
     // must never prevent the REAL result from reaching the real caller.
     try {
-      if (result && typeof result.pid === "number") LOOM_TEST_SPAWNED_PIDS.add(result.pid);
+      if (result && typeof result.pid === "number") {
+        LOOM_TEST_SPAWNED_PIDS.add(result.pid);
+        if (captureCreationTime) captureTestRegistryCreationTime(result.pid, registeredAt);
+      }
     } catch { /* best-effort */ }
     return result;
   };
@@ -81,7 +230,8 @@ function wrapSpawnLikeForTestRegistry(moduleExports, name) {
 {
   const requireHere = createRequire(import.meta.url);
   const cp = requireHere("node:child_process");
-  for (const name of ["spawn", "fork", "exec", "execFile"]) wrapSpawnLikeForTestRegistry(cp, name);
+  wrapSpawnLikeForTestRegistry(cp, "spawn", /* captureCreationTime */ true);
+  for (const name of ["fork", "exec", "execFile"]) wrapSpawnLikeForTestRegistry(cp, name);
   // Re-syncs every BUILTIN module's named ESM exports to the CJS exports object's CURRENT property
   // values (Node's own documented mechanism, builtins only) — without this, a module that did
   // `import { spawn } from "node:child_process"` would still hold the ORIGINAL, unpatched binding.

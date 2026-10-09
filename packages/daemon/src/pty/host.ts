@@ -10,6 +10,16 @@ import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, Capabi
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
+import {
+  type OrphanSweepRow, parseWin32SweepTicks, parseOrphanSweepLine, WIN32_SWEEP_PS_COMMAND,
+  isHelperPidCollision, enumerateWin32SweepRows, enumerateWin32SweepRowForPid,
+  ROOT_CREATION_CAPTURE_SLACK_MS, resolveVerifiedRootCreationTime,
+} from "./win32-root-creation.js";
+export {
+  type OrphanSweepRow, parseWin32SweepTicks, parseOrphanSweepLine, WIN32_SWEEP_PS_COMMAND,
+  isHelperPidCollision, enumerateWin32SweepRows, enumerateWin32SweepRowForPid,
+  ROOT_CREATION_CAPTURE_SLACK_MS, resolveVerifiedRootCreationTime,
+} from "./win32-root-creation.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, unlinkSessionSettings, mcpTokenRidesEnv, withSettingsDirDenyForSpawn, toCliPermissionMode, sessionSettingsPath, type CliPermissionMode } from "./claude-settings.js";
@@ -1535,11 +1545,6 @@ export const CREATION_TIME_SLACK_MS = Number(process.env.LOOM_ROOT_REAP_CREATION
  * 1ms (a false mismatch there makes `recycleWorker` PROCEED beside a live predecessor); never widen either.
  */
 export const ROOT_CREATION_MATCH_TOLERANCE_MS = Number(process.env.LOOM_ROOT_CREATION_MATCH_TOLERANCE_MS) || 1;
-
-/** @decision 87691385 (CR f89d9552 round 3) — `CreateProcess` returns before `startedAt` is ever stamped,
- *  so the true root's own creation time is ALWAYS `<= startedAt`; this covers rounding only (~2ms), never
- *  a real margin — round 2's 50ms default was itself too wide. */
-export const ROOT_CREATION_CAPTURE_SLACK_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_SLACK_MS) || 2;
 
 /**
  * @decision 2897acc4 — bound `verifyRootDeadOrForceKill`'s win32 guard-2 branch waits for an in-flight
@@ -4311,11 +4316,6 @@ export function detectDefaultShell(): string {
   return process.env.SHELL || "/bin/bash";
 }
 
-/** @decision 2897acc4 — one row from {@link reapOrphanedDescendants}'s own lightweight enumeration: the
- *  parent chain plus (win32 only — POSIX always `null`) this row's OS-reported creation time, epoch-ms.
- *  `creationTime: null` means unavailable, never "created at epoch 0". */
-export interface OrphanSweepRow { pid: number; ppid: number; creationTime: number | null; }
-
 /** @decision 2897acc4 — a stale parent-pid link (the OS reused a dead process's pid before Windows
  *  updated the child's own reported parent) must never be walked or killed: drop any child whose own
  *  creation time predates `rootCreationTime`, when both are known; keep today's unconditional walk otherwise.
@@ -4359,125 +4359,6 @@ export function computeOrphanSweepPlan(
     }
   }
   return { toKill, skippedStale, abortedRootPidLive: false };
-}
-
-/** @decision 2897acc4 — converts the win32 sweep's raw .NET `DateTime.Ticks` integer (culture-invariant,
- *  never a locale-dependent date STRING) to epoch-ms; the sentinel `"0"` (an unreadable `CreationDate`)
- *  maps to `null`, never a bogus epoch-0 (1970) creation time. Exported for a hermetic unit test. */
-export function parseWin32SweepTicks(raw: string): number | null {
-  const ticks = Number(raw);
-  if (!Number.isFinite(ticks) || ticks <= 0) return null;
-  const DOTNET_UNIX_EPOCH_TICKS = 621355968000000000; // new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).Ticks
-  const TICKS_PER_MS = 10_000;
-  return Math.round((ticks - DOTNET_UNIX_EPOCH_TICKS) / TICKS_PER_MS);
-}
-
-/** @decision 2897acc4 — parses ONE line of {@link reapOrphanedDescendants}'s own lightweight enumeration
- *  output (`pid,ppid` or win32's `pid,ppid,ticks`); `null` for a non-matching line (never thrown — the
- *  caller filters). Exported for a hermetic unit test. */
-export function parseOrphanSweepLine(line: string): OrphanSweepRow | null {
-  const m = line.trim().match(/^(\d+)[,\s]+(\d+)(?:[,\s]+(-?\d+))?$/);
-  if (!m) return null;
-  return { pid: Number(m[1]), ppid: Number(m[2]), creationTime: m[3] !== undefined ? parseWin32SweepTicks(m[3]) : null };
-}
-
-/** @decision 2897acc4 (round 6, item 1) — must be `.ToUniversalTime().Ticks`, never bare `.Ticks` (a
- *  LOCAL-kind value {@link parseWin32SweepTicks} below wrongly treats as UTC). Shared by both the full
- *  sweep query and {@link win32SweepFilteredCommand}'s single-pid one — one source, never hand-copied. */
-const WIN32_SWEEP_FOREACH_BODY =
-  "$t = 0; if ($_.CreationDate) { $t = $_.CreationDate.ToUniversalTime().Ticks }; \"$($_.ProcessId),$($_.ParentProcessId),$t\"";
-const WIN32_SWEEP_PS_COMMAND = `Get-CimInstance Win32_Process | ForEach-Object { ${WIN32_SWEEP_FOREACH_BODY} }`;
-
-/** @decision 87691385 (CR 376c51de, item 3) — a FILTERED single-pid CIM query, never a full-table scan,
- *  for the at-spawn root-creation-time capture: shrinks both the per-spawn cost and the capture window. */
-function win32SweepFilteredCommand(pid: number): string {
-  return `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | ForEach-Object { ${WIN32_SWEEP_FOREACH_BODY} }`;
-}
-
-/** @decision 2897acc4 (round 6, item 1) — read-only, kills nothing: lets a real-spawn test cross-check this
- *  enumeration's reported creationTime against `checkRootSurvival`'s independent one for the same real pid. */
-export function enumerateWin32SweepRows(timeoutMs = 10_000): Promise<OrphanSweepRow[]> {
-  return new Promise((resolve, reject) => {
-    const cmd = spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { stdio: ["ignore", "pipe", "ignore"] });
-    let out = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { cmd.kill(); } catch { /* best-effort */ }
-      reject(new Error(`enumerateWin32SweepRows: powershell.exe timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    cmd.stdout?.on("data", (d) => { out += d; });
-    cmd.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(err);
-    });
-    cmd.on("close", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null));
-    });
-  });
-}
-
-/** @decision 87691385 (CR f89d9552 round 3, MINOR 3a) — true when our OWN diagnostic helper (spawned to
- *  answer "is `queriedPid` still alive") was itself assigned `queriedPid` — the freed pid's most reachable
- *  reuse shape. Pure; exported for a hermetic unit test (a real collision can't be forced deterministically). */
-export function isHelperPidCollision(helperPid: number, queriedPid: number): boolean {
-  return helperPid === queriedPid;
-}
-
-/** @decision 87691385 (CR 376c51de, item 3) — single-pid filtered counterpart to
- *  {@link enumerateWin32SweepRows}, for the at-spawn capture seam. `null` on any failure/timeout/no-row —
- *  never thrown; the caller (`armWin32RootCreationTime`) already treats a rejection as "unknown". */
-export function enumerateWin32SweepRowForPid(pid: number, timeoutMs = 10_000): Promise<OrphanSweepRow | null> {
-  return new Promise((resolve, reject) => {
-    const cmd = spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", win32SweepFilteredCommand(pid)], { stdio: ["ignore", "pipe", "ignore"] });
-    // @decision 87691385 (round 3, MINOR 3a) — the OS freed `pid` and could hand it straight to THIS
-    // helper; if so, the CIM query would only ever find itself, never the real target — bail immediately.
-    if (cmd.pid != null && isHelperPidCollision(cmd.pid, pid)) {
-      try { cmd.kill(); } catch { /* best-effort */ }
-      resolve(null);
-      return;
-    }
-    let out = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { cmd.kill(); } catch { /* best-effort */ }
-      reject(new Error(`enumerateWin32SweepRowForPid: powershell.exe timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    cmd.stdout?.on("data", (d) => { out += d; });
-    cmd.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(err);
-    });
-    cmd.on("close", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const rows = out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null);
-      resolve(rows.find((r) => r.pid === pid) ?? null);
-    });
-  });
-}
-
-/** @decision 87691385 — positive-identity check before a captured row is trusted as the root's own
- *  creation time: requires BOTH `row.ppid === expectedPpid` AND `row.creationTime` no later than
- *  `startedAt + slackMs`. Pure; `null` on any failed check — never partial trust. */
-export function resolveVerifiedRootCreationTime(
-  row: OrphanSweepRow | null, expectedPpid: number, startedAt: number, slackMs = ROOT_CREATION_CAPTURE_SLACK_MS,
-): number | null {
-  if (!row || row.creationTime == null) return null;
-  if (row.ppid !== expectedPpid) return null;
-  if (row.creationTime > startedAt + slackMs) return null;
-  return row.creationTime;
 }
 
 /** @decision 8c8ee0ee — pure pid→ppid ancestry walk; fails closed on an unknown/self-referential pid or
@@ -4547,6 +4428,14 @@ function hasTestSpawnRegistry(): boolean {
   return (globalThis as { __LOOM_TEST_SPAWNED_PIDS__?: Set<number> }).__LOOM_TEST_SPAWNED_PIDS__ instanceof Set;
 }
 
+/** @decision 85ae7768 (CR 85360986, MINOR 2) — registered-pid counterpart to
+ *  {@link wasSpawnedByThisTestProcess}. Narrows the stale-child filter; may turn a LIVE-root abort into a
+ *  walk ONLY for a pid+creationTime-PROVEN own root — never for an unproven or mismatched one. */
+function creationTimeFromTestSpawnRegistry(pid: number): number | null {
+  const registry = (globalThis as { __LOOM_TEST_SPAWNED_PID_CREATION_TIMES__?: Map<number, number> }).__LOOM_TEST_SPAWNED_PID_CREATION_TIMES__;
+  return registry?.get(pid) ?? null;
+}
+
 /** @decision dbbb52db — logs unconditionally; THROWS only when `hasRegistry`, else refuses silently
  * (returns false — caller MUST check it) so a registry-less LOOM_TEST process can never crash here. */
 function refuseReapTarget(label: string, pid: number, reason: string, hasRegistry: boolean): boolean {
@@ -4595,17 +4484,25 @@ function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string
  *
  * @decision 87691385 — `rootCreationTime` (optional) feeds {@link computeOrphanSweepPlan}'s stale-pid
  * guard AND its live-root abort; the onExit sweep now threads it too (win32 only, `null` elsewhere), per
- * the record. POSIX's own filter/abort both stay a permanent no-op there (no OS creation-time data). */
-export function reapOrphanedDescendants(rootPid: number, rootCreationTime: number | null = null): void {
+ * the record. POSIX's own filter/abort both stay a permanent no-op there (no OS creation-time data).
+ *
+ * @decision 85ae7768 — when the caller leaves `rootCreationTime` null, fall back to the test-registry's
+ * own captured value (null in production); `deps` is a TEST-ONLY injectable seam (never passed in
+ * production) — `deps.enumerate` replaces the real OS enumeration, `deps.kill` replaces the real kill. */
+export function reapOrphanedDescendants(
+  rootPid: number, rootCreationTime: number | null = null,
+  deps: { enumerate?: () => Promise<OrphanSweepRow[]>; kill?: (pid: number, signal: string) => void } = {},
+): void {
   if (!assertReapTargetIsOwnLiveDescendantUnderTest(rootPid, "reapOrphanedDescendants")) return;
   if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
     // eslint-disable-next-line no-console
     console.log(`[pty-reap] root=${rootPid}: skipped (not a reapable root pid)`);
     return;
   }
-  const sweep = (out: string): void => {
-    const rows = out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null);
-    const { toKill, skippedStale, abortedRootPidLive } = computeOrphanSweepPlan(rows, rootPid, rootCreationTime);
+  const effectiveRootCreationTime = rootCreationTime ?? creationTimeFromTestSpawnRegistry(rootPid);
+  const killFn = deps.kill ?? ((pid: number, signal: string) => { process.kill(pid, signal); });
+  const sweep = (rows: OrphanSweepRow[]): void => {
+    const { toKill, skippedStale, abortedRootPidLive } = computeOrphanSweepPlan(rows, rootPid, effectiveRootCreationTime);
     if (abortedRootPidLive) {
       // @decision 87691385 — logged once, exactly here — the one place this abort is ever observable.
       // eslint-disable-next-line no-console
@@ -4615,7 +4512,7 @@ export function reapOrphanedDescendants(rootPid: number, rootCreationTime: numbe
     let killed = 0;
     let alreadyGone = 0;
     for (const pid of toKill) {
-      try { process.kill(pid, "SIGKILL"); killed++; } catch { alreadyGone++; /* already gone */ }
+      try { killFn(pid, "SIGKILL"); killed++; } catch { alreadyGone++; /* already gone */ }
     }
     // Card 7d58a1aa: the only place this backstop's outcome is ever observable — previously this
     // function logged nothing on any path, so a sweep that found/killed nothing was byte-identical
@@ -4623,6 +4520,15 @@ export function reapOrphanedDescendants(rootPid: number, rootCreationTime: numbe
     // eslint-disable-next-line no-console
     console.log(`[pty-reap] root=${rootPid}: found=${toKill.length} killed=${killed} alreadyGone=${alreadyGone}${skippedStale > 0 ? ` skippedStale=${skippedStale}` : ""}`);
   };
+  if (deps.enumerate) {
+    // @decision 85ae7768 — test-only path: never reached unless a caller (always a test) passes
+    // `deps.enumerate` explicitly; every production/onExit call site leaves `deps` at its default `{}`.
+    deps.enumerate().then(sweep, (err: Error) => {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] root=${rootPid}: injected enumerate() rejected — found/killed NOTHING (best-effort, never throws): ${err.message}`);
+    });
+    return;
+  }
   const cmd = process.platform === "win32"
     ? spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { stdio: ["ignore", "pipe", "ignore"] })
     : spawnProcess("ps", ["-eo", "pid,ppid"], { stdio: ["ignore", "pipe", "ignore"] });
@@ -4652,7 +4558,7 @@ export function reapOrphanedDescendants(rootPid: number, rootCreationTime: numbe
     if (settled) return;
     settled = true;
     clearTimeout(timer);
-    sweep(out);
+    sweep(out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null));
   });
 }
 

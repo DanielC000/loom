@@ -31,7 +31,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn as spawnProcess } from "node:child_process";
-import { requireHermeticEnv } from "./_guard.mjs";
+import { requireHermeticEnv, enableRootCreationCapture, awaitRootCreationCapture } from "./_guard.mjs";
 import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
@@ -41,6 +41,10 @@ const tmpHome = path.join(os.tmpdir(), `loom-reapseam-${Date.now()}-${process.pi
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 requireHermeticEnv();
+// @decision 85ae7768 — the witness below is a REGISTERED root handed directly to the real
+// reapOrphanedDescendants sweep (not just a fabricated-data wiring check), so arm the real capture —
+// same reasoning as dev-server-teardown.mjs.
+enableRootCreationCapture();
 
 const { PtyHost, reapOrphanedDescendants } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -83,8 +87,19 @@ try {
 
   // WITNESS, fired strictly AFTER the fixture's exit above: a real, harmless short-lived child process,
   // reaped directly through the SAME exported function production/the seam's default both call.
-  witnessChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { stdio: "ignore" });
+  // 5s (not the original 50ms) so it survives the capture's own ~560-630ms real latency below — a
+  // witness that already died on its own timer before the await settles would flip this from "a LIVE
+  // registered root" into "a dead one", changing which branch of the real tripwire/filter this exercises.
+  witnessChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" });
   const witnessPid = witnessChild.pid;
+  // @decision 85ae7768 (CR 85360986, MAJOR) — await + assert BEFORE reaping, same reasoning as
+  // dev-server-teardown.mjs: the capture is async while reapOrphanedDescendants reads the registry
+  // synchronously, so reaping immediately races the capture and almost always loses.
+  const capturedCreationTime = await awaitRootCreationCapture(witnessPid);
+  if (process.platform === "win32") {
+    check("witness: creationTime is armed before reap (the filter this card protects)",
+      typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+  }
   reapOrphanedDescendants(witnessPid);
 
   await waitUntil(

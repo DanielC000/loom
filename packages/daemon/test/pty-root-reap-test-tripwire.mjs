@@ -21,7 +21,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { spawn as spawnProcess } from "node:child_process";
-import { requireHermeticEnv } from "./_guard.mjs";
+import { requireHermeticEnv, enableRootCreationCapture, awaitRootCreationCapture } from "./_guard.mjs";
 import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
@@ -37,6 +37,11 @@ const tmpHome = path.join(os.tmpdir(), `loom-reap-tripwire-${Date.now()}-${proce
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 requireHermeticEnv();
+// @decision 85ae7768 — scenarios (A)/(B) below hand REGISTERED roots directly to the real
+// reapOrphanedDescendants sweep (no injected deps.enumerate); (B2)/(B3) deliberately inject fabricated
+// rows and set the registry directly instead, so they're unaffected either way. Arm the real capture so
+// a genuine stale-ppid stranger in this run's own OS process table would be filtered, not swept.
+enableRootCreationCapture();
 
 const hostMod = await import("../dist/pty/host.js");
 const { PtyHost, reapOrphanedDescendants, isDescendantPid, reapProcessesRootedInWorktree } = hostMod;
@@ -92,6 +97,7 @@ console.error = (...args) => { capturedLines.push(args.join(" ")); realErr(...ar
 
 let fabWitnessChild = null;
 let deadChild = null;
+let liveRootLikeChild = null;
 try {
   // ===================================================================================================
   // (behavioral A) reapOrphanedDescendants(SENTINEL_PID) — REFUSED, never enumerated, never killed.
@@ -120,6 +126,13 @@ try {
   {
     fabWitnessChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
     const witnessPid = fabWitnessChild.pid;
+    // @decision 85ae7768 (CR 85360986, MAJOR) — await + assert BEFORE reaping: the capture is async
+    // (~560-630ms measured) while reapOrphanedDescendants reads the registry synchronously.
+    const capturedCreationTime = await awaitRootCreationCapture(witnessPid);
+    if (process.platform === "win32") {
+      check("(A, positive control) witness creationTime is armed before reap (the filter this card protects)",
+        typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+    }
     let threw = null;
     try { reapOrphanedDescendants(witnessPid); } catch (err) { threw = err; }
     check("(A, positive control) reapOrphanedDescendants(realChildPid) does NOT throw", threw === null);
@@ -140,6 +153,14 @@ try {
     const deadPid = deadChild.pid;
     const isAlive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
     check("(B) the soon-to-be-dead child is alive right after spawn", isAlive(deadPid));
+    // @decision 85ae7768 (CR 85360986, MAJOR) — THE card's own primary scenario: await + assert BEFORE
+    // killing — kill first and this races the capture's own ~560-630ms real latency and loses almost
+    // every time, leaving the dead-registered-root filter silently un-armed (started, never recorded).
+    const capturedCreationTime = await awaitRootCreationCapture(deadPid);
+    if (process.platform === "win32") {
+      check("(B) deadPid's creationTime is armed BEFORE it dies (the filter this card protects)",
+        typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+    }
     deadChild.kill();
     await waitUntil(() => !isAlive(deadPid), { timeoutMs: 8_000, label: "deadChild actually dead" });
     check("(B) the child is confirmed dead before reaping it", !isAlive(deadPid));
@@ -147,6 +168,123 @@ try {
     try { reapOrphanedDescendants(deadPid); } catch (err) { threw = err; }
     check("(B) reapOrphanedDescendants(deadPid) does NOT throw — the registry (branch b) recognizes it despite the pid having no live OS row",
       threw === null);
+
+    // =================================================================================================
+    // (behavioral B2) card 85ae7768 — DoD: a stale-ppid child created BEFORE this SAME dead registered
+    // root must NOT be swept, once the root's own captured creationTime is known. Exercises the REAL
+    // reapOrphanedDescendants via its test-only deps.enumerate/deps.kill seam: deps.enumerate supplies
+    // the fabricated stale-ppid row (a real OS enumeration can never be forced to report a fake
+    // parent/child relationship — no amount of platformOverride changes that), deps.kill RECORDS every
+    // pid the real code would have tried to kill rather than ever calling a real process.kill — so even
+    // the pre-fix RED shape (where the sentinel WOULD be swept) never reaches a real kill syscall against
+    // a fabricated pid. The companion registry's own entry for `deadPid` is set directly here, simulating
+    // what test/_guard.mjs's real win32-only capture would have produced — deliberately platform-agnostic
+    // (exercises the FALLBACK WIRING reapOrphanedDescendants -> creationTimeFromTestSpawnRegistry ->
+    // computeOrphanSweepPlan, never the real win32 CIM capture itself, which is a separate, win32-only,
+    // WARN-SKIP'd proof in pty-root-reap-win32-ticks-real-spawn.mjs).
+    // =================================================================================================
+    {
+      const rootCreationTimeSim = 1_700_000_000_000;
+      globalThis.__LOOM_TEST_SPAWNED_PID_CREATION_TIMES__.set(deadPid, rootCreationTimeSim);
+      const staleChildRow = { pid: SENTINEL_PID, ppid: deadPid, creationTime: rootCreationTimeSim - 10_000 };
+      const killedPids = [];
+      reapOrphanedDescendants(deadPid, null, {
+        enumerate: async () => [staleChildRow],
+        kill: (pid) => { killedPids.push(pid); },
+      });
+      await waitUntil(
+        () => capturedLines.some((l) => l.includes(`[pty-reap] root=${deadPid}:`) && l.includes("skippedStale=1")),
+        { timeoutMs: 8_000, label: "(B2) injected-enumerate sweep completion log" },
+      );
+      check("(B2) the stale-ppid child (created BEFORE the root, per its own creationTime) is NOT swept",
+        !killedPids.includes(SENTINEL_PID));
+      check("(B2) nothing else was (attempted to be) killed — toKill was genuinely empty, not a filtered-after-attempt",
+        killedPids.length === 0);
+    }
+
+    // =================================================================================================
+    // (behavioral B3) a rejecting deps.enumerate() (the injected-seam counterpart of a real enumeration
+    // helper failing to spawn) must log + return, never throw past reapOrphanedDescendants — same
+    // best-effort posture as every other enumeration-failure path in this function.
+    // =================================================================================================
+    {
+      const killedPids = [];
+      let threw = null;
+      try {
+        reapOrphanedDescendants(deadPid, null, {
+          enumerate: async () => { throw new Error("simulated injected-enumerate rejection (card 85ae7768 test)"); },
+          kill: (pid) => { killedPids.push(pid); },
+        });
+      } catch (err) { threw = err; }
+      check("(B3) a synchronously-called reapOrphanedDescendants with a rejecting deps.enumerate does not throw synchronously",
+        threw === null);
+      await waitUntil(
+        () => capturedLines.some((l) => l.includes(`[pty-reap] root=${deadPid}: injected enumerate() rejected`)),
+        { timeoutMs: 8_000, label: "(B3) injected-enumerate rejection log" },
+      );
+      check("(B3) the rejection was logged, naming the root pid and the real error message",
+        capturedLines.some((l) => l.includes(`[pty-reap] root=${deadPid}: injected enumerate() rejected`) && l.includes("simulated injected-enumerate rejection")));
+      check("(B3) nothing was killed when the injected enumeration itself failed", killedPids.length === 0);
+    }
+  }
+
+  // ===================================================================================================
+  // (behavioral B4) card 85ae7768 (CR 85360986, MINOR 2) — the live-root-abort -> walk TRANSITION,
+  // both directions, via deps.enumerate against a REAL live descendant: when the injected occupant row
+  // AT the root pid carries a creationTime that agrees with the root's own REAL captured value, the walk
+  // PROCEEDS (not aborted) and a fabricated child IS swept; when it disagrees, the abort still fires and
+  // nothing is swept — proving computeOrphanSweepPlan's own fail-safe agreement check, not just that a
+  // non-null rootCreationTime exists.
+  // ===================================================================================================
+  {
+    liveRootLikeChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const liveRootPid = liveRootLikeChild.pid;
+    const capturedCreationTime = await awaitRootCreationCapture(liveRootPid);
+    check("(B4) the live root's own creationTime is armed (needed for both legs below)",
+      process.platform !== "win32" || (typeof capturedCreationTime === "number" && capturedCreationTime > 0));
+
+    if (process.platform === "win32") {
+      // (B4a) the occupant's own creationTime AGREES with the real captured value -> proven own root -> walk.
+      {
+        const killedPids = [];
+        reapOrphanedDescendants(liveRootPid, null, {
+          enumerate: async () => [
+            { pid: liveRootPid, ppid: process.pid, creationTime: capturedCreationTime },
+            { pid: SENTINEL_PID, ppid: liveRootPid, creationTime: capturedCreationTime + 1000 },
+          ],
+          kill: (pid) => { killedPids.push(pid); },
+        });
+        await waitUntil(
+          () => capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}:`)),
+          { timeoutMs: 8_000, label: "(B4a) agreeing-occupant sweep completion log" },
+        );
+        check("(B4a) a creationTime-PROVEN own root is NOT aborted",
+          !capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)));
+        check("(B4a) the walk genuinely proceeded — the fabricated child WAS recorded as swept",
+          killedPids.includes(SENTINEL_PID));
+      }
+
+      // (B4b) the occupant's own creationTime DISAGREES with the real captured value -> still aborts.
+      {
+        const killedPids = [];
+        reapOrphanedDescendants(liveRootPid, null, {
+          enumerate: async () => [
+            { pid: liveRootPid, ppid: process.pid, creationTime: capturedCreationTime + 10_000 },
+            { pid: SENTINEL_PID, ppid: liveRootPid, creationTime: capturedCreationTime + 11_000 },
+          ],
+          kill: (pid) => { killedPids.push(pid); },
+        });
+        await waitUntil(
+          () => capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)),
+          { timeoutMs: 8_000, label: "(B4b) mismatched-occupant abort log" },
+        );
+        check("(B4b) a mismatched creationTime still ABORTS the whole walk",
+          capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)));
+        check("(B4b) nothing was (attempted to be) swept when aborted", killedPids.length === 0);
+      }
+    } else {
+      console.log("WARN  SKIP  (B4) live-root-abort->walk transition — win32-only (no POSIX creationTime data); process.platform !== 'win32' here.");
+    }
   }
 
   // ===================================================================================================
@@ -276,6 +414,7 @@ try {
   console.error = realErr;
   try { fabWitnessChild?.kill(); } catch { /* already gone */ }
   try { deadChild?.kill(); } catch { /* already gone */ }
+  try { liveRootLikeChild?.kill(); } catch { /* already gone */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
