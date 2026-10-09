@@ -1688,7 +1688,7 @@ async function main(): Promise<void> {
     // OS-service restart), not a deliberate daemon_restart — resumeFleetOnBoot never ran, so this is the
     // ONLY path that brings these workers' managers (and any solo manager with no surviving worker) back.
     // Best-effort + runs once.
-    const { resumed, skippedParked, failed, managersFailed, retiredSkipped } =
+    const { resumed, skippedParked, failed, managersFailed, retiredSkipped, consolidatedSkipped } =
       sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
         soloManagerIds: crashOrphanedManagers, shutdownMarker, hadCrashLogAtBoot, bootedAt: bootStartedAt, supervisorIteration,
       });
@@ -1698,6 +1698,9 @@ async function main(): Promise<void> {
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
       (managersFailed.length ? `, ${managersFailed.length} manager(s) themselves unresumable (check [crash-recovery] logs above for why)` : "") +
       (retiredSkipped.length ? `, ${retiredSkipped.length} skipped as a retired recycle successor (see the reconcile line above)` : "") +
+      // @decision 4775165f: a predecessor already consolidated this boot (see the reconcile line above) —
+      // never attempted here, never a duplicate manager_crash_resume_failed page.
+      (consolidatedSkipped.length ? `, ${consolidatedSkipped.length} skipped as an already-consolidated halted-recycle predecessor (see the reconcile line above)` : "") +
       (shutdownMarker ? ` (clean ${shutdownMarker.reason} stop marker found — nudges classified as a restart, not a crash)` : "") +
       (supervisorIteration !== null ? ` (supervisor iteration ${supervisorIteration})` : ""),
     );

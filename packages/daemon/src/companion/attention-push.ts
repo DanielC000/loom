@@ -166,6 +166,12 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // possible automatic owner. Same "unexpected fleet-ownership fault" shape, same class.
     case "recycle_fleet_stranded_across_restart":
       return "worker-crashed";
+    // Card 4775165f: a halted recycle's both-dead lineage consolidated onto the predecessor at boot
+    // (`a4c5f234`) — same "unexpected fleet-ownership fault, human should know" shape as its recycle_fleet_*
+    // siblings above. Dedup against a genuinely duplicate filing of the SAME lineage is handled separately,
+    // in `tick()`/`stampConsolidatedLineage` below — never assume the source event fires at most once.
+    case "recycle_split_lineage_consolidated":
+      return "worker-crashed";
     case "question_asked":
       return "decision-pending";
     // Card 5ea0153c: a still-pending ask's content just changed IN PLACE (question_amend) — same class as
@@ -426,6 +432,19 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     case "recycle_fleet_stranded_across_restart":
       line = `${projectName}: manager/Lead recycle settle lost to a daemon restart — no automatic owner exists for its fleet, human intervention needed — ${m8}`;
       break;
+    // Card 4775165f: a halted recycle whose successor ALSO turned out unresumable this boot — the fleet was
+    // reclaimed back onto this (also-dead) predecessor as bookkeeping only (`a4c5f234`); never resumed. Named
+    // distinctly from recycle_fleet_stranded_across_restart above (that case lost its settle loop to a
+    // daemon restart; this one never had a resumable owner on either side of the lineage to begin with).
+    case "recycle_split_lineage_consolidated": {
+      // @decision 54434e27: mirrors the predecessor's own banner exactly — "child session(s)", never
+      // "worker(s)" (listChildSessions counts every current child, unscoped to role or task state; the
+      // threaded reparentedWorkers value is unreliable here — see that record for why).
+      const deadSuccessor8 = typeof detail.deadSuccessorId === "string" ? detail.deadSuccessorId.slice(0, 8) : "?";
+      const childCount3 = typeof detail.childSessionCount === "number" ? ` (${detail.childSessionCount} child session(s))` : "";
+      line = `${projectName}: halted recycle lineage consolidated — successor ${deadSuccessor8} is unresumable too, fleet${childCount3} reclaimed onto the predecessor — no automatic owner, human must intervene — ${m8}`;
+      break;
+    }
     case "claude_boot_dialog_stuck": {
       const sigName = typeof detail.signatureName === "string" ? detail.signatureName : "none recognized";
       const roleLabel = typeof detail.role === "string" ? detail.role : "session";
@@ -475,7 +494,27 @@ export class AttentionPushWatcher {
    *  get their own first alert. */
   private escalationSurfaced = new Map<string, string>();
 
+  /** Card 4775165f: per-lineage dedupe for `recycle_split_lineage_consolidated`, keyed on
+   *  `(predecessorId, deadSuccessorId)` (see {@link consolidatedLineageKey}) — defense in depth against the
+   *  source event firing more than once for the SAME lineage. The source event is believed to fire at most
+   *  once ever (an idempotency guard at its one filing site), but that is NOT assumed safe here: a future
+   *  change to that guard (or a genuinely re-run boot phase) must never be able to double-page the owner for
+   *  a lineage it already paged. Unlike `escalationSurfaced` (a Map — a REAL content change legitimately
+   *  re-fires for the same taskId), this is a plain Set — the lineage either was already surfaced or wasn't,
+   *  there is no "updated content" shape for a repeat filing of this kind to carry. Seeded on start() from
+   *  this session's own durable `companion_alert_pushed` history (seedWatermark) — never cross-recipient. */
+  private consolidatedLineagesSurfaced = new Set<string>();
+
   constructor(private deps: AttentionPushWatcherDeps) {}
+
+  /** Deterministic per-lineage dedupe key for a `recycle_split_lineage_consolidated` event — the
+   *  predecessor (`managerSessionId`, the event's own subject) plus the dead successor it was consolidated
+   *  against (`detail.deadSuccessorId`). Returns null when the id is missing/malformed (defensive — never
+   *  dedupe against an empty-string key that could collide across genuinely different lineages). */
+  private consolidatedLineageKey(e: { managerSessionId: string; detail?: Record<string, unknown> }): string | null {
+    const deadSuccessorId = typeof e.detail?.deadSuccessorId === "string" ? e.detail.deadSuccessorId : null;
+    return deadSuccessorId ? `${e.managerSessionId}|${deadSuccessorId}` : null;
+  }
 
   /** Deterministic "as of this event" fingerprint for an escalation (mirrors decisionSurfaceSignature's
    *  doc): title+severity are set once at `platform_escalate` filing time and never mutated afterward, so
@@ -524,6 +563,17 @@ export class AttentionPushWatcher {
     const scanned = db.listEventsSince(this.watermark, EVENT_TAIL_LIMIT) as EventWithSeq[];
     if (scanned.length === 0) return; // nothing new since the watermark.
 
+    // Card 4775165f: a THIS-TICK-ONLY guard for consolidatedLineageKey, separate from the persistent
+    // `consolidatedLineagesSurfaced` set below. Two genuinely duplicate `recycle_split_lineage_consolidated`
+    // rows for the SAME lineage can land in the SAME `scanned` window (e.g. a re-run boot phase filing it
+    // twice) — the persistent set is only stamped at actual PUSH time, which happens AFTER this whole
+    // classify/qualify loop finishes, so checking only the persistent set here would let every duplicate in
+    // one window through. This local set catches that within-tick case without touching the persistent one
+    // prematurely — doing that instead would reopen the exact "not-yet-flushed digest row gets wrongly
+    // self-suppressed before ever delivered" hazard escalationSurfaced's own doc already warns against for
+    // the same reason, since a still-buffered (not-yet-due) row gets rescanned on every later tick until it
+    // actually flushes.
+    const seenConsolidatedLineageKeysThisTick = new Set<string>();
     const qualifying: Qualifying[] = [];
     for (const e of scanned) {
       const cls = classify(e.kind, e.detail);
@@ -543,6 +593,17 @@ export class AttentionPushWatcher {
       // signature was ever designed to fingerprint.
       if (e.kind === "platform_escalate" && e.taskId && this.escalationSurfaced.get(e.taskId) === this.escalationSignature(e.detail)) {
         continue;
+      }
+      // Card 4775165f: per-lineage dedupe, checked here (classification time), STAMPED only at actual push
+      // time (stampConsolidatedLineage, called from the same three emit sites as stampEscalation) — same
+      // discipline as the platform_escalate check above, for the same reason: a digest's "not yet due"
+      // re-scan of a still-unflushed row must not self-suppress before it's ever actually delivered.
+      if (e.kind === "recycle_split_lineage_consolidated") {
+        const lineageKey = this.consolidatedLineageKey(e);
+        if (lineageKey) {
+          if (this.consolidatedLineagesSurfaced.has(lineageKey) || seenConsolidatedLineageKeysThisTick.has(lineageKey)) continue;
+          seenConsolidatedLineageKeysThisTick.add(lineageKey);
+        }
       }
       const projectName = db.getProject(projectId)?.name ?? "?";
       // Card 91b9105e: `cls === "escalation"` is NOT only ever `platform_escalate` any more — round 2
@@ -664,7 +725,7 @@ export class AttentionPushWatcher {
       this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
       this.deferredSinceLastPush = false;
       for (const { e, cls } of qualifying) {
-        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e) });
+        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e), ...this.stampConsolidatedLineage(e) });
       }
     } else if (qualifying.length > 0) {
       // Same in-app fallback as the digest branch above.
@@ -674,7 +735,7 @@ export class AttentionPushWatcher {
         // proactive:true — see the digest branch above.
         this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName, taskIdResolvable)), "system", undefined, home, "agent", undefined, undefined, true);
         this.deferredSinceLastPush = false;
-        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e) });
+        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e), ...this.stampConsolidatedLineage(e) });
       }
     }
     this.watermark = scanned[scanned.length - 1]!.seq; // consume the WHOLE scanned window — see doc above.
@@ -713,7 +774,7 @@ export class AttentionPushWatcher {
     this.lastDigestFlushAt = now.getTime();
     this.deferredSinceLastPush = false;
     for (const { e, cls } of qualifying) {
-      this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e) });
+      this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e), ...this.stampConsolidatedLineage(e) });
     }
     this.watermark = scanned[scanned.length - 1]!.seq;
   }
@@ -732,6 +793,19 @@ export class AttentionPushWatcher {
     return { escalationTaskId: e.taskId, escalationSignature: signature };
   }
 
+  /** Card 4775165f: the `recycle_split_lineage_consolidated` sibling of {@link stampEscalation} — stamps
+   *  `consolidatedLineagesSurfaced` at the moment the event is ACTUALLY pushed (never at classification
+   *  time — see the dedupe check in `tick()`), and returns the extra `companion_alert_pushed` detail field
+   *  that lets a restart's `seedWatermark` reconstruct the set from the durable log alone. A no-op for every
+   *  other kind, or a malformed/missing `deadSuccessorId`. */
+  private stampConsolidatedLineage(e: EventWithSeq): { consolidatedLineageKey?: string } {
+    if (e.kind !== "recycle_split_lineage_consolidated") return {};
+    const key = this.consolidatedLineageKey(e);
+    if (!key) return {};
+    this.consolidatedLineagesSurfaced.add(key);
+    return { consolidatedLineageKey: key };
+  }
+
   /**
    * Restart-safe watermark seed: the MAX `sourceSeq` across this session's own durable
    * `companion_alert_pushed` events (never replay an alert already pushed), else — a companion that has
@@ -747,16 +821,23 @@ export class AttentionPushWatcher {
    * push time) is replayed in chronological order (listEvents' own ORDER BY), so the map ends up holding
    * each taskId's LATEST pushed signature — correct even in the (currently unreachable, but not assumed
    * impossible) case of two distinct pushes for the same taskId.
+   *
+   * Card 4775165f: also reconstructs `consolidatedLineagesSurfaced` from the SAME scan — each
+   * `companion_alert_pushed` row's `consolidatedLineageKey` (stamped by `stampConsolidatedLineage` at push
+   * time) is added back to the set, so a restarted watcher never re-pushes a lineage it already surfaced.
    */
   private seedWatermark(): void {
     let max = 0;
     for (const e of this.deps.db.listEvents(this.deps.sessionId)) {
       if (e.kind !== "companion_alert_pushed") continue;
-      const detail = e.detail as { sourceSeq?: number; escalationTaskId?: string; escalationSignature?: string } | undefined;
+      const detail = e.detail as { sourceSeq?: number; escalationTaskId?: string; escalationSignature?: string; consolidatedLineageKey?: string } | undefined;
       const seq = detail?.sourceSeq;
       if (typeof seq === "number" && seq > max) max = seq;
       if (typeof detail?.escalationTaskId === "string" && typeof detail?.escalationSignature === "string") {
         this.escalationSurfaced.set(detail.escalationTaskId, detail.escalationSignature);
+      }
+      if (typeof detail?.consolidatedLineageKey === "string") {
+        this.consolidatedLineagesSurfaced.add(detail.consolidatedLineageKey);
       }
     }
     this.watermark = max > 0 ? max : this.deps.db.getMaxEventSeq();

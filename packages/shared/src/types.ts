@@ -1052,7 +1052,9 @@ export type OrchestrationEventKind =
   // live predecessor watching and the loop still running; this one has neither.
   | "recycle_fleet_stranded_across_restart"
   // @decision a4c5f234 — the both-dead halted-lineage consolidation marker. `managerSessionId` = the
-  // predecessor (consolidated target); `detail` carries { deadSuccessorId }. See the full record.
+  // predecessor (consolidated target); `detail` carries { deadSuccessorId, childSessionCount, workers }.
+  // @decision 4775165f — IS an EVENT_TRIGGER_EVENT_KINDS member (reverses a4c5f234's own exclusion —
+  // see that record's amendment) now that it's the sole page for a consolidated predecessor.
   | "recycle_split_lineage_consolidated"
   // @decision 5a56bb0a — the durable marker that a recycle successor was administratively retired
   // (unlinkAndArchiveDeadRecycleSuccessor), not genuinely broken; resume()'s chokepoint refuses an
@@ -3463,6 +3465,9 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
   "worker_stuck", "worktree_vanished", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
   "fleet_resume_failed", "manager_crash_resume_failed", "fleet_resume_entry_failed",
+  // @decision 4775165f — reverses a4c5f234's own EVENT_TRIGGER_EVENT_KINDS exclusion: a consolidated
+  // predecessor is no longer also covered by a crash-path manager_crash_resume_failed trigger.
+  "recycle_split_lineage_consolidated",
   "question_asked", "question_amended", "request_escalated",
   "idle_escalated", "idle_report",
   "context_escalated", "context_blind_turn", "context_emergency_interrupt",

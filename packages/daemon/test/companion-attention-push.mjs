@@ -932,6 +932,98 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   cleanupEnv(e);
 }
 
+// --- 32. Card 4775165f: recycle_split_lineage_consolidated — a halted recycle's both-dead lineage (`a4c5f234`)
+//     consolidated onto the predecessor at boot. Same worker-crashed family as its recycle_fleet_* siblings,
+//     but named distinctly from recycle_fleet_stranded_across_restart (section 24): that case lost its
+//     settle loop to a daemon restart; this one never had a resumable owner on either side to begin with. ---
+{
+  check("classify: recycle_split_lineage_consolidated → worker-crashed (same family as its recycle_fleet_* siblings)",
+    classify("recycle_split_lineage_consolidated", { deadSuccessorId: "s-1", childSessionCount: 2 }) === "worker-crashed");
+
+  const consolidatedLine = alertLine(
+    { id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "recycle_split_lineage_consolidated", detail: { deadSuccessorId: "succ-87654321", childSessionCount: 3 } },
+    "worker-crashed", "Proj Z");
+  check("recycle_split_lineage_consolidated alert line: named explicitly as a both-dead consolidation, distinct from recycle_fleet_stranded_across_restart's wording",
+    consolidatedLine.includes("lineage consolidated") && consolidatedLine.includes("no automatic owner") && !consolidatedLine.includes("daemon restart"));
+  check("recycle_split_lineage_consolidated alert line: names the project + the predecessor's (8-char) id + the dead successor's (8-char) id",
+    consolidatedLine.includes("Proj Z") && consolidatedLine.includes("mgr-1234") && consolidatedLine.includes("succ-876"));
+  check("recycle_split_lineage_consolidated alert line: carries the child session count, worded 'child session(s)' (card 54434e27 — never 'worker(s)', which overclaims a role/task-state precision the count doesn't carry)",
+    consolidatedLine.includes("3 child session(s)"));
+
+  // A missing/malformed detail degrades gracefully — never throws, never renders "undefined".
+  const lineNoDetail = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "recycle_split_lineage_consolidated", detail: {} }, "worker-crashed", "Proj Z");
+  check("recycle_split_lineage_consolidated alert line: a missing deadSuccessorId/childSessionCount degrades to '?' + no count, never throws",
+    lineNoDetail.includes("successor ? is unresumable") && !lineNoDetail.includes("child session(s)") && !lineNoDetail.includes("undefined"));
+}
+
+// --- 33. END-TO-END (card 4775165f): a real recycle_split_lineage_consolidated event, filed under the
+//     companion's OWN granted predecessor (mgrA/projA), pushes exactly one turn. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["worker-crashed"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "recycle_split_lineage_consolidated", e.mgrA, { deadSuccessorId: "succ-e2e-11111111", childSessionCount: 1 });
+  e.watcher.tick(new Date());
+  check("e2e: a recycle_split_lineage_consolidated event pushes exactly one turn", e.enqueued.length === 1);
+  check("e2e: framed [loom:alert]", e.enqueued.length === 1 && e.enqueued[0].text.startsWith(ALERT_TAG));
+  check("e2e: the pushed turn names the lineage consolidation + the dead successor's id",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("lineage consolidated") && e.enqueued[0].text.includes("succ-e2e"));
+  const pushed = events(e, "companion_alert_pushed");
+  check("e2e: emits one companion_alert_pushed audit row, carrying the dedupe key", pushed.length === 1 &&
+    pushed[0].detail.sourceKind === "recycle_split_lineage_consolidated" &&
+    pushed[0].detail.consolidatedLineageKey === `${e.mgrA}|succ-e2e-11111111`);
+  cleanupEnv(e);
+}
+
+// --- 34. Card 4775165f DoD: "exactly one page per lineage" — a GENUINE duplicate filing of the SAME
+//     lineage (same predecessor + same deadSuccessorId) must push only ONCE, never twice. Defense in depth
+//     per the Lead's ruling: the source event is believed to fire at most once ever, but that is NOT a
+//     safe assumption to build the companion push on — a future re-run of the boot phase that files it
+//     (in-flight card 54434e27) must not double-page the owner. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["worker-crashed"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "recycle_split_lineage_consolidated", e.mgrA, { deadSuccessorId: "succ-dup-11111111", childSessionCount: 1 });
+  fire(e, "recycle_split_lineage_consolidated", e.mgrA, { deadSuccessorId: "succ-dup-11111111", childSessionCount: 1 });
+  e.watcher.tick(new Date());
+  check("dedupe: two identical recycle_split_lineage_consolidated events for the SAME lineage push exactly ONE turn", e.enqueued.length === 1);
+  check("dedupe: exactly one companion_alert_pushed row recorded, not two", events(e, "companion_alert_pushed").filter((ev) => ev.detail.sourceKind === "recycle_split_lineage_consolidated").length === 1);
+
+  // Negative control / discrimination check: a DIFFERENT lineage (different deadSuccessorId) under the
+  // SAME predecessor must still push — proves the key is (predecessorId, deadSuccessorId), not predecessorId
+  // alone, and that the dedupe doesn't over-suppress a genuinely distinct lineage.
+  e.clearPending();
+  fire(e, "recycle_split_lineage_consolidated", e.mgrA, { deadSuccessorId: "succ-dup-22222222", childSessionCount: 1 });
+  e.watcher.tick(new Date());
+  check("dedupe: a DIFFERENT lineage (same predecessor, different deadSuccessorId) still pushes — key is scoped to the pair, not the predecessor alone", e.enqueued.length === 2);
+
+  // Restart-safety: a FRESH watcher instance (re-seeded from the durable log) must also decline to
+  // re-push the original, already-surfaced lineage — mirrors section 3's restart-safety pattern, but for
+  // the dedupe set rather than the watermark.
+  e.clearPending();
+  const fresh = e.freshWatcher();
+  fresh.start(); fresh.stop();
+  fire(e, "recycle_split_lineage_consolidated", e.mgrA, { deadSuccessorId: "succ-dup-11111111", childSessionCount: 1 });
+  fresh.tick(new Date());
+  check("dedupe restart-safety: a fresh watcher instance does not re-push an already-surfaced lineage after reseeding", e.enqueued.length === 2);
+  cleanupEnv(e);
+}
+
+// --- 35. Card 4775165f DoD: "no page when nothing was consolidated" — a tick with NO
+//     recycle_split_lineage_consolidated event anywhere in the scanned window pushes nothing attributed to
+//     it, even while the SAME "worker-crashed" class is actively firing from an unrelated sibling kind
+//     (manager_crash_resume_failed) — proves this is a genuine negative result, not an artifact of the
+//     class being unsubscribed or the watcher being otherwise idle. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["worker-crashed"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "manager_crash_resume_failed", e.mgrA, { workerCount: 1, workers: [] });
+  e.watcher.tick(new Date());
+  check("no-consolidation: the watcher IS live and DOES push for an unrelated worker-crashed sibling kind", e.enqueued.length === 1);
+  check("no-consolidation: but nothing was ever consolidated, so no recycle_split_lineage_consolidated-attributed row exists",
+    events(e, "companion_alert_pushed").filter((ev) => ev.detail.sourceKind === "recycle_split_lineage_consolidated").length === 0);
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped, and claude_boot_dialog_stuck reaches the owner via the non-FLEET_OPS 'escalation' class exactly when nobody else was addressed (parentNudged:false), never otherwise."
   : `\n❌ ${failures} FAILURE(S).`);

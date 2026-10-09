@@ -78,6 +78,34 @@ const evt = (kind, managerSessionId, extra = {}) => ({ id: `e-${kind}-${managerS
   check("injected deps.timeoutMs overrides the resolved value", posts[0]?.timeoutMs === 77);
 }
 
+// --- (1d) card 4775165f: recycle_split_lineage_consolidated delivers via alertWebhook with ZERO code
+//     change — this emitter was NEVER gated by any kind-specific allowlist (unlike EVENT_TRIGGER_EVENT_KINDS,
+//     a genuine restricting enum). `events` is validated as plain strings (`alertWebhookSchema` in
+//     mcp/platform.ts) and matched here by a bare `.includes()` — any OrchestrationEventKind string a human
+//     types into their webhook config already works, and always has since this emitter was written. A
+//     POSITIVE demonstration (not just a read of the code) that this kind is no different from any other. --
+{
+  db.insertProject({ id: "pRecycle", name: "Recycled", repoPath: "C:/tmp/recycle", vaultPath: "C:/tmp/recycle",
+    config: { orchestration: { alertWebhook: { url: "https://hooks.example.com/recycle", events: ["recycle_split_lineage_consolidated"] } } },
+    createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "aRecycle", projectId: "pRecycle", name: "lead", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "mRecycle", projectId: "pRecycle", agentId: "aRecycle", engineSessionId: null, title: null,
+    cwd: "C:/tmp/recycle", processState: "exited", resumability: "unknown", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  const posts = [];
+  const emitter = new AlertWebhookEmitter({ db, post: async (url, body, timeoutMs) => { posts.push({ url, body, timeoutMs }); } });
+  await emitter.onEvent(evt("recycle_split_lineage_consolidated", "mRecycle", { detail: { deadSuccessorId: "s-dead-1", childSessionCount: 2 } }));
+  check("recycle_split_lineage_consolidated POSTs exactly once — no code gates this kind specially", posts.length === 1);
+  check("POST goes to the configured URL", posts[0]?.url === "https://hooks.example.com/recycle");
+  check("payload carries the event kind + its detail verbatim (childSessionCount + deadSuccessorId)",
+    posts[0]?.body?.event === "recycle_split_lineage_consolidated" &&
+    posts[0]?.body?.detail?.childSessionCount === 2 &&
+    posts[0]?.body?.detail?.deadSuccessorId === "s-dead-1");
+  // negative control: an unrelated project's webhook (not subscribed to this kind) stays silent.
+  await emitter.onEvent(evt("recycle_split_lineage_consolidated", "mWH"));
+  check("negative control: a project whose webhook does NOT list this kind stays silent for it", posts.length === 1);
+}
+
 // --- (2) non-matching kind -> NO POST (subscribed to merge_done/merge_rejected only) ---------------
 {
   const posts = [];

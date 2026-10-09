@@ -124,6 +124,11 @@ export interface PriorAttemptVerdict {
 }
 const PRIOR_ATTEMPT_VERDICT_MAX = 64;
 
+/** @decision 4775165f — caps the per-worker list `finishReconcilingHaltedRecycleSuccessors`'s `consolidated`
+ *  branch stores on `recycle_split_lineage_consolidated`'s detail, so a pathologically large fleet can't
+ *  grow that event unbounded; see `workersTruncated` alongside it for the honest overflow signal. */
+const CONSOLIDATED_WORKER_DETAIL_MAX = 20;
+
 /** One entry in {@link SessionService.gateQueueForManager}'s result — `taskId`/`branch`/`workerLabel` are
  *  present ONLY for an entry belonging to the CALLING manager's own project; a cross-project entry omits
  *  them entirely (never redacted-to-null, so "field absent" always means "not your project", never "this
@@ -2420,6 +2425,11 @@ export class SessionService {
    *  `resumeFleetOnBoot`/`recoverCrashOrphanedWorkers` — never gate this behind an opt-in option, or an
    *  omitted one can resume a retired recycle successor alongside its recovered predecessor. */
   private readonly retiredRecycleSuccessorIds = new Set<string>();
+
+  /** @decision 4775165f — predecessor ids, distinct from the successor-keyed `retiredRecycleSuccessorIds`
+   *  above. Consult it ONLY from `recoverCrashOrphanedWorkers` (skip the resume attempt entirely) — never
+   *  from `resumeFleetOnBoot`. */
+  private readonly consolidatedPredecessorIds = new Set<string>();
 
   /**
    * @decision 49107314 — freshId -> deadline, never a bare in-flight Set; a later arm EXTENDS this, it
@@ -6784,7 +6794,7 @@ export class SessionService {
       resumeOne?: (id: string) => ResumeOneResult; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null;
       hadCrashLogAtBoot?: boolean; bootedAt?: Date; supervisorIteration?: number | null;
     } = {},
-  ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[]; retiredSkipped: string[] } {
+  ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[]; retiredSkipped: string[]; consolidatedSkipped: string[] } {
     const now = opts.now ?? new Date();
     const cleanStop = !!opts.shutdownMarker; // fresh marker present ⇒ the preceding stop was NOT a crash
     const hadCrashLog = opts.hadCrashLogAtBoot ?? true; // undecided ⇒ keep the original "crashed" phrasing
@@ -6820,15 +6830,27 @@ export class SessionService {
     const failed: string[] = [];
     const managersFailed: string[] = [];
     const retiredSkipped: string[] = [];
+    const consolidatedSkipped: string[] = [];
     // @decision 08c81809 — same UNCONDITIONAL instance-field consultation as `resumeFleetOnBoot`'s own
     // `isRetired` (round 4 hardening item 2; card 59bfc939 removed the `excludeRetiredIds` override).
     const isRetired = (id: string): boolean => this.retiredRecycleSuccessorIds.has(id);
+    // @decision 4775165f — same UNCONDITIONAL instance-field consultation shape as `isRetired` above, but
+    // for `consolidatedPredecessorIds` (predecessor ids, not successor ids) — see that set's own doc.
+    const isConsolidated = (id: string): boolean => this.consolidatedPredecessorIds.has(id);
     const byManager = new Map<string, CrashOrphanedWorker[]>();
     for (const c of candidates) {
       // @decision 08c81809 — a retired recycle successor must never be re-resumed as a manager here
       // either. Defensive rather than primary (its workers were already reparented off it before this
       // candidate derivation ran) — the `soloManagerIds` filter just below is the primary guard.
       if (isRetired(c.managerSessionId)) { retiredSkipped.push(c.managerSessionId); continue; }
+      // @decision 4775165f — already known unresumable + already paged (recycle_split_lineage_consolidated,
+      // attention-push.ts) — never resumeOne it, never file the now-redundant manager_crash_resume_failed.
+      // The worker is real (unlike a retired-successor candidate above), so it still belongs in `failed`.
+      if (isConsolidated(c.managerSessionId)) {
+        if (!consolidatedSkipped.includes(c.managerSessionId)) consolidatedSkipped.push(c.managerSessionId);
+        failed.push(c.workerSessionId);
+        continue;
+      }
       const list = byManager.get(c.managerSessionId) ?? [];
       list.push(c);
       byManager.set(c.managerSessionId, list);
@@ -6841,6 +6863,9 @@ export class SessionService {
       // @decision 08c81809 — this IS the primary guard: a retired successor whose reparented fleet leaves
       // it with zero candidates lands here, as a solo manager, and must never get its own resume attempt.
       if (isRetired(soloId)) { if (!retiredSkipped.includes(soloId)) retiredSkipped.push(soloId); continue; }
+      // @decision 4775165f — the solo-manager mirror of the candidate-loop check above: a consolidated
+      // predecessor with zero surviving worker candidates still reaches here and must be skipped too.
+      if (isConsolidated(soloId)) { if (!consolidatedSkipped.includes(soloId)) consolidatedSkipped.push(soloId); continue; }
       if (!byManager.has(soloId)) byManager.set(soloId, []);
     }
     for (const [managerId, workers] of byManager) {
@@ -7057,7 +7082,7 @@ export class SessionService {
         this.enqueueDurableNudge(managerId, managerRole, note);
       } catch { /* not ready yet — the resume stands */ }
     }
-    return { resumed, skippedParked, failed, managersFailed, retiredSkipped };
+    return { resumed, skippedParked, failed, managersFailed, retiredSkipped, consolidatedSkipped };
   }
 
   /** @decision 2ca18433 — the single re-enqueue owner for a pre-boot undelivered durable message; the
@@ -14129,7 +14154,17 @@ export class SessionService {
         this.db.setProcessState(predecessorId, "exited");
         // @decision 54434e27 — Code Review n2: says "child session(s)", not "worker(s)" — the count is
         // every CURRENT child, unscoped to role or task state. See the full record for why.
-        const childCount = this.db.listChildSessions(predecessorId).length;
+        const children = this.db.listChildSessions(predecessorId);
+        const childCount = children.length;
+        // @decision 4775165f — carries what manager_crash_resume_failed's own detail.workers used to, now
+        // that this kind's page replaces it. Scoped to role==="worker" and bounded (CONSOLIDATED_WORKER_
+        // DETAIL_MAX); `workersTruncated` says so honestly rather than silently dropping the tail.
+        const workerChildren = children.filter((c) => c.role === "worker");
+        const workers = workerChildren.slice(0, CONSOLIDATED_WORKER_DETAIL_MAX).map((c) => {
+          const { reportedState, awaitingReview } = deriveAwaitingReview(this.db.listEventsForWorker(c.id));
+          return { workerSessionId: c.id, taskId: c.taskId ?? null, reportedState, awaitingReview };
+        });
+        const workersTruncated = workerChildren.length > CONSOLIDATED_WORKER_DETAIL_MAX;
         // @decision 54434e27 — Code Review m2: a RE-RUN (the marker survived some earlier-than-this-fix
         // throw AFTER the completion event already fired once) must not re-fire a duplicate event — only
         // finish clearing the marker. The banner/restore/exited steps above are idempotent regardless.
@@ -14141,11 +14176,19 @@ export class SessionService {
           this.db.clearHaltedRecyclePending(predecessorId);
         } else {
           // @decision 54434e27 — Code Review m2: event append + marker clear are now ONE transaction.
+          // @decision 4775165f — `childSessionCount` mirrors the banner's OWN `childCount` above exactly
+          // (same listChildSessions read, same "child session(s)" wording) rather than threading the
+          // unreliable `reparentedWorkers` — see that card's record for why.
           this.db.finishHaltedRecyclePending(predecessorId, {
             id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
-            kind: "recycle_split_lineage_consolidated", detail: { deadSuccessorId: freshId },
+            kind: "recycle_split_lineage_consolidated",
+            detail: { deadSuccessorId: freshId, childSessionCount: childCount, workers, workersTruncated },
           });
         }
+        // @decision 4775165f — unconditional, same as the push just below (whether the event fired fresh
+        // or this was a continuation clear): this lineage already has (or had) its own dedicated owner
+        // page this boot, so the crash-path's manager_crash_resume_failed attempt for it is redundant.
+        this.consolidatedPredecessorIds.add(predecessorId);
         consolidated.push(predecessorId);
       } catch (e) {
         console.error(`[halted-recycle-reconcile] consolidated pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);

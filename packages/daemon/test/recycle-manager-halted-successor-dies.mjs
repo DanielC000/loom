@@ -103,6 +103,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       SCOPED to this mechanism's own exact text tied to the freshId: an UNRELATED orphaned-fleet banner
 //       (archiveOnExit's own) survives (F7a); this mechanism's own stale banner for the SAME freshId is
 //       cleared (F7b).
+//   (F8) card 4775165f, CR a7b6f91a item 2 — MIXED CASE: a `consolidated` predecessor, a `recovered`-bucket
+//       predecessor, and a genuinely unrelated crash-orphaned manager, all in ONE recoverCrashOrphanedWorkers
+//       call. Proves consolidatedPredecessorIds stays scoped to the consolidated branch — the recovered
+//       predecessor and the unrelated manager both still reach a real resumeOne attempt (the unrelated one
+//       still files its own manager_crash_resume_failed on failure) — then RED-proves it by directly
+//       injecting the recovered predecessor's id into the skip-set and showing it wrongly gets skipped too.
 //   (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a predecessor that halted once (naming successor S1), was
 //       reclaimed after S1 died, and was then cleanly re-recycled to a BRAND NEW successor S2: the
 //       permanent halt event still names S1, but the halted-reconcile (and, since 386e4eb5,
@@ -926,29 +932,34 @@ try {
 
     // Code Review follow-up (1): the crash-orphan derivation NOW sees the reparented worker naming M1 as
     // its manager — proving the worktree-protection wiring (index.ts's protectedSessionIds, card 9fc41af5)
-    // reaches it for free — but the manager-first resume order (sha:b65d9a5e) means NEITHER M1 nor the
-    // worker is ever actually resumed: resume()'s preconditions are a confirmed strict superset of
-    // isDurablyResumable's (including the forced-role-fresh-start bypass, MAJOR 1), so M1's own attempt is
-    // guaranteed to fail first.
+    // reaches it for free. Pre-card-4775165f, the manager-first resume order (sha:b65d9a5e) meant NEITHER
+    // M1 nor the worker was ever actually resumed, but M1's own resumeOne attempt WAS genuinely made (and
+    // failed, filing manager_crash_resume_failed). Card 4775165f's own `consolidatedPredecessorIds` skip-set
+    // now short-circuits BEFORE that attempt entirely — M1 already has its own dedicated owner page
+    // (recycle_split_lineage_consolidated, checked above) — so the assertions below are flipped from the
+    // pre-4775165f shape: M1's id is never passed to resumeOne at all, and no manager_crash_resume_failed is
+    // filed for it. The end state (M1 not live, worker not live) is unchanged.
     check("(F) crash-orphan derivation: the reparented worker surfaces, naming M1 as its manager", crashOrphanedWorkers.some((c) => c.workerSessionId === workerId && c.managerSessionId === m1.id));
     // Code Review ROUND 2, finding 6a: inject the real `resumeOne` seam and record every id it's actually
     // called with — proves the worker id is NEVER passed to it, not merely that it ends up not-live.
     const resumeOneCalls = [];
-    const { managersFailed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
+    const { managersFailed, consolidatedSkipped, failed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
       soloManagerIds: crashOrphanedManagers,
       resumeOne: (id) => { resumeOneCalls.push(id); try { sessions2.resume(id); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; } },
     });
-    check("(F) crash-path (6a): M1's own id WAS passed to resumeOne (its attempt is real, not skipped)", resumeOneCalls.includes(m1.id));
-    check("(F) crash-path (6a): the worker's id was NEVER passed to resumeOne at all (manager-first ordering)", !resumeOneCalls.includes(workerId));
-    check("(F) crash-path: M1's own resume attempt FAILS (NEVER RESURRECT holds through this side door)", managersFailed.includes(m1.id));
+    check("(F) card 4775165f: M1's own id was NEVER passed to resumeOne — the consolidatedPredecessorIds skip-set short-circuits before any attempt", !resumeOneCalls.includes(m1.id));
+    check("(F) crash-path (6a): the worker's id was NEVER passed to resumeOne at all either", !resumeOneCalls.includes(workerId));
+    check("(F) card 4775165f: M1 is named in consolidatedSkipped, NOT managersFailed (no attempt was ever made to fail)", consolidatedSkipped.includes(m1.id) && !managersFailed.includes(m1.id));
+    check("(F) card 4775165f: the worker still lands in `failed` (genuinely not live), despite the attempt being skipped", failed.includes(workerId));
     check("(F) crash-path: M1 was NOT actually resumed", host2.isAlive(m1.id) === false);
     check("(F) crash-path: the worker was NEVER individually attempted (manager-first ordering) — still not live", host2.isAlive(workerId) === false);
-    // Code Review ROUND 2, finding 6c: the attempt's own outcome — the audit event under M1, M1's
-    // resumability afterwards (NOT "dead" — M1 fails on "no engine id", not the transcript/cwd paths that
-    // set that stamp, per MAJOR 2's own finding), and the banner still present.
-    check("(F) crash-path (6c): a manager_crash_resume_failed event was filed under M1", hasEvent(db2, m1.id, "manager_crash_resume_failed"));
-    check("(F) crash-path (6c): M1's resumability is NOT stamped \"dead\" (it failed on \"no engine id\", not transcript/cwd)", db2.getSession(m1.id)?.resumability !== "dead");
-    check("(F) crash-path (6c): the orphaned-fleet banner is STILL present after the failed attempt", /\[loom:orphaned-fleet\]/.test(db2.getSession(m1.id)?.lastError ?? ""));
+    // Code Review ROUND 2, finding 6c (flipped by card 4775165f): the skip-set means NO
+    // manager_crash_resume_failed is filed for M1 any more (replaced by the dedicated
+    // recycle_split_lineage_consolidated page checked above) — M1's resumability and banner are untouched
+    // by this call either way, since it never reaches far enough to touch them.
+    check("(F) card 4775165f: NO manager_crash_resume_failed event is filed under M1 (replaced by the dedicated page)", !hasEvent(db2, m1.id, "manager_crash_resume_failed"));
+    check("(F) crash-path (6c): M1's resumability is NOT stamped \"dead\" (never touched by this call at all)", db2.getSession(m1.id)?.resumability !== "dead");
+    check("(F) crash-path (6c): the orphaned-fleet banner is STILL present", /\[loom:orphaned-fleet\]/.test(db2.getSession(m1.id)?.lastError ?? ""));
 
     // Idempotency: a THIRD boot (fresh db/host reopened against the SAME file, mirroring (K)/(L)'s own
     // technique in recycle-settle-lost-to-restart.mjs) must be a no-op — the lineage is already resolved.
@@ -1417,6 +1428,96 @@ try {
     });
     check("(F7b) FIX round 2 item 1: THIS mechanism's own stale banner (for this freshId) IS cleared",
       db.getSession(m1.id)?.lastError == null);
+  }
+
+  // ==================== (F8) CR a7b6f91a item 2 — MIXED CASE: a `consolidated` predecessor, a `recovered`-
+  // bucket predecessor, and a genuinely UNRELATED crash-orphaned manager, all in ONE recoverCrashOrphanedWorkers
+  // call. Proves `consolidatedPredecessorIds` is scoped to the `consolidated` branch alone — the recovered
+  // predecessor and the unrelated manager both still reach a REAL resumeOne attempt, and the unrelated one
+  // still files its own manager_crash_resume_failed on failure. RED-proves it directly: injecting the
+  // recovered predecessor's id into consolidatedPredecessorIds (simulating a bug where the recovered loop
+  // also populated it) wrongly skips that predecessor's own resume attempt too. ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-f8";
+    seedProject(db1, P); // project P + agent `${P}-mgr`, used for M1 below
+    db1.insertAgent({ id: `${P}-mgr-rec`, projectId: P, name: "MgrRec", startupPrompt: "MGR", position: 1, profileId: null });
+    db1.insertAgent({ id: `${P}-mgr-crash`, projectId: P, name: "MgrCrash", startupPrompt: "MGR", position: 2, profileId: null });
+
+    // --- M1: CONSOLIDATED leg (mirrors scenario (F) exactly — M1 never captures a real engine id) ---
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    seedFleet(db1, P, m1.id);
+    const unstub1 = stubWakesPermanentFailure();
+    const m1succ = await sessions1.recycleManager(m1.id, "handoff — F8 consolidated leg");
+    unstub1();
+    check("(F8 pre) M1's recycle HALTED", hasEvent(db1, m1succ.id, "recycle_ownership_transfer_failed"));
+    check("(F8 pre) M1 never captured a real engine id — unresumable", db1.getSession(m1.id)?.engineSessionId == null);
+
+    // --- M_rec: RECOVERED-bucket leg (mirrors (B2) — M_rec DOES capture a real engine id, so it's durably resumable) ---
+    const mRec = sessions1.startManager(`${P}-mgr-rec`);
+    host1.deliverHook(mRec.id, { hook_event_name: "SessionStart", session_id: "eng-mrec-f8" });
+    writeFakeTranscript(mRec.cwd, "eng-mrec-f8");
+    const { workerId: workerIdRec } = seedFleet(db1, P, mRec.id);
+    const unstub2 = stubWakesPermanentFailure();
+    const mRecSucc = await sessions1.recycleManager(mRec.id, "handoff — F8 recovered leg");
+    unstub2();
+    check("(F8 pre) M_rec's recycle HALTED", hasEvent(db1, mRecSucc.id, "recycle_ownership_transfer_failed"));
+    check("(F8 pre) M_rec DOES carry a real engine id — durably resumable", db1.getSession(mRec.id)?.engineSessionId != null);
+
+    // --- M_crash: a genuinely UNRELATED manager — never recycled, never captures an engine id. ---
+    const mCrash = sessions1.startManager(`${P}-mgr-crash`);
+    const { workerId: workerIdCrash } = seedFleet(db1, P, mCrash.id);
+
+    db1.close();
+    const { db: db2, host: host2 } = makeBoot();
+    const { sessions: sessions2, haltedFinish, crashOrphanedWorkers, crashOrphanedManagers } = runRealBootSequenceUpToResume(db2, host2);
+
+    check("(F8) M1 landed in `consolidated`", haltedFinish.consolidated.includes(m1.id));
+    check("(F8) M_rec landed in `recovered`, NOT `consolidated`", haltedFinish.recovered.includes(mRec.id) && !haltedFinish.consolidated.includes(mRec.id));
+    check("(F8) M_crash (never recycled) is in NEITHER bucket", !haltedFinish.consolidated.includes(mCrash.id) && !haltedFinish.recovered.includes(mCrash.id));
+    check("(F8) M_crash IS a derived crash-orphan candidate (via its own worker)", crashOrphanedWorkers.some((c) => c.workerSessionId === workerIdCrash && c.managerSessionId === mCrash.id));
+    check("(F8) M_rec's own reclaimed worker IS a derived crash-orphan candidate too", crashOrphanedWorkers.some((c) => c.workerSessionId === workerIdRec && c.managerSessionId === mRec.id));
+
+    // --- GREEN: the real call, with the real (unmutated) consolidatedPredecessorIds. ---
+    const resumeOneCalls = [];
+    const resumeOneStub = (id) => {
+      resumeOneCalls.push(id);
+      try { sessions2.resume(id); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; }
+    };
+    const { managersFailed, consolidatedSkipped, failed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
+      soloManagerIds: crashOrphanedManagers, resumeOne: resumeOneStub,
+    });
+
+    check("(F8 GREEN) M1 (consolidated) is skipped — never passed to resumeOne", !resumeOneCalls.includes(m1.id));
+    check("(F8 GREEN) M1 is named in consolidatedSkipped, not managersFailed", consolidatedSkipped.includes(m1.id) && !managersFailed.includes(m1.id));
+    check("(F8 GREEN) no manager_crash_resume_failed filed for M1", !hasEvent(db2, m1.id, "manager_crash_resume_failed"));
+
+    check("(F8 GREEN) M_rec (recovered) IS still passed to resumeOne — the skip-set never touches the recovered bucket", resumeOneCalls.includes(mRec.id));
+    check("(F8 GREEN) M_rec's resume attempt SUCCEEDS (it is durably resumable) — not in managersFailed or consolidatedSkipped", !managersFailed.includes(mRec.id) && !consolidatedSkipped.includes(mRec.id));
+    check("(F8 GREEN) M_rec is genuinely live again after the crash-path resume", host2.isAlive(mRec.id) === true);
+
+    check("(F8 GREEN) M_crash (unrelated) IS still passed to resumeOne — the skip-set never touches an unrelated manager", resumeOneCalls.includes(mCrash.id));
+    check("(F8 GREEN) M_crash's resume attempt genuinely FAILS (never captured an engine id)", managersFailed.includes(mCrash.id) && !consolidatedSkipped.includes(mCrash.id));
+    check("(F8 GREEN) manager_crash_resume_failed IS filed for the unrelated M_crash", hasEvent(db2, mCrash.id, "manager_crash_resume_failed"));
+    check("(F8 GREEN) M_crash's worker lands in `failed` too (its manager's resume failed)", failed.includes(workerIdCrash));
+
+    // --- RED PROOF: inject the EXACT bug this scenario exists to catch — the recovered predecessor's id
+    // wrongly present in consolidatedPredecessorIds (as if a future edit mistakenly populated it from the
+    // `recovered` loop too, mirroring the Code Reviewer's own example). TS `private` is compile-time only
+    // (no real runtime privacy, same technique restart-fleet.mjs already uses on retiredRecycleSuccessorIds),
+    // so this reaches the real field directly rather than needing a second contrived boot. ---
+    sessions2.consolidatedPredecessorIds.add(mRec.id);
+    const resumeOneCallsRed = [];
+    const { consolidatedSkipped: consolidatedSkippedRed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
+      soloManagerIds: crashOrphanedManagers,
+      resumeOne: (id) => { resumeOneCallsRed.push(id); return { ok: true }; },
+    });
+    check("(F8 RED) injecting M_rec into consolidatedPredecessorIds wrongly skips its own resumeOne attempt", !resumeOneCallsRed.includes(mRec.id));
+    check("(F8 RED) M_rec is now wrongly named in consolidatedSkipped too", consolidatedSkippedRed.includes(mRec.id));
+    // The unrelated M_crash and the genuine M1 are UNAFFECTED by this injection — still correctly handled.
+    check("(F8 RED) the injection does NOT also affect the unrelated M_crash", resumeOneCallsRed.includes(mCrash.id));
+    check("(F8 RED) the injection does NOT also affect M1 (already correctly skipped)", !resumeOneCallsRed.includes(m1.id));
+    sessions2.consolidatedPredecessorIds.delete(mRec.id); // revert — leaves sessions2 in its correct state
   }
 
   // ==================== (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a cleanly re-recycled lineage is left untouched ====================
