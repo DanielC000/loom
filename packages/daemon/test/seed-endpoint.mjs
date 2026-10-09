@@ -245,6 +245,20 @@ try {
       wkr?.processState === "live" && wkr?.role === "worker" && wkr?.parentSessionId === "live-mgr-1" && wkr?.busy === true);
     check("(b) plain role collapses to a NULL role", plain?.processState === "live" && plain?.role === null);
 
+    // Round-trip #2b (card 65294dcc): lastError round-trips verbatim when given, and defaults to null when
+    // omitted — the ONLY seed lever for a lastError-prefix-keyed web derivation (isOrphanedFleet/isCrashLooped).
+    const lastErrSeed = await testApp.inject({
+      method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+      payload: {
+        liveSessions: [
+          { id: "live-lasterr-1", projectId: "proj-1", agentId: "agent-1", processState: "exited", lastError: "[loom:orphaned-fleet] seeded for e2e" },
+        ],
+      },
+    });
+    check("(b) seeding a lastError -> 201", lastErrSeed.statusCode === 201);
+    check("(b) lastError round-trips verbatim", db.getSession("live-lasterr-1")?.lastError === "[loom:orphaned-fleet] seeded for e2e");
+    check("(b) an omitted lastError still defaults to null", mgr?.lastError === null);
+
     // Round-trip #3: the wake round-trips through the SAME reader GET /api/sessions/:id/wakes uses.
     const wakesForMgr = db.listWakesForSession("live-mgr-1");
     check("(b) seeded wake round-trips via listWakesForSession",

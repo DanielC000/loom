@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -118,6 +118,7 @@ export const BROWSER_NOTIFICATION_LABELS: Record<BrowserNotificationKind, { labe
   "stuck-busy": { label: "Stuck busy", hint: "A session has been mid-turn far longer than expected." },
   "crash-looped": { label: "Crash looped", hint: "A session kept dying and auto-resume gave up on it." },
   "orphaned-fleet": { label: "Orphaned fleet", hint: "A worker outlived the manager that dispatched it." },
+  "recycle-lineage-consolidated": { label: "Recycle lineage consolidated", hint: "A halted recycle's successor died too; its fleet was consolidated back onto the predecessor with no automatic owner." },
 };
 
 /**
@@ -258,6 +259,23 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     refetchInterval: 15000,
   });
   const activeCodexGaps = activeCodexIsolationGapAlerts(codexGapEventsQuery.data ?? []);
+
+  // Card 65294dcc — a both-dead halted-recycle lineage's consolidation banner (docs/decisions/a4c5f234).
+  // Filed under the predecessor's OWN session id, which by construction is not a live manager — same
+  // kind-filtered-query reason as the two queries above (card 43084723's rule).
+  const recycleConsolidatedEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "recycle_split_lineage_consolidated"],
+    queryFn: () => api.orchestrationEventsByKinds(["recycle_split_lineage_consolidated"]),
+    refetchInterval: 15000,
+  });
+  const activeRecycleConsolidated = activeRecycleLineageConsolidatedAlerts(
+    recycleConsolidatedEventsQuery.data ?? [],
+    (predecessorId) => {
+      const p = all.find((x) => x.id === predecessorId);
+      return !!p && isOrphanedFleet(p);
+    },
+  );
+  const recycleConsolidatedPredecessorIds = new Set(activeRecycleConsolidated.map((c) => c.predecessorId));
 
   // Card 7be85378 — CRASH-LOOPED for a session the `all.filter(isCrashLooped)` loop below can never see:
   // `archiveOnExit` always archives the subject before the watcher's own give-up tick stamps the banner,
@@ -493,6 +511,17 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       hoverText: gapItems.map((i) => i.reason).filter((r): r is string => !!r).join("\n\n") || null,
     });
   }
+  // Card 65294dcc — see docs/decisions/65294dcc: a dedicated kind so this never double-renders alongside
+  // the generic ORPHANED FLEET item below (which excludes any predecessor id covered here).
+  for (const { event: e, predecessorId } of activeRecycleConsolidated) {
+    const p = all.find((x) => x.id === predecessorId);
+    items.push({
+      key: `rlc-${e.id}`, tone: "red", notify: "recycle-lineage-consolidated", kind: "RECYCLE LINEAGE CONSOLIDATED",
+      sessionId: predecessorId,
+      projectId: p?.projectId ?? null,
+      text: `${p ? `${p.projectName} · ${p.role ?? "session"} ` : "session "}${predecessorId.slice(0, 8)} — a halted recycle's successor died too; its fleet was consolidated back here. No automatic owner exists — resume this session, reassign its workers, or start a new manager.`,
+    });
+  }
   for (const e of latestGiveUpRecovery.values()) {
     const detail = (e.detail ?? {}) as { count?: number; windowMs?: number };
     const windowMin = detail.windowMs ? Math.round(detail.windowMs / 60_000) : null;
@@ -600,6 +629,10 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     });
   }
   for (const s of all.filter(isOrphanedFleet)) {
+    // Card 65294dcc — a predecessor already covered by the more specific RECYCLE LINEAGE CONSOLIDATED item
+    // above incidentally also matches isOrphanedFleet (the consolidation branch reuses its lastError
+    // prefix); skip it here so the same lineage never renders twice. See docs/decisions/65294dcc.
+    if (recycleConsolidatedPredecessorIds.has(s.id)) continue;
     items.push({
       key: `of-${s.id}`, tone: "red", notify: "orphaned-fleet", kind: "ORPHANED FLEET", sessionId: s.id,
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
@@ -643,6 +676,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // above (a deliberately narrower gate, naming only the DISMISSABLE kinds' own sources).
   const resolved = !sessions.isPending && !questions.isPending && !bootStuckEventsQuery.isPending
     && !vaultLockEventsQuery.isPending && !codexGapEventsQuery.isPending
+    && !recycleConsolidatedEventsQuery.isPending
     && !crashLoopAbandonedEventsQuery.isPending && !crashLoopRecoveredEventsQuery.isPending
     && eventQueries.every((q) => !q.isPending);
 

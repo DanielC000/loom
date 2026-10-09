@@ -293,6 +293,31 @@ export function activeCrashLoopAbandonments(
   return out;
 }
 
+// ── RECYCLE LINEAGE CONSOLIDATED (card 65294dcc) ────────────────────────────────────────────────────────
+// @decision 65294dcc — own kind-filtered query (P is not a live manager); `isStillConsolidated` must stay
+// `isOrphanedFleet(predecessorId)` re-checked live (no second "cleared" event exists for this kind); the
+// caller must exclude any predecessor id covered here from the generic ORPHANED FLEET loop.
+export interface RecycleLineageConsolidatedAlert { event: OrchestrationEvent; predecessorId: string }
+
+export function activeRecycleLineageConsolidatedAlerts(
+  events: readonly OrchestrationEvent[],
+  isStillConsolidated: (predecessorId: string) => boolean,
+): RecycleLineageConsolidatedAlert[] {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of sorted) {
+    if (e.kind !== "recycle_split_lineage_consolidated") continue;
+    if (!e.managerSessionId) continue; // can't key a per-predecessor pairing without one — drop defensively
+    latest.set(e.managerSessionId, e);
+  }
+  const out: RecycleLineageConsolidatedAlert[] = [];
+  for (const [predecessorId, event] of latest) {
+    if (!isStillConsolidated(predecessorId)) continue; // a human already resumed/archived/superseded P
+    out.push({ event, predecessorId });
+  }
+  return out;
+}
+
 // ── ATTENTION ITEM → OWNING PROJECT ─────────────────────────────────────────────────────────────────────
 // The ONE resolver behind every project-scoped read of the attention queue: the project Overview's
 // `projAttention` list and Mission Control's per-project `attnByProject` count.

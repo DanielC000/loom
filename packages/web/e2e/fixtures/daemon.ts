@@ -361,6 +361,12 @@ export interface LoomDaemon {
      *  `harness` is pinned onto the row from the resolved Profile at spawn, and spawning is exactly what
      *  the no-spawn guard forbids. Omitted ⇒ NULL ⇒ "claude", byte-identical to every existing call. */
     harness?: "claude" | "codex";
+    /** (card 65294dcc) Omitted ⇒ "live", byte-identical to every existing call. Pass "exited" to build a
+     *  dead-but-visible row (e.g. for a lastError-prefix-keyed derivation like isOrphanedFleet). */
+    processState?: "none" | "starting" | "live" | "exited";
+    /** (card 65294dcc) Omitted ⇒ null. The ONLY way a spec can seed a row that matches a lastError-prefix-
+     *  keyed web derivation (isOrphanedFleet/isCrashLooped in packages/web/src/lib/attention.ts). */
+    lastError?: string;
   }) => Promise<SeededLiveSession>;
   /**
    * Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind via POST
@@ -766,6 +772,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
           parentSessionId: opts.parentSessionId, taskId, branch: opts.branch, title: opts.title,
           ptyGeometry: opts.ptyGeometry, ptyBytes: opts.ptyBytes,
           model: opts.model, ctxInputTokens: opts.ctxInputTokens, harness: opts.harness,
+          processState: opts.processState, lastError: opts.lastError,
         }],
         wakes: opts.wake ? [{ sessionId, note: wakeNote }] : [],
       });

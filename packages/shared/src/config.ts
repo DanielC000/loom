@@ -970,6 +970,10 @@ export const BROWSER_NOTIFICATION_KINDS = [
   "stuck-busy",
   "crash-looped",
   "orphaned-fleet",
+  // Card 65294dcc — a `recycle_split_lineage_consolidated` event (a both-dead halted-recycle lineage, see
+  // docs/decisions/a4c5f234): deliberately distinct from "orphaned-fleet" so it keeps its own toggle and
+  // wording rather than riding the generic kind's accidental lastError-prefix reuse.
+  "recycle-lineage-consolidated",
 ] as const;
 
 /** One member of {@link BROWSER_NOTIFICATION_KINDS}. */

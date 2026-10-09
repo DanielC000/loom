@@ -3337,6 +3337,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           role?: SessionRole | "plain" | null;
           parentSessionId?: string; taskId?: string; title?: string;
           busy?: boolean; branch?: string; model?: string; processState?: ProcessState;
+          // (card 65294dcc) The ONLY way an e2e spec can seed a row that matches a lastError-prefix-keyed
+          // web derivation (isOrphanedFleet/isCrashLooped in packages/web/src/lib/attention.ts) — every
+          // other seed field defaults lastError to null, and no other test-only lever writes it. Omitted ⇒
+          // null, byte-identical to every existing caller.
+          lastError?: string | null;
           // Measured context occupancy (card b449be97) — the ONLY way an e2e spec can seed a session with
           // a real ctxInputTokens reading; nothing else writes ctx_input_tokens outside the pty's own
           // onContextStats. `0` is a legitimate MEASURED value (a real 0% meter), distinct from the
@@ -3657,7 +3662,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           title: s.title ?? null, cwd: project.repoPath,
           processState: (s.processState as ProcessState | undefined) ?? "live",
           resumability: "resumable", busy: s.busy ?? false,
-          createdAt: now, lastActivity: now, lastError: null,
+          createdAt: now, lastActivity: now, lastError: s.lastError ?? null,
           role: s.role && s.role !== "plain" ? (s.role as SessionRole) : null,
           parentSessionId: s.parentSessionId ?? null,
           taskId: s.taskId ?? null,

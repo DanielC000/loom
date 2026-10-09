@@ -13,7 +13,7 @@ import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
   activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
-  activeCrashLoopAbandonments,
+  activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts,
   resolveAttentionProjectId, attentionItemInProject,
 } from "../src/lib/fleet.ts";
 
@@ -722,6 +722,68 @@ check("activeCrashLoopAbandonments: a manager/platform with zero live workers (r
   const items = activeCrashLoopAbandonments([abandoned], [], NO_LIVE);
   assert.equal(items.length, 1, "the ruling scoped this role-agnostic, not worker-only");
   assert.equal(items[0].event.detail.role, "manager");
+});
+
+// ── RECYCLE LINEAGE CONSOLIDATED (card 65294dcc) — a both-dead halted-recycle lineage's consolidation
+// banner (docs/decisions/a4c5f234), keyed by the predecessor's own session id. ──────────────────────────
+let rlcSeq = 0;
+const rlcEv = (o = {}) => ({
+  id: `rlc-${++rlcSeq}`,
+  ts: o.ts ?? new Date(rlcSeq).toISOString(),
+  kind: o.kind ?? "recycle_split_lineage_consolidated",
+  workerSessionId: null,
+  managerSessionId: o.managerSessionId ?? "pred-a",
+  taskId: null,
+  detail: o.detail ?? { deadSuccessorId: "succ-a" },
+});
+
+check("activeRecycleLineageConsolidatedAlerts: a consolidated event surfaces an alert while the predecessor is still stranded", () => {
+  const ev = rlcEv();
+  const alerts = activeRecycleLineageConsolidatedAlerts([ev], () => true);
+  assert.equal(alerts.length, 1, "still consolidated ⇒ item");
+  assert.equal(alerts[0].predecessorId, "pred-a");
+  assert.equal(alerts[0].event.id, ev.id);
+});
+
+check("activeRecycleLineageConsolidatedAlerts: clears once the predecessor is no longer stranded (isStillConsolidated:false)", () => {
+  const ev = rlcEv();
+  const alerts = activeRecycleLineageConsolidatedAlerts([ev], () => false);
+  assert.deepEqual(alerts, [], "a human resumed/archived the predecessor (or a later banner superseded it) ⇒ none");
+});
+
+check("activeRecycleLineageConsolidatedAlerts: exactly one item per predecessor even with multiple events for it (latest wins)", () => {
+  const first = rlcEv({ managerSessionId: "pred-b", ts: "2026-01-01T00:00:00.000Z" });
+  const second = rlcEv({ managerSessionId: "pred-b", ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeRecycleLineageConsolidatedAlerts([first, second], () => true);
+  assert.equal(alerts.length, 1, "one row per predecessor, not one per event");
+  assert.equal(alerts[0].event.id, second.id, "latest event wins");
+});
+
+check("activeRecycleLineageConsolidatedAlerts: unsorted input is sorted internally — order of the array passed in doesn't matter", () => {
+  const first = rlcEv({ managerSessionId: "pred-c", ts: "2026-01-01T00:00:00.000Z" });
+  const second = rlcEv({ managerSessionId: "pred-c", ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeRecycleLineageConsolidatedAlerts([second, first], () => true); // passed out of order
+  assert.equal(alerts[0].event.id, second.id, "still resolves to the later one regardless of array order");
+});
+
+check("activeRecycleLineageConsolidatedAlerts: independent predecessors are tracked separately — one cleared, one still open", () => {
+  const evX = rlcEv({ managerSessionId: "pred-x" });
+  const evY = rlcEv({ managerSessionId: "pred-y" });
+  const alerts = activeRecycleLineageConsolidatedAlerts([evX, evY], (id) => id === "pred-x");
+  assert.equal(alerts.length, 1, "only the still-stranded predecessor surfaces");
+  assert.equal(alerts[0].predecessorId, "pred-x");
+});
+
+check("activeRecycleLineageConsolidatedAlerts: an event with no managerSessionId is dropped defensively, never crashes", () => {
+  const malformed = { ...rlcEv(), managerSessionId: null };
+  const alerts = activeRecycleLineageConsolidatedAlerts([malformed], () => true);
+  assert.deepEqual(alerts, [], "no predecessor id to key on ⇒ dropped, not surfaced");
+});
+
+check("activeRecycleLineageConsolidatedAlerts: an unrelated event kind is ignored", () => {
+  const other = { ...rlcEv(), kind: "recycle_fleet_recovered" };
+  const alerts = activeRecycleLineageConsolidatedAlerts([other], () => true);
+  assert.deepEqual(alerts, [], "a non-matching kind never surfaces here");
 });
 
 console.log(`\n${pass} passed`);
