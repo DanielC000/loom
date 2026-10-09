@@ -124,7 +124,23 @@ export function PlanUsageStrip() {
   );
 }
 
-export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionItem; onOpen?: () => void; onDismiss?: () => void }) {
+/**
+ * Card 51a80b4d — what AttentionRow needs to RENDER a row, which is strictly less than what
+ * `useAttention` must produce. `notify` (the browser-notification category) is OPTIONAL here and
+ * REQUIRED on `AttentionItem`, deliberately: the required field on `AttentionItem` is what guarantees
+ * every alert that can raise a desktop notification also has a Settings toggle, but a caller that only
+ * BORROWS this row shape to render something never routed through `useAttention` (today:
+ * `MergeGateAttention` in components/mergeGate.tsx, which renders straight onto Overview and never
+ * reaches `useNewAttention`) has no notification to categorise. Forcing it to name one would ship a
+ * toggle in Settings that silences nothing. A real `AttentionItem` satisfies this type, so the two
+ * genuine callers (MissionControl, Overview) are unaffected.
+ *
+ * ⚠️ If a render-only borrowing is ever wired INTO `useAttention`'s item list, it stops being render-only
+ * and must gain a real `notify` kind (+ its Settings toggle) at that point.
+ */
+export type AttentionRowItem = Omit<AttentionItem, "notify"> & Partial<Pick<AttentionItem, "notify">>;
+
+export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionRowItem; onOpen?: () => void; onDismiss?: () => void }) {
   // A pending Request of ANY type (live or orphaned) reads as an answerable ask: a cyan left-edge, a
   // PENDING state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE
   // REQUEST and the red/amber alerts. Orphaned still routes to the same answer page (its own amber

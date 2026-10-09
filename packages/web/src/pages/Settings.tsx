@@ -23,7 +23,13 @@ import {
   ORCHESTRATION_TIMEOUT_MS_BOUNDS,
   PLATFORM_MS_BOUNDS,
   MEMORY_CONFIG_MAX,
+  BROWSER_NOTIFICATION_KINDS,
+  type BrowserNotificationKind,
 } from "@loom/shared";
+// Card 51a80b4d — the display copy for the Browser-notifications toggles below. A TOTAL record over
+// BROWSER_NOTIFICATION_KINDS, co-located with the attention-item builders it describes, so this list and
+// the alerts that actually fire are the same single source.
+import { BROWSER_NOTIFICATION_LABELS } from "../lib/attention";
 import {
   api,
   type ProjectPatchError,
@@ -1250,6 +1256,17 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const [coalesceAgentMsgs, setCoalesceAgentMsgs] = useState(triStr(override.coalesceAgentMessages));
   // Bucket 2b "Elevated Operator" gate — same daemon-global tri-state pattern, own toggle (default OFF).
   const [operatorEnabled, setOperatorEnabled] = useState(triStr(override.operatorEnabled));
+  // Card 51a80b4d — the browser-notification mute set. Held as a Set of MUTED kinds (matching the stored
+  // denylist shape exactly, so there is no on/off inversion to get wrong between here and the config),
+  // while each checkbox reads and writes the INVERSE: checked = notify = NOT in this set.
+  const [mutedNotifications, setMutedNotifications] = useState<Set<BrowserNotificationKind>>(
+    () => new Set(override.mutedBrowserNotifications ?? []),
+  );
+  const toggleNotification = (kind: BrowserNotificationKind) => setMutedNotifications((prev) => {
+    const next = new Set(prev);
+    if (next.has(kind)) next.delete(kind); else next.add(kind);
+    return next;
+  });
   // Pillar-B cron Scheduler gate (§19b) — daemon-global (one shared daemon), same tri-state pattern.
   // Boot-time-gated by design: a flip here needs a daemon restart to start/stop the ticker (see the
   // banner above and the Schedules page hint).
@@ -1368,6 +1385,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     }
     o.coalesceAgentMessages = coalesceAgentMsgs === "inherit" ? null : coalesceAgentMsgs === "true";
     o.operatorEnabled = operatorEnabled === "inherit" ? null : operatorEnabled === "true";
+    // Card 51a80b4d: always emit the FULL muted set (the panel renders every kind, so its state is always
+    // complete — the PATCH handler replaces this key wholesale, it is not deep-merged). Nothing muted
+    // sends the `null` clear sentinel rather than `[]`, so an all-notifications-on config leaves no stored
+    // key behind at all and reads identically to a daemon that never had this setting.
+    o.mutedBrowserNotifications = mutedNotifications.size === 0
+      ? null
+      : BROWSER_NOTIFICATION_KINDS.filter((k) => mutedNotifications.has(k));
     o.schedulerEnabled = schedulerEnabled === "inherit" ? null : schedulerEnabled === "true";
     // Number("") would be 0 (a deadlocking cap), so blank must send the clear sentinel, not 0. A
     // non-numeric entry is routed through as the ORIGINAL STRING rather than Number()'s NaN — NaN
@@ -1588,6 +1612,53 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             rejection, an already-merged notice) stay on their own turn either way.
           </Hint>
         </label>
+      </Panel>
+
+      {/* Card 51a80b4d — one general set of toggles (owner: "General toggles no project specific
+          toggles") over the DESKTOP notification only. Rendered from the shared
+          BROWSER_NOTIFICATION_KINDS order, so this list cannot drift from what actually fires. */}
+      <Panel>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+          <SectionLabel>Browser notifications</SectionLabel>
+          <span style={{ flex: 1 }} />
+          <span data-testid="notify-muted-count">
+            <Hint>
+              {mutedNotifications.size === 0
+                ? "all on"
+                : `${mutedNotifications.size} of ${BROWSER_NOTIFICATION_KINDS.length} muted`}
+            </Hint>
+          </span>
+          <Button data-testid="notify-mute-all" onClick={() => setMutedNotifications(new Set(BROWSER_NOTIFICATION_KINDS))}
+            disabled={mutedNotifications.size === BROWSER_NOTIFICATION_KINDS.length}>Mute all</Button>
+          <Button data-testid="notify-unmute-all" onClick={() => setMutedNotifications(new Set())}
+            disabled={mutedNotifications.size === 0}>Unmute all</Button>
+        </div>
+        {/* Capped measure: this panel is full-width, and an uncapped hint runs past 90 characters a line
+            — well over the ~75ch the rest of the page reads at (its sibling hints are narrow only because
+            they sit inside maxWidth-ed field labels, which this one has no reason to be). */}
+        <Hint style={{ display: "block", marginTop: 8, maxWidth: "68ch", lineHeight: 1.6 }}>
+          Which alerts may raise a desktop notification from your browser. Unchecking one silences only its
+          desktop ping — its on-screen toast, the pending-request pill and the sidebar count all stay, so
+          nothing disappears from this page. Daemon-wide, not per-project.
+        </Hint>
+        <div className="loom-field-grid loom-field-grid-2" style={{ marginTop: 14 }}>
+          {BROWSER_NOTIFICATION_KINDS.map((kind) => {
+            const { label, hint } = BROWSER_NOTIFICATION_LABELS[kind];
+            const notify = !mutedNotifications.has(kind);
+            return (
+              <label key={kind} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", padding: "2px 0" }}>
+                <input type="checkbox" data-testid={`notify-${kind}`} checked={notify}
+                  onChange={() => toggleNotification(kind)}
+                  style={{ marginTop: 2, accentColor: "var(--loom-phosphor)", width: 16, height: 16, flexShrink: 0 }} />
+                <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                  <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontSize: 13,
+                    color: notify ? color.text : color.textMuted }}>{label}</span>
+                  <Hint style={{ lineHeight: 1.5 }}>{hint}</Hint>
+                </span>
+              </label>
+            );
+          })}
+        </div>
       </Panel>
 
       <Panel>

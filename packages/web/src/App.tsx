@@ -13,7 +13,7 @@ import { CredentialBanner } from "./components/CredentialBanner";
 import { GatewayTokenBanner } from "./components/GatewayTokenBanner";
 import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
-import { useAttention, useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
+import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionOpenTarget, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider } from "./lib/activeProject";
 import { color, font, radius, tone } from "./theme";
@@ -106,6 +106,7 @@ function ToastContainer() {
   const navigate = useNavigate();
   const location = useLocation();
   const { items } = useAttention();
+  const muted = useMutedBrowserNotifications();
   const [toasts, setToasts] = useState<{ id: number; item: AttentionItem }[]>([]);
   const dismiss = (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id));
 
@@ -116,8 +117,11 @@ function ToastContainer() {
   }, []);
 
   useNewAttention((item) => {
-    // The desktop ping still fires for EVERY new item (non-occluding, off-screen), including requests.
-    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+    // The desktop ping fires for every new item (non-occluding, off-screen), including requests — EXCEPT a
+    // category the human muted in Settings → Browser notifications (card 51a80b4d). The mute governs this
+    // browser Notification ONLY: the on-screen toast and the request pill below are deliberately
+    // unchanged, since the owner asked about browser notifications.
+    if (!muted.has(item.notify) && typeof Notification !== "undefined" && Notification.permission === "granted") {
       new Notification(`Loom · ${item.kind}`, { body: item.text });
     }
     // On-screen, a pending REQUEST is carried by the collapsed count pill below — never its own toast.

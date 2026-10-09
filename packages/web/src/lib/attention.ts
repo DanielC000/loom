@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
-import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
+import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
 import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
@@ -97,10 +97,55 @@ function useDismissedSet(): Set<string> {
   return useMemo(() => new Set(snap), [snap]);
 }
 
+// Card 51a80b4d — the display copy for the browser-notification toggles, a TOTAL record over the shared
+// `BrowserNotificationKind` domain. Total on purpose: adding an id to `BROWSER_NOTIFICATION_KINDS`
+// (packages/shared/src/config.ts) without adding its label here is a COMPILE error, and a builder below
+// cannot set a `notify` outside that domain either — so the Settings list can't drift from what actually
+// fires in EITHER direction. `kind` (the free-form display string in the toast title) stays separate:
+// several kinds share one notification category, and the Request kinds vary their label by type/state.
+export const BROWSER_NOTIFICATION_LABELS: Record<BrowserNotificationKind, { label: string; hint: string }> = {
+  "request": { label: "Pending requests", hint: "A manager is waiting on you — a decision, an answer, an authorization, or a secret. Covers stale and orphaned requests too." },
+  "merge-request": { label: "Merge request", hint: "A worker finished and its branch is waiting for your review." },
+  "boot-stuck": { label: "Boot stuck", hint: "A session never reached ready after spawning." },
+  "manager-asleep": { label: "Manager asleep", hint: "A manager went idle with work still on its board." },
+  "queue-drained": { label: "Queue drained", hint: "A manager ran out of dispatchable work." },
+  "context-overflow": { label: "Context overflow", hint: "A manager is close to filling its context window." },
+  "vault-lock-stuck": { label: "Vault lock stuck", hint: "A vault commit lock has been held too long." },
+  "codex-isolation-gap": { label: "Codex isolation gap", hint: "A codex session's sandbox could not be confirmed." },
+  "give-up-recovery": { label: "Give-up recovery", hint: "Loom stopped retrying a message delivery into a session." },
+  "quiet-board": { label: "Quiet board", hint: "A manager's board has gone quiet with nothing in flight." },
+  "rate-limited": { label: "Rate limited", hint: "A session hit the model provider's rate limit." },
+  "stuck-busy": { label: "Stuck busy", hint: "A session has been mid-turn far longer than expected." },
+  "crash-looped": { label: "Crash looped", hint: "A session kept dying and auto-resume gave up on it." },
+  "orphaned-fleet": { label: "Orphaned fleet", hint: "A worker outlived the manager that dispatched it." },
+};
+
+/**
+ * Card 51a80b4d — the human's muted browser-notification categories, read LIVE off the RESOLVED platform
+ * group (never the raw override, and never an ad-hoc default here: `resolveConfig` on the daemon side is
+ * the one resolution mechanism, and this reads its output). Shares the `["platformConfig"]` query key
+ * with the Settings page, so react-query dedups the fetch and Settings' own save-invalidation refreshes
+ * this immediately — no second poll and no restart. While the config is still loading, or if the read
+ * fails, the set is EMPTY: the fail-open direction is "still notify", because losing an alert the human
+ * asked to keep is worse than one extra ping they asked to mute.
+ */
+export function useMutedBrowserNotifications(): Set<BrowserNotificationKind> {
+  const cfg = useQuery({ queryKey: ["platformConfig"], queryFn: () => api.getPlatformConfig() });
+  const muted = cfg.data?.resolved.mutedBrowserNotifications;
+  return useMemo(() => new Set(muted ?? []), [muted]);
+}
+
 export interface AttentionItem {
   key: string;
   tone: Tone;
   kind: string;
+  // Card 51a80b4d — which browser-notification toggle governs this item's desktop `Notification`.
+  // REQUIRED, and typed to the shared domain, so a new item builder cannot ship a kind that silently
+  // escapes the Settings toggles (the structural half of this feature; see BROWSER_NOTIFICATION_LABELS
+  // above). Several display `kind`s map to one `notify` — every Request presentation is `"request"`, and
+  // both CRASH-LOOPED builders are `"crash-looped"`. Governs the browser Notification ONLY: the on-screen
+  // toast stack and the pending-Request count pill ignore it entirely.
+  notify: BrowserNotificationKind;
   text: string;
   // Set on a user-dismissable kind — STUCK-BUSY (`${sessionId}:${lastActivity}`) and CODEX ISOLATION GAP
   // (`${agent}:${itemsKey}`, card ed0858dc). Its presence is what makes a row dismissable (AttentionRow
@@ -331,13 +376,13 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     // good, so there is nothing left for a session lookup to find.
     items.push(q.sessionOrphaned
       ? {
-          key: `q-${q.id}`, tone: "amber", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "amber", notify: "request", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           text: `${decisionAttentionText(q)} — asking session is gone; may never be consumed`,
         }
       : stale
       ? {
-          key: `q-${q.id}`, tone: "red", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "red", notify: "request", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           // Structural marker for the Snooze affordance (AttentionRow) — set ONLY on this exact branch, so
           // "snooze" never shows on a cyan/amber/orphaned row where there's nothing stale to suppress.
@@ -345,7 +390,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
           text: `${decisionAttentionText(q)} — pending since ${new Date(q.createdAt).toLocaleDateString()}, unanswered`,
         }
       : {
-          key: `q-${q.id}`, tone: "cyan", kind: label, questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "cyan", notify: "request", kind: label, questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           text: decisionAttentionText(q),
         });
@@ -363,7 +408,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const e of latestMerge.values()) {
     if (e.kind === "merge_request" && liveWorker(e.workerSessionId)) {
       items.push({
-        key: `m-${e.id}`, tone: "phosphor", kind: "MERGE REQUEST", workerSessionId: e.workerSessionId,
+        key: `m-${e.id}`, tone: "phosphor", notify: "merge-request", kind: "MERGE REQUEST", workerSessionId: e.workerSessionId,
         text: `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`,
       });
     }
@@ -371,7 +416,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const { event: e, sessionId: sid } of activeBootStuck) {
     const detail = (e.detail ?? {}) as { signatureName?: string | null; role?: string | null; timeoutMs?: number };
     items.push({
-      key: `bs-${e.id}`, tone: "red", kind: "BOOT STUCK", sessionId: sid,
+      key: `bs-${e.id}`, tone: "red", notify: "boot-stuck", kind: "BOOT STUCK", sessionId: sid,
       text: `${detail.role ?? "session"} ${sid.slice(0, 8)} never reached SessionStart — possible blocking CLI dialog (${detail.signatureName ?? "none recognized"})`,
     });
   }
@@ -379,12 +424,12 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     const detail = (e.detail ?? {}) as { state?: string; detail?: string; unanswered?: number };
     if (e.kind === "idle_escalated") {
       items.push({
-        key: `ie-${e.id}`, tone: "red", kind: "MANAGER ASLEEP", sessionId: e.managerSessionId,
+        key: `ie-${e.id}`, tone: "red", notify: "manager-asleep", kind: "MANAGER ASLEEP", sessionId: e.managerSessionId,
         text: `manager ${e.managerSessionId.slice(0, 8)} — ${detail.unanswered ?? "?"} unanswered idle nudges, escalated`,
       });
     } else if (detail.state === "done") {
       items.push({
-        key: `id-${e.id}`, tone: "amber", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
+        key: `id-${e.id}`, tone: "amber", notify: "queue-drained", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
         text: `manager ${e.managerSessionId.slice(0, 8)} — queue drained; reclaim/close the session${detail.detail ? ` (${detail.detail})` : ""}`,
       });
     }
@@ -393,7 +438,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const e of latestContext.values()) {
     const detail = (e.detail ?? {}) as { unanswered?: number; pct?: number };
     items.push({
-      key: `ce-${e.id}`, tone: "red", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
+      key: `ce-${e.id}`, tone: "red", notify: "context-overflow", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
     });
   }
@@ -401,7 +446,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     const detail = (e.detail ?? {}) as { repoPath?: string; command?: string; ageMs?: number; projectId?: string };
     const ageMin = typeof detail.ageMs === "number" ? Math.round(detail.ageMs / 60000) : null;
     items.push({
-      key: `vl-${e.id}`, tone: "red", kind: "VAULT LOCK STUCK",
+      key: `vl-${e.id}`, tone: "red", notify: "vault-lock-stuck", kind: "VAULT LOCK STUCK",
       // Card 5ced500b — this item carries NO session id at all (it keys on `detail.repoPath`; no session
       // owns a vault watcher), so before this it resolved to no project and showed on NO project Overview,
       // ever. The daemon has always filed `detail.projectId` alongside repoPath (vault/versioner.ts), so
@@ -427,7 +472,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     const agentLabel = all.find((s) => s.id === sid)?.agentName
       ?? (detail.agentId ? `agent ${detail.agentId.slice(0, 8)}` : `session ${sid.slice(0, 8)}`);
     items.push({
-      key: `cig-${e.id}`, tone: "amber", kind: "CODEX ISOLATION GAP", sessionId: sid,
+      key: `cig-${e.id}`, tone: "amber", notify: "codex-isolation-gap", kind: "CODEX ISOLATION GAP", sessionId: sid,
       // Card 5ced500b — this kind has NO liveness filter by design (card ed0858dc: it reports a
       // standing CONFIGURATION fact whose remedy outlives the disclosing session), and a codex run is
       // short-lived, so by the time a human looks the session is usually archived and gone from the live
@@ -452,7 +497,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     const detail = (e.detail ?? {}) as { count?: number; windowMs?: number };
     const windowMin = detail.windowMs ? Math.round(detail.windowMs / 60_000) : null;
     items.push({
-      key: `gr-${e.id}`, tone: "red", kind: "GIVE-UP RECOVERY", sessionId: e.managerSessionId,
+      key: `gr-${e.id}`, tone: "red", notify: "give-up-recovery", kind: "GIVE-UP RECOVERY", sessionId: e.managerSessionId,
       text: `manager ${e.managerSessionId.slice(0, 8)} — submit give-up recovery fired ${detail.count ?? "?"}x${windowMin ? ` in ~${windowMin}m` : ""}; its composer submissions may be unreliable`,
     });
   }
@@ -484,7 +529,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       : `manager ${e.managerSessionId.slice(0, 8)} — quiet: ${causePhrase}` +
         (questionCount > 0 ? `; answering ${questionCount} pending Request(s) releases ${releasedCardCount} card(s)` : "");
     items.push({
-      key: `bq-${e.id}`, tone: "amber", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
+      key: `bq-${e.id}`, tone: "amber", notify: "quiet-board", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
     });
   }
   // Defense-in-depth: only a LIVE session is actionably rate-limited. The durable fix clears
@@ -492,7 +537,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   // could still carry a future timestamp — it can never resume, so it must not linger here.
   for (const s of all.filter((s) => isRateLimited(s) && s.processState === "live")) {
     items.push({
-      key: `r-${s.id}`, tone: "red", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
+      key: `r-${s.id}`, tone: "red", notify: "rate-limited", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
       // Card 5ced500b — this row carries `rateLimitSessionId` (the clear/retry action's target), never
       // `sessionId`, so the old session-id-only resolver found nothing and the item surfaced GLOBALLY only.
       // A comment on the Overview used to call that deliberate; it wasn't — it described the missing field,
@@ -511,7 +556,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     isWaitingSnoozed: isActiveWaitingSnooze(latestIdle.get(s.id)),
   }))) {
     items.push({
-      key: `s-${s.id}`, tone: "amber", kind: "STUCK-BUSY", sessionId: s.id,
+      key: `s-${s.id}`, tone: "amber", notify: "stuck-busy", kind: "STUCK-BUSY", sessionId: s.id,
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
       // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
       projectId: s.projectId,
@@ -521,7 +566,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   }
   for (const s of all.filter(isCrashLooped)) {
     items.push({
-      key: `cl-${s.id}`, tone: "red", kind: "CRASH-LOOPED", sessionId: s.id,
+      key: `cl-${s.id}`, tone: "red", notify: "crash-looped", kind: "CRASH-LOOPED", sessionId: s.id,
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
       // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
       projectId: s.projectId,
@@ -539,7 +584,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   for (const { event: e, sessionId: sid } of archivedCrashLoopItems) {
     const detail = (e.detail ?? {}) as { role?: string | null; attempts?: number; projectId?: string | null };
     items.push({
-      key: `cl-${e.id}`, tone: "red", kind: "CRASH-LOOPED", sessionId: sid,
+      key: `cl-${e.id}`, tone: "red", notify: "crash-looped", kind: "CRASH-LOOPED", sessionId: sid,
       // Card 5ced500b — stated directly from the event's own detail: session_recovery_abandoned is
       // already a DURABLE_AUDIT_EVENT_KINDS member, so db.ts's appendEvent backstop (9f7f2b50) stamps
       // projectId generically at write time — no daemon change was needed for this card. A row filed
@@ -556,7 +601,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   }
   for (const s of all.filter(isOrphanedFleet)) {
     items.push({
-      key: `of-${s.id}`, tone: "red", kind: "ORPHANED FLEET", sessionId: s.id,
+      key: `of-${s.id}`, tone: "red", notify: "orphaned-fleet", kind: "ORPHANED FLEET", sessionId: s.id,
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
       // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
       projectId: s.projectId,

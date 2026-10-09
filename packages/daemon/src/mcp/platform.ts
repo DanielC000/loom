@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, TASK_CREATE_STRUCTURE_DOC } from "../tasks/relations.js";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, redactAlertWebhookInConfig, resolveConfig } from "@loom/shared";
+import { BROWSER_NOTIFICATION_KINDS, MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, redactAlertWebhookInConfig, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
@@ -1005,6 +1005,14 @@ const platformConfigOverrideSchema = z.object({
   // agent-facing platform-config surface at all (see the function doc below), so this reaches an agent
   // no differently than gateCommand reaches one via the project schema: it simply isn't reachable.
   operatorEnabled: z.boolean().optional(),
+  // Card 51a80b4d: the browser-notification denylist. Validated against the SHARED
+  // `BROWSER_NOTIFICATION_KINDS` domain rather than a bare `z.array(z.string())`, so a typo'd or retired
+  // kind id is a 400 at write time instead of a silently-inert entry nothing ever matches. HUMAN-only
+  // like every platform key — there is no agent-facing platform-config surface at all (see this
+  // function's own doc), so it reaches an agent no differently than gateCommand does: it simply isn't
+  // reachable. Plain operational tuning (a list of UI category ids) with no credential/host-path shape,
+  // so `sanitizePlatformConfigForAgent` passes it through unredacted.
+  mutedBrowserNotifications: z.array(z.enum(BROWSER_NOTIFICATION_KINDS)).optional(),
   remoteAccess: remoteAccessOverride.optional(),
   // Pillar-B trigger gate (§19b), moved here from the per-project orchestration shape (see the removal
   // note on orchestrationOverride above) — schedulerEnabled is a daemon-wide service, not per-project.
@@ -1117,7 +1125,8 @@ const remoteAccessPatchOverride = z.object(nullableShape(remoteAccessOverride.sh
  * `timeouts`/`backup`/`gateRetry` (the deep-partial groups) and `schedulerEnabled`/`operatorEnabled`/
  * `coalesceAgentMessages`/`maxConcurrentGates`/`maxConcurrentManagers`/`maxConcurrentAuditors`/
  * `usageSampleIntervalMs`/`usageSampleRetentionDays`/`updateCheckIntervalMs` (the tri-state toggles + the
- * scalar cap/cadence inputs) — additionally accept an explicit
+ * scalar cap/cadence inputs) and `mutedBrowserNotifications` (card 51a80b4d — the "nothing muted" state
+ * clears the key rather than storing `[]`) — additionally accept an explicit
  * `null`. Whole-group `null` means "delete this whole group from the persisted override" (revert every
  * field in it to the resolved default). Within a submitted group object, EACH FIELD is also individually
  * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride`/`backupPatchOverride`/
@@ -1143,6 +1152,9 @@ const platformConfigPatchSchema = z.object({
   coalesceAgentMessages: z.boolean().nullable().optional(),
   companionVoiceEnabled: z.boolean().optional(),
   operatorEnabled: z.boolean().nullable().optional(),
+  // Card 51a80b4d — nullable like the toggles above: the Settings panel sends `null` when nothing is
+  // muted, so an all-on config stores no key at all rather than an empty array.
+  mutedBrowserNotifications: z.array(z.enum(BROWSER_NOTIFICATION_KINDS)).nullable().optional(),
   remoteAccess: remoteAccessPatchOverride.optional(),
   schedulerEnabled: z.boolean().nullable().optional(),
   maxConcurrentGates: z.number().int().min(1).max(50).nullable().optional(),

@@ -943,6 +943,39 @@ export function resolveCodescapeMemoryCeilingMb(platformOverride?: unknown): num
 }
 
 /**
+ * Card 51a80b4d — the mutable DOMAIN of `PlatformConfig.mutedBrowserNotifications`: every category of
+ * attention item that can fire a browser `Notification`, in the order the Settings list renders them.
+ *
+ * It lives HERE, not in `packages/web/src/lib/attention.ts` where the items are built, because these ids
+ * are PERSISTED in platform config: the daemon's write validator (`platformConfigOverrideSchema`) must
+ * validate against the same list the web builders key off, and the daemon cannot import from
+ * `packages/web`. Three readers, no second copy: this type constrains `AttentionItem.notify` (a builder
+ * physically cannot invent a category with no toggle), `BROWSER_NOTIFICATION_LABELS` in `lib/attention.ts`
+ * is a TOTAL record over it (a new id with no display copy is a compile error), and the validator rejects
+ * anything outside it. `request` covers EVERY item carrying a `questionId` — all four Request types across
+ * all three presentations (NEEDED/STALE/ORPHANED): one notification concern to a human, not twelve.
+ */
+export const BROWSER_NOTIFICATION_KINDS = [
+  "request",
+  "merge-request",
+  "boot-stuck",
+  "manager-asleep",
+  "queue-drained",
+  "context-overflow",
+  "vault-lock-stuck",
+  "codex-isolation-gap",
+  "give-up-recovery",
+  "quiet-board",
+  "rate-limited",
+  "stuck-busy",
+  "crash-looped",
+  "orphaned-fleet",
+] as const;
+
+/** One member of {@link BROWSER_NOTIFICATION_KINDS}. */
+export type BrowserNotificationKind = (typeof BROWSER_NOTIFICATION_KINDS)[number];
+
+/**
  * Daemon-global "platform" tuning grouping: rate-limit numbers, watcher cadences, operation timeouts.
  * NOT per-project — like `backup`/`schedulerEnabled`, the daemon shares ONE of these. The daemon
  * supplies an optional global override (its SQLite-persisted singleton blob) as the 2nd arg to
@@ -995,6 +1028,21 @@ export interface PlatformConfig {
    * rest of `PlatformConfig`.
    */
   operatorEnabled: boolean;
+  /**
+   * Card 51a80b4d (owner wish: "allow users to turn off browser notifications for each specific
+   * notification type. General toggles no project specific toggles") — the attention categories whose
+   * desktop `Notification` the human has muted. A DENYLIST, so the default `[]` means every kind still
+   * pings and an unset override is byte-identical to the pre-card behavior; an allowlist would instead
+   * need its default re-stated every time a kind is added, and would silently mute the new one.
+   *
+   * Scope is the browser `Notification` ONLY — the in-app toast stack and the pending-Request count pill
+   * are untouched, because the owner asked about browser notifications. Read LIVE by the web client off
+   * the resolved platform group (`GET /api/platform/config`), so a save takes effect on the next poll
+   * with no daemon restart — unlike `coalesceAgentMessages`/`companionVoiceEnabled` above, which the
+   * daemon reads ONCE at boot. DAEMON-GLOBAL (deliberately not per-project: the owner asked for one
+   * general set of toggles) + HUMAN-only, mirroring the rest of `PlatformConfig`.
+   */
+  mutedBrowserNotifications: BrowserNotificationKind[];
 }
 
 /** Default for `PlatformConfig.companionVoiceEnabled` — a single named constant so flipping the shipped
@@ -1386,6 +1434,10 @@ export interface PlatformConfigOverride {
   companionVoiceEnabled?: boolean;
   /** See PlatformConfig.operatorEnabled. */
   operatorEnabled?: boolean;
+  /** See PlatformConfig.mutedBrowserNotifications. A submitted list REPLACES the stored one wholesale (it
+   *  is not a `DEEP_MERGE_GROUPS` member in the PATCH handler) — the Settings panel always emits the full
+   *  muted set, so there is no partial-list shape to merge. */
+  mutedBrowserNotifications?: BrowserNotificationKind[];
   /** See RemoteAccessConfig. Deep-partial: `tls`/`rateLimit` replace whole when present. */
   remoteAccess?: Partial<RemoteAccessConfig>;
   /** See ResolvedConfig.harness. Daemon-global fleet default; deep-partial (`default`/`scope` each optional). */
@@ -1475,7 +1527,7 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "remoteAccess" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
+  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "remoteAccess" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs" | "mutedBrowserNotifications"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
@@ -1496,6 +1548,10 @@ export type PlatformConfigPatch = Omit<
   usageSampleIntervalMs?: number | null;
   usageSampleRetentionDays?: number | null;
   updateCheckIntervalMs?: number | null;
+  /** Card 51a80b4d. Nullable like the toggles above — the Settings panel's "nothing muted" state sends
+   *  the clear sentinel rather than an empty array, so an all-on config leaves no stored key behind at
+   *  all. A submitted non-null list replaces the stored one wholesale (shallow, not deep-merged). */
+  mutedBrowserNotifications?: BrowserNotificationKind[] | null;
 };
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -1556,6 +1612,9 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     companionVoiceEnabled: COMPANION_VOICE_ENABLED_DEFAULT,
     // Default OFF (OPERATOR_ENABLED_DEFAULT) — the Bucket 2b Elevated Operator surface is explicit opt-in.
     operatorEnabled: OPERATOR_ENABLED_DEFAULT,
+    // Card 51a80b4d: nothing muted by default — every attention kind still fires its browser
+    // Notification, so an unset override behaves exactly as it did before the toggles existed.
+    mutedBrowserNotifications: [],
   },
   // Access-story Phase A: OFF + loopback by default — ships inert (see RemoteAccessConfig). The
   // rateLimit default is carried here too (Phase C) so it applies the moment a human flips `enabled`
@@ -1890,6 +1949,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
     companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,
     operatorEnabled: po?.operatorEnabled ?? d.operatorEnabled,
+    mutedBrowserNotifications: po?.mutedBrowserNotifications ?? d.mutedBrowserNotifications,
   };
 }
 
