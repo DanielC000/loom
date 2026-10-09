@@ -56,6 +56,7 @@ const SCENARIOS = [
   "clear-by-id-refused-on-canonical-collision",
   "clear-by-id-ordinary-unchanged",
   "collision-refusal-text-names-clear-by-path",
+  "dual-armed-sibling-at-non-first-key-text-and-id-agree",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -1043,6 +1044,95 @@ try {
       checkX.ok === false && checkY.ok === false && checkX.reason.includes(x) && checkX.reason.includes(y) && checkY.reason.includes(x) && checkY.reason.includes(y));
     check("x's and y's refusals are byte-identical (same blocker, same id — exactly why a bare id can't discriminate)",
       checkX.ok === false && checkY.ok === false && checkX.reason === checkY.reason);
+  } else if (scenarioName === "dual-armed-sibling-at-non-first-key-text-and-id-agree") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 9a55fb90 (CR e31c5809, finding 2) — an entry armed under TWO keys (PASS 1's dual-arm branch,
+    // a resolvable entry whose stored `resolvedKey` differs from its freshly-computed current key) can
+    // have `armedKeys[0]` name a DIFFERENT key than `quarantineLatchFileIdsFor`'s own sorted-first id
+    // (that sort is real-file-first, never armedKeys order). The OLD refusal-text code checked siblings
+    // at `armedKeys?.[0]` blindly; if the sibling instead collides at the key the OFFERED id actually
+    // names (not armedKeys[0]), the text would silently say "safe, here's the id" while clear-by-id,
+    // which resolves its own key FROM that same id, correctly refuses — a user-visible disagreement.
+    // `canonicalSiblingsForLatchId` fixes this by finding the armed key that actually hashes to the
+    // OFFERED latchId, never a positional guess.
+    //
+    // x (resolvable) is made OLDER than z (degraded, unresolvable) so armQuarantineKey's own "older
+    // wins" union keeps x's repoPath AND puts x's own key (kx) FIRST in armedKeys (verified below, not
+    // assumed) -- `armedKeys = [kx, k2]`. sub (resolvable) canonically owns k2 and survives as its own
+    // independent pending record (z's own degraded occupation of k2 blocks sub's migrate-write, exactly
+    // the c9114934 X/Y shape). kx's OWN physical file is the only one PASS 1 actually writes during this
+    // exact boot (k2's write is refused -- a different, currently-unresolvable occupant (z) already owns
+    // that physical slot) -- so by DEFAULT both armedKeys[0] AND quarantineLatchFileIdsFor's sorted-first
+    // id already agree (kx), reproducing nothing. To reach the real-world shape CR e31c5809 named (the
+    // two CAN disagree), this scenario deliberately swaps which physical file exists -- remove kx's file,
+    // touch a stand-in file at k2's own hash -- forcing the sort to prefer k2 while armedKeys still has
+    // kx first. This is an explicit test construction, not a claim that THIS exact boot sequence produces
+    // it unassisted; see the decision record for why both halves (armedKeys order, and file-exists sort)
+    // had to be verified empirically rather than assumed.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const x = path.join(os.tmpdir(), `loom-mqp1mu-x-da-${freshSfx()}`);
+    fs.mkdirSync(x, { recursive: true });
+    tmpDirs.push(x);
+    fs.writeFileSync(path.join(x, "README.md"), "# dual-armed-sibling-at-non-first-key (x)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: x });
+    commitAll(x, "init", GIT_ID);
+    const kx = canonicalRepoLockKey(x);
+
+    const sub = path.join(os.tmpdir(), `loom-mqp1mu-sub-da-${freshSfx()}`);
+    fs.mkdirSync(sub, { recursive: true });
+    tmpDirs.push(sub);
+    fs.writeFileSync(path.join(sub, "README.md"), "# dual-armed-sibling-at-non-first-key (sub)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: sub });
+    commitAll(sub, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(sub);
+
+    const z = path.join(os.tmpdir(), `loom-mqp1mu-z-da-never-${freshSfx()}`); // deliberately never created
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kx)}.json`);
+    const zFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    const subFile = path.join(MERGE_QUARANTINE_DIR, `stale-sub-da-${freshSfx()}.json`); // non-hash name -> migrates
+    // x is OLDER than z -- armQuarantineKey's own "older wins" union (unionQuarantineEntries) keeps x's
+    // own identity AND puts x's own armedKeys ([kx]) BEFORE z's ([k2]) in the merged armedKeys array.
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "x dual-armed at kx (own) and k2 (stale resolvedKey)",
+      enteredAt: Date.now() - 180_000, tokens: ["token-x-da"], resolvedKey: k2,
+    }, null, 2) + "\n");
+    fs.writeFileSync(zFile, JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "z's own manufactured resolvedKey collision with sub",
+      enteredAt: Date.now() - 60_000, tokens: ["token-z-da"], resolvedKey: k2,
+    }, null, 2) + "\n");
+    fs.writeFileSync(subFile, JSON.stringify({
+      repoPath: sub, branch: "sub-branch", reason: "sub's real, genuine unconfirmed-kill reason", enteredAt: Date.now(), tokens: ["token-sub-da"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([x, sub, z]);
+    const xEntry = activeMergeQuarantineFor(x);
+    check("(precondition) x is dual-armed under exactly two keys", xEntry?.armedKeys?.length === 2);
+    check("(precondition) armedKeys[0] is kx -- the NON-colliding key", xEntry?.armedKeys?.[0] === kx);
+    check("(precondition) armedKeys[1] is k2 -- the key sub actually collides at", xEntry?.armedKeys?.[1] === k2);
+    check("(precondition) sub reads quarantined (blocked by z's degraded occupation of k2)", !!activeMergeQuarantineFor(sub));
+
+    // Force the file-exists sort to disagree with armedKeys order -- see the scenario's own header
+    // comment for why this boot sequence alone does not already produce that disagreement.
+    fs.rmSync(xFile, { force: true });
+    fs.writeFileSync(zFile, "{}");
+    check("(precondition) kx's own file no longer exists", !fs.existsSync(xFile));
+    check("(precondition) k2's own file now exists (stand-in)", fs.existsSync(zFile));
+
+    const textResult = assertRepoNotQuarantined(x);
+    check("(precondition) x is refused", textResult.ok === false);
+    const offeredId = textResult.ok === false ? textResult.reason.match(/latch id '([0-9a-f]{24})'/)?.[1] : undefined;
+    check("the offered latch id is k2's own hash, NOT armedKeys[0]'s (kx) -- confirms quarantineLatchFileIdsFor's sort really did disagree with armedKeys order here", offeredId === hashForKey(k2));
+    check(
+      "*** THE FIX (9a55fb90, finding 2) *** the TEXT correctly flags the collision at the OFFERED id's own key, not armedKeys[0]",
+      textResult.ok === false && textResult.reason.includes("ambiguous") && textResult.reason.includes(sub),
+    );
+    check(
+      "*** THE FIX (9a55fb90, finding 2) *** clear-by-id on that SAME offered id ALSO refuses -- text and clear-by-id agree",
+      !!offeredId && clearMergeQuarantineLatchFile(offeredId).ok === false,
+    );
+    check("sub is untouched by the refused clear-by-id attempt", !!activeMergeQuarantineFor(sub));
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

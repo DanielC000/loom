@@ -185,6 +185,22 @@ function canonicalSiblingsFor(key: string, ownIdentityRepoPath: string): Pending
     directPathIdentity(p.entry.repoPath) !== ownIdentity);
 }
 
+/** {@link canonicalSiblingsFor}, but keyed off a specific OFFERED latch id rather than a bare key — for
+ *  an entry armed under MORE than one key, `entry.armedKeys?.[0]` is NOT guaranteed to be the key that
+ *  hashes to `latchId`: {@link quarantineLatchFileIdsFor}'s own id list is sorted real-file-first, never
+ *  `armedKeys` order, so the two can name different keys. Finding the armed key that actually hashes to
+ *  `latchId` keeps every refusal-text caller evaluating the EXACT SAME (key, ownIdentity) predicate input
+ *  {@link clearMergeQuarantineLatchFile} itself will use when a human acts on that same offered id — text
+ *  and clear-by-id must never be able to disagree about one given id.
+ *
+ * @decision 9a55fb90 (round 2, CR e31c5809) — see the decision record for the dual-armed-entry repro this
+ * closes; do not go back to a bare `armedKeys?.[0]`. */
+function canonicalSiblingsForLatchId(entry: MergeQuarantineEntry, latchId: string | undefined): PendingUnresolvedQuarantine[] {
+  if (!latchId) return [];
+  const key = entry.armedKeys?.find((k) => quarantineHashForKey(k) === latchId) ?? entry.armedKeys?.[0];
+  return key ? canonicalSiblingsFor(key, entry.repoPath) : [];
+}
+
 export const MERGE_QUARANTINE_DIR = path.join(LOOM_HOME, "merge-quarantines");
 
 /** Hash a raw canonical-repo-lock KEY directly (never a repoPath) — the primitive every other
@@ -1770,9 +1786,14 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
     const reason = sameAsBefore
       ? `repoPath is still quarantined by its own recorded entry (repoPath '${after.repoPath}', latch id '${latchId}') — this clear did not lift it`
       : `repoPath is quarantined by ANOTHER repo's own, separate quarantine (repoPath '${after.repoPath}', latch id '${latchId}') that this clear never addressed`;
+    // @decision 9a55fb90 — route the bare-id suggestion through the SAME collision check as
+    // assertRepoNotQuarantined, never offer it unconditionally — a collision at this key makes it
+    // ambiguous here too.
+    const siblings = canonicalSiblingsForLatchId(after, latchId);
+    const clearByIdSuggestion = siblings.length > 0 ? "" : ` or ${JSON.stringify({ id: latchId })}`;
     return {
       wasQuarantined: true,
-      reason: `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })} or ${JSON.stringify({ id: latchId })} to clear it directly.`,
+      reason: `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`,
     };
   }
   if (clearResult && "latchKept" in clearResult && clearResult.latchKept) {
@@ -1955,8 +1976,7 @@ export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok:
   const latchId = quarantineLatchFileIdsFor(q)[0];
   // @decision 9a55fb90 — a collision at this key makes the bare-id clear option ambiguous; name only
   // the repoPath route (which discriminates correctly) rather than a shortcut that reads equally valid.
-  const armedKey = q.armedKeys?.[0];
-  const siblings = armedKey ? canonicalSiblingsFor(armedKey, q.repoPath) : [];
+  const siblings = canonicalSiblingsForLatchId(q, latchId);
   const clearGuidance = siblings.length > 0
     ? `a human clears it: this latch id is ambiguous right now (${siblings.length} other, currently-resolvable repo${siblings.length === 1 ? "" : "s"} — ` +
       `${siblings.map((p) => `'${p.entry.repoPath}'`).join(", ")} — also canonically own this exact key), so clear by repoPath instead: ` +
