@@ -4701,6 +4701,10 @@ export interface WorktreeProcess {
   /** @decision bf58c19c — populated ONLY by the macOS/POSIX `ps` fallback (the sole consumer); `null`
    *  elsewhere (win32 CIM, Linux `/proc`), same per-platform-as-used posture as `creationTicks` above. */
   ppid: number | null;
+  /** @decision 2b7df434 — `true` only on a synthetic placeholder row for a pid whose data could not be
+   *  verified in time (a joined read that outlasted this call's own join bound, or rejected) — NOT
+   *  necessarily hung; every caller must treat it like an enumeration failure, never "gone". */
+  readUnverified?: true;
 }
 
 /** Injectable process lister for {@link reapProcessesRootedInWorktree} (defaults to the real OS
@@ -4941,6 +4945,75 @@ function armLinuxStartTicks(live: Live | CodexLive): void {
   readLinuxStartTicks(live.pid).then((ticks) => { live.startTicksLinux = ticks; }).catch(() => {});
 }
 
+/** A per-pid `/proc` attribute read: four independently best-effort fields. */
+type PosixPidRecord = { exePath: string | null; cwd: string | null; commandLine: string | null; creationTicks: number | null };
+
+/** @decision 2b7df434 — keyed by pid string; value is the SHARED in-flight promise for that pid's real
+ *  read, joined (never duplicated) by every concurrent caller. Cleared on EITHER settlement, never by a
+ *  timer/cap: evicting a still-pending entry would let a later call start a second real read for it. */
+const posixInFlightPidReads = new Map<string, Promise<PosixPidRecord>>();
+
+/** @decision 2b7df434 — round 3 (re-CR d25075d5): every pid races the REMAINING time to ONE shared
+ *  `deadline` (this call's own entry time + its `timeoutMs`), not a fresh fraction computed per pid — a
+ *  per-pid fraction made the effective fan-out deadline ~4× tighter than this call's own budget. */
+async function readPosixPidRecordDeduped(
+  pidStr: string, readPidRecord: (pidStr: string) => Promise<PosixPidRecord>, deadline: number,
+): Promise<{ unverified: true } | { unverified: false; record: PosixPidRecord }> {
+  let inFlight = posixInFlightPidReads.get(pidStr);
+  if (!inFlight) {
+    inFlight = readPidRecord(pidStr);
+    posixInFlightPidReads.set(pidStr, inFlight);
+    // Clear on EITHER settlement: a rejection must never poison a later, fresh attempt for this pid, and
+    // a genuine success must free the pid for the next enumeration to read current data, not stale.
+    const clear = (): void => { if (posixInFlightPidReads.get(pidStr) === inFlight) posixInFlightPidReads.delete(pidStr); };
+    inFlight.then(clear, clear);
+  }
+  const settleOrReject = inFlight.then((record) => ({ ok: true as const, record }), () => ({ ok: false as const }));
+  const remainingMs = Math.max(1, deadline - Date.now());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const bound = new Promise<{ ok: false }>((resolve) => { timer = setTimeout(() => resolve({ ok: false }), remainingMs); });
+    const settled = await Promise.race([settleOrReject, bound]);
+    return settled.ok ? { unverified: false, record: settled.record } : { unverified: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** @decision 2b7df434 — injectable per-step seam for {@link enumerateProcessesPosix}, so a test can
+ *  simulate one pid's read hanging forever (and others resolving normally) without touching a real
+ *  filesystem — defaults to the real `fs.promises` calls, byte-identical to the pre-existing behavior. */
+export interface PosixEnumerationDeps {
+  listProcPids?: () => Promise<string[]>;
+  readBootTimeMs?: () => Promise<number | null>;
+  readPidRecord?: (pidStr: string) => Promise<PosixPidRecord>;
+}
+
+/** The real per-pid `/proc` attribute read, unchanged from before this card: four independently
+ *  best-effort fields, each swallowing its own gone/denied failure. Extracted to its own function purely
+ *  so {@link PosixEnumerationDeps.readPidRecord} can substitute a fake one pid at a time. */
+async function readPosixPidRecordReal(pidStr: string): Promise<PosixPidRecord> {
+  let exePath: string | null = null;
+  let cwd: string | null = null;
+  let commandLine: string | null = null;
+  let creationTicks: number | null = null;
+  try { exePath = await fs.promises.readlink(`/proc/${pidStr}/exe`); } catch { /* gone/denied */ }
+  try { cwd = await fs.promises.readlink(`/proc/${pidStr}/cwd`); } catch { /* gone/denied */ }
+  try {
+    const raw = await fs.promises.readFile(`/proc/${pidStr}/cmdline`, "utf8");
+    const joined = raw.split("\0").filter(Boolean).join(" ");
+    if (joined) commandLine = joined;
+  } catch { /* gone/denied */ }
+  // Round 4 (item 2, card 2897acc4): `creationTicks` is read UNCONDITIONALLY, independent of whether a
+  // boot-time anchor resolved — it needs none, which is exactly what makes it safe to compare against
+  // `Live.startTicksLinux` (both boot-relative, no `Date.now()` on either side).
+  try {
+    const stat = await fs.promises.readFile(`/proc/${pidStr}/stat`, "utf8");
+    creationTicks = parseProcStatStarttimeTicks(stat);
+  } catch { /* gone/denied — creationTicks stays null for this row */ }
+  return { exePath, cwd, commandLine, creationTicks };
+}
+
 /** Real POSIX process enumerator: walk `/proc/<pid>` reading `exe`/`cwd` (symlinks) and `cmdline` (NUL-
  *  joined argv). Any per-pid read failure (permission denied, or the pid exited mid-scan) is swallowed —
  *  that pid is simply reported with whatever fields DID resolve, or omitted if none did. If `/proc`
@@ -4953,43 +5026,46 @@ function armLinuxStartTicks(live: Live | CodexLive): void {
  * no-op on Linux. A failed boot-time read, or a failed per-pid stat read, degrades that ONE row's
  * `creationTime` to `null` (guard 2 stays a no-op for it, exactly as before this round) rather than
  * failing the whole enumeration.
+ *
+ * @decision 2b7df434 — a pid whose read is joined-but-unresolved past this call's own bound
+ * ({@link readPosixPidRecordDeduped}) gets a synthetic `readUnverified:true` row instead of a second
+ * read — pushed unconditionally (bypassing the "only push if some field resolved" rule below), so the pid
+ * is never silently absent, which would read as "gone" to a caller like `checkRootSurvival`. Exported
+ * (and `deps`-injectable) for a hermetic unit test — see `PosixEnumerationDeps`'s own doc.
  */
-async function enumerateProcessesPosix(timeoutMs: number): Promise<WorktreeProcess[]> {
+export async function enumerateProcessesPosix(timeoutMs: number, deps: PosixEnumerationDeps = {}): Promise<WorktreeProcess[]> {
+  // @decision 2b7df434 — captured FIRST, before any await, so every pid below shares this ONE deadline
+  // (this call's own entry time + its own timeoutMs) rather than each getting a fresh fraction-based bound.
+  const deadline = Date.now() + timeoutMs;
+  const listProcPids = deps.listProcPids ?? (() => fs.promises.readdir("/proc"));
+  const readBootTimeMs = deps.readBootTimeMs ?? (async () => {
+    try {
+      const uptimeSeconds = parseProcUptimeSeconds(await fs.promises.readFile("/proc/uptime", "utf8"));
+      return uptimeSeconds != null ? Date.now() - uptimeSeconds * 1000 : null;
+    } catch {
+      return null; // creationTime stays null below for every row
+    }
+  });
+  const readPidRecord = deps.readPidRecord ?? readPosixPidRecordReal;
   let entries: string[];
   try {
-    entries = await fs.promises.readdir("/proc");
+    entries = await listProcPids();
   } catch {
     return enumerateProcessesPosixViaPs(timeoutMs);
   }
-  let bootTimeMs: number | null = null;
-  try {
-    const uptimeSeconds = parseProcUptimeSeconds(await fs.promises.readFile("/proc/uptime", "utf8"));
-    if (uptimeSeconds != null) bootTimeMs = Date.now() - uptimeSeconds * 1000;
-  } catch { /* creationTime stays null below for every row */ }
+  const bootTimeMs = await readBootTimeMs();
   const procs: WorktreeProcess[] = [];
   await Promise.all(entries.filter((e) => /^\d+$/.test(e)).map(async (pidStr) => {
-    let exePath: string | null = null;
-    let cwd: string | null = null;
-    let commandLine: string | null = null;
-    let creationTime: number | null = null;
-    let creationTicks: number | null = null;
-    try { exePath = await fs.promises.readlink(`/proc/${pidStr}/exe`); } catch { /* gone/denied */ }
-    try { cwd = await fs.promises.readlink(`/proc/${pidStr}/cwd`); } catch { /* gone/denied */ }
-    try {
-      const raw = await fs.promises.readFile(`/proc/${pidStr}/cmdline`, "utf8");
-      const joined = raw.split("\0").filter(Boolean).join(" ");
-      if (joined) commandLine = joined;
-    } catch { /* gone/denied */ }
-    // Round 4 (item 2): `creationTicks` is read UNCONDITIONALLY, independent of whether `bootTimeMs`
-    // resolved — it needs no boot-time anchor at all, which is exactly what makes it safe to compare
-    // against `Live.startTicksLinux` (both boot-relative, no `Date.now()` on either side). `creationTime`
-    // (ms) stays a SEPARATE, best-effort derivative of it, kept only for non-Linux-aware callers.
-    try {
-      const stat = await fs.promises.readFile(`/proc/${pidStr}/stat`, "utf8");
-      creationTicks = parseProcStatStarttimeTicks(stat);
-      if (creationTicks != null && bootTimeMs != null) creationTime = bootTimeMs + (creationTicks / LINUX_CLK_TCK) * 1000;
-    } catch { /* gone/denied — creationTime/creationTicks stay null for this row */ }
-    if (exePath || cwd || commandLine) procs.push({ pid: Number(pidStr), exePath, cwd, commandLine, creationTime, creationTicks, ppid: null });
+    const outcome = await readPosixPidRecordDeduped(pidStr, readPidRecord, deadline);
+    if (outcome.unverified) {
+      procs.push({ pid: Number(pidStr), exePath: null, cwd: null, commandLine: null, creationTime: null, creationTicks: null, ppid: null, readUnverified: true });
+      return;
+    }
+    const { record } = outcome;
+    const creationTime = record.creationTicks != null && bootTimeMs != null ? bootTimeMs + (record.creationTicks / LINUX_CLK_TCK) * 1000 : null;
+    if (record.exePath || record.cwd || record.commandLine) {
+      procs.push({ pid: Number(pidStr), exePath: record.exePath, cwd: record.cwd, commandLine: record.commandLine, creationTime, creationTicks: record.creationTicks, ppid: null });
+    }
   }));
   return procs;
 }
@@ -5271,6 +5347,12 @@ export async function checkRootSurvival(
     }
     const row = procs.find((p) => p.pid === rootPid);
     if (!row) return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null, creationTicks: null, ppid: null };
+    // @decision 2b7df434 — `readUnverified` must report exactly like the catch below (never "gone",
+    // never a confirmed match), or recycleWorker's identity==="unreadable" refusal silently stops firing.
+    if (row.readUnverified) {
+      console.error(`[pty-reap] root=${rootPid} sessionId=${sessionId}: this pid's data could not be verified in time — treating as an enumeration failure, never confirmed gone`);
+      return { foundAlive: false, identityConfirmed: false, enumerationFailed: true, creationTime: null, creationTicks: null, ppid: null };
+    }
     return { foundAlive: true, identityConfirmed: commandLineMatchesSession(row.commandLine, sessionId), enumerationFailed: false, creationTime: row.creationTime, creationTicks: row.creationTicks, ppid: row.ppid };
   } catch (err) {
     console.error(`[pty-reap] root=${rootPid} sessionId=${sessionId}: survival-check enumeration FAILED — treating as unconfirmed, never killing on a failed check: ${(err as Error).message}`);
@@ -5312,7 +5394,7 @@ export interface RootReapResult {
 export async function reapProcessesRootedInWorktree(
   worktreePath: string,
   deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number; excludePids?: number[] } = {},
-): Promise<{ killedPids: number[]; enumerationFailed?: boolean; enumerationAttempts?: number }> {
+): Promise<{ killedPids: number[]; enumerationFailed?: boolean; enumerationAttempts?: number; skippedUnverifiedPids?: number[] }> {
   const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
   const kill = deps.kill ?? killProcessById;
   const timeoutMs = deps.timeoutMs ?? 10_000;
@@ -5330,13 +5412,21 @@ export async function reapProcessesRootedInWorktree(
   try {
     const { procs, attempts } = await withReapTimeout(enumerateWithRetry(enumerate, timeoutMs), totalBudgetMs);
     const killedPids: number[] = [];
+    const skippedUnverifiedPids: number[] = [];
     for (const proc of procs) {
       if (proc.pid === process.pid) continue; // NEVER the daemon's own process — see SELF-EXCLUSION above
       if (excluded.has(proc.pid)) continue; // caller-supplied survivor — see excludePids doc above
+      // @decision 2b7df434 — an unverified placeholder never matches (every field is null), so it's
+      // already never killed; logged LOUDLY (mirrors the total-failure catch below) and returned on
+      // skippedUnverifiedPids too, so neither a silent caller nor a reader of this field alone misses it.
+      if (proc.readUnverified) { skippedUnverifiedPids.push(proc.pid); continue; }
       if (!processRootedInWorktree(proc, worktreePath)) continue;
       try { kill(proc.pid); killedPids.push(proc.pid); } catch { /* best effort */ }
     }
-    return { killedPids, enumerationAttempts: attempts };
+    if (skippedUnverifiedPids.length > 0) {
+      console.error(`[reap] ${worktreePath}: ${skippedUnverifiedPids.length} pid(s) could not be verified in time this cycle (${skippedUnverifiedPids.join(", ")}) — never killed, not proof they aren't rooted here`);
+    }
+    return { killedPids, enumerationAttempts: attempts, ...(skippedUnverifiedPids.length > 0 ? { skippedUnverifiedPids } : {}) };
   } catch (err) {
     // LOUD ON FAILURE: still fail-CLOSED (never widen the kill set on a failure — return nothing to kill,
     // exactly like before) but no longer SILENT — a total enumeration collapse used to be indistinguishable
@@ -5432,14 +5522,22 @@ export async function attributeProcessesToWorktree(
   totalProcessesScanned: number;
   enumerationFailed?: boolean;
   enumerationAttempts?: number;
+  skippedUnverifiedPids?: number[];
 }> {
   const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const totalBudgetMs = REAP_ENUMERATE_MAX_ATTEMPTS * timeoutMs + (REAP_ENUMERATE_MAX_ATTEMPTS - 1) * REAP_ENUMERATE_RETRY_DELAY_MS;
   try {
     const { procs, attempts } = await withReapTimeout(enumerateWithRetry(enumerate, timeoutMs), totalBudgetMs);
-    const matched = procs.filter((p) => processRootedInWorktree(p, worktreePath));
-    return { matched, totalProcessesScanned: procs.length, enumerationAttempts: attempts };
+    // @decision 2b7df434 — an unverified placeholder never matches (every field is null); logged LOUDLY
+    // (mirrors the total-failure catch below) and returned on skippedUnverifiedPids too, so neither a
+    // silent caller nor a reader of totalProcessesScanned/matched alone misses it.
+    const skippedUnverifiedPids = procs.filter((p) => p.readUnverified).map((p) => p.pid);
+    const matched = procs.filter((p) => !p.readUnverified && processRootedInWorktree(p, worktreePath));
+    if (skippedUnverifiedPids.length > 0) {
+      console.error(`[attribution] ${worktreePath}: ${skippedUnverifiedPids.length} pid(s) could not be verified in time this cycle (${skippedUnverifiedPids.join(", ")}) — excluded from matched, not proof they aren't rooted here`);
+    }
+    return { matched, totalProcessesScanned: procs.length, enumerationAttempts: attempts, ...(skippedUnverifiedPids.length > 0 ? { skippedUnverifiedPids } : {}) };
   } catch (err) {
     console.error(`[attribution] ${worktreePath}: process enumeration FAILED this cycle — returning NOTHING (fail-closed, not proof nothing is running): ${(err as Error).message}`);
     return { matched: [], totalProcessesScanned: 0, enumerationFailed: true };
