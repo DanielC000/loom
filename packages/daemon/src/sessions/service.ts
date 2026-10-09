@@ -14087,12 +14087,30 @@ export class SessionService {
         this.retiredRecycleSuccessorIds.add(freshId);
         this.carryPendingToSuccessor(freshId, predecessorId, [], this.db.listUnresolvedQueuedMessagesForWorker(freshId));
         this.unlinkAndArchiveDeadRecycleSuccessor(predecessorId, freshId);
-        this.db.appendEvent({
-          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
-          kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
-        });
-        this.enqueueDurableNudge(predecessorId, "manager",
-          `[loom:recycle-failed] a daemon restart found your halted recycle's successor ${freshId.slice(0, 8)} unresumable — your workers/wakes/questions/pending (whatever had transferred) are back on you — re-read worker_list to continue.`);
+        // @decision 54434e27 — a prior partial `consolidated` attempt for THIS freshId may have stamped
+        // its own banner before throwing — clear ONLY that exact text, never a bare `[loom:orphaned-fleet]`
+        // match (shared by archiveOnExit's real banner and 08c81809's stampStranded banner — see record).
+        if (this.db.getSession(predecessorId)?.lastError?.includes(`A halted recycle's successor ${freshId.slice(0, 8)}`)) {
+          this.db.setLastError(predecessorId, null);
+        }
+        // @decision 54434e27 — Code Review m2: a RE-RUN (the marker survived some earlier-than-this-fix
+        // throw AFTER the completion event already fired once) must not re-fire a duplicate event/nudge —
+        // only finish clearing the marker.
+        const alreadyCompleted = this.db.listEventsForSession(predecessorId).some((e) =>
+          e.kind === "recycle_fleet_recovered" && (e.detail as { deadSuccessorId?: string } | undefined)?.deadSuccessorId === freshId);
+        if (alreadyCompleted) {
+          this.db.clearHaltedRecyclePending(predecessorId);
+        } else {
+          this.enqueueDurableNudge(predecessorId, "manager",
+            `[loom:recycle-failed] a daemon restart found your halted recycle's successor ${freshId.slice(0, 8)} unresumable — your workers/wakes/questions/pending (whatever had transferred) are back on you — re-read worker_list to continue.`);
+          // @decision 54434e27 — Code Review m2: the event append + marker clear are now ONE transaction
+          // (`finishHaltedRecyclePending`) — a crash between them can no longer leave a committed event
+          // with the marker still set, which used to duplicate the event on the next boot's retry.
+          this.db.finishHaltedRecyclePending(predecessorId, {
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+            kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
+          });
+        }
         recovered.push(predecessorId);
       } catch (e) {
         console.error(`[halted-recycle-reconcile] later pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
@@ -14102,19 +14120,32 @@ export class SessionService {
     // `finalizeRecovery` — P is NEVER resumed, only made VISIBLE. See the full record for why
     // `allowSuperseded` is NOT the remedy here.
     const consolidated: string[] = [];
-    for (const { predecessorId, freshId, reparentedWorkers } of early.consolidated) {
+    for (const { predecessorId, freshId } of early.consolidated) {
       try {
         this.retiredRecycleSuccessorIds.add(freshId);
         this.carryPendingToSuccessor(freshId, predecessorId, [], this.db.listUnresolvedQueuedMessagesForWorker(freshId));
         this.unlinkAndArchiveDeadRecycleSuccessor(predecessorId, freshId);
         this.db.restoreSession(predecessorId);
         this.db.setProcessState(predecessorId, "exited");
+        // @decision 54434e27 — Code Review n2: says "child session(s)", not "worker(s)" — the count is
+        // every CURRENT child, unscoped to role or task state. See the full record for why.
+        const childCount = this.db.listChildSessions(predecessorId).length;
+        // @decision 54434e27 — Code Review m2: a RE-RUN (the marker survived some earlier-than-this-fix
+        // throw AFTER the completion event already fired once) must not re-fire a duplicate event — only
+        // finish clearing the marker. The banner/restore/exited steps above are idempotent regardless.
+        const alreadyCompleted = this.db.listEventsForSession(predecessorId).some((e) =>
+          e.kind === "recycle_split_lineage_consolidated" && (e.detail as { deadSuccessorId?: string } | undefined)?.deadSuccessorId === freshId);
         this.db.setLastError(predecessorId,
-          `[loom:orphaned-fleet] A halted recycle's successor ${freshId.slice(0, 8)} is unresumable, and this predecessor is also not resumable this boot — its fleet (${reparentedWorkers} worker(s), plus whatever wakes/questions/pending had transferred) has been consolidated back onto THIS session as bookkeeping only. No automatic owner exists; a human must intervene (reassign the workers or start a new manager).`);
-        this.db.appendEvent({
-          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
-          kind: "recycle_split_lineage_consolidated", detail: { deadSuccessorId: freshId },
-        });
+          `[loom:orphaned-fleet] A halted recycle's successor ${freshId.slice(0, 8)} is unresumable, and this predecessor is also not resumable this boot — its fleet (${childCount} child session(s), plus whatever wakes/questions/pending had transferred) has been consolidated back onto THIS session as bookkeeping only. No automatic owner exists; a human must intervene (reassign the workers or start a new manager).`);
+        if (alreadyCompleted) {
+          this.db.clearHaltedRecyclePending(predecessorId);
+        } else {
+          // @decision 54434e27 — Code Review m2: event append + marker clear are now ONE transaction.
+          this.db.finishHaltedRecyclePending(predecessorId, {
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+            kind: "recycle_split_lineage_consolidated", detail: { deadSuccessorId: freshId },
+          });
+        }
         consolidated.push(predecessorId);
       } catch (e) {
         console.error(`[halted-recycle-reconcile] consolidated pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);

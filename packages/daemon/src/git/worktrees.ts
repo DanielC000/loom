@@ -4789,6 +4789,13 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // comments in source, so a comment-only edit inserting decoy call-site text between the real calls
   // could in principle shift what the gap search finds.
   "packages/daemon/test/merge-staged-dirt-lock-race.mjs",
+  // Card 54434e27: its (6) static guard reads real db.ts SOURCE directly and, per-line, checks that no
+  // `CREATE INDEX` line also contains the literal `halted_recycle_pending_for` — a genuinely new read with
+  // no live production re-derivation to inherit immunity from, same posture as this list's other entries.
+  // tsc is irrelevant here (this reads src/**, never dist/**), but the hazard is the same shape: a
+  // comment-only line that happens to combine both tokens (e.g. a stray "// CREATE INDEX ... on
+  // halted_recycle_pending_for" note) would land on the SAME line the regex scans and flip the verdict.
+  "packages/daemon/test/halted-recycle-pending-schema-migration.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its

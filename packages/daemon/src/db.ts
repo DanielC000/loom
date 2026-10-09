@@ -524,6 +524,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- a daemon restart mid-settle can be reconciled at boot instead of stranding the lineage forever.
   -- NULL = no recycle settle in flight for this session. See reconcileStrandedRecycleSettles.
   recycle_settle_pending_for TEXT,
+  -- @decision 54434e27 — do not clear this before the LATER phase
+  -- (finishReconcilingHaltedRecycleSuccessors) has actually completed the lineage, and never reference it
+  -- from a base-schema index/constraint (crashes any upgraded DB that predates this column).
+  halted_recycle_pending_for TEXT,
   ctx_input_tokens INTEGER,
   ctx_turns INTEGER,
   ctx_updated_at TEXT,
@@ -1849,6 +1853,9 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // @decision 08c81809 — durable settle-in-flight marker (see the CREATE TABLE comment above); nullable,
   // no DEFAULT needed, so every legacy row backfills to NULL = "no recycle settle in flight".
   recycle_settle_pending_for: "TEXT",
+  // @decision 54434e27 — durable halted-recycle reparent-pending marker (see the CREATE TABLE comment
+  // above); nullable, no DEFAULT needed, so every legacy row backfills to NULL = "nothing pending".
+  halted_recycle_pending_for: "TEXT",
   ctx_input_tokens: "INTEGER",
   ctx_turns: "INTEGER",
   ctx_updated_at: "TEXT",
@@ -6812,6 +6819,71 @@ export class Db {
     return this.db.prepare(
       "SELECT id AS predecessorId, recycle_settle_pending_for AS freshId FROM sessions WHERE recycle_settle_pending_for IS NOT NULL",
     ).all() as { predecessorId: string; freshId: string }[];
+  }
+  /** @decision 54434e27 — atomically nulls the successor's `recycled_from` link (if still linked),
+   *  reparents every category onto the predecessor, AND stamps the durable
+   *  `halted_recycle_pending_for` marker on the predecessor — all in ONE transaction. Mirrors
+   *  `insertRecycleSuccessor`'s own reasoning (08c81809): setting the marker any later than this would
+   *  leave a crash-sized gap where the reparent already happened but nothing durable records that
+   *  `SessionService.finishReconcilingHaltedRecycleSuccessors` still owes this lineage its completion
+   *  (archive the dead successor, banner/restore the predecessor, file the event). Every step called
+   *  here is a plain prepared statement (never its own nested `this.db.transaction()`), so nesting them
+   *  under this outer transaction is safe. Idempotent: safe to call again on an already-reparented
+   *  lineage (a boot-reconcile continuation, after a crash between this call and the later phase) —
+   *  every step moves zero rows the second time. See `reconcileHaltedRecycleSuccessorsEarly`'s own
+   *  marker-driven loop, which relies on exactly this idempotency. */
+  reparentHaltedRecycleLineage(freshId: string, predecessorId: string): number {
+    return this.db.transaction(() => {
+      const fresh = this.getSession(freshId);
+      if (fresh && fresh.recycledFrom === predecessorId) this.setOrchestration(freshId, { recycledFrom: null });
+      const reparentedWorkers = this.reparentAllChildren(freshId, predecessorId);
+      this.reparentWakes(freshId, predecessorId);
+      this.reparentQuestions(freshId, predecessorId);
+      this.reparentEventTriggerTargets(freshId, predecessorId);
+      this.reparentPollJobTargets(freshId, predecessorId);
+      this.reparentWebhookTargets(freshId, predecessorId);
+      this.reparentPendingOwnerMessage(freshId, predecessorId);
+      this.db.prepare("UPDATE sessions SET halted_recycle_pending_for = ? WHERE id = ?").run(freshId, predecessorId);
+      return reparentedWorkers;
+    })();
+  }
+  /** @decision 54434e27 — clears the durable halted-recycle reparent-pending marker (see
+   *  `reparentHaltedRecycleLineage`). Called on every terminal (success) outcome of
+   *  `finishReconcilingHaltedRecycleSuccessors`'s `recovered`/`consolidated` branches, as the LAST
+   *  statement in each — never cleared on a throw, mirroring `clearRecycleSettlePending`'s own
+   *  last-not-first placement (08c81809 round 4). A no-op if already clear. */
+  clearHaltedRecyclePending(predecessorId: string): void {
+    this.clearHaltedRecyclePendingStatement(predecessorId);
+    this.notifySessionChanged(predecessorId);
+  }
+  /** @decision 54434e27 — the raw UPDATE, split out so `finishHaltedRecyclePending` can share it inside
+   *  its own transaction (and so a test can stub JUST this statement to prove the transaction rolls back
+   *  the paired `appendEvent` too — see `recycle-manager-halted-successor-dies.mjs` (F5)). */
+  private clearHaltedRecyclePendingStatement(predecessorId: string): void {
+    this.db.prepare("UPDATE sessions SET halted_recycle_pending_for = NULL WHERE id = ?").run(predecessorId);
+  }
+  /** @decision 54434e27 — every predecessor row still carrying a halted-recycle reparent-pending marker,
+   *  read ONCE at boot by `reconcileHaltedRecycleSuccessorsEarly`, BEFORE its own ordinary
+   *  event-kind-driven discovery loop (which can no longer find this lineage once the reparent has
+   *  already nulled `recycled_from` — `hasSuccessor` reads false from that point on).
+   *
+   *  Rare in practice (0 or 1 rows): a marker set by `reparentHaltedRecycleLineage` and never cleared
+   *  because the daemon restarted before `finishReconcilingHaltedRecycleSuccessors` resolved it. */
+  listHaltedRecyclePending(): { predecessorId: string; freshId: string }[] {
+    return this.db.prepare(
+      "SELECT id AS predecessorId, halted_recycle_pending_for AS freshId FROM sessions WHERE halted_recycle_pending_for IS NOT NULL",
+    ).all() as { predecessorId: string; freshId: string }[];
+  }
+  /** @decision 54434e27 — appends the halted-recycle completion event AND clears the marker in ONE
+   *  transaction — a crash between two separate statements used to leave a committed event with the
+   *  marker still set, duplicating it on retry. Caller skips this (clears the marker alone instead) when
+   *  a completion event for this (predecessorId, freshId) pair already exists. */
+  finishHaltedRecyclePending(predecessorId: string, event: OrchestrationEvent): void {
+    this.db.transaction(() => {
+      this.appendEvent(event);
+      this.clearHaltedRecyclePendingStatement(predecessorId);
+    })();
+    this.notifySessionChanged(predecessorId);
   }
   /**
    * Count of currently-LIVE SCHEDULER-SPAWNED manager sessions — the Scheduler's OWN manager-cap gate

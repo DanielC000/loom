@@ -41,6 +41,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the in-process watch could ever see it (the successor never captured an engine id at all). The
 //       REAL boot sequence (runBootRecoveryPrefix + finishReconcilingHaltedRecycleSuccessors) reclaims the
 //       transferred fleet, exactly like (A) but driven by the boot-time pair instead of the live watch.
+//   (B2) card 54434e27 — a crash lands BETWEEN the early reparent and the later (banner/archive/event)
+//       phase (recovered bucket): boot 2 runs ONLY the early prefix and is left in the half-done state
+//       (reparented, no marker on main — the bug); boot 3 runs the full sequence and must detect + finish
+//       it via the new durable marker, since hasSuccessor is already permanently false by then; boot 4
+//       proves idempotency.
 //   (C) FIX 386e4eb5 — A STILL-SPLIT HALTED PREDECESSOR WITH A STILL-MATCHING SUCCESSOR IS NOW CAPTURED +
 //       RESUMED. The successor DOES durably survive the restart (real engine id + transcript); the
 //       predecessor is itself still genuinely `live` (never stopped) WITH a successor that still EXACTLY
@@ -69,6 +74,35 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       `recycle_ownership_transfer_resolved` event already named the (now also dead) successor before
 //       the restart, so `currentHaltedSuccessor` stops matching before the new consolidation branch is
 //       ever reached — the lineage stays exactly as it was, untouched.
+//   (F3) card 54434e27 — the SAME crash-between-phases shape as (B2), for the `consolidated` bucket: boot
+//       2's half-done state (reparented, no marker on main), boot 3's marker-driven detection + completion
+//       (including the banner's child-session count reading the REAL current fleet, not the zero a
+//       continuation's own reparent return value would give it), and boot 4's idempotency.
+//   (F4) card 54434e27 Code Review m1 — STALE MARKER: a marker for S1 is left pending, then P is resumed
+//       and halt-recycled AGAIN to a brand-new S2 (also dies unresumable) entirely in-process, with S1's
+//       marker never reprocessed (the early reconcile only runs at boot). A real boot must reconcile S2
+//       normally AND clear S1's now-stale marker without acting — no event/nudge/banner naming S1. Round
+//       2 item 4: the nudge check uses a real `enqueueDurableNudge` spy and matches the 8-char id prefix
+//       the banner/nudge text actually embeds (matching the FULL id, as an earlier draft did, is vacuous).
+//   (F4b) card 54434e27 Code Review round 2 item 3 — the SAME stale-marker shape as (F4), but via the
+//       OTHER staleness disjunct: S2 dies WHILE P is alive and the IN-PROCESS reclaim watch unlinks it (no
+//       reboot) — `hasSuccessor(P)` reads false again, so only the "latest halt event names someone else"
+//       disjunct catches this.
+//   (F5) card 54434e27 Code Review m2/m3a — a throw in the LATER phase (a stubbed
+//       `unlinkAndArchiveDeadRecycleSuccessor`) leaves the marker set and nothing banner/archived/eventful;
+//       a subsequent run completes it cleanly, exactly once.
+//   (F5b) card 54434e27 Code Review round 2 item 2 — the DUPLICATE GUARD, exercised directly: a
+//       completion event for (P, freshId) is pre-seeded WHILE the marker is still set ⇒ the recovered
+//       branch finishes with exactly ONE event and ZERO new nudges (spied directly).
+//   (F5c) card 54434e27 Code Review round 2 item 2 — ATOMICITY: a throw inside
+//       `finishHaltedRecyclePending`'s own marker-clear statement rolls the completion EVENT back too.
+//   (F6) card 54434e27 Code Review m3b — a throw MID-`reparentHaltedRecycleLineage` (a stubbed
+//       `reparentWebhookTargets`) rolls back the WHOLE transaction: the worker stays on the dead
+//       successor, `recycled_from` stays linked, and no marker is left behind.
+//   (F7a)/(F7b) card 54434e27 Code Review round 2 item 1 — the recovered branch's stale-banner clear is
+//       SCOPED to this mechanism's own exact text tied to the freshId: an UNRELATED orphaned-fleet banner
+//       (archiveOnExit's own) survives (F7a); this mechanism's own stale banner for the SAME freshId is
+//       cleared (F7b).
 //   (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a predecessor that halted once (naming successor S1), was
 //       reclaimed after S1 died, and was then cleanly re-recycled to a BRAND NEW successor S2: the
 //       permanent halt event still names S1, but the halted-reconcile (and, since 386e4eb5,
@@ -266,6 +300,20 @@ function stubWakesPermanentFailure() {
   const original = Db.prototype.reparentWakes;
   Db.prototype.reparentWakes = function () { throw new Error("injected PERMANENT failure (halted-successor-dies test)"); };
   return () => { Db.prototype.reparentWakes = original; };
+}
+
+/** Card 54434e27, Code Review round 2 item 4: observes the REAL `enqueueDurableNudge` call arguments
+ *  directly, rather than inferring "was a nudge sent" from a downstream queue read (`listUnresolvedQueuedMessagesForWorker`
+ *  can under-report — a message already delivered is excluded from "unresolved" — which made an earlier
+ *  draft of this file's own (F4) check vacuous). Caller restores. */
+function spyOnEnqueueDurableNudge() {
+  const calls = [];
+  const original = SessionService.prototype.enqueueDurableNudge;
+  SessionService.prototype.enqueueDurableNudge = function (...args) {
+    calls.push(args);
+    return original.apply(this, args);
+  };
+  return { calls, restore: () => { SessionService.prototype.enqueueDurableNudge = original; } };
 }
 
 try {
@@ -654,6 +702,59 @@ try {
     check("(B) M1 is not in the failed list", !failed.includes(m1.id));
   }
 
+  // ==================== (B2) card 54434e27 — CRASH BETWEEN THE EARLY REPARENT AND THE LATER PHASE (recovered bucket) ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-b2";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-b2" });
+    writeFakeTranscript(m1.cwd, "eng-m1-b2");
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — a crash lands between the early reparent and the later (banner/archive/event) phase");
+    unstub();
+    check("(B2 pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
+    db1.close();
+
+    // Boot 2: run ONLY the early, DB-only prefix — simulates a crash right after it, before the later
+    // phase (which needs SessionService/PtyHost, constructed far later in index.ts) ever runs.
+    const { db: db2 } = makeBoot();
+    const haltedEarly2 = runBootRecoveryPrefix(db2).haltedEarly;
+    check("(B2) boot 2: the early phase classified the pair `recovered`", haltedEarly2.recovered.some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    check("(B2) boot 2: hasSuccessor(M1) is now false (the reparent already ran)", db2.hasSuccessor(m1.id) === false);
+    check("(B2) boot 2: the worker IS already reparented onto M1", db2.getSession(workerId)?.parentSessionId === m1.id);
+    check("(B2) boot 2: the durable marker IS set, naming M2", db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    // The half-done state this card fixes: reparented, but NOT yet completed — RED on main (main has no
+    // marker at all, and the NEXT boot would simply never find this lineage again). M2's own archivedAt
+    // is NOT a usable signal here — the generic crash-path backstop (snapshotAndArchiveRecovered, earlier
+    // in this SAME prefix) already archives any stale live/starting session regardless of the
+    // halted-recycle logic; `recycle_fleet_recovered` is the one event ONLY the later phase ever files.
+    check("(B2) boot 2: no recycle_fleet_recovered event yet", !hasEvent(db2, m1.id, "recycle_fleet_recovered"));
+    db2.close(); // simulates the crash landing exactly in this gap
+
+    // Boot 3: the FULL sequence — must detect the pending lineage via the marker (never via the
+    // now-permanently-false hasSuccessor check) and complete it.
+    const { db: db3, host: host3 } = makeBoot();
+    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3);
+    check("(B2) boot 3: the marker-driven loop re-detected the pair `recovered`", haltedEarly3.recovered.some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    check("(B2) boot 3: the later phase recovered the predecessor", haltedFinish3.recovered.includes(m1.id));
+    check("(B2) boot 3: the worker is STILL on M1", db3.getSession(workerId)?.parentSessionId === m1.id);
+    check("(B2) boot 3: M2 is NOW archived", !!db3.getSession(m2.id)?.archivedAt);
+    const recoveredEvents3 = db3.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered");
+    check("(B2) boot 3: exactly ONE recycle_fleet_recovered event (not duplicated)", recoveredEvents3.length === 1);
+    check("(B2) boot 3: the marker is now CLEARED", !db3.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id));
+
+    // Boot 4: idempotency — a further boot must not re-fire anything for this already-resolved lineage.
+    db3.close();
+    const { db: db4, host: host4 } = makeBoot();
+    const { haltedEarly: haltedEarly4, haltedFinish: haltedFinish4 } = runRealBootSequenceUpToResume(db4, host4);
+    check("(B2) boot 4: no longer scanned into `recovered` again", !haltedEarly4.recovered.some((r) => r.predecessorId === m1.id));
+    check("(B2) boot 4: the later phase recovered nothing new for this lineage", !haltedFinish4.recovered.includes(m1.id));
+    check("(B2) boot 4: still exactly ONE recycle_fleet_recovered event", db4.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 1);
+  }
+
   // ==================== (C) FIX 386e4eb5 — a still-split, still-MATCHING halted predecessor IS captured + resumed ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
@@ -893,6 +994,429 @@ try {
     check("(F2) FIX a4c5f234: the worker is left exactly where it was (still on M2) — nothing reparented it", db2.getSession(workerId)?.parentSessionId === m2.id);
     check("(F2) M2's recycledFrom link is untouched by this card's new branch", db2.getSession(m2.id)?.recycledFrom === m1.id);
     check("(F2) no recycle_split_lineage_consolidated event was fabricated", !hasEvent(db2, m1.id, "recycle_split_lineage_consolidated"));
+  }
+
+  // ==================== (F3) card 54434e27 — CRASH BETWEEN THE EARLY REPARENT AND THE LATER PHASE (consolidated bucket) ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-f3";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    // M1 never captures a real engine id — unresumable, same shape as (F).
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — both dead, and a crash lands between the early reparent and the later (banner/archive/event) phase");
+    unstub();
+    check("(F3 pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
+    check("(F3 pre) M1 never captured a real engine id — unresumable", db1.getSession(m1.id)?.engineSessionId == null);
+    check("(F3 pre) M2 never captured a real engine id either — unresumable", db1.getSession(m2.id)?.engineSessionId == null);
+    db1.close();
+
+    // Boot 2: run ONLY the early, DB-only prefix — simulates a crash right after it, before the later
+    // phase (which needs SessionService/PtyHost, constructed far later in index.ts) ever runs.
+    const { db: db2 } = makeBoot();
+    const haltedEarly2 = runBootRecoveryPrefix(db2).haltedEarly;
+    check("(F3) boot 2: the early phase classified the pair `consolidated`", haltedEarly2.consolidated.some((c) => c.predecessorId === m1.id && c.freshId === m2.id));
+    check("(F3) boot 2: hasSuccessor(M1) is now false (the reparent already ran)", db2.hasSuccessor(m1.id) === false);
+    check("(F3) boot 2: the worker IS already reparented onto M1", db2.getSession(workerId)?.parentSessionId === m1.id);
+    check("(F3) boot 2: the durable marker IS set, naming M2", db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    // The half-done state this card fixes: reparented, but NOT yet completed — RED on main (main has no
+    // marker at all, and the NEXT boot would simply never find this lineage again). M2's own archivedAt
+    // is NOT a usable signal here — the generic crash-path backstop (snapshotAndArchiveRecovered, earlier
+    // in this SAME prefix) already archives any stale live/starting session regardless of the
+    // halted-recycle logic. M1's own banner IS a usable signal — only the later phase ever stamps it.
+    check("(F3) boot 2: M1 is NOT yet un-archived/bannered — the later phase never ran", db2.getSession(m1.id)?.lastError == null);
+    check("(F3) boot 2: no recycle_split_lineage_consolidated event yet", !hasEvent(db2, m1.id, "recycle_split_lineage_consolidated"));
+    db2.close(); // simulates the crash landing exactly in this gap
+
+    // Boot 3: the FULL sequence — must detect the pending lineage via the marker (never via the
+    // now-permanently-false hasSuccessor check) and complete it.
+    const { db: db3, host: host3 } = makeBoot();
+    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3);
+    check("(F3) boot 3: the marker-driven loop re-detected the pair `consolidated`", haltedEarly3.consolidated.some((c) => c.predecessorId === m1.id && c.freshId === m2.id));
+    check("(F3) boot 3: the later phase consolidated it", haltedFinish3.consolidated.includes(m1.id));
+    check("(F3) boot 3: the worker is STILL on M1", db3.getSession(workerId)?.parentSessionId === m1.id);
+    check("(F3) boot 3: M2 is NOW archived", !!db3.getSession(m2.id)?.archivedAt);
+    check("(F3) boot 3: M1 is un-archived (visible) but never resumed", db3.getSession(m1.id)?.archivedAt == null && db3.getSession(m1.id)?.processState === "exited" && host3.isAlive(m1.id) === false);
+    // Lead review: the banner's worker count must reflect the CURRENT fleet on M1, not the (zero, since
+    // this boot's reparent moved nothing new) threaded reparentedWorkers value from boot 3's own early phase.
+    check("(F3) boot 3: the banner quotes the REAL current child-session count (1), not 0", /\(1 child session\(s\)/.test(db3.getSession(m1.id)?.lastError ?? ""));
+    const consolidatedEvents3 = db3.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_split_lineage_consolidated");
+    check("(F3) boot 3: exactly ONE recycle_split_lineage_consolidated event (not duplicated)", consolidatedEvents3.length === 1);
+    check("(F3) boot 3: the marker is now CLEARED", !db3.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id));
+
+    // Boot 4: idempotency — a further boot must not re-fire anything for this already-resolved lineage.
+    db3.close();
+    const { db: db4, host: host4 } = makeBoot();
+    const { haltedEarly: haltedEarly4, haltedFinish: haltedFinish4 } = runRealBootSequenceUpToResume(db4, host4);
+    check("(F3) boot 4: no longer scanned into `consolidated` again", !haltedEarly4.consolidated.some((c) => c.predecessorId === m1.id));
+    check("(F3) boot 4: the later phase consolidated nothing new for this lineage", !haltedFinish4.consolidated.includes(m1.id));
+    check("(F3) boot 4: still exactly ONE recycle_split_lineage_consolidated event", db4.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_split_lineage_consolidated").length === 1);
+    check("(F3) boot 4: M1 is STILL not resumed", host4.isAlive(m1.id) === false);
+  }
+
+  // ==================== (F4) card 54434e27 Code Review m1 — STALE MARKER: P moved on to a NEW successor
+  // before the stale marker was ever processed ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-f4";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-f4" });
+    writeFakeTranscript(m1.cwd, "eng-m1-f4");
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub1 = stubWakesPermanentFailure();
+    const s1 = await sessions1.recycleManager(m1.id, "handoff — S1 will be left as a stale marker");
+    unstub1();
+    check("(F4 pre) the first recycle HALTED (naming S1)", hasEvent(db1, s1.id, "recycle_ownership_transfer_failed"));
+    db1.close();
+
+    // Boot 2: run ONLY the early prefix — sets the durable marker for (M1, S1) and reparents the worker
+    // back onto M1, exactly like (B2)/(F3). Simulates a crash before the later phase ever processes it.
+    const { db: db2, host: host2 } = makeBoot();
+    const haltedEarly2 = runBootRecoveryPrefix(db2).haltedEarly;
+    check("(F4) boot 2: the marker IS set, naming S1", db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === s1.id));
+    check("(F4) boot 2: the worker IS reparented onto M1", db2.getSession(workerId)?.parentSessionId === m1.id);
+    void haltedEarly2;
+
+    // Continue LIVE on the SAME db2/host2 (no boot, no crash) — M1 is resumed, then halt-recycled AGAIN to
+    // a BRAND NEW successor S2, which also dies unresumable — all while S1's marker sits unprocessed
+    // (the daemon never restarted, so the early reconcile never ran again to clear it).
+    let sessions2;
+    host2.events.onExit = (id, code, info) => {
+      db2.setProcessState(id, "exited");
+      db2.setBusy(id, false);
+      const exited = db2.getSession(id);
+      if (exited) sessions2.archiveOnExit(exited);
+      if (exited) sessions2.reconcileNeverStartedRecycleSuccessor(id, info.intended);
+    };
+    sessions2 = new SessionService(db2, host2, new OrchestrationControl());
+    sessions2.resume(m1.id);
+    check("(F4) M1 is genuinely live again after the resume", host2.isAlive(m1.id) === true);
+
+    const unstub2 = stubWakesPermanentFailure();
+    const s2 = await sessions2.recycleManager(m1.id, "handoff — a SECOND halt, to S2, while S1's marker is still pending");
+    unstub2();
+    check("(F4) the second recycle ALSO halted (naming S2)", hasEvent(db2, s2.id, "recycle_ownership_transfer_failed"));
+    check("(F4) S2 never captured a real engine id — unresumable", db2.getSession(s2.id)?.engineSessionId == null);
+    db2.close(); // the crash this time — S1's marker is STALE, S2's halt is brand new and unprocessed
+
+    // Boot 3: the FULL sequence. S2's lineage must be reconciled normally (via the event-kind loop, since
+    // the stale S1 marker must NOT occupy predecessorId in the skip-set); S1's stale marker must be
+    // cleared WITHOUT any action — no event, no nudge, no banner naming S1.
+    const { db: db3, host: host3 } = makeBoot();
+    // Code Review round 2 item 4: spy on the REAL enqueueDurableNudge call directly — a downstream queue
+    // read (listUnresolvedQueuedMessagesForWorker) can under-report (it excludes an already-delivered
+    // message), which made an earlier draft of this exact check vacuous.
+    const nudgeSpy3 = spyOnEnqueueDurableNudge();
+    let haltedEarly3, haltedFinish3;
+    try {
+      ({ haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3));
+    } finally {
+      nudgeSpy3.restore();
+    }
+
+    check("(F4) FIX m1: S2's lineage IS reconciled — classified `recovered` (M1 is durably resumable)",
+      haltedEarly3.recovered.some((r) => r.predecessorId === m1.id && r.freshId === s2.id));
+    check("(F4) FIX m1: the stale S1 marker is NEVER classified `recovered` or `consolidated`",
+      !haltedEarly3.recovered.some((r) => r.freshId === s1.id) && !haltedEarly3.consolidated.some((c) => c.freshId === s1.id));
+    check("(F4) FIX m1: the later phase actually recovered M1 for S2", haltedFinish3.recovered.includes(m1.id));
+    check("(F4) FIX m1: the worker (never touched by S1 OR S2) is STILL on M1", db3.getSession(workerId)?.parentSessionId === m1.id);
+    check("(F4) FIX m1: the stale S1 marker is now CLEARED", !db3.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id));
+    check("(F4) FIX m1: NO event anywhere names S1 as the dead successor",
+      !db3.listEventsForSession(m1.id).some((e) =>
+        (e.kind === "recycle_fleet_recovered" || e.kind === "recycle_split_lineage_consolidated") &&
+        e.detail?.deadSuccessorId === s1.id));
+    // Code Review round 2 item 4: match the 8-char prefix the banner/nudge text actually embeds — matching
+    // the FULL id here is vacuous (it can never appear, so the check passes regardless of the bug).
+    check("(F4) FIX m1: NO real enqueueDurableNudge call mentions S1's id",
+      !nudgeSpy3.calls.some((args) => args[2]?.includes(s1.id.slice(0, 8))));
+    check("(F4) FIX m1: M1's lastError does not mention S1 either", !(db3.getSession(m1.id)?.lastError ?? "").includes(s1.id.slice(0, 8)));
+  }
+
+  // ==================== (F4b) card 54434e27 Code Review round 2 item 3 — STALE MARKER via the OTHER
+  // disjunct: a newer halt event, with NO new successor currently linked (hasSuccessor alone would miss
+  // this) ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-f4b";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-f4b" });
+    writeFakeTranscript(m1.cwd, "eng-m1-f4b");
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub1 = stubWakesPermanentFailure();
+    const s1 = await sessions1.recycleManager(m1.id, "handoff — S1 will be left as a stale marker");
+    unstub1();
+    check("(F4b pre) the first recycle HALTED (naming S1)", hasEvent(db1, s1.id, "recycle_ownership_transfer_failed"));
+    db1.close();
+
+    // Boot 2: run ONLY the early prefix — sets the durable marker for (M1, S1), exactly like (F4).
+    const { db: db2, host: host2 } = makeBoot();
+    runBootRecoveryPrefix(db2);
+    check("(F4b) boot 2: the marker IS set, naming S1", db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === s1.id));
+
+    // Continue LIVE: M1 is resumed, halt-recycled AGAIN to S2 — identical to (F4) so far.
+    let sessions2;
+    host2.events.onExit = (id, code, info) => {
+      db2.setProcessState(id, "exited");
+      db2.setBusy(id, false);
+      const exited = db2.getSession(id);
+      if (exited) sessions2.archiveOnExit(exited);
+      if (exited) sessions2.reconcileNeverStartedRecycleSuccessor(id, info.intended);
+    };
+    sessions2 = new SessionService(db2, host2, new OrchestrationControl());
+    sessions2.resume(m1.id);
+    const unstub2 = stubWakesPermanentFailure();
+    const s2 = await sessions2.recycleManager(m1.id, "handoff — a SECOND halt, to S2");
+    unstub2();
+    check("(F4b) the second recycle ALSO halted (naming S2)", hasEvent(db2, s2.id, "recycle_ownership_transfer_failed"));
+
+    // UNLIKE (F4): S2 now dies too, WHILE M1 IS STILL ALIVE, and the IN-PROCESS reclaim watch
+    // (watchHaltedRecycleSuccessor) unlinks S2 and reclaims it back onto M1 — all before any reboot. This
+    // makes `hasSuccessor(M1)` FALSE again (the `hasSuccessor` disjunct alone would miss this lineage),
+    // while S2 is now the predecessor's LATEST halt event — the SECOND staleness disjunct.
+    const s2Pty = host2.handles.get(s2.id);
+    check("(F4b setup) S2's fake pty handle captured", !!s2Pty);
+    s2Pty.kill();
+    const reclaimed = await waitUntil(() => hasEvent(db2, m1.id, "recycle_fleet_recovered"));
+    check("(F4b) the in-process watch reclaimed S2's fleet onto M1 (no reboot)", reclaimed);
+    check("(F4b) hasSuccessor(M1) is FALSE again — the hasSuccessor disjunct alone would miss this", db2.hasSuccessor(m1.id) === false);
+    db2.close(); // the crash this time — S1's marker is stale via the SECOND disjunct; S2 is already fully resolved
+
+    // Boot 3: the FULL sequence. S1's stale marker must be cleared WITHOUT any action, and nothing new
+    // happens for S2 either — its lineage is ALREADY resolved via the in-process path.
+    const { db: db3, host: host3 } = makeBoot();
+    const nudgeSpy = spyOnEnqueueDurableNudge();
+    let haltedEarly3, haltedFinish3;
+    try {
+      ({ haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3));
+    } finally {
+      nudgeSpy.restore();
+    }
+
+    check("(F4b) FIX round 2 item 3: the stale S1 marker is NEVER classified `recovered` or `consolidated`",
+      !haltedEarly3.recovered.some((r) => r.freshId === s1.id) && !haltedEarly3.consolidated.some((c) => c.freshId === s1.id));
+    check("(F4b) FIX round 2 item 3: nothing new happened for M1 (S2's lineage was already resolved in-process)",
+      !haltedFinish3.recovered.includes(m1.id) && !haltedFinish3.consolidated.includes(m1.id));
+    check("(F4b) FIX round 2 item 3: the worker is STILL on M1", db3.getSession(workerId)?.parentSessionId === m1.id);
+    check("(F4b) FIX round 2 item 3: the stale S1 marker is now CLEARED", !db3.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id));
+    check("(F4b) FIX round 2 item 3: NO event anywhere names S1 as the dead successor",
+      !db3.listEventsForSession(m1.id).some((e) =>
+        (e.kind === "recycle_fleet_recovered" || e.kind === "recycle_split_lineage_consolidated") &&
+        e.detail?.deadSuccessorId === s1.id));
+    check("(F4b) FIX round 2 item 3: NO real enqueueDurableNudge call mentions S1's id",
+      !nudgeSpy.calls.some((args) => args[2]?.includes(s1.id.slice(0, 8))));
+    check("(F4b) FIX round 2 item 3: M1's lastError does not mention S1 either", !(db3.getSession(m1.id)?.lastError ?? "").includes(s1.id.slice(0, 8)));
+  }
+
+  // ==================== (F5) card 54434e27 Code Review m3 — a throw in the LATER phase leaves the marker
+  // set; a subsequent run completes it ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-f5";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    // M1 never captures a real engine id — unresumable, so this exercises the `consolidated` branch.
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — a throw in the later phase must leave the marker set");
+    unstub();
+    check("(F5 pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
+    db1.close();
+
+    const { db: db2, host: host2 } = makeBoot();
+    const haltedEarly = runBootRecoveryPrefix(db2).haltedEarly;
+    check("(F5) early phase classified the pair `consolidated`", haltedEarly.consolidated.some((c) => c.predecessorId === m1.id && c.freshId === m2.id));
+
+    const sessions2 = new SessionService(db2, host2, new OrchestrationControl());
+    const originalUnlinkAndArchive = SessionService.prototype.unlinkAndArchiveDeadRecycleSuccessor;
+    let throwCount = 0;
+    SessionService.prototype.unlinkAndArchiveDeadRecycleSuccessor = function (...args) {
+      if (throwCount === 0) { throwCount++; throw new Error("injected later-phase failure (F5 test)"); }
+      return originalUnlinkAndArchive.apply(this, args);
+    };
+    try {
+      const finish1 = sessions2.finishReconcilingHaltedRecycleSuccessors(haltedEarly);
+      check("(F5) the throwing attempt did NOT consolidate M1", !finish1.consolidated.includes(m1.id));
+    } finally {
+      SessionService.prototype.unlinkAndArchiveDeadRecycleSuccessor = originalUnlinkAndArchive;
+    }
+    check("(F5) the marker SURVIVES the throw", db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    check("(F5) M1 is NOT yet un-archived/bannered — the throw happened before any of that ran", db2.getSession(m1.id)?.lastError == null);
+    check("(F5) no recycle_split_lineage_consolidated event was fabricated by the failed attempt", !hasEvent(db2, m1.id, "recycle_split_lineage_consolidated"));
+
+    // A subsequent run (same process, simulating "the next boot") completes it cleanly.
+    const haltedEarly2 = runBootRecoveryPrefix(db2).haltedEarly;
+    const finish2 = sessions2.finishReconcilingHaltedRecycleSuccessors(haltedEarly2);
+    check("(F5) the subsequent run DOES consolidate M1", finish2.consolidated.includes(m1.id));
+    check("(F5) the marker is now CLEARED", !db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id));
+    check("(F5) exactly ONE recycle_split_lineage_consolidated event — the failed attempt never fabricated one", db2.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_split_lineage_consolidated").length === 1);
+    check("(F5) the worker ended up on M1 regardless", db2.getSession(workerId)?.parentSessionId === m1.id);
+  }
+
+  // ==================== (F6) card 54434e27 Code Review m3 — a throw mid-reparent rolls back fully: no
+  // partial state, no marker ====================
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-f6";
+    seedProject(db, P);
+    const m1 = sessions.startManager(`${P}-mgr`);
+    const { workerId } = seedFleet(db, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — reparentHaltedRecycleLineage itself will throw mid-way");
+    unstub();
+    check("(F6 pre) the recycle HALTED", hasEvent(db, m2.id, "recycle_ownership_transfer_failed"));
+    check("(F6 pre) the worker DID transfer onto M2 during the live halt", db.getSession(workerId)?.parentSessionId === m2.id);
+
+    const originalReparentWebhookTargets = Db.prototype.reparentWebhookTargets;
+    Db.prototype.reparentWebhookTargets = function () { throw new Error("injected mid-reparent failure (F6 test)"); };
+    let thrown = null;
+    try { db.reparentHaltedRecycleLineage(m2.id, m1.id); } catch (e) { thrown = e; }
+    Db.prototype.reparentWebhookTargets = originalReparentWebhookTargets;
+
+    check("(F6) FIX m3: reparentHaltedRecycleLineage DID throw", thrown !== null && /injected mid-reparent failure/.test(thrown.message));
+    check("(F6) FIX m3: the worker is STILL on M2 — the reparent rolled back fully", db.getSession(workerId)?.parentSessionId === m2.id);
+    check("(F6) FIX m3: M2's recycledFrom link is STILL intact — not partially unlinked", db.getSession(m2.id)?.recycledFrom === m1.id);
+    check("(F6) FIX m3: NO marker was left behind by the failed transaction", !db.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id));
+    check("(F6) FIX m3: hasSuccessor(M1) is STILL true — nothing committed", db.hasSuccessor(m1.id) === true);
+  }
+
+  // ==================== (F5b) card 54434e27 Code Review round 2 item 2 — the DUPLICATE GUARD, exercised
+  // directly: a completion event for (M1, M2) already exists WHILE the marker is still set ⇒ the recovered
+  // branch finishes with exactly ONE event and ZERO new nudges ====================
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-f5b";
+    seedProject(db, P);
+    const m1 = sessions.startManager(`${P}-mgr`);
+    host.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-f5b" });
+    writeFakeTranscript(m1.cwd, "eng-m1-f5b");
+    const { workerId } = seedFleet(db, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — a completion event for this pair already exists, pre-seeded");
+    unstub();
+    check("(F5b pre) the recycle HALTED", hasEvent(db, m2.id, "recycle_ownership_transfer_failed"));
+
+    // Simulate the EARLY phase having already run (reparent + marker set) AND the later phase having
+    // already fired its event once in some prior (pre-atomicity-fix) run, without ever clearing the
+    // marker — the exact shape the duplicate guard exists to protect against.
+    const reparentedWorkers = db.reparentHaltedRecycleLineage(m2.id, m1.id);
+    db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: m1.id,
+      kind: "recycle_fleet_recovered", detail: { deadSuccessorId: m2.id, oldStillLive: true, reparentedWorkers },
+    });
+    check("(F5b pre) exactly one recycle_fleet_recovered event exists (the pre-seeded one)",
+      db.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 1);
+    check("(F5b pre) the marker is STILL set (the old run never cleared it)",
+      db.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+
+    const nudgeSpy = spyOnEnqueueDurableNudge();
+    let finish;
+    try {
+      finish = sessions.finishReconcilingHaltedRecycleSuccessors({
+        recovered: [{ predecessorId: m1.id, freshId: m2.id, reparentedWorkers }], pendingResolution: [], consolidated: [],
+      });
+    } finally {
+      nudgeSpy.restore();
+    }
+
+    check("(F5b) FIX round 2 item 2: the run finishes (recovered includes M1)", finish.recovered.includes(m1.id));
+    check("(F5b) FIX round 2 item 2: the marker is now CLEARED", !db.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id));
+    check("(F5b) FIX round 2 item 2: STILL exactly ONE recycle_fleet_recovered event — no duplicate",
+      db.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 1);
+    check("(F5b) FIX round 2 item 2: ZERO new enqueueDurableNudge calls", nudgeSpy.calls.length === 0);
+    check("(F5b) the worker is on M1", db.getSession(workerId)?.parentSessionId === m1.id);
+  }
+
+  // ==================== (F5c) card 54434e27 Code Review round 2 item 2 — ATOMICITY: a throw inside
+  // finishHaltedRecyclePending's own marker-clear statement rolls the completion EVENT back too ====================
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-f5c";
+    seedProject(db, P);
+    const m1 = sessions.startManager(`${P}-mgr`);
+    host.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-f5c" });
+    writeFakeTranscript(m1.cwd, "eng-m1-f5c");
+    seedFleet(db, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — the marker-clear statement itself will throw");
+    unstub();
+    check("(F5c pre) the recycle HALTED", hasEvent(db, m2.id, "recycle_ownership_transfer_failed"));
+    const reparentedWorkers = db.reparentHaltedRecycleLineage(m2.id, m1.id);
+
+    const originalClearStatement = Db.prototype.clearHaltedRecyclePendingStatement;
+    Db.prototype.clearHaltedRecyclePendingStatement = function () { throw new Error("injected marker-clear failure (F5c test)"); };
+    let finish;
+    try {
+      finish = sessions.finishReconcilingHaltedRecycleSuccessors({
+        recovered: [{ predecessorId: m1.id, freshId: m2.id, reparentedWorkers }], pendingResolution: [], consolidated: [],
+      });
+    } finally {
+      Db.prototype.clearHaltedRecyclePendingStatement = originalClearStatement;
+    }
+
+    check("(F5c) FIX round 2 item 2: the branch did NOT recover M1 — the throw was caught", !finish.recovered.includes(m1.id));
+    check("(F5c) FIX round 2 item 2: the marker is STILL set — the clear genuinely failed",
+      db.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    check("(F5c) FIX round 2 item 2: the completion event was ALSO rolled back — the SAME transaction never committed",
+      db.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 0);
+  }
+
+  // ==================== (F7) card 54434e27 Code Review round 2 item 1 — the recovered branch's stale-
+  // banner clear is SCOPED to this mechanism's own text, never a bare [loom:orphaned-fleet] match ====================
+  {
+    // (F7a) an UNRELATED orphaned-fleet banner (e.g. archiveOnExit's own) must SURVIVE the recovered branch.
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-f7a";
+    seedProject(db, P);
+    const m1 = sessions.startManager(`${P}-mgr`);
+    host.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-f7a" });
+    writeFakeTranscript(m1.cwd, "eng-m1-f7a");
+    seedFleet(db, P, m1.id);
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — an unrelated orphaned-fleet banner must survive");
+    unstub();
+    const reparentedWorkers = db.reparentHaltedRecycleLineage(m2.id, m1.id);
+    const unrelatedBanner = "[loom:orphaned-fleet] This manager exited while 2 worker(s)/child sessions were still live; archived instead of orphaning them — review before resuming.";
+    db.setLastError(m1.id, unrelatedBanner);
+
+    sessions.finishReconcilingHaltedRecycleSuccessors({
+      recovered: [{ predecessorId: m1.id, freshId: m2.id, reparentedWorkers }], pendingResolution: [], consolidated: [],
+    });
+    check("(F7a) FIX round 2 item 1: an UNRELATED orphaned-fleet banner SURVIVES the recovered branch",
+      db.getSession(m1.id)?.lastError === unrelatedBanner);
+  }
+  {
+    // (F7b) THIS mechanism's own banner, for this exact freshId, IS cleared.
+    const { db, host, sessions } = makeHarness();
+    const P = "rmhsd-f7b";
+    seedProject(db, P);
+    const m1 = sessions.startManager(`${P}-mgr`);
+    host.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-f7b" });
+    writeFakeTranscript(m1.cwd, "eng-m1-f7b");
+    seedFleet(db, P, m1.id);
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions.recycleManager(m1.id, "handoff — this mechanism's own stale banner must be cleared");
+    unstub();
+    const reparentedWorkers = db.reparentHaltedRecycleLineage(m2.id, m1.id);
+    // Exactly the text a prior boot's PARTIAL `consolidated` attempt for this SAME freshId would have
+    // stamped (see the `consolidated` branch's own banner) before throwing.
+    const ownStaleBanner = `[loom:orphaned-fleet] A halted recycle's successor ${m2.id.slice(0, 8)} is unresumable, and this predecessor is also not resumable this boot — its fleet (1 child session(s), plus whatever wakes/questions/pending had transferred) has been consolidated back onto THIS session as bookkeeping only. No automatic owner exists; a human must intervene (reassign the workers or start a new manager).`;
+    db.setLastError(m1.id, ownStaleBanner);
+
+    sessions.finishReconcilingHaltedRecycleSuccessors({
+      recovered: [{ predecessorId: m1.id, freshId: m2.id, reparentedWorkers }], pendingResolution: [], consolidated: [],
+    });
+    check("(F7b) FIX round 2 item 1: THIS mechanism's own stale banner (for this freshId) IS cleared",
+      db.getSession(m1.id)?.lastError == null);
   }
 
   // ==================== (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a cleanly re-recycled lineage is left untouched ====================
