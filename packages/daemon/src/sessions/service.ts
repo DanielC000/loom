@@ -14,7 +14,7 @@ import {
 // Card 66b1b40d: its own statement (not folded into the import above). orchestration-mcp-role-guard.mjs now matches the
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
-import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
+import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, isForcedRoleFreshStart, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError, explicitRoleGrantCarryoverError } from "../profiles/validate.js";
 import { computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
@@ -4053,7 +4053,9 @@ export class SessionService {
     if (this.pty.isAlive(session.id)) return session;
     // @decision 7955458e — ruling 1(b): a codex-pinned row whose RESOLVED role forces claude can never be
     // `--resume`d on codex — detected here, before the codex-transcript checks below (irrelevant to it).
-    const forcedRoleFreshStart = session.harness === "codex" && session.role != null && TRANSCRIPT_ROOT_DENY_ROLES.has(session.role);
+    // @decision a4c5f234 — THE one call site for this check, shared with `isDurablyResumable` — never
+    // re-derive the expression inline here again.
+    const forcedRoleFreshStart = isForcedRoleFreshStart(session);
     if (!forcedRoleFreshStart) {
       if (!session.engineSessionId) throw new Error("session has no engine id to resume");
       // Backstop dead-ID detection: if the engine transcript is gone, this id is unresumable.
@@ -14078,7 +14080,7 @@ export class SessionService {
    * `halted-recycle-reconcile.ts`'s early half): archives it + nudges the predecessor, and — same reason as
    * `finishReconcilingRecycleSettles` — must run BEFORE the resume paths below so they never retry it.
    */
-  finishReconcilingHaltedRecycleSuccessors(early: HaltedRecycleEarlyResult): { recovered: string[]; pendingResolutionArmed: string[] } {
+  finishReconcilingHaltedRecycleSuccessors(early: HaltedRecycleEarlyResult): { recovered: string[]; pendingResolutionArmed: string[]; consolidated: string[] } {
     const recovered: string[] = [];
     for (const { predecessorId, freshId, reparentedWorkers } of early.recovered) {
       try {
@@ -14096,6 +14098,28 @@ export class SessionService {
         console.error(`[halted-recycle-reconcile] later pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
       }
     }
+    // @decision a4c5f234 — the both-dead consolidation: mirrors `stampStranded` (08c81809), never
+    // `finalizeRecovery` — P is NEVER resumed, only made VISIBLE. See the full record for why
+    // `allowSuperseded` is NOT the remedy here.
+    const consolidated: string[] = [];
+    for (const { predecessorId, freshId, reparentedWorkers } of early.consolidated) {
+      try {
+        this.retiredRecycleSuccessorIds.add(freshId);
+        this.carryPendingToSuccessor(freshId, predecessorId, [], this.db.listUnresolvedQueuedMessagesForWorker(freshId));
+        this.unlinkAndArchiveDeadRecycleSuccessor(predecessorId, freshId);
+        this.db.restoreSession(predecessorId);
+        this.db.setProcessState(predecessorId, "exited");
+        this.db.setLastError(predecessorId,
+          `[loom:orphaned-fleet] A halted recycle's successor ${freshId.slice(0, 8)} is unresumable, and this predecessor is also not resumable this boot — its fleet (${reparentedWorkers} worker(s), plus whatever wakes/questions/pending had transferred) has been consolidated back onto THIS session as bookkeeping only. No automatic owner exists; a human must intervene (reassign the workers or start a new manager).`);
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+          kind: "recycle_split_lineage_consolidated", detail: { deadSuccessorId: freshId },
+        });
+        consolidated.push(predecessorId);
+      } catch (e) {
+        console.error(`[halted-recycle-reconcile] consolidated pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+      }
+    }
     // @decision d9512de7 — arm one bounded observer per still-open lineage; see
     // waitForHaltedSuccessorReadyThenResolve's own doc for why this can't resolve the alert directly here.
     const pendingResolutionArmed: string[] = [];
@@ -14105,7 +14129,7 @@ export class SessionService {
         console.error(`[halted-recycle-reconcile] ready-wait failed for predecessor ${predecessorId.slice(0, 8)} -> successor ${freshId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
       });
     }
-    return { recovered, pendingResolutionArmed };
+    return { recovered, pendingResolutionArmed, consolidated };
   }
 
   /**

@@ -1051,6 +1051,9 @@ export type OrchestrationEventKind =
   // automatic fleet owner. Distinct from `recycle_fleet_unresolved` on purpose: that case still has a
   // live predecessor watching and the loop still running; this one has neither.
   | "recycle_fleet_stranded_across_restart"
+  // @decision a4c5f234 — the both-dead halted-lineage consolidation marker. `managerSessionId` = the
+  // predecessor (consolidated target); `detail` carries { deadSuccessorId }. See the full record.
+  | "recycle_split_lineage_consolidated"
   // @decision 5a56bb0a — the durable marker that a recycle successor was administratively retired
   // (unlinkAndArchiveDeadRecycleSuccessor), not genuinely broken; resume()'s chokepoint refuses an
   // automatic caller only when this + resumability:"dead"+archivedAt all agree. `workerSessionId` = retired successor.
@@ -1970,7 +1973,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   spawn_worker: true, message_worker: true, worker_report: true, stop_worker: true,
   redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true,
   recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true,
-  recycle_fleet_stranded_across_restart: true, recycle_successor_retired: true, recycle_ownership_transfer_failed: true,
+  recycle_fleet_stranded_across_restart: true, recycle_split_lineage_consolidated: true, recycle_successor_retired: true, recycle_ownership_transfer_failed: true,
   recycle_ownership_transfer_resolved: true, recycle_reattempt_failed: true, recycle_reattempt_handoff_undelivered: true, worker_revived: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, merge_landing_started: true, merge_landing_aborted: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,

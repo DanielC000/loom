@@ -14,11 +14,15 @@ export interface HaltedRecycleEarlyResult {
   /** @decision d9512de7 — a durably-resumable successor with a still-open unresolved alert; never
    *  resolved from this DB-only check alone. See the full record for why. */
   pendingResolution: { predecessorId: string; freshId: string }[];
+  /** @decision a4c5f234 — both sides unresumable this boot; reparented onto the predecessor as bookkeeping
+   *  only (never served). See the full record. */
+  consolidated: { predecessorId: string; freshId: string; reparentedWorkers: number }[];
 }
 
 export function reconcileHaltedRecycleSuccessorsEarly(db: Db): HaltedRecycleEarlyResult {
   const recovered: HaltedRecycleEarlyResult["recovered"] = [];
   const pendingResolution: HaltedRecycleEarlyResult["pendingResolution"] = [];
+  const consolidated: HaltedRecycleEarlyResult["consolidated"] = [];
   for (const predecessorId of db.listWorkerSessionIdsWithEventKind(["recycle_ownership_transfer_failed"])) {
     try {
       // Already resolved (a prior boot's own later phase, or the in-process watch, already reclaimed it) —
@@ -53,23 +57,34 @@ export function reconcileHaltedRecycleSuccessorsEarly(db: Db): HaltedRecycleEarl
         }
         continue;
       }
+      // Shared by both branches below — moving S1's categories onto P is identical bookkeeping whether P
+      // turns out resumable (`recovered`) or not (`consolidated`).
+      const reparentOntoPredecessor = (): number => {
+        if (fresh.recycledFrom === predecessorId) db.setOrchestration(fresh.id, { recycledFrom: null });
+        const reparentedWorkers = db.reparentAllChildren(fresh.id, predecessorId);
+        db.reparentWakes(fresh.id, predecessorId);
+        db.reparentQuestions(fresh.id, predecessorId);
+        db.reparentEventTriggerTargets(fresh.id, predecessorId);
+        db.reparentPollJobTargets(fresh.id, predecessorId);
+        db.reparentWebhookTargets(fresh.id, predecessorId);
+        db.reparentPendingOwnerMessage(fresh.id, predecessorId);
+        return reparentedWorkers;
+      };
       // @decision 08c81809 — NEVER RESURRECT: confirm the predecessor is itself a viable destination
-      // (mirrors `reconcileStrandedRecycleSettlesEarly`'s own gate) before touching the successor's
-      // lineage — a predecessor ALSO unresumable this boot leaves nobody to serve; leave both alone.
-      if (!isDurablyResumable(predecessor)) continue;
-      if (fresh.recycledFrom === predecessorId) db.setOrchestration(fresh.id, { recycledFrom: null });
-      const reparentedWorkers = db.reparentAllChildren(fresh.id, predecessorId);
-      db.reparentWakes(fresh.id, predecessorId);
-      db.reparentQuestions(fresh.id, predecessorId);
-      db.reparentEventTriggerTargets(fresh.id, predecessorId);
-      db.reparentPollJobTargets(fresh.id, predecessorId);
-      db.reparentWebhookTargets(fresh.id, predecessorId);
-      db.reparentPendingOwnerMessage(fresh.id, predecessorId);
-      recovered.push({ predecessorId, freshId: fresh.id, reparentedWorkers });
+      // (mirrors `reconcileStrandedRecycleSettlesEarly`'s own gate) before deciding which outcome this is.
+      if (!isDurablyResumable(predecessor)) {
+        // BOTH dead: consolidate anyway (bookkeeping, not serving) instead of leaving ownership split
+        // forever — nothing here is resumed.
+        //
+        // @decision a4c5f234 — see the full record for why P (not S1) is the consolidation target.
+        consolidated.push({ predecessorId, freshId: fresh.id, reparentedWorkers: reparentOntoPredecessor() });
+        continue;
+      }
+      recovered.push({ predecessorId, freshId: fresh.id, reparentedWorkers: reparentOntoPredecessor() });
     } catch (e) {
       // A single bad lineage must never abort the whole boot sequence — log and move on.
       console.error(`[halted-recycle-reconcile] early pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
     }
   }
-  return { recovered, pendingResolution };
+  return { recovered, pendingResolution, consolidated };
 }

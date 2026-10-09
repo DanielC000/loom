@@ -39,6 +39,15 @@ export interface CodexCompatInput {
 export const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor", "manager", "platform", "setup"]);
 
 /**
+ * @decision a4c5f234 — THE one place this shape is computed; `resume()` and `isDurablyResumable` both
+ * call it instead of each keeping their own copy, so the two can never classify a row differently. See
+ * the full record for why a bare duplicate of this expression was a real bug.
+ */
+export function isForcedRoleFreshStart(session: { harness?: "claude" | "codex"; role?: SessionRole | null }): boolean {
+  return session.harness === "codex" && session.role != null && TRANSCRIPT_ROOT_DENY_ROLES.has(session.role);
+}
+
+/**
  * Card 7955458e, owner ruling — the HARD-REJECT reason for an explicit `harness:"codex"` profile whose
  * role is in {@link TRANSCRIPT_ROOT_DENY_ROLES}. `HARNESS_FLEET_ROLES` (`packages/shared/src/config.ts`)
  * already limits a DEFAULT-derived codex harness to `worker`, because codex has no parity for any other

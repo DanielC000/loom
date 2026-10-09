@@ -2,6 +2,7 @@ import type { Db } from "../db.js";
 import type { Session } from "@loom/shared";
 import fs from "node:fs";
 import { engineTranscriptExists } from "./transcript.js";
+import { isForcedRoleFreshStart } from "../profiles/codex-compat.js";
 
 /**
  * @decision 08c81809 — the EARLY, DB-ONLY half of the boot-time recovery for a manager/platform recycle
@@ -64,17 +65,22 @@ export interface RecycleSettleEarlyResult {
 }
 
 /**
- * Pure, DB/filesystem-only replica of `resume()`'s own three up-front resumability preconditions
- * (`engineSessionId` set, its engine transcript exists, its `cwd` exists) — deliberately NOT
- * `pty.isAlive`/`hasSuccessor`, neither of which is meaningful pre-boot or relevant here. Lets the EARLY,
- * DB-only reconcile pass decide "would `resume()` even attempt this" before `SessionService`/`PtyHost`
- * exist. NOT a substitute for actually calling `resume()`: it cannot catch a failure mode `resume()`
- * itself only discovers by trying (e.g. a `pty.spawn` throw) — the LATER phase's own real `resume()`
- * attempt, wrapped in try/catch, is what actually decides success for the row this function green-lit.
+ * Pure, DB/filesystem-only replica of `resume()`'s own up-front resumability preconditions — deliberately
+ * NOT `pty.isAlive`/`hasSuccessor`, neither of which is meaningful pre-boot or relevant here. Lets the
+ * EARLY, DB-only reconcile pass decide "would `resume()` even attempt this" before `SessionService`/
+ * `PtyHost` exist. NOT a substitute for actually calling `resume()`: it cannot catch a failure mode
+ * `resume()` itself only discovers by trying (e.g. a `pty.spawn` throw) — the LATER phase's own real
+ * `resume()` attempt, wrapped in try/catch, is what actually decides success for the row this green-lit.
+ *
+ * @decision a4c5f234 — `isForcedRoleFreshStart` is the SAME check `resume()` consults before its own
+ * `engineSessionId`/transcript checks; a forced-role row fresh-starts instead of `--resume`ing, so it
+ * needs neither. See the full record for the bug a bare duplicate of this check caused.
  */
-export function isDurablyResumable(session: Pick<Session, "engineSessionId" | "cwd" | "harness">): boolean {
-  if (!session.engineSessionId) return false;
-  if (!engineTranscriptExists(session.cwd, session.engineSessionId, session.harness)) return false;
+export function isDurablyResumable(session: Pick<Session, "engineSessionId" | "cwd" | "harness" | "role">): boolean {
+  if (!isForcedRoleFreshStart(session)) {
+    if (!session.engineSessionId) return false;
+    if (!engineTranscriptExists(session.cwd, session.engineSessionId, session.harness)) return false;
+  }
   if (!fs.existsSync(session.cwd)) return false;
   return true;
 }

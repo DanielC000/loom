@@ -638,9 +638,12 @@ try {
     const { db: db2, host: host2, sessions: sessions2 } = makeHarness();
     const { waiterPromises, restore } = installWaiterCapture();
 
-    // Convert M2 to a legacy codex-pinned row BEFORE the boot-reconcile's own isDurablyResumable check runs
-    // — a real codex rollout fixture (same shape forced-role-resume-retry-safety.mjs's own WINDOW 1 uses)
-    // so that check resolves true under harness "codex", not vacuously false.
+    // Convert M2 to a legacy codex-pinned row BEFORE the boot-reconcile's own isDurablyResumable check
+    // runs. Card a4c5f234: this makes isForcedRoleFreshStart(M2) true (harness:"codex" + role "manager",
+    // a TRANSCRIPT_ROOT_DENY_ROLES member), so isDurablyResumable now resolves M2 via that bypass alone —
+    // it never even reads M2's transcript. The real codex rollout fixture below (same shape
+    // forced-role-resume-retry-safety.mjs's own WINDOW 1 uses) is kept for realism but is no longer
+    // load-bearing for this specific check.
     const codexDayDir = path.join(tmpCodexHome, "sessions", "2026", "09", "07");
     fs.mkdirSync(codexDayDir, { recursive: true });
     fs.writeFileSync(
@@ -655,7 +658,7 @@ try {
     db2.setEngineSessionId(m2.id, engineSessionId);
 
     const { haltedEarly } = runBootRecoveryPrefix(db2);
-    check("(m2 setup) isDurablyResumable now resolves M2 under its CODEX transcript — pendingResolution still records the pair", haltedEarly.pendingResolution.some((e) => e.predecessorId === m1.id && e.freshId === m2.id));
+    check("(m2 setup) isDurablyResumable now resolves M2 TRUE via the forced-role-fresh-start bypass (card a4c5f234), not its transcript — pendingResolution still records the pair", haltedEarly.pendingResolution.some((e) => e.predecessorId === m1.id && e.freshId === m2.id));
     const haltedFinish = sessions2.finishReconcilingHaltedRecycleSuccessors(haltedEarly);
     check("(m2 setup) the boot-armed observer is armed", haltedFinish.pendingResolutionArmed.includes(m2.id));
     await waiterPromises.get(m2.id); // times out — nothing revived M2 yet

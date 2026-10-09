@@ -55,12 +55,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       derivation (deriveCrashOrphanedManagers + recoverCrashOrphanedWorkers, no RestartIntent): the
 //       predecessor NOW IS a crash-recovery candidate (same carve-out) and IS resumed, alongside the
 //       surviving successor.
-//   (F) BOTH DEAD — the predecessor is ALSO unresumable this boot (never captured an engine id): the
-//       halted-reconcile's own NEVER RESURRECT gate (mirrors reconcileStrandedRecycleSettlesEarly's
-//       isDurablyResumable(predecessor) check) leaves BOTH untouched — nothing archived, overwritten, or
-//       reparented onto a predecessor that can't come back either. 386e4eb5's carve-out changes nothing
-//       here either: `resume()`'s EARLIER unresumability checks (no engine id) refuse the predecessor
-//       before the code ever reaches the superseded check, exactly as before this card.
+//   (F) BOTH DEAD — card a4c5f234: the predecessor is ALSO unresumable this boot (never captured an
+//       engine id). Superseded behavior: the old NEVER RESURRECT gate used to leave BOTH sides untouched
+//       forever (nothing archived/reparented), stranding ownership permanently split. NOW: the lineage is
+//       CONSOLIDATED onto the predecessor as pure bookkeeping (workers/wakes/questions/etc. reparented,
+//       the successor unlinked + archived, `recycle_split_lineage_consolidated` filed) — NEVER RESURRECT
+//       still holds (nothing is auto-resumed; the predecessor is only made VISIBLE, un-archived + banner
+//       stamped, for a human `allowSuperseded` resume). Also proves: idempotent across a THIRD boot; the
+//       crash-orphan derivation sees the reparented worker (worktree-GC protection reaches it for free)
+//       but the manager-first resume order means neither the predecessor nor the worker is ever actually
+//       resumed through that side door — see card a4c5f234's own decision record for the full trace.
+//   (F2) BOTH DEAD, BUT ALREADY RESOLVED — card a4c5f234 must respect dfc3b014's resolution marker: a
+//       `recycle_ownership_transfer_resolved` event already named the (now also dead) successor before
+//       the restart, so `currentHaltedSuccessor` stops matching before the new consolidation branch is
+//       ever reached — the lineage stays exactly as it was, untouched.
 //   (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a predecessor that halted once (naming successor S1), was
 //       reclaimed after S1 died, and was then cleanly re-recycled to a BRAND NEW successor S2: the
 //       permanent halt event still names S1, but the halted-reconcile (and, since 386e4eb5,
@@ -104,6 +112,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -754,7 +763,7 @@ try {
     check("(E) M2 is genuinely live again too", host2.isAlive(m2.id) === true);
   }
 
-  // ==================== (F) BOTH DEAD — the halted reconcile must never resurrect ONTO an unresumable predecessor ====================
+  // ==================== (F) BOTH DEAD — card a4c5f234: now CONSOLIDATED onto the predecessor, bookkeeping only ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
     const P = "rmhsd-f";
@@ -762,6 +771,15 @@ try {
     const m1 = sessions1.startManager(`${P}-mgr`);
     // M1 never captures a real engine id (no SessionStart hook delivered) — isDurablyResumable(M1) is FALSE.
     const { workerId } = seedFleet(db1, P, m1.id);
+    // Code Review ROUND 2, finding 6e: a NON-WORKER category that actually transfers during the live halt
+    // (only "wakes" is stubbed to fail below — "questions" succeeds normally) — proves `consolidated`
+    // reparents more than just workers, not only the one category every other scenario in this file checks.
+    const questionId = `${m1.id}-question`;
+    db1.insertQuestion({
+      id: questionId, sessionId: m1.id, projectId: P, type: "decision", title: "t", body: "b",
+      options: null, recommendation: null, state: "pending", chosenOption: null, note: null,
+      createdAt: new Date().toISOString(), answeredAt: null, consumedAt: null, taskId: null,
+    });
 
     const unstub = stubWakesPermanentFailure();
     const m2 = await sessions1.recycleManager(m1.id, "handoff — forcing a halt where BOTH predecessor and successor are unresumable");
@@ -769,22 +787,112 @@ try {
     check("(F pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
     check("(F pre) M1 never captured a real engine id — unresumable", db1.getSession(m1.id)?.engineSessionId == null);
     check("(F pre) M2 never captured a real engine id either (never reached SessionStart) — unresumable", db1.getSession(m2.id)?.engineSessionId == null);
+    check("(F pre) the question DID transfer onto M2 during the live halt (questions step was never stubbed)", db1.getQuestion(questionId)?.sessionId === m2.id);
+
+    db1.close();
+    const { db: db2, host: host2 } = makeBoot();
+    const { sessions: sessions2, haltedEarly, haltedFinish, crashOrphanedWorkers, crashOrphanedManagers } = runRealBootSequenceUpToResume(db2, host2);
+
+    check("(F) FIX a4c5f234: the early phase CONSOLIDATED — recorded in `consolidated`, never `recovered`", haltedEarly.consolidated.some((c) => c.predecessorId === m1.id && c.freshId === m2.id));
+    check("(F) FIX a4c5f234: the early phase did NOT also mark it `recovered`", !haltedEarly.recovered.some((r) => r.predecessorId === m1.id));
+    check("(F) FIX a4c5f234: the later phase consolidated it too", haltedFinish.consolidated.includes(m1.id));
+    check("(F) FIX a4c5f234: the later phase did NOT also mark it `recovered`", !haltedFinish.recovered.includes(m1.id));
+
+    // The "workers" ownership-transfer step itself ALWAYS succeeds here (only "wakes" was stubbed to fail)
+    // — exactly like (A)/(B), the worker DID transfer onto M2 before the halt was ever detected. P, not S1,
+    // is the consolidation target (see card a4c5f234's own record for why) — the worker now comes BACK.
+    check("(F) FIX a4c5f234: the worker IS reclaimed back onto M1 (the consolidation target is P, never S1)", db2.getSession(workerId)?.parentSessionId === m1.id);
+    check("(F) FIX a4c5f234: M2's recycledFrom link IS unlinked now", db2.getSession(m2.id)?.recycledFrom === null);
+    check("(F) FIX a4c5f234: M2 is archived (administratively retired)", !!db2.getSession(m2.id)?.archivedAt);
+    check("(F) FIX a4c5f234: hasSuccessor(M1) is now FALSE", db2.hasSuccessor(m1.id) === false);
+    const consolidatedEvents = db2.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_split_lineage_consolidated");
+    check("(F) FIX a4c5f234: exactly one recycle_split_lineage_consolidated event, naming M2", consolidatedEvents.length === 1 && consolidatedEvents[0].detail?.deadSuccessorId === m2.id);
+    check("(F) FIX a4c5f234: no recycle_fleet_recovered event was fabricated for M1 (consolidated, not recovered)", !hasEvent(db2, m1.id, "recycle_fleet_recovered"));
+    // Code Review ROUND 2, finding 6e: the question (a non-worker category) moved back onto M1 too.
+    check("(F) FIX a4c5f234 (6e): the question moved back onto M1 — consolidation isn't worker-only", db2.getQuestion(questionId)?.sessionId === m1.id);
+
+    // NEVER RESURRECT: M1 is made VISIBLE (un-archived, exited) but never actually resumed.
+    check("(F) FIX a4c5f234: M1 is un-archived (visible on the live rail)", db2.getSession(m1.id)?.archivedAt == null);
+    check("(F) FIX a4c5f234: M1's processState is exited, NOT live — never resumed", db2.getSession(m1.id)?.processState === "exited");
+    // Code Review ROUND 2 MAJOR 2: the banner must NOT point at `allowSuperseded` (it can't actually work
+    // here — see the decision record) — it uses `stampStranded`'s own honest wording instead.
+    check("(F) FIX a4c5f234 (MAJOR 2): M1's lastError carries the orphaned-fleet banner with the HONEST remedy, never allowSuperseded",
+      /\[loom:orphaned-fleet\]/.test(db2.getSession(m1.id)?.lastError ?? "") &&
+      /no automatic owner/i.test(db2.getSession(m1.id)?.lastError ?? "") &&
+      /human must intervene/i.test(db2.getSession(m1.id)?.lastError ?? "") &&
+      !/allowSuperseded/.test(db2.getSession(m1.id)?.lastError ?? ""));
+    check("(F) M1 was never actually resumed (not alive)", host2.isAlive(m1.id) === false);
+
+    // Code Review follow-up (1): the crash-orphan derivation NOW sees the reparented worker naming M1 as
+    // its manager — proving the worktree-protection wiring (index.ts's protectedSessionIds, card 9fc41af5)
+    // reaches it for free — but the manager-first resume order (sha:b65d9a5e) means NEITHER M1 nor the
+    // worker is ever actually resumed: resume()'s preconditions are a confirmed strict superset of
+    // isDurablyResumable's (including the forced-role-fresh-start bypass, MAJOR 1), so M1's own attempt is
+    // guaranteed to fail first.
+    check("(F) crash-orphan derivation: the reparented worker surfaces, naming M1 as its manager", crashOrphanedWorkers.some((c) => c.workerSessionId === workerId && c.managerSessionId === m1.id));
+    // Code Review ROUND 2, finding 6a: inject the real `resumeOne` seam and record every id it's actually
+    // called with — proves the worker id is NEVER passed to it, not merely that it ends up not-live.
+    const resumeOneCalls = [];
+    const { managersFailed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
+      soloManagerIds: crashOrphanedManagers,
+      resumeOne: (id) => { resumeOneCalls.push(id); try { sessions2.resume(id); return { ok: true }; } catch (e) { return { ok: false, reason: e.message }; } },
+    });
+    check("(F) crash-path (6a): M1's own id WAS passed to resumeOne (its attempt is real, not skipped)", resumeOneCalls.includes(m1.id));
+    check("(F) crash-path (6a): the worker's id was NEVER passed to resumeOne at all (manager-first ordering)", !resumeOneCalls.includes(workerId));
+    check("(F) crash-path: M1's own resume attempt FAILS (NEVER RESURRECT holds through this side door)", managersFailed.includes(m1.id));
+    check("(F) crash-path: M1 was NOT actually resumed", host2.isAlive(m1.id) === false);
+    check("(F) crash-path: the worker was NEVER individually attempted (manager-first ordering) — still not live", host2.isAlive(workerId) === false);
+    // Code Review ROUND 2, finding 6c: the attempt's own outcome — the audit event under M1, M1's
+    // resumability afterwards (NOT "dead" — M1 fails on "no engine id", not the transcript/cwd paths that
+    // set that stamp, per MAJOR 2's own finding), and the banner still present.
+    check("(F) crash-path (6c): a manager_crash_resume_failed event was filed under M1", hasEvent(db2, m1.id, "manager_crash_resume_failed"));
+    check("(F) crash-path (6c): M1's resumability is NOT stamped \"dead\" (it failed on \"no engine id\", not transcript/cwd)", db2.getSession(m1.id)?.resumability !== "dead");
+    check("(F) crash-path (6c): the orphaned-fleet banner is STILL present after the failed attempt", /\[loom:orphaned-fleet\]/.test(db2.getSession(m1.id)?.lastError ?? ""));
+
+    // Idempotency: a THIRD boot (fresh db/host reopened against the SAME file, mirroring (K)/(L)'s own
+    // technique in recycle-settle-lost-to-restart.mjs) must be a no-op — the lineage is already resolved.
+    db2.close();
+    const { db: db3, host: host3 } = makeBoot();
+    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3);
+    check("(F) SECOND BOOT: the lineage is no longer even scanned into `consolidated` again — hasSuccessor(M1) is already false", !haltedEarly3.consolidated.some((c) => c.predecessorId === m1.id));
+    check("(F) SECOND BOOT: the later phase consolidated nothing new for this lineage", !haltedFinish3.consolidated.includes(m1.id));
+    check("(F) SECOND BOOT: still exactly ONE recycle_split_lineage_consolidated event — no duplicate", db3.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_split_lineage_consolidated").length === 1);
+    check("(F) SECOND BOOT: M1 is STILL not resumed", host3.isAlive(m1.id) === false);
+  }
+
+  // ==================== (F2) BOTH DEAD, BUT ALREADY RESOLVED — card a4c5f234 must respect the resolved marker ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-f2";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    // M1 never captures a real engine id — unresumable, same shape as (F).
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — both dead, but a recycle_reattempt already resolved it before the restart");
+    unstub();
+    check("(F2 pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
+
+    // Simulate a live recycle_reattempt having ALREADY resolved this exact lineage (dfc3b014's own
+    // resolution marker) before the crash/restart — same field shape `reattemptManagerOwnershipTransfer`
+    // files (service.ts): managerSessionId = the successor, workerSessionId = the predecessor.
+    db1.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: m2.id, workerSessionId: m1.id,
+      kind: "recycle_ownership_transfer_resolved", detail: { successorId: m2.id },
+    });
+    check("(F2 pre) the resolution marker now names M2 for M1", hasEvent(db1, m1.id, "recycle_ownership_transfer_resolved"));
 
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
     const { haltedEarly, haltedFinish } = runRealBootSequenceUpToResume(db2, host2);
 
-    check("(F) FIX: the early phase reparented NOTHING — the predecessor is ALSO not a viable destination (NEVER RESURRECT)", haltedEarly.recovered.length === 0);
-    check("(F) FIX: the later phase recovered NOTHING either", haltedFinish.recovered.length === 0);
-    // The "workers" ownership-transfer step itself ALWAYS succeeds here (only "wakes" was stubbed to fail)
-    // — exactly like (A)/(B), the worker DID transfer onto M2 before the halt was ever detected. With BOTH
-    // sides unresumable, nothing can reclaim it back: it stays on M2 (a dead, archived session) rather than
-    // being moved onto an equally-unresumable M1 — the known, accepted residual this scenario proves.
-    check("(F) the worker transferred onto M2 before the halt, exactly like (A)/(B)", db2.getSession(workerId)?.parentSessionId === m2.id);
-    check("(F) FIX: the worker was NOT reclaimed back onto the equally-unresumable M1", db2.getSession(workerId)?.parentSessionId !== m1.id);
-    check("(F) FIX: M2's recycledFrom link is untouched — never unlinked", db2.getSession(m2.id)?.recycledFrom === m1.id);
-    check("(F) FIX: hasSuccessor(M1) is STILL true — nothing unlinked M2", db2.hasSuccessor(m1.id) === true);
-    check("(F) FIX: no recycle_fleet_recovered event was fabricated for M1", !hasEvent(db2, m1.id, "recycle_fleet_recovered"));
+    check("(F2) FIX a4c5f234: the already-resolved lineage is NEVER consolidated — currentHaltedSuccessor stops matching before the new branch is ever reached", !haltedEarly.consolidated.some((c) => c.predecessorId === m1.id));
+    check("(F2) the already-resolved lineage is also never in `recovered`", !haltedEarly.recovered.some((r) => r.predecessorId === m1.id));
+    check("(F2) the later phase did nothing for this lineage either", !haltedFinish.consolidated.includes(m1.id) && !haltedFinish.recovered.includes(m1.id));
+    check("(F2) FIX a4c5f234: the worker is left exactly where it was (still on M2) — nothing reparented it", db2.getSession(workerId)?.parentSessionId === m2.id);
+    check("(F2) M2's recycledFrom link is untouched by this card's new branch", db2.getSession(m2.id)?.recycledFrom === m1.id);
+    check("(F2) no recycle_split_lineage_consolidated event was fabricated", !hasEvent(db2, m1.id, "recycle_split_lineage_consolidated"));
   }
 
   // ==================== (G) A DIFFERENT SUCCESSOR (ID MISMATCH) — a cleanly re-recycled lineage is left untouched ====================
@@ -1004,6 +1112,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a halted recycle's successor-death watch reclaims whatever DID transfer (in-process and across a boot reconcile); card 386e4eb5's isSupersededByRecycle carve-out correctly auto-resumes a halted predecessor ONLY while its successor still exactly matches its latest unresolved halt (id — the real discriminator; gen only a defensive secondary check) — via resume(), the crash-recovery candidate derivation, and resumeFleetOnBoot's capture alike — while an ordinary recycle, a re-recycle to a different successor (id mismatch) than its halt event named, and a both-dead lineage all stay refused exactly as before."
+  ? "\n✅ ALL PASS — a halted recycle's successor-death watch reclaims whatever DID transfer (in-process and across a boot reconcile); card 386e4eb5's isSupersededByRecycle carve-out correctly auto-resumes a halted predecessor ONLY while its successor still exactly matches its latest unresolved halt (id — the real discriminator; gen only a defensive secondary check) — via resume(), the crash-recovery candidate derivation, and resumeFleetOnBoot's capture alike — while an ordinary recycle and a re-recycle to a different successor (id mismatch) than its halt event named both stay refused exactly as before; card a4c5f234's both-dead lineage is now CONSOLIDATED onto the predecessor as bookkeeping only (never resumed, idempotent, never through the crash-orphan side door either) unless dfc3b014's own resolution marker already named it, in which case it stays untouched."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
