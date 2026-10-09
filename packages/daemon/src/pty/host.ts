@@ -4980,13 +4980,36 @@ async function readPosixPidRecordDeduped(
   }
 }
 
+/** @decision 49186d90 — never reuse this episode across two different pending reads: clearing it on
+ *  settle is the re-arm, and skipping that clear leaves a later stuck read inheriting a stale
+ *  `signaled:true`, so it would never raise its own signal. */
+interface PosixSingletonEpisode {
+  startedAt: number;
+  timeoutHits: number;
+  signaled: boolean;
+}
+
+/** How many consecutive timed-out joins against the SAME pending episode (see
+ *  {@link PosixSingletonEpisode}) before {@link joinSingletonPosixRead} emits its one loud
+ *  `console.error`. Exported so a test asserts against the real value, never a hardcoded duplicate.
+ *  Picked small (3): these calls arrive from independent lifecycle triggers, never a tight poll loop, so
+ *  1-2 could be near-simultaneous callers racing a merely-slow (not hung) read. Asymmetric in practice
+ *  across the two slots — `enumerateWithRetry` retries only readdir's timeout, never uptime's silent
+ *  degrade — with the measured per-resource join counts in
+ *  `docs/decisions/49186d90-posix-singleton-stuck-read-signal.md`. */
+export const POSIX_SINGLETON_STUCK_SIGNAL_THRESHOLD = 3;
+
 /** @decision 21f6175c — process-wide in-flight slot for the SINGLE shared `readdir("/proc")` listing —
  *  no pid key needed (there is exactly one `/proc` directory). Same clear-on-either-settlement posture
- *  as {@link posixInFlightPidReads}, via {@link joinSingletonPosixRead}. */
-const posixReaddirSlot: { current: Promise<string[]> | null } = { current: null };
+ *  as {@link posixInFlightPidReads}, via {@link joinSingletonPosixRead}.
+ *  @decision 49186d90 — now also carries `episode` (see {@link PosixSingletonEpisode}), cleared in
+ *  lockstep with `current`. */
+const posixReaddirSlot: { current: Promise<string[]> | null; episode: PosixSingletonEpisode | null } = { current: null, episode: null };
 
-/** @decision 21f6175c — process-wide in-flight slot for the SINGLE shared `/proc/uptime` read. */
-const posixUptimeSlot: { current: Promise<number | null> | null } = { current: null };
+/** @decision 21f6175c — process-wide in-flight slot for the SINGLE shared `/proc/uptime` read.
+ *  @decision 49186d90 — now also carries `episode` (see {@link PosixSingletonEpisode}), cleared in
+ *  lockstep with `current`. */
+const posixUptimeSlot: { current: Promise<number | null> | null; episode: PosixSingletonEpisode | null } = { current: null, episode: null };
 
 /** @decision 21f6175c — round 2: a symbol marker (never enumerable via `for...in`/`JSON`/iteration) set
  *  on a joined-but-possibly-stale listing; `checkRootSurvival` alone reads it. Exported so a test can
@@ -4995,9 +5018,13 @@ export const POSIX_LISTING_JOINED_STALE = Symbol("posixListingJoinedStale");
 
 /** @decision 21f6175c — the non-per-pid counterpart to {@link readPosixPidRecordDeduped}: a single
  *  shared resource (no pid key), joined by every caller, with a three-way outcome plus whether THIS
- *  caller joined an already-in-flight read (round 2 — see {@link POSIX_LISTING_JOINED_STALE}). */
+ *  caller joined an already-in-flight read (round 2 — see {@link POSIX_LISTING_JOINED_STALE}).
+ *
+ * @decision 49186d90 — the stuck-read signal below is a console.error LOG LINE ONLY, never a durable
+ * event — do not wire one up without re-reading why (no PtyHostEvents/db handle reaches a free function
+ * here). It must never evict the pending read, start a second one, or change the outcome shape below. */
 async function joinSingletonPosixRead<T>(
-  slot: { current: Promise<T> | null }, startRead: () => Promise<T>, deadline: number,
+  slot: { current: Promise<T> | null; episode: PosixSingletonEpisode | null }, startRead: () => Promise<T>, deadline: number, label: string,
 ): Promise<
   | { outcome: "resolved"; value: T; joined: boolean }
   | { outcome: "rejected"; joined: boolean }
@@ -5005,6 +5032,7 @@ async function joinSingletonPosixRead<T>(
 > {
   const joined = slot.current != null;
   let inFlight = slot.current;
+  let episode = slot.episode;
   if (!inFlight) {
     try {
       inFlight = startRead();
@@ -5015,8 +5043,10 @@ async function joinSingletonPosixRead<T>(
       // read is kicked off but not awaited until after the per-pid loop — see `enumerateProcessesPosix`).
       return { outcome: "rejected", joined: false };
     }
+    episode = { startedAt: Date.now(), timeoutHits: 0, signaled: false };
     slot.current = inFlight;
-    const clear = (): void => { if (slot.current === inFlight) slot.current = null; };
+    slot.episode = episode;
+    const clear = (): void => { if (slot.current === inFlight) { slot.current = null; slot.episode = null; } };
     inFlight.then(clear, clear);
   }
   const settled = inFlight.then(
@@ -5028,6 +5058,17 @@ async function joinSingletonPosixRead<T>(
   try {
     const timedOut = new Promise<{ outcome: "timeout" }>((resolve) => { timer = setTimeout(() => resolve({ outcome: "timeout" }), remainingMs); });
     const result = await Promise.race([settled, timedOut]);
+    // @decision 49186d90 — count only against the episode THIS call started with (the identity check
+    // guards the narrow window where the read settles between the race resolving and this line); never
+    // evict, never start a second read, never alter `result`.
+    if (result.outcome === "timeout" && episode != null && slot.episode === episode) {
+      episode.timeoutHits++;
+      if (!episode.signaled && episode.timeoutHits >= POSIX_SINGLETON_STUCK_SIGNAL_THRESHOLD) {
+        episode.signaled = true;
+        const pendingMs = Date.now() - episode.startedAt;
+        console.error(`[pty-posix-stuck] ${label} has been pending for ${pendingMs}ms across ${episode.timeoutHits} consecutive timed-out join(s) — likely hung; never evicted, no second read started (decision 21f6175c, signal: 49186d90)`);
+      }
+    }
     return { ...result, joined };
   } finally {
     clearTimeout(timer);
@@ -5110,9 +5151,9 @@ export async function enumerateProcessesPosix(timeoutMs: number, deps: PosixEnum
 
   // @decision 21f6175c — started now, joined later (NOT awaited here) — see this function's own doc
   // comment above for why sequencing matters.
-  const uptimeOutcomePromise = joinSingletonPosixRead(posixUptimeSlot, readBootTimeMs, deadline);
+  const uptimeOutcomePromise = joinSingletonPosixRead(posixUptimeSlot, readBootTimeMs, deadline, "/proc/uptime read");
 
-  const readdirOutcome = await joinSingletonPosixRead(posixReaddirSlot, listProcPids, deadline);
+  const readdirOutcome = await joinSingletonPosixRead(posixReaddirSlot, listProcPids, deadline, 'readdir("/proc")');
   if (readdirOutcome.outcome === "rejected") {
     // Unchanged pre-existing behavior: a CONFIRMED readdir failure falls back to the ps-based enumerator
     // — a BRAND NEW enumeration for this call, never stale, so no POSIX_LISTING_JOINED_STALE marking.
