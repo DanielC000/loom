@@ -162,10 +162,13 @@ function listLoomBranches(repoPath) {
  *
  *  Card cee17efe (round-3 ruling 6, count added round-4 ruling 7): the PRIOR version of this comment
  *  asserted "measured flake: ~1-in-5 single-shot reads" — re-investigated by instrumenting the FIRST read
- *  (before any retry sleep) across every `survivorBranches` call in this file (6 per complete run — (1),
- *  (5), (9), (14), (16), (17)). MEASURED: 0 first-read misses in 21 reads across 4 full runs of this suite
- *  (one run's own log captured only 3 of its 6 before the process moved on, hence 21, not the 24-call
- *  ceiling). The ~1-in-5 figure is accordingly RETRACTED as unverified here — this file's own scenarios
+ *  (before any retry sleep) across every `survivorBranches` call in this file, 6 per complete run at the
+ *  time of that investigation — (1), (5), (9), (14), (16), (17). MEASURED: 0 first-read misses in 21
+ *  reads across 4 full runs of this suite (one run's own log captured only 3 of its 6 before the process
+ *  moved on, hence 21, not the 24-call ceiling of 4 runs x 6 calls). Card 02c5311d: scenario (20) was
+ *  added later and also calls `survivorBranches` (7 calls/run as of this card) — the 21-reads/24-ceiling
+ *  figures above are NOT re-derived for 7; they describe the 6-call-per-run suite that was actually
+ *  measured, not this file's current shape. The ~1-in-5 figure is accordingly RETRACTED as unverified here — this file's own scenarios
  *  never produced a concurrent actor (each uses its own freshly-cloned repo, and scenarios run
  *  sequentially, never in parallel, so there is no OTHER process that could hold a stale ref open), and no
  *  transient git-level lag was reproduced either. The retry loop is kept anyway, defensively, since a
@@ -840,7 +843,7 @@ try {
       const wtPath21 = path.join(WORKTREES_DIR, P.projId, taskKey(taskIdForOp21));
       try { fs.rmSync(wtPath21, { recursive: true, force: true }); } catch { /* best-effort */ }
       try { execSync(`git worktree prune`, { cwd: P.repo }); } catch { /* best-effort */ }
-      try { execSync(`git branch -D loom/${taskKey(taskIdForOp21)}`, { cwd: P.repo }); } catch { /* may already be gone — see the finding in this scenario's own debug trail */ }
+      try { execSync(`git branch -D loom/${taskKey(taskIdForOp21)}`, { cwd: P.repo }); } catch { /* may already be gone — card cee17efe round-4 ruling 1a, this scenario's own test-isolation cleanup above */ }
     }
   }
 
@@ -871,6 +874,116 @@ try {
     check("(22) the sweep reports ZERO real removals (the stubbed removeWorktree never actually removed anything)", swept === 0);
     check("(22) recordWorktreeWedgeAttempt was called exactly once (the boot-sweep path)", wedgeAttemptCalls === 1);
     check("(22) armWedgeSweep was called (the background wedge-retry sweep is armed)", armWedgeSweepCalls >= 1);
+  }
+
+  // ── (23) card 02c5311d: the in-run cleanup's `deleteBranch` calls must NOT strip a branch that git
+  //    still has checked out — `update-ref -d` (unlike `branch -D`) deletes a checked-out branch's ref
+  //    anyway, so on a left-on-disk (not fully removed) worktree, the branch must survive post-cleanup.
+  //    Distinct from (21)/(22) (wedged:true, which routes into the wedge-retry machinery) — this is the
+  //    plain `removed:false, wedged:false` ("could not remove, non-fatal, left on disk") shape, which
+  //    falls through the SAME listCheckedOutBranches guard. ───────────────────────────────────────────
+  {
+    const P = mk("branchsurvive"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db, { distImporterCheckRemoveWorktree: async () => ({ removed: false, wedged: false, aborted: false }) });
+    await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
+    const w = await addWorker(db, P, { "packages/daemon/src/foo.ts": "export const FOO = 23;\n" });
+    const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
+    check("(23) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
+    await settleAllKicks(ctx.spy);
+    const op23 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
+      { label: "(23) the check's own pending-gate-op settled" });
+    check("(23) the check itself still passed (the stub only affects worktree removal, not the gate)", op23?.verdict === "pass");
+    const checkTaskId = `dist-importer-check-${op23.opId}`;
+    const checkWtPath = path.join(WORKTREES_DIR, P.projId, taskKey(checkTaskId));
+    const checkBranch = `loom/${taskKey(checkTaskId)}`;
+    check("(23) [setup] the stubbed removal left the worktree dir on disk, still a REAL registered git worktree",
+      fs.existsSync(checkWtPath) && execSync("git worktree list --porcelain", { cwd: P.repo }).toString().includes(checkWtPath.replace(/\\/g, "/")));
+    check("(23) the branch SURVIVES: git still has it checked out, so the CAS delete was skipped",
+      listLoomBranches(P.repo).includes(checkBranch));
+    // CLEANUP (test isolation, not production behavior): bypass the stub and force-remove the worktree +
+    // branch directly, the same technique (21) uses, so this scenario's own leftover row/dir/branch never
+    // confuses a later scenario's sweep (pending_gate_ops is shared across every Db() in this file).
+    try { fs.rmSync(checkWtPath, { recursive: true, force: true }); } catch { /* best-effort */ }
+    try { execSync(`git worktree prune`, { cwd: P.repo }); } catch { /* best-effort */ }
+    try { execSync(`git branch -D ${checkBranch}`, { cwd: P.repo }); } catch { /* may already be gone */ }
+  }
+
+  // ── (24) card 02c5311d: the FAIL-CLOSED catch — if listCheckedOutBranches itself THROWS (an unreadable
+  //    list), the guard must treat that as "still checked out" and skip the delete, never read a throw as
+  //    "safe to delete". Ordinary flow (real cut + real removal both succeed) so the ONLY reason the
+  //    branch could survive is this fail-closed catch, not a stubbed removal failure. ──────────────────
+  {
+    const P = mk("failclosed"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db, {
+      distImporterCheckListCheckedOutBranches: async () => { throw new Error("synthetic listCheckedOutBranches failure (card 02c5311d fail-closed proof)"); },
+    });
+    await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
+    const w = await addWorker(db, P, { "packages/daemon/src/foo.ts": "export const FOO = 24;\n" });
+    const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
+    check("(24) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
+    await settleAllKicks(ctx.spy);
+    const op24 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
+      { label: "(24) the check's own pending-gate-op settled" });
+    check("(24) the check itself still passed (the stub only affects the branch-delete guard's own read)", op24?.verdict === "pass");
+    const checkTaskId = `dist-importer-check-${op24.opId}`;
+    const checkWtPath = path.join(WORKTREES_DIR, P.projId, taskKey(checkTaskId));
+    const checkBranch = `loom/${taskKey(checkTaskId)}`;
+    check("(24) [setup] the worktree itself WAS genuinely removed (real removal succeeded)", !fs.existsSync(checkWtPath));
+    check("(24) the branch SURVIVES anyway: an unreadable listCheckedOutBranches fails CLOSED, never read as 'safe to delete'",
+      listLoomBranches(P.repo).includes(checkBranch));
+    // CLEANUP (test isolation): the worktree dir is already gone (real removal); only the branch survives.
+    try { execSync(`git branch -D ${checkBranch}`, { cwd: P.repo }); } catch { /* may already be gone */ }
+  }
+
+  // ── (25) card 02c5311d: coverage for the DETERMINISTIC-PATH's own `expectedBranch` guard (round-3
+  //    ruling 5's shape) — withTimeout races `createWorktree`, never cancels it, so a cut that loses the
+  //    race can still land a REAL worktree+branch on disk in the background; worktreePath/branch stay
+  //    unset for THIS invocation, so its finally cleanup takes the deterministic path. Shortens
+  //    distImporterCheckProvisionTimeoutMs so the race fires in test time; the stub fully awaits the REAL
+  //    cut (landing it for real) BEFORE holding its own return past the shortened timeout, so by the time
+  //    the race fires the worktree is unconditionally already on disk — never a timing guess. ALSO stubs
+  //    removal to fail (same technique as (23)) — otherwise the deterministic path's OWN worktree-removal
+  //    attempt (round-3 ruling 5's self-heal) would succeed on its own and leave nothing for the
+  //    `expectedBranch` guard to actually protect against, since a fully-removed worktree is no longer
+  //    checked out by the time that guard runs. ──────────────────────────────────────────────────────
+  {
+    const P = mk("detpathsurvive"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db, {
+      distImporterCheckProvisionTimeoutMs: 2_000,
+      distImporterCheckRemoveWorktree: async () => ({ removed: false, wedged: false, aborted: false }),
+      distImporterCheckCreateWorktree: async (...args) => {
+        const real = await createWorktreeDirect(...args); // lands for REAL, fully, before any delay starts
+        // TIMING-GUARD-SAFE: scripted-duration-margin — this IS the mocked subject's own scripted
+        // internal latency (a test-set constant, not a wait inserted to gate a check): it's deliberately
+        // sized past distImporterCheckProvisionTimeoutMs (2_000 above) so the race ALWAYS resolves via the
+        // real withTimeout's own timer, deterministically — the assertions below never await or observe
+        // this delay's own completion; they read filesystem/git state the source's synchronous finally
+        // cleanup already settled once that timer fired.
+        await new Promise((res) => setTimeout(res, 2_500));
+        return real;
+      },
+    });
+    await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
+    const w = await addWorker(db, P, { "packages/daemon/src/foo.ts": "export const FOO = 25;\n" });
+    const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
+    check("(25) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
+    await settleAllKicks(ctx.spy);
+    const op25 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
+      { label: "(25) the check's own pending-gate-op settled", timeoutMs: 10_000 });
+    check("(25) the check settled as a mechanism failure (the cut 'timed out'; worktreePath/branch stayed unset)", op25?.verdict === "error");
+    const checkTaskId = `dist-importer-check-${op25.opId}`;
+    const checkWtPath = path.join(WORKTREES_DIR, P.projId, taskKey(checkTaskId));
+    const checkBranch = `loom/${taskKey(checkTaskId)}`;
+    check("(25) [setup] the REAL cut landed on disk anyway, and the stubbed removal left it there (still genuinely checked out)", fs.existsSync(checkWtPath));
+    check("(25) the branch SURVIVES: the deterministic-path's own expectedBranch delete was guarded (git still has it checked out)",
+      listLoomBranches(P.repo).includes(checkBranch));
+    // CLEANUP (test isolation): bypass the stub and force-remove the real worktree + branch.
+    try { fs.rmSync(checkWtPath, { recursive: true, force: true }); } catch { /* best-effort */ }
+    try { execSync(`git worktree prune`, { cwd: P.repo }); } catch { /* best-effort */ }
+    try { execSync(`git branch -D ${checkBranch}`, { cwd: P.repo }); } catch { /* may already be gone */ }
   }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }

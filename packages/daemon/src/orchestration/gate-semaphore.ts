@@ -1113,19 +1113,15 @@ export class GateSemaphore {
     return { cancelled: false };
   }
 
-  /** Ask an ALREADY-RUNNING entry (by registry `id`) to stop, by aborting its `controller` — this is a
-   *  REQUEST, not a guarantee: whether (and how fast, and how verifiably) the run actually stops depends
-   *  entirely on whether its own `fn` reads `cancelSignal` and how it responds (see
-   *  `SessionService.runWorkerGate`'s wiring into `runGateSequential`/`runGateStep`, which is where the
-   *  actual process-tree kill + verified-death tagging happens — this method has no process-level
-   *  knowledge at all). Returns `false` if `id` isn't currently running (queued, already settled, or never
-   *  existed) — the caller decides what that means for its own outcome. */
   /** Wait up to `ms` for registry entry `id` to settle (leave `registry`) — mirrors
-   *  `PendingOpRegistry.waitBriefly`'s contract against THIS registry instead, for a gate kind whose
-   *  `runExclusive` call is never wrapped in `pendingOps.attach` (card cee17efe's dist-importer-check:
-   *  the generic `gate:<sessionId>` key `cancelGateOp`'s RUNNING-cancel branch waits on has nothing
-   *  registered under it, so it returned `true` at once with the kill unverified — see that card's
-   *  record). `true` immediately if `id` is already gone. */
+   *  `PendingOpRegistry.waitBriefly`'s contract against THIS registry instead, for any gate kind whose
+   *  `runExclusive` call is never wrapped in `pendingOps.attach` (card cee17efe's dist-importer-check, and
+   *  card 02c5311d's landingCheckOnly: the generic `gate:<sessionId>` key `cancelGateOp`'s RUNNING-cancel
+   *  branch used to wait on had nothing registered under it, so it returned `true` at once with the kill
+   *  unverified — see those cards' records). `cancelGateOp` now defaults to THIS method for every gate
+   *  kind except the plain worker self-check (see `isWorkerSelfCheckGate`), so a future kind that doesn't
+   *  attach under `gate:<sessionId>` gets real verification automatically. `true` immediately if `id` is
+   *  already gone. */
   async waitForSettleBriefly(id: string, ms: number): Promise<boolean> {
     const entry = this.registry.get(id);
     if (!entry) return true;
@@ -1134,6 +1130,13 @@ export class GateSemaphore {
     return !this.registry.has(id);
   }
 
+  /** Ask an ALREADY-RUNNING entry (by registry `id`) to stop, by aborting its `controller` — this is a
+   *  REQUEST, not a guarantee: whether (and how fast, and how verifiably) the run actually stops depends
+   *  entirely on whether its own `fn` reads `cancelSignal` and how it responds (see
+   *  `SessionService.runWorkerGate`'s wiring into `runGateSequential`/`runGateStep`, which is where the
+   *  actual process-tree kill + verified-death tagging happens — this method has no process-level
+   *  knowledge at all). Returns `false` if `id` isn't currently running (queued, already settled, or never
+   *  existed) — the caller decides what that means for its own outcome. */
   cancelRunning(id: string, detail: string): boolean {
     const entry = this.registry.get(id);
     if (!entry || entry.startedAt == null) return false;

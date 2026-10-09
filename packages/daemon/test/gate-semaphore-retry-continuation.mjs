@@ -313,5 +313,30 @@ async function assertDrained(sem, label) {
   await assertDrained(sem3, "(H3)");
 }
 
+// (SETTLE) card 02c5311d — the registry entry's `settle` promise (the real signal `gate_cancel`'s
+// RUNNING-cancel verification now defaults to, via waitForSettleBriefly, for every gate kind except the
+// plain worker self-check) must resolve ONLY in runExclusive's one outer `finally`, AFTER the WHOLE
+// chain ends — never between retry links. Read `entry.settle` DIRECTLY off the registry (not via
+// waitForSettleBriefly, whose own `!registry.has(id)` fallback would mask an early-resolving `settle` as
+// long as the entry is still registered — a weaker, registry-membership-only check that cannot
+// distinguish "settle resolved early" from "settle hasn't resolved yet" the way this test needs to).
+{
+  const sem = new GateSemaphore();
+  const a = chained(sem, 2, "settle1");
+  const id = sem.snapshot().entries[0].id;
+  const entry = sem.registry.get(id);
+  let settledAfterLink1 = false;
+  entry.settle.then(() => { settledAfterLink1 = true; });
+  a.fail1();
+  await waitUntil(() => running(sem, "settle1")?.attempt === 2, { label: "(SETTLE) retry link begins" });
+  await Promise.resolve(); await Promise.resolve(); // let any premature resolveSettle()'s .then() queue drain
+  check("(SETTLE) settle has NOT resolved between link 1 (failed) and link 2 (running) — this is the regression this test exists to catch", settledAfterLink1 === false);
+  check("(SETTLE) the entry is still genuinely registered (never removed mid-chain)", sem.registry.has(id));
+  a.retryPass();
+  await a.done;
+  check("(SETTLE) settle resolves once the WHOLE chain has ended", settledAfterLink1 === true);
+  await assertDrained(sem, "(SETTLE)");
+}
+
 if (failures > 0) { console.error(`\n${failures} FAILURE(S)`); process.exit(1); }
 console.log("\nOK");

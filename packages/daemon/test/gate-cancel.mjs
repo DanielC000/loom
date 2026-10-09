@@ -1482,6 +1482,112 @@ function makeRepo(repo) {
   void pDic;
 }
 
+// ── (j) card 02c5311d: a landingCheckOnly op ALSO never calls `pendingOps.attach` under
+//    `gate:<sessionId>` (it attaches, when it attaches at all, under `merge:<workerSessionId>` inside
+//    confirmWorkerMerge — see runUngatedLandingCheck's own real descriptor shape) — so the OLD
+//    `waitBriefly(\`gate:<workerSessionId>\`)` verification was vacuous for it too, exactly like (i) for
+//    distImporterCheckOnly. Mirrors the "never-settling kill" scenario (3)/(i): the fn never settles even
+//    after cancelSignal aborts, so an honest verification must report NOT cancelled, never "cancelled"
+//    on an unverified assumption. ──────────────────────────────────────────────────────────────────────
+{
+  const sfx = `lc-hang-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-lchang-${sfx}`);
+  registerForCleanup(reposDir);
+  const db = new Db();
+  dbs.push(db);
+  const projId = `gc-lchang-p-${sfx}`, mgrId = `gc-lchang-mgr-${sfx}`, workerId = `gc-lchang-w-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "LCHANG", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-lchang-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-lchang-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { gateCancelVerifyMs: 150 });
+
+  let resolveAbortObserved;
+  const abortObservedPromise = new Promise((res) => { resolveAbortObserved = res; });
+  const LC_HANG_OP_ID = `gc-lchang-op-${sfx}`;
+  const pLc = sessions.gateSemaphore.runExclusive(
+    1, { gateType: "worker", projectId: projId, sessionId: workerId, taskId: null, opId: LC_HANG_OP_ID, landingCheckOnly: true },
+    (_startedAt, cancelSignal) => new Promise(() => {
+      // Mirrors runUngatedLandingCheck's own real descriptor shape — never settles, even once
+      // cancelSignal aborts, simulating a kill whose completion can never be verified.
+      if (cancelSignal.aborted) { resolveAbortObserved(); return; }
+      cancelSignal.addEventListener("abort", () => resolveAbortObserved());
+    }),
+    "low",
+  ).catch(() => {}); // deliberately left unresolved — this session/db is torn down below regardless
+
+  const liveEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running.find((e) => e.opId === LC_HANG_OP_ID));
+  check("(j) [setup] the landingCheckOnly entry is genuinely RUNNING before cancel", !!liveEntry && liveEntry.landingCheckOnly === true);
+
+  if (liveEntry) {
+    const cancelResult = await sessions.cancelGateOp(mgrId, liveEntry.opId, { scope: { kind: "project" } });
+    check("(j) cancelGateOp reports NOT cancelled (the kill is genuinely unverified — the pre-fix vacuous wait could never produce this)", cancelResult.outcome === "not_cancelled");
+    check("(j) the reason names the verification bound, not a generic failure", /not verified dead/i.test(cancelResult.reason ?? ""));
+    await abortObservedPromise; // no timeout — the abort really was delivered to this op's own fn
+    check("(j) the abort was requested and (eventually) observed by the fake fn", true);
+    const snapAfter = sessions.gateQueueForManager(projId);
+    check("(j) the op is STILL reported running — the slot was NOT freed on an unverified kill",
+      snapAfter.running.some((e) => e.opId === liveEntry.opId));
+  } else {
+    console.log("SKIP  (j) cancel/abort assertions — setup sanity check above already failed");
+  }
+
+  void pLc;
+}
+
+// ── (k) card 02c5311d: the POSITIVE-PATH companion to (i) — a distImporterCheckOnly op whose fn DOES
+//    settle promptly once cancelSignal aborts must report outcome:"cancelled", phase:"running". Every
+//    other assertion in this file about distImporterCheckOnly/landingCheckOnly RUNNING-cancel is a
+//    NEGATIVE one (the fn never settles); an always-false `waitForSettleBriefly` would still pass all of
+//    them. This is the scenario that would catch exactly that regression. ──────────────────────────────
+{
+  const sfx = `dic-ok-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-dicok-${sfx}`);
+  registerForCleanup(reposDir);
+  const db = new Db();
+  dbs.push(db);
+  const projId = `gc-dicok-p-${sfx}`, mgrId = `gc-dicok-mgr-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "DICOK", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-dicok-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-dicok-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { gateCancelVerifyMs: 2000 });
+
+  const DIC_OK_OP_ID = `gc-dicok-op-${sfx}`;
+  const pDic = sessions.gateSemaphore.runExclusive(
+    1, { gateType: "worker", projectId: projId, sessionId: mgrId, taskId: null, opId: DIC_OK_OP_ID, distImporterCheckOnly: true },
+    (_startedAt, cancelSignal) => new Promise((resolve) => {
+      // UNLIKE (i)/(j): this fn genuinely stops once cancelled, settling promptly — the honest "the kill
+      // actually worked" case `waitForSettleBriefly` must be able to report just as reliably as the
+      // never-settling case reports the opposite.
+      cancelSignal.addEventListener("abort", () => resolve({ passed: false, cancelled: true }));
+    }),
+    "low",
+  ).catch(() => {});
+
+  const liveEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running.find((e) => e.opId === DIC_OK_OP_ID));
+  check("(k) [setup] the distImporterCheckOnly entry is genuinely RUNNING before cancel", !!liveEntry && liveEntry.distImporterCheckOnly === true);
+
+  if (liveEntry) {
+    const cancelResult = await sessions.cancelGateOp(mgrId, liveEntry.opId, { scope: { kind: "project" } });
+    check("(k) cancelGateOp reports cancelled (the kill WAS genuinely verified)", cancelResult.outcome === "cancelled");
+    check("(k) the reported phase is \"running\" (it was admitted, not merely queued)", cancelResult.phase === "running");
+    const snapAfter = sessions.gateQueueForManager(projId);
+    check("(k) the slot IS now freed — the op is no longer reported live",
+      !snapAfter.running.some((e) => e.opId === liveEntry.opId) && !snapAfter.queued.some((e) => e.opId === liveEntry.opId));
+  } else {
+    console.log("SKIP  (k) cancel assertions — setup sanity check above already failed");
+  }
+
+  void pDic;
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is. Card a0d912f5: a WORKER can cancel only its OWN run_gate self-check — never another worker's, and never a merge gate that happens to share its own sessionId — and intent/reason land verbatim in the settled op's own reason text, for BOTH a QUEUED cancel (GateCancelledError.detail) AND a VERIFIED RUNNING cancel (cancelSignalRef), the latter negative-controlled against a bare cancel that carries neither string."
   : `\n❌ ${failures} FAILURE(S).`);

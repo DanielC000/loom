@@ -2688,6 +2688,16 @@ export class SessionService {
    *  `recordWorktreeWedgeAttempt`/`armWedgeSweep` fire, without a real OS-level held handle. `undefined`
    *  in production ⇒ the real {@link removeWorktree}, byte-identical. */
   private readonly distImporterCheckRemoveWorktree: typeof removeWorktree | undefined;
+  /** Card 02c5311d — TEST SEAM for the in-run cleanup's own `listCheckedOutBranches` read (the cc9bce38
+   *  guard before each `deleteBranch` call): lets a hermetic test drive a deterministic THROW (an
+   *  unreadable list) and assert the fail-closed branch (treat as still-checked-out, skip the delete)
+   *  without a real git-level failure. `undefined` in production ⇒ the real {@link listCheckedOutBranches}, byte-identical. */
+  private readonly distImporterCheckListCheckedOutBranches: typeof listCheckedOutBranches | undefined;
+  /** Card 02c5311d — TEST SEAM for {@link DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS}: lets a hermetic test
+   *  shorten the cut's own timeout so a stubbed, never-resolving `createWorktree` can genuinely race past
+   *  it in test time, landing the deterministic-path cleanup branch (worktreePath/branch left unset)
+   *  without waiting out the real 300s. `undefined` in production ⇒ the real module constant, byte-identical. */
+  private readonly distImporterCheckProvisionTimeoutMs: number | undefined;
   /**
    * Card cee17efe — per-(project,repo) coalescing state for the automatic post-ungated-landing
    * dist-importer advisory (LEAD ruling B): at most ONE check runs at a time per key; a landing arriving
@@ -2995,6 +3005,10 @@ export class SessionService {
       distImporterCheckComputeRunSet?: typeof computeDirectDistImporterRunSet;
       /** TEST SEAM (card cee17efe, round-4 ruling 1a): the dist-importer check's own worktree removal — see {@link distImporterCheckRemoveWorktree}'s own doc. */
       distImporterCheckRemoveWorktree?: typeof removeWorktree;
+      /** TEST SEAM (card 02c5311d): the in-run cleanup's own listCheckedOutBranches read — see {@link distImporterCheckListCheckedOutBranches}'s own doc. */
+      distImporterCheckListCheckedOutBranches?: typeof listCheckedOutBranches;
+      /** TEST SEAM (card 02c5311d): the dist-importer check's own cut timeout — see {@link distImporterCheckProvisionTimeoutMs}'s own doc. */
+      distImporterCheckProvisionTimeoutMs?: number;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -3028,6 +3042,8 @@ export class SessionService {
     this.distImporterCheckCreateWorktree = opts?.distImporterCheckCreateWorktree;
     this.distImporterCheckComputeRunSet = opts?.distImporterCheckComputeRunSet;
     this.distImporterCheckRemoveWorktree = opts?.distImporterCheckRemoveWorktree;
+    this.distImporterCheckListCheckedOutBranches = opts?.distImporterCheckListCheckedOutBranches;
+    this.distImporterCheckProvisionTimeoutMs = opts?.distImporterCheckProvisionTimeoutMs;
   }
 
   /**
@@ -6004,10 +6020,12 @@ export class SessionService {
     // RUNNING — gateType already checked above.
     const aborted = this.gateSemaphore.cancelRunning(entry.id, detail);
     if (!aborted) return { outcome: "not_cancelled", reason: "no longer running (it settled moments ago)", opId: entry.opId ?? opId };
-    // @decision cee17efe — a distImporterCheckOnly op never attaches to pendingOps; wait on the semaphore's own registry entry instead.
-    const settled = entry.distImporterCheckOnly
-      ? await this.gateSemaphore.waitForSettleBriefly(entry.id, this.gateCancelVerifyMs)
-      : await this.pendingOps.waitBriefly(`gate:${entry.sessionId}`, this.gateCancelVerifyMs);
+    // @decision cee17efe — only the plain worker self-check (isWorkerSelfCheckGate) attaches under
+    // `gate:<sessionId>`; default to the semaphore's own settle promise so any OTHER gate kind (including
+    // a future one) gets real verification rather than silently inheriting a vacuous wait (card 02c5311d).
+    const settled = isWorkerSelfCheckGate(entry)
+      ? await this.pendingOps.waitBriefly(`gate:${entry.sessionId}`, this.gateCancelVerifyMs)
+      : await this.gateSemaphore.waitForSettleBriefly(entry.id, this.gateCancelVerifyMs);
     if (!settled) {
       return {
         outcome: "not_cancelled", opId: entry.opId ?? opId,
@@ -21701,6 +21719,10 @@ export class SessionService {
     let gateStartedAt = 0;
     // @decision cee17efe — captured so a post-admission cancel can still report WHY (mirrors runWorkerGate's cancelSignalRef).
     let cancelSignalRef: AbortSignal | undefined;
+    // @decision cee17efe — true once runGateSeq is genuinely ENTERED (the call was made, not a claim a
+    // child process was confirmed spawned), so the catch below (card 02c5311d) can tell "never reached
+    // runGateSeq" apart from "runGateSeq itself threw" instead of hardcoding gateSpawned:false for both.
+    let gateEntered = false;
     const cancelReason = (fallback: string): string =>
       typeof cancelSignalRef?.reason === "string" && cancelSignalRef.reason.length > 0 ? cancelSignalRef.reason : fallback;
     let outcome: Outcome;
@@ -21723,7 +21745,7 @@ export class SessionService {
           try {
             info = await withTimeout(
               cutWorktree(repoPath, projectId, `dist-importer-check-${opId}`, {}, repoKey, landedSha),
-              DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS, "dist-importer-check: create worktree",
+              this.distImporterCheckProvisionTimeoutMs ?? DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS, "dist-importer-check: create worktree",
             );
           } catch (err) {
             return { kind: "mechanism-failure", reason: `could not cut the isolated check worktree (${err instanceof Error ? err.message : String(err)})` };
@@ -21757,6 +21779,7 @@ export class SessionService {
           // ~8191-char command-line ceiling on Windows once the selection is large.
           const onlyFilePath = path.join(worktreePath, ".dist-importer-check-only.txt");
           fs.writeFileSync(onlyFilePath, names.join("\n"), "utf8");
+          gateEntered = true;
           const gate = await runGateSeq(
             `pnpm --filter @loom/daemon test:daemon --only-file=${JSON.stringify(onlyFilePath)}`,
             worktreePath, gateTimeoutMs, undefined,
@@ -21776,7 +21799,11 @@ export class SessionService {
         return;
       }
       this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message.split("\n", 1)[0]?.slice(0, 200) : String(err) } });
-      recordEvent({ mechanismLike: true, reason: err instanceof Error ? err.message.split("\n", 1)[0]?.slice(0, 200) : String(err), gateSpawned: false });
+      // Card 02c5311d: gateSpawned reflects whether runGateSeq was genuinely ENTERED — an error thrown
+      // AFTER that point (e.g. runGateSeq itself threw) must not be stamped identically to one thrown
+      // before runGateSeq was ever entered (e.g. the cut/build phase throwing unexpectedly, outside
+      // their own mechanism-failure returns).
+      recordEvent({ mechanismLike: true, reason: err instanceof Error ? err.message.split("\n", 1)[0]?.slice(0, 200) : String(err), gateSpawned: gateEntered });
       pushNudge(formatDistImporterMechanismFailureNudge({ landedSha, reason: `the isolated check errored (${err instanceof Error ? err.message : String(err)})` }));
       return;
     } finally {
@@ -21808,12 +21835,30 @@ export class SessionService {
           }
         }
         const expectedBranch = `loom/${taskKey(expectedTaskId)}`;
-        try { await deleteBranch(repoPath, expectedBranch, { expectedTip: landedSha, timeoutMs: this.gitOpMs }); }
-        catch (err) { console.warn(`[dist-importer-check] could not delete branch ${expectedBranch} (deterministic path, non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+        // @decision cc9bce38 — a wedged/not-fully-removed worktree is still checked out; update-ref -d
+        // (unlike branch -D) would strip the branch from it anyway, so skip the delete while git still
+        // lists it (fail closed on an unreadable list, card 02c5311d — same guard finalizeMerge uses).
+        const listCheckedOut = this.distImporterCheckListCheckedOutBranches ?? listCheckedOutBranches;
+        let expectedBranchCheckedOut = false;
+        try { expectedBranchCheckedOut = (await listCheckedOut(repoPath, { timeoutMs: this.gitOpMs })).has(expectedBranch); } catch { expectedBranchCheckedOut = true; }
+        if (expectedBranchCheckedOut) {
+          console.warn(`[dist-importer-check] branch ${expectedBranch} NOT deleted (deterministic path): git still has it checked out in a worktree, or that could not be verified`);
+        } else {
+          try { await deleteBranch(repoPath, expectedBranch, { expectedTip: landedSha, timeoutMs: this.gitOpMs }); }
+          catch (err) { console.warn(`[dist-importer-check] could not delete branch ${expectedBranch} (deterministic path, non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+        }
       }
       if (branch) {
-        try { await deleteBranch(repoPath, branch, { expectedTip: landedSha, timeoutMs: this.gitOpMs }); }
-        catch (err) { console.warn(`[dist-importer-check] could not delete branch ${branch} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+        // @decision cc9bce38 — same guard as the deterministic-path branch above; see that comment.
+        const listCheckedOut = this.distImporterCheckListCheckedOutBranches ?? listCheckedOutBranches;
+        let branchCheckedOut = false;
+        try { branchCheckedOut = (await listCheckedOut(repoPath, { timeoutMs: this.gitOpMs })).has(branch); } catch { branchCheckedOut = true; }
+        if (branchCheckedOut) {
+          console.warn(`[dist-importer-check] branch ${branch} NOT deleted: git still has it checked out in a worktree, or that could not be verified`);
+        } else {
+          try { await deleteBranch(repoPath, branch, { expectedTip: landedSha, timeoutMs: this.gitOpMs }); }
+          catch (err) { console.warn(`[dist-importer-check] could not delete branch ${branch} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+        }
       }
     }
 
