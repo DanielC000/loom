@@ -3275,6 +3275,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!result.ok) return reply.code(400).send({ error: result.reason });
     return {
       ok: true, wasQuarantined: result.wasQuarantined, id: body.id, liftedRepoPaths: result.liftedRepoPaths,
+      // @decision 64283e06 — card d4b25feb's "two independent raise-groups" shape: this id's own latch
+      // was lifted, but the SAME identity is still quarantined by an independent record. Surface it
+      // explicitly rather than letting a bare `liftedRepoPaths` omission go unexplained.
+      ...(result.stillQuarantined ? { stillQuarantined: true, reason: result.reason } : {}),
       ...(result.latchKept ? { latchKept: true, referencingRepoPaths: result.referencingRepoPaths } : {}),
     };
   });

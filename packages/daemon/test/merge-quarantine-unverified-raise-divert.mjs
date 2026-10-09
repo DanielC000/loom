@@ -66,6 +66,9 @@ const SCENARIOS = [
   "clear-by-recorded-path-lifts-whole-identity",
   "partial-clear-syncs-armed-twin-across-reboot-and-remount",
   "identity-invariant-accepts-two-legitimate-rejects-overlap",
+  "twin-sync-on-second-unverified-raise",
+  "clear-by-id-leaves-independent-pending-quarantined",
+  "clear-by-pending-id-leaves-independent-active-quarantined",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -568,31 +571,177 @@ try {
     // TWO independent objects (one active, one pending, disjoint tokens). It must still reject anything
     // else sharing an identity: 3+ objects, or 2 objects whose tokens OVERLAP (the exact staleness this
     // card's round-3 fix above eliminates — if it ever regressed, this invariant must catch it).
+    //
+    // Card 64283e06 (CR d6f37fcb) findings 2a/2b — this scenario's ORIGINAL legit/overlap halves never
+    // actually exercised a TWIN (same object armed in `activeQuarantines` AND present in
+    // `pendingUnresolvedQuarantines` by reference — the 883e29bc boot-divert shape): the "legit" half
+    // below builds two wholly SEPARATE objects (active-only + pending-only, never a twin), so it passed
+    // whether or not the invariant treats a twin as "active" at all. And the ORIGINAL "overlap" half
+    // reused the SAME identity/MERGE_QUARANTINE_DIR as the legit half without clearing residue, so its
+    // own fresh boot read 4 on-disk files for that identity (not 2) — the `list.length === 2` branch
+    // never ran, so deleting `&& !tokensOverlap` from the invariant stayed green against it. Both are
+    // fixed below with a genuine, OWN-fixture twin+independent-pending shape, proven both ways.
     // ════════════════════════════════════════════════════════════════════════════════════════════════
-    const { repo, nested } = makeRepoWithNestedRepoAndSubdir("invariant");
+    const { nested } = makeRepoWithNestedRepoAndSubdir("invariant");
     enterMergeQuarantine(nested, "x-branch", "t1 — raised while X is still resolvable");
     const parkedX = path.join(os.tmpdir(), `loom-mqurd-parked-invariant-${freshSfx()}`);
     fs.renameSync(nested, parkedX);
     enterMergeQuarantine(nested, "x-branch", "t2 — raised AFTER X became unresolvable");
 
     const legit = assertQuarantineIdentityInvariantTestOnly();
-    check("*** THE FIX *** the legitimate 'one active + one independent pending, disjoint tokens' shape is ACCEPTED", legit.ok === true && legit.violations.length === 0);
+    check("(precondition) the active-only + pending-only shape (NOT a twin) is ACCEPTED", legit.ok === true && legit.violations.length === 0);
+    fs.renameSync(parkedX, nested); // restore for cleanup
 
-    // Manufacture an OVERLAP by hand — two distinct pending-divert files for the SAME identity sharing one
-    // token (the exact staleness shape this card's round-3 fix eliminates; the invariant must still catch
-    // it if some future change ever reintroduces it).
-    const overlapToken = "overlap-" + freshSfx();
+    // *** THE REAL FIX TARGET *** — a genuine TWIN (A armed in activeQuarantines AND present in
+    // pendingUnresolvedQuarantines by the SAME reference — same manufacture recipe as
+    // partial-clear-syncs-armed-twin-across-reboot-and-remount) PLUS a wholly independent, separately
+    // manufactured pending entry P sharing A's identity, disjoint tokens — its OWN fixture/identity, never
+    // reusing `nested` above, so this reads exactly 2 objects for this identity (never 4).
+    const { repo: repo2, nested: nested2 } = makeRepoWithNestedRepoAndSubdir("invariant-twin");
+    const Kx2 = canonicalRepoLockKey(nested2);
+    const parkedX2 = path.join(os.tmpdir(), `loom-mqurd-parked-invariant-twin-${freshSfx()}`);
+    fs.renameSync(nested2, parkedX2);
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `!stale-overlap-a-${freshSfx()}.json`), JSON.stringify({
-      repoPath: nested, branch: "x-branch", reason: "manufactured overlap A", enteredAt: Date.now() - 1000, tokens: [overlapToken],
+    const tokA = "twinA-" + freshSfx(), tokP = "pendP-" + freshSfx();
+    const hashKx2 = createHash("sha256").update(Kx2).digest("hex").slice(0, 24);
+    const aFile = path.join(MERGE_QUARANTINE_DIR, `${hashKx2}.json`);
+    fs.writeFileSync(aFile, JSON.stringify({
+      repoPath: nested2, branch: "x-branch", reason: "A — the twin's own degraded-arm-eligible raise",
+      enteredAt: Date.now() - 2000, tokens: [tokA], resolvedKey: Kx2,
     }, null, 2) + "\n");
-    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `!stale-overlap-b-${freshSfx()}.json`), JSON.stringify({
-      repoPath: nested, branch: "x-branch", reason: "manufactured overlap B", enteredAt: Date.now(), tokens: [overlapToken],
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `!stale-p-${freshSfx()}.json`), JSON.stringify({
+      repoPath: nested2, branch: "x-branch", reason: "P — a wholly independent, separately-diverted pending raise",
+      enteredAt: Date.now(), tokens: [tokP],
     }, null, 2) + "\n");
+
+    const bootTwin = await freshBootModule();
+    bootTwin.reenterMergeQuarantinesAtBoot([repo2, parkedX2]);
+    const twinObjects = bootTwin.listActiveMergeQuarantines().filter((e) => e.repoPath === nested2);
+    check("(precondition) exactly 2 distinct objects represent this identity (A the twin, P independent)", twinObjects.length === 2);
+    const twinCheck = bootTwin.assertQuarantineIdentityInvariantTestOnly();
+    check("*** THE FIX *** a genuine twin (active+pending by reference) + an independent pending entry, disjoint tokens, is ACCEPTED", twinCheck.ok === true && twinCheck.violations.length === 0);
+
+    // MUTATION — on this SAME two-object fixture (never a vacuous 4-object read): rewrite A's own final to
+    // also carry tokP, so the bucket's two objects now share a token — proving the overlap clause is
+    // load-bearing, not merely satisfied by a population-count side effect.
+    const aOnDisk = JSON.parse(fs.readFileSync(aFile, "utf8"));
+    fs.writeFileSync(aFile, JSON.stringify({ ...aOnDisk, tokens: [...aOnDisk.tokens, tokP] }, null, 2) + "\n");
     const bootOverlap = await freshBootModule();
-    bootOverlap.reenterMergeQuarantinesAtBoot([repo, parkedX]);
+    bootOverlap.reenterMergeQuarantinesAtBoot([repo2, parkedX2]);
+    const overlapObjects = bootOverlap.listActiveMergeQuarantines().filter((e) => e.repoPath === nested2);
+    check("(precondition) still exactly 2 distinct objects — the mutation alone did not change object count", overlapObjects.length === 2);
     const overlapResult = bootOverlap.assertQuarantineIdentityInvariantTestOnly();
-    check("*** THE FIX *** two independent-looking entries sharing a TOKEN is still correctly REJECTED", overlapResult.ok === false && overlapResult.violations.length > 0);
+    check("*** THE FIX *** the SAME two-object shape, now sharing a token, is correctly REJECTED", overlapResult.ok === false && overlapResult.violations.length > 0);
+
+    fs.renameSync(parkedX2, nested2); // restore for cleanup
+  } else if (scenarioName === "twin-sync-on-second-unverified-raise") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 64283e06 (CR d6f37fcb) finding 1 — mergeTokenIntoPendingEntries splices the matched pending
+    // entry/entries out and pushes a brand-new merged object, but never touched activeQuarantines. When
+    // the matched entry is also an 883e29bc boot-diverted TWIN (the SAME object armed in
+    // activeQuarantines AND present in pendingUnresolvedQuarantines), the active side was left pointing
+    // at the STALE, pre-merge object — listActiveMergeQuarantines then reported X twice (one stale, one
+    // merged) under what should be a single identity.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested } = makeRepoWithNestedRepoAndSubdir("twinmerge");
+    const Kx = canonicalRepoLockKey(nested);
+    const parkedX = path.join(os.tmpdir(), `loom-mqurd-parked-twinmerge-${freshSfx()}`);
+    fs.renameSync(nested, parkedX);
+
+    // Manufacture the twin directly (same recipe as partial-clear-syncs-armed-twin-across-reboot-and-remount):
+    // X's own latch at hash(Kx).json, resolvedKey=Kx, currently unresolvable and degraded to a DIFFERENT key.
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const hashKx = createHash("sha256").update(Kx).digest("hex").slice(0, 24);
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashKx}.json`);
+    const tok1 = "twinmerge1-" + freshSfx();
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: nested, branch: "x-branch", reason: "X's own divert-eligible raise",
+      enteredAt: Date.now(), tokens: [tok1], resolvedKey: Kx,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([repo, parkedX]);
+    check("(precondition) exactly ONE object represents X, armed AND pending (the twin)", listActiveMergeQuarantines().filter((e) => e.repoPath === nested).length === 1);
+
+    // THE CALL UNDER TEST — a second unverified raise while X is STILL parked; pre-fix, this routes
+    // through mergeTokenIntoPendingEntries and rebuilds a NEW object touching only the pending side.
+    const tok2 = enterMergeQuarantine(nested, "x-branch", "X's own second raise, STILL unmounted");
+
+    const allObjects = listActiveMergeQuarantines().filter((e) => e.repoPath === nested);
+    check("*** THE FIX *** STILL exactly ONE object (no stale active-side duplicate)", allObjects.length === 1);
+    check("*** THE FIX *** that one object carries BOTH tokens", allObjects.length === 1 && allObjects[0].tokens.includes(tok1) && allObjects[0].tokens.includes(tok2) && allObjects[0].tokens.length === 2);
+    const invariant = assertQuarantineIdentityInvariantTestOnly();
+    check("*** THE FIX *** the identity invariant reports no violation", invariant.ok === true && invariant.violations.length === 0);
+
+    for (let i = 0; i < 3; i++) {
+      const boot = await freshBootModule();
+      boot.reenterMergeQuarantinesAtBoot([repo, parkedX]);
+      const stillThere = boot.listActiveMergeQuarantines().filter((e) => e.repoPath === nested);
+      check(`(boot ${i + 1}, still parked) exactly one object, both tokens`, stillThere.length === 1 && stillThere[0].tokens.includes(tok1) && stillThere[0].tokens.includes(tok2));
+    }
+
+    fs.renameSync(parkedX, nested); // restore for cleanup
+  } else if (scenarioName === "clear-by-id-leaves-independent-pending-quarantined") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 64283e06 (CR d6f37fcb) finding 3 — clearMergeQuarantineLatchFile's active-match branch
+    // reported unqualified success (liftedRepoPaths:[X]) after clearing X's OWN active entry, even when
+    // X's SAME identity is still quarantined via a wholly independent pending record (d4b25feb's "two
+    // independent raise-groups" shape: X raised once while resolvable, then again later while
+    // unresolvable — a genuinely separate, untouched pending entry, by design never swept by this clear).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { nested } = makeRepoWithNestedRepoAndSubdir("clearidindep");
+    const Kx = canonicalRepoLockKey(nested);
+    const tok1 = enterMergeQuarantine(nested, "x-branch", "t1 — X's own founding raise, while resolvable");
+    const xActive = activeMergeQuarantineFor(nested);
+    check("(precondition) X's first raise is plain active, armed at its own key", !!xActive && xActive.resolvedKey === Kx);
+
+    const parkedX = path.join(os.tmpdir(), `loom-mqurd-parked-clearidindep-${freshSfx()}`);
+    fs.renameSync(nested, parkedX);
+    const tok2 = enterMergeQuarantine(nested, "x-branch", "t2 — X's own second raise, AFTER becoming unresolvable");
+    check("(precondition) X now has TWO independent entries: one active (t1), one pending (t2)", listActiveMergeQuarantines().filter((e) => e.repoPath === nested).length === 2);
+
+    const activeId = quarantineLatchFileIdsFor(xActive)[0];
+    const clearResult = clearMergeQuarantineLatchFile(activeId);
+    check("(precondition) the clear itself succeeds and reports wasQuarantined", clearResult.ok === true && clearResult.wasQuarantined === true);
+    check("*** THE FIX *** X is NOT listed as fully lifted — its own independent pending record (t2) still blocks it", !clearResult.liftedRepoPaths.includes(nested));
+    check("*** THE FIX *** stillQuarantined is surfaced explicitly, with a reason naming the remaining record", clearResult.stillQuarantined === true && typeof clearResult.reason === "string" && clearResult.reason.includes(nested));
+    check("*** THE FIX *** a direct query for X still correctly refuses — t2's own raise is untouched", !!activeMergeQuarantineFor(nested) && (activeMergeQuarantineFor(nested)?.tokens ?? []).includes(tok2));
+    check("(sanity) t1's own active entry really is gone (not merely hidden)", !(activeMergeQuarantineFor(nested)?.tokens ?? []).includes(tok1));
+
+    fs.renameSync(parkedX, nested); // restore for cleanup
+  } else if (scenarioName === "clear-by-pending-id-leaves-independent-active-quarantined") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 64283e06 (CR 3439677b, item 1) — the MIRROR of finding 3, reached from the PENDING side:
+    // clearMergeQuarantineLatchFile's pending-match branch reported unqualified success
+    // (liftedRepoPaths:[X]) after clearing X's OWN independent pending entry (t2), even when X's SAME
+    // identity is STILL quarantined via its own separate, untouched ACTIVE entry (t1) — d4b25feb's "two
+    // independent raise-groups" shape, this time cleared by the pending id instead of the active one.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { nested } = makeRepoWithNestedRepoAndSubdir("clearpendindep");
+    const Kx = canonicalRepoLockKey(nested);
+    const tok1 = enterMergeQuarantine(nested, "x-branch", "t1 — X's own founding raise, while resolvable");
+    const xActive = activeMergeQuarantineFor(nested);
+    check("(precondition) X's first raise is plain active, armed at its own key", !!xActive && xActive.resolvedKey === Kx);
+
+    const parkedX = path.join(os.tmpdir(), `loom-mqurd-parked-clearpendindep-${freshSfx()}`);
+    fs.renameSync(nested, parkedX);
+    const tok2 = enterMergeQuarantine(nested, "x-branch", "t2 — X's own second raise, AFTER becoming unresolvable");
+    const allForX = listActiveMergeQuarantines().filter((e) => e.repoPath === nested);
+    check("(precondition) X now has TWO independent entries: one active (t1), one pending (t2)", allForX.length === 2);
+    const xPending = allForX.find((e) => e !== xActive);
+    check("(precondition) the second object is genuinely distinct from the active one", !!xPending && xPending !== xActive);
+
+    const pendingId = quarantineLatchFileIdsFor(xPending)[0];
+    check("(precondition) the pending id differs from the active id", pendingId !== quarantineLatchFileIdsFor(xActive)[0]);
+    const clearResult = clearMergeQuarantineLatchFile(pendingId);
+    check("(precondition) the clear itself succeeds and reports wasQuarantined", clearResult.ok === true && clearResult.wasQuarantined === true);
+    check("*** THE FIX *** X is NOT listed as fully lifted — its own independent active record (t1) still blocks it", !clearResult.liftedRepoPaths.includes(nested));
+    check("*** THE FIX *** stillQuarantined is surfaced explicitly, with a reason naming the remaining record", clearResult.stillQuarantined === true && typeof clearResult.reason === "string" && clearResult.reason.includes(nested));
+    // NOTE: activeMergeQuarantineFor's own pending-match tiers can never find an unresolvable path's own
+    // ACTIVE entry by identity (no such tier exists — only resolveQuarantineFor's ownIdentityEntryFor does,
+    // via the exported assertRepoNotQuarantined, which this card's own fix routes through too).
+    const refusal = assertRepoNotQuarantined(nested);
+    check("*** THE FIX *** a direct query for X still correctly refuses — t1's own raise is untouched", refusal.ok === false && refusal.reason.includes("t1 — X's own founding raise"));
+    check("(sanity) t2's own pending entry really is gone (not merely hidden)", !listActiveMergeQuarantines().some((e) => e.repoPath === nested && (e.tokens ?? []).includes(tok2)));
 
     fs.renameSync(parkedX, nested); // restore for cleanup
   } else {

@@ -899,6 +899,10 @@ function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: st
  * folding every OTHER matched entry's own `sourceFile` into `orphanLatchFiles` (defensive: in production
  * this is expected to always be a single match, since the caller's own `siblingIndices` is always empty
  * while `repoPath` is unresolvable).
+ *
+ * @decision 64283e06 — a matched entry can be an 883e29bc boot-diverted TWIN (same reference ALSO armed
+ * in `activeQuarantines`) — never rewrite only the pending side; route each through {@link
+ * replaceEntryEverywhere} onto `merged`, or the active side goes stale.
  */
 function mergeTokenIntoPendingEntries(indices: number[], token: string): string {
   const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine);
@@ -912,6 +916,7 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
     ...others.map((p) => p.sourceFile).filter((f) => f !== base.sourceFile),
   ])];
   const merged: MergeQuarantineEntry = { ...base.entry, tokens, orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined };
+  for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
   const persisted = writePendingDivertFile(base.sourceFile, merged);
   pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
   if (!persisted) {
@@ -1068,6 +1073,10 @@ function clearPendingEntryByToken(repoPath: string, token: string): void {
   const updated: MergeQuarantineEntry = { ...pending.entry, tokens: remaining };
   // @decision d4b25feb (round 3) — re-point EVERY in-memory reference to this entry (883e29bc's own
   // divert can make it the SAME object armed in activeQuarantines) before durably rewriting each owned key.
+  //
+  // @decision 64283e06 — ROUTED, DEFENSIVE (fd189d91's own posture): unreachable today ONLY because the
+  // caller's own identity-scan already catches any active twin first — do not remove this routing on
+  // that basis, or a future change to that scan silently reopens the bug class this call closes.
   replaceEntryEverywhere(activeQuarantines, pending.entry, updated);
   pendingUnresolvedQuarantines[idx] = { ...pending, entry: updated };
   for (const k of pending.entry.armedKeys ?? []) {
@@ -1637,6 +1646,9 @@ export function listActiveMergeQuarantines(): MergeQuarantineEntry[] {
  * "one identity, two raise-groups" shape — a repoPath raised once while resolvable, then again later while
  * unresolvable) — and in that two-object case, their token SETS must be completely DISJOINT (no token in
  * both; a shared token would mean a stale, un-synced copy, the exact staleness `d4b25feb` round 3 fixed).
+ * "Active" here includes an 883e29bc boot-diverted TWIN (the same object ALSO present in
+ * `pendingUnresolvedQuarantines` by reference) — see the `64283e06` decision below for why excluding it
+ * was itself a bug, not an extra safeguard.
  * `listActiveMergeQuarantines`'s own reported count must equal the total number of distinct OBJECTS (never
  * identities — one identity can now legitimately own two). TEST-ONLY (never a production call site — this
  * module's own guard, `no-src-testonly-import-guard.mjs`, keeps a `packages/daemon/src/**` file from ever
@@ -1656,6 +1668,9 @@ export function listActiveMergeQuarantines(): MergeQuarantineEntry[] {
  * @decision d4b25feb (round 3) — the ORIGINAL "at most one object per identity, always" invariant this
  * function asserted is now TOO STRICT (it would flag this card's own legitimate new shape as a violation);
  * see this function's own updated doc above for the replacement rule.
+ *
+ * @decision 64283e06 — a twin (active AND pending, by reference) must still count as the "active" side
+ * of the 2-object rule — requiring it be pending-FREE wrongly rejected the real post-reboot shape.
  */
 export function assertQuarantineIdentityInvariantTestOnly(): { ok: boolean; violations: string[] } {
   const violations: string[] = [];
@@ -1677,7 +1692,9 @@ export function assertQuarantineIdentityInvariantTestOnly(): { ok: boolean; viol
       const [a, b] = list as [MergeQuarantineEntry, MergeQuarantineEntry];
       const aActive = activeEntrySet.has(a), bActive = activeEntrySet.has(b);
       const aPending = pendingEntrySet.has(a), bPending = pendingEntrySet.has(b);
-      const oneActiveOnePending = (aActive && !aPending && bPending && !bActive) || (bActive && !bPending && aPending && !aActive);
+      // @decision 64283e06 — a twin (active AND pending, by reference — 883e29bc's own boot-diverted
+      // shape) still counts as the "active" side here; only the OTHER object must be pending-ONLY.
+      const oneActiveOnePending = (aActive && bPending && !bActive) || (bActive && aPending && !aActive);
       const tokensOverlap = a.tokens.some((t) => b.tokens.includes(t));
       if (oneActiveOnePending && !tokensOverlap) continue; // legitimate
     }
@@ -1756,6 +1773,32 @@ export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[]
   return [quarantineHashFor(entry.repoPath)];
 }
 
+/**
+ * The reason text for a clear that ran but left `after`'s own identity still quarantined — names WHICH
+ * blocker remains (the SAME one `before` already was, or a DIFFERENT repo's own separate quarantine) and
+ * the clear-by-path/clear-by-id remedy. Shared by {@link clearMergeQuarantineReporting} and {@link
+ * clearMergeQuarantineLatchFile} so the two can never disagree about how this is worded.
+ *
+ * @decision 64283e06 — factored out of `clearMergeQuarantineReporting` so `clearMergeQuarantineLatchFile`
+ * can report the SAME truthful "still quarantined" shape instead of claiming unqualified success while an
+ * independent record (card d4b25feb's own "two independent raise-groups") still blocks.
+ */
+function stillQuarantinedReason(after: MergeQuarantineEntry, before: MergeQuarantineEntry | undefined): string {
+  const latchId = quarantineLatchFileIdsFor(after)[0];
+  // @decision 883e29bc — word by WHICH blocker remains: the SAME one `before` already was (never
+  // touched), or a DIFFERENT repo's own separate quarantine (not residue of this clear).
+  const sameAsBefore = !!before && directPathIdentity(before.repoPath) === directPathIdentity(after.repoPath);
+  const reason = sameAsBefore
+    ? `repoPath is still quarantined by its own recorded entry (repoPath '${after.repoPath}', latch id '${latchId}') — this clear did not lift it`
+    : `repoPath is quarantined by ANOTHER repo's own, separate quarantine (repoPath '${after.repoPath}', latch id '${latchId}') that this clear never addressed`;
+  // @decision 9a55fb90 — route the bare-id suggestion through the SAME collision check as
+  // assertRepoNotQuarantined, never offer it unconditionally — a collision at this key makes it
+  // ambiguous here too.
+  const siblings = canonicalSiblingsForLatchId(after, latchId);
+  const clearByIdSuggestion = siblings.length > 0 ? "" : ` or ${JSON.stringify({ id: latchId })}`;
+  return `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`;
+}
+
 /** Thin wrapper over {@link clearMergeQuarantine} for the project-resolved `/internal/merge-quarantine/clear`
  *  route (card c0be9bf9) — that route's own job ends at resolving projectId/repoKey down to a `repoPath`
  *  and calling this.
@@ -1779,22 +1822,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
   const clearResult = clearMergeQuarantine(repoPath);
   const after = resolveQuarantineFor(repoPath);
   if (after) {
-    const latchId = quarantineLatchFileIdsFor(after)[0];
-    // @decision 883e29bc — word by WHICH blocker remains: the SAME one `before` already was (never
-    // touched), or a DIFFERENT repo's own separate quarantine (not residue of this clear).
-    const sameAsBefore = !!before && directPathIdentity(before.repoPath) === directPathIdentity(after.repoPath);
-    const reason = sameAsBefore
-      ? `repoPath is still quarantined by its own recorded entry (repoPath '${after.repoPath}', latch id '${latchId}') — this clear did not lift it`
-      : `repoPath is quarantined by ANOTHER repo's own, separate quarantine (repoPath '${after.repoPath}', latch id '${latchId}') that this clear never addressed`;
-    // @decision 9a55fb90 — route the bare-id suggestion through the SAME collision check as
-    // assertRepoNotQuarantined, never offer it unconditionally — a collision at this key makes it
-    // ambiguous here too.
-    const siblings = canonicalSiblingsForLatchId(after, latchId);
-    const clearByIdSuggestion = siblings.length > 0 ? "" : ` or ${JSON.stringify({ id: latchId })}`;
-    return {
-      wasQuarantined: true,
-      reason: `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`,
-    };
+    return { wasQuarantined: true, reason: stillQuarantinedReason(after, before) };
   }
   if (clearResult && "latchKept" in clearResult && clearResult.latchKept) {
     return { wasQuarantined, latchKept: true, referencingRepoPaths: clearResult.referencingRepoPaths, reason: clearResult.reason };
@@ -1823,8 +1851,12 @@ const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
  * @decision fd189d91 — the active and pending matches are both found BEFORE either is acted on; when
  * `id` matches an active entry AND a pending entry for a genuinely DIFFERENT repo, this refuses rather
  * than silently picking the active one. See the decision record for the repro.
+ *
+ * @decision 64283e06 — re-resolves the cleared entry's own identity after the clear; `liftedRepoPaths`
+ * names only an identity actually freed, never one still blocked by its own independent (d4b25feb) record
+ * — `stillQuarantined`/`reason` name that case instead of a silently-false success.
  */
-export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; latchKept?: true; referencingRepoPaths?: string[] } | { ok: false; reason: string } {
+export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; stillQuarantined?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[] } | { ok: false; reason: string } {
   if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
     return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list)` };
   }
@@ -1867,8 +1899,18 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
           `refusing to guess which one you meant. Clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify(candidates)}.`,
       };
     }
-    clearMergeQuarantineByKey(activeMatch.key, activeMatch.entry.repoPath);
-    return { ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath] };
+    const activeClearResult = clearMergeQuarantineByKey(activeMatch.key, activeMatch.entry.repoPath);
+    // @decision 64283e06 (CR 3439677b, item 3) — surface clearMergeQuarantineByKey's OWN latchKept/
+    // referencingRepoPaths too, the same way the pending branch below already does, instead of discarding
+    // the return value.
+    const activeLatchKeptFields = activeClearResult && "latchKept" in activeClearResult && activeClearResult.latchKept
+      ? { latchKept: true as const, referencingRepoPaths: activeClearResult.referencingRepoPaths } : {};
+    const after = resolveQuarantineFor(activeMatch.entry.repoPath);
+    const sameIdentityStillQuarantined = !!after && directPathIdentity(after.repoPath) === directPathIdentity(activeMatch.entry.repoPath);
+    if (sameIdentityStillQuarantined) {
+      return { ok: true, wasQuarantined: true, liftedRepoPaths: [], stillQuarantined: true, reason: stillQuarantinedReason(after, activeMatch.entry), ...activeLatchKeptFields };
+    }
+    return { ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath], ...activeLatchKeptFields };
   }
   if (matchedPending.length > 0) {
     // A pending entry isn't armed into activeQuarantines under any key — drop ONLY these exact pending
@@ -1902,8 +1944,22 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // stale graduation source) even though no entry actually matched/removed above claims it.
     const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id);
     if (tmpSweep.kept) for (const rp of tmpSweep.referencingRepoPaths) keptRepoPaths.add(rp);
+    // @decision 64283e06 — mirrors the active-match branch's truthful-liftedRepoPaths rule:
+    // `matchedPending` can span MULTIPLE DISTINCT identities (882d6cff's multi-claimant shape) — re-resolve
+    // EACH one; a repoPath still quarantined elsewhere is left OUT, never assumed fully freed.
+    const matchedRepoPaths = [...new Set(matchedPending.map((p) => p.entry.repoPath))];
+    const liftedRepoPaths: string[] = [];
+    const stillBlockedReasons: string[] = [];
+    for (const repoPath of matchedRepoPaths) {
+      const before = matchedPending.find((p) => p.entry.repoPath === repoPath)?.entry;
+      const after = resolveQuarantineFor(repoPath);
+      const sameIdentityStillQuarantined = !!after && directPathIdentity(after.repoPath) === directPathIdentity(repoPath);
+      if (sameIdentityStillQuarantined) stillBlockedReasons.push(stillQuarantinedReason(after, before));
+      else liftedRepoPaths.push(repoPath);
+    }
     return {
-      ok: true, wasQuarantined: true, liftedRepoPaths: matchedPending.map((p) => p.entry.repoPath),
+      ok: true, wasQuarantined: true, liftedRepoPaths,
+      ...(stillBlockedReasons.length > 0 ? { stillQuarantined: true, reason: stillBlockedReasons.join(" ") } : {}),
       ...(keptRepoPaths.size > 0 ? { latchKept: true, referencingRepoPaths: [...keptRepoPaths] } : {}),
     };
   }

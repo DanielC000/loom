@@ -1574,6 +1574,48 @@ function hashKey(key) {
   clearMergeQuarantineByRecordedPath(repoAB_E);
 }
 
+// ===================== (AC) POST /clear-by-path {id} forwards stillQuarantined/reason over REAL HTTP (card 64283e06, CR 3439677b, item 2) =====================
+// (D)/finding-3's own module-level test proves clearMergeQuarantineLatchFile itself; this proves the
+// gateway route actually forwards the new fields on its JSON response, not just that the function carries
+// them — mirrors (Z1-route)'s own latchKept/referencingRepoPaths route-forwarding proof, for the NEW
+// stillQuarantined/reason fields instead. Dropping the route's own conditional spread
+// (`...(result.stillQuarantined ? {...} : {})`) must fail this.
+{
+  const repoAC = freshDir("repoAC");
+  enterMergeQuarantine(repoAC, "x-branch", "t1 — X's own founding raise, while resolvable (AC)");
+  const idActiveAC = quarantineLatchIdFor(repoAC); // captured BEFORE park, while resolvable
+  const parkedAC = path.join(os.tmpdir(), `loom-mqcbp-parked-ac-${sfx}`);
+  fs.renameSync(repoAC, parkedAC);
+  enterMergeQuarantine(repoAC, "x-branch", "t2 — X's own second raise, AFTER becoming unresolvable (AC)");
+  check("(AC precondition) X now has TWO independent entries: one active (t1), one pending (t2)", listActiveMergeQuarantines().filter((e) => e.repoPath === repoAC).length === 2);
+
+  const TMPAC = mkdtempManaged("loom-mqcbp-gw-ac-");
+  const PORTAC = 47900 + (process.pid % 400);
+  const HAC = { host: `127.0.0.1:${PORTAC}`, origin: `http://127.0.0.1:${PORTAC}`, "content-type": "application/json" };
+  const dbAC = new Db(path.join(TMPAC, "loom.db"));
+  const stubAC = {};
+  const appAC = await buildServer({
+    db: dbAC, pty: stubAC, sessions: stubAC, mcp: stubAC, orchMcp: stubAC, platformMcp: stubAC, auditMcp: stubAC,
+    userAuditMcp: stubAC, setupMcp: stubAC, runMcp: stubAC, control: stubAC, usageStatus: stubAC,
+  });
+  try {
+    const clearAC = await appAC.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HAC, payload: { id: idActiveAC } });
+    check("(AC) POST /clear-by-path {id} (active, still-blocked-by-independent-pending) → 200", clearAC.statusCode === 200);
+    const bodyAC = clearAC.json();
+    check("(AC) ok:true, wasQuarantined:true", bodyAC.ok === true && bodyAC.wasQuarantined === true);
+    check("(AC) THE FIX: X is NOT in liftedRepoPaths (still blocked by its own independent pending record)", !bodyAC.liftedRepoPaths.includes(repoAC));
+    check("(AC) THE FIX (item 2): the route forwards stillQuarantined:true", bodyAC.stillQuarantined === true);
+    check("(AC) THE FIX (item 2): the route forwards reason, naming the remaining record", typeof bodyAC.reason === "string" && bodyAC.reason.includes(repoAC));
+    check("(AC) a direct query for X still correctly refuses", !!activeMergeQuarantineFor(repoAC));
+  } finally {
+    await appAC.close();
+    dbAC.close();
+  }
+  fs.renameSync(parkedAC, repoAC); // restore, then cleanup
+  clearMergeQuarantineByRecordedPath(repoAC);
+  check("(AC cleanup) repoAC is fully cleared", !activeMergeQuarantineFor(repoAC));
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it. Card 9cabd143: (Y) the sweep never deletes a filename a SURVIVING entry has since legitimately reclaimed as its own live physical latch (proven across a real restart, in a separate child process), (Z1)/(Z1-route) close the SAME gap at clearMergeQuarantineLatchFile's raw-fallback bypass site (over both the function and the real HTTP route), now reporting `latchKept`/`referencingRepoPaths` instead of a bare `ok:true` when a file survives. Round 2 (Code Review d37fd1aa): (Z2) is RE-POINTED — clearing a PENDING entry by id deletes its OWN file even when an unrelated entry's `orphanLatchFiles` merely lists it (check 1 alone must never protect an entry's own file; only genuine ownership, check 2, may), proven to stick across a real child-process restart and to agree with `/clear`/`/clear-by-path {repoPath}`; (AA) proves check (2)'s PENDING-ownership half is genuinely reachable (not just defensive) via the ordinary orphan-reference sweep; (AB) proves check (2)'s ACTIVE-ownership half also covers an entry's TRUE current write target (`quarantinePathFor`), not only its own (possibly stale, post-drift) `armedKeys`."
   : `\n❌ ${failures} FAILURE(S).`);
