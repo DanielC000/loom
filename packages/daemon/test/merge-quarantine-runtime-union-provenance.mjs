@@ -88,6 +88,15 @@ const SCENARIOS = [
   // verbatim, and every real unconfirmedKillReason() raise ends by naming the single-identity /clear
   // route, reopening the text/action mismatch round 4 closed.
   "ambiguous-refusal-never-embeds-unconfirmed-kill-clear-route",
+  // Card 96e6aa58 (round 4 item 5 of THIS card's own decision record, carded separately) —
+  // `consumeMatchedPendingsIntoArmedEntry`'s own bare per-key `.set()` (the SAME bug class MINOR A fixed
+  // for `clearActiveEntryTokenAtKey`), reached via the sibling-absorb raise path instead of a partial
+  // clear. See docs/decisions/96e6aa58-consume-matched-pendings-ownership-gate.md.
+  "stale-armed-key-survives-sibling-absorb-raise",
+  // Card 96e6aa58, round 2 (CR b166c6e6) — the round-1 fix gated a non-anchor key ONLY against `extra`,
+  // so the NO-`extra` graduation path (a bare pending twin, no cross-tier absorb) left its own stale
+  // secondary key pointed at the spliced-out twin object instead of the union.
+  "no-extra-graduation-repoints-twin-slot",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -129,7 +138,7 @@ const {
   reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, enterMergeQuarantine, clearMergeQuarantine,
   clearMergeQuarantineLatchFile, assertRepoNotQuarantined, clearMergeQuarantineByToken,
   clearMergeQuarantineByRecordedPath, MERGE_QUARANTINE_DIR, unconfirmedKillReason,
-  UNCONFIRMED_KILL_WINDOWS_GUIDANCE,
+  UNCONFIRMED_KILL_WINDOWS_GUIDANCE, listActiveMergeQuarantines,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -732,6 +741,210 @@ try {
       check("(case B) assertRepoNotQuarantined(x) reads clear afterward", reboot1.assertRepoNotQuarantined(x).ok === true);
       check("(case B) assertRepoNotQuarantined(y) ALSO reads clear afterward", reboot1.assertRepoNotQuarantined(y).ok === true);
     }
+  } else if (scenarioName === "stale-armed-key-survives-sibling-absorb-raise") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 96e6aa58 — `consumeMatchedPendingsIntoArmedEntry`'s own bare `for (const k of armedKeys)
+    // activeQuarantines.set(k, armed)` (THREE sites) bypassed ownership entirely — reached via the
+    // sibling-absorb raise path (`enterMergeQuarantine`'s `existing` branch, when a genuine cross-tier
+    // sibling is pending at the SAME key). SUB-CASE (a): a dual-armed E's stale secondary key (K2) has
+    // since been reclaimed by a genuinely DIFFERENT, unresolvable entry W — the bare loop clobbers W's
+    // in-memory slot. Reproduced via a DOUBLE-BOOT construction (same technique as round 3 MINOR A's own
+    // `stale-armed-key-owned-by-different-entry-survives-partial-clear`) — this is the only way to reach
+    // the stale-key state TODAY; it proves the guard, not that this exact state is reachable within a
+    // single production process's lifetime (production never reboots twice in-process).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    {
+      const { e, w, k1, k2, eFile, wFile } = buildDualArmFixture("sibling-absorb");
+      check("(precondition) E dual-armed at k1 and k2 after boot #1", activeMergeQuarantineFor(e)?.armedKeys?.length === 2);
+
+      // E's own file is superseded/gone — only THIS process's in-memory state still carries the stale
+      // dual-arm claim on k2 (mirrors the round-3 MINOR A construction exactly).
+      fs.rmSync(eFile, { force: true });
+      fs.writeFileSync(wFile, JSON.stringify({
+        repoPath: w, branch: "w-branch", reason: "W's own genuine, unrelated quarantine",
+        enteredAt: Date.now() - 30_000, tokens: ["w-token"], resolvedKey: k2,
+      }, null, 2) + "\n");
+      reenterMergeQuarantinesAtBoot([w]); // boot #2 — SAME process; arms W alone at k2, bare-overwriting whatever boot #1 left there
+      check("(precondition) E's OWN armedKeys STILL (stale) names k2", activeMergeQuarantineFor(e)?.armedKeys?.includes(k2));
+      check("(precondition) k2 is now genuinely, separately W", activeMergeQuarantineFor(w)?.repoPath === w);
+
+      // NOW a genuine cross-tier SIBLING of E (a plain subdir, no own `.git` — collapses onto E's own
+      // canonical key k1 once resolvable) goes pending via a THIRD boot call, parked away at that instant
+      // (same technique as merge-quarantine-cross-tier-sibling-absorb.mjs's own scenario 4).
+      const sibling = path.join(e, `sib-${freshSfx()}`);
+      fs.mkdirSync(sibling, { recursive: true });
+      const oldHashForPath = (p) => hashForKey(process.platform === "win32" ? fs.realpathSync.native(p).toLowerCase() : fs.realpathSync.native(p));
+      fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${oldHashForPath(sibling)}.json`), JSON.stringify({
+        repoPath: sibling, branch: "sib-branch", reason: "sibling's own pending raise, same canonical key as E",
+        enteredAt: Date.now(), tokens: ["sib-token"],
+      }, null, 2) + "\n");
+      const parkedSibling = path.join(os.tmpdir(), `loom-mqrup-parked-sib-${freshSfx()}`);
+      fs.renameSync(sibling, parkedSibling);
+      reenterMergeQuarantinesAtBoot([sibling]); // boot #3 — sibling unresolvable right now, diverts to pending
+      fs.renameSync(parkedSibling, sibling);
+      check("(precondition) sibling shares E's own canonical key once resolvable", canonicalRepoLockKey(sibling) === k1);
+
+      const wBytesBeforeRaise = fs.readFileSync(wFile, "utf8");
+      const t2 = enterMergeQuarantine(e, "e-branch-2", "e's second raise, triggering the sibling absorb"); // THE RAISE — hits `existing`, absorbs the sibling via consumeMatchedPendingsIntoArmedEntry(extra=entry, armedKeys=[k1,k2])
+
+      const activeE = activeMergeQuarantineFor(e);
+      check("(sanity) the sibling absorb itself still functions — E's union carries all 3 tokens", !!activeE && ["e-token", t2, "sib-token"].every((t) => activeE.tokens.includes(t)));
+
+      const wAfterRaise = activeMergeQuarantineFor(w);
+      check("*** THE FIX *** W's in-memory slot survives the sibling-absorb raise, unaffected", wAfterRaise?.repoPath === w);
+      check("*** THE FIX *** W's own token survives in memory", !!wAfterRaise?.tokens.includes("w-token"));
+      const wTextAfterRaise = assertRepoNotQuarantined(w);
+      check("*** THE FIX *** W's own query text still names W, not E/the sibling", wTextAfterRaise.ok === false && wTextAfterRaise.reason.includes(w) && !wTextAfterRaise.reason.includes(e));
+      check("*** THE FIX *** W's own file on disk is byte-identical — never touched (this function only ever durably writes `key`)", fs.readFileSync(wFile, "utf8") === wBytesBeforeRaise);
+
+      const reboot1 = await rebootSim();
+      reboot1.reenterMergeQuarantinesAtBoot([e, w, sibling]);
+      const wAfterReboot = reboot1.activeMergeQuarantineFor(w);
+      check("*** restart survival *** W's own quarantine is STILL resolvable, correctly, after a reboot", wAfterReboot?.repoPath === w && !!wAfterReboot?.tokens.includes("w-token"));
+      const eAfterReboot = reboot1.activeMergeQuarantineFor(e);
+      check("*** restart survival *** E's own union (with the sibling absorbed) is ALSO still correctly resolvable after a reboot", !!eAfterReboot && ["e-token", t2, "sib-token"].every((t) => eAfterReboot.tokens.includes(t)));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // SUB-CASE (b) — the round-3 re-CR's "different object, same identity" occupant shape: a secondary
+    // armed key's CURRENT occupant shares `extra`'s own `directPathIdentity` but is NOT the same object
+    // reference (so a bare `replaceEntryEverywhere(extra, armed)` scan alone would miss it — this is
+    // exactly why the fix also gates on `entryStillOwnsKey`, not reference equality alone).
+    //
+    // Built from the SAME "883e29bc boot-diverted twin" mechanism this file's own `buildRuntimeUnionFixture`
+    // already relies on (never a new, unprecedented construction): E2's own latch, re-processed by PASS 1
+    // while E2 is unresolvable, re-arms a FRESH object at K2 (its own recorded `resolvedKey`) and — per
+    // that same mechanism — pushes a PENDING reference to THAT fresh object for lazy re-resolve once E2
+    // becomes resolvable again. K1's own (unrelated, boot-#1) slot is untouched by this second boot pass —
+    // confirmed directly below via `listActiveMergeQuarantines`, never merely assumed. The absorb this
+    // sub-case exercises is then triggered by an ORDINARY QUERY (`activeMergeQuarantineFor`'s own `direct`
+    // fast-path absorb, `extra=direct`) rather than a raise — a DIFFERENT caller of the SAME
+    // `consumeMatchedPendingsIntoArmedEntry` chokepoint than sub-case (a)'s raise-triggered absorb, for
+    // caller diversity. Confirmed EMPIRICALLY (not merely argued) via a throwaway scratch repro before
+    // writing this scenario.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    {
+      const { e: e2, w: w2, k1: k1b, k2: k2b, eFile: e2File, wFile: k2bFile } = buildDualArmFixture("same-identity-reversed");
+      fs.rmSync(e2File, { force: true }); // E2's own primary file is gone — only this process's in-memory k1b slot still carries boot #1's object
+      const parkedE2 = path.join(os.tmpdir(), `loom-mqrup-parked-e2-${freshSfx()}`);
+      fs.renameSync(e2, parkedE2);
+      fs.writeFileSync(k2bFile, JSON.stringify({
+        repoPath: e2, branch: "e2-same-identity-at-k2", reason: "manufactured different object, same identity as e2",
+        enteredAt: Date.now() - 30_000, tokens: ["k2-legacy-token"], resolvedKey: k2b,
+      }, null, 2) + "\n");
+      reenterMergeQuarantinesAtBoot([]); // boot #2 — e2 unresolvable right now; arms a FRESH object at k2b + pushes its own boot-diverted twin, leaving k1b's own slot untouched
+      fs.renameSync(parkedE2, e2);
+
+      const beforeQuery = listActiveMergeQuarantines().filter((q) => q.repoPath === e2);
+      check("(precondition) k1 and k2 hold TWO DIFFERENT objects sharing e2's own identity, before any query", beforeQuery.length === 2 && beforeQuery[0] !== beforeQuery[1]);
+
+      const afterQuery = activeMergeQuarantineFor(e2); // THE QUERY — triggers the `direct` fast-path absorb (extra = k1b's own object)
+      check("(sanity) the absorb itself still functions — the union carries both tokens", !!afterQuery && ["e-token", "k2-legacy-token"].every((t) => afterQuery.tokens.includes(t)));
+
+      const k2bProxy = activeMergeQuarantineFor(w2); // w2's own path has always hashed to k2b — a window onto that slot (isKeyVerifiedFor fails for it, so this never itself re-triggers an absorb)
+      check("*** THE FIX *** the SAME-IDENTITY-different-object slot IS re-pointed to the union (never skipped)", k2bProxy === afterQuery);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // SUB-CASE (c) — round 2 (CR b166c6e6), item 3: a DIFFERENT-IDENTITY matched sibling (not `extra`)
+    // that is ITSELF a boot-diverted twin, carrying its OWN stale secondary key K3. Gating only against
+    // `extra` (round 1's own fix) would skip K3 — the anchor set must include every matched entry, not
+    // only `extra`. E here is a plain, single-key raise (never dual-armed itself), isolating this case to
+    // the sibling's OWN secondary key.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    {
+      const e3 = path.join(os.tmpdir(), `loom-mqrup-e3-${freshSfx()}`);
+      fs.mkdirSync(e3, { recursive: true });
+      tmpDirs.push(e3);
+      fs.writeFileSync(path.join(e3, "README.md"), "# e3\n");
+      execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: e3 });
+      commitAll(e3, "init", GIT_ID);
+      const k1c = canonicalRepoLockKey(e3);
+      const t1c = enterMergeQuarantine(e3, "e3-branch-1", "e3's own brand-new raise — no pending/dual-arm involved");
+      check("(precondition) e3 is armed singly at k1 (not dual-armed)", activeMergeQuarantineFor(e3)?.armedKeys?.length === 1);
+
+      // The SIBLING: a plain subdir of e3 (collapses onto k1c once resolvable), itself a boot-diverted twin
+      // — its own latch is filed under its own direct-path hash but records resolvedKey=k3 (a genuinely
+      // different key), while parked/unresolvable at boot time, so PASS 1 arms it at k3 and pushes a twin.
+      const sibling3 = path.join(e3, `sib3-${freshSfx()}`);
+      fs.mkdirSync(sibling3, { recursive: true });
+      const w3 = path.join(os.tmpdir(), `loom-mqrup-w3-never-exists-${freshSfx()}`);
+      const k3 = canonicalRepoLockKey(w3);
+      const oldHashForSibling3 = hashForKey(process.platform === "win32" ? fs.realpathSync.native(sibling3).toLowerCase() : fs.realpathSync.native(sibling3));
+      fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${oldHashForSibling3}.json`), JSON.stringify({
+        repoPath: sibling3, branch: "sib3-branch", reason: "sibling3's own dual-armed latch, resolvedKey=k3",
+        enteredAt: Date.now(), tokens: ["sib3-token"], resolvedKey: k3,
+      }, null, 2) + "\n");
+      const parkedSibling3 = path.join(os.tmpdir(), `loom-mqrup-parked-sib3-${freshSfx()}`);
+      fs.renameSync(sibling3, parkedSibling3);
+      reenterMergeQuarantinesAtBoot([]); // sibling3 unresolvable right now — arms at k3, pushes its own boot-diverted twin
+      fs.renameSync(parkedSibling3, sibling3);
+      check("(precondition) sibling3 shares e3's own canonical key once resolvable", canonicalRepoLockKey(sibling3) === k1c);
+
+      const t2c = enterMergeQuarantine(e3, "e3-branch-2", "e3's second raise, triggering the sibling-twin absorb"); // hits `existing`, absorbs sibling3's twin (extra=rebuilt-e3, matched=[sibling3's twin])
+      const finalE3 = activeMergeQuarantineFor(e3);
+      check("(sanity) the union carries all 3 tokens", !!finalE3 && [t1c, t2c, "sib3-token"].every((t) => finalE3.tokens.includes(t)));
+
+      const k3Proxy = activeMergeQuarantineFor(w3);
+      check("*** THE FIX (round 2) *** the DIFFERENT-IDENTITY sibling-twin's OWN stale secondary key (k3) is ALSO re-pointed to the union (never skipped just because it isn't `extra`'s own)", k3Proxy === finalE3);
+    }
+  } else if (scenarioName === "no-extra-graduation-repoints-twin-slot") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 96e6aa58, ROUND 2 (CR b166c6e6) — the round-1 fix (`stale-armed-key-survives-sibling-absorb-
+    // raise`) gated a non-anchor key ONLY against `extra` — but `extra` is `undefined` on the NO-extra
+    // graduation path (`activeMergeQuarantineFor`'s own lazy-graduation tail, when nothing is armed yet at
+    // `key`). A bare pending twin (armed SINGLY at its own `resolvedKey` K2, with a pending reference
+    // pushed, by reference, for lazy re-resolve at its real key K1 — PASS 1's own degraded-divert branch,
+    // `degradedDivertsToFlush`/`flushDegradedDiverts`) graduates via exactly this path once its path
+    // resolves again. The round-1 fix skipped K2 outright (no `extra` to check ownership against) AND
+    // `replaceEntryEverywhere` had nothing to re-point either (it was only ever called for `extra`) — so
+    // K2 kept pointing at the now-spliced-out twin object forever, producing a DOUBLE report for the same
+    // logical identity. RED on commit b7fff0f4 (the round-1 fix).
+    //
+    // E must be NESTED inside a surviving ancestor R (own `.git`, never touched) for this — a plain
+    // TOPLEVEL repo's own degraded (unresolvable) fallback key is IDENTICAL to its own real key (both
+    // reduce to "this path, no further walk needed"), so parking a toplevel repo alone never trips PASS
+    // 1's `freshHash !== hash` migrate/divert branch at all (confirmed empirically via a throwaway scratch
+    // repro before writing this scenario — an earlier draft used a bare toplevel E and was vacuous,
+    // passing on BOTH b7fff0f4 and this fix because it never reached the degraded-divert branch).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const r = path.join(os.tmpdir(), `loom-mqrup-r-notwin-${freshSfx()}`);
+    const e = path.join(r, "nested");
+    fs.mkdirSync(e, { recursive: true });
+    tmpDirs.push(r);
+    fs.writeFileSync(path.join(r, "README.md"), "# r\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: r });
+    commitAll(r, "init r", GIT_ID);
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: e });
+    fs.writeFileSync(path.join(e, "README.md"), "# e nested\n");
+    commitAll(e, "init e", GIT_ID);
+    const k1 = canonicalRepoLockKey(e); // E's own REAL key, while E is its own toplevel
+
+    const w = path.join(os.tmpdir(), `loom-mqrup-w-notwin-never-exists-${freshSfx()}`);
+    const k2 = canonicalRepoLockKey(w); // a genuinely different key
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const eFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k1)}.json`);
+    fs.writeFileSync(eFile, JSON.stringify({
+      repoPath: e, branch: "e-branch", reason: "E's own latch, filed at k1 but recorded resolvedKey=k2",
+      enteredAt: Date.now() - 60_000, tokens: ["e-token"], resolvedKey: k2,
+    }, null, 2) + "\n");
+    const parkedE = path.join(os.tmpdir(), `loom-mqrup-parked-notwin-${freshSfx()}`);
+    fs.renameSync(e, parkedE); // E vanishes entirely; R (its own parent, own `.git`) survives — the walk now degrades to R's key, not E's own
+    reenterMergeQuarantinesAtBoot([]); // e unresolvable THIS boot (and only this boot) — arms SINGLY at k2, pushes a pending twin for k1
+    fs.renameSync(parkedE, e);
+
+    const before = listActiveMergeQuarantines().filter((q) => q.repoPath === e);
+    check("(precondition) exactly one entry for e before any query, armed SINGLY at k2 — NOTHING yet at k1", before.length === 1 && before[0].armedKeys?.length === 1 && before[0].armedKeys[0] === k2);
+
+    const graduated = activeMergeQuarantineFor(e); // THE QUERY — `direct` is undefined at k1, so this is the NO-extra graduation path
+    check("(sanity) graduation carries e's own token", !!graduated && graduated.tokens.includes("e-token"));
+
+    const k2Proxy = activeMergeQuarantineFor(w); // w's own path has always hashed to k2 — a window onto that slot
+    check("*** THE FIX (round 2) *** k2's slot IS re-pointed to the SAME union object (never left stale)", k2Proxy === graduated);
+
+    const afterList = listActiveMergeQuarantines().filter((q) => q.repoPath === e);
+    check("*** THE FIX (round 2) *** e is listed exactly ONCE after graduation (no stale-twin double-report)", afterList.length === 1);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

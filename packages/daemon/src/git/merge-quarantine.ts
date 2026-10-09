@@ -761,15 +761,27 @@ function consumeMatchedPendingsIntoArmedEntry(
   const strippedOrphanLatchFiles = unioned.orphanLatchFiles?.filter((f) => !sourceFiles.includes(f));
   const armedKeys = [...new Set([...(unioned.armedKeys ?? []), key])];
   let armed: MergeQuarantineEntry = { ...unioned, resolvedKey: key, armedKeys, orphanLatchFiles: strippedOrphanLatchFiles };
-  for (const k of armedKeys) activeQuarantines.set(k, armed);
+  // @decision 96e6aa58 (round 2) — anchor set = extra (if any) + every matched pending entry's own object;
+  // each is being consumed into this union, so re-pointing what it already owns is correct and matches
+  // main. Gate non-anchor keys on ownership by ANY anchor, then replaceEntryEverywhere per anchor.
+  const anchors: MergeQuarantineEntry[] = extra ? [extra, ...matched.map((p) => p.entry)] : matched.map((p) => p.entry);
+  for (const k of armedKeys) {
+    if (k === key) { activeQuarantines.set(k, armed); continue; }
+    if (anchors.some((o) => entryStillOwnsKey(k, o))) activeQuarantines.set(k, armed);
+  }
+  for (const o of anchors) replaceEntryEverywhere(activeQuarantines, o, armed);
   // @decision 97cff6db (round 4) — pass `key` explicitly, never derived from `armed.repoPath` — same
   // "never trust entry.repoPath at a site that can see a degraded identity" rule as every boot write site.
   const writeSucceeded = writeMergeQuarantineLatch(armed, false, key, skipDegradedOccupantGuard);
   if (writeSucceeded) {
     const failedToDelete = sourceFiles.filter((sourceFile) => !deleteSourceLatchIfSuperseded(sourceFile, armed, key));
     if (failedToDelete.length > 0) {
-      armed = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), ...failedToDelete])] };
-      for (const k of armedKeys) activeQuarantines.set(k, armed);
+      const updated: MergeQuarantineEntry = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), ...failedToDelete])] };
+      // @decision 96e6aa58 — same-identity rebuild of `armed` itself: route through replaceEntryEverywhere,
+      // never a bare per-key `.set()` — safe here because every slot currently holding `armed` by
+      // reference was already placed there correctly by the fix above (never a slot belonging to W).
+      replaceEntryEverywhere(activeQuarantines, armed, updated);
+      armed = updated;
       if (!writeMergeQuarantineLatch(armed, false, key, skipDegradedOccupantGuard)) {
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] graduated ${armed.repoPath} but could NOT re-persist it after ${failedToDelete.length} stale source file(s) (${failedToDelete.join(", ")}) failed to unlink — those file(s) stay on disk, UNTRACKED by this entry's own bookkeeping in THIS process; a restart may re-arm this quarantine from them (fail-closed, never open, but investigate the unlink failure).`);
@@ -780,8 +792,10 @@ function consumeMatchedPendingsIntoArmedEntry(
     const freshWriteTarget = path.basename(quarantinePathForKey(key));
     const toFold = sourceFiles.filter((f) => f !== freshWriteTarget);
     if (toFold.length > 0) {
-      armed = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), ...toFold])] };
-      for (const k of armedKeys) activeQuarantines.set(k, armed);
+      const updated: MergeQuarantineEntry = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), ...toFold])] };
+      // @decision 96e6aa58 — same-identity rebuild, same reason as the success branch above.
+      replaceEntryEverywhere(activeQuarantines, armed, updated);
+      armed = updated;
     }
   }
   return { armed, matched, writeSucceeded };
@@ -1783,7 +1797,9 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
     // path genuinely resolves. Pinning here would reopen the exact bug this pending mechanism exists to
     // close: a LATER remount recomputes a DIFFERENT (real) key, and an already-graduated entry sitting
     // under the degraded key would miss it exactly like the original one-boot fail-open did, just later.
-    // Every matched entry shares `first`'s identity by construction, so its resolvability speaks for all.
+    // Tiers 1/2/4 (direct identity, ancestor-alias, resolvedKey) only ever match entries sharing
+    // `first`'s identity, so its resolvability speaks for all of them. Tier 3 (cross-tier sibling) never
+    // reaches this branch at all — its own predicate requires every match to already be resolvable.
     return first.entry;
   }
   // Genuinely resolvable now — graduate EVERY identity-matching pending entry in ONE step via the shared
