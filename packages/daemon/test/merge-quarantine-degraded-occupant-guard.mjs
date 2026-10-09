@@ -75,11 +75,13 @@ if (!scenarioArg) {
   console.log(failedScenarios === 0
     ? "\n✅ ALL SCENARIOS PASS — a runtime write never destroys a degraded occupant's only durable copy "
       + "(both the sibling-absorb and lazy-graduation branches refuse, in BOTH tie-break age orders); a "
-      + "fresh raise is durable across a reboot via BOTH of enterMergeQuarantine's own opt-out shapes (the "
-      + "brand-new-entry branch AND the pending-merge branch), with the occupant-overwrite residual "
-      + "reported, not fixed; and the guard still allows a legitimate resolvable-different-identity "
-      + "overwrite THROUGH A GUARDED CALLER (never the opted-out enterMergeQuarantine path). clear(S) is "
-      + "deliberately out of scope — see the decision record."
+      + "fresh raise is durable across a reboot via BOTH of enterMergeQuarantine's own opt-out shapes. The "
+      + "brand-new-entry branch's own occupant-overwrite residual is reported, not fixed, here (a VERIFIED "
+      + "raiser — see card 2a6a8073); the pending-merge branch's own residual (an UNVERIFIED raiser) IS "
+      + "fixed (card d4b25feb — that branch no longer reaches writeMergeQuarantineLatch at all for an "
+      + "unverified raiser). The guard still allows a legitimate resolvable-different-identity overwrite "
+      + "THROUGH A GUARDED CALLER (never the opted-out enterMergeQuarantine path). clear(S) is deliberately "
+      + "out of scope — see the decision record."
     : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board card e1cb7d33.`);
   process.exit(failedScenarios === 0 ? 0 : 1);
 }
@@ -380,18 +382,22 @@ try {
   } else if (scenarioName === "pending-merge-fresh-raise-survives-reboot") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // ROUND 2, ITEM 3 — the SECOND of `enterMergeQuarantine`'s 4 own opt-out write sites: its PENDING-MERGE
-    // branch (merge-quarantine.ts ~line 777, `consumeMatchedPendingsIntoArmedEntry(allPendingIndices, key,
-    // fresh, true)`), reached when the raised repo has its OWN pending (never-yet-resolved) latch to merge
-    // into — a DIFFERENT call site than `fresh-raise-survives-reboot`'s own "brand new entry" branch
-    // (~line 786), which only fires when there is NO pending match at all. Verified empirically (never
-    // hand-traced) against the real dist build before writing these assertions.
+    // branch, reached when the raised repo has its OWN pending (never-yet-resolved) latch to merge into —
+    // a DIFFERENT call site than `fresh-raise-survives-reboot`'s own "brand new entry" branch, which only
+    // fires when there is NO pending match at all.
     //
     // Shape: X is pure-pending at Kp (no resolvedKey); teamA ALSO has its own stale, pending latch (teamA
-    // does not exist yet at boot, so it stays genuinely pending rather than being armed). The raise below
-    // merges teamA's own pending entry with a fresh one via the L777 call site — reaching a DIFFERENT
-    // write path than either of `fresh-raise-survives-reboot`'s or `runtime-sibling-absorb-refuses-direct-
-    // path`'s own call sites, so this scenario is required to prove THIS specific opt-out, not merely infer
-    // it from a sibling one.
+    // does not exist yet at boot, so it stays genuinely pending rather than being armed) — i.e. teamA's OWN
+    // raise below is itself UNVERIFIED (teamA still doesn't exist on disk when it raises).
+    //
+    // @decision d4b25feb — UPDATED: this scenario used to document the SAME "documented residual" as
+    // `fresh-raise-survives-reboot` (X's physical file overwritten) — card d4b25feb's own fix closes it
+    // for THIS specific shape (an UNVERIFIED raiser merging into its own pending latch), while leaving
+    // `fresh-raise-survives-reboot`'s own shape (a VERIFIED raiser, teamA genuinely resolves there) fully
+    // untouched and still open (tracked separately on card 2a6a8073). teamA's own raise here now diverts
+    // via `mergeTokenIntoPendingEntries` instead of ever calling `consumeMatchedPendingsIntoArmedEntry`/
+    // `writeMergeQuarantineLatch` at all — so it never reaches, or needs, this call site's own `writeMerge-
+    // QuarantineLatch`-based opt-out any more. See docs/decisions/d4b25feb-*.md.
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const repo = path.join(os.tmpdir(), `loom-mqdog-repo-pendraise-${freshSfx()}`);
     fs.mkdirSync(repo, { recursive: true });
@@ -418,17 +424,23 @@ try {
     // branch `fresh-raise-survives-reboot` exercises either.
     const token = enterMergeQuarantine(teamA, "teamA-branch", "a fresh raise merging into teamA's own pending latch, over X's degraded Kp occupancy");
     const teamAEntry = activeMergeQuarantineFor(teamA);
-    check("*** THE OPT-OUT (L777) *** teamA's merged raise is enforced IN-MEMORY immediately", !!teamAEntry && (teamAEntry.tokens ?? []).includes(token) && (teamAEntry.tokens ?? []).includes("token-teamA-pendraise"));
+    check("*** THE FIX (card d4b25feb) *** teamA's merged raise is enforced IN-MEMORY immediately", !!teamAEntry && (teamAEntry.tokens ?? []).includes(token) && (teamAEntry.tokens ?? []).includes("token-teamA-pendraise"));
     check(
-      "(documented residual, pre-existing — see the decision record) the write proceeded and X's own physical file is now teamA's content, not X's",
-      JSON.parse(fs.readFileSync(xAtKpPath, "utf8")).repoPath === teamA,
+      "*** THE FIX (card d4b25feb) *** X's own physical file is STILL X's own data (never overwritten) — teamA's unverified raise diverted instead of arming at the shared degraded key",
+      JSON.parse(fs.readFileSync(xAtKpPath, "utf8")).repoPath === x,
     );
-    check("(sanity) teamA's own stale pending source was superseded (deleted) by the successful write", !fs.existsSync(staleTeamAPath));
+    check(
+      "*** THE FIX (card d4b25feb) *** teamA's own stale pending source is REWRITTEN IN PLACE (not deleted) — it is now teamA's own durable pending-divert record",
+      fs.existsSync(staleTeamAPath) && JSON.parse(fs.readFileSync(staleTeamAPath, "utf8")).tokens.includes(token),
+    );
+    check("(sanity) X is still independently active too — never touched by teamA's own merge", !!activeMergeQuarantineFor(x) && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-pendraise"));
 
-    // *** THE FIX FOR THIS RULING *** durable across a real reboot — without this specific opt-out, the
-    // write at THIS call site refuses, and the fresh token is silently LOST at the next boot (see the
-    // `--ref` behavioral RED this scenario is paired with: flipping this ONE call site's own
-    // `skipDegradedOccupantGuard` argument to `false` reproduces exactly that loss).
+    // *** THE FIX FOR THIS RULING *** durable across a real reboot. Stale as of card d4b25feb: this call
+    // site no longer reaches `consumeMatchedPendingsIntoArmedEntry`/`writeMergeQuarantineLatch` at all (an
+    // unverified teamA now routes through `mergeTokenIntoPendingEntries`/`writePendingDivertFile` instead,
+    // which has no `skipDegradedOccupantGuard` to flip) — durability here comes from that write succeeding
+    // on its own terms, not from an opt-out of a guard this path no longer consults. The behavioral RED for
+    // THIS shape is d4b25feb's own negative-control (reverting the whole fix), not a flag flip here.
     const boot2 = await freshBootModule();
     boot2.reenterMergeQuarantinesAtBoot([repo, teamA, x]);
     const teamAAfterReboot = boot2.activeMergeQuarantineFor(teamA);

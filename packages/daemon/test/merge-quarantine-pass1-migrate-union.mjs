@@ -556,7 +556,7 @@ try {
     if (xFileSurvived) {
       report("in-memory-twin", "DID NOT REPRODUCE — X's own backing file survived clearMergeQuarantine(y). See the decision record for why (if determined) before relying on this as a general guarantee.");
     } else {
-      report("in-memory-twin", "REPRODUCED — clearMergeQuarantine(y) deleted X's own backing file (sha(Ky).json) as a side effect of lifting the in-memory union's shared armedKeys. This is the in-memory twin of 4480b077's own on-disk defect, NOT fixed by this card — tracked on card d4b25feb.");
+      report("in-memory-twin", "REPRODUCED — clearMergeQuarantine(y) deleted X's own backing file (sha(Ky).json) as a side effect of lifting the in-memory union's shared armedKeys. This is the in-memory twin of 4480b077's own on-disk defect, NOT fixed by card d4b25feb — split out and tracked on card c9114934.");
     }
     console.log(`(in-memory-twin) X's backing file exists after clearMergeQuarantine(y): ${xFileSurvived}`);
 
