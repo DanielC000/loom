@@ -172,16 +172,25 @@ try {
   // killRoot deliberately left UNOVERRIDDEN (the true default), is the legitimate way to reach it.
   // ===================================================================================================
   {
+    // Card 64d7a914 (CR 33ae2f8a round 2, follow-up) — verifyRootDeadOrForceKill now REFUSES before any
+    // kill when no owner can be resolved at all, closing the exact gap this scenario used to rely on
+    // (killing on command-line identity alone, no owner). A real creationTime (TRIPWIRE_CREATION_TIME,
+    // shared by the probe and the registered owner below) is needed too, or win32's own M3 null-check
+    // refuses first; both exist purely to let this scenario still reach the real killRoot, which is its
+    // whole point — this file has nothing to do with creation-time matching.
+    const TRIPWIRE_CREATION_TIME = Date.now() - 1_000;
     class RealKillRootHost extends PtyHost {
       reapExitedDescendants(_rootPid, _sessionId) { /* never used — verifyRootDeadOrForceKill is called directly */ }
       async probeRootSurvival(_rootPid, _sessionId) {
-        return { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: null };
+        return { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: TRIPWIRE_CREATION_TIME };
       }
       async captureRootCreationRow(_pid) { return null; }
       sweepOrphanedDescendants(_rootPid) { /* never reached: probeRootSurvival always reports alive, so dead stays false */ }
     }
     const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
     const host = new RealKillRootHost(events);
+    const owner = { pid: SENTINEL_PID, startedAt: Date.now() - 2_000, creationTime: TRIPWIRE_CREATION_TIME, creationTimeReady: Promise.resolve(), alive: true };
+    host.live.set("sess-tripwire-killroot-test", owner);
     let rejected = null;
     try {
       await host.verifyRootDeadOrForceKill("sess-tripwire-killroot-test", SENTINEL_PID, "hard-stop");

@@ -121,6 +121,11 @@ class SpyHost extends createSeamHost(PtyHost) {
     return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null };
   }
   killRoot(_pid) {}
+  // Card 64d7a914 — overrides `createSeamHost`'s own null-returning no-op: every spawn in this file gets
+  // a VERIFIED `live.creationTime` of 0 (ppid matches, creationTime <= startedAt), deterministically and
+  // through the real `armWin32RootCreationTime` flow — never a side-channel patch after spawn, which would
+  // race that flow's own pending `.then()` and get silently clobbered back to `null`.
+  async captureRootCreationRow(pid) { return { pid, ppid: process.pid, creationTime: 0 }; }
   async verifyRootDeadOrForceKill(sessionId, rootPid, trigger, expectedOwner) {
     this.verifyCalls.push({ sessionId, rootPid, trigger });
     return super.verifyRootDeadOrForceKill(sessionId, rootPid, trigger, expectedOwner);
@@ -257,10 +262,11 @@ function spawnCodex(sid) {
 {
   const SID = "claude-confirmed-force-kill-sweep";
   const fake = spawnClaude(SID, Infinity); // Infinity: never exits on its own via Ctrl-C
+  // Card 64d7a914 — win32's own guard 2 now cross-checks the occupant against the VERIFIED
+  // `live.creationTime` (SpyHost's own `captureRootCreationRow` override above settles it to 0, matching
+  // the probe's own creationTime:0 below — 0, not null: win32's separate M3 guard refuses a null occupant
+  // creationTime outright).
   host.probeOverrides.set(SID, [
-    // creationTime:0 (not null) — win32's own guard 2 (M3) refuses on a NULL creationTime as an
-    // enumeration anomaly; 0 is a real (if ancient) value that trivially clears the slack check against
-    // this session's own just-now startedAt, so this scenario actually reaches the force-kill branch.
     { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: 0 }, // first probe: alive + confirmed
     { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null }, // recheck after killRoot: confirmed dead
   ]);

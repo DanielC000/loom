@@ -219,6 +219,40 @@ them. Left for its own card. The capture mechanism built here (`armWin32RootCrea
 registry itself record a captured creation time at registration — but that is a design choice for whoever
 picks up that residual, not decided or built by this card.
 
+## Round 5 (card 64d7a914): the capture gets a SECOND consumer — `verifyRootDeadOrForceKill`'s own guard 2
+
+This card's `live.creationTime`/`CodexLive.creationTime` capture was built for exactly ONE consumer —
+`computeOrphanSweepPlan`'s live-root-abort check. Card `64d7a914` (see `2897acc4`'s own record, rounds 7-8,
+for the full mechanism) adds a second: `verifyRootDeadOrForceKill`'s guard 2, win32-only, retiring that
+branch's prior cross-source `CREATION_TIME_SLACK_MS` comparison against `owner.startedAt` in favor of a
+DIFFERENT cross-source pairing against this card's own capture (round 2 of the card's review corrected an
+early draft's "same-source" framing — `2897acc4`'s own `ROOT_CREATION_MATCH_TOLERANCE_MS` doc has the real
+measurement). Two consequences for THIS record specifically:
+
+- `Live`/`CodexLive` gained a sibling field, `creationTimeReady: Promise<void>` — resolves once
+  `creationTime` settles, never rejects; a pre-resolved stub everywhere except the real win32
+  `armWin32RootCreationTime` path, which replaces it with the real in-flight chain. Guard 2 awaits this
+  (bounded) BEFORE ever probing the occupant — not at guard-2 entry, which left a real TOCTOU window
+  between the probe and the kill (`2897acc4`'s own record, round 8) — closing a timing gap THIS card's own
+  abort check never had to worry about (an onExit sweep runs well after spawn by construction; a
+  hard-kill's guard 2 can run very soon after it).
+- The shared `createSeamHost` fixture's `captureRootCreationRow` no-op (round 3, MINOR 2) now ALSO
+  determines every seam-hosted spawn's `live.creationTime` for guard-2 purposes, not just the sweep's — a
+  test exercising guard 2's new win32 branch through a real `spawn()` call needs its own
+  `captureRootCreationRow` override (never a direct post-spawn write to `live.creationTime`, which races
+  the real arm's pending `.then()`), same requirement this card's own (r)/(s)/(t)/(u) scenarios already had.
+
+## Round 6 (card 64d7a914, CR 33ae2f8a round 2): capture failures were silent
+
+`armWin32RootCreationTime` left `live.creationTime` null on EITHER a rejected promise OR a row that failed
+`resolveVerifiedRootCreationTime`'s own verification (wrong ppid, or too late), with nothing logged either
+way — a silent null here now also feeds guard 2's own `"owner-creation-time-unavailable"` refusal
+(`2897acc4`'s record, round 8), with no way to tell a genuine capture failure from a row the OS simply
+never produced. Fixed: both paths log once, under a new fixed, greppable `[pty-reap-capture]` tag, naming
+the pid and — for the unverified case — which check failed (no row / ppid mismatch / too late), or the
+exception message for a genuine rejection. This card's own (r)/(s) scenarios (a wrong-ppid row; a row later
+than `startedAt+slack`) now also exercise this logging path directly.
+
 ## Do not
 
 - Do not use `Live.startedAt`/`CodexLive.startedAt` as `computeOrphanSweepPlan`'s `rootCreationTime` — it
@@ -297,3 +331,18 @@ picks up that residual, not decided or built by this card.
   round 3's own "drives the real `spawn()`/`spawnCodex()` path" text was written before any codex-path
   test existed; a narrative claim here is only as true as the code it describes, and goes stale exactly
   like inline source comments do.
+- (Round 5) Do not assume `captureRootCreationRow`'s no-op in the shared `createSeamHost` fixture only
+  affects `computeOrphanSweepPlan`'s own abort check — it now ALSO determines what `verifyRootDeadOrForceKill`'s
+  win32 guard-2 branch sees for any seam-hosted spawn (card `64d7a914`); a test exercising that branch needs
+  its own override, same as this card's own (r)/(s)/(t)/(u) scenarios.
+- (Round 5) Do not write `live.creationTime` directly after a real `spawn()` call as a test shortcut — it
+  races `armWin32RootCreationTime`'s own pending `.then()` and gets silently overwritten back to whatever
+  the real capture resolves to; override `captureRootCreationRow` on the test's own PtyHost subclass so the
+  value flows through the real arm mechanism instead.
+- (Round 6) Do not leave a capture failure (a rejected promise, or a row that failed
+  `resolveVerifiedRootCreationTime`'s own verification) unlogged — log once, under the fixed
+  `[pty-reap-capture]` tag, naming the pid and the specific reason, on both paths.
+- (Round 6) Do not call guard 2's win32 comparison "same-source" with THIS card's own abort check — they
+  read the same real OS attribute but via two DIFFERENT query/conversion pairs (`checkRootSurvival`'s
+  `/Date(ms)/` truncation vs this card's own `.Ticks` rounding); see `2897acc4`'s own record, round 8, for
+  the measured cross-source delta and why `ROOT_CREATION_MATCH_TOLERANCE_MS` must never tighten below 1ms.

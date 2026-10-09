@@ -413,6 +413,181 @@ own header rather than attempted — the syntactic scan is deliberately NOT wide
 STRUCTURAL RUNTIME tripwire (carded separately by the lead) is the right tool for that gap, not a wider AST
 pattern here.
 
+## Round 7 (card 64d7a914): guard 2's win32 branch moves off the cross-source slack onto the verified capture
+
+Card `2897acc4`'s own guard 2 (the ms-arithmetic branch, `CREATION_TIME_SLACK_MS`) compares two DIFFERENT
+clock sources — the OS's own `check.creationTime` (read fresh by `probeRootSurvival` at verify time)
+against `owner.startedAt` (Loom's own `Date.now()` at the original `spawn()` call) — which is why it needed
+a 5-second slack (measured spawn latency 10-950ms under load, card `758486bc`, plus rounding/skew). Card
+`87691385` built exactly the SAME-SOURCE capture `verifyRootDeadOrForceKill` itself never consumed: a
+verified `live.creationTime`/`CodexLive.creationTime` (win32-only), read via the identical CIM query the
+onExit sweep's own agreement check already trusts at 1ms (`ROOT_CREATION_MATCH_TOLERANCE_MS`). This round
+retires the cross-source comparison on win32 specifically and replaces it with that tight, same-source one.
+
+**The fix, scoped to `process.platform === "win32"` only** (a new branch in `verifyRootDeadOrForceKill`,
+parallel to the pre-existing Linux-ticks branch): compares `check.creationTime` against the verified
+`owner.creationTime` via `Math.abs(diff) <= ROOT_CREATION_MATCH_TOLERANCE_MS`, symmetric agreement — never
+a one-directional "not later than" check, same posture 87691385's own abort check took. Either side
+unknown, or a genuine disagreement, both refuse — never fall through to a kill on an unverified guess.
+`CREATION_TIME_SLACK_MS` is UNCHANGED in value, and keeps its other two consumers (the Linux-ticks default,
+and — see below — mac/other-POSIX, unaffected by this round).
+
+**Deliberately NOT applied to mac/other-POSIX.** `87691385`'s capture (`armWin32RootCreationTime`) is
+win32-only by construction — mac's `live.creationTime` is permanently `null`, so routing mac through the
+same tight check would make guard 2 permanently refuse there (never merely stricter — structurally
+inoperative), reintroducing the exact S2-shaped defect (`2897acc4`'s own headline incident: a hard stop
+whose kill is never confirmed) this card exists to fix, for one platform specifically. Mac/other-POSIX
+keeps today's `check.creationTime` vs `owner.startedAt + CREATION_TIME_SLACK_MS` comparison, unchanged —
+newly exercised directly by a `platformOverride: "darwin"` test (`pty-root-reap-identity.mjs`, scenario 9d)
+that did not exist before this round; scenarios 8/9 in that file previously ran on whatever real platform
+the gate happened to execute on (win32, on this project's own gate host) and were the ONLY coverage of this
+branch at all — conflating the two platforms' behavior under one untagged test.
+
+**The timing hazard: a kill issued very soon after spawn, before the capture resolves.** `live.creationTime`
+is armed fire-and-forget right after `spawn()`/`spawnCodex()` (87691385); reading a still-`null`,
+not-yet-resolved value as "permanently unknown" would under-kill a genuine survivor in exactly the window
+this capture is still in flight. Fixed: `Live`/`CodexLive` gained `creationTimeReady: Promise<void>` —
+resolves once `creationTime` settles (never rejects; a pre-resolved stub at construction everywhere except
+the real win32 `armWin32RootCreationTime` path, which replaces it with the real in-flight chain). Guard 2's
+win32 branch awaits it, BOUNDED by `ROOT_CREATION_CAPTURE_AWAIT_MS`, before deciding — re-reading
+`owner.creationTime` AFTER the await, never the stale value read at entry. Still null after the bound ⇒
+refuse (`identity: "unreadable"`, same reason/shape as the pre-existing win32 null-`check.creationTime`
+guard above it) — the fail-safe default, never a guessed match.
+
+**The bound's value is measured, not guessed** (same posture as `ROOT_CREATION_CAPTURE_SLACK_MS`'s own
+correction in round 3 of `87691385`): real conpty children via `enumerateWin32SweepRowForPid` on this host,
+n=12 idle (min=568/p50=590/p90=646/p99=677/max=677ms) and n=8 under 3 concurrent CPU spinners
+(min=661/p50=680/p90=1144/p99=1144/max=1144ms). `ROOT_CREATION_CAPTURE_AWAIT_MS` defaults to 3000ms — over
+2.6x the single worst sample observed. Env-overridable (`LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS`) for a test
+to shrink it, same convention as every other timing constant in this file.
+
+New tests in `pty-root-reap-identity.mjs`: scenario 8 (mismatch, now against the verified capture, not
+`startedAt`), scenario 9 (agreement, same), 9b (still null after the bound ⇒ refuse), 9c (resolves within
+the bound ⇒ decides on the resolved value, not the stale entry read), 9d (mac/darwin, unchanged 5s path,
+both directions — the gap this round found). Scenario 7 (the pre-existing no-respawn negative control) was
+updated to populate `creationTime`/`creationTimeReady` on its owner object — it now also reaches the new
+win32 branch, where it previously reached the retired generic one.
+`pty-root-reap-call-site-wiring.mjs`'s scenario 7 (and its own negative control) needed a `captureRootCreationRow`
+override returning a verified row (never a post-spawn side-channel write to `live.creationTime` directly —
+that races `armWin32RootCreationTime`'s own pending `.then()` and gets silently clobbered back to `null`;
+caught by actually running the fix before writing it this way).
+
+## Round 8 (Code Review 33ae2f8a, round 2): a TOCTOU window, a mislabeled cross-source comparison, a reason split, and an unreachable-but-cheap-to-close gap
+
+**Item 1 (MAJOR) — round 7's own bounded wait ran AFTER the occupant probe, not before, leaving a real
+TOCTOU window between the probe and the kill.** The CR measured `identityCheckToKillMs = 1509` with a
+single probe: `probeRootSurvival` ran, THEN guard 2 awaited up to `ROOT_CREATION_CAPTURE_AWAIT_MS` (3s) for
+an in-flight capture, THEN `killRoot` ran a blind kill keyed off the now-stale probe result — in that
+window the OS could have reused or replaced `rootPid`, and the kill would still fire against it. **Fixed:**
+the bounded wait moved to run immediately after computing `owner`, BEFORE `probeRootSurvival` is ever
+called — nothing awaits between the probe and `killRoot` any more (pure synchronous guard evaluation in
+between). Returns immediately when no capture is in flight: off win32, or once `creationTime` has already
+settled, the race is skipped outright rather than still allocating and clearing a 3s timer against an
+already-resolved promise — so the common-case cost is unchanged. Proven with a dedicated timing test
+(`pty-root-reap-identity.mjs`, scenario 9e): the capture resolves only after an observable 50ms delay, and
+the test asserts BOTH that `probeRootSurvival` fires only after that delay has elapsed, and that the
+probe-to-kill gap itself is tiny (<20ms) — if the ordering regressed back to probe-then-await, the gap
+assertion would absorb that 50ms instead, exactly reproducing the CR's own measurement. Re-measured on CR
+re-review (33ae2f8a, round 2): `identityCheckToKillMs` down from 1509ms to 0.82ms.
+
+**Item 1c (CR 33ae2f8a round 3 — a regression in the round-2 polish, caught before merge) — the skip-the-
+race gate must read `resolveRootReapPlatform()`, never raw `process.platform`.** The round-2 polish pass
+(gating the skip on `process.platform === "win32"`, to avoid allocating a timer at all off win32) reopened
+the exact Linux-CI-red risk round 8's own item 2 had just closed: scenarios 8/9/9b/9c/9e force
+`platformOverride = "win32"` so guard 2's OWN branch below still takes the win32 path on a Linux CI runner
+— but the early-wait gate, reading raw `process.platform`, would see `"linux"` there and skip the wait
+entirely, leaving `owner.creationTime` read as a stale, never-awaited `null`. 9b, 9c and 9e would fail on
+CI; 8/9 would still pass by accident (their owners already carry a resolved `creationTime`, so the skipped
+wait never mattered for them). **Fixed:** gate on `this.resolveRootReapPlatform()` instead — the SAME
+test-overridable seam guard 2's own branch reads — so the wait and the branch it serves can never disagree
+on which platform they think they're running under. `armWin32RootCreationTime`'s own capture-arming gate
+is UNCHANGED (still raw `process.platform`) — that one is never test-overridden and never needs to be, by
+design (round 7's own text). **Proven, not just fixed:** a temp copy of `pty-root-reap-identity.mjs` faked
+`process.platform` to `"linux"` via `Object.defineProperty` before importing dist — ALL PASS against the
+`resolveRootReapPlatform()`-gated fix; reverting just that one gate back to raw `process.platform` in
+`dist` (nothing else touched) turned exactly 9b/9c/9e red under the same fake, matching the regression's
+own predicted shape precisely — restored and sha256-verified after, temp file deleted.
+
+**Latency this intentionally moves elsewhere (CR 33ae2f8a round 2, item 3) — not a hang.** An
+exit-reap/hard-stop on a session dying while its own win32 creation-time capture is still in flight now
+waits up to `ROOT_CREATION_CAPTURE_AWAIT_MS` (3s) BEFORE reporting "confirmed gone", since the bounded wait
+now runs ahead of the probe for every call, not only the ones that reach a kill. Intended: the alternative
+is reading a still-in-flight `null` as permanently unknown, which is the exact under-kill risk this
+mechanism exists to close.
+
+**Item 1b (nitpick 5, caught implementing item 1) — the bound timer must NEVER be `.unref()`'d.** The first
+attempt at moving the wait called `boundTimer.unref?.()` right after creating it (intending only to avoid a
+dangling handle) — this stranded the whole await PERMANENTLY in a hermetic test with nothing else keeping
+the event loop alive: Node can and did exit the process before an unref'd timer ever fired, leaving the
+`Promise.race` — and everything awaiting it up the stack — unsettled forever (reproduced directly: "Detected
+unsettled top-level await" on exactly this line). Fixed by never unref'ing the timer at all; `clearTimeout`
+after the race resolves is what actually avoids leaving a dangling handle once `creationTimeReady` wins.
+
+**Item 2 (MAJOR, test-only) — scenarios 8, 9, 9b and 9c (round 7) set no `platformOverride`, so on a Linux
+CI runner they silently take the Linux-ticks branch instead of the win32 branch they claim to test.** 8, 9
+and 9c happened to still pass there (their tick values gave the Linux branch the same high-level
+kill/refuse outcome, for the wrong reason); 9b genuinely failed (the Linux branch has no bounded-await
+mechanism to time, so the "waited roughly the bound" assertion read `elapsed≈0`). **Fixed:** all four (and
+the new 9e) now set `host.platformOverride = "win32"` explicitly, mirroring how scenarios 11-13 already
+force `"linux"`. Scenarios 2 and 4 (pre-existing, unrelated to either creation-time guard) needed a
+different fix — once an owner became required at all (item 6 below), their newly-added owners needed BOTH
+a matching `creationTime` (win32 pair) and a matching `startTicksLinux`/`creationTicks` (Linux pair), same
+dual-platform-consistency convention scenario 7 already used, so they stay platform-independent rather than
+needing their own forced override. **Proven, not just fixed:** temporarily forcing `ControllableHost`'s own
+default platform to `"linux"` (bypassing `process.platform` entirely) reproduced the CR's exact finding
+with the overrides removed (8/9/9c passed by accident, 9b and the new 9e genuinely failed) and confirmed
+the fix (all pass, overrides restored) — both runs reverted, diffed clean against the pre-mutation file
+afterward.
+
+**Item 3 (MINOR) — guard 2's win32 branch is CROSS-source, not same-source, and this record (and the
+constant's own inline comment) had claimed otherwise.** The occupant's `check.creationTime` comes from
+`checkRootSurvival`'s `/Date(ms)/`-truncated query; the owner's `owner.creationTime` comes from THIS card's
+own `.Ticks`-based, `Math.round`-rounded one — two different conversions of the same real OS attribute, not
+two reads of the identical query 87691385's own abort check compares. The CR measured Δ ∈ {0, -1}ms,
+roughly 50/50, never more than 1ms — independently re-measured here across 15 fresh real conpty children:
+{0, +1}ms (opposite subtraction order, same magnitude), 9 zero / 6 one, max 1ms. `ROOT_CREATION_MATCH_TOLERANCE_MS`
+is sound at exactly 1ms for this pairing, but with ZERO headroom: a false "mismatch" makes `recycleWorker`
+PROCEED to spawn a successor beside a still-live predecessor (`sessions/service.ts`'s own identity gate), the
+wrong direction to be wrong in. **Fixed:** corrected this record (above) and the constant's own doc comment
+to state the cross-source pairing and the "never tighten below 1ms" rule explicitly, and tightened
+`pty-root-reap-win32-ticks-real-spawn.mjs`'s own cross-check from a loose `≤2000ms` to `≤ ROOT_CREATION_MATCH_TOLERANCE_MS`
+— that real-spawn test reads exactly this pair (`enumerateWin32SweepRows` vs `checkRootSurvival`, same two
+query shapes), so it now actually pins the premise guard 2 depends on, every gate run, rather than merely
+ruling out "not a timezone bug" with 2000ms of unrelated slack.
+
+**Item 4 (MINOR) — two gaps closed together: silent capture failures, and one shared reason for two
+different unknowns.** `armWin32RootCreationTime` previously left `live.creationTime` null on EITHER a
+rejected promise OR a row that failed `resolveVerifiedRootCreationTime`'s own verification (wrong ppid, or
+too late), with no log line distinguishing a genuine failure from an unverified-but-received row. Fixed:
+both paths now log once, under a new fixed, greppable `[pty-reap-capture]` tag, naming the pid and — for
+the unverified case — which specific check failed (no row / ppid mismatch / too late), or the exception
+message for a genuine rejection. Separately, guard 2's own null-refusal collapsed TWO independently-unknown
+sides onto the SAME `"creation-time-missing"` reason — the OWNER's capture never resolving (or failing
+verification) and the OCCUPANT's probe never reporting one are different failure classes, the first new to
+this round and specific to the win32-tight-tolerance branch. Fixed: the owner-side null now reports a
+distinct `"owner-creation-time-unavailable"` reason; the occupant-side null (reached here only as a
+defensive, type-narrowing fallback — on win32 it is already caught earlier by round 3's own M3 null-check,
+unconditional on `owner`) keeps `"creation-time-missing"`. Every consumer of this reason string was grepped
+first (`sessions/service.ts`, the event writer, no UI consumer exists): none branches on the raw STRING —
+`recycleWorker`'s own gate reads the `identity` field (`"unreadable"` vs `"mismatch"` vs `"confirmed"`),
+which both reasons already carry as `"unreadable"`, so the new string is handled identically to
+`"creation-time-missing"` with no further code change needed. New test: scenario 9b's own reason assertion
+now expects the distinct string; a removed `9b2` scenario (deleted after writing it) would have duplicated
+round 3's own scenario 10, which already covers the occupant-side case on win32 unconditionally.
+
+**Item 5 (follow-up, closed) — before this round, an `owner`-undefined call skipped every creation-time
+guard entirely and fell through to killing on command-line identity alone**, since guard 1 and every guard-2
+branch are gated on `owner`. Genuinely unreachable in PRODUCTION (every real call site resolves an owner by
+construction — `reapExitedDescendants`/`stop()`/`escalateGracefulStop`/`stopCodex`/`recycleWorker` all pass
+or capture one), but several of THIS file's own pre-existing hermetic scenarios (2 and 4) exploited exactly
+that gap as a test shortcut, to isolate kill-confirmation mechanics from the identity/creation-time guards
+without constructing an owner object. Fixed: a new explicit `if (!owner)` refusal (reason
+`"owner-creation-time-unavailable"`, identity `"unreadable"`) sits right after guard 1; scenarios 2 and 4
+were given plausible, dual-platform-consistent owners (see item 2) so they keep testing what they always
+tested, and a new scenario 9f was added specifically to prove the new refusal itself (no owner, no live
+entry, at all) — proven load-bearing via a dist mutation (disabling the `if (!owner)` branch) that turned
+only 9f red.
+
 ## Do not
 
 - Do not read the win32 sweep's `.Ticks` as already UTC — `CreationDate` is a LOCAL-kind `[DateTime]`;
@@ -525,3 +700,54 @@ pattern here.
 - Do not build a command-line-marker, whole-process-list sweep for `recycleWorker`'s "no predecessor pid
   at all" case — that is a wider, unbounded version of the exact bare-substring hazard `commandLineMatchesSession`
   was fixed to stop being (round 3, M1); keep today's "no pid -> proceed" behavior (round 5, item 4).
+- (Round 7) Do not route mac/other-POSIX through guard 2's win32 tight-tolerance branch (`owner.creationTime`
+  vs `ROOT_CREATION_MATCH_TOLERANCE_MS`) — `87691385`'s capture is win32-only by construction, so mac's
+  `creationTime` is permanently `null`; doing so would make guard 2 permanently refuse on mac, not merely
+  stricter. Mac/other-POSIX keeps `check.creationTime` vs `owner.startedAt + CREATION_TIME_SLACK_MS`,
+  unchanged, gated on `resolveRootReapPlatform() !== "win32"` (and `!== "linux"`, which has its own branch).
+- (Round 7) Do not read a still-`null` `owner.creationTime` at guard-2 entry as "permanently unknown" on
+  win32 without first awaiting `owner.creationTimeReady`, bounded by `ROOT_CREATION_CAPTURE_AWAIT_MS` — a
+  kill issued very soon after spawn can reach guard 2 before the async capture has resolved; still null
+  AFTER the bound is the only point at which "unknown" is a final answer.
+- (Round 7) Do not decide guard 2's win32 branch on the value of `owner.creationTime` read BEFORE the
+  bounded await — re-read it AFTER awaiting `creationTimeReady`, since the whole point of the await is to
+  let a still-in-flight capture land first.
+- (Round 7) Do not patch a test's `live.creationTime` directly after `spawn()` as a side channel to force a
+  known value — it races `armWin32RootCreationTime`'s own pending `.then()` (which can fire anywhere in the
+  microtasks between the patch and the actual `verifyRootDeadOrForceKill` call) and gets silently clobbered
+  back to whatever the real capture resolves to. Override `captureRootCreationRow` on the test's own PtyHost
+  subclass instead, so the value is produced by (and stays consistent with) the real arm flow.
+- (Round 8) Do not await a bounded wait for an in-flight creation-time capture AFTER `probeRootSurvival` —
+  await it BEFORE, immediately once `owner` is computed. Probing first and awaiting afterward leaves a real
+  TOCTOU window between the probe and `killRoot` (measured at 1509ms) in which the OS can reuse/replace
+  `rootPid` and the kill still fires against the stale probe result.
+- (Round 8) Do not `.unref()` the bounded-wait timer — an unref'd timer can let the process exit before it
+  ever fires if nothing else is scheduled, permanently stranding the `Promise.race` (and everything
+  awaiting it) unresolved. Only `clearTimeout` it, after the race settles.
+- (Round 8) Do not write a `pty-root-reap-identity.mjs` scenario for guard 2's win32 branch without setting
+  `host.platformOverride = "win32"` explicitly, UNLESS the scenario is deliberately dual-platform-consistent
+  (matching `creationTime`/`startTicksLinux` pairs, like scenario 7/2/4) — an unforced scenario silently
+  takes the Linux-ticks branch on a Linux CI runner, which can pass for the wrong reason or fail outright
+  depending on what the scenario's own tick values happen to produce there.
+- (Round 8) Do not call guard 2's win32 comparison "same-source" — it is CROSS-source (the occupant via
+  `checkRootSurvival`'s `/Date(ms)/` truncation, the owner via this card's own `.Ticks` rounding), measured
+  at Δ∈{0,±1}ms with ZERO headroom. Never tighten `ROOT_CREATION_MATCH_TOLERANCE_MS` below 1ms for this
+  reason alone — a false "mismatch" makes `recycleWorker` PROCEED beside a live predecessor.
+- (Round 8) Do not leave `armWin32RootCreationTime`'s capture failures silent — log once, under the fixed
+  `[pty-reap-capture]` tag, naming the pid and the specific reason (no row / ppid mismatch / too late /
+  the exception message), on both the verification-failure path and the rejection path.
+- (Round 8) Do not collapse the OWNER-side creation-time-unknown case onto the OCCUPANT-side
+  `"creation-time-missing"` reason in guard 2's win32 branch — they are different failure classes; the
+  owner side gets its own `"owner-creation-time-unavailable"` reason. Before changing either, grep every
+  consumer of the reason string (not just `identity`) to confirm nothing branches on the raw text.
+- (Round 8) Do not let `verifyRootDeadOrForceKill` reach a kill when `owner` is unresolvable (no
+  `expectedOwner`, no live/codexLive entry) — every creation-time guard is gated on `owner`, so without one
+  it falls straight through to killing on command-line identity alone. Refuse (`"owner-creation-time-unavailable"`,
+  `identity: "unreadable"`) right after guard 1 instead.
+- (Round 8, item 1c) Do not gate the early-wait "skip the race" optimization on raw `process.platform` —
+  gate it on `this.resolveRootReapPlatform()`, the SAME test-overridable seam guard 2's own branch reads.
+  A raw-`process.platform` gate disagrees with a test's `platformOverride` on a non-win32 CI host, silently
+  skipping the wait while guard 2's own branch still runs the win32 path it was supposed to feed — this
+  exact mistake shipped once and was caught only by re-running the CI-host-simulation proof, not by
+  re-reading the diff. `armWin32RootCreationTime`'s OWN arming gate is the one correct exception — it is
+  never test-overridden, so raw `process.platform` is right there (round 7's own text).

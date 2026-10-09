@@ -39,7 +39,10 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 requireHermeticEnv();
 
-const { enumerateWin32SweepRows, checkRootSurvival, enumerateWin32SweepRowForPid, resolveVerifiedRootCreationTime } = await import("../dist/pty/host.js");
+const {
+  enumerateWin32SweepRows, checkRootSurvival, enumerateWin32SweepRowForPid, resolveVerifiedRootCreationTime,
+  ROOT_CREATION_MATCH_TOLERANCE_MS,
+} = await import("../dist/pty/host.js");
 
 try {
   // The SAME real pid (this test's own process) probed by BOTH independent, real PowerShell enumerations
@@ -62,13 +65,19 @@ try {
     const deltaMs = Math.abs(selfRow.creationTime - survival.creationTime);
     // Both sides read a FIXED, unchanging OS attribute (when this process was created) via two SEPARATE
     // PowerShell queries moments apart — the underlying value never changes between the two reads, so
-    // genuine agreement should be near-exact. 2000ms of slack covers the two queries' differing time
-    // precision (.NET Ticks, 100ns, vs the ConvertTo-Json `/Date(<ms>)/` form's ms rounding) and ordinary
-    // scheduling jitter between the two spawns — it is NOT slack for a timezone-offset bug, which
-    // (pre-fix, measured on a CEST host) was a full UTC-offset's worth of error (hours, not
-    // milliseconds) and would blow through this bound by orders of magnitude.
-    check(`[THE FIX] the sweep's own creationTime (${selfRow.creationTime}) agrees with checkRootSurvival's (${survival.creationTime}) within 2000ms — delta=${deltaMs}ms`,
-      deltaMs <= 2000);
+    // genuine agreement should be near-exact. It is NOT slack for a timezone-offset bug, which (pre-fix,
+    // measured on a CEST host) was a full UTC-offset's worth of error (hours, not milliseconds) and would
+    // blow through this bound by orders of magnitude.
+    //
+    // Card 64d7a914 (CR 33ae2f8a round 2, minor 3): `verifyRootDeadOrForceKill`'s win32 guard-2 branch now
+    // compares EXACTLY this pair (its own `owner.creationTime` capture vs `checkRootSurvival`'s occupant
+    // read) at `ROOT_CREATION_MATCH_TOLERANCE_MS` — tightened here from a loose 2000ms to that SAME bound,
+    // so this real-spawn test actually pins the premise guard 2 depends on, rather than merely confirming
+    // "not a timezone bug" with 2000ms of unrelated headroom. Independently re-measured across 15 fresh
+    // real conpty children before tightening this: deltas in {0, 1}ms only, roughly 60/40, max 1ms — never
+    // more (matching the CR's own measured Δ ∈ {0, -1}ms, same magnitude, opposite subtraction order).
+    check(`[THE FIX] the sweep's own creationTime (${selfRow.creationTime}) agrees with checkRootSurvival's (${survival.creationTime}) within ROOT_CREATION_MATCH_TOLERANCE_MS (${ROOT_CREATION_MATCH_TOLERANCE_MS}ms) — delta=${deltaMs}ms`,
+      deltaMs <= ROOT_CREATION_MATCH_TOLERANCE_MS);
   }
 
   // =====================================================================================================

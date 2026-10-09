@@ -27,13 +27,17 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-root-reap-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 64d7a914 — shrunk from the 3000ms production default so the "still null after the bound" scenario
+// below doesn't cost 3 real seconds on every run; read at module load, so this MUST be set before the
+// dist import below.
+process.env.LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS = "150";
 
 const {
   PtyHost, commandLineMatchesSession,
   parsePsLstartTimestamp, parsePsPidLstartCommandLine, parseProcStatStarttimeTicks, parseProcUptimeSeconds,
   linuxStartTicksConsistent, computeOrphanSweepPlan, parseWin32SweepTicks, parseOrphanSweepLine,
   CREATION_TIME_SLACK_MS, ROOT_CREATION_MATCH_TOLERANCE_MS, ROOT_CREATION_CAPTURE_SLACK_MS,
-  resolveVerifiedRootCreationTime, isHelperPidCollision,
+  ROOT_CREATION_CAPTURE_AWAIT_MS, resolveVerifiedRootCreationTime, isHelperPidCollision,
 } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
@@ -69,11 +73,17 @@ class ControllableHost extends PtyHost {
   // exercise that branch's real code) on THIS host too, whatever `process.platform` really is — the
   // Windows gate has no Linux runner, so this is the only way to prove that branch at all here.
   platformOverride = null;
+  // Card 64d7a914 (CR 33ae2f8a round 2, MAJOR) — timestamp hooks, optional, so a scenario can assert the
+  // probe-to-kill TOCTOU ordering directly: the bounded wait for an in-flight `creationTimeReady` capture
+  // must happen BEFORE `probeRootSurvival`, never between the probe and `killRoot`.
+  onProbeRootSurvivalCalled = null;
+  onKillRootCalled = null;
   createPty() { throw new Error("not used by this file"); }
   reapExitedDescendants() {} // unused here; this file calls verifyRootDeadOrForceKill directly
   sweepOrphanedDescendants(rootPid, rootCreationTime = null) { this.sweptPids.push(rootPid); this.sweptCreationTimes.push(rootCreationTime); }
   resolveRootReapPlatform() { return this.platformOverride ?? super.resolveRootReapPlatform(); }
   async probeRootSurvival(_rootPid, _sessionId) {
+    this.onProbeRootSurvivalCalled?.();
     if (this.nextChecks.length === 0) {
       this.unexpectedProbeCalls++;
       return { foundAlive: false, identityConfirmed: false, enumerationFailed: true, creationTime: null };
@@ -81,7 +91,7 @@ class ControllableHost extends PtyHost {
     return this.nextChecks.shift();
   }
   async captureRootCreationRow(_pid) { return null; }
-  killRoot(pid) { this.killedPids.push(pid); }
+  killRoot(pid) { this.onKillRootCalled?.(); this.killedPids.push(pid); }
 }
 
 const survivedEvents = [];
@@ -118,10 +128,18 @@ try {
     // which would NOT equal this sentinel.
     const FIRST_PROBE_CREATION_TIME = 918_273_645;
     host.nextChecks = [
-      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: FIRST_PROBE_CREATION_TIME }, // first probe: alive, ours
+      // Linux ticks ALSO populated, matching, so this scenario passes on whichever real
+      // `resolveRootReapPlatform()` the gate happens to run it on — this scenario isn't testing either
+      // platform-specific creation-time guard, just kill confirmation (same convention as scenario 7).
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: FIRST_PROBE_CREATION_TIME, creationTicks: 1000 }, // first probe: alive, ours
       { foundAlive: false, identityConfirmed: false, enumerationFailed: false }, // re-check after kill: gone
     ];
-    const result = await host.verifyRootDeadOrForceKill("sess-survivor", 22222, "exit-reap");
+    // Card 64d7a914 (CR 33ae2f8a round 2, follow-up) — an owner is now REQUIRED before any kill, even for
+    // a scenario (like this one) that isn't testing the creation-time guards at all; matches the first
+    // probe's own creationTime/creationTicks exactly so this scenario's own concern (kill confirmation)
+    // stays isolated from guard 2's, on EITHER platform branch.
+    const owner = { pid: 22222, startedAt: Date.now() - 1000, startTicksLinux: 1000, creationTime: FIRST_PROBE_CREATION_TIME, creationTimeReady: Promise.resolve() };
+    const result = await host.verifyRootDeadOrForceKill("sess-survivor", 22222, "exit-reap", owner);
     check("(2) confirmed survivor: killRoot WAS called, with the exact pid", host.killedPids.length === 1 && host.killedPids[0] === 22222);
     check("(2) confirmed survivor: result reports forceKilled + dead after re-verify", result.forceKilled === true && result.dead === true);
     check("(2) confirmed survivor: a process_survived_kill event fired with reason 'force-killed'",
@@ -163,11 +181,17 @@ try {
   // ===================================================================================================
   {
     const host = new ControllableHost(events);
+    // Card 64d7a914 — the first probe's own creationTime must be non-null (win32's M3 null-check) and
+    // agree with the owner's below (guard 2) — this scenario is testing kill-confirmation, not either
+    // creation-time guard, so both are given matching, trivially-agreeing values, on EITHER platform
+    // branch (startTicksLinux/creationTicks also matched, same convention as scenario 7).
+    const CREATION_TIME_4 = Date.now() - 5_000;
     host.nextChecks = [
-      { foundAlive: true, identityConfirmed: true, enumerationFailed: false },
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: CREATION_TIME_4, creationTicks: 1000 },
       { foundAlive: true, identityConfirmed: true, enumerationFailed: false }, // STILL alive after kill
     ];
-    const result = await host.verifyRootDeadOrForceKill("sess-unkillable", 44444, "hard-stop");
+    const owner = { pid: 44444, startedAt: Date.now() - 1000, startTicksLinux: 1000, creationTime: CREATION_TIME_4, creationTimeReady: Promise.resolve() };
+    const result = await host.verifyRootDeadOrForceKill("sess-unkillable", 44444, "hard-stop", owner);
     check("(4) kill issued but didn't take: killRoot WAS still called (we tried)", host.killedPids.length === 1);
     check("(4) kill issued but didn't take: result reports forceKilled=true but dead=false — never silently 'fixed'",
       result.forceKilled === true && result.dead === false);
@@ -230,12 +254,17 @@ try {
     // — before this round, a real Linux runner would see owner.startTicksLinux===undefined and
     // check.creationTicks===undefined, both `== null`, and the Linux branch would wrongly refuse
     // ("unreadable") instead of proceeding to kill.
-    const owner = { pid: PID, startedAt: Date.now() - 10_000, alive: true, startTicksLinux: 500_000 };
+    // Card 64d7a914 — `creationTime`/`creationTimeReady` ALSO populated, consistently, so this scenario
+    // passes identically on win32 too (now the VERIFIED owner.creationTime branch, not owner.startedAt).
+    const owner = {
+      pid: PID, startedAt: Date.now() - 10_000, alive: true, startTicksLinux: 500_000,
+      creationTime: Date.now() - 10_000, creationTimeReady: Promise.resolve(),
+    };
     host.live.set(SID, owner); // the SAME object is both the current owner and the expectedOwner
     host.nextChecks = [
       // creationTime deliberately NON-null (round 3, M3: a null here on win32 now refuses as
-      // "creation-time-missing" — set it to owner.startedAt so this negative control still proceeds).
-      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: owner.startedAt, creationTicks: 500_000 },
+      // "creation-time-missing" — set it to owner.creationTime so this negative control still proceeds).
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: owner.creationTime, creationTicks: 500_000 },
       { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null },
     ];
     const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
@@ -244,29 +273,33 @@ try {
     check("(7, negative control) result's caller-facing identity is 'confirmed'", result.identity === "confirmed");
     check("(7) sweepOrphanedDescendants was called exactly once, with the confirmed-dead root's pid", host.sweptPids.length === 1 && host.sweptPids[0] === PID);
     // Round 6 (item 2) — same wiring pin as scenario 2: the sweep's second argument must be the FIRST
-    // probe's own creationTime (owner.startedAt here), not dropped/undefined.
-    check("(7) sweepOrphanedDescendants received the FIRST probe's own creationTime as its second argument", host.sweptCreationTimes[0] === owner.startedAt);
+    // probe's own creationTime (owner.creationTime here), not dropped/undefined.
+    check("(7) sweepOrphanedDescendants received the FIRST probe's own creationTime as its second argument", host.sweptCreationTimes[0] === owner.creationTime);
   }
 
   // ===================================================================================================
-  // Scenario 8 (CR round 2, finding 3's second signal) — the creation-time guard: no live-entry conflict
-  // (findLiveEntryByPid finds nothing for this pid at all — e.g. the respawn hasn't even reached the live
-  // map yet, or it's an unrelated process), but the OS reports this pid was created well AFTER our own
-  // recorded spawn time. Must refuse, same as the live-entry guard.
+  // Scenario 8 (CR round 2, finding 3's second signal; card 64d7a914 — now the VERIFIED
+  // `owner.creationTime`, never `owner.startedAt`) — the creation-time guard: no live-entry conflict
+  // (findLiveEntryByPid finds nothing for this pid at all), but the occupant's own creationTime disagrees
+  // with our verified spawn-time capture, past ROOT_CREATION_MATCH_TOLERANCE_MS. Must refuse. This test
+  // runs on this host's REAL platform (win32, per this file's own header) — see scenario 9d below for the
+  // mac/other-POSIX branch this file previously conflated with win32 here.
   // ===================================================================================================
   {
     const host = new ControllableHost(events);
+    host.platformOverride = "win32"; // CR 33ae2f8a round 2, MAJOR: force win32 regardless of the real CI host — this scenario's own tick values have no deliberate Linux-branch parity (unlike scenario 7), so an unforced ubuntu run would silently take the Linux branch instead.
     const SID = "sess-creation-time-mismatch";
     const PID = 66668;
-    // Round 5 (item 2): `startTicksLinux`/`creationTicks` below mirror the ms-based mismatch (1000 vs
-    // 50000 is `linuxStartTicksConsistent`'s own documented mismatch case) so this scenario is ALSO a
-    // mismatch on a real Linux runner, not just win32/POSIX-ms — see scenario 7's own note.
-    const owner = { pid: PID, startedAt: Date.now() - 100_000, startTicksLinux: 1000 }; // we spawned this pid 100s ago
+    const VERIFIED_CREATION_TIME = Date.now() - 100_000;
     // no host.live.set(...) at all — findLiveEntryByPid finds nothing, so only the creation-time guard
     // can catch this.
-    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: Date.now(), creationTicks: 50_000 }]; // "created" just now — long after our spawn
+    const owner = {
+      pid: PID, startedAt: VERIFIED_CREATION_TIME + 1, startTicksLinux: 1000,
+      creationTime: VERIFIED_CREATION_TIME, creationTimeReady: Promise.resolve(),
+    };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: VERIFIED_CREATION_TIME + 1000, creationTicks: 50_000 }]; // disagrees well past tolerance
     const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
-    check("(8) a pid created long after our own spawn is NOT killed", host.killedPids.length === 0);
+    check("(8) a pid whose creationTime disagrees with our verified capture is NOT killed", host.killedPids.length === 0);
     check("(8) event reason is 'creation-time-mismatch'", survivedEvents.at(-1).reason === "creation-time-mismatch");
     check("(8) result's caller-facing identity is 'mismatch', never 'confirmed' (round 3, M5)", result.identity === "mismatch");
     check("(8) no unexpected extra probe call", host.unexpectedProbeCalls === 0);
@@ -274,28 +307,182 @@ try {
   }
 
   // ===================================================================================================
-  // Scenario 9 (negative control for 8) — creationTime WITHIN slack of our own recorded spawn time, no
-  // live-entry conflict: the kill must proceed normally.
+  // Scenario 9 (negative control for 8) — the occupant's creationTime AGREES (within
+  // ROOT_CREATION_MATCH_TOLERANCE_MS) with our verified spawn-time capture, no live-entry conflict: the
+  // kill must proceed normally.
   // ===================================================================================================
   {
     const host = new ControllableHost(events);
+    host.platformOverride = "win32"; // CR 33ae2f8a round 2, MAJOR — see scenario 8's own note
     const SID = "sess-creation-time-ok";
     const PID = 66669;
-    // Round 5 (item 2): `startTicksLinux`/`creationTicks` below mirror the ms-based "within slack" case
-    // (identical ticks — `linuxStartTicksConsistent`'s own documented consistent case) — see scenario
-    // 7's own note on why both signals are populated.
-    const spawnedAt = Date.now() - 100_000;
-    const owner = { pid: PID, startedAt: spawnedAt, startTicksLinux: 1000 };
+    const VERIFIED_CREATION_TIME = Date.now() - 100_000;
+    const owner = {
+      pid: PID, startedAt: VERIFIED_CREATION_TIME + 1, startTicksLinux: 1000,
+      creationTime: VERIFIED_CREATION_TIME, creationTimeReady: Promise.resolve(),
+    };
     host.nextChecks = [
-      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: spawnedAt + 50, creationTicks: 1000 }, // well within slack
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: VERIFIED_CREATION_TIME, creationTicks: 1000 }, // exact agreement
       { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null },
     ];
     const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
-    check("(9, negative control) creationTime within slack: killRoot WAS called", host.killedPids.length === 1 && host.killedPids[0] === PID);
-    check("(9, negative control) creationTime within slack: result reports forceKilled + dead", result.forceKilled === true && result.dead === true);
+    check("(9, negative control) creationTime agrees with verified capture: killRoot WAS called", host.killedPids.length === 1 && host.killedPids[0] === PID);
+    check("(9, negative control) creationTime agrees: result reports forceKilled + dead", result.forceKilled === true && result.dead === true);
     check("(9) sweepOrphanedDescendants was called exactly once, with the confirmed-dead root's pid", host.sweptPids.length === 1 && host.sweptPids[0] === PID);
-    // Round 6 (item 2) — same wiring pin: the FIRST probe's own creationTime (spawnedAt + 50 here).
-    check("(9) sweepOrphanedDescendants received the FIRST probe's own creationTime as its second argument", host.sweptCreationTimes[0] === spawnedAt + 50);
+    check("(9) sweepOrphanedDescendants received the FIRST probe's own creationTime as its second argument", host.sweptCreationTimes[0] === VERIFIED_CREATION_TIME);
+  }
+
+  // ===================================================================================================
+  // Scenario 9b (card 64d7a914) — `owner.creationTime` is still null when guard 2 runs (the capture never
+  // armed, or hasn't resolved) and its `creationTimeReady` promise never resolves within
+  // ROOT_CREATION_CAPTURE_AWAIT_MS — must refuse as "unreadable" (unknown ⇒ not ours), never guess.
+  // ===================================================================================================
+  {
+    const host = new ControllableHost(events);
+    host.platformOverride = "win32"; // CR 33ae2f8a round 2, MAJOR — see scenario 8's own note
+    const SID = "sess-creation-time-pending-timeout";
+    const PID = 66674;
+    const owner = {
+      pid: PID, startedAt: Date.now() - 100_000, startTicksLinux: 1000,
+      creationTime: null, creationTimeReady: new Promise(() => {}), // never resolves
+    };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: Date.now(), creationTicks: 50_000 }];
+    const t0 = Date.now();
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    const elapsed = Date.now() - t0;
+    check("(9b) still null after the bound: NOT killed", host.killedPids.length === 0);
+    check("(9b) still null after the bound: identity 'unreadable'", result.identity === "unreadable" && result.dead === false);
+    // CR 33ae2f8a round 2, minor 4: the OWNER-side null now gets its own distinct reason — never the
+    // occupant-side 'creation-time-missing' this scenario asserted before that split.
+    check("(9b) event reason is 'owner-creation-time-unavailable'", survivedEvents.at(-1).reason === "owner-creation-time-unavailable");
+    check(`(9b) actually waited roughly the bound (${ROOT_CREATION_CAPTURE_AWAIT_MS}ms test override), not an instant refusal — elapsed=${elapsed}ms`,
+      elapsed >= ROOT_CREATION_CAPTURE_AWAIT_MS - 20);
+    check("(9b) sweepOrphanedDescendants was NOT called", host.sweptPids.length === 0);
+  }
+  // No separate "occupant-side null" scenario here — on win32 that case is caught EARLIER, by the
+  // pre-existing M3 null-check above (`check.creationTime == null` alone, independent of `owner`), which
+  // scenario 10 below already pins with reason 'creation-time-missing'; my new branch's own
+  // `check.creationTime == null` disjunct is unreachable in practice on win32 (defensive/type-narrowing
+  // only) and was never a separate code path to cover here.
+
+  // ===================================================================================================
+  // Scenario 9c (card 64d7a914) — `owner.creationTime` is null when guard 2 runs, but its
+  // `creationTimeReady` promise resolves WELL WITHIN the bound — guard 2 must decide on the
+  // freshly-resolved value, never the stale null it read at entry.
+  // ===================================================================================================
+  {
+    const host = new ControllableHost(events);
+    host.platformOverride = "win32"; // CR 33ae2f8a round 2, MAJOR — see scenario 8's own note
+    const SID = "sess-creation-time-pending-resolves";
+    const PID = 66675;
+    const RESOLVED_CREATION_TIME = Date.now() - 50_000;
+    const owner = { pid: PID, startedAt: Date.now() - 100_000, startTicksLinux: 1000, creationTime: null };
+    owner.creationTimeReady = new Promise((resolve) => {
+      setTimeout(() => { owner.creationTime = RESOLVED_CREATION_TIME; resolve(); }, 20); // well within the 150ms test bound
+    });
+    host.nextChecks = [
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: RESOLVED_CREATION_TIME, creationTicks: 1000 }, // agrees with the RESOLVED value
+      { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null },
+    ];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9c) decides on the resolved value, not the stale null: killRoot WAS called", host.killedPids.length === 1 && host.killedPids[0] === PID);
+    check("(9c) result reports forceKilled + dead", result.forceKilled === true && result.dead === true);
+  }
+
+  // ===================================================================================================
+  // Scenario 9e (card 64d7a914, CR 33ae2f8a round 2, MAJOR) — the TOCTOU fix itself: the bounded wait for
+  // an in-flight `creationTimeReady` capture must happen BEFORE `probeRootSurvival` is ever called, so
+  // there is NO await between the probe and the eventual kill. Proven by timing, not by reading the
+  // source: `owner.creationTimeReady` resolves only after an OBSERVABLE delay (50ms). If the
+  // implementation still awaited AFTER the probe (the pre-fix ordering the CR measured at 1509ms),
+  // `probeRootSurvival` would fire almost immediately and the probe-to-kill gap would absorb that 50ms
+  // wait instead of the pre-probe gap absorbing it. Asserts BOTH directly: the probe fires only after the
+  // capture has resolved, and the probe-to-kill gap itself is tiny.
+  // ===================================================================================================
+  {
+    const host = new ControllableHost(events);
+    host.platformOverride = "win32";
+    const SID = "sess-capture-before-probe-ordering";
+    const PID = 66680;
+    const RESOLVED_CREATION_TIME = Date.now() - 50_000; // a wall-clock epoch value fed into production comparisons, not a timing measurement
+    const owner = { pid: PID, startedAt: Date.now() - 100_000, creationTime: null };
+    // CR 33ae2f8a round 3: performance.now() for the ordering/gap measurements themselves (project
+    // convention for bounded-timing asserts — monotonic, immune to a wall-clock step mid-test).
+    const captureResolvedAt = { t: null };
+    owner.creationTimeReady = new Promise((resolve) => {
+      setTimeout(() => { owner.creationTime = RESOLVED_CREATION_TIME; captureResolvedAt.t = performance.now(); resolve(); }, 50);
+    });
+    const probeCalledAt = { t: null };
+    const killCalledAt = { t: null };
+    host.onProbeRootSurvivalCalled = () => { probeCalledAt.t ??= performance.now(); };
+    host.onKillRootCalled = () => { killCalledAt.t = performance.now(); };
+    host.nextChecks = [
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: RESOLVED_CREATION_TIME, creationTicks: 1000 },
+      { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null },
+    ];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9e) the probe ran AFTER the capture settled, not before", probeCalledAt.t !== null && captureResolvedAt.t !== null && probeCalledAt.t >= captureResolvedAt.t);
+    check(`(9e) the probe-to-kill gap is tiny (no await between the probe and the kill) — gap=${killCalledAt.t - probeCalledAt.t}ms`,
+      killCalledAt.t - probeCalledAt.t < 20);
+    check("(9e) result reports forceKilled + dead (the kill actually proceeded)", result.forceKilled === true && result.dead === true);
+  }
+
+  // ===================================================================================================
+  // Scenario 9d (card 64d7a914 — the gap this card found: no prior test forced mac/other-POSIX through
+  // guard 2 at all; scenarios 8/9 above always ran on this host's real platform, win32, which now takes
+  // the DIFFERENT verified-creationTime branch). Forces "darwin" via platformOverride, mirroring how
+  // scenarios 11-13 force "linux" below — proves mac is UNCHANGED: still `owner.startedAt +
+  // CREATION_TIME_SLACK_MS`, never the win32 verified-creationTime comparison (owner carries no
+  // creationTime/creationTimeReady at all here — mac never arms them per 87691385).
+  // ===================================================================================================
+  {
+    const host = new ControllableHost(events);
+    host.platformOverride = "darwin";
+    const SID = "sess-mac-creation-time-mismatch";
+    const PID = 66676;
+    const owner = { pid: PID, startedAt: Date.now() - 100_000 };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: Date.now() }]; // "created" just now — long after our spawn
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9d) mac, creationTime long after spawn: NOT killed (unchanged 5s-slack path)", host.killedPids.length === 0);
+    check("(9d) mac mismatch: identity 'mismatch'", result.identity === "mismatch" && result.dead === false);
+    check("(9d) event reason is 'creation-time-mismatch'", survivedEvents.at(-1).reason === "creation-time-mismatch");
+  }
+  {
+    // (9d, negative control) mac, creationTime WITHIN the 5s slack of startedAt — kill proceeds, proving
+    // CREATION_TIME_SLACK_MS still governs mac, unchanged by this card.
+    const host = new ControllableHost(events);
+    host.platformOverride = "darwin";
+    const SID = "sess-mac-creation-time-ok";
+    const PID = 66677;
+    const spawnedAt = Date.now() - 100_000;
+    const owner = { pid: PID, startedAt: spawnedAt };
+    host.nextChecks = [
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: spawnedAt + 50 },
+      { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null },
+    ];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9d, negative control) mac, within slack: killRoot WAS called", host.killedPids.length === 1 && host.killedPids[0] === PID);
+    check("(9d, negative control) mac, within slack: forceKilled + dead", result.forceKilled === true && result.dead === true);
+  }
+
+  // ===================================================================================================
+  // Scenario 9f (card 64d7a914, CR 33ae2f8a round 2, follow-up) — no owner is resolvable AT ALL (no
+  // `expectedOwner`, and no live/codexLive entry for this sessionId) while the occupant is still
+  // identity-confirmed-alive. Before this round, every creation-time guard is gated on `owner`, so this
+  // fell straight through to killing on command-line identity alone. Must now refuse instead.
+  // ===================================================================================================
+  {
+    const host = new ControllableHost(events);
+    const SID = "sess-no-owner-at-all";
+    const PID = 66681;
+    // no host.live.set(...), no expectedOwner argument below — owner resolves to undefined either way.
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: Date.now() }];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop");
+    check("(9f) no owner resolvable at all: NOT killed", host.killedPids.length === 0);
+    check("(9f) no owner resolvable at all: identity 'unreadable'", result.identity === "unreadable" && result.dead === false);
+    check("(9f) event reason is 'owner-creation-time-unavailable'", survivedEvents.at(-1).reason === "owner-creation-time-unavailable");
+    check("(9f) no unexpected extra probe call (refused before any re-check)", host.unexpectedProbeCalls === 0);
+    check("(9f) sweepOrphanedDescendants was NOT called", host.sweptPids.length === 0);
   }
 
   // ===================================================================================================

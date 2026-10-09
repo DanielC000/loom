@@ -1519,18 +1519,35 @@ const ROOT_REAP_KILL_VERIFY_DELAY_MS = Number(process.env.LOOM_ROOT_REAP_KILL_VE
  * Card 2897acc4 (CR round 2, MAJOR/LEAD RULING): a reused pid's OS-reported creation time must postdate
  * our own recorded spawn time by no more than this much slack before `verifyRootDeadOrForceKill` trusts
  * it as "genuinely the process we spawned" — clock-skew/rounding margin, not a measured bound.
+ *
+ * @decision 2897acc4 — win32 no longer reads this for guard 2; it compares `check.creationTime` against
+ * the verified `owner.creationTime` within `ROOT_CREATION_MATCH_TOLERANCE_MS` instead. This constant is
+ * now mac/other-POSIX guard-2 ms-arithmetic and the Linux-ticks default only.
  */
 export const CREATION_TIME_SLACK_MS = Number(process.env.LOOM_ROOT_REAP_CREATION_TIME_SLACK_MS) || 5_000;
 
-/** @decision 87691385 — two reads of the SAME fixed OS attribute via the SAME query/conversion agree
- *  EXACTLY (measured maxΔ=0ms/473 pids); 1ms absorbs only rounding — never widen toward a cross-source
- *  margin. */
+/**
+ * @decision 87691385 — `computeOrphanSweepPlan`'s own use: two reads of the SAME fixed OS attribute via
+ * the SAME query/conversion agree EXACTLY (measured maxΔ=0ms/473 pids); 1ms absorbs only rounding.
+ *
+ * @decision 2897acc4 — ALSO used by `verifyRootDeadOrForceKill`'s win32 guard-2 branch for a DIFFERENT,
+ * CROSS-source pair (measured Δ ∈ {0, -1}ms, max 1ms — sound but ZERO headroom). ⛔ Never tighten below
+ * 1ms (a false mismatch there makes `recycleWorker` PROCEED beside a live predecessor); never widen either.
+ */
 export const ROOT_CREATION_MATCH_TOLERANCE_MS = Number(process.env.LOOM_ROOT_CREATION_MATCH_TOLERANCE_MS) || 1;
 
 /** @decision 87691385 (CR f89d9552 round 3) — `CreateProcess` returns before `startedAt` is ever stamped,
  *  so the true root's own creation time is ALWAYS `<= startedAt`; this covers rounding only (~2ms), never
  *  a real margin — round 2's 50ms default was itself too wide. */
 export const ROOT_CREATION_CAPTURE_SLACK_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_SLACK_MS) || 2;
+
+/**
+ * @decision 2897acc4 — bound `verifyRootDeadOrForceKill`'s win32 guard-2 branch waits for an in-flight
+ * `creationTimeReady` capture before deciding, rather than reading a pre-resolution `null` as "unknown
+ * forever". Measured (see record): idle max=677ms, under 3-CPU-spinner load max=1144ms; 3000ms is >2.6x
+ * the worst observed sample. Still null after this ⇒ refuse (fail-safe), never a guessed match.
+ */
+export const ROOT_CREATION_CAPTURE_AWAIT_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS) || 3_000;
 
 /**
  * Settle window for `interruptForRedirect`: after writing the single Esc that cancels a busy worker's
@@ -2700,6 +2717,9 @@ interface Live {
   // @decision 87691385 — the pid's own OS-reported creation time (epoch-ms, win32-only), captured async
   // right after spawn; never `startedAt` — unknown (`null`) must fail an abort decision CLOSED, not open.
   creationTime: number | null;
+  // @decision 2897acc4 — resolves once `creationTime` is settled; never rejects. A pre-resolved stub at
+  // construction, replaced with the real in-flight capture by `armWin32RootCreationTime` (win32 only).
+  creationTimeReady: Promise<void>;
   logStream: fs.WriteStream;
   // Flips true the first time logStream emits 'error' (see attachLogErrorGuard) — degrades THIS
   // session's log-writing to a no-op for the rest of its life. A WriteStream auto-destroys on error,
@@ -3303,6 +3323,8 @@ export interface CodexLive {
   startTicksLinux: number | null;
   // @decision 87691385 — same field + same contract as `Live.creationTime` — see that field's doc.
   creationTime: number | null;
+  // @decision 2897acc4 — same field + same contract as `Live.creationTimeReady` — see that field's doc.
+  creationTimeReady: Promise<void>;
   logStream: fs.WriteStream;
   logBroken: boolean;
   busy: boolean;
@@ -3789,7 +3811,8 @@ export interface PtyHostEvents {
     pid: number; trigger: RootReapTrigger; identityConfirmed: boolean; forceKilled: boolean; dead: boolean;
     identity: "confirmed" | "mismatch" | "unreadable";
     reason: "identity-unconfirmed" | "force-killed" | "force-kill-unconfirmed" | "check-failed"
-      | "pid-now-live-session" | "creation-time-mismatch" | "creation-time-missing";
+      | "pid-now-live-session" | "creation-time-mismatch" | "creation-time-missing"
+      | "owner-creation-time-unavailable";
   }): void;
   /** Card 5b97da80 — ensureTrusted degraded to writing the ~/.claude.json trust flags WITHOUT the
    *  cross-process lock (see EnsureTrustedResult's own doc). PtyHost has no DB, same layering boundary
@@ -5694,6 +5717,7 @@ export class PtyHost {
       startedAt: Date.now(),
       startTicksLinux: null, // armed async, right after this.live.set below
       creationTime: null, // armed async (win32 only), right after this.live.set below
+      creationTimeReady: Promise.resolve(), // replaced with the real in-flight promise below (win32 only)
       logStream: openSessionLogStream(opts.sessionId, spawnLogReason),
       logBroken: false,
       busy: false,
@@ -6029,6 +6053,7 @@ export class PtyHost {
       startedAt: Date.now(),
       startTicksLinux: null, // a shell is never a verifyRootDeadOrForceKill target — never armed
       creationTime: null, // a shell is never a verifyRootDeadOrForceKill target — never armed
+      creationTimeReady: Promise.resolve(), // never armed — same reason as creationTime above
       logStream: openSessionLogStream(opts.id, "shell spawn"),
       logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
@@ -6396,6 +6421,7 @@ export class PtyHost {
       alive: true, killed: false, startedAt: Date.now(),
       startTicksLinux: null, // armed async, right after this.liveCodex.set below
       creationTime: null, // armed async (win32 only), right after this.liveCodex.set below
+      creationTimeReady: Promise.resolve(), // replaced with the real in-flight promise below (win32 only)
       logStream: openSessionLogStream(opts.sessionId, isCodexResumeSpawn ? "codex resume" : "codex fresh spawn"),
       logBroken: false,
       busy: false,
@@ -7288,6 +7314,7 @@ export class PtyHost {
       startedAt: Date.now(),
       startTicksLinux: null, // a canned entry is never a verifyRootDeadOrForceKill target — never armed
       creationTime: null, // a canned entry is never a verifyRootDeadOrForceKill target — never armed
+      creationTimeReady: Promise.resolve(), // never armed — same reason as creationTime above
       logStream: openSessionLogStream(opts.id, "canned test seed"),
       logBroken: false,
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
@@ -7470,9 +7497,29 @@ export class PtyHost {
    *  the real `spawn()` path. */
   private armWin32RootCreationTime(live: Live | CodexLive): void {
     if (process.platform !== "win32") return;
-    this.captureRootCreationRow(live.pid).then((row) => {
-      live.creationTime = resolveVerifiedRootCreationTime(row, process.pid, live.startedAt);
-    }).catch(() => { live.creationTime = null; });
+    // @decision 2897acc4 — replaces the construction-time `Promise.resolve()` stub with the real
+    // in-flight chain, so `verifyRootDeadOrForceKill`'s win32 guard-2 branch can await an in-flight
+    // capture (bounded) rather than reading a pre-resolution `null` as "unknown forever".
+    //
+    // CR 33ae2f8a (round 2, minor 4): every path that leaves `live.creationTime` null is logged, once,
+    // under a single fixed, greppable tag — a silent null here is exactly what later reads as
+    // "owner-creation-time-unavailable" at guard 2, with no way to tell a genuine capture failure from a
+    // row the OS never produced.
+    live.creationTimeReady = this.captureRootCreationRow(live.pid).then((row) => {
+      const verified = resolveVerifiedRootCreationTime(row, process.pid, live.startedAt);
+      live.creationTime = verified;
+      if (verified == null) {
+        const reason = row == null ? "no row found"
+          : row.ppid !== process.pid ? `ppid mismatch (row ppid=${row.ppid}, expected ${process.pid})`
+          : "creation time later than startedAt+slack";
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap-capture] pid=${live.pid}: capture unverified — creationTime stays null (${reason})`);
+      }
+    }).catch((err) => {
+      live.creationTime = null;
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap-capture] pid=${live.pid}: capture FAILED — creationTime stays null (${(err as Error)?.message ?? err})`);
+    });
   }
 
   /** Injectable seam used by {@link verifyRootDeadOrForceKill} for the actual OS kill — overridden
@@ -7547,6 +7594,21 @@ export class PtyHost {
       return { pid: rootPid, dead: false, identityConfirmed: null, forceKilled: false, checkFailed: true, identity: "unreadable" };
     }
     const owner = expectedOwner ?? this.findAnyLive(sessionId);
+    // @decision 2897acc4 — await an in-flight win32 capture BEFORE probing (closes a TOCTOU window
+    // measured at 1509ms, 0.82ms post-fix); skipped outright off win32 or once settled. Gated on
+    // `resolveRootReapPlatform()`, never raw `process.platform`, so this and guard 2 never disagree.
+    if (owner && this.resolveRootReapPlatform() === "win32" && owner.creationTime == null) {
+      // Nitpick 5 — the timer is NEVER unref'd: an unref'd timer can let the process exit before it ever
+      // fires if nothing else is scheduled, permanently stranding this await (reproduced: a hermetic test
+      // with nothing else pending hung on exactly this). `clearTimeout` below is what actually avoids
+      // leaving a dangling handle once `creationTimeReady` wins the race instead.
+      let boundTimer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<void>((resolve) => {
+        boundTimer = setTimeout(resolve, ROOT_CREATION_CAPTURE_AWAIT_MS);
+      });
+      await Promise.race([owner.creationTimeReady, bound]);
+      clearTimeout(boundTimer);
+    }
     const check = await this.probeRootSurvival(rootPid, sessionId);
     if (check.enumerationFailed) {
       // eslint-disable-next-line no-console
@@ -7579,6 +7641,15 @@ export class PtyHost {
       // reason, and must instead proceed, since the original predecessor is the one that's gone).
       this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "pid-now-live-session" });
       return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+    }
+    // @decision 2897acc4 — every creation-time guard below is gated on `owner`; without one this would
+    // fall straight through to killing on command-line identity alone. Unreachable today, but cheap to
+    // close: never kill without a resolvable owner to cross-check against.
+    if (!owner) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but no owner could be resolved at all (no expectedOwner, no live/codexLive entry) — NOT killing`);
+      this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "unreadable", reason: "owner-creation-time-unavailable" });
+      return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "unreadable" };
     }
     // Round 3 (M3): on win32, a CIM row's CreationDate should ALWAYS parse (parseWin32CimDate returns
     // null only on a malformed/absent value — an enumeration anomaly, not legitimate "no data"). A null
@@ -7615,10 +7686,32 @@ export class PtyHost {
         this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
         return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
       }
+    } else if (owner && this.resolveRootReapPlatform() === "win32") {
+      // @decision 2897acc4 — win32 cross-checks the occupant against the VERIFIED `owner.creationTime`
+      // (87691385's capture) at tight `ROOT_CREATION_MATCH_TOLERANCE_MS` agreement, CROSS-source (not
+      // same-source — see that constant's own doc), never `CREATION_TIME_SLACK_MS` (mac/POSIX only now).
+      //
+      // The bounded wait for an in-flight capture happens EARLIER now, before `probeRootSurvival` was
+      // even called (see this method's own comment there) — by this point `owner.creationTime` is already
+      // whatever it's going to be; this branch only reads it, never awaits again.
+      if (owner.creationTime == null || check.creationTime == null) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but a creationTime is unavailable (owner=${owner.creationTime} occupant=${check.creationTime}) — NOT killing`);
+        const reason = owner.creationTime == null ? "owner-creation-time-unavailable" : "creation-time-missing";
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "unreadable", reason });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "unreadable" };
+      }
+      if (Math.abs(check.creationTime - owner.creationTime) > ROOT_CREATION_MATCH_TOLERANCE_MS) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the occupant's creationTime (${check.creationTime}) disagrees with our own verified spawn-time capture (${owner.creationTime}) — NOT killing`);
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+      }
     } else if (owner && check.creationTime != null && check.creationTime > owner.startedAt + CREATION_TIME_SLACK_MS) {
       // eslint-disable-next-line no-console
       console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the OS reports this pid created AFTER our own spawn (creationTime=${check.creationTime} > spawnedAt=${owner.startedAt}+slack) — NOT killing`);
       // Round 3 (M5): "mismatch" — same correction as guard 1 above; our tracked predecessor is gone.
+      // mac/other-POSIX only now — win32 uses the verified owner.creationTime branch above instead.
       this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
       return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
     }
