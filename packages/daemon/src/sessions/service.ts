@@ -13938,6 +13938,10 @@ export class SessionService {
    * predecessor recovering the fleet must never leave a dead successor still resumable, or a later
    * crash-recovery tick can resurrect it as a SECOND live manager/platform alongside the recovered
    * predecessor.
+   *
+   * @decision fcf8a0f8 — a stopping predecessor (`isStopping`) is still a VALID reclaim destination;
+   * refusing it strands the fleet on a dead, unresumable M2 instead — archiveOnExit already makes its
+   * own later exit safe. Recorded as `predecessorStopping` for diagnosis only, never a gate.
    */
   private recoverFleetAfterFailedRecycleSuccessor(oldId: string, freshId: string, role: "manager" | "platform"): void {
     if (!this.pty.isAlive(oldId)) {
@@ -13947,6 +13951,7 @@ export class SessionService {
       });
       return;
     }
+    const predecessorStopping = this.pty.isStopping(oldId);
     this.unlinkAndArchiveDeadRecycleSuccessor(oldId, freshId);
     // recyclePlatformLead's atomic handoff flips this row to `exited` SYNCHRONOUSLY, before ever touching
     // the real pty (see its own doc) — now that isAlive above confirmed the real process never actually
@@ -13972,7 +13977,7 @@ export class SessionService {
     this.carryPendingToSuccessor(freshId, oldId, this.pty.flushPending(freshId), this.db.listUnresolvedQueuedMessagesForWorker(freshId));
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
-      kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
+      kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers, predecessorStopping },
     });
     const fleetNote = role === "manager"
       ? "your workers/wakes/questions/cap-queue/pending are back on you — re-read worker_list to continue"
@@ -14000,6 +14005,9 @@ export class SessionService {
     // recyclePlatformLead's own doc) — restore it now that we've confirmed the real process is still
     // alive, so the DB stops lying about an elevated Lead's liveness for however long this stays
     // unresolved (recycleManager never touches oldId's processState, so nothing to restore for that role).
+    // @decision fcf8a0f8 — deliberately ungated on isStopping (tried, reverted): onPtyExit unconditionally
+    // sets processState:"exited" the instant the real exit lands, so a premature restore is never a
+    // lasting lie, and recoverFleetAfterFailedRecycleSuccessor's own identical restore is ungated too.
     if (role === "platform" && oldStillLive) this.db.restoreLiveAfterConfirmedAlive(oldId);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,

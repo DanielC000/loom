@@ -61,14 +61,17 @@ This can never be stale: the marker is a durable DB row, written with no event-l
 the `isAlive(oldId)` read at all for this lineage once resolved, so the mid-kill staleness of that read
 is moot here (though it remains open generally — see Residual below).
 
-## Residual (NOT fixed here — separate follow-up)
+## Residual — EXAMINED by card `fcf8a0f8`; reclaim is the deliberate outcome
 
 The underlying `pty.isAlive` staleness through the `kill()` → `'exit'` async window, inside
-`recoverFleetAfterFailedRecycleSuccessor`'s own NEVER-RESURRECT check, is a narrower, pre-existing hazard
-independent of `recycle_reattempt` — it could in principle affect the watch's own unprompted reclaim too
-(no reattempt involved at all), if a death observation happens to land in that exact window relative to
-some OTHER stop of the predecessor. `PtyHost` exposes no public "is stopping" / "is killed" accessor
-today; closing this fully needs new `PtyHost` surface. Carded separately; not addressed by this fix.
+`recoverFleetAfterFailedRecycleSuccessor`'s own NEVER-RESURRECT check, was a narrower, pre-existing hazard
+independent of `recycle_reattempt` — it could affect the watch's own unprompted reclaim too (no reattempt
+involved at all), if a death observation landed in that exact window relative to some OTHER stop of the
+predecessor. Card `fcf8a0f8` examined it and found reclaiming onto a stopping predecessor is the SAFER
+outcome, not the hazard this section originally framed it as — `archiveOnExit` already makes that
+predecessor's own later exit safe (visible, resumable, bannered), whereas refusing strands the fleet on a
+confirmed-dead successor instead. See `docs/decisions/fcf8a0f8-reclaim-onto-a-stopping-predecessor.md` for
+the full comparison and why reclaim wins.
 
 ## Do not
 

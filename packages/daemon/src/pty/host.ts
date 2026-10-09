@@ -13469,6 +13469,13 @@ export class PtyHost {
     return this.findAnyLive(sessionId)?.alive ?? false;
   }
 
+  /** @decision fcf8a0f8 — `live.stopping` (a `stop()` of either mode is in flight). NOT a reclaim gate —
+   *  archiveOnExit already makes a stopping predecessor's own exit safe; use this only where a caller
+   *  needs "confirmed alive AND not already mid-stop" (e.g. before restoring a processState to "live"). */
+  isStopping(sessionId: string): boolean {
+    return this.findAnyLive(sessionId)?.stopping ?? false;
+  }
+
   /** Whether a session's turn is CURRENTLY in flight — the same in-memory `live.busy` flag `setBusy`
    *  writes on every rising/falling edge (mirrored to the DB via `onBusy`, but read here directly with no
    *  DB round-trip). Card d88163b7: lets a caller that's about to force-interrupt a session (e.g. a
