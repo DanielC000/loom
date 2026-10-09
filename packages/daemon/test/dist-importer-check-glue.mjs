@@ -95,7 +95,24 @@ registerForCleanup(TEMPLATE_REPO);
   // explained by touched-module-count ranking (it imports BOTH foo+bar), never by alphabetical order.
   fs.writeFileSync(path.join(TEMPLATE_REPO, "packages", "daemon", "test", "zzz-importer-both.mjs"), "const a = await import(\"../dist/foo.js\");\nconst b = await import(\"../dist/bar.js\");\n");
   mkdirp(path.join(TEMPLATE_REPO, "packages", "daemon", "scripts"));
-  fs.writeFileSync(path.join(TEMPLATE_REPO, "packages", "daemon", "scripts", "test-daemon.mjs"), "export const EXCLUDED_DIR_NAMES = new Set();\nexport const NOT_HERMETIC = new Set();\n");
+  // Card cd3a5943: computeDirectDistImporterRunSet now sources its corpus-size denominator AND candidate
+  // classification from the harness's own discoverHermeticTests() (via loadHermeticTestNames), never a
+  // hand-rolled EXCLUDED_DIR_NAMES/NOT_HERMETIC-only reimplementation — so this stub must export it too.
+  // This fixture's own test dir is flat (no subdirs, no underscore-helpers, no fixtures/census, no
+  // NOT_HERMETIC names) and its 4 fixture files are never actually EXECUTED as real tests here (only
+  // AST-scanned for import specifiers), so this minimal version skips the real discoverHermeticTests's
+  // content-based looksLikeTest check entirely and just reports every top-level .mjs file as hermetic —
+  // preserving every scenario's existing corpusSize-of-4 expectation (e.g. the cap=2-of-4 scenario below).
+  fs.writeFileSync(
+    path.join(TEMPLATE_REPO, "packages", "daemon", "scripts", "test-daemon.mjs"),
+    "import fs from \"node:fs\";\n" +
+    "export const EXCLUDED_DIR_NAMES = new Set();\n" +
+    "export const NOT_HERMETIC = new Set();\n" +
+    "export function discoverHermeticTests(testDir) {\n" +
+    "  const hermetic = fs.readdirSync(testDir).filter((f) => f.endsWith(\".mjs\")).map((f) => f.slice(0, -\".mjs\".length)).sort();\n" +
+    "  return { hermetic, violations: [], notHermeticNames: [] };\n" +
+    "}\n",
+  );
   execSync(`git init -q && git config user.email dic@loom && git config user.name dic`, { cwd: TEMPLATE_REPO });
   commitAll(TEMPLATE_REPO, "init", GIT_ID);
 })();

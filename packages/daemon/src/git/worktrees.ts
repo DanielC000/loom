@@ -5519,22 +5519,26 @@ export type DirectDistImporterCheckResult =
 /** @decision cee17efe — never let candidate classification and the corpus-size count drift apart on
  *  what "runnable" means.
  *
- *  Applies the SAME three exclusions {@link foldInTestImporters} applies to a discovered importer
- *  (EXCLUDED_DIR_NAMES/underscore-helper/NOT_HERMETIC) to a bare path RELATIVE TO `test/` — shared by both
- *  {@link computeDirectDistImporterRunSet}'s candidate classification AND its corpus-size count. `rel` is
- *  always `/`-separated (matches {@link listAllTestMjsFilesRelative}'s own return shape). */
-function isRunnableHermeticRelPath(rel: string, excludedDirNames: Set<string>, notHermeticNames: Set<string>): boolean {
-  const segments = rel.split("/");
-  const dirSegments = segments.slice(0, -1);
-  if (dirSegments.some((seg) => excludedDirNames.has(seg))) return false; // fixtures/census pass-through node — never a run target
-  if (segments.some((seg) => seg.startsWith("_"))) return false; // helper pass-through node — never a run target
-  if (dirSegments.length === 0) {
-    // NOT_HERMETIC only ever names test/'s TOP-LEVEL files, same as foldInTestImporters's own rule.
-    const harnessName = rel.slice(0, -".mjs".length);
-    if (notHermeticNames.has(harnessName)) return false;
-  }
-  return true;
-}
+ *  Card cd3a5943 — this used to be a THIRD hand-copy of the "runnable hermetic test" rule (alongside
+ *  `foldInTestImporters`'s own classification loop and the harness's real `discoverHermeticTests`,
+ *  scripts/test-daemon.mjs). Both the corpus-size denominator AND the candidate classification in
+ *  {@link computeDirectDistImporterRunSet} below now derive from {@link loadHermeticTestNames} — the
+ *  harness's own `discoverHermeticTests()`, evaluated against THIS worktree's own test dir in the same
+ *  killable child process {@link loadHarnessSetExports} already uses — so the two can no longer drift
+ *  apart BY CONSTRUCTION, never by two independent implementations of the same three exclusions happening
+ *  to agree. `discoverHermeticTests` additionally requires a candidate to `looksLikeTest` (an
+ *  assertion-marker scan) — a fourth, strictly NARROWER check the old hand-rolled version here never
+ *  applied; in practice this never diverges from the old corpusSize on a real corpus, since a
+ *  `looksLikeTest` violation makes the harness itself refuse to run at all (scripts/test-daemon.mjs's own
+ *  discovery-violation exit path) — one can never survive to a landed commit this check runs against.
+ *
+ *  Deliberately NOT extended to `foldInTestImporters`/`computeEmitCompareGate`'s own classification loop
+ *  (the SECOND hand-copy) — that is the load-bearing REDUCED MERGE GATE, explicitly protected by decision
+ *  record 72769424's ruling that those two functions "stay untouched... regardless of how similar their
+ *  AST-walk shape looks". Routing that path through content-reading `discoverHermeticTests` would add a
+ *  new per-file read to a gate that decides whether the WHOLE test suite runs, for an advisory-only
+ *  payoff (this check never blocks a merge — see this section's own anchor above). Left as a tracked,
+ *  understood duplication, not an oversight. */
 
 export async function computeDirectDistImporterRunSet(
   worktreePath: string, touchedDistRelPaths: readonly string[], scanTimeoutMs: number = DIRECT_DIST_IMPORTER_SCAN_TIMEOUT_MS,
@@ -5542,22 +5546,18 @@ export async function computeDirectDistImporterRunSet(
   const testDirAbs = path.join(worktreePath, "packages", "daemon", "test");
   const scan = await scanDirectDistImportersInChildProcess(testDirAbs, touchedDistRelPaths, scanTimeoutMs);
   if (!scan.ok) return { ok: false, reason: scan.reason };
-  let allRelFiles: string[];
-  try {
-    allRelFiles = listAllTestMjsFilesRelative(testDirAbs);
-  } catch {
-    return { ok: false, reason: "could not count the packages/daemon/test/**/*.mjs corpus for the cap computation" };
+  // @decision cee17efe (LEAD ruling 7) — load this UNCONDITIONALLY, before the corpus-size count below, so
+  // the cap's denominator is always the RUNNABLE hermetic count, never the raw walk (which would silently
+  // inflate `computeDistImporterCap`'s denominator).
+  //
+  // Card cd3a5943: sourced from the harness's own `discoverHermeticTests()` via {@link
+  // loadHermeticTestNames}, not a hand-rolled re-implementation — see this function's own leading doc
+  // comment above for the full rationale.
+  const hermeticNames = await loadHermeticTestNames(worktreePath);
+  if (hermeticNames === null) {
+    return { ok: false, reason: "could not load discoverHermeticTests() from the isolated worktree's own scripts/test-daemon.mjs" };
   }
-  // @decision cee17efe (LEAD ruling 7) — load these UNCONDITIONALLY, before the corpus-size count below,
-  // so the cap's denominator is always the RUNNABLE hermetic count, never the raw walk (which would
-  // silently inflate `computeDistImporterCap`'s denominator).
-  const [excludedDirNames, notHermeticNames] = await Promise.all([
-    loadExcludedTestDirNames(worktreePath), loadNotHermeticNames(worktreePath),
-  ]);
-  if (excludedDirNames === null || notHermeticNames === null) {
-    return { ok: false, reason: "could not load EXCLUDED_DIR_NAMES/NOT_HERMETIC from the isolated worktree's own scripts/test-daemon.mjs" };
-  }
-  const corpusSize = allRelFiles.filter((rel) => isRunnableHermeticRelPath(rel, excludedDirNames, notHermeticNames)).length;
+  const corpusSize = hermeticNames.size;
   const rawCandidates: DirectDistImporterMatch[] = [
     ...scan.matched,
     ...scan.wildcardImporters.map((p) => ({ path: p, touchedCount: 0 })),
@@ -5567,7 +5567,7 @@ export async function computeDirectDistImporterRunSet(
   for (const c of rawCandidates) {
     const p = c.path;
     const relToTestDir = p.slice(EMIT_COMPARE_TEST_PREFIX.length);
-    if (!isRunnableHermeticRelPath(relToTestDir, excludedDirNames, notHermeticNames)) continue;
+    if (!hermeticNames.has(relToTestDir.slice(0, -".mjs".length))) continue;
     if (!TEST_PATH_SHELL_SAFE_RE.test(p)) continue; // advisory-only: drop rather than fail the whole check closed
     candidates.push(c);
   }
@@ -5990,41 +5990,56 @@ export const HARNESS_CONFIG_LOAD_TIMEOUT_MS = 20_000;
 /** argv[1] of the child is deliberately `process.execPath` (a real, resolvable path that is NOT the script):
  *  test-daemon.mjs's main-module guard realpaths `process.argv[1]` and REFUSES (exit 1) if it can't, so under
  *  `-e` the first user arg must be a real path or loading the script for its exports would never succeed.
- *  Evaluated by the child (`node --input-type=module -e`). Imports the worktree's script ONCE and reads BOTH
- *  `EXCLUDED_DIR_NAMES` and `NOT_HERMETIC` off that SAME module object — folds what used to be two separate
- *  child spawns into one (card 758486bc; see {@link loadHarnessSetExports}'s own anchor for why).
+ *  Evaluated by the child (`node --input-type=module -e`). Imports the worktree's script ONCE and reads
+ *  `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` off that SAME module object — folds what used to be two separate
+ *  child spawns into one (card 758486bc; see {@link loadHarnessSetExports}'s own anchor for why). When
+ *  `wantHermetic==='1'` it ALSO calls the harness's own exported `discoverHermeticTests(testDirAbs)` and
+ *  reports its `hermetic` names (card cd3a5943 — see {@link loadHermeticTestNames}) — gated behind this
+ *  flag so a caller that only needs the two Sets (e.g. {@link computeEmitCompareGate}'s hot reduced-gate
+ *  path) never pays for the extra per-file content read `discoverHermeticTests` does. A missing/throwing
+ *  `discoverHermeticTests` (a synthetic test-only harness script with no such export) never fails the
+ *  whole probe — only the `HERMETIC` field degrades to `{ok:false}`.
  *  Prints ONE JSON line and force-exits so a stray timer/handle in the branch's module can't keep the child
  *  alive. An import that never settles (top-level await) makes node itself exit non-zero with no output. */
 const HARNESS_EXPORT_PROBE_SOURCE =
-  "const [url]=process.argv.slice(2);" +
+  "const [url,testDirAbs,wantHermetic]=process.argv.slice(2);" +
   "import(url).then(m=>{" +
   "const pick=(n)=>{const v=m[n];return v instanceof Set?{ok:true,values:[...v].map(String)}:{ok:false}};" +
-  "process.stdout.write(JSON.stringify({ok:true,EXCLUDED_DIR_NAMES:pick('EXCLUDED_DIR_NAMES'),NOT_HERMETIC:pick('NOT_HERMETIC')})+'\\n');" +
+  "let hermetic={ok:false};" +
+  "if(wantHermetic==='1'){try{const d=m.discoverHermeticTests(testDirAbs);if(d&&Array.isArray(d.hermetic))hermetic={ok:true,values:d.hermetic.map(String)};}catch{}}" +
+  "process.stdout.write(JSON.stringify({ok:true,EXCLUDED_DIR_NAMES:pick('EXCLUDED_DIR_NAMES'),NOT_HERMETIC:pick('NOT_HERMETIC'),HERMETIC:hermetic})+'\\n');" +
   "process.exit(0)},()=>process.exit(2));";
 
-/** The combined shape {@link loadHarnessSetExports} resolves — BOTH sets read from ONE child
+/** The combined shape {@link loadHarnessSetExports} resolves — every field read from ONE child
  *  evaluation of the worktree's harness script. `ok:false` is a MECHANISM failure (spawn error, timeout,
- *  non-zero exit, unparseable output) — both fields are `null` in that case, same fail-closed default the
- *  two public wrappers already returned before this card. `ok:true` with an individual field `null` means
- *  the module loaded fine but that particular export was missing or not a `Set` — also fails closed,
- *  per-field, unchanged from the pre-758486bc per-export contract. */
+ *  non-zero exit, unparseable output) — every field is `null` in that case, same fail-closed default the
+ *  public wrappers already returned before this card. `ok:true` with an individual field `null` means
+ *  the module loaded fine but that particular export was missing/malformed (or, for `hermeticNames`, was
+ *  never requested — see {@link loadHarnessSetExports}'s `includeHermeticNames` param) — also fails
+ *  closed, per-field, unchanged from the pre-758486bc per-export contract. */
 interface HarnessSetExportsResult {
   ok: boolean;
   excludedDirNames: Set<string> | null;
   notHermeticNames: Set<string> | null;
+  hermeticNames: Set<string> | null;
 }
-const HARNESS_SET_EXPORTS_FAIL: HarnessSetExportsResult = { ok: false, excludedDirNames: null, notHermeticNames: null };
+const HARNESS_SET_EXPORTS_FAIL: HarnessSetExportsResult = { ok: false, excludedDirNames: null, notHermeticNames: null, hermeticNames: null };
 
 /** @decision fca110cf — the worktree's harness config is evaluated in a killable CHILD PROCESS, never an
  *  in-process `import()`. Fails closed to {@link HARNESS_SET_EXPORTS_FAIL} on ANY failure.
  *
  *  @decision 758486bc — ALWAYS spawns fresh, no cross-call cache in front of this (round 4 removed one
- *  that used to sit here — see the decision record for why). */
+ *  that used to sit here — see the decision record for why).
+ *
+ *  `includeHermeticNames` (default `false`, card cd3a5943) opts into also running the harness's own
+ *  `discoverHermeticTests()` in the SAME child evaluation — omit it (every pre-existing caller does) to
+ *  stay byte-identical to before this param existed. */
 function loadHarnessSetExports(
-  worktreePath: string, timeoutMs: number,
+  worktreePath: string, timeoutMs: number, includeHermeticNames = false,
 ): Promise<HarnessSetExportsResult> {
   return new Promise((resolve) => {
     const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
+    const testDirAbs = path.join(worktreePath, "packages", "daemon", "test");
     let settled = false;
     let child: ChildProcess;
     const done = (r: HarnessSetExportsResult) => {
@@ -6039,7 +6054,10 @@ function loadHarnessSetExports(
     }, timeoutMs);
     try {
       // Windows: import() needs a file:// URL, never a bare drive-letter path (ERR_UNSUPPORTED_ESM_URL_SCHEME).
-      child = spawn(process.execPath, ["--input-type=module", "-e", HARNESS_EXPORT_PROBE_SOURCE, process.execPath, pathToFileURL(scriptPath).href], {
+      child = spawn(process.execPath, [
+        "--input-type=module", "-e", HARNESS_EXPORT_PROBE_SOURCE, process.execPath,
+        pathToFileURL(scriptPath).href, testDirAbs, includeHermeticNames ? "1" : "0",
+      ], {
         cwd: worktreePath, stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
       });
     } catch {
@@ -6054,11 +6072,21 @@ function loadHarnessSetExports(
       if (code !== 0) { done(HARNESS_SET_EXPORTS_FAIL); return; }
       try {
         const line = stdoutAcc.value.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
-        const parsed = JSON.parse(line) as { ok?: boolean; EXCLUDED_DIR_NAMES?: { ok?: boolean; values?: unknown }; NOT_HERMETIC?: { ok?: boolean; values?: unknown } };
+        const parsed = JSON.parse(line) as {
+          ok?: boolean;
+          EXCLUDED_DIR_NAMES?: { ok?: boolean; values?: unknown };
+          NOT_HERMETIC?: { ok?: boolean; values?: unknown };
+          HERMETIC?: { ok?: boolean; values?: unknown };
+        };
         if (parsed.ok !== true) { done(HARNESS_SET_EXPORTS_FAIL); return; }
         const extract = (field: { ok?: boolean; values?: unknown } | undefined): Set<string> | null =>
           field?.ok === true && Array.isArray(field.values) ? new Set(field.values as string[]) : null;
-        done({ ok: true, excludedDirNames: extract(parsed.EXCLUDED_DIR_NAMES), notHermeticNames: extract(parsed.NOT_HERMETIC) });
+        done({
+          ok: true,
+          excludedDirNames: extract(parsed.EXCLUDED_DIR_NAMES),
+          notHermeticNames: extract(parsed.NOT_HERMETIC),
+          hermeticNames: extract(parsed.HERMETIC),
+        });
       } catch {
         done(HARNESS_SET_EXPORTS_FAIL);
       }
@@ -6094,6 +6122,26 @@ export function loadNotHermeticNames(
   worktreePath: string, timeoutMs: number = HARNESS_CONFIG_LOAD_TIMEOUT_MS,
 ): Promise<Set<string> | null> {
   return loadHarnessSetExports(worktreePath, timeoutMs).then((r) => r.notHermeticNames);
+}
+
+/**
+ * Card cd3a5943 — the single source of truth for "which `packages/daemon/test/**\/*.mjs` files are
+ * actually runnable hermetic tests", for any caller that needs that set/count (today:
+ * {@link computeDirectDistImporterRunSet}'s cap denominator and candidate classification). Returns the
+ * harness's own `discoverHermeticTests()` result's `hermetic` names (bare, extension-stripped, `/`-
+ * separated — same shape {@link computeDirectDistImporterRunSet} already works in), evaluated against
+ * THIS worktree's OWN `scripts/test-daemon.mjs` and `test/` dir in the same killable child process
+ * {@link loadExcludedTestDirNames}/{@link loadNotHermeticNames} already use — never a hand-rolled
+ * re-implementation of the EXCLUDED_DIR_NAMES/underscore-helper/NOT_HERMETIC/`looksLikeTest` rule (see
+ * {@link computeDirectDistImporterRunSet}'s own leading doc comment for why that hand-copy was retired).
+ * Same fail-closed contract as its siblings: `null` on any load/parse error or timeout — a caller that
+ * gets `null` MUST fail closed, same as the `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` case. ALWAYS spawns fresh
+ * (card 758486bc's no-cross-call-cache rule applies here too).
+ */
+export function loadHermeticTestNames(
+  worktreePath: string, timeoutMs: number = HARNESS_CONFIG_LOAD_TIMEOUT_MS,
+): Promise<Set<string> | null> {
+  return loadHarnessSetExports(worktreePath, timeoutMs, true).then((r) => r.hermeticNames);
 }
 
 /** @decision bafc68e7 — never re-add a local soundness-predicate/walker/transpile-helper copy here; they
