@@ -89,6 +89,29 @@ async function waitUntilRepoGuardQueued(sessions, projId, repoPath, timeoutMs) {
   }
 }
 
+// @decision 7d272e9f — scenario (A)'s "repo guard queued" wait needs a baseline-relative budget, never
+// a bare fixed one: ~11 real git spawns run before it, each paying a variable host-contention cost.
+function measureBaselineGitSpawnMs(repoPath, samples = 10) {
+  let max = 0;
+  for (let i = 0; i < samples; i++) {
+    const t0 = Date.now();
+    execSync("git rev-parse HEAD", { cwd: repoPath, stdio: ["ignore", "ignore", "ignore"] });
+    const d = Date.now() - t0;
+    if (d > max) max = d;
+  }
+  return max;
+}
+
+// Do not shrink SPAWN_COUNT_ESTIMATE below the real spawn count on the (A) path (see the decision
+// above) — undercounting it just reintroduces the same false-FAIL under load this budget exists to
+// close. MULTIPLIER is a separate safety margin ON TOP of that count: the same measurement run above
+// also showed the (baseline → actual-wait) ratio reach ~3.75× the bare spawn-count product on one
+// sample (a low baseline draw paired with a high real wait) — 4× leaves headroom above that, never
+// shrink it below what a future re-measurement under comparable load actually needs.
+const A_SPAWN_COUNT_ESTIMATE = 12;
+const A_BUDGET_FLOOR_MS = 10_000;
+const A_BUDGET_MULTIPLIER = 4;
+
 const dbs = [];
 const worktrees = [];
 try {
@@ -115,8 +138,15 @@ try {
       repoPath: A.repo, projectId: A.projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op-a",
     });
 
+    // Baseline-relative budget (see the @decision above `measureBaselineGitSpawnMs`'s declaration) —
+    // sampled against THIS repo, right before firing confirmWorkerMerge, so it reflects THIS host's
+    // actual git-spawn cost right now rather than a number only ever true of one host at one moment.
+    const aBaselineSpawnMs = measureBaselineGitSpawnMs(A.repo);
+    const aTimeoutMs = Math.max(A_BUDGET_FLOOR_MS, A_BUDGET_MULTIPLIER * A_SPAWN_COUNT_ESTIMATE * aBaselineSpawnMs);
+    console.log(`(A) baseline git-spawn cost on this host: ${aBaselineSpawnMs}ms ⇒ queued-wait budget = max(${A_BUDGET_FLOOR_MS}ms, ${A_BUDGET_MULTIPLIER}×${A_SPAWN_COUNT_ESTIMATE}×baseline) = ${aTimeoutMs}ms`);
+
     const confirmPromise = sessions.confirmWorkerMerge(A.mgrId, A.workerId);
-    const queued = await waitUntilRepoGuardQueued(sessions, A.projId, A.repo, 10000);
+    const queued = await waitUntilRepoGuardQueued(sessions, A.projId, A.repo, aTimeoutMs);
     check("(A) precondition: confirmWorkerMerge's own repo-guard-only wait is genuinely queued", queued);
 
     if (!queued) {
