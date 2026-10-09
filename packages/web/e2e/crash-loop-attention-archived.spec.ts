@@ -15,11 +15,47 @@
 // (`db.appendEvent`'s session_recovery_abandoned, filed AFTER the session is already archived, exactly as
 // CrashRecoveryWatcher.tick's give-up branch does it) makes the row appear on BOTH Mission Control (the
 // global queue) and the project Overview (project-scoped) — the two surfaces `useAttention` feeds.
+//
+// CROSS-SPEC CLEANUP (card 9703fcd9 — load-bearing, same shape as codex-isolation-gap-attention.spec.ts's
+// own afterEach): a `session_recovery_abandoned` row has NO liveness filter and no automatic expiry
+// (lib/fleet.ts's `activeCrashLoopAbandonments` keys purely off the event stream), so unlike `merge_request`
+// it does NOT self-clean when `archiveSeededSessions` archives the subject session — the CRASH-LOOPED item
+// persists globally into every later spec's "Alerts" count (nav.tsx's badge is daemon-wide, not
+// project-scoped) until a later `session_recovered` for the same session supersedes it. Without this
+// afterEach, this file's own seeded row leaked into nav-cleanup.spec.ts's "Alerts excludes requests"
+// assertion (expected 1, observed 2) on the shared worker-scoped e2e daemon.
 import { randomUUID } from "node:crypto";
 import type { Page } from "@playwright/test";
 import { expect, test, type LoomDaemon } from "./fixtures/daemon";
 
 const mintId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+// Every worker session id this file seeded a `session_recovery_abandoned` row for, so the afterEach can
+// supersede each one. Recorded at seed time (not rebuilt from the page) so a test that fails mid-way still
+// gets its row cleaned up — mirrors codex-isolation-gap-attention.spec.ts's `seededGaps`.
+const abandonedWorkerIds: string[] = [];
+
+test.afterEach(async ({ loomDaemon }) => {
+  for (const workerSessionId of abandonedWorkerIds.splice(0)) {
+    // A `session_recovered` for the SAME session, filed AFTER the abandoned row — exactly the shape
+    // CrashRecoveryWatcher.tick's own stable-resume branch writes (managerSessionId: parentSessionId ??
+    // sessionId, workerSessionId: sessionId). `activeCrashLoopAbandonments` keys the latest-by-ts event
+    // per session, so this supersedes the abandoned row and the item clears — the real "it recovered"
+    // path, not a fixture-only shortcut.
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: workerSessionId, workerSessionId, kind: "session_recovered", detail: { afterAttempts: 3 },
+    });
+    // Fail loudly: a cleanup that quietly no-ops breaks a LATER spec, not this one.
+    const res = await fetch(`${loomDaemon.baseURL}/api/orchestration/events?kinds=session_recovery_abandoned,session_recovered`);
+    if (!res.ok) throw new Error(`cleanup read-back: GET events -> ${res.status}`);
+    const rows = (await res.json()) as { kind: string; workerSessionId: string | null; managerSessionId: string }[];
+    // The route orders ts DESC, so the newest row for this session must now be the superseding recovery.
+    const newest = rows.find((r) => (r.workerSessionId ?? r.managerSessionId) === workerSessionId);
+    if (newest?.kind !== "session_recovered") {
+      throw new Error(`cleanup: expected session_recovered to supersede session_recovery_abandoned for ${workerSessionId}, got ${JSON.stringify(newest)}`);
+    }
+  }
+});
 
 /** Pin the header-selected active project, exactly as overview-attention-archived.spec.ts does. */
 async function pinActiveProject(page: Page, projectId: string) {
@@ -86,6 +122,7 @@ test.describe("CRASH-LOOPED survives archive, on both Mission Control and the pr
       kind: "session_recovery_abandoned",
       detail: { role: "worker", attempts: 3 },
     });
+    abandonedWorkerIds.push(worker.sessionId);
 
     // AFTER: Mission Control (the global queue, route "/") shows it.
     await page.goto(`${loomDaemon.baseURL}/`);
