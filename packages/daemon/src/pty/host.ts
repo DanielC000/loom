@@ -4570,8 +4570,11 @@ const rootReapEnumerationSemaphore = new EnumerationSemaphore(ROOT_REAP_ENUMERAT
  * process the runner user owns.
  *
  * @decision 87691385 — `rootCreationTime` (optional) feeds {@link computeOrphanSweepPlan}'s stale-pid
- * guard AND its live-root abort; the onExit sweep now threads it too (win32 only, `null` elsewhere), per
- * the record. POSIX's own filter/abort both stay a permanent no-op there (no OS creation-time data).
+ * guard AND its live-root abort; the onExit sweep now threads it too.
+ *
+ * @decision bf58c19c — the SOURCE (`liveRef.creationTime`) is no longer win32-only (POSIX now arms it
+ * too), but `computeOrphanSweepPlan`'s OWN candidate-row enumeration still populates a row's own
+ * `creationTime` on win32 only — the filter/abort stay a no-op on POSIX regardless.
  *
  * @decision 85ae7768 — when the caller leaves `rootCreationTime` null, fall back to the test-registry's
  * own captured value (null in production); `deps` is a TEST-ONLY injectable seam (never passed in
@@ -5826,8 +5829,8 @@ export class PtyHost {
       killed: false,
       startedAt: Date.now(),
       startTicksLinux: null, // armed async, right after this.live.set below
-      creationTime: null, // armed async (win32 only), right after this.live.set below
-      creationTimeReady: Promise.resolve(), // replaced with the real in-flight promise below (win32 only)
+      creationTime: null, // armed async (every platform except Linux), right after this.live.set below
+      creationTimeReady: Promise.resolve(), // replaced with the real in-flight promise below (every platform except Linux)
       logStream: openSessionLogStream(opts.sessionId, spawnLogReason),
       logBroken: false,
       busy: false,
@@ -6530,8 +6533,8 @@ export class PtyHost {
       subscribers: new Set(),
       alive: true, killed: false, startedAt: Date.now(),
       startTicksLinux: null, // armed async, right after this.liveCodex.set below
-      creationTime: null, // armed async (win32 only), right after this.liveCodex.set below
-      creationTimeReady: Promise.resolve(), // replaced with the real in-flight promise below (win32 only)
+      creationTime: null, // armed async (every platform except Linux), right after this.liveCodex.set below
+      creationTimeReady: Promise.resolve(), // replaced with the real in-flight promise below (every platform except Linux)
       logStream: openSessionLogStream(opts.sessionId, isCodexResumeSpawn ? "codex resume" : "codex fresh spawn"),
       logBroken: false,
       busy: false,
@@ -7597,9 +7600,14 @@ export class PtyHost {
 
   /** @decision 87691385 — injectable seam for the at-spawn root-creation-time capture's own OS query,
    *  same pattern as {@link probeRootSurvival}/{@link sweepOrphanedDescendants}. Defaults to the real,
-   *  filtered, single-pid lookup: win32 CIM, or POSIX `ps` elsewhere (see the next doc comment below). */
+   *  filtered, single-pid lookup: win32 CIM, or POSIX `ps` elsewhere.
+   *
+   * @decision bf58c19c — dispatches on {@link resolveRootReapPlatform}, never raw `process.platform`, so
+   * a test can force the POSIX path via `platformOverride` and actually exercise this through the real
+   * `armRootCreationTime` call, not merely assert it would dispatch that way.
+   */
   protected captureRootCreationRow(pid: number): Promise<OrphanSweepRow | null> {
-    return process.platform === "win32" ? enumerateWin32SweepRowForPid(pid) : enumeratePosixSweepRowForPid(pid);
+    return this.resolveRootReapPlatform() === "win32" ? enumerateWin32SweepRowForPid(pid) : enumeratePosixSweepRowForPid(pid);
   }
 
   /** @decision 87691385 — fire-and-forget; only a {@link resolveVerifiedRootCreationTime}-approved row
@@ -7607,10 +7615,11 @@ export class PtyHost {
    *  the real `spawn()` path.
    *
    * @decision bf58c19c — renamed from `armWin32RootCreationTime`: arms on every platform except Linux
-   * (own ticks mechanism, {@link armLinuxStartTicks}), selecting a platform-appropriate verification slack.
+   * (own ticks mechanism, {@link armLinuxStartTicks}), gated + slack-selected via `resolveRootReapPlatform()`
+   * (never raw `process.platform`) so a test can force either branch through the real arm path.
    */
   private armRootCreationTime(live: Live | CodexLive): void {
-    if (process.platform === "linux") return;
+    if (this.resolveRootReapPlatform() === "linux") return;
     // @decision 2897acc4 — replaces the construction-time `Promise.resolve()` stub with the real
     // in-flight chain, so `verifyRootDeadOrForceKill`'s guard-2 branch can await an in-flight capture
     // (bounded) rather than reading a pre-resolution `null` as "unknown forever".
@@ -7619,7 +7628,7 @@ export class PtyHost {
     // under a single fixed, greppable tag — a silent null here is exactly what later reads as
     // "owner-creation-time-unavailable" at guard 2, with no way to tell a genuine capture failure from a
     // row the OS never produced.
-    const slackMs = process.platform === "win32" ? ROOT_CREATION_CAPTURE_SLACK_MS : POSIX_ROOT_CREATION_CAPTURE_SLACK_MS;
+    const slackMs = this.resolveRootReapPlatform() === "win32" ? ROOT_CREATION_CAPTURE_SLACK_MS : POSIX_ROOT_CREATION_CAPTURE_SLACK_MS;
     live.creationTimeReady = this.captureRootCreationRow(live.pid).then((row) => {
       const verified = resolveVerifiedRootCreationTime(row, process.pid, live.startedAt, slackMs);
       live.creationTime = verified;
@@ -7772,9 +7781,11 @@ export class PtyHost {
     // Round 3 (M3): on win32, a CIM row's CreationDate should ALWAYS parse (parseWin32CimDate returns
     // null only on a malformed/absent value — an enumeration anomaly, not legitimate "no data"). A null
     // here must refuse like guard 2's own mismatch below, never silently skip straight to killing. POSIX
-    // is unaffected: a per-pid /proc or ps read can legitimately fail to produce a creationTime for THIS
-    // one row (see enumerateProcessesPosix/ViaPs's own docs) — that narrower, expected gap stays covered
-    // by guard 1 alone, exactly as before this round.
+    // is unaffected here: a per-pid `ps` read can legitimately fail to produce a creationTime for THIS one
+    // row (see enumerateProcessesPosix/ViaPs's own docs) — a narrower, expected gap than win32's anomaly.
+    // @decision bf58c19c — that gap is NOT left to guard 1 alone any more: the darwin/POSIX branch below
+    // has its own explicit `check.creationTime == null` refusal (plus a ppid-missing refusal), independent
+    // of guard 1's respawn check.
     if (owner && this.resolveRootReapPlatform() === "win32" && check.creationTime == null) {
       // eslint-disable-next-line no-console
       console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the OS gave no creation time to cross-check (win32 enumeration anomaly) — NOT killing`);

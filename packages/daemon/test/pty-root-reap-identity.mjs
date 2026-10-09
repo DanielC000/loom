@@ -21,6 +21,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Card a19fbad3 (CR on bf58c19c) — pinned BEFORE any Date use in this file: without this, the
+// `parsePsLstartTimestamp` UTC-construction assertions below pass even if the parser regresses to
+// `Date.parse` of the bare string, on any CI host whose OWN local TZ happens to be UTC (common default
+// for ubuntu containers) — the regression would be invisible there. A non-UTC zone makes `Date.parse`'s
+// local-time interpretation genuinely diverge from the expected `Date.UTC(...)` value, so the test can
+// actually fail when it should. Every OTHER Date value in this file is epoch-ms (`Date.now()`, TZ-
+// independent) or TZ-independent by construction (`Date.UTC(...)`) — grepped, no other `Date.parse`/
+// `getHours`/`toLocaleString`/local-time-formatting call exists anywhere else in this file.
+process.env.TZ = "America/New_York";
+
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
@@ -1238,6 +1248,77 @@ if (process.platform === "win32") {
   }
 } else {
   console.log("WARN  SKIP  armWin32RootCreationTime real-spawn-path wiring tests — win32-only; process.platform !== 'win32' here.");
+}
+
+// =======================================================================================================
+// Card a19fbad3 (CR on bf58c19c, item 3) — `armRootCreationTime`/`captureRootCreationRow` now dispatch on
+// `resolveRootReapPlatform()`, never raw `process.platform` — specifically so this scenario can force the
+// darwin/POSIX path through the REAL arm wiring (mirroring (r)/(s)/(t) above, same abstraction level —
+// `captureRootCreationRow` overridden to inject a controllable row, never a real `ps` spawn) on ANY host,
+// including this suite's own win32 gate host. NOT run only when `process.platform === "win32"`: the whole
+// point of routing through the override seam is that it no longer needs to be.
+//
+// This check NAMES WHAT IT DOES NOT COVER: it proves (a) darwin actually ARMS (reaches
+// `captureRootCreationRow` at all — would NOT happen if the gate regressed to raw
+// `process.platform === "linux"` early-return reasoning that happened to agree with `resolveRootReapPlatform`
+// only by coincidence) and (b) the VERIFICATION slack used is POSIX's (1000ms default), not win32's (2ms)
+// — via a row whose creationTime delta from startedAt is picked to be accepted under the POSIX slack and
+// REJECTED under the win32 one. It does NOT exercise `captureRootCreationRow`'s own real dispatch BODY
+// (the win32-CIM-vs-POSIX-ps ternary) — that would need a real `ps` spawn, which this Windows host can't
+// do; `pty-root-reap-posix-lstart-real-spawn.mjs` is the (darwin-only, currently unverified-on-target) real
+// dispatch proof.
+// =======================================================================================================
+{
+  class CaptureRowDarwinHost extends createSeamHost(PtyHost) {
+    platformOverride = "darwin";
+    resolveRootReapPlatform() { return this.platformOverride; }
+    capturedPids = [];
+    nextRow = null; // set BEFORE spawn() — captureRootCreationRow runs synchronously during spawn()
+    captureRootCreationRow(pid) {
+      this.capturedPids.push(pid);
+      this.lastCapturePromise = Promise.resolve(this.nextRow);
+      return this.lastCapturePromise;
+    }
+  }
+  const mkEvents = () => ({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onCodexBootStuck() {} });
+  const spawnOpts = (sessionId) => ({
+    sessionId, cwd: tmpHome,
+    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+    geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+  });
+
+  // (v) forced-darwin spawn: a row whose creationTime is 500ms AHEAD of startedAt — rejected under
+  // win32's 2ms slack, accepted under POSIX's 1000ms default. Two real failure modes collapse to the SAME
+  // observable (live.creationTime stays null): darwin never arming at all, or arming but verifying against
+  // the wrong (win32) slack — either regression turns this RED.
+  {
+    const host = new CaptureRowDarwinHost(mkEvents());
+    const t0 = Date.now();
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: t0 + 500 };
+    host.spawn(spawnOpts("sess-capture-darwin-posix-slack"));
+    await host.lastCapturePromise;
+    check("(v) forced-darwin spawn: captureRootCreationRow WAS called (darwin arms, same as win32)",
+      host.capturedPids.length === 1 && host.capturedPids[0] === 4242);
+    check("(v) forced-darwin spawn: a +500ms row is ACCEPTED (verified against the POSIX 1000ms slack, not win32's 2ms)",
+      host.captureLiveRef("sess-capture-darwin-posix-slack")?.creationTime === t0 + 500);
+  }
+  // (v, negative control) the SAME +500ms delta, but forcing win32 instead — proves the row genuinely
+  // WOULD be rejected under the tighter slack, so (v)'s acceptance isn't vacuous (a slack so wide it
+  // accepts everything would pass (v) for the wrong reason).
+  {
+    class CaptureRowWin32Host extends createSeamHost(PtyHost) {
+      resolveRootReapPlatform() { return "win32"; }
+      nextRow = null;
+      captureRootCreationRow(_pid) { this.lastCapturePromise = Promise.resolve(this.nextRow); return this.lastCapturePromise; }
+    }
+    const host = new CaptureRowWin32Host(mkEvents());
+    const t0 = Date.now();
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: t0 + 500 };
+    host.spawn(spawnOpts("sess-capture-win32-rejects-500ms"));
+    await host.lastCapturePromise;
+    check("(v, negative control) the SAME +500ms row IS rejected under the win32 (2ms) slack",
+      host.captureLiveRef("sess-capture-win32-rejects-500ms")?.creationTime === null);
+  }
 }
 
 // =======================================================================================================

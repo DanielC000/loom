@@ -88,11 +88,17 @@ tightening the second-granular comparison further — it cannot be tightened pas
 
 ## Why the whole `else` catch-all, not a literal `"darwin"` check
 
-The `ps -p <pid> -o pid=,ppid=,lstart=` mechanism depends on nothing darwin-specific — any non-Linux POSIX
-that reaches `enumerateProcessesPosix`'s `ps`-fallback branch (today: darwin, or a Linux host sandboxed away
-from `/proc`) gets the same fix. Scoping to literal `"darwin"` would leave a hypothetical other POSIX
-platform on the still-defective `owner.startedAt` comparison for no benefit — the existing buggy code was
-never darwin-literal either (it was already the generic `else`).
+The `ps -p <pid> -o pid=,ppid=,lstart=` mechanism depends on nothing darwin-specific — `verifyRootDeadOrForceKill`
+routes PURELY on `resolveRootReapPlatform()` (ultimately `process.platform`), never on whether an
+enumeration actually succeeded, so a Linux host ALWAYS takes the Linux ticks branch regardless of whether
+`/proc` itself is reachable — it never falls through to this `else` branch, sandboxed or not. (A Linux host
+without `/proc` DOES fall back to the `ps`-based `enumerateProcessesPosixViaPs` for its general
+`WorktreeProcess` LISTING, but `verifyRootDeadOrForceKill`'s own platform routing is independent of that —
+it would still take the Linux-ticks branch and correctly refuse as "unreadable" there, since the ps fallback
+never populates `creationTicks`.) The `else` branch is reached only by a REAL non-Linux, non-win32
+`process.platform` — today: darwin, or a hypothetical other BSD-like POSIX. Scoping to literal `"darwin"`
+would leave that hypothetical platform on the still-defective `owner.startedAt` comparison for no benefit —
+the existing buggy code was never darwin-literal either (it was already the generic `else`).
 
 ## Unverified: no macOS host available
 
@@ -105,6 +111,18 @@ non-darwin hosts (same convention that win32 test uses for non-win32) — **it h
 a real macOS host as part of this change.** The fail direction if any of these assumptions is wrong is
 always toward MORE `identity:"unreadable"` refusals, never toward a wrong kill (every null/parse-failure
 path refuses) — but this is a disclosed gap, not a proven one.
+
+**The core premise this whole fix rests on, also unverified**: that darwin's `lstart` is the kernel's own
+STORED process-start time (`p_start`, read directly off the process table), never RECOMPUTED from a
+boot-time anchor at query time. This fix's entire reasoning — "two reads of the same still-alive pid's
+`lstart` are the identical string" — depends on it being a stored, immutable value. If it were instead
+recomputed on each `ps` invocation (the way Linux's OLD, now-retired ms-epoch arithmetic recomputed
+`creationTime` fresh via `Date.now() - uptime` at every check — see `2897acc4` round 4, item 2, the exact
+defect class this whole card family exists to fix), a wall-clock step between the at-spawn capture and the
+verify-time read would reproduce the SAME false-mismatch bug this card closes, just one layer down. BSD/
+Darwin's `lstart` is understood to be the stored `p_starttime`/`p_start` (a kqueue/sysctl-exposed field, not
+derived from boot time + elapsed), consistent with every POSIX `ps` implementation's documented behavior —
+but this was never independently confirmed against a real darwin kernel as part of this card.
 
 ## Do not
 

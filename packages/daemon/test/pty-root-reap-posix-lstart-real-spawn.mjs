@@ -45,7 +45,7 @@ requireHermeticEnv();
 
 const {
   enumeratePosixSweepRowForPid, checkRootSurvival, resolveVerifiedRootCreationTime,
-  POSIX_CREATION_TIME_MATCH_TOLERANCE_MS,
+  POSIX_CREATION_TIME_MATCH_TOLERANCE_MS, POSIX_ROOT_CREATION_CAPTURE_SLACK_MS,
 } = await import("../dist/pty/host.js");
 
 try {
@@ -66,16 +66,20 @@ try {
     // DISCLOSURE above).
     check("[enumeratePosixSweepRowForPid] the row's ppid is THIS process's own pid (the predicate's anchor)", row?.ppid === process.pid);
 
-    const verified = resolveVerifiedRootCreationTime(row, process.pid, startedAt);
+    // card a19fbad3 (CR on bf58c19c) — pass PRODUCTION's actual POSIX slack explicitly; the win32 default
+    // (2ms) this function falls back to without a 4th argument is NOT what `armRootCreationTime` uses on
+    // this platform, and asserting against the wrong slack would prove nothing about the real behavior.
+    const verified = resolveVerifiedRootCreationTime(row, process.pid, startedAt, POSIX_ROOT_CREATION_CAPTURE_SLACK_MS);
     check("[resolveVerifiedRootCreationTime] the real predicate POSITIVELY IDENTIFIES the genuine root (non-null)", verified !== null);
     check("[resolveVerifiedRootCreationTime] the accepted value equals the row's own creationTime exactly", verified === row?.creationTime);
     // Negative controls, same real row: a WRONG expected ppid, and a `startedAt` well BEFORE the row's own
     // creationTime (the row is "too late" relative to it) — neither may be partially trusted.
     check("[resolveVerifiedRootCreationTime, negative control] a wrong expected ppid against the SAME real row is rejected (null)",
-      resolveVerifiedRootCreationTime(row, process.pid + 1, startedAt) === null);
+      resolveVerifiedRootCreationTime(row, process.pid + 1, startedAt, POSIX_ROOT_CREATION_CAPTURE_SLACK_MS) === null);
     if (row?.creationTime != null) {
+      // Past the POSIX slack (1000ms default), not just the win32 one — 10s safely exceeds either.
       check("[resolveVerifiedRootCreationTime, negative control] a row later than startedAt+slack (too late) against the SAME real row is rejected (null)",
-        resolveVerifiedRootCreationTime(row, process.pid, row.creationTime - 10_000) === null);
+        resolveVerifiedRootCreationTime(row, process.pid, row.creationTime - 10_000, POSIX_ROOT_CREATION_CAPTURE_SLACK_MS) === null);
     }
 
     // [THE FIX] cross-check the single-pid capture query's own reported creationTime against
