@@ -34,10 +34,11 @@ process.env.LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS = "150";
 
 const {
   PtyHost, commandLineMatchesSession,
-  parsePsLstartTimestamp, parsePsPidLstartCommandLine, parseProcStatStarttimeTicks, parseProcUptimeSeconds,
+  parsePsLstartTimestamp, parsePsPidLstartCommandLine, parsePsPidPpidLstartLine, parseProcStatStarttimeTicks, parseProcUptimeSeconds,
   linuxStartTicksConsistent, computeOrphanSweepPlan, parseWin32SweepTicks, parseOrphanSweepLine,
   CREATION_TIME_SLACK_MS, ROOT_CREATION_MATCH_TOLERANCE_MS, ROOT_CREATION_CAPTURE_SLACK_MS,
   ROOT_CREATION_CAPTURE_AWAIT_MS, resolveVerifiedRootCreationTime, isHelperPidCollision,
+  POSIX_ROOT_CREATION_CAPTURE_SLACK_MS, POSIX_CREATION_TIME_MATCH_TOLERANCE_MS,
 } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
@@ -428,41 +429,108 @@ try {
   }
 
   // ===================================================================================================
-  // Scenario 9d (card 64d7a914 — the gap this card found: no prior test forced mac/other-POSIX through
-  // guard 2 at all; scenarios 8/9 above always ran on this host's real platform, win32, which now takes
-  // the DIFFERENT verified-creationTime branch). Forces "darwin" via platformOverride, mirroring how
-  // scenarios 11-13 force "linux" below — proves mac is UNCHANGED: still `owner.startedAt +
-  // CREATION_TIME_SLACK_MS`, never the win32 verified-creationTime comparison (owner carries no
-  // creationTime/creationTimeReady at all here — mac never arms them per 87691385).
+  // Scenario 9d (card bf58c19c — FIXES the defect this scenario used to prove unchanged: mac/other
+  // non-Linux POSIX now compares the VERIFIED at-spawn `owner.creationTime` against the fresh
+  // `check.creationTime` — the SAME `lstart` attribute, forced UTC/C-locale so an exact match is
+  // correct — never `owner.startedAt` (a DIFFERENT clock read at a DIFFERENT instant; an NTP/VM clock
+  // step between spawn and check could desync that comparison for the genuinely-same, still-alive
+  // process — exactly the false "mismatch" this card fixes). Forces "darwin" via platformOverride,
+  // mirroring scenarios 8/9/9b/9c's own win32 shape, plus the ppid cross-check that branch doesn't need.
   // ===================================================================================================
   {
-    const host = new ControllableHost(events);
-    host.platformOverride = "darwin";
-    const SID = "sess-mac-creation-time-mismatch";
-    const PID = 66676;
-    const owner = { pid: PID, startedAt: Date.now() - 100_000 };
-    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: Date.now() }]; // "created" just now — long after our spawn
-    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
-    check("(9d) mac, creationTime long after spawn: NOT killed (unchanged 5s-slack path)", host.killedPids.length === 0);
-    check("(9d) mac mismatch: identity 'mismatch'", result.identity === "mismatch" && result.dead === false);
-    check("(9d) event reason is 'creation-time-mismatch'", survivedEvents.at(-1).reason === "creation-time-mismatch");
-  }
-  {
-    // (9d, negative control) mac, creationTime WITHIN the 5s slack of startedAt — kill proceeds, proving
-    // CREATION_TIME_SLACK_MS still governs mac, unchanged by this card.
+    // (9d) mac, verified capture agrees EXACTLY with the fresh check (same lstart, same ppid) — kill proceeds.
     const host = new ControllableHost(events);
     host.platformOverride = "darwin";
     const SID = "sess-mac-creation-time-ok";
-    const PID = 66677;
-    const spawnedAt = Date.now() - 100_000;
-    const owner = { pid: PID, startedAt: spawnedAt };
+    const PID = 66676;
+    const VERIFIED_CREATION_TIME = Date.now() - 100_000;
+    const owner = { pid: PID, startedAt: VERIFIED_CREATION_TIME - 5, creationTime: VERIFIED_CREATION_TIME, creationTimeReady: Promise.resolve() };
     host.nextChecks = [
-      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: spawnedAt + 50 },
+      { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: VERIFIED_CREATION_TIME, ppid: process.pid },
       { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null },
     ];
     const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
-    check("(9d, negative control) mac, within slack: killRoot WAS called", host.killedPids.length === 1 && host.killedPids[0] === PID);
-    check("(9d, negative control) mac, within slack: forceKilled + dead", result.forceKilled === true && result.dead === true);
+    check("(9d) mac, exact agreement + matching ppid: killRoot WAS called", host.killedPids.length === 1 && host.killedPids[0] === PID);
+    check("(9d) mac, exact agreement: result reports forceKilled + dead, identity 'confirmed'", result.forceKilled === true && result.dead === true && result.identity === "confirmed");
+  }
+  {
+    // (9d, negative control) mac, creationTime disagrees by just past the exact-match tolerance (0ms,
+    // unlike win32's cross-source 1ms — card bf58c19c) — NOT killed, identity 'mismatch'. This is exactly
+    // the shape the OLD `owner.startedAt`-based comparison could not reliably catch across an NTP/VM
+    // clock step (see this scenario's own RED proof in docs/decisions/bf58c19c-*.md).
+    const host = new ControllableHost(events);
+    host.platformOverride = "darwin";
+    const SID = "sess-mac-creation-time-mismatch";
+    const PID = 66677;
+    const VERIFIED_CREATION_TIME = Date.now() - 100_000;
+    const owner = { pid: PID, startedAt: VERIFIED_CREATION_TIME - 5, creationTime: VERIFIED_CREATION_TIME, creationTimeReady: Promise.resolve() };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: VERIFIED_CREATION_TIME + POSIX_CREATION_TIME_MATCH_TOLERANCE_MS + 1, ppid: process.pid }];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9d, negative control) mac, disagreement past tolerance: NOT killed", host.killedPids.length === 0);
+    check("(9d, negative control) mac, disagreement past tolerance: identity 'mismatch'", result.identity === "mismatch" && result.dead === false);
+    check("(9d, negative control) event reason is 'creation-time-mismatch'", survivedEvents.at(-1).reason === "creation-time-mismatch");
+  }
+  {
+    // (9d2) mac, owner.creationTime never verified (the at-spawn capture failed or its row didn't verify)
+    // — refuse "unreadable", never fall through to a guessed kill or a false "mismatch" (DoD point 2).
+    const host = new ControllableHost(events);
+    host.platformOverride = "darwin";
+    const SID = "sess-mac-owner-creation-time-null";
+    const PID = 66678;
+    const owner = { pid: PID, startedAt: Date.now() - 100_000, creationTime: null, creationTimeReady: Promise.resolve() };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: Date.now(), ppid: process.pid }];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9d2) mac, owner.creationTime null: NOT killed", host.killedPids.length === 0);
+    check("(9d2) mac, owner.creationTime null: identity 'unreadable'", result.identity === "unreadable" && result.dead === false);
+    check("(9d2) event reason is 'owner-creation-time-unavailable'", survivedEvents.at(-1).reason === "owner-creation-time-unavailable");
+  }
+  {
+    // (9d3, negative control for 9d2) mac, the OCCUPANT's creationTime is null — a legitimate per-pid `ps`
+    // read failure (unlike win32's CIM anomaly, this is EXPECTED on POSIX) — refuse "unreadable" too, but
+    // via the distinct 'creation-time-missing' reason (occupant-side, not owner-side).
+    const host = new ControllableHost(events);
+    host.platformOverride = "darwin";
+    const SID = "sess-mac-check-creation-time-null";
+    const PID = 66679;
+    const VERIFIED_CREATION_TIME = Date.now() - 100_000;
+    const owner = { pid: PID, startedAt: VERIFIED_CREATION_TIME - 5, creationTime: VERIFIED_CREATION_TIME, creationTimeReady: Promise.resolve() };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: null, ppid: process.pid }];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9d3) mac, occupant creationTime null: NOT killed", host.killedPids.length === 0);
+    check("(9d3) mac, occupant creationTime null: identity 'unreadable'", result.identity === "unreadable" && result.dead === false);
+    check("(9d3) event reason is 'creation-time-missing'", survivedEvents.at(-1).reason === "creation-time-missing");
+  }
+  {
+    // (9d4, the stated residual's own guard, missing-data leg) mac, the occupant's ppid is UNAVAILABLE —
+    // the ppid cross-check must fail CLOSED on missing data too, never fall through to the exact-match
+    // comparison alone.
+    const host = new ControllableHost(events);
+    host.platformOverride = "darwin";
+    const SID = "sess-mac-ppid-missing";
+    const PID = 66682;
+    const VERIFIED_CREATION_TIME = Date.now() - 100_000;
+    const owner = { pid: PID, startedAt: VERIFIED_CREATION_TIME - 5, creationTime: VERIFIED_CREATION_TIME, creationTimeReady: Promise.resolve() };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: VERIFIED_CREATION_TIME, ppid: null }];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9d4) mac, occupant ppid missing: NOT killed", host.killedPids.length === 0);
+    check("(9d4) mac, occupant ppid missing: identity 'unreadable'", result.identity === "unreadable" && result.dead === false);
+  }
+  {
+    // (9d5, negative control for 9d4 — and the proof the ppid cross-check is load-bearing, not vacuous
+    // alongside the exact-match check) mac, creationTime agrees EXACTLY but the occupant's ppid belongs to
+    // a DIFFERENT parent — MUST refuse as 'mismatch'. This is the residual the ppid check narrows (a
+    // same-second reuse under the SAME parent would still slip through — stated, not closed, in the record).
+    const host = new ControllableHost(events);
+    host.platformOverride = "darwin";
+    const SID = "sess-mac-ppid-mismatch";
+    const PID = 66683;
+    const VERIFIED_CREATION_TIME = Date.now() - 100_000;
+    const owner = { pid: PID, startedAt: VERIFIED_CREATION_TIME - 5, creationTime: VERIFIED_CREATION_TIME, creationTimeReady: Promise.resolve() };
+    host.nextChecks = [{ foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: VERIFIED_CREATION_TIME, ppid: process.pid + 1 }];
+    const result = await host.verifyRootDeadOrForceKill(SID, PID, "hard-stop", owner);
+    check("(9d5) mac, ppid mismatch despite exact creationTime agreement: NOT killed", host.killedPids.length === 0);
+    check("(9d5) mac, ppid mismatch: identity 'mismatch' (our tracked predecessor is gone; the pid is occupied by something else)", result.identity === "mismatch" && result.dead === false);
+    check("(9d5) event reason is 'creation-time-mismatch'", survivedEvents.at(-1).reason === "creation-time-mismatch");
   }
 
   // ===================================================================================================
@@ -697,16 +765,37 @@ try {
   check("[parseProcUptimeSeconds] realistic /proc/uptime content", parseProcUptimeSeconds("12345.67 54321.00\n") === 12345.67);
   check("[parseProcUptimeSeconds, negative control] malformed content: null", parseProcUptimeSeconds("not-a-number") === null);
 
-  // parsePsLstartTimestamp: BSD/GNU `ps`'s ctime-style lstart string.
-  const lstartMs = parsePsLstartTimestamp("Wed Oct  7 05:25:48 2026");
-  check("[parsePsLstartTimestamp] a real lstart-shaped string parses to a finite epoch-ms", Number.isFinite(lstartMs) && lstartMs > 0);
+  // parsePsLstartTimestamp: BSD/GNU `ps`'s ctime-style lstart string (card bf58c19c — now constructed
+  // deterministically via Date.UTC, never Date.parse of the bare string).
+  {
+    const lstartMs = parsePsLstartTimestamp("Wed Oct  7 05:25:48 2026");
+    check("[parsePsLstartTimestamp] a real lstart-shaped string parses to the EXACT UTC instant (never a guessed/local-TZ value)",
+      lstartMs === Date.UTC(2026, 9, 7, 5, 25, 48)); // month is 0-indexed: 9 === October
+  }
   check("[parsePsLstartTimestamp, negative control] garbage text: null", parsePsLstartTimestamp("not a date at all") === null);
   check("[parsePsLstartTimestamp, negative control] empty string: null", parsePsLstartTimestamp("") === null);
-
-  // parsePsPidLstartCommandLine: the full `ps -axwwo pid=,lstart=,command=` line shape.
+  check("[parsePsLstartTimestamp, negative control] a bad month abbreviation: null", parsePsLstartTimestamp("Wed Xxx  7 05:25:48 2026") === null);
+  // (card bf58c19c) the whole reason to construct via Date.UTC instead of Date.parse: a wall-clock hour
+  // that's AMBIGUOUS under local-TZ DST (US fall-back, Nov 2 2025 01:30 local happens TWICE) must still
+  // resolve to exactly ONE, deterministic UTC instant — Date.parse of the bare string has no such guarantee
+  // (it's whatever the CALLING process's own local TZ says), but Date.UTC construction never consults any
+  // TZ at all, so this is immune by construction, not by coincidence.
   {
-    const r = parsePsPidLstartCommandLine("  1234 Wed Oct  7 05:25:48 2026 /usr/bin/node /path/to/hook-relay.mjs abc 1234 tok");
+    const ambiguousMs = parsePsLstartTimestamp("Sun Nov  2 01:30:00 2025");
+    check("[parsePsLstartTimestamp] a DST-fall-back-ambiguous local hour still resolves to the single UTC instant",
+      ambiguousMs === Date.UTC(2025, 10, 2, 1, 30, 0));
+    // Re-parsing the SAME string twice must produce the IDENTICAL value — the "same process, same lstart
+    // string, same ms" equivalence card bf58c19c's whole exact-match comparison depends on.
+    check("[parsePsLstartTimestamp] parsing the same string twice is deterministic (no hidden state/TZ dependency)",
+      parsePsLstartTimestamp("Sun Nov  2 01:30:00 2025") === ambiguousMs);
+  }
+
+  // parsePsPidLstartCommandLine: the full `ps -axwwo pid=,ppid=,lstart=,command=` line shape (card
+  // bf58c19c added the ppid column).
+  {
+    const r = parsePsPidLstartCommandLine("  1234 1 Wed Oct  7 05:25:48 2026 /usr/bin/node /path/to/hook-relay.mjs abc 1234 tok");
     check("[parsePsPidLstartCommandLine] pid parsed", r?.pid === 1234);
+    check("[parsePsPidLstartCommandLine] ppid parsed", r?.ppid === 1);
     check("[parsePsPidLstartCommandLine] creationTime parsed from the lstart sub-field", Number.isFinite(r?.creationTime) && r.creationTime > 0);
     check("[parsePsPidLstartCommandLine] commandLine is everything AFTER the lstart sub-field, not before",
       r?.commandLine === "/usr/bin/node /path/to/hook-relay.mjs abc 1234 tok");
@@ -714,14 +803,33 @@ try {
   // (negative control, round 3's own fail-open discipline) an lstart sub-field that doesn't parse must
   // NEVER drop the row — it degrades to creationTime:null with the WHOLE remainder folded into commandLine.
   {
-    const r = parsePsPidLstartCommandLine("5678 not-a-valid-lstart-format /bin/bash -c something");
-    check("[parsePsPidLstartCommandLine, negative control] an unparseable lstart sub-field does NOT drop the row", r !== null && r?.pid === 5678);
+    const r = parsePsPidLstartCommandLine("5678 1 not-a-valid-lstart-format /bin/bash -c something");
+    check("[parsePsPidLstartCommandLine, negative control] an unparseable lstart sub-field does NOT drop the row", r !== null && r?.pid === 5678 && r?.ppid === 1);
     check("[parsePsPidLstartCommandLine, negative control] creationTime degrades to null (never dropped, never guessed)", r?.creationTime === null);
     check("[parsePsPidLstartCommandLine, negative control] the WHOLE remainder (incl. the unparsed lstart text) survives as commandLine",
       r?.commandLine === "not-a-valid-lstart-format /bin/bash -c something");
   }
-  check("[parsePsPidLstartCommandLine, negative control] a line with no leading pid at all: null",
+  check("[parsePsPidLstartCommandLine, negative control] a line with no leading pid+ppid pair at all: null",
     parsePsPidLstartCommandLine("not a ps line") === null);
+  check("[parsePsPidLstartCommandLine, negative control] a pid with no ppid column at all: null (mirrors parseOrphanSweepLine's own win32 shape)",
+    parsePsPidLstartCommandLine("1234 Wed Oct  7 05:25:48 2026 /usr/bin/node") === null);
+
+  // parsePsPidPpidLstartLine (card bf58c19c): the single-pid `ps -p <pid> -o pid=,ppid=,lstart=` capture
+  // line shape — no `command` column at all, returning the generic OrphanSweepRow shape.
+  {
+    const r = parsePsPidPpidLstartLine("  1234 1 Wed Oct  7 05:25:48 2026");
+    check("[parsePsPidPpidLstartLine] pid parsed", r?.pid === 1234);
+    check("[parsePsPidPpidLstartLine] ppid parsed", r?.ppid === 1);
+    check("[parsePsPidPpidLstartLine] creationTime parsed to the exact UTC instant", r?.creationTime === Date.UTC(2026, 9, 7, 5, 25, 48));
+  }
+  {
+    // (negative control) an unparseable lstart degrades to creationTime:null, never drops the row.
+    const r = parsePsPidPpidLstartLine("5678 1 not-a-valid-lstart-format");
+    check("[parsePsPidPpidLstartLine, negative control] unparseable lstart does NOT drop the row", r !== null && r?.pid === 5678 && r?.ppid === 1);
+    check("[parsePsPidPpidLstartLine, negative control] creationTime degrades to null", r?.creationTime === null);
+  }
+  check("[parsePsPidPpidLstartLine, negative control] no leading pid+ppid pair at all: null",
+    parsePsPidPpidLstartLine("not a ps line") === null);
 }
 
 // =======================================================================================================
@@ -965,6 +1073,19 @@ try {
     const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: STARTED_AT + ROOT_CREATION_CAPTURE_SLACK_MS };
     const result = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
     check("(o, boundary) exactly at the capture slack boundary: still accepted", result === STARTED_AT + ROOT_CREATION_CAPTURE_SLACK_MS);
+  }
+
+  // (o2, card bf58c19c) the POSIX slack is a DIFFERENT, wider constant than win32's — a delta that would
+  // be rejected under the win32 default is accepted when the caller explicitly passes
+  // POSIX_ROOT_CREATION_CAPTURE_SLACK_MS (1000ms), proving the two are not silently interchangeable.
+  {
+    const posixDelta = ROOT_CREATION_CAPTURE_SLACK_MS + 50; // past the win32 default, within the POSIX one
+    check("(o2) setup: this delta would be rejected under the win32 default slack", posixDelta > ROOT_CREATION_CAPTURE_SLACK_MS);
+    const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: STARTED_AT + posixDelta };
+    const rejectedUnderWin32Default = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
+    check("(o2) that same delta IS rejected under the win32 default slack", rejectedUnderWin32Default === null);
+    const acceptedUnderPosixSlack = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT, POSIX_ROOT_CREATION_CAPTURE_SLACK_MS);
+    check("(o2) the POSIX slack accepts the same row the win32 default rejected", acceptedUnderPosixSlack === STARTED_AT + posixDelta);
   }
 
   // (p, negative control) no row at all (enumeration found nothing, e.g. already dead) — null, never throws.

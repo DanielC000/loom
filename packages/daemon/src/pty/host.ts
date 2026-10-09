@@ -1555,6 +1555,18 @@ export const ROOT_CREATION_MATCH_TOLERANCE_MS = Number(process.env.LOOM_ROOT_CRE
 export const ROOT_CREATION_CAPTURE_AWAIT_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS) || 3_000;
 
 /**
+ * @decision bf58c19c — NOT the win32 slack (`ROOT_CREATION_CAPTURE_SLACK_MS`, 2ms): `ps`'s `lstart` is
+ * only second-granular and may round rather than floor. Never tighten without re-reading the record.
+ */
+export const POSIX_ROOT_CREATION_CAPTURE_SLACK_MS = Number(process.env.LOOM_POSIX_ROOT_CREATION_CAPTURE_SLACK_MS) || 1_000;
+
+/**
+ * @decision bf58c19c — exact match is correct ONLY because both reads are forced UTC/C-locale and parsed
+ * deterministically; never reuse `ROOT_CREATION_MATCH_TOLERANCE_MS` here (that one is cross-source).
+ */
+export const POSIX_CREATION_TIME_MATCH_TOLERANCE_MS = Number(process.env.LOOM_POSIX_CREATION_TIME_MATCH_TOLERANCE_MS) || 0;
+
+/**
  * Settle window for `interruptForRedirect`: after writing the single Esc that cancels a busy worker's
  * in-flight generation, wait this long for the engine to unwind back to an idle prompt before we
  * SYNCHRONOUSLY clear the (now stale) busy and drain the freshly-enqueued redirect as the next turn. An
@@ -2719,11 +2731,13 @@ interface Live {
   // @decision 2897acc4 — this pid's own /proc/<pid>/stat `starttime` (boot-relative ticks), captured
   // async right after spawn; null until resolved, or always off-Linux. See verifyRootDeadOrForceKill's own doc.
   startTicksLinux: number | null;
-  // @decision 87691385 — the pid's own OS-reported creation time (epoch-ms, win32-only), captured async
-  // right after spawn; never `startedAt` — unknown (`null`) must fail an abort decision CLOSED, not open.
+  // @decision 87691385 — the pid's own OS-reported creation time (epoch-ms; win32 CIM, or POSIX `ps`
+  // elsewhere except Linux), captured async right after spawn; never `startedAt` — unknown (`null`) must
+  // fail an abort decision CLOSED, not open.
   creationTime: number | null;
   // @decision 2897acc4 — resolves once `creationTime` is settled; never rejects. A pre-resolved stub at
-  // construction, replaced with the real in-flight capture by `armWin32RootCreationTime` (win32 only).
+  // construction, replaced with the real in-flight capture by `armRootCreationTime` (every platform
+  // except Linux).
   creationTimeReady: Promise<void>;
   logStream: fs.WriteStream;
   // Flips true the first time logStream emits 'error' (see attachLogErrorGuard) — degrades THIS
@@ -4681,6 +4695,9 @@ export interface WorktreeProcess {
   /** @decision 2897acc4 — boot-relative ticks, Linux `/proc/<pid>/stat` only; `null` elsewhere (win32,
    *  the macOS/`/proc`-less `ps` fallback). See `Live.startTicksLinux`'s own doc for why this, not `creationTime`, is what Linux's guard 2 actually compares. */
   creationTicks: number | null;
+  /** @decision bf58c19c — populated ONLY by the macOS/POSIX `ps` fallback (the sole consumer); `null`
+   *  elsewhere (win32 CIM, Linux `/proc`), same per-platform-as-used posture as `creationTicks` above. */
+  ppid: number | null;
 }
 
 /** Injectable process lister for {@link reapProcessesRootedInWorktree} (defaults to the real OS
@@ -4722,28 +4739,50 @@ export function processRootedInWorktree(proc: WorktreeProcess, worktreePath: str
   return matches(proc.exePath) || matches(proc.cwd) || matches(proc.commandLine);
 }
 
-/** @decision 2897acc4 — `ps`'s `lstart` ctime-style string parses via `Date.parse` under the default
- *  (English) locale; best-effort/locale-fragile by nature, `null` (never a guess) on anything else. See
- *  the record for the exact format assumed. Exported for a hermetic unit test. */
+/** @decision bf58c19c — constructs via `Date.UTC(...)`, never `Date.parse` of the bare string: `Date.parse`
+ *  reads a timezone-less string in the CALLING process's own local TZ, not the spawned `ps` child's
+ *  `TZ=UTC`, and is ambiguous across a DST transition. `null` on anything that doesn't match. */
 export function parsePsLstartTimestamp(raw: string): number | null {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const ms = Date.parse(trimmed);
+  const m = /^[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(trimmed);
+  if (!m) return null;
+  const monthIdx = PS_LSTART_MONTH_ABBR.indexOf(m[1] ?? "");
+  if (monthIdx === -1) return null;
+  const ms = Date.UTC(Number(m[6]), monthIdx, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
   return Number.isNaN(ms) ? null : ms;
 }
 
-/** @decision 2897acc4 — parses ONE `ps -axwwo pid=,lstart=,command=` line. NEVER drops a row for failing
- *  to parse the `lstart` sub-field (sha:16b7c38c's fail-open family: a dropped row could hide a real
- *  survivor) — degrades to `creationTime:null` instead. Hermetic-test-exported. */
-export function parsePsPidLstartCommandLine(line: string): { pid: number; creationTime: number | null; commandLine: string } | null {
-  const outer = /^\s*(\d+)\s+(.*)$/.exec(line);
+/** @decision bf58c19c — `Date.UTC`'s own month index order; `lstart`'s C-locale 3-letter abbreviation is
+ *  looked up against this, never a locale-dependent parse. */
+const PS_LSTART_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** @decision 2897acc4 — parses ONE `ps -axwwo pid=,ppid=,lstart=,command=` line. NEVER drops a row for
+ *  failing to parse the `lstart` sub-field (sha:16b7c38c's fail-open family) — degrades to
+ *  `creationTime:null` instead. A missing/non-numeric leading pid+ppid pair DOES drop the row. */
+export function parsePsPidLstartCommandLine(line: string): { pid: number; ppid: number; creationTime: number | null; commandLine: string } | null {
+  const outer = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
   if (!outer) return null;
   const pid = Number(outer[1]);
-  const rest = outer[2] ?? "";
+  const ppid = Number(outer[2]);
+  const rest = outer[3] ?? "";
   const inner = /^([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(rest);
-  if (!inner) return { pid, creationTime: null, commandLine: rest };
-  return { pid, creationTime: parsePsLstartTimestamp(inner[1] ?? ""), commandLine: inner[2] ?? "" };
+  if (!inner) return { pid, ppid, creationTime: null, commandLine: rest };
+  return { pid, ppid, creationTime: parsePsLstartTimestamp(inner[1] ?? ""), commandLine: inner[2] ?? "" };
 }
+
+/** @decision bf58c19c — single-pid counterpart to {@link parsePsPidLstartCommandLine} (no `command`
+ *  column), returning the generic `OrphanSweepRow` shape so this capture reuses win32's OWN
+ *  `resolveVerifiedRootCreationTime`, never a duplicate verification. */
+export function parsePsPidPpidLstartLine(line: string): OrphanSweepRow | null {
+  const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+  if (!m) return null;
+  return { pid: Number(m[1]), ppid: Number(m[2]), creationTime: parsePsLstartTimestamp((m[3] ?? "").trim()) };
+}
+
+/** @decision bf58c19c — both the general fallback enumeration (below) and the at-spawn single-pid capture
+ *  ({@link enumeratePosixSweepRowForPid}) spawn `ps` with this SAME forced env — one source, never
+ *  hand-copied, or the two reads could silently stop being the same clock domain (see the record). */
+const POSIX_PS_UTC_ENV = { ...process.env, TZ: "UTC", LC_ALL: "C" };
 
 /** @decision 2897acc4 — `/proc`-less POSIX (macOS) falls back to `ps`, never silently returns `[]`
  *  (that used to read identical to "everything confirmed gone" — the sha:16b7c38c silent-collapse).
@@ -4757,10 +4796,14 @@ export function parsePsPidLstartCommandLine(line: string): { pid: number; creati
  * requests `lstart` (M1) so `creationTime` is populated on this platform too, via
  * {@link parsePsPidLstartCommandLine} — previously `null` unconditionally, leaving `verifyRootDeadOrForceKill`'s
  * guard 2 a permanent no-op here.
+ *
+ * @decision bf58c19c — also now requests `ppid` and forces `TZ=UTC`/`LC_ALL=C` ({@link POSIX_PS_UTC_ENV}),
+ * matching {@link enumeratePosixSweepRowForPid}'s at-spawn capture — never read `lstart` here without
+ * that forced env, or the two reads stop being the same, exact-match-comparable clock domain.
  */
 async function enumerateProcessesPosixViaPs(timeoutMs: number): Promise<WorktreeProcess[]> {
   return new Promise((resolve, reject) => {
-    const cmd = spawnProcess("ps", ["-axwwo", "pid=,lstart=,command="], { stdio: ["ignore", "pipe", "pipe"] });
+    const cmd = spawnProcess("ps", ["-axwwo", "pid=,ppid=,lstart=,command="], { stdio: ["ignore", "pipe", "pipe"], env: POSIX_PS_UTC_ENV });
     let out = "";
     let errOut = "";
     let settled = false;
@@ -4781,7 +4824,7 @@ async function enumerateProcessesPosixViaPs(timeoutMs: number): Promise<Worktree
       for (const line of out.split("\n")) {
         const parsed = parsePsPidLstartCommandLine(line);
         if (!parsed) continue;
-        procs.push({ pid: parsed.pid, exePath: null, cwd: null, commandLine: parsed.commandLine || null, creationTime: parsed.creationTime, creationTicks: null });
+        procs.push({ pid: parsed.pid, ppid: parsed.ppid, exePath: null, cwd: null, commandLine: parsed.commandLine || null, creationTime: parsed.creationTime, creationTicks: null });
       }
       // A live host always has at least the `ps` process itself (mirrors sha:266afe3f's win32 reasoning)
       // — zero rows, or a non-zero exit with nothing parsed, is anomalous, never "nothing running".
@@ -4790,6 +4833,45 @@ async function enumerateProcessesPosixViaPs(timeoutMs: number): Promise<Worktree
         return;
       }
       finish(procs);
+    });
+  });
+}
+
+/** @decision bf58c19c — single-pid filtered counterpart to {@link enumerateProcessesPosixViaPs}, for the
+ *  at-spawn root-creation-time capture — mirrors win32's own {@link enumerateWin32SweepRowForPid} shape and
+ *  cost rationale (a filtered single-pid query, never a full-table scan, for both cost and capture-window
+ *  reasons). `null` on any failure/timeout/no-row — never thrown; `armRootCreationTime`'s own `.catch`
+ *  already treats a rejection as "unknown". Reuses {@link isHelperPidCollision} (same hazard: the OS could
+ *  hand this helper itself the just-freed `pid`). */
+export function enumeratePosixSweepRowForPid(pid: number, timeoutMs = 10_000): Promise<OrphanSweepRow | null> {
+  return new Promise((resolve, reject) => {
+    const cmd = spawnProcess("ps", ["-p", String(pid), "-o", "pid=,ppid=,lstart="], { stdio: ["ignore", "pipe", "ignore"], env: POSIX_PS_UTC_ENV });
+    if (cmd.pid != null && isHelperPidCollision(cmd.pid, pid)) {
+      try { cmd.kill(); } catch { /* best-effort */ }
+      resolve(null);
+      return;
+    }
+    let out = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { cmd.kill(); } catch { /* best-effort */ }
+      reject(new Error(`enumeratePosixSweepRowForPid: ps timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    cmd.stdout?.on("data", (d) => { out += d; });
+    cmd.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+    cmd.on("close", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const rows = out.split("\n").map(parsePsPidPpidLstartLine).filter((r): r is OrphanSweepRow => r !== null);
+      resolve(rows.find((r) => r.pid === pid) ?? null);
     });
   });
 }
@@ -4904,7 +4986,7 @@ async function enumerateProcessesPosix(timeoutMs: number): Promise<WorktreeProce
       creationTicks = parseProcStatStarttimeTicks(stat);
       if (creationTicks != null && bootTimeMs != null) creationTime = bootTimeMs + (creationTicks / LINUX_CLK_TCK) * 1000;
     } catch { /* gone/denied — creationTime/creationTicks stay null for this row */ }
-    if (exePath || cwd || commandLine) procs.push({ pid: Number(pidStr), exePath, cwd, commandLine, creationTime, creationTicks });
+    if (exePath || cwd || commandLine) procs.push({ pid: Number(pidStr), exePath, cwd, commandLine, creationTime, creationTicks, ppid: null });
   }));
   return procs;
 }
@@ -4942,6 +5024,7 @@ export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
     commandLine: (r["CommandLine"] as string | null) ?? null,
     creationTime: parseWin32CimDate(r["CreationDate"]),
     creationTicks: null, // ticks-domain reading is Linux-only; win32 uses the CIM CreationDate above
+    ppid: null, // only the macOS/POSIX ps fallback populates this today
   }));
 }
 
@@ -5146,6 +5229,9 @@ export interface RootSurvivalCheck {
   /** @decision 2897acc4 — the found row's own boot-relative ticks (see `WorktreeProcess.creationTicks`'s
    *  doc); `null` under the same conditions as `creationTime`, plus always off-Linux. */
   creationTicks: number | null;
+  /** @decision bf58c19c — the found row's own ppid (see `WorktreeProcess.ppid`'s doc); populated only by
+   *  the macOS/POSIX `ps` fallback, `null` elsewhere — used to cross-check a same-second lstart match. */
+  ppid: number | null;
 }
 
 /**
@@ -5181,11 +5267,11 @@ export async function checkRootSurvival(
       release();
     }
     const row = procs.find((p) => p.pid === rootPid);
-    if (!row) return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null, creationTicks: null };
-    return { foundAlive: true, identityConfirmed: commandLineMatchesSession(row.commandLine, sessionId), enumerationFailed: false, creationTime: row.creationTime, creationTicks: row.creationTicks };
+    if (!row) return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null, creationTicks: null, ppid: null };
+    return { foundAlive: true, identityConfirmed: commandLineMatchesSession(row.commandLine, sessionId), enumerationFailed: false, creationTime: row.creationTime, creationTicks: row.creationTicks, ppid: row.ppid };
   } catch (err) {
     console.error(`[pty-reap] root=${rootPid} sessionId=${sessionId}: survival-check enumeration FAILED — treating as unconfirmed, never killing on a failed check: ${(err as Error).message}`);
-    return { foundAlive: false, identityConfirmed: false, enumerationFailed: true, creationTime: null, creationTicks: null };
+    return { foundAlive: false, identityConfirmed: false, enumerationFailed: true, creationTime: null, creationTicks: null, ppid: null };
   }
 }
 
@@ -5838,7 +5924,7 @@ export class PtyHost {
     };
     this.live.set(opts.sessionId, live);
     armLinuxStartTicks(live);
-    this.armWin32RootCreationTime(live);
+    this.armRootCreationTime(live);
     // Card 019d2e7a — carry any attached viewer across the respawn. `findAnyLive` rather than `outgoing`
     // above: that one is deliberately `this.live`-only (it exists to clear claude-specific timers), while
     // a viewer can equally be sitting in a codex entry this session is respawning away from. Done after
@@ -6471,7 +6557,7 @@ export class PtyHost {
     };
     this.liveCodex.set(opts.sessionId, live);
     armLinuxStartTicks(live);
-    this.armWin32RootCreationTime(live);
+    this.armRootCreationTime(live);
     this.adoptSubscribers(previousLive, live); // card 019d2e7a — see spawn()'s own call site
     attachLogErrorGuard(opts.sessionId, live);
 
@@ -7511,26 +7597,31 @@ export class PtyHost {
 
   /** @decision 87691385 — injectable seam for the at-spawn root-creation-time capture's own OS query,
    *  same pattern as {@link probeRootSurvival}/{@link sweepOrphanedDescendants}. Defaults to the real,
-   *  filtered, single-pid lookup. */
+   *  filtered, single-pid lookup: win32 CIM, or POSIX `ps` elsewhere (see the next doc comment below). */
   protected captureRootCreationRow(pid: number): Promise<OrphanSweepRow | null> {
-    return enumerateWin32SweepRowForPid(pid);
+    return process.platform === "win32" ? enumerateWin32SweepRowForPid(pid) : enumeratePosixSweepRowForPid(pid);
   }
 
   /** @decision 87691385 — fire-and-forget; only a {@link resolveVerifiedRootCreationTime}-approved row
    *  is trusted. Always routed through {@link captureRootCreationRow}, so a test can drive this through
-   *  the real `spawn()` path. */
-  private armWin32RootCreationTime(live: Live | CodexLive): void {
-    if (process.platform !== "win32") return;
+   *  the real `spawn()` path.
+   *
+   * @decision bf58c19c — renamed from `armWin32RootCreationTime`: arms on every platform except Linux
+   * (own ticks mechanism, {@link armLinuxStartTicks}), selecting a platform-appropriate verification slack.
+   */
+  private armRootCreationTime(live: Live | CodexLive): void {
+    if (process.platform === "linux") return;
     // @decision 2897acc4 — replaces the construction-time `Promise.resolve()` stub with the real
-    // in-flight chain, so `verifyRootDeadOrForceKill`'s win32 guard-2 branch can await an in-flight
-    // capture (bounded) rather than reading a pre-resolution `null` as "unknown forever".
+    // in-flight chain, so `verifyRootDeadOrForceKill`'s guard-2 branch can await an in-flight capture
+    // (bounded) rather than reading a pre-resolution `null` as "unknown forever".
     //
     // CR 33ae2f8a (round 2, minor 4): every path that leaves `live.creationTime` null is logged, once,
     // under a single fixed, greppable tag — a silent null here is exactly what later reads as
     // "owner-creation-time-unavailable" at guard 2, with no way to tell a genuine capture failure from a
     // row the OS never produced.
+    const slackMs = process.platform === "win32" ? ROOT_CREATION_CAPTURE_SLACK_MS : POSIX_ROOT_CREATION_CAPTURE_SLACK_MS;
     live.creationTimeReady = this.captureRootCreationRow(live.pid).then((row) => {
-      const verified = resolveVerifiedRootCreationTime(row, process.pid, live.startedAt);
+      const verified = resolveVerifiedRootCreationTime(row, process.pid, live.startedAt, slackMs);
       live.creationTime = verified;
       if (verified == null) {
         const reason = row == null ? "no row found"
@@ -7618,10 +7709,13 @@ export class PtyHost {
       return { pid: rootPid, dead: false, identityConfirmed: null, forceKilled: false, checkFailed: true, identity: "unreadable" };
     }
     const owner = expectedOwner ?? this.findAnyLive(sessionId);
-    // @decision 2897acc4 — await an in-flight win32 capture BEFORE probing (closes a TOCTOU window
-    // measured at 1509ms, 0.82ms post-fix); skipped outright off win32 or once settled. Gated on
-    // `resolveRootReapPlatform()`, never raw `process.platform`, so this and guard 2 never disagree.
-    if (owner && this.resolveRootReapPlatform() === "win32" && owner.creationTime == null) {
+    // @decision 2897acc4 — await an in-flight capture BEFORE probing (closes a TOCTOU window measured at
+    // 1509ms, 0.82ms post-fix); skipped off Linux or once settled. Gated on `resolveRootReapPlatform()`,
+    // never raw `process.platform`, so this and guard 2 never disagree.
+    //
+    // @decision bf58c19c — widened from win32-only to "not Linux": POSIX now arms the same
+    // `creationTime`/`creationTimeReady` fields too, so this wait must cover it as well.
+    if (owner && this.resolveRootReapPlatform() !== "linux" && owner.creationTime == null) {
       // Nitpick 5 — the timer is NEVER unref'd: an unref'd timer can let the process exit before it ever
       // fires if nothing else is scheduled, permanently stranding this await (reproduced: a hermetic test
       // with nothing else pending hung on exactly this). `clearTimeout` below is what actually avoids
@@ -7731,13 +7825,38 @@ export class PtyHost {
         this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
         return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
       }
-    } else if (owner && check.creationTime != null && check.creationTime > owner.startedAt + CREATION_TIME_SLACK_MS) {
-      // eslint-disable-next-line no-console
-      console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the OS reports this pid created AFTER our own spawn (creationTime=${check.creationTime} > spawnedAt=${owner.startedAt}+slack) — NOT killing`);
-      // Round 3 (M5): "mismatch" — same correction as guard 1 above; our tracked predecessor is gone.
-      // mac/other-POSIX only now — win32 uses the verified owner.creationTime branch above instead.
-      this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
-      return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+    } else {
+      // @decision bf58c19c — darwin/other non-Linux POSIX: compares the verified at-spawn
+      // `owner.creationTime` against the fresh `check.creationTime` — the SAME `lstart` attribute, never
+      // `owner.startedAt` (a DIFFERENT clock at a DIFFERENT instant — the bug this card fixes).
+      if (owner.creationTime == null || check.creationTime == null) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but a creationTime is unavailable (owner=${owner.creationTime} occupant=${check.creationTime}) — NOT killing`);
+        const reason = owner.creationTime == null ? "owner-creation-time-unavailable" : "creation-time-missing";
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "unreadable", reason });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "unreadable" };
+      }
+      // @decision bf58c19c — `lstart`'s 1-second granularity means a same-second pid reuse could match
+      // the comparison above by coincidence. Requiring the occupant's ppid to equal OUR pid narrows this
+      // to "reused within the same second, under the same parent" — it does NOT fully close the hazard.
+      if (check.ppid == null) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the occupant's ppid is unavailable for the same-second cross-check — NOT killing`);
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "unreadable", reason: "creation-time-missing" });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "unreadable" };
+      }
+      if (check.ppid !== process.pid) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the occupant's ppid (${check.ppid}) is not ours (${process.pid}) — NOT killing`);
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+      }
+      if (Math.abs(check.creationTime - owner.creationTime) > POSIX_CREATION_TIME_MATCH_TOLERANCE_MS) {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: identity matched but the occupant's creationTime (${check.creationTime}) disagrees with our own verified spawn-time capture (${owner.creationTime}) — NOT killing`);
+        this.events.onProcessSurvivedKill?.(sessionId, { pid: rootPid, trigger, identityConfirmed: true, forceKilled: false, dead: false, identity: "mismatch", reason: "creation-time-mismatch" });
+        return { pid: rootPid, dead: false, identityConfirmed: true, forceKilled: false, checkFailed: false, identity: "mismatch" };
+      }
     }
     // eslint-disable-next-line no-console
     console.error(`[pty-reap] ${sessionId} pid=${rootPid} trigger=${trigger}: CONFIRMED alive (identity matched) — force-killing`);
