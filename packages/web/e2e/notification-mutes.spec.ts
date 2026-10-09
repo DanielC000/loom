@@ -134,23 +134,24 @@ test.describe("per-kind browser-notification mutes (card 51a80b4d)", () => {
       (window as unknown as { Notification: unknown }).Notification = RecordingNotification;
     });
 
-    // Count only the notifications raised for THIS test's own seeded request, matched on its unique
-    // stamp in the body. The daemon is shared, so filtering on the kind label alone ("DECISION NEEDED")
-    // would let a neighbouring spec's pending request count as ours in either direction.
-    const title = `Muted-then-unmuted decision ${stamp}`;
-    const ourNotifications = () => page.evaluate((needle) =>
+    // Count only the notifications raised for THIS test's own seeded requests, matched on a unique stamp
+    // in the body. The daemon is shared, so filtering on the kind label alone ("DECISION NEEDED") would
+    // let a neighbouring spec's pending request count as ours in either direction.
+    const mutedTitle = `Muted decision ${stamp}`;
+    const unmutedTitle = `Unmuted decision ${stamp}`;
+    const matching = (needle: string) => page.evaluate((n) =>
       (window as unknown as { __loomNotifications: { title: string; body: string | null }[] })
-        .__loomNotifications.filter((n) => (n.body ?? "").includes(needle)), title);
+        .__loomNotifications.filter((rec) => (rec.body ?? "").includes(n)), needle);
 
-    // ONE request, observed under BOTH mute states — a stronger contrast than two different requests,
-    // because the only thing that differs between the two phases is the config value under test.
+    // Both phases observe a request that is created AFTER its page has loaded, under the one config value
+    // being tested — so each polarity is driven by the real new-item signal rather than by a page load.
     //
-    // ⚠️ The phase-B replay this leans on is REAL, OBSERVED behavior of `useNewAttention`, and it is the
-    // opposite of what that hook's own comment claims ("seeds the seen-set silently on first load (so a
-    // reload doesn't replay the backlog)"): on a COLD load the first effect run sees an EMPTY `items` (the
-    // sessions/questions queries haven't resolved yet), so the seen-set seeds empty and every
-    // already-pending item is treated as new once the data lands. Reported up as a separate finding — do
-    // NOT "fix" that comment-vs-behavior mismatch by changing the hook without re-deriving this phase.
+    // ⚠️ Phase B used to reuse phase A's SAME request, re-announced by the reload, which was a stronger
+    // contrast (only the config differed). That rested on `useNewAttention` replaying the whole pending
+    // backlog on every cold load — the defect card 3157a563 fixed, so it is gone and cannot come back.
+    // Two different rows is the cost; it is a small one here, because both are `type:"decision"` and so
+    // resolve to the SAME `notify:"request"` category the mute under test keys on — the config value is
+    // still the only difference that this feature can see.
 
     // ---- PHASE A: `request` MUTED, so the item arrives, the pill shows it, NO Notification fires. ----
     await patchMuted(loomDaemon.baseURL, ["request"]);
@@ -162,22 +163,33 @@ test.describe("per-kind browser-notification mutes (card 51a80b4d)", () => {
 
     await loomDaemon.seedQuestion({
       sessionId: mgr.sessionId, projectId: mgr.projectId, type: "decision",
-      title, options: ["A", "B"],
+      title: mutedTitle, options: ["A", "B"],
     });
     // THE WITNESS: the pill proves the new attention item really reached the toast surface during this
     // phase. Without it, the zero below would be indistinguishable from "nothing ever arrived" — which is
     // what makes this a real assertion rather than an unfalsifiable wait.
     await expect(pill).toHaveText(/1\s*request needs you/);
-    expect(await ourNotifications()).toEqual([]);
+    expect(await matching(mutedTitle)).toEqual([]);
 
-    // ---- PHASE B (the positive control): the SAME request, UNMUTED, DOES raise a Notification. ----
+    // ---- PHASE B (the positive control): a request seeded UNMUTED, after the load, DOES raise one. ----
     await patchMuted(loomDaemon.baseURL, null);
     // The reload makes the client re-read the platform config, and re-runs the init script so the recorder
     // starts empty again — so anything it catches now was raised under the unmuted config.
     await page.reload();
+    // Phase A's request is STILL pending across the reload (the pill proves it), and with the mute now
+    // lifted it is the one row that would re-announce if the backlog ever replayed again — so this phase
+    // doubles as a standing regression witness for card 3157a563. Asserted below, after phase B's own
+    // notification has landed, so the zero can't be an un-flushed-effect race.
     await expect(page.getByTestId("request-count-pill")).toHaveText(/1\s*request needs you/);
-    await expect.poll(async () => (await ourNotifications()).length).toBe(1);
+
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, type: "decision",
+      title: unmutedTitle, options: ["A", "B"],
+    });
+    await expect(page.getByTestId("request-count-pill")).toHaveText(/2\s*requests need you/);
+    await expect.poll(async () => (await matching(unmutedTitle)).length).toBe(1);
     // The body carries the request's own text, so the mute gates the notification without degrading it.
-    expect((await ourNotifications())[0]!.body).toContain(title);
+    expect((await matching(unmutedTitle))[0]!.body).toContain(unmutedTitle);
+    expect(await matching(mutedTitle)).toEqual([]);
   });
 });

@@ -205,7 +205,7 @@ export function attentionOpenTarget(item: AttentionItem): string | null {
   return item.sessionId ? `/session/${item.sessionId}` : null;
 }
 
-export function useAttention(): { items: AttentionItem[]; count: number } {
+export function useAttention(): { items: AttentionItem[]; count: number; resolved: boolean } {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const all = sessions.data ?? [];
   // Manager→human DECISION INBOX (card 8701bdbb): the GLOBAL "waiting on me" queue. A PENDING question is
@@ -635,12 +635,24 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     pruneDismissed(new Set(derivableSig ? derivableSig.split("\n") : []));
   }, [loaded, derivableSig]);
 
-  return { items: visible, count: visible.length };
+  // Whether `items` is the REAL attention set rather than a not-yet-resolved prefix of it: every query ANY
+  // kind is derived from has settled. Read `isPending`, not `data !== undefined`, so an ERRORED query still
+  // counts as settled (react-query leaves `data` undefined forever after a failed fetch).
+  //
+  // @decision 3157a563 — never narrow this to a subset of the queries, and never fold it into `loaded`
+  // above (a deliberately narrower gate, naming only the DISMISSABLE kinds' own sources).
+  const resolved = !sessions.isPending && !questions.isPending && !bootStuckEventsQuery.isPending
+    && !vaultLockEventsQuery.isPending && !codexGapEventsQuery.isPending
+    && !crashLoopAbandonedEventsQuery.isPending && !crashLoopRecoveredEventsQuery.isPending
+    && eventQueries.every((q) => !q.isPending);
+
+  return { items: visible, count: visible.length, resolved };
 }
 
-// Shared "newly-appeared attention item" detector. Seeds the seen-set silently on first load (so a
-// reload doesn't replay the backlog), then invokes `onNew` exactly once per item whose key wasn't
-// seen before; departed keys drop out so a re-occurrence re-fires. Defined ONCE here so the shell
+// Shared "newly-appeared attention item" detector. Seeds the seen-set silently from the FIRST RESOLVED
+// attention set — not the first render, which on a cold load carries no items at all (card 3157a563) — so
+// a reload doesn't replay the backlog; then invokes `onNew` exactly once per item whose key wasn't seen
+// before; departed keys drop out so a re-occurrence re-fires. Defined ONCE here so the shell
 // bell (browser Notification) and the in-app toast stack run off the same new-item signal instead of
 // each re-deriving it — no surface fires for an item it already announced.
 // The fleet affordance (surface 5): a per-session map of the PENDING decisions each asking manager holds,
@@ -664,11 +676,15 @@ export function usePendingDecisionsBySession(): Map<string, PendingDecision> {
 }
 
 export function useNewAttention(onNew: (item: AttentionItem) => void): void {
-  const { items } = useAttention();
+  const { items, resolved } = useAttention();
   const seen = useRef<Set<string> | null>(null);
   const cb = useRef(onNew);
   cb.current = onNew;
   useEffect(() => {
+    // @decision 3157a563 — never seed the seen-set from an UNRESOLVED render. A cold load's first effect
+    // pass sees `items` EMPTY because the queries behind it haven't resolved, so seeding there seeds
+    // nothing and replays the whole pending backlog as "new" on every single page load.
+    if (!resolved) return;
     if (seen.current === null) {
       seen.current = new Set(items.map((i) => i.key));
       return;
@@ -677,5 +693,5 @@ export function useNewAttention(onNew: (item: AttentionItem) => void): void {
       if (!seen.current.has(it.key)) cb.current(it);
     }
     seen.current = new Set(items.map((i) => i.key));
-  }, [items]);
+  }, [items, resolved]);
 }
