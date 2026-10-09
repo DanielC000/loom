@@ -6103,6 +6103,49 @@ const WORKTREES_EMIT_COMPARE_SCOPE: EmitCompareSoundnessScope = {
   srcDirRelPaths: [path.join("packages", "daemon", "src")],
 };
 
+/** A safety margin under cmd.exe's real ~8191-char command-line ceiling for a reduced gate's `--only=`
+ *  step (shell:true, gate-runner.ts) — see {@link buildReducedGateCommand}'s own doc.
+ *  @decision 92be634e — do not raise this toward the real ceiling, or shrink its margin, without
+ *  re-deriving both the real ceiling and the step's own prefix length. */
+export const REDUCED_GATE_ONLY_INLINE_MAX_CHARS = 6000;
+
+/** Thrown by {@link buildReducedGateCommand} when the `--only=` selection exceeds
+ *  {@link REDUCED_GATE_ONLY_INLINE_MAX_CHARS} and either no `onlyFilePath` was supplied, or writing it failed.
+ *  @decision 92be634e — never resolve either case to a silent fallback onto the over-length inline `--only=`. */
+export class ReducedGateOnlyFileError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReducedGateOnlyFileError";
+  }
+}
+
+/** Real, production default for {@link BuildReducedGateCommandOpts.writeOnlyFile}. `onlyFilePath`'s own
+ *  parent (`GATE_SPILL_DIR`, orchestration/gate-spill.ts) is never pre-created on a fresh LOOM_HOME — this
+ *  mkdir's it lazily first, same "caller mkdir's it on first write" contract {@link gateOnlyListPath}'s own
+ *  doc already states, mirroring `gateSpillPath`'s identical contract for the sibling output-spill file.
+ *  Exported only so a test can call it directly without going through `buildReducedGateCommand`'s own
+ *  threshold logic. */
+export function writeReducedGateOnlyFileReal(onlyFilePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(onlyFilePath), { recursive: true });
+  fs.writeFileSync(onlyFilePath, content, "utf8");
+}
+
+export interface BuildReducedGateCommandOpts {
+  /** Where to write the `--only=` selection when it crosses {@link REDUCED_GATE_ONLY_INLINE_MAX_CHARS}.
+   *  A production caller derives this from its own opId (e.g. `gateOnlyListPath(opId)`,
+   *  orchestration/gate-spill.ts). Omitted is fine as long as the selection never crosses the threshold.
+   *  @decision 92be634e — do not default this to an implicit `os.tmpdir()` path when it's missing and the
+   *  threshold IS crossed — throw `ReducedGateOnlyFileError` instead; see the docs/decisions record. */
+  onlyFilePath?: string;
+  /** Injectable writer, defaulting to {@link writeReducedGateOnlyFileReal}. A test crossing the threshold
+   *  can inject a fake here to assert the written content without touching the real filesystem; a test
+   *  proving the real end-to-end behavior (real file, real shell spawn) omits it to exercise the real
+   *  default. Any throw from this — injected or real — is wrapped in a {@link ReducedGateOnlyFileError}
+   *  naming `onlyFilePath` and the underlying cause; it must never be swallowed into a silent fallback to
+   *  the over-length inline `--only=` form. */
+  writeOnlyFile?: (onlyFilePath: string, content: string) => void;
+}
+
 /** @decision dd4349ff — a changed test file runs THROUGH THE HARNESS (`test:daemon --only=`), never as
  *  bare `node <path>` — a bare invocation left a hermetic-env-needing file unable to even start (exit 99,
  *  0s, no assertion run). `changedTestFiles` must already exclude `NOT_HERMETIC` names; never re-filter here.
@@ -6111,9 +6154,12 @@ const WORKTREES_EMIT_COMPARE_SCOPE: EmitCompareSoundnessScope = {
  *  sets up its own hermetic env, so it needs none of what the harness wrapper provides.
  *  @decision f862f9c5 — `changedScriptFiles` folds {@link CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS} in on its
  *  OWN condition, independent of `changedTsPaths` — never gate it on the `.ts` trigger or the combined
- *  `identicalFileCount`. A diff can set either trigger, both, or neither. */
+ *  `identicalFileCount`. A diff can set either trigger, both, or neither.
+ *  @decision 92be634e — do not re-derive a second overflow mechanism for the `--only=` step; reuse
+ *  `--only-file=` (scripts/test-daemon.mjs, card cee17efe) exactly as below. */
 export function buildReducedGateCommand(
   input: Pick<EmitCompareGateResult, "changedTestFiles" | "changedAssetPaths" | "changedTsPaths" | "changedScriptFiles">,
+  opts: BuildReducedGateCommandOpts = {},
 ): string {
   const { changedTestFiles, changedAssetPaths, changedTsPaths, changedScriptFiles } = input;
   const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
@@ -6124,7 +6170,27 @@ export function buildReducedGateCommand(
     : changedTestFiles;
   if (testPaths.length > 0) {
     const names = testPaths.map((p) => p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length));
-    steps.push(`pnpm --filter @loom/daemon test:daemon --only=${names.join(",")}`);
+    const inlineStep = `pnpm --filter @loom/daemon test:daemon --only=${names.join(",")}`;
+    if (inlineStep.length > REDUCED_GATE_ONLY_INLINE_MAX_CHARS) {
+      if (!opts.onlyFilePath) {
+        throw new ReducedGateOnlyFileError(
+          `the reduced gate's --only selection (${names.length} file(s), ${inlineStep.length} chars) exceeds ` +
+          `the safe inline command-line length (${REDUCED_GATE_ONLY_INLINE_MAX_CHARS}) and no onlyFilePath was ` +
+          "supplied — the caller must provide one rather than defaulting to an implicit temp path",
+        );
+      }
+      try {
+        (opts.writeOnlyFile ?? writeReducedGateOnlyFileReal)(opts.onlyFilePath, names.join("\n"));
+      } catch (err) {
+        throw new ReducedGateOnlyFileError(
+          `could not write the reduced gate's --only selection (${names.length} file(s)) to ${opts.onlyFilePath}: ` +
+          `${(err as Error).message}`,
+        );
+      }
+      steps.push(`pnpm --filter @loom/daemon test:daemon --only-file=${JSON.stringify(opts.onlyFilePath)}`);
+    } else {
+      steps.push(inlineStep);
+    }
   }
   return steps.join(" && ");
 }

@@ -27,6 +27,7 @@ import { createKokoroSynthesizer, prewarmTts } from "./companion/tts.js";
 import { checkCompanionReplyHealth } from "./companion/reply-watch.js";
 import { PtyHost } from "./pty/host.js";
 import { archiveOldCodexRollouts } from "./pty/codex-rollout-archive.js";
+import { sweepStaleGateOnlyFiles } from "./orchestration/gate-spill.js";
 import { SessionService } from "./sessions/service.js";
 import { CodescapeSupervisor, codescapeBootRepoPaths } from "./codescape/supervisor.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
@@ -767,6 +768,17 @@ async function main(): Promise<void> {
     if (runs.failed > 0) console.log(`[boot] failed ${runs.failed} interrupted run(s) (ephemeral — no resume) + swept run snapshots`);
   } catch (err) {
     console.warn(`[boot] run reconcile failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Card 92be634e: no merge/batch gate op survives a restart, so any reduced-gate --only-file= overflow
+  // selection still on disk at boot (owning op's onSettle cleanup never ran — a crash mid-gate) is
+  // unconditionally stale. Its OWN try block, independent of the run-reconcile try immediately above —
+  // a throw there must never skip this unrelated sweep (same reasoning as every other sweep in this file
+  // having its own try, e.g. the codex-rollout-archive sweep right below).
+  try {
+    const onlyFilesSwept = sweepStaleGateOnlyFiles();
+    if (onlyFilesSwept > 0) console.log(`[boot] gate-only-file sweep: removed ${onlyFilesSwept} stale .only.txt file(s)`);
+  } catch (err) {
+    console.warn(`[boot] gate-only-file sweep failed: ${(err as Error).message}`);
   }
   // Card b8124a1f: bound the otherwise-unbounded ~/.codex/sessions corpus — archive-not-delete, best-
   // effort, boot-only (mirrors sweepUnresumableScratchDirs's own posture). Pure fs stat/rename over a

@@ -33,6 +33,50 @@ export function gateSpillPath(opId: string): string {
 }
 
 /**
+ * Card 92be634e: where a reduced gate's `--only-file=` overflow selection lives for a given op — the SAME
+ * `GATE_SPILL_DIR` (outside every worktree) `gateSpillPath` already uses, same "filename is the opId"
+ * convention, but a DIFFERENT extension (`.only.txt`, never `.log`) and a DIFFERENT lifecycle: this file
+ * carries no diagnostic value once its gate settles, so it is cleaned up explicitly by the caller right
+ * after settle (`sessions/service.ts`'s solo-merge and batch `onSettle` hooks), never retained or swept by
+ * {@link pruneGateSpills}/{@link listGateSpillOpIds} — both filter strictly on `.endsWith(".log")`, so a
+ * `.only.txt` file here is structurally invisible to them (never counted, never misclassified as a spill,
+ * never deleted by the retention sweep). Pure derivation — never creates anything; on a fresh LOOM_HOME
+ * this directory doesn't exist yet, so the writer (`writeReducedGateOnlyFileReal`, git/worktrees.ts)
+ * `mkdirSync`'s it lazily on first write, same contract as `gateSpillPath`/`runGateStep`. Also swept at
+ * boot ({@link sweepStaleGateOnlyFiles}, below, called from `reconcileRunsOnBoot` in sessions/service.ts)
+ * — no merge op survives a daemon restart, so any `.only.txt` still present then is unconditionally stale.
+ */
+export function gateOnlyListPath(opId: string): string {
+  return path.join(GATE_SPILL_DIR, `${opId}.only.txt`);
+}
+
+/**
+ * Card 92be634e — boot-time backstop: deletes every `*.only.txt` file directly under `dir`, unconditionally.
+ * No merge/batch gate op survives a daemon restart (every live op is either settled or abandoned by the
+ * time boot reconcile runs), so a `.only.txt` file still present at boot can only be one whose owning op's
+ * own `onSettle` cleanup never ran (a crash mid-gate, or a process kill before settle) — there is no
+ * "still in use" case to protect, unlike `pruneGateSpills`'s retention policy for diagnostic `.log` spills.
+ * Best-effort: a missing/unreadable `dir`, or a single file's removal failing, never throws — mirrors
+ * `pruneGateSpills`'s own swallow-and-continue posture. Returns the count actually removed.
+ */
+export function sweepStaleGateOnlyFiles(dir: string = GATE_SPILL_DIR): number {
+  let swept = 0;
+  try {
+    if (!fs.existsSync(dir)) return 0;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!e.isFile() || !e.name.endsWith(".only.txt")) continue;
+      try {
+        fs.rmSync(path.join(dir, e.name), { force: true });
+        swept++;
+      } catch { /* best-effort, same posture as pruneGateSpills */ }
+    }
+  } catch (err) {
+    console.warn(`[gate-spill] stale .only.txt sweep failed (continuing): ${(err as Error).message}`);
+  }
+  return swept;
+}
+
+/**
  * Per-file ceiling on a SINGLE spill (bytes). This is NOT the same cliff as `OUTPUT_TAIL_BYTES` — it is
  * several orders of magnitude larger (this daemon's own ~668-file test suite output, even a verbose
  * failing run, comfortably fits in low single-digit MB) and exists ONLY to bound worst-case disk usage

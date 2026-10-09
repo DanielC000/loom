@@ -29,7 +29,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -85,7 +85,7 @@ import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
-import { gateSpillPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
+import { gateSpillPath, gateOnlyListPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
 import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision } from "../orchestration/merge-gate-interval.js";
 import { touchedDistPathsFor, computeDistImporterCap, rankAndCapRunSet, newDistImporterCheckQueueState, enqueueLanding, drainFollowUp, formatDistImporterResultNudge, formatDistImporterMechanismFailureNudge, formatDistImporterCancelledNudge, type DistImporterCheckQueueState } from "../orchestration/dist-importer-check.js";
 import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
@@ -723,6 +723,11 @@ type MergeBatchResult = {
    *  carries (notHermeticExcluded/inertPathsSkipped/changedAssetPaths/isolation caveat), scoped to every
    *  branch this batch landed rather than a single one. */
   reducedGateWarning?: string;
+  /** Card 92be634e: the reduced gate's `--only-file=` overflow write failed inside the batch `runGate`
+   *  closure, before any gate step ever spawned — threaded from `RunBatchedMergeResult.gateDetail.detail`
+   *  (the ordinary `!result.ok` branch below) so a caller can tell this apart from a genuine test failure.
+   *  Absent on every other outcome. */
+  reducedGateOnlyFileFailed?: boolean;
 };
 
 type ConfirmMergeResult = {
@@ -854,6 +859,12 @@ type ConfirmMergeResult = {
    *  fix) must re-attempt for real rather than replay. Never counted toward the merge-gate interval
    *  counter or `gateOwed` either way. */
   ungatedLandingCheckFailed?: boolean;
+  /** Card 92be634e: the reduced gate's `--only-file=` overflow write (`buildReducedGateCommand`) failed —
+   *  nothing squashed, classified `"reduced-gate-only-file-failed"` (`NEVER_CACHED_OUTCOMES`). A real,
+   *  resolved fact about THIS attempt's own prep step (a transient host condition — EACCES, ENOSPC, a
+   *  missing onlyFilePath), never about the branch's content: a re-call after the cause clears must
+   *  genuinely re-attempt, never replay the stale refusal. */
+  reducedGateOnlyFileFailed?: boolean;
   /** Card bbccf470: refused BEFORE any gate/union/squash because the branch tip moved after the manager's last worker_merge review (classified `"reviewed-tip-moved"`, never cached — a re-review changes the answer). */
   reviewedTipMoved?: boolean;
   /** Card 7e5b23e7: set on a union-merge (pre-gate) rejection caused by `mergeMainIntoWorktree` raising —
@@ -8055,6 +8066,10 @@ export class SessionService {
     } catch (e) {
       console.warn(`[boot] settings-dir sweep failed: ${(e as Error).message}`);
     }
+    // Card 92be634e: the stale .only.txt sweep lives in its OWN try block in index.ts, NOT here — a throw
+    // from this function's own earlier, unrelated run-reconcile logic (listInterruptedRuns/failRun/
+    // runBootScratchGcSweep, none individually guarded) would otherwise skip it too, since it's the last
+    // statement in this same function and index.ts wraps the whole reconcileRunsOnBoot() call in one try.
     return { failed: interrupted.length };
   }
 
@@ -16950,6 +16965,18 @@ export class SessionService {
       evt("merge_rejected", { reason: "gate_worktree_dirty", sha, phase, detail, ...(reuseRefusalReasons && reuseRefusalReasons.length > 0 ? { reuseRefusalReasons } : {}), ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateWorktreeDirty: { phase, detail } };
     };
+    // Card 92be634e — a reduced gate's --only-file= overflow write (buildReducedGateCommand) failing is a
+    // genuine prep-time failure, surfaced exactly like a dirty worktree: never a silent fallback to an
+    // over-length inline --only= that would fail later as a misleading "command line too long" RED. Shared
+    // by both the pre-wait call site (below) and the admission-time re-derivation's own throw (caught
+    // alongside AdmissionReunionFailedError, further down).
+    const rejectReducedGateOnlyFileFailure = async (err: ReducedGateOnlyFileError): Promise<ConfirmMergeResult> => {
+      const why = `could not prepare the reduced gate's --only selection (${err.message})`;
+      const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. This refusal is never cached, a re-call retries for real.`;
+      const { suppressed, sha } = await rejectNotify("reduced_gate_only_file_failed", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "reduced_gate_only_file_failed", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, reducedGateOnlyFileFailed: true };
+    };
     // Card 6f13746c / bd9a483b (CR round 2): shared by BOTH gate_owed in-lock checks (the pre-existing one
     // at the squash point, and the NEW one right after the ungated-landing-check's own stale-tip
     // verification) — a single refusal shape, called from two points, rather than two copies that could
@@ -17917,7 +17944,21 @@ export class SessionService {
       // `let`, not `const` (card 7183540f): re-assigned by the admission-time re-derivation inside
       // `reunionAtAdmission` below when a branch/main move during the CAP-queue wait invalidates this
       // pre-wait classification — see that function's own doc for the full mechanism.
-      let effectiveGate = emitCompareSkip ? buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles }) : gate;
+      let effectiveGate: typeof gate;
+      // Card 92be634e: a thrown ReducedGateOnlyFileError here is a genuine prep-time failure (the --only=
+      // selection overflowed and the only-file write failed) — reported exactly like a dirty worktree,
+      // never left to propagate into a generic catch. gateOnlyListPath(thisOpId) is the SAME deterministic,
+      // LOOM_HOME-rooted path the admission-time re-derivation below (and this op's onSettle cleanup) use.
+      if (emitCompareSkip) {
+        try {
+          effectiveGate = buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles }, { onlyFilePath: gateOnlyListPath(thisOpId) });
+        } catch (err) {
+          if (err instanceof ReducedGateOnlyFileError) return rejectReducedGateOnlyFileFailure(err);
+          throw err;
+        }
+      } else {
+        effectiveGate = gate;
+      }
 
       // @decision 975c774b — refuse a known-dirty/unreadable tree before the queue turn, but ONLY where a gate will really spawn:
       // a reused or inert-skipped merge has no verdict to contaminate (the squash reads commits), so it behaves as before.
@@ -18213,7 +18254,9 @@ export class SessionService {
               emitCompareTsPaths = reclassified.changedTsPaths;
               emitCompareScriptFiles = reclassified.changedScriptFiles;
               emitCompareIdenticalCount = reclassified.identicalFileCount;
-              effectiveGate = buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles });
+              // Card 92be634e: a thrown ReducedGateOnlyFileError here propagates out of reunionAtAdmission()
+              // and this runExclusive callback, caught alongside AdmissionReunionFailedError below.
+              effectiveGate = buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles }, { onlyFilePath: gateOnlyListPath(thisOpId) });
               // Card 4def0708: mirrors the pre-wait classification's own explicit `false` on its
               // `eligible:true` branch, above — the re-derivation DID run and decided this diff is
               // applicable.
@@ -18537,6 +18580,9 @@ export class SessionService {
         }
       } catch (err) {
         if (err instanceof AdmissionReunionFailedError) return rejectAdmissionReunionFailure(err);
+        // Card 92be634e: the admission-time re-derivation's own buildReducedGateCommand call (inside
+        // reunionAtAdmission, above) can throw this when its --only-file= overflow write fails.
+        if (err instanceof ReducedGateOnlyFileError) return rejectReducedGateOnlyFileFailure(err);
         if (err instanceof GateWorktreeDirtyError && !gateHasRun) return refuseWorktreeDirty("before-gate", err.detail);
         // CANCELLED-WHILE-QUEUED (card 361520a0, Half Two — mirrors runWorkerGate's identical catch): thrown
         // by GateSemaphore.runExclusive when THIS op was withdrawn (gate_cancel, card 8d585277) before it
@@ -20124,7 +20170,29 @@ export class SessionService {
             // the reader-facing warning built after the gate settles (below), so the two can never disagree
             // about whether this run was reduced.
             const batchReduced = batchEmitCompare?.eligible === true;
-            const effectiveGate = batchReduced ? buildReducedGateCommand(batchEmitCompare!) : gate!;
+            // Card 92be634e: gateOnlyListPath(opId), the SAME deterministic path this op's settle-time
+            // cleanup (below) targets. A thrown ReducedGateOnlyFileError here (the overflow write failed)
+            // is caught and resolved as an ORDINARY pre-gate failure (passed:false) — never left to
+            // propagate past this closure, where the outer catch (below) would classify it as a genuinely
+            // UNKNOWN post-gate state. Nothing has run yet at this point, so `runBatchedMerge`'s own
+            // `!gate.passed` branch routes this through the normal per-candidate solo fallback, exactly
+            // like any other RED — the batch itself lands nothing.
+            let effectiveGate: string;
+            if (batchReduced) {
+              try {
+                effectiveGate = buildReducedGateCommand(batchEmitCompare!, { onlyFilePath: gateOnlyListPath(opId) });
+              } catch (err) {
+                if (err instanceof ReducedGateOnlyFileError) {
+                  // `detail.reducedGateOnlyFileFailed` lets the outer onSettle (below) synthesize a real
+                  // verdict for this case — it never reaches `deriveBatchGateVerdict`/`evtBatch("build_gate"`
+                  // (both further down this same closure, past this early return).
+                  return { passed: false, reason: `could not prepare the reduced gate's --only selection (${err.message})`, detail: { reducedGateOnlyFileFailed: true } };
+                }
+                throw err;
+              }
+            } else {
+              effectiveGate = gate!;
+            }
             // Card 10fd660b: `taskId`/`branch` stay null (a batch genuinely has neither) — `batchBranches` is what
             // lets the Gates page's active lane render this as a batch rather than an anonymous merge. It is the
             // REQUESTED set; the landed count only exists once `runGate` is called back with it, so that half is
@@ -20276,6 +20344,10 @@ export class SessionService {
             // finalize, still to come after this closure returns) is done.
             batchGateVerdict = deriveBatchGateVerdict(r, batchGateAttempt1DurationMs, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, landedCount, { retriedFile, retryPassed });
             pruneGateSpillsClassified(this.db);
+            // Card 92be634e: the --only-file= overflow cleanup for THIS op lives in the outer `onSettle`
+            // hook below (`mergeBatchTracked`'s own attach()), not here — this closure's own happy-path tail
+            // is never reached on a throw (e.g. a pre-gate ReducedGateOnlyFileError resolved further up, or
+            // a genuinely unexpected throw), and the cleanup must still run on every outcome.
             // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
             // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
             // so `emitCompareReduced` is DECIDABLE here whenever `computeEmitCompareGate`'s predicate applies at
@@ -20595,6 +20667,10 @@ export class SessionService {
                     ? formatRetryRescuedButGateRejectedWarning(result.gateDetail.retriedFile, result.landed.length)
                     : formatRetryAlsoFailedWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, result.landed.length),
               } : {}),
+              // Card 92be634e: threaded from the runGate closure's own early-return `detail` (above) — lets
+              // a caller (and the onSettle verdict synthesis, further below) tell this apart from a genuine
+              // gate/test failure.
+              ...(result.gateDetail?.detail?.reducedGateOnlyFileFailed === true ? { reducedGateOnlyFileFailed: true } : {}),
             };
           }
 
@@ -20879,7 +20955,7 @@ export class SessionService {
         // describes the resolved candidate branches at all (they are facts about the CANONICAL CHECKOUT at
         // fast-forward time), so a cached replay would be stale the moment a human restores the checkout —
         // exactly the `"squash-refused"` reasoning that const's own doc already states for the solo path.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.ok ? "landed" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.
         //
@@ -20899,8 +20975,17 @@ export class SessionService {
             else if (batchAllDropped) verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: every candidate was dropped at assembly and handed to its own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "all-candidates-dropped", batchBranchCount: 0, batchLanded: false, ...timing } };
             // Card ba663984's own early refusal (before any worktree cut) — same no-gate-ran shape as batchAllDropped above.
             else if (outcome.value.watermarkUnreadable) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "the stored mainline watermark record is unreadable", skipReason: "watermark-unreadable", batchBranchCount: 0, batchLanded: false, ...timing } };
+            // Card 92be634e: the `runGate` closure's own early return (above) for a failed --only-file=
+            // overflow write never reaches `deriveBatchGateVerdict`/the `evtBatch("build_gate", ...)` event
+            // either — same no-gate-ran shape as its siblings above, told apart by this skipReason.
+            else if (outcome.value.reducedGateOnlyFileFailed === true) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "could not prepare the reduced gate's --only selection", skipReason: "reduced-gate-only-file-failed", batchBranchCount: 0, batchLanded: false, ...timing } };
           }
           this.db.settlePendingGateOp(opId, verdict);
+          // Card 92be634e: best-effort cleanup of this op's reduced-gate --only-file= overflow selection
+          // (buildReducedGateCommand, above), if one was ever written — a no-op `force:true` otherwise.
+          // Here, not the runGate closure's own happy-path tail, so it fires on EVERY outcome (including a
+          // throw), symmetric with the solo-merge path's identical onSettle-placed cleanup.
+          try { fs.rmSync(gateOnlyListPath(opId), { force: true }); } catch { /* best-effort */ }
         },
       },
       // OWNER EXEMPTION (card 94725dcb): buildBatchDedupeKey embeds rootOf(managerSessionId) and
@@ -22463,7 +22548,7 @@ export class SessionService {
         // @decision 9f5ae011 — `soloMergeTransient` classifies distinctly too, same reasoning one layer
         // later: `resetOrSkip`'s own confirmed-kill cleanup clearing must see a fresh re-attempt, never a
         // stale cached rejection from before it cleared.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
@@ -22500,6 +22585,11 @@ export class SessionService {
             }
           }
           pruneGateSpillsClassified(this.db);
+          // Card 92be634e: best-effort cleanup of this op's reduced-gate --only-file= overflow selection
+          // (buildReducedGateCommand), if one was ever written — a no-op `force:true` removal otherwise.
+          // Fires on EVERY genuine settle (see this onSettle's own doc above), after any retries within
+          // this one attempt, so the file outlives the single-file/transient-kill retries that reuse it.
+          try { fs.rmSync(gateOnlyListPath(opId), { force: true }); } catch { /* best-effort */ }
         },
       },
       // OWNER CHECK (card 94725dcb): ignores `existing` by design — this unifies the SAME hoisted

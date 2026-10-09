@@ -1185,7 +1185,13 @@ export async function runBatchedMerge(
   }
   const gate = await runGate(batchWorktreePath, baseMainSha, landed.length, assemblyMs);
   if (!gate.passed) {
-    return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateFailed: isMergeGateRed(gate), ...(gate.cancelled ? { cancelled: true } : {}), gateDetail: gate, reason: gate.reason ?? "batch gate failed" };
+    // Card 92be634e: a reduced-gate --only-file= overflow write failure never ran any gate step at all —
+    // it must never count as a merge-gate RED (recordMergeGateFailure/gateOwed), matching the solo path,
+    // which never touches merge-gate state for this same failure. `isMergeGateRed` itself stays untouched
+    // (card 13571c71's "one rule" for every OTHER caller); this is a one-site override, same shape as the
+    // `cancelled` spread immediately after it.
+    const reducedGateOnlyFileFailed = gate.detail?.reducedGateOnlyFileFailed === true;
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateFailed: reducedGateOnlyFileFailed ? false : isMergeGateRed(gate), ...(gate.cancelled ? { cancelled: true } : {}), gateDetail: gate, reason: gate.reason ?? "batch gate failed" };
   }
   const { git, timeoutMs } = boundedGit(batchWorktreePath, deps);
   let batchHeadSha: string;
