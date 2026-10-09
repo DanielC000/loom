@@ -4474,6 +4474,79 @@ function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string
   return true;
 }
 
+/** @decision 6d484a46 — bounds concurrent OS process-enumeration helper spawns, daemon-wide, so a mass
+ *  stop can never fork dozens at once; a queue-wait rejection must be treated exactly like any other
+ *  enumeration failure, never as "dead"/"confirmed gone". */
+class EnumerationSemaphore {
+  private running = 0;
+  private readonly queue: Array<{ resolve: () => void; cancelled: boolean }> = [];
+  constructor(private readonly max: number) {}
+
+  /** Resolves with a release function once a slot is granted, or REJECTS if the wait itself exceeds
+   *  `queueTimeoutMs` — the caller must treat that exactly like any other enumeration failure. A rejected
+   *  waiter's timeout handler `splice`s it OUT of `this.queue` outright (never `.unref()`'d — `clearTimeout`
+   *  avoids a dangling handle); `cancelled` still marks it too, as a defensive backstop only — see
+   *  `release()`'s own comment below for why the splice, not the mark, is what prevents pile-up. */
+  acquire(queueTimeoutMs: number): Promise<() => void> {
+    const release = (): void => {
+      while (this.queue.length > 0) {
+        const waiter = this.queue.shift()!;
+        // @decision 6d484a46 (CR bc3a1445) — this branch is UNREACHABLE in practice now that a
+        // timed-out waiter is spliced out of `this.queue` the instant it times out (see the timeout
+        // handler below) — there is no longer a cancelled entry left in the array for `shift()` to
+        // ever find. Kept as a defensive backstop only, never the primary cleanup mechanism.
+        if (waiter.cancelled) continue;
+        waiter.resolve();
+        return; // slot handed DIRECTLY to the next waiter — `running` stays unchanged
+      }
+      this.running--; // nobody waiting — the slot is genuinely free
+    };
+    if (this.running < this.max) {
+      this.running++;
+      return Promise.resolve(release);
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter = { resolve: () => {}, cancelled: false };
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        waiter.cancelled = true;
+        // @decision 6d484a46 (CR ab171b39) — remove the waiter OUTRIGHT, never just mark+leave it for
+        // a future release() to skip over: a queue with no further activity after this would otherwise
+        // pile up dead entries forever instead of shrinking back down.
+        const idx = this.queue.indexOf(waiter);
+        if (idx !== -1) this.queue.splice(idx, 1);
+        reject(new Error(`enumeration queue wait exceeded ${queueTimeoutMs}ms`));
+      }, queueTimeoutMs);
+      waiter.resolve = () => {
+        if (timedOut) return; // already rejected; the slot passes to whoever release() finds next
+        clearTimeout(timer);
+        resolve(release);
+      };
+      this.queue.push(waiter);
+    });
+  }
+}
+
+/** @decision 6d484a46 — how many of these enumeration helper spawns may run at once, daemon-wide. Small
+ *  on purpose: bounds "dozens of PowerShell processes" down to a handful, while a typical real win32 CIM
+ *  query (~560-630ms, measured in 85ae7768's own record) still drains a mass-stop in a few seconds rather
+ *  than fully serializing. Env-overridable for a test, same convention as every other timing constant here. */
+// @decision 6d484a46 (CR ab171b39/bc3a1445) — clamped to a finite integer >= 1: `Number(...) || 4`
+// alone misses a negative value (deadlocks every acquire()), `"Infinity"` (silently disables the
+// bound), and a fractional one (`running` is always whole, so e.g. 2.5 actually allows a 3rd holder).
+function resolveRootReapEnumerationConcurrency(): number {
+  const raw = Number(process.env.LOOM_ROOT_REAP_ENUMERATION_CONCURRENCY);
+  if (!Number.isFinite(raw)) return 4; // unset/NaN/+-Infinity all fall back to the default
+  return Math.max(1, Math.floor(raw));
+}
+const ROOT_REAP_ENUMERATION_CONCURRENCY = resolveRootReapEnumerationConcurrency();
+/** @decision 6d484a46 — how long a caller may wait for a concurrency slot before it is rejected (never an
+ *  unbounded wait) — generous relative to each slot's OWN internal enumeration timeout (5-10s), so only a
+ *  genuine, extreme overload ever trips it. */
+const ROOT_REAP_ENUMERATION_QUEUE_TIMEOUT_MS = Number(process.env.LOOM_ROOT_REAP_ENUMERATION_QUEUE_TIMEOUT_MS) || 30_000;
+const rootReapEnumerationSemaphore = new EnumerationSemaphore(ROOT_REAP_ENUMERATION_CONCURRENCY);
+
 /** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant a torn-down root escapes
  * node-pty's containment into (a backgrounded `pnpm dev` vite server — six stale servers observed live);
  * enumerates the whole process list (a dead root breaks taskkill /T) with a `seen`-pid guard for reuse.
@@ -4520,46 +4593,75 @@ export function reapOrphanedDescendants(
     // eslint-disable-next-line no-console
     console.log(`[pty-reap] root=${rootPid}: found=${toKill.length} killed=${killed} alreadyGone=${alreadyGone}${skippedStale > 0 ? ` skippedStale=${skippedStale}` : ""}`);
   };
-  if (deps.enumerate) {
-    // @decision 85ae7768 — test-only path: never reached unless a caller (always a test) passes
-    // `deps.enumerate` explicitly; every production/onExit call site leaves `deps` at its default `{}`.
-    deps.enumerate().then(sweep, (err: Error) => {
+  // @decision 6d484a46 — ONE shared concurrency slot gates entry to EITHER branch below (incl. the
+  // injected test enumerator), released once that branch's own enumeration settles; a queue-wait
+  // rejection hits the SAME best-effort catch as any other enumeration failure — never a new state.
+  rootReapEnumerationSemaphore.acquire(ROOT_REAP_ENUMERATION_QUEUE_TIMEOUT_MS).then(
+    (release) => {
+      // @decision 6d484a46 (CR ab171b39, MINOR) — a SYNCHRONOUS throw here (ENOMEM-class `spawnProcess`,
+      // or a sync-throwing `deps.enumerate`) would otherwise escape as an unhandled rejection (process
+      // exit) with the slot never freed; `releaseOnce` funnels every release point through one guard.
+      let released = false;
+      const releaseOnce = (): void => { if (released) return; released = true; release(); };
+      try {
+        if (deps.enumerate) {
+          // @decision 85ae7768 — test-only path: never reached unless a caller (always a test) passes
+          // `deps.enumerate` explicitly; every production/onExit call site leaves `deps` at its default `{}`.
+          deps.enumerate().then(
+            (rows) => { releaseOnce(); sweep(rows); },
+            (err: Error) => {
+              releaseOnce();
+              // eslint-disable-next-line no-console
+              console.error(`[pty-reap] root=${rootPid}: injected enumerate() rejected — found/killed NOTHING (best-effort, never throws): ${err.message}`);
+            },
+          );
+          return;
+        }
+        const cmd = process.platform === "win32"
+          ? spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { stdio: ["ignore", "pipe", "ignore"] })
+          : spawnProcess("ps", ["-eo", "pid,ppid"], { stdio: ["ignore", "pipe", "ignore"] });
+        let out = "";
+        let settled = false;
+        cmd.stdout?.on("data", (d) => { out += d; });
+        // @decision 8c8ee0ee — bounded (mirrors enumerateWin32SweepRows's own timer): a wedged powershell.exe/ps
+        // used to hang this fire-and-forget sweep (and its pending handle) indefinitely.
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          releaseOnce();
+          try { cmd.kill(); } catch { /* best-effort */ }
+          // eslint-disable-next-line no-console
+          console.error(`[pty-reap] root=${rootPid}: enumeration helper timed out after ${REAP_ENUMERATION_TIMEOUT_MS}ms — found/killed NOTHING (fail-closed, best-effort, never throws)`);
+        }, REAP_ENUMERATION_TIMEOUT_MS);
+        // Card 7d58a1aa: mirrors the same fix reapProcessesRootedInWorktree already got (decision
+        // sha:16b7c38c) — an enumeration-helper spawn failure used to be silent, indistinguishable from
+        // "nothing needed killing". Still best-effort, still never throws past this handler.
+        cmd.on("error", (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          releaseOnce();
+          // eslint-disable-next-line no-console
+          console.error(`[pty-reap] root=${rootPid}: enumeration helper failed to spawn — found/killed NOTHING (best-effort, never throws): ${err.message}`);
+        });
+        cmd.on("close", () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          releaseOnce();
+          sweep(out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null));
+        });
+      } catch (err) {
+        releaseOnce();
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] root=${rootPid}: enumeration setup threw synchronously — found/killed NOTHING (best-effort, never throws): ${(err as Error).message}`);
+      }
+    },
+    (err: Error) => {
       // eslint-disable-next-line no-console
-      console.error(`[pty-reap] root=${rootPid}: injected enumerate() rejected — found/killed NOTHING (best-effort, never throws): ${err.message}`);
-    });
-    return;
-  }
-  const cmd = process.platform === "win32"
-    ? spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN32_SWEEP_PS_COMMAND], { stdio: ["ignore", "pipe", "ignore"] })
-    : spawnProcess("ps", ["-eo", "pid,ppid"], { stdio: ["ignore", "pipe", "ignore"] });
-  let out = "";
-  let settled = false;
-  cmd.stdout?.on("data", (d) => { out += d; });
-  // @decision 8c8ee0ee — bounded (mirrors enumerateWin32SweepRows's own timer): a wedged powershell.exe/ps
-  // used to hang this fire-and-forget sweep (and its pending handle) indefinitely.
-  const timer = setTimeout(() => {
-    if (settled) return;
-    settled = true;
-    try { cmd.kill(); } catch { /* best-effort */ }
-    // eslint-disable-next-line no-console
-    console.error(`[pty-reap] root=${rootPid}: enumeration helper timed out after ${REAP_ENUMERATION_TIMEOUT_MS}ms — found/killed NOTHING (fail-closed, best-effort, never throws)`);
-  }, REAP_ENUMERATION_TIMEOUT_MS);
-  // Card 7d58a1aa: mirrors the same fix reapProcessesRootedInWorktree already got (decision
-  // sha:16b7c38c) — an enumeration-helper spawn failure used to be silent, indistinguishable from
-  // "nothing needed killing". Still best-effort, still never throws past this handler.
-  cmd.on("error", (err) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    // eslint-disable-next-line no-console
-    console.error(`[pty-reap] root=${rootPid}: enumeration helper failed to spawn — found/killed NOTHING (best-effort, never throws): ${err.message}`);
-  });
-  cmd.on("close", () => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    sweep(out.split("\n").map(parseOrphanSweepLine).filter((r): r is OrphanSweepRow => r !== null));
-  });
+      console.error(`[pty-reap] root=${rootPid}: ${err.message} — found/killed NOTHING (fail-closed, best-effort, never throws)`);
+    },
+  );
 }
 
 /**
@@ -5047,21 +5149,37 @@ export interface RootSurvivalCheck {
 }
 
 /**
- * Async, bounded, best-effort: is `rootPid` still alive on the OS right now, and if so, does its command
- * line confirm it is genuinely `sessionId`'s own process? Reuses the SAME enumerator
- * {@link reapProcessesRootedInWorktree} already uses (one short-lived helper process on win32, a `/proc`
- * read on POSIX) via {@link enumerateWithRetry} — same cost shape, same timeout/retry/failure
- * classification. Never throws: an enumeration failure is reported via `enumerationFailed`, never
- * silently folded into "not alive" (that would be the exact silent-collapse `sha:16b7c38c` closed for the
- * worktree reaper — a broken enumerator must never look identical to a genuinely dead process).
- * `enumerate` is an injectable seam for hermetic tests only — production never passes it.
+ * Async, GENUINELY bounded (CR ab171b39: the semaphore slot is held across a `withReapTimeout`-wrapped
+ * call, never across a bare, potentially-never-settling one — see that decision below), best-effort: is
+ * `rootPid` still alive on the OS right now, and if so, does its command line confirm it is genuinely
+ * `sessionId`'s own process? Reuses the SAME enumerator {@link reapProcessesRootedInWorktree} already
+ * uses (one short-lived helper process on win32, a `/proc` read on POSIX) via {@link enumerateWithRetry}
+ * — same cost shape, same timeout/retry/failure classification, same `totalBudgetMs` arithmetic
+ * ({@link REAP_ENUMERATE_MAX_ATTEMPTS}/{@link REAP_ENUMERATE_RETRY_DELAY_MS}). Never throws: an
+ * enumeration failure is reported via `enumerationFailed`, never silently folded into "not alive" (that
+ * would be the exact silent-collapse `sha:16b7c38c` closed for the worktree reaper — a broken enumerator
+ * must never look identical to a genuinely dead process). `enumerate` is an injectable seam for hermetic
+ * tests only — production never passes it.
  */
 export async function checkRootSurvival(
   rootPid: number, sessionId: string, timeoutMs = 5_000, enumerate?: ProcessEnumerator,
 ): Promise<RootSurvivalCheck> {
   const enumerator = enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
   try {
-    const { procs } = await enumerateWithRetry(enumerator, timeoutMs);
+    // @decision 6d484a46 — one shared concurrency slot covers the WHOLE call (incl. any internal retry),
+    // never acquired per attempt; a queue-wait rejection here is caught by the SAME catch below as any
+    // other enumeration failure, so it fails closed exactly like one — never a false "dead"/"confirmed gone".
+    const release = await rootReapEnumerationSemaphore.acquire(ROOT_REAP_ENUMERATION_QUEUE_TIMEOUT_MS);
+    let procs: WorktreeProcess[];
+    try {
+      // @decision 6d484a46 (CR ab171b39, MAJOR) — POSIX's `/proc` read has no timer of its own; without
+      // this outer bound a hung read holds this slot FOREVER (the `finally` below can't run until this
+      // await settles) — see `reapProcessesRootedInWorktree`'s own `totalBudgetMs` comment for the formula.
+      const totalBudgetMs = REAP_ENUMERATE_MAX_ATTEMPTS * timeoutMs + (REAP_ENUMERATE_MAX_ATTEMPTS - 1) * REAP_ENUMERATE_RETRY_DELAY_MS;
+      ({ procs } = await withReapTimeout(enumerateWithRetry(enumerator, timeoutMs), totalBudgetMs));
+    } finally {
+      release();
+    }
     const row = procs.find((p) => p.pid === rootPid);
     if (!row) return { foundAlive: false, identityConfirmed: false, enumerationFailed: false, creationTime: null, creationTicks: null };
     return { foundAlive: true, identityConfirmed: commandLineMatchesSession(row.commandLine, sessionId), enumerationFailed: false, creationTime: row.creationTime, creationTicks: row.creationTicks };
