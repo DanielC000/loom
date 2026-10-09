@@ -14104,6 +14104,10 @@ export class SessionService {
    * @decision f1969787 — the LATER half of boot recovery for a HALTED recycle's unresumable successor (see
    * `halted-recycle-reconcile.ts`'s early half): archives it + nudges the predecessor, and — same reason as
    * `finishReconcilingRecycleSettles` — must run BEFORE the resume paths below so they never retry it.
+   *
+   * @decision 0d4effab — `recovered` is INCOMPLETE at this call's own return (a fresh completion pushes
+   * only once `enqueueDurableNudge`'s deferred `onOutcome` fires) — never log a boot summary off its
+   * length; each real completion logs its own `[halted-recycle-reconcile] predecessor ... recovered` line.
    */
   finishReconcilingHaltedRecycleSuccessors(early: HaltedRecycleEarlyResult): { recovered: string[]; pendingResolutionArmed: string[]; consolidated: string[] } {
     const recovered: string[] = [];
@@ -14125,18 +14129,35 @@ export class SessionService {
           e.kind === "recycle_fleet_recovered" && (e.detail as { deadSuccessorId?: string } | undefined)?.deadSuccessorId === freshId);
         if (alreadyCompleted) {
           this.db.clearHaltedRecyclePending(predecessorId);
+          recovered.push(predecessorId);
+          console.log(`[halted-recycle-reconcile] predecessor ${predecessorId.slice(0, 8)} recovered their unresumable successor ${freshId.slice(0, 8)}'s fleet (continuation: already completed)`);
         } else {
+          // @decision 0d4effab — do not call finishHaltedRecyclePending unconditionally right after
+          // enqueueDurableNudge — the nudge is only ARMED, not yet durable, until onOutcome confirms it.
           this.enqueueDurableNudge(predecessorId, "manager",
-            `[loom:recycle-failed] a daemon restart found your halted recycle's successor ${freshId.slice(0, 8)} unresumable — your workers/wakes/questions/pending (whatever had transferred) are back on you — re-read worker_list to continue.`);
-          // @decision 54434e27 — Code Review m2: the event append + marker clear are now ONE transaction
-          // (`finishHaltedRecyclePending`) — a crash between them can no longer leave a committed event
-          // with the marker still set, which used to duplicate the event on the next boot's retry.
-          this.db.finishHaltedRecyclePending(predecessorId, {
-            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
-            kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
-          });
+            `[loom:recycle-failed] a daemon restart found your halted recycle's successor ${freshId.slice(0, 8)} unresumable — your workers/wakes/questions/pending (whatever had transferred) are back on you — re-read worker_list to continue.`,
+            null, {
+              onOutcome: (outcome) => {
+                if (!outcome.dispatched) {
+                  console.error(`[halted-recycle-reconcile] nudge to predecessor ${predecessorId.slice(0, 8)} never dispatched (${(outcome.error as Error)?.message ?? outcome.error}) — marker left set for a later boot to retry`);
+                  return;
+                }
+                try {
+                  // @decision 54434e27 — Code Review m2: event append + marker clear are ONE transaction
+                  // (finishHaltedRecyclePending) — a crash between them can't leave a committed event with
+                  // the marker still set, which used to duplicate the event on the next boot's retry.
+                  this.db.finishHaltedRecyclePending(predecessorId, {
+                    id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+                    kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
+                  });
+                  recovered.push(predecessorId);
+                  console.log(`[halted-recycle-reconcile] predecessor ${predecessorId.slice(0, 8)} recovered their unresumable successor ${freshId.slice(0, 8)}'s fleet`);
+                } catch (e) {
+                  console.error(`[halted-recycle-reconcile] later pass (post-dispatch completion) failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+                }
+              },
+            });
         }
-        recovered.push(predecessorId);
       } catch (e) {
         console.error(`[halted-recycle-reconcile] later pass failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
       }

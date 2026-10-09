@@ -266,13 +266,22 @@ function makeHarness() {
   return { db, host, sessions };
 }
 
+/** @decision 0d4effab — card's own fix defers finishHaltedRecyclePending's commit into
+ *  enqueueDurableNudge's onOutcome, which `.then(dispatch)` always schedules at least one microtask away
+ *  (even when waitForMcpSeen resolves already-settled) — await a few ticks so every caller's synchronous
+ *  assertion sees the settled DB state, mirroring companion-inbound-serialization.mjs's own helper. */
+async function flushMicrotasks(n = 5) {
+  for (let i = 0; i < n; i++) await Promise.resolve();
+}
+
 /** Replicates index.ts's real boot order via the SAME exported runBootRecoveryPrefix, then both later
  *  reconcile phases, exactly matching index.ts's own line order (recycle-settle FIRST, then halted-recycle). */
-function runRealBootSequenceUpToResume(db, host) {
+async function runRealBootSequenceUpToResume(db, host) {
   const { early, haltedEarly, recovered, crashOrphanedWorkers, crashOrphanedManagers } = runBootRecoveryPrefix(db);
   const sessions = new SessionService(db, host, new OrchestrationControl());
   const finish = sessions.finishReconcilingRecycleSettles(early);
   const haltedFinish = sessions.finishReconcilingHaltedRecycleSuccessors(haltedEarly);
+  await flushMicrotasks();
   return { sessions, recovered, crashOrphanedWorkers, crashOrphanedManagers, finish, haltedFinish, haltedEarly };
 }
 
@@ -691,7 +700,7 @@ try {
     const preRestartFleet = sessions1.liveFleetResumeSet(); // captured BEFORE the restart
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { sessions: sessions2, haltedFinish, haltedEarly } = runRealBootSequenceUpToResume(db2, host2);
+    const { sessions: sessions2, haltedFinish, haltedEarly } = await runRealBootSequenceUpToResume(db2, host2);
 
     check("(B) FIX: the early phase classified M2 as unresumable and reparented the worker", haltedEarly.recovered.some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
     check("(B) FIX: the later phase recovered the predecessor", haltedFinish.recovered.includes(m1.id));
@@ -743,7 +752,7 @@ try {
     // Boot 3: the FULL sequence — must detect the pending lineage via the marker (never via the
     // now-permanently-false hasSuccessor check) and complete it.
     const { db: db3, host: host3 } = makeBoot();
-    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3);
+    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = await runRealBootSequenceUpToResume(db3, host3);
     check("(B2) boot 3: the marker-driven loop re-detected the pair `recovered`", haltedEarly3.recovered.some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
     check("(B2) boot 3: the later phase recovered the predecessor", haltedFinish3.recovered.includes(m1.id));
     check("(B2) boot 3: the worker is STILL on M1", db3.getSession(workerId)?.parentSessionId === m1.id);
@@ -755,7 +764,7 @@ try {
     // Boot 4: idempotency — a further boot must not re-fire anything for this already-resolved lineage.
     db3.close();
     const { db: db4, host: host4 } = makeBoot();
-    const { haltedEarly: haltedEarly4, haltedFinish: haltedFinish4 } = runRealBootSequenceUpToResume(db4, host4);
+    const { haltedEarly: haltedEarly4, haltedFinish: haltedFinish4 } = await runRealBootSequenceUpToResume(db4, host4);
     check("(B2) boot 4: no longer scanned into `recovered` again", !haltedEarly4.recovered.some((r) => r.predecessorId === m1.id));
     check("(B2) boot 4: the later phase recovered nothing new for this lineage", !haltedFinish4.recovered.includes(m1.id));
     check("(B2) boot 4: still exactly ONE recycle_fleet_recovered event", db4.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 1);
@@ -787,7 +796,7 @@ try {
     check("(C) the surviving successor M2 IS captured too", preRestartFleet.some((e) => e.sessionId === m2.id));
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { sessions: sessions2, haltedFinish } = runRealBootSequenceUpToResume(db2, host2);
+    const { sessions: sessions2, haltedFinish } = await runRealBootSequenceUpToResume(db2, host2);
     check("(C) the halted-reconcile left the still-resumable lineage untouched", haltedFinish.recovered.length === 0);
     check("(C pre-resume) hasSuccessor(M1) is STILL true going into the fleet resume", db2.hasSuccessor(m1.id) === true);
 
@@ -854,7 +863,7 @@ try {
 
     db1.close(); // crash path: no RestartIntent captured at all
     const { db: db2, host: host2 } = makeBoot();
-    const { sessions: sessions2, crashOrphanedWorkers, crashOrphanedManagers, haltedFinish } = runRealBootSequenceUpToResume(db2, host2);
+    const { sessions: sessions2, crashOrphanedWorkers, crashOrphanedManagers, haltedFinish } = await runRealBootSequenceUpToResume(db2, host2);
     check("(E) the halted-reconcile left the still-resumable lineage untouched", haltedFinish.recovered.length === 0);
     check("(E pre) hasSuccessor(M1) is STILL true going into crash recovery", db2.hasSuccessor(m1.id) === true);
     check("(E) FIX 386e4eb5: M1 IS a crash-recovery candidate — its successor still matches its unresolved halt", crashOrphanedManagers.includes(m1.id));
@@ -898,7 +907,7 @@ try {
 
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { sessions: sessions2, haltedEarly, haltedFinish, crashOrphanedWorkers, crashOrphanedManagers } = runRealBootSequenceUpToResume(db2, host2);
+    const { sessions: sessions2, haltedEarly, haltedFinish, crashOrphanedWorkers, crashOrphanedManagers } = await runRealBootSequenceUpToResume(db2, host2);
 
     check("(F) FIX a4c5f234: the early phase CONSOLIDATED — recorded in `consolidated`, never `recovered`", haltedEarly.consolidated.some((c) => c.predecessorId === m1.id && c.freshId === m2.id));
     check("(F) FIX a4c5f234: the early phase did NOT also mark it `recovered`", !haltedEarly.recovered.some((r) => r.predecessorId === m1.id));
@@ -965,7 +974,7 @@ try {
     // technique in recycle-settle-lost-to-restart.mjs) must be a no-op — the lineage is already resolved.
     db2.close();
     const { db: db3, host: host3 } = makeBoot();
-    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3);
+    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = await runRealBootSequenceUpToResume(db3, host3);
     check("(F) SECOND BOOT: the lineage is no longer even scanned into `consolidated` again — hasSuccessor(M1) is already false", !haltedEarly3.consolidated.some((c) => c.predecessorId === m1.id));
     check("(F) SECOND BOOT: the later phase consolidated nothing new for this lineage", !haltedFinish3.consolidated.includes(m1.id));
     check("(F) SECOND BOOT: still exactly ONE recycle_split_lineage_consolidated event — no duplicate", db3.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_split_lineage_consolidated").length === 1);
@@ -997,7 +1006,7 @@ try {
 
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { haltedEarly, haltedFinish } = runRealBootSequenceUpToResume(db2, host2);
+    const { haltedEarly, haltedFinish } = await runRealBootSequenceUpToResume(db2, host2);
 
     check("(F2) FIX a4c5f234: the already-resolved lineage is NEVER consolidated — currentHaltedSuccessor stops matching before the new branch is ever reached", !haltedEarly.consolidated.some((c) => c.predecessorId === m1.id));
     check("(F2) the already-resolved lineage is also never in `recovered`", !haltedEarly.recovered.some((r) => r.predecessorId === m1.id));
@@ -1044,7 +1053,7 @@ try {
     // Boot 3: the FULL sequence — must detect the pending lineage via the marker (never via the
     // now-permanently-false hasSuccessor check) and complete it.
     const { db: db3, host: host3 } = makeBoot();
-    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3);
+    const { haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = await runRealBootSequenceUpToResume(db3, host3);
     check("(F3) boot 3: the marker-driven loop re-detected the pair `consolidated`", haltedEarly3.consolidated.some((c) => c.predecessorId === m1.id && c.freshId === m2.id));
     check("(F3) boot 3: the later phase consolidated it", haltedFinish3.consolidated.includes(m1.id));
     check("(F3) boot 3: the worker is STILL on M1", db3.getSession(workerId)?.parentSessionId === m1.id);
@@ -1060,7 +1069,7 @@ try {
     // Boot 4: idempotency — a further boot must not re-fire anything for this already-resolved lineage.
     db3.close();
     const { db: db4, host: host4 } = makeBoot();
-    const { haltedEarly: haltedEarly4, haltedFinish: haltedFinish4 } = runRealBootSequenceUpToResume(db4, host4);
+    const { haltedEarly: haltedEarly4, haltedFinish: haltedFinish4 } = await runRealBootSequenceUpToResume(db4, host4);
     check("(F3) boot 4: no longer scanned into `consolidated` again", !haltedEarly4.consolidated.some((c) => c.predecessorId === m1.id));
     check("(F3) boot 4: the later phase consolidated nothing new for this lineage", !haltedFinish4.consolidated.includes(m1.id));
     check("(F3) boot 4: still exactly ONE recycle_split_lineage_consolidated event", db4.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_split_lineage_consolidated").length === 1);
@@ -1124,7 +1133,7 @@ try {
     const nudgeSpy3 = spyOnEnqueueDurableNudge();
     let haltedEarly3, haltedFinish3;
     try {
-      ({ haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3));
+      ({ haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = await runRealBootSequenceUpToResume(db3, host3));
     } finally {
       nudgeSpy3.restore();
     }
@@ -1204,7 +1213,7 @@ try {
     const nudgeSpy = spyOnEnqueueDurableNudge();
     let haltedEarly3, haltedFinish3;
     try {
-      ({ haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = runRealBootSequenceUpToResume(db3, host3));
+      ({ haltedEarly: haltedEarly3, haltedFinish: haltedFinish3 } = await runRealBootSequenceUpToResume(db3, host3));
     } finally {
       nudgeSpy.restore();
     }
@@ -1373,6 +1382,9 @@ try {
     } finally {
       Db.prototype.clearHaltedRecyclePendingStatement = originalClearStatement;
     }
+    // @decision 0d4effab — finishHaltedRecyclePending's own commit (and its throw, here) now happens
+    // inside enqueueDurableNudge's onOutcome, at least one microtask after this call returns.
+    await flushMicrotasks();
 
     check("(F5c) FIX round 2 item 2: the branch did NOT recover M1 — the throw was caught", !finish.recovered.includes(m1.id));
     check("(F5c) FIX round 2 item 2: the marker is STILL set — the clear genuinely failed",
@@ -1470,7 +1482,7 @@ try {
 
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { sessions: sessions2, haltedFinish, crashOrphanedWorkers, crashOrphanedManagers } = runRealBootSequenceUpToResume(db2, host2);
+    const { sessions: sessions2, haltedFinish, crashOrphanedWorkers, crashOrphanedManagers } = await runRealBootSequenceUpToResume(db2, host2);
 
     check("(F8) M1 landed in `consolidated`", haltedFinish.consolidated.includes(m1.id));
     check("(F8) M_rec landed in `recovered`, NOT `consolidated`", haltedFinish.recovered.includes(mRec.id) && !haltedFinish.consolidated.includes(mRec.id));
@@ -1554,7 +1566,7 @@ try {
 
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { haltedEarly, finish } = runRealBootSequenceUpToResume(db2, host2);
+    const { haltedEarly, finish } = await runRealBootSequenceUpToResume(db2, host2);
 
     check("(G) FIX: the stale halt event (naming dead S1) is NOT mistaken for M1's CURRENT successor S2",
       !haltedEarly.recovered.some((r) => r.predecessorId === m1.id));
@@ -1615,7 +1627,7 @@ try {
 
     db1.close();
     const { db: db2, host: host2 } = makeBoot();
-    const { sessions: sessions2, haltedEarly } = runRealBootSequenceUpToResume(db2, host2);
+    const { sessions: sessions2, haltedEarly } = await runRealBootSequenceUpToResume(db2, host2);
 
     check("(G') FIX: the stale halt event (naming dead S1) is NOT mistaken for M1's CURRENT, durably-resumable successor S2 — no reparent recorded for M1",
       !haltedEarly.recovered.some((r) => r.predecessorId === m1.id));
@@ -1730,6 +1742,147 @@ try {
     check("(H) R2 FIX: the REAL crash-recovery resume attempt leaves M1 untouched — not live", host2.isAlive(m1.id) === false);
     check("(H) R2 FIX: ONLY the new successor ends up live — M1 stays exited, now genuinely exercised (not vacuous)", db2.getSession(m1.id)?.processState === "exited");
     check("(H) R2: M1 was never even attempted (excluded candidate), so it cannot appear in managersFailed either", !managersFailed.includes(m1.id));
+  }
+
+  // ==================== (M) card 0d4effab — RESTART-IN-THE-GAP: the recovered branch's nudge survives a
+  // crash while P is live but not yet seen on MCP ====================
+  // Found by Code Review daf19b4c on 54434e27: finishHaltedRecyclePending (event filed + marker cleared)
+  // used to commit unconditionally, right after enqueueDurableNudge RETURNS — but for a manager recipient
+  // enqueueDurableNudge only ARMS `waitForMcpSeen(predecessorId).then(dispatch, ...)` and returns void; the
+  // actual durable write happens only once dispatch() finally runs. If the daemon restarts in that gap, the
+  // nudge is lost permanently (marker gone, event already says "done", nothing left to retry it).
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-m";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-m" });
+    writeFakeTranscript(m1.cwd, "eng-m1-m");
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — a restart lands while the recovery nudge is still pending behind waitForMcpSeen");
+    unstub();
+    check("(M pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
+    check("(M pre) M2 never captured an engine id (never reached SessionStart)", db1.getSession(m2.id)?.engineSessionId == null);
+    db1.close();
+
+    // Boot 2: run the early (DB-only) phase, then resume M1 for REAL on this boot's own host — live, but
+    // deliberately NEVER markMcpSeen'd — before driving the later phase. LOOM_MCP_READY_TIMEOUT_MS is 25ms
+    // (file-wide env override above) and nothing here ever awaits, so the simulated "restart" below lands
+    // well before either `markMcpSeen` or that timeout could ever resolve the pending wait.
+    const { db: db2, host: host2 } = makeBoot();
+    const haltedEarly2 = runBootRecoveryPrefix(db2).haltedEarly;
+    check("(M) boot2: the early phase classified the pair `recovered`", haltedEarly2.recovered.some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    const sessions2 = new SessionService(db2, host2, new OrchestrationControl());
+    sessions2.resume(m1.id);
+    check("(M) boot2: M1 is genuinely live on this boot's host", host2.isAlive(m1.id) === true);
+
+    sessions2.finishReconcilingHaltedRecycleSuccessors(haltedEarly2);
+    // NO flushMicrotasks here, deliberately — the whole point is to inspect the DB in the exact gap
+    // between enqueueDurableNudge arming the dispatch and dispatch() ever actually running.
+    check("(M) boot2 FIX: the marker is STILL set — the nudge is still only ARMED, not yet durable",
+      db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    check("(M) boot2 FIX: the completion event has NOT been filed yet",
+      db2.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 0);
+    check("(M) boot2 FIX: the nudge itself has NOT been durably recorded yet either — this is the exact loss window",
+      db2.listUnresolvedQueuedMessagesForWorker(m1.id).filter((e) => e.detail?.text?.includes("[loom:recycle-failed]")).length === 0);
+
+    db2.close(); // simulate the restart: the pending waitForMcpSeen wait is abandoned, never resolved
+
+    // Boot 3: the FULL sequence, on a fresh host — must rediscover and complete the lineage EXACTLY once.
+    const { db: db3, host: host3 } = makeBoot();
+    const { haltedFinish: haltedFinish3 } = await runRealBootSequenceUpToResume(db3, host3);
+    check("(M) boot3 FIX: the later phase recovered the predecessor on retry", haltedFinish3.recovered.includes(m1.id));
+    check("(M) boot3 FIX: the worker is reclaimed back onto M1", db3.getSession(workerId)?.parentSessionId === m1.id);
+    check("(M) boot3 FIX: exactly ONE recycle_fleet_recovered event now exists (no duplicate, no loss)",
+      db3.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 1);
+    check("(M) boot3 FIX: the nudge was durably delivered exactly once",
+      db3.listUnresolvedQueuedMessagesForWorker(m1.id).filter((e) => e.detail?.text?.includes("[loom:recycle-failed]")).length === 1);
+    check("(M) boot3 FIX: the durable marker is finally cleared", db3.listHaltedRecyclePending().length === 0);
+  }
+
+  // ==================== (N) card 0d4effab — `dispatched:false` leaves the marker set; a later boot
+  // completes it exactly once ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-n";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-n" });
+    writeFakeTranscript(m1.cwd, "eng-m1-n");
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — the nudge dispatch itself genuinely fails, not merely delayed");
+    unstub();
+    check("(N pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
+    db1.close();
+
+    const { db: db2, host: host2 } = makeBoot();
+    const haltedEarly2 = runBootRecoveryPrefix(db2).haltedEarly;
+    const sessions2 = new SessionService(db2, host2, new OrchestrationControl());
+
+    // `enqueueDurableMessage` is `private` only at compile time — this file imports compiled JS, so it's
+    // a plain prototype method a test can stub, same pattern as (F5c)'s `clearHaltedRecyclePendingStatement`
+    // stub above. Throwing a PLAIN Error (not a landed PostEffectPersistError) drives onOutcome's genuine
+    // `dispatched:false` branch — a total loss, nothing ever recorded anywhere.
+    const originalEnqueueDurableMessage = SessionService.prototype.enqueueDurableMessage;
+    SessionService.prototype.enqueueDurableMessage = function () { throw new Error("injected total-loss dispatch failure (N test)"); };
+    try {
+      sessions2.finishReconcilingHaltedRecycleSuccessors(haltedEarly2);
+      await flushMicrotasks();
+    } finally {
+      SessionService.prototype.enqueueDurableMessage = originalEnqueueDurableMessage;
+    }
+
+    check("(N) boot2 FIX: the marker is STILL set — the dispatch genuinely failed (dispatched:false)",
+      db2.listHaltedRecyclePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    check("(N) boot2 FIX: no completion event was filed", db2.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 0);
+
+    // Boot 3: the FULL sequence, with the real enqueueDurableMessage restored — must complete cleanly,
+    // exactly once, on retry.
+    const { db: db3, host: host3 } = makeBoot();
+    const { haltedFinish: haltedFinish3 } = await runRealBootSequenceUpToResume(db3, host3);
+    check("(N) boot3 FIX: the later phase recovered the predecessor on retry", haltedFinish3.recovered.includes(m1.id));
+    check("(N) boot3 FIX: the worker is reclaimed back onto M1", db3.getSession(workerId)?.parentSessionId === m1.id);
+    check("(N) boot3 FIX: exactly ONE recycle_fleet_recovered event now exists", db3.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 1);
+    check("(N) boot3 FIX: the nudge was durably delivered exactly once", db3.listUnresolvedQueuedMessagesForWorker(m1.id).filter((e) => e.detail?.text?.includes("[loom:recycle-failed]")).length === 1);
+    check("(N) boot3 FIX: the durable marker is finally cleared", db3.listHaltedRecyclePending().length === 0);
+  }
+
+  // ==================== (O) card 0d4effab — NORMAL (no-crash) path still files exactly one event and
+  // exactly one nudge ====================
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rmhsd-o";
+    seedProject(db1, P);
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-o" });
+    writeFakeTranscript(m1.cwd, "eng-m1-o");
+    const { workerId } = seedFleet(db1, P, m1.id);
+
+    const unstub = stubWakesPermanentFailure();
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — the ordinary, no-crash boot-reconcile path");
+    unstub();
+    check("(O pre) the recycle HALTED", hasEvent(db1, m2.id, "recycle_ownership_transfer_failed"));
+    db1.close();
+
+    const { db: db2, host: host2 } = makeBoot();
+    const nudgeSpy = spyOnEnqueueDurableNudge();
+    let haltedFinish;
+    try {
+      ({ haltedFinish } = await runRealBootSequenceUpToResume(db2, host2));
+    } finally {
+      nudgeSpy.restore();
+    }
+
+    check("(O) FIX: the later phase recovered the predecessor", haltedFinish.recovered.includes(m1.id));
+    check("(O) FIX: the worker is reclaimed back onto M1", db2.getSession(workerId)?.parentSessionId === m1.id);
+    check("(O) FIX: exactly ONE recycle_fleet_recovered event", db2.listEventsForSession(m1.id).filter((e) => e.kind === "recycle_fleet_recovered").length === 1);
+    check("(O) FIX: exactly ONE enqueueDurableNudge call, addressed to M1", nudgeSpy.calls.filter((args) => args[0] === m1.id).length === 1);
+    check("(O) FIX: the nudge was durably delivered exactly once", db2.listUnresolvedQueuedMessagesForWorker(m1.id).filter((e) => e.detail?.text?.includes("[loom:recycle-failed]")).length === 1);
+    check("(O) FIX: the durable marker is cleared", db2.listHaltedRecyclePending().length === 0);
   }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }

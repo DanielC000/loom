@@ -1650,8 +1650,10 @@ async function main(): Promise<void> {
   // recycle's unresumable successor must be archived (and its retirement recorded) BEFORE the resume paths
   // below compute their candidate sets, or they'd attempt to resume an archived row for nothing.
   {
-    const { recovered, pendingResolutionArmed, consolidated } = sessions.finishReconcilingHaltedRecycleSuccessors(haltedRecycleSettleEarly);
-    if (recovered.length) console.log(`[boot] halted-recycle reconcile: ${recovered.length} predecessor(s) recovered their unresumable successor's fleet`);
+    // @decision 0d4effab — `recovered` is undercounted here by design (see that method's own doc) — a
+    // fresh completion logs its own `[halted-recycle-reconcile] predecessor ... recovered` line instead
+    // of being summarized by this count; nothing to log here for that bucket.
+    const { pendingResolutionArmed, consolidated } = sessions.finishReconcilingHaltedRecycleSuccessors(haltedRecycleSettleEarly);
     // @decision a4c5f234 — both-dead lineages: consolidated onto the predecessor as bookkeeping only
     // (never resumed) — see that record for why.
     if (consolidated.length) console.log(`[boot] halted-recycle reconcile: ${consolidated.length} both-dead lineage(s) consolidated onto their predecessor (check [loom:orphaned-fleet] banners)`);
