@@ -2148,6 +2148,11 @@ export interface GateRun {
    *  worker self-check); the Gates page's active lane must label it distinctly. `false` on every other
    *  run. */
   landingCheckOnly: boolean;
+  /** Card cee17efe: echoed from `GateSnapshotEntry.distImporterCheckOnly` — `true` ONLY for the
+   *  automatic post-ungated-landing dist-importer advisory (`gateType:"worker"` underneath, but never a
+   *  real worker self-check, and a DIFFERENT mechanism from `landingCheckOnly` above); the Gates page's
+   *  active lane must label it distinctly too. `false` on every other run. */
+  distImporterCheckOnly: boolean;
   /** The RESOLVED per-project `orchestration.gateCommandTimeoutMs` (ms), read server-side so a
    *  per-project override is reflected. `null` means genuinely UNKNOWN — ⛔ not a measured zero, never
    *  substitute a default. ⚠️ This is the RAW configured value, not the ~2× effective ceiling a first
@@ -2178,10 +2183,15 @@ export interface GatesActive {
 /** How a settled gate run ended, derived from its orchestration_event detail. `"cancelled"` and
  *  `"skipped"` are DISTINCT non-verdicts — never count either as a `"reject"`/`"pass"` when computing a
  *  rate from a series of {@link GateHistoryRow}s. `"skipped"` is always paired with `gateRan:false`.
+ *  `"error"` (card cee17efe) is a FOURTH distinct non-verdict: the dist-importer advisory's own
+ *  `mechanismLike` outcome (the scan/build/run machinery itself broke — a bad worktree cut, a build
+ *  failure, a harness/usage error with no identifiable failing test) — never a real test red, so it must
+ *  never fall through to `"reject"` the way it used to before `gateOutcomeFromDetail` checked
+ *  `detail.mechanismLike` explicitly. Today only a `distImporterCheckOnly` row ever carries it.
  *  @decision 3a6f04cc — a `"reject"` row immediately followed (same opId) by a cancelled
  *   `build_gate_retry` row is one unresolved op, not a rejection (transient-kill-retry); a
  *   single-file-retry's own `cancelled:true` never loses attempt 1's real failure (sibling row). */
-export type GateOutcome = "pass" | "reject" | "timeout" | "kill" | "cancelled" | "skipped";
+export type GateOutcome = "pass" | "reject" | "timeout" | "kill" | "cancelled" | "skipped" | "error";
 
 /** One settled gate run in the HISTORY table — reconstructed from a gate-related orchestration_event
  *  (`worker_gate` / `build_gate` / `deploy`), enriched via a JOIN to the keyed session's project/task. */
@@ -2328,6 +2338,12 @@ export interface GateHistoryRow {
    *  real gate. `countGateEvents` tallies a `landingCheckOnly:true` row under its own `"landingCheck"`
    *  bucket, separate from both `"worker"` and `"merge"`. `false` on every ordinary row, never `null`. */
   landingCheckOnly: boolean;
+  /** Card cee17efe — `true` ONLY for the automatic post-ungated-landing dist-importer advisory. Its OWN
+   *  distinct `worker_gate`-kind row (`gateType:"worker"`), never a real worker self-check and never
+   *  sharing an opId with the landing's own merge. `countGateEvents` tallies a
+   *  `distImporterCheckOnly:true` row under its own `"distImporterCheck"` bucket, separate from
+   *  `"worker"`, `"merge"`, and `"landingCheck"`. `false` on every ordinary row, never `null`. */
+  distImporterCheckOnly: boolean;
   /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
    *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below).
    *

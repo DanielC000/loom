@@ -7062,7 +7062,11 @@ export class Db {
       // Card bd9a483b: a landing-check row (`worker_gate` kind) must never inflate the `"worker"` tally
       // alongside a real worker self-check — tallied under its OWN bucket instead, so a reader can tell
       // "how many real gates ran" from "how many safety-net checks ran" without re-deriving it by hand.
-      const gateType = detail.landingCheckOnly === true ? "landingCheck" : gateTypeForKind(r.kind);
+      const gateType = detail.landingCheckOnly === true
+        ? "landingCheck"
+        : detail.distImporterCheckOnly === true
+          ? "distImporterCheck"
+          : gateTypeForKind(r.kind);
       byGateType[gateType] = (byGateType[gateType] ?? 0) + 1;
       const outcome = gateOutcomeFromDetail(detail);
       byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1;
@@ -10007,11 +10011,16 @@ function gateTypeForKind(kind: string): GateType {
  *  `"reject"`. `skipped` is checked BEFORE `passed` (@decision db9b0130) — an inert-diff skip stamps
  *  `passed:true` too (so `gateResult.passed` still drives the merge proceeding) but must never be
  *  reported as a `"pass"` outcome; checking it first means that stamp can never shadow this one.
- *  Otherwise truthy `passed`/`ok` is a pass; a timed-out run is `timeout`; a signal-killed run is `kill`;
- *  anything else is `reject`. */
+ *  `detail.mechanismLike === true` is checked next, for the SAME reason — the advisory's own scan/build/
+ *  run machinery breaking is neither a pass nor a real rejection, and `settlePendingGateOp` already
+ *  settles this SAME run with verdict kind `"error"`.
+ *  @decision cee17efe — `gate_history`/`countGateEvents`/the Gates UI must agree with that, never
+ *  `"reject"`. Otherwise truthy `passed`/`ok` is a pass; a timed-out run is `timeout`; a signal-killed run
+ *  is `kill`; anything else is `reject`. */
 function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
   if (detail.cancelled === true) return "cancelled";
   if (detail.skipped === true) return "skipped";
+  if (detail.mechanismLike === true) return "error";
   if (detail.passed === true || detail.ok === true) return "pass";
   if (detail.timedOut === true) return "timeout";
   if (typeof detail.signal === "string" && detail.signal.length > 0) return "kill";
@@ -10228,6 +10237,9 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     // Card bd9a483b: `runUngatedLandingCheck` stamps this directly onto its OWN `worker_gate` event (never
     // shared with the landing's own merge opId) — see GateHistoryRow.landingCheckOnly's doc.
     landingCheckOnly: detail.landingCheckOnly === true,
+    // Card cee17efe: `runOneDistImporterCheck` stamps this directly onto its OWN `worker_gate` event —
+    // see GateHistoryRow.distImporterCheckOnly's own doc.
+    distImporterCheckOnly: detail.distImporterCheckOnly === true,
   };
 }
 

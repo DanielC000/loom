@@ -8,7 +8,7 @@
 // spawning it (even to kill it quickly) would nest an entire hermetic test run inside this one test.
 // `discoverHermeticTests`/`auditDiscoveryAgainstGit` in test-daemon-discovery.mjs already establish this
 // import-without-triggering-isMain pattern for this exact file.
-import { classifyCliArgs, KNOWN_CLI_FLAGS, KNOWN_CLI_VALUE_PREFIXES, resolveSelection, resolveSelectionForCliMode } from "../scripts/test-daemon.mjs";
+import { classifyCliArgs, KNOWN_CLI_FLAGS, KNOWN_CLI_VALUE_PREFIXES, resolveSelection, resolveSelectionForCliMode, parseOnlyFileNames } from "../scripts/test-daemon.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -69,8 +69,8 @@ check(
 // so recognized by PREFIX, kept in a SEPARATE export from KNOWN_CLI_FLAGS (exact-match) above.
 {
   check(
-    "KNOWN_CLI_VALUE_PREFIXES is exactly {--only=, --exclude=, --concurrency=}",
-    KNOWN_CLI_VALUE_PREFIXES.length === 3 && ["--only=", "--exclude=", "--concurrency="].every((p) => KNOWN_CLI_VALUE_PREFIXES.includes(p)),
+    "KNOWN_CLI_VALUE_PREFIXES is exactly {--only=, --only-file=, --exclude=, --concurrency=}",
+    KNOWN_CLI_VALUE_PREFIXES.length === 4 && ["--only=", "--only-file=", "--exclude=", "--concurrency="].every((p) => KNOWN_CLI_VALUE_PREFIXES.includes(p)),
   );
 
   check("--only=a,b classifies as mode:run with only:['a','b']", (() => {
@@ -99,6 +99,34 @@ check(
   check("[positive control] --concurrency=-1 is rejected", classifyCliArgs(["--concurrency=-1"]).mode === "error");
   check("[positive control] --concurrency=1.5 is rejected (integer only)", classifyCliArgs(["--concurrency=1.5"]).mode === "error");
   check("--count alongside --only= still classifies as mode:count (--count/--list take priority, unchanged)", classifyCliArgs(["--count", "--only=a"]).mode === "count");
+
+  // Card cee17efe: --only-file= — delivers the --only= selection via a file path instead of an argv
+  // value, so a large generated run set never hits the OS command-line length limit.
+  check("--only-file=/some/path classifies as mode:run with onlyFilePath set, only left null", (() => {
+    const r = classifyCliArgs(["--only-file=/some/path"]);
+    return r.mode === "run" && r.onlyFilePath === "/some/path" && r.only === null;
+  })());
+  check("no --only-file= given -> onlyFilePath:null (byte-identical default path)", classifyCliArgs([]).onlyFilePath === null);
+  check("[positive control] --only= and --only-file= together is rejected (ambiguous selection source)", (() => {
+    const r = classifyCliArgs(["--only=a", "--only-file=/some/path"]);
+    return r.mode === "error" && r.unrecognized.some((u) => u.includes("cannot be combined"));
+  })());
+  check("[positive control] --only-file= combined with --codex-real-spawn is rejected (ambiguous)", (() => {
+    const r = classifyCliArgs(["--codex-real-spawn", "--only-file=/some/path"]);
+    return r.mode === "error" && r.unrecognized.some((u) => u.includes("cannot be combined"));
+  })());
+  check("--count alongside --only-file= still classifies as mode:count (--count/--list take priority, unchanged)", classifyCliArgs(["--count", "--only-file=/some/path"]).mode === "count");
+
+  // parseOnlyFileNames: pure file-content parsing, exercised directly (no real file on disk).
+  check("parseOnlyFileNames splits on newlines, trims, and drops blank lines", (() => {
+    const names = parseOnlyFileNames("a\n b \n\nc\n");
+    return names.length === 3 && names[0] === "a" && names[1] === "b" && names[2] === "c";
+  })());
+  check("parseOnlyFileNames on an empty string returns an empty array", parseOnlyFileNames("").length === 0);
+  check("parseOnlyFileNames handles a single name with no trailing newline", (() => {
+    const names = parseOnlyFileNames("solo-name");
+    return names.length === 1 && names[0] === "solo-name";
+  })());
 
   // resolveSelection: pure selection-resolution logic, exercised directly (no subprocess spawn).
   const HERM = ["a", "b", "c"];

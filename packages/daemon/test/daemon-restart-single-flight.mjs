@@ -428,6 +428,50 @@ function tmpDbFile(tag) {
   try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
 }
 
+// ============== (F) TREE-KILL via AbortController (cee17efe round-4 ruling 5), real spawn ==============
+// Card cee17efe: runBuildStep's `cancelSignal` param (threaded in so the dist-importer check's own build
+// step can be killed early on a RUNNING `gate_cancel`) must kill the WHOLE process tree exactly like the
+// existing timeoutMs path (C) above — not just resolve the promise while a real grandchild keeps running.
+{
+  const scratchDir = path.join(os.tmpdir(), `loom-drsf-ac-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  fs.mkdirSync(scratchDir, { recursive: true });
+  const pidFile = path.join(scratchDir, "grandchild.pid");
+  const q = (p) => `"${p}"`;
+  // SAME fixture as (C) — a non-detached grandchild that writes its own pid then hangs forever — but a
+  // LARGE timeoutMs this time, so a kill can ONLY be attributed to the AbortController, never to (C)'s
+  // own timeout path.
+  const parentScript = path.join(scratchDir, "parent.cjs");
+  fs.writeFileSync(parentScript, [
+    'const { spawn } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    `const gc = spawn(${JSON.stringify(process.execPath)}, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });`,
+    `fs.writeFileSync(${JSON.stringify(pidFile)}, String(gc.pid));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+
+  const step = { label: "build", command: `${q(process.execPath)} ${q(parentScript)}`, args: [], shell: true, timeoutMs: 120_000 };
+  const controller = new AbortController();
+  const resultPromise = restart.runBuildStep(step, scratchDir, controller.signal);
+
+  await waitUntil(() => fs.existsSync(pidFile), 5000);
+  const grandchildPid = Number(fs.readFileSync(pidFile, "utf8").trim());
+  check("(F) [setup] the grandchild pid file was actually written (the grandchild really started)",
+    Number.isFinite(grandchildPid) && grandchildPid > 0);
+
+  const started = Date.now();
+  controller.abort();
+  const result = await resultPromise;
+  const elapsed = Date.now() - started;
+  check("(F) the cancelSignal kill settles promptly — never waits out the 120s timeoutMs bound", elapsed < 10_000);
+  check("(F) the failure tail names the cancellation, distinct from a timeout", /cancelled/i.test(result.out) && !/exceeded \d+ms — killed/.test(result.out));
+  check("(F) result.code is non-zero (the step never completed normally)", result.code !== 0);
+
+  const gcGone = await waitUntil(() => !isAlive(grandchildPid), 5000);
+  check("(F) the GRANDCHILD is ACTUALLY GONE after the AbortController kill — the SAME killGateProcessTree tree-kill (C) proves for the timeout path, now proven for cancelSignal too", gcGone);
+
+  try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+}
+
 try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
 
 console.log(failures === 0

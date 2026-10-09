@@ -1355,6 +1355,133 @@ function makeRepo(repo) {
   check("(g) the landing-check, left uncancelled by the refused attempt, still completes normally", landingResult?.passed === true);
 }
 
+// ── (h) card cee17efe (round-3 ruling 3/R3-3): the SAME discriminating refusal as (g), for the
+//    automatic post-ungated-landing dist-importer advisory (`distImporterCheckOnly:true`) — a worker's
+//    `{kind:"own"}` gate_cancel against it must name it correctly, never "a merge/deploy gate" (the
+//    `isWorkerSelfCheckGate` exclusion covers BOTH landingCheckOnly and distImporterCheckOnly the same way). ──
+{
+  const sfx = `distimporter-own-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-dic-${sfx}`);
+  registerForCleanup(reposDir);
+  const db = new Db();
+  dbs.push(db);
+  db.setPlatformConfig({ maxConcurrentGates: 1 }); // saturate so the dist-importer-check entry below genuinely queues
+
+  const projId = `gc-dic-p-${sfx}`, mgrId = `gc-dic-mgr-${sfx}`;
+  const taskId = `gc-dic-t-${sfx}`, workerId = `gc-dic-w-${sfx}`;
+  const taskHolderId = `gc-dic-th-${sfx}`, workerHolderId = `gc-dic-wh-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "DIC", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-dic-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-dic-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  db.insertAgent({ id: `agent-dic-w-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: "DIC-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wt = await createWorktree(repo, projId, taskId);
+  worktrees.push(wt.worktreePath);
+  db.insertSession({ id: workerId, projectId: projId, agentId: `agent-dic-w-${sfx}`, engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: wt.worktreePath, branch: wt.branch });
+
+  db.insertAgent({ id: `agent-dic-h-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskHolderId, projectId: projId, title: "DIC-HTASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wtHolder = await createWorktree(repo, projId, taskHolderId);
+  worktrees.push(wtHolder.worktreePath);
+  db.insertSession({ id: workerHolderId, projectId: projId, agentId: `agent-dic-h-${sfx}`, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: taskHolderId, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
+
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
+  let releaseDicHolder;
+  const dicHolderHold = new Promise((res) => { releaseDicHolder = res; });
+  const pDicHolder = sessions.gateSemaphore.runExclusive(1, { gateType: "worker", projectId: projId, sessionId: workerHolderId, worktreePath: wtHolder.worktreePath }, async () => { await dicHolderHold; return "holder"; });
+  await waitUntil(() => sessions.gateSemaphore.snapshot().active === 1);
+
+  // Synthesize the manager's OWN dist-importer-check entry directly — distImporterCheckOnly:true,
+  // gateType:"worker", sessionId:mgrId (mirrors `runOneDistImporterCheck`'s real descriptor shape in
+  // sessions/service.ts, which always carries the MANAGER's own sessionId, never a worker's).
+  const DIC_OP_ID = `gc-dic-op-${sfx}`;
+  const pDic = sessions.gateSemaphore.runExclusive(
+    1, { gateType: "worker", projectId: projId, sessionId: mgrId, taskId: null, opId: DIC_OP_ID, distImporterCheckOnly: true },
+    async () => ({ passed: true }), "low",
+  );
+  pDic.catch(() => {});
+  const dicEntry = await waitUntil(() => sessions.gateQueueForManager(projId).queued.find((e) => e.opId === DIC_OP_ID));
+  check("(h) the dist-importer-check entry is queued, carrying distImporterCheckOnly:true (setup sanity)", !!dicEntry && dicEntry.distImporterCheckOnly === true);
+
+  if (dicEntry) {
+    const ownAttempt = await sessions.cancelGateOp(workerId, dicEntry.opId, { scope: { kind: "own", sessionId: workerId } });
+    check("(h) the worker is REFUSED cancelling the manager's own in-flight dist-importer-check via {kind:\"own\"}", ownAttempt.outcome === "refused");
+    check("(h) the refusal does NOT call it \"a merge/deploy gate\" (it is neither)", !/merge\/deploy gate/i.test(ownAttempt.reason ?? ""));
+    check("(h) the refusal instead names it as the manager's own automatic dist-importer advisory",
+      /dist-importer advisory/i.test(ownAttempt.reason ?? ""));
+    check("(h) the dist-importer-check entry is STILL queued — the refused attempt never touched the semaphore",
+      sessions.gateQueueForManager(projId).queued.some((e) => e.opId === dicEntry.opId));
+  } else {
+    console.log("SKIP  (h) cancel assertions — setup sanity check above already failed");
+  }
+
+  releaseDicHolder("go");
+  await pDicHolder.catch(() => {});
+  const dicResult = await pDic;
+  check("(h) the dist-importer-check, left uncancelled by the refused attempt, still completes normally", dicResult?.passed === true);
+}
+
+// ── (i) card cee17efe (round-4 ruling 4b): a distImporterCheckOnly op never calls `pendingOps.attach`,
+//    so the generic `gate:<sessionId>` key `cancelGateOp`'s RUNNING-cancel verification used to wait on
+//    had NOTHING registered under it — `waitBriefly` returned `true` AT ONCE regardless of whether the
+//    kill was ever verified, reporting `outcome:"cancelled"` on a run that may still be executing. This
+//    mirrors the "never-settling kill" scenario above (3), but for a distImporterCheckOnly entry: the fn
+//    never settles even after `cancelSignal` aborts, so a HONEST verification must report NOT cancelled
+//    and leave the slot held — the exact outcome the pre-fix vacuous wait could never produce. ──────────
+{
+  const sfx = `dic-hang-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-dichang-${sfx}`);
+  registerForCleanup(reposDir);
+  const db = new Db();
+  dbs.push(db);
+  const projId = `gc-dichang-p-${sfx}`, mgrId = `gc-dichang-mgr-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "DICHANG", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-dichang-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-dichang-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  // Tiny verify bound — this test does not wait out the real production default.
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { gateCancelVerifyMs: 150 });
+
+  let resolveAbortObserved;
+  const abortObservedPromise = new Promise((res) => { resolveAbortObserved = res; });
+  const DIC_HANG_OP_ID = `gc-dichang-op-${sfx}`;
+  const pDic = sessions.gateSemaphore.runExclusive(
+    1, { gateType: "worker", projectId: projId, sessionId: mgrId, taskId: null, opId: DIC_HANG_OP_ID, distImporterCheckOnly: true },
+    (_startedAt, cancelSignal) => new Promise(() => {
+      // Mirrors runOneDistImporterCheck's own real descriptor shape — never settles, even once
+      // cancelSignal aborts, simulating a kill whose completion can never be verified.
+      if (cancelSignal.aborted) { resolveAbortObserved(); return; }
+      cancelSignal.addEventListener("abort", () => resolveAbortObserved());
+    }),
+    "low",
+  ).catch(() => {}); // deliberately left unresolved — this session/db is torn down below regardless
+
+  const liveEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running.find((e) => e.opId === DIC_HANG_OP_ID));
+  check("(i) [setup] the distImporterCheckOnly entry is genuinely RUNNING before cancel", !!liveEntry && liveEntry.distImporterCheckOnly === true);
+
+  if (liveEntry) {
+    const cancelResult = await sessions.cancelGateOp(mgrId, liveEntry.opId, { scope: { kind: "project" } });
+    check("(i) cancelGateOp reports NOT cancelled (the kill is genuinely unverified — the pre-fix vacuous wait could never produce this)", cancelResult.outcome === "not_cancelled");
+    check("(i) the reason names the verification bound, not a generic failure", /not verified dead/i.test(cancelResult.reason ?? ""));
+    await abortObservedPromise; // no timeout — the abort really was delivered to this op's own fn
+    check("(i) the abort was requested and (eventually) observed by the fake fn", true);
+    const snapAfter = sessions.gateQueueForManager(projId);
+    check("(i) the op is STILL reported running — the slot was NOT freed on an unverified kill",
+      snapAfter.running.some((e) => e.opId === liveEntry.opId));
+  } else {
+    console.log("SKIP  (i) cancel/abort assertions — setup sanity check above already failed");
+  }
+
+  void pDic;
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is. Card a0d912f5: a WORKER can cancel only its OWN run_gate self-check — never another worker's, and never a merge gate that happens to share its own sessionId — and intent/reason land verbatim in the settled op's own reason text, for BOTH a QUEUED cancel (GateCancelledError.detail) AND a VERIFIED RUNNING cancel (cancelSignalRef), the latter negative-controlled against a bare cancel that carries neither string."
   : `\n❌ ${failures} FAILURE(S).`);

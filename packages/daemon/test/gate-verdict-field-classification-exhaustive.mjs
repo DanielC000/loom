@@ -115,7 +115,8 @@ const DERIVED_KEYS = ["passed", "cancelled", "retryWarning", "transientRetryWarn
 // union (see that Record's own doc, service.ts, for the gap this closes). Hand-listed here for the same
 // reason DERIVED_KEYS is: no interface to derive them from. Card `bd9a483b` later added `landingCheckOnly`
 // as an 8th outer key the same way — kept in this one list, never a second OUTER_KEYS-shaped const.
-const OUTER_KEYS = ["state", "gateType", "elapsedMs", "idleMs", "admittedAt", "ownerSessionAlive", "outcome", "landingCheckOnly"];
+// Card cee17efe later added `distImporterCheckOnly`, a 9th outer key, the same way.
+const OUTER_KEYS = ["state", "gateType", "elapsedMs", "idleMs", "admittedAt", "ownerSessionAlive", "outcome", "landingCheckOnly", "distImporterCheckOnly"];
 
 // ── THE GUARANTEE — every PendingGateOpVerdict member, and every derived/outer key, has a classification ──
 // entry.

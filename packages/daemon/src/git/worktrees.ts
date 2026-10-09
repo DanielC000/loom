@@ -5356,6 +5356,257 @@ async function foldInTestImporters(
   return { ok: true, addChangedTestFiles, addNotHermeticExcluded };
 }
 
+/** One directly-matching test file plus HOW MANY distinct touched dist modules it imports — the input
+ *  to {@link rankAndCapRunSet}'s descending-count ranking (LEAD ruling on cee17efe). */
+export interface DirectDistImporterMatch {
+  path: string;
+  /** Count of DISTINCT `touchedDistRelPaths` entries this file's own specifiers resolve to. */
+  touchedCount: number;
+}
+
+/** {@link scanDirectDistImporters}'s verdict — the RAW (pre-classification) direct-importer match, same
+ *  split {@link scanTestImporterClosure}/{@link foldInTestImporters} use: the AST walk happens in a child
+ *  process and returns raw paths; classification against NOT_HERMETIC/EXCLUDED_DIR_NAMES happens
+ *  afterward, in the host process, in {@link computeDirectDistImporterRunSet} below. */
+export type DirectDistImporterScanResult =
+  | { ok: true; matched: DirectDistImporterMatch[]; wildcardImporters: string[] }
+  | { ok: false; kind: "typescript-unresolvable" | "harness-config-unavailable"; reason: string };
+
+/**
+ * @decision cee17efe — never fold this into {@link scanTestImporterClosure}/{@link foldInTestImporters}
+ * (a deliberate LEAD ruling, not duplication to clean up); a non-literal dynamic import folds into
+ * `wildcardImporters`, never silently dropped — same fail-closed rule decision 72769424 established.
+ *
+ * The DIRECT (non-transitive) counterpart to {@link scanTestImporterClosure}: for every real
+ * `packages/daemon/test/**\/*.mjs` file, extracts its own import/dynamic-import specifiers (the SAME
+ * {@link extractModuleSpecifiers} parse {@link scanTestImporterClosure} already uses) and reports a MATCH
+ * when any specifier resolves to one of `touchedDistRelPaths` (repo-relative compiled module paths, e.g.
+ * `"packages/daemon/dist/sessions/service.js"`). No BFS, no reverse-edge graph — Option B (design card
+ * 71a77fb2 §5) is explicitly a direct-importer scan only.
+ *
+ * Returns the RAW matched/wildcard paths, not yet classified against NOT_HERMETIC/EXCLUDED_DIR_NAMES —
+ * see {@link computeDirectDistImporterRunSet} for that half. Exported only so a child process can
+ * `import()` and call it (via {@link scanDirectDistImportersInChildProcess} immediately below).
+ */
+export async function scanDirectDistImporters(
+  testDirAbs: string, touchedDistRelPaths: readonly string[],
+): Promise<DirectDistImporterScanResult> {
+  let tsModule: TestImportTsModuleLike;
+  try {
+    const imported = (await import("typescript")) as unknown as { default?: TestImportTsModuleLike } & TestImportTsModuleLike;
+    tsModule = imported.default ?? imported;
+  } catch {
+    return { ok: false, kind: "typescript-unresolvable", reason: "typescript module not resolvable while scanning for direct dist importers (expected on a shipped end-user install)" };
+  }
+  let relFiles: string[];
+  try {
+    relFiles = listAllTestMjsFilesRelative(testDirAbs);
+  } catch {
+    return { ok: false, kind: "harness-config-unavailable", reason: "could not list packages/daemon/test/**/*.mjs while scanning for direct dist importers" };
+  }
+  const touched = new Set(touchedDistRelPaths);
+  const matched: DirectDistImporterMatch[] = [];
+  const wildcardImporters: string[] = [];
+  for (const rel of relFiles) {
+    const repoRelPath = `${EMIT_COMPARE_TEST_PREFIX}${rel}`;
+    let content: string;
+    try {
+      content = fs.readFileSync(path.join(testDirAbs, rel), "utf8");
+    } catch {
+      return { ok: false, kind: "harness-config-unavailable", reason: `could not read ${repoRelPath} while scanning for direct dist importers` };
+    }
+    const { specifiers, hasUnresolvedDynamicImport } = extractModuleSpecifiers(tsModule, repoRelPath, content);
+    if (hasUnresolvedDynamicImport) { wildcardImporters.push(repoRelPath); continue; }
+    // Card cee17efe (LEAD ruling): count DISTINCT touched matches, not a boolean — rankAndCapRunSet ranks
+    // on this count, descending, so a file importing more of the touched modules runs first under a cap.
+    const matchedTouched = new Set<string>();
+    for (const spec of specifiers) {
+      if (!spec.startsWith("./") && !spec.startsWith("../")) continue; // bare/absolute specifier — never resolves into dist/
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(repoRelPath), spec));
+      if (touched.has(resolved)) matchedTouched.add(resolved);
+    }
+    if (matchedTouched.size > 0) matched.push({ path: repoRelPath, touchedCount: matchedTouched.size });
+  }
+  return { ok: true, matched, wildcardImporters };
+}
+
+/** @decision 72769424 (shared posture) — never call {@link scanDirectDistImporters} from the host's own
+ *  event loop. Mirrors {@link scanTestImporterClosureInChildProcess} exactly (same probe-source/stdin
+ *  technique, same bounded timeout, same killable-child isolation) with ONE payload difference: this
+ *  scan's input is `touchedDistRelPaths` (dist module paths), not `roots` (test-file paths) — still sent
+ *  over stdin, never argv, for the same Windows command-line-length reason (@decision db669d74). */
+const DIRECT_DIST_IMPORTER_SCAN_PROBE_SOURCE =
+  "const [url,testDirAbs]=process.argv.slice(1);" +
+  "let touchedJson='';" +
+  "process.stdin.setEncoding('utf8');" +
+  "process.stdin.on('data',(c)=>{touchedJson+=c});" +
+  "process.stdin.on('end',()=>{" +
+  "import(url).then(" +
+  "(m)=>m.scanDirectDistImporters(testDirAbs,JSON.parse(touchedJson))" +
+  ".then((r)=>{process.stdout.write(JSON.stringify(r));process.exit(0)})" +
+  ".catch(()=>process.exit(4))," +
+  "()=>process.exit(2));" +
+  "});";
+
+/** Mirrors {@link TEST_IMPORTER_SCAN_TIMEOUT_MS}'s own generous bound — same corpus, same class of walk. */
+export const DIRECT_DIST_IMPORTER_SCAN_TIMEOUT_MS = 120_000;
+
+function scanDirectDistImportersInChildProcess(
+  testDirAbs: string, touchedDistRelPaths: readonly string[], timeoutMs: number,
+): Promise<DirectDistImporterScanResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let child: ChildProcess;
+    const done = (r: DirectDistImporterScanResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      killRemoveChild(child);
+      done({ ok: false, kind: "harness-config-unavailable", reason: "direct-dist-importer-scan child process timed out" });
+    }, timeoutMs);
+    try {
+      child = spawn(process.execPath, ["--input-type=module", "-e", DIRECT_DIST_IMPORTER_SCAN_PROBE_SOURCE, import.meta.url, testDirAbs], {
+        stdio: ["pipe", "pipe", "ignore"], windowsHide: true,
+      });
+    } catch {
+      done({ ok: false, kind: "harness-config-unavailable", reason: "could not spawn direct-dist-importer-scan child process" });
+      return;
+    }
+    const stdoutAcc = collectUtf8Stdout(child.stdout, 1_000_000);
+    child.stdin?.on("error", () => {});
+    try {
+      child.stdin?.end(JSON.stringify(touchedDistRelPaths));
+    } catch {
+      // Best-effort — see the sibling stdin "error" listener's own comment on scanTestImporterClosureInChildProcess.
+    }
+    child.on("error", () => done({ ok: false, kind: "harness-config-unavailable", reason: "direct-dist-importer-scan child process errored" }));
+    child.on("close", (code) => {
+      if (code !== 0) { done({ ok: false, kind: "harness-config-unavailable", reason: `direct-dist-importer-scan child process exited with code ${code}` }); return; }
+      try {
+        done(JSON.parse(stdoutAcc.value.trim()) as DirectDistImporterScanResult);
+      } catch {
+        done({ ok: false, kind: "harness-config-unavailable", reason: "could not parse direct-dist-importer-scan child process output" });
+      }
+    });
+  });
+}
+
+/** The fully-classified verdict of {@link computeDirectDistImporterRunSet} — `candidates` is NOT yet
+ *  ranked or capped (LEAD ruling on cee17efe: ranking/capping is pure logic, owned by
+ *  `orchestration/dist-importer-check.ts`'s `rankAndCapRunSet`, not this git-facing function). A
+ *  wildcard (non-literal-dynamic-import) candidate carries `touchedCount: 0` — unknown/unconfirmed, so it
+ *  ranks last under `rankAndCapRunSet`'s descending-count sort, never first. */
+export type DirectDistImporterCheckResult =
+  | { ok: true; candidates: DirectDistImporterMatch[]; corpusSize: number }
+  | { ok: false; reason: string };
+
+/**
+ * Card cee17efe — the full "which test files are eligible to run" computation for one isolated
+ * worktree: scans (in a child process) for every test file directly importing one of
+ * `touchedDistRelPaths`, then classifies each candidate against NOT_HERMETIC/EXCLUDED_DIR_NAMES/the
+ * `_`-prefixed-helper convention — the SAME three exclusions {@link foldInTestImporters} applies to its
+ * own discovered importers, duplicated here (not shared via a refactor of that function) per the LEAD
+ * ruling to leave it untouched. A shell-unsafe discovered path is dropped rather than failing the whole
+ * check closed (unlike `foldInTestImporters`'s refusal for the merge-reduction case): this signal is
+ * advisory-only, so losing one candidate test file is an acceptable, silent-to-the-manager cost; failing
+ * the whole advisory closed over one odd path is not worth the loss of coverage for every OTHER touched
+ * module. Ranking/capping the returned `candidates` down to an actual run set is the CALLER's job (see
+ * `rankAndCapRunSet`) — this function never truncates.
+ */
+/** @decision cee17efe — never let candidate classification and the corpus-size count drift apart on
+ *  what "runnable" means.
+ *
+ *  Applies the SAME three exclusions {@link foldInTestImporters} applies to a discovered importer
+ *  (EXCLUDED_DIR_NAMES/underscore-helper/NOT_HERMETIC) to a bare path RELATIVE TO `test/` — shared by both
+ *  {@link computeDirectDistImporterRunSet}'s candidate classification AND its corpus-size count. `rel` is
+ *  always `/`-separated (matches {@link listAllTestMjsFilesRelative}'s own return shape). */
+function isRunnableHermeticRelPath(rel: string, excludedDirNames: Set<string>, notHermeticNames: Set<string>): boolean {
+  const segments = rel.split("/");
+  const dirSegments = segments.slice(0, -1);
+  if (dirSegments.some((seg) => excludedDirNames.has(seg))) return false; // fixtures/census pass-through node — never a run target
+  if (segments.some((seg) => seg.startsWith("_"))) return false; // helper pass-through node — never a run target
+  if (dirSegments.length === 0) {
+    // NOT_HERMETIC only ever names test/'s TOP-LEVEL files, same as foldInTestImporters's own rule.
+    const harnessName = rel.slice(0, -".mjs".length);
+    if (notHermeticNames.has(harnessName)) return false;
+  }
+  return true;
+}
+
+export async function computeDirectDistImporterRunSet(
+  worktreePath: string, touchedDistRelPaths: readonly string[], scanTimeoutMs: number = DIRECT_DIST_IMPORTER_SCAN_TIMEOUT_MS,
+): Promise<DirectDistImporterCheckResult> {
+  const testDirAbs = path.join(worktreePath, "packages", "daemon", "test");
+  const scan = await scanDirectDistImportersInChildProcess(testDirAbs, touchedDistRelPaths, scanTimeoutMs);
+  if (!scan.ok) return { ok: false, reason: scan.reason };
+  let allRelFiles: string[];
+  try {
+    allRelFiles = listAllTestMjsFilesRelative(testDirAbs);
+  } catch {
+    return { ok: false, reason: "could not count the packages/daemon/test/**/*.mjs corpus for the cap computation" };
+  }
+  // @decision cee17efe (LEAD ruling 7) — load these UNCONDITIONALLY, before the corpus-size count below,
+  // so the cap's denominator is always the RUNNABLE hermetic count, never the raw walk (which would
+  // silently inflate `computeDistImporterCap`'s denominator).
+  const [excludedDirNames, notHermeticNames] = await Promise.all([
+    loadExcludedTestDirNames(worktreePath), loadNotHermeticNames(worktreePath),
+  ]);
+  if (excludedDirNames === null || notHermeticNames === null) {
+    return { ok: false, reason: "could not load EXCLUDED_DIR_NAMES/NOT_HERMETIC from the isolated worktree's own scripts/test-daemon.mjs" };
+  }
+  const corpusSize = allRelFiles.filter((rel) => isRunnableHermeticRelPath(rel, excludedDirNames, notHermeticNames)).length;
+  const rawCandidates: DirectDistImporterMatch[] = [
+    ...scan.matched,
+    ...scan.wildcardImporters.map((p) => ({ path: p, touchedCount: 0 })),
+  ];
+  if (rawCandidates.length === 0) return { ok: true, candidates: [], corpusSize };
+  const candidates: DirectDistImporterMatch[] = [];
+  for (const c of rawCandidates) {
+    const p = c.path;
+    const relToTestDir = p.slice(EMIT_COMPARE_TEST_PREFIX.length);
+    if (!isRunnableHermeticRelPath(relToTestDir, excludedDirNames, notHermeticNames)) continue;
+    if (!TEST_PATH_SHELL_SAFE_RE.test(p)) continue; // advisory-only: drop rather than fail the whole check closed
+    candidates.push(c);
+  }
+  return { ok: true, candidates, corpusSize };
+}
+
+/**
+ * Card cee17efe — the changed `packages/daemon/src/**\/*.ts` repo-relative paths for ONE already-landed
+ * commit (a squash commit always has exactly one parent, so `<sha>^..<sha>` is unambiguous). A thin,
+ * standalone `git diff --name-status` read — deliberately NOT a reuse of {@link computeEmitCompareGate}'s
+ * own inline classification loop, which is scoped to a pre-merge WORKTREE diff against a base ref (gate
+ * reduction) and carries test/asset/script classification this advisory signal doesn't need. `null` on
+ * any git failure (unreadable sha, timeout) — the caller treats that as "nothing to check", never as an
+ * empty-but-real diff.
+ */
+export async function changedDaemonSrcTsPathsForCommit(
+  repoPath: string, sha: string, deps: BoundedGitDeps = {},
+): Promise<string[] | null> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  let out: string;
+  try {
+    out = (await withTimeout(
+      git.raw(["diff", "--name-status", "--no-renames", `${sha}^`, sha, "--", "packages/daemon/src"]),
+      timeoutMs, "git diff --name-status (dist-importer-check)",
+    )).trim();
+  } catch {
+    return null;
+  }
+  if (!out) return [];
+  const paths: string[] = [];
+  for (const line of out.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab === -1) continue;
+    const p = line.slice(tab + 1).trim();
+    if (p.startsWith("packages/daemon/src/") && p.endsWith(".ts")) paths.push(p);
+  }
+  return paths;
+}
+
 /** @decision 2154b6ad — skips the ~668-test RUNTIME SUITE only (never the whole gate): proven via isolated
  *  transpile-comparison per changed file — never a hand-rolled scanner (desyncs on template literals), never
  *  "comments-only" (a real comment can flip a static guard).

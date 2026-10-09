@@ -57,8 +57,10 @@ const KIND_LABEL: Record<GateType, string> = { merge: "merge", deploy: "deploy",
 // for a pending-merge cancel — it must never read as a failure (red), since no verdict was reached.
 // "skipped" (card db9b0130) shares that same cyan info tone — also a non-verdict (an inert-diff merge
 // gate that never spawned), distinct from cancelled only in WHY nothing ran, not in whether it's a failure.
-const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.phosphor, reject: color.red, timeout: color.red, kill: color.red, cancelled: color.cyan, skipped: color.cyan };
-const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false, timeout: true, kill: true, cancelled: false, skipped: false };
+// "error" (card cee17efe) is a FOURTH non-verdict, amber rather than red or cyan: the dist-importer
+// advisory's own machinery broke (a bad cut/build/scan), never a real test red and never a withdrawal.
+const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.phosphor, reject: color.red, timeout: color.red, kill: color.red, cancelled: color.cyan, skipped: color.cyan, error: color.amber };
+const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false, timeout: true, kill: true, cancelled: false, skipped: false, error: false };
 const PRIORITY_RANK: Record<TaskPriority, number> = { p0: 0, p1: 1, p2: 2, p3: 3 };
 const PRIORITY_COLOR: Record<TaskPriority, string> = { p0: color.red, p1: color.red, p2: color.amber, p3: color.textMuted };
 
@@ -85,6 +87,7 @@ function nonRunReason(outcome: GateOutcome, skipReason?: string | null): string 
   if (outcome === "skipped" && skipReason === "gate-disabled") return "The project's merge gate is switched OFF, so the merge landed without running the gate (not a pass).";
   if (outcome === "skipped") return "The merge diff was proven inert, so the gate was never attempted.";
   if (outcome === "cancelled") return "This run was withdrawn before a gate process spawned.";
+  if (outcome === "error") return "The check's own scan/build/run machinery failed before it could reach a verdict — not a real test red.";
   if (outcome === "pass") return "This merge reused an already-green worker self-check.";
   return "No gate process spawned for this run.";
 }
@@ -685,9 +688,11 @@ function QueueCard({ gate, position, now, isHol }: { gate: GateRun; position: nu
 }
 
 function KindTag({ gate }: { gate: GateRun }) {
-  // Card bd9a483b: same no-confusion-with-a-real-gate labeling as HistoryRow below — see its comment.
-  const label = gate.landingCheckOnly ? "landing check" : KIND_LABEL[gate.gateType];
-  const c = gate.landingCheckOnly ? color.cyan : KIND_COLOR[gate.gateType];
+  // Card bd9a483b / cee17efe: same no-confusion-with-a-real-gate labeling as HistoryRow below — see its
+  // comment. Two independent non-gate mechanisms share "worker" underneath; neither must ever render as
+  // an ordinary worker self-check.
+  const label = gate.landingCheckOnly ? "landing check" : gate.distImporterCheckOnly ? "dist importer check" : KIND_LABEL[gate.gateType];
+  const c = gate.landingCheckOnly ? color.cyan : gate.distImporterCheckOnly ? color.amber : KIND_COLOR[gate.gateType];
   return (
     <span style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", padding: "2px 8px", borderRadius: radius.sm, border: `1px solid ${c}`, color: c, flex: "none" }}>
       {label}
@@ -767,8 +772,8 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
   // Card bd9a483b: a landing-check row is gateType:"worker" underneath (it shares that admission lane),
   // but must never render as an ordinary worker self-check — the whole point of `landingCheckOnly` is
   // that a reader can tell it apart from a real gate at a glance, not just in the underlying data.
-  const kindLabel = row.landingCheckOnly ? "landing check" : KIND_LABEL[row.gateType];
-  const kindC = row.landingCheckOnly ? color.cyan : KIND_COLOR[row.gateType];
+  const kindLabel = row.landingCheckOnly ? "landing check" : row.distImporterCheckOnly ? "dist importer check" : KIND_LABEL[row.gateType];
+  const kindC = row.landingCheckOnly ? color.cyan : row.distImporterCheckOnly ? color.amber : KIND_COLOR[row.gateType];
   const outC = OUTCOME_COLOR[row.outcome];
   const killed = row.outcome === "kill" || row.outcome === "timeout";
   return (

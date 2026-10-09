@@ -110,7 +110,11 @@ check(
   const scriptSource = fs.readFileSync(scriptPath, "utf8");
   check(
     "isMain wires the REAL, imported CODEX_REAL_SPAWN_BASENAMES binding into resolveSelectionForCliMode (source-text check)",
-    scriptSource.includes("resolveSelectionForCliMode(HERMETIC, cliMode, CODEX_REAL_SPAWN_BASENAMES)"),
+    // Card cee17efe: the second argument is now `effectiveCliMode` (cliMode with --only-file= already
+    // resolved into an ordinary `only` list, read once at this exact call site) — still the REAL cliMode
+    // object, carrying the REAL codexRealSpawnPreset, never a re-typed literal; see that card's own
+    // commit for the --only-file= resolution this wraps around the original `cliMode` binding.
+    scriptSource.includes("resolveSelectionForCliMode(HERMETIC, effectiveCliMode, CODEX_REAL_SPAWN_BASENAMES)"),
   );
 }
 

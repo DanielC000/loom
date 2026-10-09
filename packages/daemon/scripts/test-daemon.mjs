@@ -670,11 +670,21 @@ export const KNOWN_CLI_FLAGS = new Set(["--count", "--list", "--help", "-h", "--
 // without a hand-rolled recipe. Value-bearing, so recognized by PREFIX (the value varies per
 // invocation) rather than exact membership in KNOWN_CLI_FLAGS above — kept as a SEPARATE set so the
 // existing exact-match flags and their own test assertions are untouched by this addition.
-export const KNOWN_CLI_VALUE_PREFIXES = ["--only=", "--exclude=", "--concurrency="];
+// @decision cee17efe — `--only-file=<path>` delivers the `--only=` selection out of band (a newline-
+// separated file) so a large generated run set never hits cmd.exe's command-line length limit.
+export const KNOWN_CLI_VALUE_PREFIXES = ["--only=", "--only-file=", "--exclude=", "--concurrency="];
 
 function parseValueFlag(argv, prefix) {
   const token = argv.find((a) => a.startsWith(prefix));
   return token === undefined ? undefined : token.slice(prefix.length);
+}
+
+// Card cee17efe: pure parsing of `--only-file=`'s file CONTENT (one name per line, blank lines ignored,
+// surrounding whitespace trimmed) — kept separate from the actual `fs.readFileSync` call (done once, at
+// the `isMain` call site below) so a test can exercise the parsing rule directly against a string, never
+// a real file on disk.
+export function parseOnlyFileNames(content) {
+  return content.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 // A positive integer only — "0", "-1", "abc", "1.5" are all invalid. `undefined` means "flag omitted"
@@ -698,15 +708,22 @@ export function classifyCliArgs(argv) {
   }
 
   const onlyRaw = parseValueFlag(argv, "--only=");
+  const onlyFilePath = parseValueFlag(argv, "--only-file=") ?? null;
   const excludeRaw = parseValueFlag(argv, "--exclude=");
   const wantsCodexOnly = argv.includes("--codex-real-spawn");
   const wantsCodexExclude = argv.includes("--no-codex-real-spawn");
+  // Card cee17efe: --only= and --only-file= are two delivery mechanisms for the SAME selection — refuse
+  // the ambiguous combination loudly rather than silently picking a winner, same posture as every other
+  // "a recognized token can still be rejected" check in this function.
+  if (onlyRaw !== undefined && onlyFilePath !== null) {
+    unrecognized.push("--only= and --only-file= cannot be combined (ambiguous selection source)");
+  }
   // Card ce02e7e5: fail loudly on an ambiguous combination rather than silently picking a winner — same
   // "a recognized token can still be rejected" posture as the --concurrency= value check above.
   if (wantsCodexOnly && wantsCodexExclude) {
     unrecognized.push("--codex-real-spawn and --no-codex-real-spawn (mutually exclusive)");
-  } else if ((wantsCodexOnly || wantsCodexExclude) && (onlyRaw !== undefined || excludeRaw !== undefined)) {
-    unrecognized.push("--codex-real-spawn/--no-codex-real-spawn cannot be combined with --only=/--exclude=");
+  } else if ((wantsCodexOnly || wantsCodexExclude) && (onlyRaw !== undefined || onlyFilePath !== null || excludeRaw !== undefined)) {
+    unrecognized.push("--codex-real-spawn/--no-codex-real-spawn cannot be combined with --only=/--only-file=/--exclude=");
   }
   if (unrecognized.length) return { mode: "error", unrecognized };
 
@@ -715,6 +732,9 @@ export function classifyCliArgs(argv) {
   return {
     mode: (argv.includes("--count") || argv.includes("--list")) ? "count" : "run",
     only,
+    // Card cee17efe: a bare path string only — reading it is the `isMain` call site's job (keeps this
+    // classifier pure/sync, no fs access, so a test can exercise it with no file on disk at all).
+    onlyFilePath,
     exclude,
     concurrency,
     // Card ce02e7e5: "only" | "exclude" | null — resolved against the REAL CODEX_REAL_SPAWN_BASENAMES
@@ -1607,7 +1627,8 @@ if (isMain) {
   if (cliMode.mode === "help") {
     console.log([
       "Usage: node scripts/test-daemon.mjs [--count | --list | --help]",
-      "                                    [--only=name,name] [--exclude=name,name] [--concurrency=N]",
+      "                                    [--only=name,name | --only-file=path] [--exclude=name,name]",
+      "                                    [--concurrency=N]",
       "                                    [--codex-real-spawn | --no-codex-real-spawn]",
       "",
       "  (no flags)             run the full hermetic daemon suite — this is what the merge gate,",
@@ -1616,6 +1637,10 @@ if (isMain) {
       "  --count                print discovery counts only (no tests run)",
       "  --list                 alias for --count",
       "  --only=a,b             run ONLY these discovered hermetic test(s), by bare name",
+      "  --only-file=path       same as --only=, but the comma-separated name list is replaced with a",
+      "                         newline-separated FILE — use this instead of --only= when the selection",
+      "                         is large enough to risk the OS command-line length limit (mutually",
+      "                         exclusive with --only=)",
       "  --exclude=a,b          run every discovered hermetic test EXCEPT these, by bare name",
       "  --concurrency=N        override the pool size for just this invocation (still clamped to",
       "                         the MAX_CONCURRENCY ceiling); LOOM_GATE_TEST_CONCURRENCY still applies",
@@ -1740,7 +1765,22 @@ if (isMain) {
   // `--codex-real-spawn`/`--no-codex-real-spawn` presets here, from `CODEX_REAL_SPAWN_BASENAMES` above —
   // every other cliMode shape (plain --only=/--exclude=, or neither) is byte-identical to the old direct
   // `resolveSelection` call it replaces.
-  const selectionResult = resolveSelectionForCliMode(HERMETIC, cliMode, CODEX_REAL_SPAWN_BASENAMES);
+  // Card cee17efe: resolve --only-file= into an ordinary `only` list BEFORE calling
+  // resolveSelectionForCliMode — the fs read happens exactly once, here, so the pure resolver below never
+  // touches disk itself (classifyCliArgs's own mutual-exclusion check above already guarantees cliMode.only
+  // is null whenever onlyFilePath is set, so this assignment can never silently clobber a real --only=).
+  let effectiveCliMode = cliMode;
+  if (cliMode.onlyFilePath) {
+    let onlyFileContent;
+    try {
+      onlyFileContent = fs.readFileSync(cliMode.onlyFilePath, "utf8");
+    } catch (err) {
+      console.error(`❌ test-daemon.mjs: could not read --only-file= path "${cliMode.onlyFilePath}": ${err.message}`);
+      process.exit(1);
+    }
+    effectiveCliMode = { ...cliMode, only: parseOnlyFileNames(onlyFileContent) };
+  }
+  const selectionResult = resolveSelectionForCliMode(HERMETIC, effectiveCliMode, CODEX_REAL_SPAWN_BASENAMES);
   if (selectionResult.error) {
     console.error(`❌ test-daemon.mjs: ${selectionResult.error}`);
     process.exit(1);

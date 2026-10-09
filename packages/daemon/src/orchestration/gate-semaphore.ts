@@ -47,6 +47,7 @@
 import type { GateType } from "@loom/shared";
 import { resolveIdPrefix, type IdPrefixResult } from "../id-prefix.js";
 import type { GateLivenessHooks } from "./gate-runner.js";
+import { clearableSleep } from "./pending-ops.js";
 
 /** Queue priority for {@link GateSemaphore.runExclusive} (card 24642c3d): `"high"` for a merge/deploy
  *  gate, `"low"` for a worker's own `run_gate` DoD self-check. Governs QUEUE ORDER only — there is no
@@ -133,6 +134,12 @@ export interface GateDescriptor {
    * gate — unchanged.
    */
   landingCheckOnly?: boolean;
+  /** Card cee17efe — set ONLY by the automatic post-ungated-landing dist-importer advisory
+   *  (`runOneDistImporterCheck`, sessions/service.ts); `gateType` is `"worker"` for this run, same as
+   *  `landingCheckOnly`, but this is a DIFFERENT mechanism (never human-configured, never a merge gate,
+   *  never refuses a landing) — see that field's own doc for why the two never collapse into one flag.
+   *  `undefined`/`false` on every other gate. */
+  distImporterCheckOnly?: boolean;
 }
 
 /** The callback shape {@link GateSemaphore.runExclusive} runs once admitted — one per chain link. */
@@ -209,6 +216,9 @@ export interface GateSnapshotEntry {
    *  merge/worker/deploy/batch gate; `true` only for the ungated-landing safety-net check (card bd9a483b).
    *  A reader deriving a real gate pass/fail fact from `gate_queue` must check this first. */
   landingCheckOnly: boolean;
+  /** Echoed from {@link GateDescriptor.distImporterCheckOnly} — see its own doc. `false` on every
+   *  ordinary merge/worker/deploy/batch gate AND on a `landingCheckOnly` run. */
+  distImporterCheckOnly: boolean;
 }
 
 /** The whole live picture: the counter/queue depth plus a detail entry per in-flight run. */
@@ -304,6 +314,8 @@ interface RegistryEntry {
   /** Card 68155573: start of the current chain link; `null` while queued. See {@link GateSnapshotEntry.attemptStartedAt}. */
   attemptStartedAt: number | null;
   controller: AbortController;
+  /** @decision cee17efe — resolves from runExclusive's own finally, same step that deletes this entry; feeds `waitForSettleBriefly`. */
+  settle: Promise<void>;
   /** See {@link GateSnapshotEntry.lastOutputAt} — null until the running `fn`'s `GateLivenessHooks` first
    *  reports a step start/output, updated in lockstep with `gate-runner.ts`'s own internal clock. */
   lastOutputAt: number | null;
@@ -955,9 +967,11 @@ export class GateSemaphore {
     // unchanged) never reaches this — `grantNext()`'s own cap check makes it a no-op there anyway, but
     // scoping the call to a genuine raise avoids a wasted waiter scan on every ordinary gate run.
     if (capRaised) this.grantEligible();
+    let resolveSettle!: () => void;
+    const settle = new Promise<void>((res) => { resolveSettle = res; });
     const entry: RegistryEntry = {
       id: `gate-${++this.seq}`, descriptor: { ...descriptor }, priority, enqueuedAt: Date.now(), startedAt: null, attemptStartedAt: null,
-      controller: new AbortController(), lastOutputAt: null, extended: false, maxConcurrent: 0,
+      controller: new AbortController(), lastOutputAt: null, extended: false, maxConcurrent: 0, settle,
     };
     this.registry.set(entry.id, entry);
     // Card c6750500: closes over `entry` directly (not a registry lookup), so it reads correctly even
@@ -1017,6 +1031,9 @@ export class GateSemaphore {
     } finally {
       this.registry.delete(entry.id);
       if (acquired) this.release(entry, holdRepoGuard);
+      // @decision cee17efe — resolved LAST, after the entry is already gone from `registry`, so a
+      // `waitForSettleBriefly` caller that wakes on this promise sees the entry already absent.
+      resolveSettle();
     }
   }
 
@@ -1089,7 +1106,7 @@ export class GateSemaphore {
       // landing-check still works via a different, exact-id primitive (`cancelQueued`, resolved through
       // `findByOpId` — see `cancelGateOp`'s own queued-phase branch), which this exclusion never touches:
       // "a manager's gate_cancel stays allowed" either way.
-      if (e.startedAt == null && e.descriptor.sessionId === sessionId && e.descriptor.gateType === gateType && e.descriptor.projectId === projectId && !e.descriptor.landingCheckOnly) {
+      if (e.startedAt == null && e.descriptor.sessionId === sessionId && e.descriptor.gateType === gateType && e.descriptor.projectId === projectId && !e.descriptor.landingCheckOnly && !e.descriptor.distImporterCheckOnly) {
         if (this.cancelQueued(e.id, kind, detail)) return { cancelled: true, opId: e.descriptor.opId };
       }
     }
@@ -1103,6 +1120,20 @@ export class GateSemaphore {
    *  actual process-tree kill + verified-death tagging happens — this method has no process-level
    *  knowledge at all). Returns `false` if `id` isn't currently running (queued, already settled, or never
    *  existed) — the caller decides what that means for its own outcome. */
+  /** Wait up to `ms` for registry entry `id` to settle (leave `registry`) — mirrors
+   *  `PendingOpRegistry.waitBriefly`'s contract against THIS registry instead, for a gate kind whose
+   *  `runExclusive` call is never wrapped in `pendingOps.attach` (card cee17efe's dist-importer-check:
+   *  the generic `gate:<sessionId>` key `cancelGateOp`'s RUNNING-cancel branch waits on has nothing
+   *  registered under it, so it returned `true` at once with the kill unverified — see that card's
+   *  record). `true` immediately if `id` is already gone. */
+  async waitForSettleBriefly(id: string, ms: number): Promise<boolean> {
+    const entry = this.registry.get(id);
+    if (!entry) return true;
+    const timeout = clearableSleep(ms);
+    try { await Promise.race([entry.settle, timeout.promise]); } finally { timeout.clear(); }
+    return !this.registry.has(id);
+  }
+
   cancelRunning(id: string, detail: string): boolean {
     const entry = this.registry.get(id);
     if (!entry || entry.startedAt == null) return false;
@@ -1136,6 +1167,7 @@ export class GateSemaphore {
       attempt: e.descriptor.attempt ?? null,
       priorAttemptMs: e.descriptor.priorAttemptMs ?? null,
       landingCheckOnly: e.descriptor.landingCheckOnly ?? false,
+      distImporterCheckOnly: e.descriptor.distImporterCheckOnly ?? false,
       attemptStartedAt: phase === "running" ? e.attemptStartedAt : null,
       phase,
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,

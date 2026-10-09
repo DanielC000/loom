@@ -4737,10 +4737,16 @@ export class OrchestrationMcpRouter {
           "`countsOnly:true` (card eb62d585, same contract as `tasks_list`'s own `countsOnly`) SHORT-" +
           "CIRCUITS before any row fetch, JOIN-enrichment, or `fields` projection and returns " +
           "{total, byGateType, byOutcome} instead of {items,...} — `byGateType` breaks down by " +
-          "\"merge\"|\"worker\"|\"deploy\", `byOutcome` by \"pass\"|\"reject\"|\"timeout\"|\"kill\"|" +
-          "\"cancelled\"|\"skipped\" (see the outcome caveats above — a rejection-rate reader must still " +
-          "pair a \"reject\" with an immediately-following cancelled retry, same rule as scanning `items` " +
-          "directly). `limit`/`offset`/`fields` are ignored when `countsOnly` is set — this is the WHOLE " +
+          "\"merge\"|\"worker\"|\"deploy\"|\"landingCheck\"|\"distImporterCheck\" (the last two are the " +
+          "ungated-landing safety-net check, card bd9a483b, and the automatic post-ungated-landing " +
+          "dist-importer advisory, card cee17efe — neither is a real gate, both tallied separately so " +
+          "they never inflate the \"worker\" bucket), `byOutcome` by " +
+          "\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"|\"skipped\"|\"error\" (\"error\" is " +
+          "card cee17efe's own mechanism-failure shape — the dist-importer check's scan/build/run " +
+          "machinery itself broke, never a real test red; see the outcome caveats above — a rejection-" +
+          "rate reader must still pair a \"reject\" with an immediately-following cancelled retry, same " +
+          "rule as scanning `items` directly, and must never fold \"error\" into that rate either). " +
+          "`limit`/`offset`/`fields` are ignored when `countsOnly` is set — this is the WHOLE " +
           "project-scoped matching set, not one page of it.",
         inputSchema: strictShape({
           limit: z.number().int().positive().optional(),

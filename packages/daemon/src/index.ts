@@ -1774,6 +1774,17 @@ async function main(): Promise<void> {
     console.warn(`[boot] unsurfaced gate-op sweep failed (continuing boot): ${(err as Error).message}`);
   }
 
+  // Card cee17efe (LEAD round-2 ruling 4a): a dist-importer-check worktree/branch left behind by a crash
+  // mid-run is invisible to every OTHER boot sweep (it has no session row at all) — this re-derives its
+  // path from the durable pending_gate_ops row the two sweeps just above already settle, and removes it.
+  // Never gates boot.
+  try {
+    const swept = await sessions.sweepOrphanedDistImporterCheckWorktrees();
+    if (swept > 0) console.log(`[boot] dist-importer-check worktree sweep: removed ${swept} leftover worktree(s)/branch(es)`);
+  } catch (err) {
+    console.warn(`[boot] dist-importer-check worktree sweep failed (continuing boot): ${(err as Error).message}`);
+  }
+
   // Setup Assistant E1-6: FIRST-RUN auto-launch. On a brand-new/empty install (no ordinary projects + the
   // one-time app_meta marker unset) greet the user by auto-spawning the Setup Assistant ONCE; the marker
   // is stamped at launch so it never re-fires — not after a daemon_restart, not after the user later

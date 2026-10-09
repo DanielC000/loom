@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
@@ -28,11 +29,11 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
-import { boundedSimpleGit, isNotAGitRepositoryError } from "../git/bounded.js";
+import { boundedSimpleGit, isNotAGitRepositoryError, withTimeout } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -65,7 +66,7 @@ import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, runBuildStep, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
 import { armHardShutdownWatchdog, GRACEFUL_TEARDOWN_HARD_EXIT_MS } from "../graceful-teardown.js";
 import { currentDeployStaleness } from "../served-status.js";
 import { advisoryBuildStamp, type DeployStalenessResult } from "../deploy-staleness.js";
@@ -86,6 +87,7 @@ import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
 import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision } from "../orchestration/merge-gate-interval.js";
+import { touchedDistPathsFor, computeDistImporterCap, rankAndCapRunSet, newDistImporterCheckQueueState, enqueueLanding, drainFollowUp, formatDistImporterResultNudge, formatDistImporterMechanismFailureNudge, formatDistImporterCancelledNudge, type DistImporterCheckQueueState } from "../orchestration/dist-importer-check.js";
 import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
@@ -184,6 +186,11 @@ export interface GateQueueEntry {
    *  cross-project visibility tier as `repoContended`/`extended` — it reveals nothing beyond a boolean
    *  classification. A reader deriving a real merge-gate fact from this snapshot must check this first. */
   landingCheckOnly: boolean;
+  /** Card cee17efe: echoed from {@link GateDescriptor.distImporterCheckOnly} — see its own doc. `true`
+   *  ONLY for the automatic post-ungated-landing dist-importer advisory; `false` for every ordinary
+   *  merge/worker/deploy/batch gate, and for a `landingCheckOnly` run. Same visibility tier as
+   *  `landingCheckOnly` above — a reader deriving a real merge-gate fact must check this too. */
+  distImporterCheckOnly: boolean;
   taskId?: string | null;
   branch?: string | null;
   workerLabel?: string | null;
@@ -444,7 +451,7 @@ export type GateCancelScope = { kind: "project" } | { kind: "own"; sessionId: st
  * @decision 289f2607 — gateType, not just sessionId, decides what a worker's stop may ever touch.
  */
 function isWorkerSelfCheckGate(entry: GateSnapshotEntry): boolean {
-  return entry.gateType === "worker" && !entry.landingCheckOnly;
+  return entry.gateType === "worker" && !entry.landingCheckOnly && !entry.distImporterCheckOnly;
 }
 
 /** One entry in {@link SessionService.getRetainedWorktrees}'s result — a worktree Pass B of
@@ -2403,6 +2410,50 @@ export const SETUP_SESSION_FORK_BARRED_ERROR =
 // for this module's existing importers (gateway/server.ts, the test suite).
 export { SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 
+/**
+ * Card cee17efe — resolve `turbo`'s bin from WITHIN `worktreePath`'s own `node_modules`, never the
+ * daemon's own (`restart.ts`'s private `turboBin()` resolves relative to ITS OWN module location, which
+ * is the running daemon's checkout, not an isolated check worktree with its own freshly-provisioned
+ * deps). Anchored on that worktree's own root `package.json` (createRequire needs a real existing file
+ * to resolve from), falling back to the conventional node_modules path on any resolution failure.
+ */
+function resolveTurboBinFor(worktreePath: string): string {
+  try { return createRequire(path.join(worktreePath, "package.json")).resolve("turbo/bin/turbo"); }
+  catch { return path.join(worktreePath, "node_modules", "turbo", "bin", "turbo"); }
+}
+
+/**
+ * Card cee17efe (LEAD round-2 ruling 3) — bounds the check's own cut (`createWorktree`) AND build
+ * (`runBuildStep`), each wrapped individually so a diagnosis names which one stalled. Measured: a forced
+ * (cache-bypassed) `turbo build --filter=@loom/daemon` took ~6.5s on this host (2026-10-09, shared
+ * worktree cache in play) — 300s gives ~45x headroom for a loaded host or a cold dependency install.
+ * `createWorktree`'s own background dep-install is separately bounded at `PROVISION_TIMEOUT_MS` (180s,
+ * best-effort), so this is never the tighter ceiling there either. A timeout here does not kill the
+ * underlying operation (plain `withTimeout` races, it does not cancel) — any worktree a timed-out cut
+ * still creates in the background is swept at the next boot by
+ * {@link SessionService.sweepOrphanedDistImporterCheckWorktrees}, keyed off the durable pending-op row
+ * minted before this check's own admission.
+ */
+const DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS = 300_000;
+
+/**
+ * Card cee17efe — the dist-importer check's real build step: a PLAIN (no `--force`) `turbo build` of
+ * just `@loom/daemon`, in the isolated worktree it's given. No `--force` needed (unlike the deploy
+ * build's own anti-replay concern, decisions 51522f05/3d7dccb9): this worktree is freshly cut and
+ * nobody else mutates it mid-run, so there is no stale-cache-replay risk to defend against — an ordinary
+ * content-keyed turbo cache hit here is a genuinely-unchanged build, not a bad replay. Bounded by
+ * `DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS` via `runBuildStep`'s own real process-tree kill (never a
+ * bare `withTimeout` race) — see that constant's own doc for the measured figure this is picked from.
+ */
+async function defaultDistImporterCheckBuild(worktreePath: string, cancelSignal?: AbortSignal): Promise<{ ok: boolean; reason?: string }> {
+  const turbo = resolveTurboBinFor(worktreePath);
+  const result = await runBuildStep(
+    { label: "build", command: process.execPath, args: [turbo, "build", "--filter=@loom/daemon"], shell: false, timeoutMs: DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS },
+    worktreePath, cancelSignal,
+  );
+  return result.code === 0 ? { ok: true } : { ok: false, reason: `turbo build exited ${result.code}: ${result.out.slice(-500)}` };
+}
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
   /**
@@ -2614,6 +2665,38 @@ export class SessionService {
   private readonly runGate:
     | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks, spillFile?: string) => Promise<GateSequentialResult>)
     | undefined;
+  /**
+   * Card cee17efe — the dist-importer check's own build step (plain `turbo build --filter=@loom/daemon`,
+   * no `--force`: the isolated worktree it runs in has nothing cached to defeat). `undefined` in
+   * production ⇒ {@link runOneDistImporterCheck} falls back to the real build. Lets a hermetic test skip
+   * the real multi-second `turbo` invocation entirely and drive a deterministic ok/fail outcome instead —
+   * mirrors {@link runGate}'s own seam shape, one layer earlier in the same pipeline.
+   */
+  private readonly distImporterCheckBuild: ((worktreePath: string, cancelSignal?: AbortSignal) => Promise<{ ok: boolean; reason?: string }>) | undefined;
+  /** Card cee17efe (round-3 ruling 3) — TEST SEAM for the check's own worktree cut: lets a hermetic test
+   *  drive a deterministic cut FAILURE (a mechanism failure before any build/scan) without faking a real
+   *  git error. `undefined` in production ⇒ the real {@link createWorktree}, byte-identical. */
+  private readonly distImporterCheckCreateWorktree: typeof createWorktree | undefined;
+  /** Card cee17efe (round-3 ruling 3) — TEST SEAM for the check's own direct-importer scan: lets a
+   *  hermetic test drive a deterministic scan FAILURE without corrupting a real fixture repo.
+   *  `undefined` in production ⇒ the real {@link computeDirectDistImporterRunSet}, byte-identical. */
+  private readonly distImporterCheckComputeRunSet: typeof computeDirectDistImporterRunSet | undefined;
+  /** Card cee17efe (round-4 ruling 1a) — TEST SEAM for the check's own worktree removal, shared by its
+   *  in-run cleanup (both the ordinary and the deterministic-path branch) AND
+   *  {@link sweepOrphanedDistImporterCheckWorktrees}'s boot sweep, so a hermetic test can drive a
+   *  deterministic `{removed:false, wedged:true}` on EITHER path and assert
+   *  `recordWorktreeWedgeAttempt`/`armWedgeSweep` fire, without a real OS-level held handle. `undefined`
+   *  in production ⇒ the real {@link removeWorktree}, byte-identical. */
+  private readonly distImporterCheckRemoveWorktree: typeof removeWorktree | undefined;
+  /**
+   * Card cee17efe — per-(project,repo) coalescing state for the automatic post-ungated-landing
+   * dist-importer advisory (LEAD ruling B): at most ONE check runs at a time per key; a landing arriving
+   * while one is in flight folds into a single follow-up run — see `orchestration/dist-importer-check.ts`
+   * for the pure queue mechanics this field just holds. Keyed `${projectId}:${repoKey}`; an entry is
+   * deleted once its queue goes idle (see {@link runDistImporterCheckLoop}), so this map's size is always
+   * exactly the number of repos with a check CURRENTLY in flight — never a permanent per-project entry.
+   */
+  private readonly distImporterCheckQueues = new Map<string, DistImporterCheckQueueState>();
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
    * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
@@ -2904,6 +2987,14 @@ export class SessionService {
       soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
       /** TEST SEAM (card 8c3d6c04): git factory for the solo pre-squash union-merge — see the field's own doc. */
       unionMergeGitFactory?: BoundedGitDeps["gitFactory"];
+      /** TEST SEAM (card cee17efe): the dist-importer check's own build step — see {@link distImporterCheckBuild}'s own doc. */
+      distImporterCheckBuild?: (worktreePath: string, cancelSignal?: AbortSignal) => Promise<{ ok: boolean; reason?: string }>;
+      /** TEST SEAM (card cee17efe, round-3 ruling 3): the dist-importer check's own worktree cut — see {@link distImporterCheckCreateWorktree}'s own doc. */
+      distImporterCheckCreateWorktree?: typeof createWorktree;
+      /** TEST SEAM (card cee17efe, round-3 ruling 3): the dist-importer check's own direct-importer scan — see {@link distImporterCheckComputeRunSet}'s own doc. */
+      distImporterCheckComputeRunSet?: typeof computeDirectDistImporterRunSet;
+      /** TEST SEAM (card cee17efe, round-4 ruling 1a): the dist-importer check's own worktree removal — see {@link distImporterCheckRemoveWorktree}'s own doc. */
+      distImporterCheckRemoveWorktree?: typeof removeWorktree;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -2933,6 +3024,10 @@ export class SessionService {
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
     this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
     this.codescape = opts?.codescape;
+    this.distImporterCheckBuild = opts?.distImporterCheckBuild;
+    this.distImporterCheckCreateWorktree = opts?.distImporterCheckCreateWorktree;
+    this.distImporterCheckComputeRunSet = opts?.distImporterCheckComputeRunSet;
+    this.distImporterCheckRemoveWorktree = opts?.distImporterCheckRemoveWorktree;
   }
 
   /**
@@ -4924,6 +5019,7 @@ export class SessionService {
         branchCount: e.batchLandedCount,
         batchBranches: e.batchBranches,
         landingCheckOnly: e.landingCheckOnly,
+        distImporterCheckOnly: e.distImporterCheckOnly,
         // Card fd9edb87: this run's OWN project's resolved gate timeout, so a cross-project reader can
         // scale a long-run cue per ROW instead of against one page-level constant. Resolved through the
         // SAME resolveConfig(project.config, platformConfig) path the merge/worker gates themselves use
@@ -4970,6 +5066,11 @@ export class SessionService {
      *  "gate" row this applies to). `undefined` for every row this doesn't apply to (never a fabricated
      *  `false`) — present (`true`/`false`) only for a `"gate"`-kind op. */
     landingCheckOnly?: boolean;
+    /** Card cee17efe: the same pattern as {@link landingCheckOnly} immediately above, for the automatic
+     *  post-ungated-landing dist-importer advisory (`dist-importer-check:<opId>` tombstone key prefix).
+     *  `undefined` for every row this doesn't apply to; present (`true`/`false`) only for a `"gate"`-kind
+     *  op. Never both `true` alongside `landingCheckOnly:true` — the two mechanisms are independent. */
+    distImporterCheckOnly?: boolean;
     /** @decision d5e67146 — for tombstone state:"pending", elapsedMs re-bases to time-since-MINT, a
      *  third origin on top of the live queued/running phases, never an exemption from reading `state`
      *  first */
@@ -5187,6 +5288,7 @@ export class SessionService {
         idleMs: entry.lastOutputAt != null ? Date.now() - entry.lastOutputAt : null,
         extended: entry.extended,
         landingCheckOnly: entry.landingCheckOnly,
+        distImporterCheckOnly: entry.distImporterCheckOnly,
         // Card 99a1cf6f: see GateQueueEntry.attempt's own doc — same fields, same reason, now also
         // reachable by a caller polling ONE op via gate_status(opId) rather than scanning gate_queue.
         attempt: entry.attempt ?? null, priorAttemptMs: entry.priorAttemptMs ?? null,
@@ -5220,7 +5322,7 @@ export class SessionService {
        * — an unclassified field must fail to compile, never silently default to visible
        */
       type GateVerdictDerivedKey = "passed" | "cancelled" | "retryWarning" | "transientRetryWarning";
-      type GateOuterFieldKey = "state" | "gateType" | "elapsedMs" | "idleMs" | "admittedAt" | "ownerSessionAlive" | "outcome" | "landingCheckOnly";
+      type GateOuterFieldKey = "state" | "gateType" | "elapsedMs" | "idleMs" | "admittedAt" | "ownerSessionAlive" | "outcome" | "landingCheckOnly" | "distImporterCheckOnly";
       type GateVerdictFieldKey = keyof PendingGateOpVerdict | GateVerdictDerivedKey | GateOuterFieldKey;
       const GATE_VERDICT_FIELD_CLASSIFICATION: Record<GateVerdictFieldKey, "sensitive" | "structural"> = {
         // Content-bearing — another tenant's paths, test names, error text, or landed work.
@@ -5292,6 +5394,9 @@ export class SessionService {
         // Card bd9a483b: a plain boolean fleet classification (is this gate op the landing-check safety
         // net, or a real gate), same bucket as gateType/extended — no foreign path/test/error content.
         landingCheckOnly: "structural",
+        // Card cee17efe: same bucket as landingCheckOnly immediately above — a plain boolean fleet
+        // classification, no foreign path/test/error content.
+        distImporterCheckOnly: "structural",
       };
       const settleTimingFields = {
         ...(payload?.settledAt !== undefined ? { settledAt: payload.settledAt } : {}),
@@ -5424,12 +5529,16 @@ export class SessionService {
       // tombstone whose unrelated `key` happened to start the same way (never in practice — merge/deploy
       // keys have their own fixed shapes) can never be misread as a landing check.
       const landingCheckOnly = t.record.kind === "gate" && t.record.key.startsWith("landing-check:") ? true : undefined;
+      // Card cee17efe: same derivation shape as landingCheckOnly immediately above — the dist-importer
+      // check always mints its key as `dist-importer-check:<opId>` (runOneDistImporterCheck).
+      const distImporterCheckOnly = t.record.kind === "gate" && t.record.key.startsWith("dist-importer-check:") ? true : undefined;
       const rawOuterFields = {
         state: t.record.state, gateType, elapsedMs: pendingElapsedMs, idleMs: null,
         admittedAt: t.record.startedAt,
         ...(ownerSessionAlive !== undefined ? { ownerSessionAlive } : {}),
         ...(t.record.verdict != null ? { outcome: t.record.verdict } : {}),
         ...(landingCheckOnly !== undefined ? { landingCheckOnly } : {}),
+        ...(distImporterCheckOnly !== undefined ? { distImporterCheckOnly } : {}),
       };
       // Card 753b9699 (manager review): `GateOuterFieldKey` is a hand-written literal union, not derived
       // from an interface — so adding an 8th field to `rawOuterFields` above WITHOUT also adding it to that
@@ -5508,6 +5617,7 @@ export class SessionService {
         queuePosition: e.queuePosition,
         repoContended: e.repoContended,
         landingCheckOnly: e.landingCheckOnly,
+        distImporterCheckOnly: e.distImporterCheckOnly,
         // Card 99a1cf6f: unconditional, same tier as idleMs/extended/repoContended above — a retry
         // attempt number and its prior attempt's duration carry no more task/branch identity than the
         // elapsed-time fields already visible cross-project, so there's no reason to gate them behind
@@ -5866,7 +5976,9 @@ export class SessionService {
         // `landingCheckOnly:true`) — so the refusal must not call the latter "a merge/deploy gate".
         const reason = entry.landingCheckOnly
           ? "this op is the manager's own ungated-landing-check (part of its worker_merge_confirm call), not your own run_gate self-check — workers may only cancel their own gate op"
-          : "this op is a merge/deploy gate, not your own run_gate self-check — workers may only cancel their own gate op";
+          : entry.distImporterCheckOnly
+            ? "this op is the manager's own automatic dist-importer advisory (fired after an ungated landing), not your own run_gate self-check — workers may only cancel their own gate op"
+            : "this op is a merge/deploy gate, not your own run_gate self-check — workers may only cancel their own gate op";
         return { outcome: "refused", reason, opId: entry.opId ?? opId };
       }
       if (entry.sessionId !== restrictToOwnerSessionId) {
@@ -5892,7 +6004,10 @@ export class SessionService {
     // RUNNING — gateType already checked above.
     const aborted = this.gateSemaphore.cancelRunning(entry.id, detail);
     if (!aborted) return { outcome: "not_cancelled", reason: "no longer running (it settled moments ago)", opId: entry.opId ?? opId };
-    const settled = await this.pendingOps.waitBriefly(`gate:${entry.sessionId}`, this.gateCancelVerifyMs);
+    // @decision cee17efe — a distImporterCheckOnly op never attaches to pendingOps; wait on the semaphore's own registry entry instead.
+    const settled = entry.distImporterCheckOnly
+      ? await this.gateSemaphore.waitForSettleBriefly(entry.id, this.gateCancelVerifyMs)
+      : await this.pendingOps.waitBriefly(`gate:${entry.sessionId}`, this.gateCancelVerifyMs);
     if (!settled) {
       return {
         outcome: "not_cancelled", opId: entry.opId ?? opId,
@@ -18805,6 +18920,14 @@ export class SessionService {
     if (gate && merge.ok && !merge.noop && (gateDisabled ? inertSkip : !inertSkip)) {
       try { this.recordMergeGateOutcome(project.id, gateDisabled ? { kind: "ungated", landed: 1 } : { kind: "pass", sha: merge.sha ?? null, opId: reusedOpId ?? thisOpId, periodic: mergeGateDecision.cadence !== "every" }, worker.repoKey ?? "primary"); } catch (err) { console.warn(`[merge-gate] failed to record a landing (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
       onMergeGateRecorded?.();
+      // Card cee17efe (design card 71a77fb2, Option B) — narrowed to `"gate-interval"` specifically (NOT
+      // `"gate-disabled"`, a project with the gate fully off): keyed off THIS skip, never the
+      // human-only mergeGate/mergeGateInterval/ungatedLandingCheckCommand settings themselves. Fired
+      // OFF the event loop, after the squash — never awaited, so it can never delay or fail this
+      // response; see kickDistImporterCheck's own doc for the coalescing + LOW-tier admission it does.
+      if (gateDisabled && mergeSkipReason === "gate-interval" && merge.sha) {
+        void this.kickDistImporterCheck(project.id, worker.repoKey ?? "primary", targetRepo.path, managerSessionId, merge.sha);
+      }
     }
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
@@ -21454,6 +21577,357 @@ export class SessionService {
       if (next !== state) { this.db.putMergeGateState(projectId, next, repoKey); cleared.push(repoKey); }
     }
     return cleared;
+  }
+
+  /**
+   * Card cee17efe (design card 71a77fb2, Option B) — entry point for the automatic post-ungated-landing
+   * dist-importer advisory, called (fire-and-forget, never awaited) right after a solo landing records
+   * `recordMergeGateOutcome({kind:"ungated"})` with `skipReason:"gate-interval"`. Computes the landed
+   * commit's own changed `packages/daemon/src/**\/*.ts` paths and, if any exist, enqueues the landing
+   * onto this (project,repo)'s coalescing queue (LEAD ruling B — see `orchestration/dist-importer-check.ts`)
+   * and kicks the run loop the first time the queue goes from idle to running. Never throws into its
+   * caller — every failure here is logged and swallowed, since this is advisory-only and must never be
+   * able to affect a merge response.
+   */
+  private kickDistImporterCheck(
+    projectId: string, repoKey: string, repoPath: string, managerSessionId: string, landedSha: string,
+  ): Promise<void> {
+    // Returns its own promise (never rejects — every failure is caught and logged below) so a test can
+    // await "this kick has fully settled" instead of guessing a timeout; the production call site at
+    // confirmWorkerMergeTracked's squash deliberately does not await it (never delays or can fail a
+    // merge response), but nothing stops it from also existing to await.
+    return (async () => {
+      let changedTs: string[] | null;
+      try {
+        changedTs = await changedDaemonSrcTsPathsForCommit(repoPath, landedSha, { timeoutMs: this.gitOpMs });
+      } catch (err) {
+        console.warn(`[dist-importer-check] could not compute changed paths for ${landedSha} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      if (!changedTs || changedTs.length === 0) return; // git failure, or nothing in packages/daemon/src — nothing to check
+      const touchedDistPaths = touchedDistPathsFor(changedTs);
+      if (touchedDistPaths.length === 0) return;
+      const key = `${projectId}:${repoKey}`;
+      let q = this.distImporterCheckQueues.get(key);
+      if (!q) { q = newDistImporterCheckQueueState(); this.distImporterCheckQueues.set(key, q); }
+      const { shouldRunNow } = enqueueLanding(q, landedSha, touchedDistPaths);
+      if (!shouldRunNow) return; // folded into the in-flight run's own follow-up batch — that loop will pick this up
+      await this.runDistImporterCheckLoop(key, q, projectId, repoKey, repoPath, managerSessionId, landedSha, touchedDistPaths);
+    })().catch((err) => console.warn(`[dist-importer-check] kick failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
+  }
+
+  /**
+   * Drains {@link DistImporterCheckQueueState} after every settled run until it's genuinely idle.
+   * @decision cee17efe — `drainFollowUp` must run even when `runOneDistImporterCheck` throws, or the
+   * queue sticks `running:true` forever with no error and no nudge.
+   */
+  private async runDistImporterCheckLoop(
+    key: string, q: DistImporterCheckQueueState, projectId: string, repoKey: string, repoPath: string,
+    managerSessionId: string, firstSha: string, firstTouchedDistPaths: string[],
+  ): Promise<void> {
+    let sha = firstSha;
+    let touchedDistPaths = firstTouchedDistPaths;
+    for (;;) {
+      try {
+        await this.runOneDistImporterCheck(projectId, repoKey, repoPath, managerSessionId, sha, touchedDistPaths);
+      } catch (err) {
+        console.warn(`[dist-importer-check] a run threw unexpectedly for ${sha} (non-fatal, queue continues): ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const next = drainFollowUp(q);
+      if (!next) { this.distImporterCheckQueues.delete(key); return; }
+      sha = next.sha;
+      touchedDistPaths = next.touchedDistPaths;
+    }
+  }
+
+  /**
+   * Card cee17efe — ONE run: cut an isolated worktree at `landedSha` (LEAD ruling A — never the canonical
+   * repo: a torn `dist` under the live self-hosting daemon, a per-repo guard that would stall real
+   * merges, and a possibly-dirty/already-stale canonical checkout are all closed by isolation), build it,
+   * compute the direct-importer run set, and either run it (admitted at the LOW `"worker"` tier, no
+   * `repoPath` on the descriptor so no per-repo guard is ever taken — ruling A(ii)) or cap it (ruling B).
+   * Always pushes exactly one nudge (pass/fail/mechanism-failure/cancelled — never silent), and always
+   * removes the worktree + deletes its branch, success or failure alike. Never touches
+   * `recordMergeGateOutcome`/`applyGatePass`/`applyGateFail`/`applyGateNext`/`putMergeGateState` — that
+   * absence is what makes this never count as a gate pass, the interval counter, or `gateOwed`.
+   *
+   * @decision cee17efe — round-2 rulings 1/2/3/5/8 restructured this function; see that record's own
+   * "LEAD round-2 rulings" section, not restated here.
+   */
+  private async runOneDistImporterCheck(
+    projectId: string, repoKey: string, repoPath: string, managerSessionId: string, landedSha: string, touchedDistPaths: string[],
+  ): Promise<void> {
+    const opId = randomUUID();
+    const pushNudge = (text: string) => {
+      try { this.enqueueDurableMessage(managerSessionId, text, { sender: "system", taskId: null, kind: "warning" }); }
+      catch (err) { console.warn(`[dist-importer-check] could not push nudge (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+    };
+    const project = this.db.getProject(projectId);
+    if (!project) {
+      pushNudge(formatDistImporterMechanismFailureNudge({ landedSha, reason: "project no longer exists" }));
+      return;
+    }
+    const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
+    const gateCap = orchestration.maxConcurrentGates;
+    const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
+    const runGateSeq = this.runGate ?? runGateSequential;
+
+    // Minted BEFORE admission (never after the run set is computed) — a durable breadcrumb that survives
+    // a crash during the cut/build below, so reconcileUnsurfacedPendingGateOps/reconcileOrphanedGateOps
+    // (boot) can settle THIS row the same way they settle any other "gate"-kind tombstone, and
+    // sweepOrphanedDistImporterCheckWorktrees (boot) can re-derive this op's own worktree path from
+    // (projectId, opId) alone to clean it up (ruling 4a) even if this function never learns `worktreePath`.
+    this.db.insertPendingGateOp({
+      opId, kind: "gate", key: `dist-importer-check:${opId}`, ownerSessionId: managerSessionId,
+      projectId, taskId: null, branch: null, startedAt: new Date().toISOString(), state: "pending", surfacedPending: false,
+    });
+
+    type Outcome =
+      | { kind: "mechanism-failure"; reason: string }
+      | { kind: "nothing-to-run" }
+      | { kind: "cancelled"; reason: string }
+      | { kind: "gate"; gate: GateSequentialResult; ranSize: number; matchedSize: number; corpusSize: number };
+    let worktreePath: string | undefined;
+    let branch: string | undefined;
+    const gateDescriptor: GateDescriptor = { gateType: "worker", projectId, sessionId: managerSessionId, taskId: null, branch: null, opId, distImporterCheckOnly: true };
+    let gateStartedAt = 0;
+    // @decision cee17efe — captured so a post-admission cancel can still report WHY (mirrors runWorkerGate's cancelSignalRef).
+    let cancelSignalRef: AbortSignal | undefined;
+    const cancelReason = (fallback: string): string =>
+      typeof cancelSignalRef?.reason === "string" && cancelSignalRef.reason.length > 0 ? cancelSignalRef.reason : fallback;
+    let outcome: Outcome;
+    // @decision cee17efe — reports every settle via ONE distImporterCheckOnly worker_gate event (LEAD
+    // round-3 ruling 2): before this, only a real gate pass/fail ever reached `gate_history` at all.
+    const recordEvent = (detail: Record<string, unknown>): void => {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "worker_gate",
+        detail: { opId, distImporterCheckOnly: true, landedSha, touchedDistPaths, ...detail },
+      });
+    };
+    try {
+      outcome = await this.gateSemaphore.runExclusive(
+        gateCap, gateDescriptor,
+        async (startedAt, cancelSignal, hooks): Promise<Outcome> => {
+          gateStartedAt = startedAt;
+          cancelSignalRef = cancelSignal;
+          const cutWorktree = this.distImporterCheckCreateWorktree ?? createWorktree;
+          let info: Awaited<ReturnType<typeof createWorktree>>;
+          try {
+            info = await withTimeout(
+              cutWorktree(repoPath, projectId, `dist-importer-check-${opId}`, {}, repoKey, landedSha),
+              DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS, "dist-importer-check: create worktree",
+            );
+          } catch (err) {
+            return { kind: "mechanism-failure", reason: `could not cut the isolated check worktree (${err instanceof Error ? err.message : String(err)})` };
+          }
+          worktreePath = info.worktreePath;
+          branch = info.branch;
+          // @decision cee17efe — checked after each phase so a cancel frees this check's slot promptly, not just inside runGateSeq's own per-step check.
+          if (cancelSignal.aborted) return { kind: "cancelled", reason: cancelReason("cancelled while cutting the isolated worktree") };
+          const build = this.distImporterCheckBuild ?? defaultDistImporterCheckBuild;
+          const built = await build(worktreePath, cancelSignal);
+          if (cancelSignal.aborted) return { kind: "cancelled", reason: cancelReason("cancelled while building the isolated worktree") };
+          if (!built.ok) {
+            return { kind: "mechanism-failure", reason: built.reason ?? "the isolated worktree failed to build" };
+          }
+          const computeRunSet = this.distImporterCheckComputeRunSet ?? computeDirectDistImporterRunSet;
+          const runSetResult = await computeRunSet(worktreePath, touchedDistPaths);
+          if (cancelSignal.aborted) return { kind: "cancelled", reason: cancelReason("cancelled after computing the run set") };
+          if (!runSetResult.ok) {
+            return { kind: "mechanism-failure", reason: runSetResult.reason };
+          }
+          if (runSetResult.candidates.length === 0) return { kind: "nothing-to-run" }; // nothing directly imports the touched module(s)
+          // SECOND LEAD ruling (2026-10-09): never skip — cap. Rank by touched-module count (descending,
+          // the scan's own already-computed signal — NOT mtime, which degenerates to alphabetical in a
+          // fresh worktree where every file shares one checkout-time mtime), run the top cap-many.
+          const cap = computeDistImporterCap(runSetResult.corpusSize);
+          const { runSet, matchedSize } = rankAndCapRunSet(runSetResult.candidates, cap);
+          const names = runSet.map((p) => p.slice("packages/daemon/test/".length, -".mjs".length));
+          // @decision cee17efe (LEAD round-2 ruling 1, CRITICAL) — deliver the selection via a FILE,
+          // written inside this check's OWN isolated worktree (never a shared temp dir — cleaned up with
+          // everything else when the worktree is removed): an inline `--only=<names>` can exceed cmd.exe's
+          // ~8191-char command-line ceiling on Windows once the selection is large.
+          const onlyFilePath = path.join(worktreePath, ".dist-importer-check-only.txt");
+          fs.writeFileSync(onlyFilePath, names.join("\n"), "utf8");
+          const gate = await runGateSeq(
+            `pnpm --filter @loom/daemon test:daemon --only-file=${JSON.stringify(onlyFilePath)}`,
+            worktreePath, gateTimeoutMs, undefined,
+            gateOpIdEnvOverride(opId, 0, gateCap, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, hooks, gateSpillPath(opId),
+          );
+          return { kind: "gate", gate, ranSize: runSet.length, matchedSize, corpusSize: runSetResult.corpusSize };
+        },
+        "low",
+      );
+    } catch (err) {
+      if (err instanceof GateCancelledError) {
+        this.db.settlePendingGateOp(opId, { kind: "cancelled" });
+        recordEvent({ cancelled: true, cancelDetail: err.detail ?? "no reason given", gateSpawned: false });
+        // @decision cee17efe (LEAD round-2 ruling 8) — no SILENT cancel: the confirming manager gets a
+        // short nudge rather than nothing at all.
+        pushNudge(formatDistImporterCancelledNudge({ landedSha, reason: err.detail ?? "no reason given" }));
+        return;
+      }
+      this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message.split("\n", 1)[0]?.slice(0, 200) : String(err) } });
+      recordEvent({ mechanismLike: true, reason: err instanceof Error ? err.message.split("\n", 1)[0]?.slice(0, 200) : String(err), gateSpawned: false });
+      pushNudge(formatDistImporterMechanismFailureNudge({ landedSha, reason: `the isolated check errored (${err instanceof Error ? err.message : String(err)})` }));
+      return;
+    } finally {
+      const removeWt = this.distImporterCheckRemoveWorktree ?? removeWorktree;
+      if (worktreePath) {
+        const removal = await removeWt(repoPath, worktreePath, { timeoutMs: this.gitOpMs }).catch(() => ({ removed: false, wedged: false, aborted: false }));
+        if (!removal.removed && removal.wedged) {
+          // @decision cee17efe (LEAD round-2 ruling 4b) — route a genuinely wedged removal into the SAME
+          // durable retry machinery sweepWedgedWorktreesOnce already drains for every other worktree,
+          // rather than leaving it untracked and silently left on disk.
+          this.db.recordWorktreeWedgeAttempt(worktreePath, repoPath, "dist-importer-check worktree removal was force-killed on timeout (handle still held)");
+          this.armWedgeSweep();
+          console.warn(`[dist-importer-check] worktree ${worktreePath} is wedged — handed to the background wedge-retry sweep`);
+        } else if (!removal.removed) {
+          console.warn(`[dist-importer-check] could not remove worktree ${worktreePath} (non-fatal, left on disk — the next boot's sweep will retry it)`);
+        }
+      } else {
+        // @decision cee17efe — withTimeout races createWorktree, never cancels it; attempt ONE bounded cleanup at its deterministic path/branch too.
+        const expectedTaskId = `dist-importer-check-${opId}`;
+        const expectedPath = resolveWorktreePath(projectId, expectedTaskId, repoKey);
+        if (fs.existsSync(expectedPath)) {
+          const removal = await removeWt(repoPath, expectedPath, { timeoutMs: this.gitOpMs }).catch(() => ({ removed: false, wedged: false, aborted: false }));
+          if (!removal.removed && removal.wedged) {
+            this.db.recordWorktreeWedgeAttempt(expectedPath, repoPath, "dist-importer-check worktree removal (deterministic path, cut never completed in time) was force-killed on timeout");
+            this.armWedgeSweep();
+            console.warn(`[dist-importer-check] worktree ${expectedPath} (deterministic path, cut never completed) is wedged — handed to the background wedge-retry sweep`);
+          } else if (!removal.removed) {
+            console.warn(`[dist-importer-check] could not remove worktree ${expectedPath} (deterministic path, non-fatal, left on disk — the next boot's sweep will retry it)`);
+          }
+        }
+        const expectedBranch = `loom/${taskKey(expectedTaskId)}`;
+        try { await deleteBranch(repoPath, expectedBranch, { expectedTip: landedSha, timeoutMs: this.gitOpMs }); }
+        catch (err) { console.warn(`[dist-importer-check] could not delete branch ${expectedBranch} (deterministic path, non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      }
+      if (branch) {
+        try { await deleteBranch(repoPath, branch, { expectedTip: landedSha, timeoutMs: this.gitOpMs }); }
+        catch (err) { console.warn(`[dist-importer-check] could not delete branch ${branch} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      }
+    }
+
+    if (outcome.kind === "mechanism-failure") {
+      this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: outcome.reason.slice(0, 200) } });
+      recordEvent({ mechanismLike: true, reason: outcome.reason.slice(0, 200), gateSpawned: false });
+      pushNudge(formatDistImporterMechanismFailureNudge({ landedSha, reason: outcome.reason }));
+      return;
+    }
+    if (outcome.kind === "cancelled") {
+      this.db.settlePendingGateOp(opId, { kind: "cancelled", payload: { reason: outcome.reason } });
+      recordEvent({ cancelled: true, cancelDetail: outcome.reason, gateSpawned: false });
+      pushNudge(formatDistImporterCancelledNudge({ landedSha, reason: outcome.reason }));
+      return;
+    }
+    if (outcome.kind === "nothing-to-run") {
+      this.db.settlePendingGateOp(opId, { kind: "pass", payload: {} });
+      return;
+    }
+    const { gate: gateResult, ranSize, matchedSize, corpusSize } = outcome;
+    // @decision cee17efe — a RUNNING cancel resolves gateResult normally; check it BEFORE mechanismLike, which would otherwise misclassify it.
+    if (gateResult.cancelled) {
+      const reason = cancelReason("cancelled while running");
+      this.db.settlePendingGateOp(opId, { kind: "cancelled", payload: { reason } });
+      // @decision cee17efe (LEAD round-4 ruling 3) — gateSpawned:true: this cancel was discovered INSIDE
+      // the "gate" outcome, i.e. runGateSequential was genuinely entered, unlike every mid-phase/queued
+      // cancel above (gateSpawned:false there — nothing had reached the real gate call yet).
+      recordEvent({ cancelled: true, cancelDetail: reason, ranSize, matchedSize, corpusSize, gateSpawned: true });
+      pushNudge(formatDistImporterCancelledNudge({ landedSha, reason }));
+      return;
+    }
+    // @decision cee17efe — a genuine timeout is excluded from mechanismLike; reported as a timeout, never folded into the mechanism-failure nudge.
+    const timedOut = gateResult.failedTimedOut === true;
+    // @decision cee17efe (LEAD round-2 ruling 1) — a non-test exit (the harness itself reporting
+    // selected files were never executed, or an exit with no identifiable failing test at all) is a
+    // MECHANISM failure, never a red.
+    const mechanismLike = !gateResult.passed && !timedOut && (gateResult.harnessNotExecutedDetected === true || !gateResult.failingTest);
+    this.db.settlePendingGateOp(opId, {
+      kind: mechanismLike ? "error" : gateResult.passed ? "pass" : "fail",
+      payload: { durationMs: gateStartedAt ? Date.now() - gateStartedAt : undefined, outputTail: gateResult.outputTail, steps: gateResult.steps },
+    });
+    recordEvent({
+      ranSize, matchedSize, corpusSize, passed: gateResult.passed, mechanismLike, timedOut, cancelled: false, gateSpawned: true,
+      ...(gateResult.outputTail ? { outputTail: gateResult.outputTail } : {}),
+      ...(gateResult.failingTest ? { failingTest: gateResult.failingTest } : {}),
+    });
+    if (mechanismLike) {
+      pushNudge(formatDistImporterMechanismFailureNudge({
+        landedSha,
+        reason: gateResult.harnessNotExecutedDetected
+          ? "the harness itself reported selected test file(s) were not actually executed (a usage/mechanism failure, not a real test red)"
+          : "the isolated run exited non-zero with no identifiable failing test name — a harness/usage error, not a confirmed red",
+      }));
+      return;
+    }
+    const failingFiles = gateResult.failingTest ? [gateResult.failingTest] : undefined;
+    pushNudge(formatDistImporterResultNudge({ landedSha, touchedDistPaths, ranSize, matchedSize, passed: gateResult.passed, failingFiles, timedOut }));
+  }
+
+  /**
+   * Card cee17efe (LEAD round-2 ruling 4a) — boot-time disk cleanup for a dist-importer-check worktree/
+   * branch left behind by a crash mid-run. The check's own worktree dir is the SAME opaque `taskKey`-
+   * hashed path every other worktree uses ({@link resolveWorktreePath}), so it carries no recognizable
+   * prefix on disk — the durable `pending_gate_ops` row (key `dist-importer-check:<opId>`, always minted
+   * BEFORE the worktree cut even starts — see {@link runOneDistImporterCheck}) is the record this sweep
+   * re-derives the candidate path FROM, trying every one of the project's registered repoKeys (the row
+   * itself carries no repoKey) since the deterministic formula needs one to resolve a path.
+   * `reconcileUnsurfacedPendingGateOps`/`reconcileOrphanedGateOps` already settle the ROW itself (it's an
+   * ordinary `kind:"gate"` tombstone) — this sweep ONLY cleans up the worktree/branch those don't touch.
+   * Best-effort, never throws; a project/repo that no longer resolves is skipped, not retried forever (a
+   * leftover under a since-deleted project is accepted residue, same posture as a stale-aside worktree).
+   * Exposed (not private) so a test can drive it deterministically instead of only via a real boot.
+   */
+  async sweepOrphanedDistImporterCheckWorktrees(): Promise<number> {
+    let swept = 0;
+    const rows = this.db.listPendingGateOps().filter((r) => r.kind === "gate" && r.key.startsWith("dist-importer-check:"));
+    for (const row of rows) {
+      if (!row.projectId) continue;
+      const project = this.db.getProject(row.projectId);
+      if (!project) continue;
+      const candidateRepoKeys: (string | null)[] = [null, ...project.repos.map((r) => r.key)];
+      const taskIdForOp = `dist-importer-check-${row.opId}`;
+      for (const repoKey of candidateRepoKeys) {
+        let repoPath: string;
+        try { repoPath = resolveRepoByKey(project, repoKey).path; } catch { continue; }
+        const worktreePath = resolveWorktreePath(project.id, taskIdForOp, repoKey);
+        const branch = `loom/${taskKey(taskIdForOp)}`;
+        const dirExists = fs.existsSync(worktreePath);
+        // @decision cee17efe (LEAD round-3 ruling 4) — a leftover branch is checked/deleted even when its
+        // worktree dir is already gone (the two used to be coupled under one `continue`, silently
+        // stranding an orphaned branch whenever something had already cleared the dir alone).
+        const branchExisted = dirExists || await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs });
+        if (!dirExists && !branchExisted) continue; // genuinely nothing here for this (project,repoKey)
+        let removedSomething = false;
+        if (dirExists) {
+          console.warn(`[dist-importer-check] boot sweep: removing leftover worktree ${worktreePath} (op ${row.opId}, repoKey ${repoKey ?? "primary"})`);
+          const removeWt = this.distImporterCheckRemoveWorktree ?? removeWorktree;
+          const removal = await removeWt(repoPath, worktreePath, { timeoutMs: this.gitOpMs }).catch((err) => {
+            console.warn(`[dist-importer-check] boot sweep: could not remove leftover worktree ${worktreePath} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+            return { removed: false, wedged: false, aborted: false };
+          });
+          if (removal.removed) {
+            removedSomething = true;
+          } else if (removal.wedged) {
+            // Card cee17efe (round-3 ruling 4) — route a genuinely wedged removal into the SAME durable
+            // retry machinery `runOneDistImporterCheck`'s own cleanup already uses, never leave it
+            // untracked on disk.
+            this.db.recordWorktreeWedgeAttempt(worktreePath, repoPath, "dist-importer-check boot-sweep worktree removal was force-killed on timeout (handle still held)");
+            this.armWedgeSweep();
+            console.warn(`[dist-importer-check] boot sweep: worktree ${worktreePath} is wedged — handed to the background wedge-retry sweep`);
+          }
+        }
+        if (branchExisted) {
+          // @decision cee17efe — deleteBranch never throws on a generic failure; re-check branchExistsInRepo AFTERWARD and count only a real removal.
+          try { await deleteBranch(repoPath, branch, { timeoutMs: this.gitOpMs }); }
+          catch (err) { console.warn(`[dist-importer-check] boot sweep: could not delete leftover branch ${branch} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+          if (!(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs }))) removedSomething = true;
+        }
+        if (removedSomething) swept++; // count only a REAL removal — never a wedged/failed attempt
+      }
+    }
+    return swept;
   }
 
   /** Card 8b1fb28f: validates {@link ConfirmMergeResult.gatedIdentity} (captured pre-spawn inside `confirmWorkerMerge`)

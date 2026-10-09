@@ -178,9 +178,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** @decision 164f7915 — a bare `sleep()` timer keeps running up to `ms` even once `e.settle` wins the
- *  race; clear it instead, now that a caller can pass a multi-minute `ms`. See 164f7915 Round 4. */
-function clearableSleep(ms: number): { promise: Promise<void>; clear: () => void } {
+/** @decision 164f7915 — clear the timer on either race outcome, not just its own firing.
+ *  Exported (card cee17efe) for `GateSemaphore.waitForSettleBriefly` to reuse, rather than a second copy. */
+export function clearableSleep(ms: number): { promise: Promise<void>; clear: () => void } {
   let timer: ReturnType<typeof setTimeout>;
   const promise = new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); });
   return { promise, clear: () => clearTimeout(timer) };

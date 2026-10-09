@@ -686,8 +686,11 @@ export function deployBuildSteps(root: string): BuildStep[] {
  *
  * Exported (mirrors `gate-runner.ts`'s own `runGateStep` export) so a hermetic test can drive it
  * directly with a REAL spawn + REAL timeout to prove the tree-kill, without going through the full
- * deployBuildSteps/BuildDeps.runStep indirection. */
-export function runBuildStep(step: BuildStep, cwd: string): Promise<{ code: number; out: string }> {
+ * deployBuildSteps/BuildDeps.runStep indirection.
+ *
+ * @decision cee17efe — `cancelSignal` (optional) kills the tree early, same as the timeout path; every
+ * existing caller omits it and is byte-identical. */
+export function runBuildStep(step: BuildStep, cwd: string, cancelSignal?: AbortSignal): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
     let out = "";
     const cap = (b: Buffer) => { out += b.toString(); if (out.length > 8000) out = out.slice(-8000); };
@@ -700,7 +703,13 @@ export function runBuildStep(step: BuildStep, cwd: string): Promise<{ code: numb
       ? spawn(step.command, { cwd, shell: true, env: { ...process.env, CI: "1" }, detached })
       : spawn(step.command, step.args, { cwd, detached });
     let settled = false;
-    const done = (r: { code: number; out: string }) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(r); };
+    const done = (r: { code: number; out: string }) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (cancelSignal) cancelSignal.removeEventListener("abort", onCancel);
+      resolve(r);
+    };
     const timer = step.timeoutMs > 0
       ? setTimeout(() => {
           // Claim resolution IMMEDIATELY, synchronously — BEFORE the async tree-kill below — mirrors
@@ -710,11 +719,26 @@ export function runBuildStep(step: BuildStep, cwd: string): Promise<{ code: numb
           // killed" diagnostic in favor of a plain exit code.
           if (settled) return;
           settled = true;
+          if (cancelSignal) cancelSignal.removeEventListener("abort", onCancel);
           void killGateProcessTree(child).finally(() => {
             resolve({ code: 1, out: `${out}\n(${step.label} exceeded ${step.timeoutMs}ms — killed)` });
           });
         }, step.timeoutMs)
       : undefined;
+    // Card cee17efe — same claim-resolution-before-async-kill shape as the timeout path above, just
+    // triggered by the caller's own cancelSignal instead of this function's own timer.
+    const onCancel = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      void killGateProcessTree(child).finally(() => {
+        resolve({ code: 1, out: `${out}\n(${step.label} cancelled)` });
+      });
+    };
+    if (cancelSignal) {
+      if (cancelSignal.aborted) onCancel();
+      else cancelSignal.addEventListener("abort", onCancel, { once: true });
+    }
     child.stdout?.on("data", cap);
     child.stderr?.on("data", cap);
     child.on("error", (e) => done({ code: 1, out: `${out}\n${step.label} could not start: ${e.message}` }));
