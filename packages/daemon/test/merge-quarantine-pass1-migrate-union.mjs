@@ -48,6 +48,11 @@ const SCENARIOS = [
   "migrate-source-collides-with-sibling-target",
   "degraded-receiver-guard", "union-with-degraded-in-memory",
   "in-memory-twin-clear-destroys-degraded-file",
+  "in-memory-twin-clear-x-removes-safety-copy",
+  "gone-subdir-reblocks-once-then-clearable",
+  "foreign-nested-repo-quarantine-survives",
+  "dual-collision-union-survives-second-protect",
+  "reversed-tie-break-no-protection-report-only",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -89,13 +94,13 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, clearMergeQuarantine, clearMergeQuarantineLatchFile,
-  quarantineLatchIdFor, MERGE_QUARANTINE_DIR,
+  quarantineLatchIdFor, MERGE_QUARANTINE_DIR, clearMergeQuarantineByRecordedPath, assertRepoNotQuarantined,
+  clearMergeQuarantineByKey,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-const report = (label, text) => { console.log(`REPORT  ${label}: ${text}`); }; // observation only — never counted as a failure
 const GIT_ID = "-c user.email=mqp1mu@loom -c user.name=mqp1mu";
 const tmpDirs = [];
 const freshSfx = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -507,22 +512,31 @@ try {
       const activeY = activeMergeQuarantineFor(y);
       check("*** FAIL-CLOSED *** X still reads quarantined in-process, even with no file ever written for it this way", !!activeX);
       check("*** FAIL-CLOSED *** Y still reads quarantined in-process, even though its own migrate-write was skipped", !!activeY);
-      check("(in-memory) no fresh-hash file was ever created for Y's own migration (the write was genuinely skipped, not silently retried elsewhere)", fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json")).length === 2);
+      // @decision c9114934 — EXCLUDES a `pending-<24hex>.json` protective copy from this count: that is
+      // X's OWN safety record (protectDegradedOccupant), never a write for Y's migration. This check's own
+      // job is narrower than "exactly 2 files total" post-c9114934 — it asserts Y's migrate-write target
+      // specifically was never created, which a pending-prefixed file can never be confused with (disjoint
+      // naming, see the decision record).
+      const migrationWriteFiles = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json") && !f.startsWith("pending-"));
+      check("(in-memory) no fresh-hash file was ever created for Y's own migration (the write was genuinely skipped, not silently retried elsewhere)", migrationWriteFiles.length === 2);
     }
-  } else if (scenarioName === "in-memory-twin-clear-destroys-degraded-file") {
+  } else if (scenarioName === "in-memory-twin-clear-destroys-degraded-file" || scenarioName === "in-memory-twin-clear-x-removes-safety-copy") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
-    // ROUND 3, FINDING 2 (MAJOR, "Repro B") + the still-open in-memory twin (card d4b25feb, NOT fixed
-    // here) in ONE fixture. The degraded-collision fall-through STILL unions X (degraded) and Y
-    // (resolvable) into ONE in-memory entry (armQuarantineKey is unconditional, unchanged by this card on
-    // purpose — only the WRITE is gated).
-    //   - X's own backing file (sha(Ky).json): a human clearing Y lifts the shared union's `armedKeys`
-    //     and deletes it as a side effect — the in-memory twin of 4480b077's own on-disk defect. This
-    //     scenario REPORTS that result (card d4b25feb); it does not assert pass/fail on it.
-    //   - Y's own migrating source (stale-y.json): round 2 left it UNTRACKED by the skip branch, so the
-    //     SAME clear left it behind, and the NEXT boot re-migrated it successfully (X's own file is now
-    //     gone too, so nothing blocks it) — resurrecting Y's quarantine the human just cleared. Round 3
-    //     folds it into the shared union's own `orphanLatchFiles` so the SAME clear's existing orphan-sweep
-    //     removes it too. THIS half IS asserted (pass/fail) — it's the fix round 3 actually makes.
+    // ROUND 3, FINDING 2 (MAJOR, "Repro B") + the in-memory twin, now fixed by card c9114934 (right
+    // before clearing Y's shared key would destroy X's only backing file, X's own CURRENT on-disk content
+    // is copied aside to a NEW disjoint pending-divert filename — see docs/decisions/c9114934-degraded-
+    // occupant-safety-copy-before-key-reclaim.md for why this is deliberately a CLEAR-TIME protection,
+    // never preemptive at boot). The degraded-collision fall-through STILL unions X (degraded) and Y
+    // (resolvable) into ONE in-memory entry at Ky (armQuarantineKey is unconditional, unchanged by this
+    // card on purpose — only the WRITE is gated), and clearing Y STILL correctly deletes Ky's own physical
+    // file (e1cb7d33's retraction: the clear must PROCEED, never refuse) — but X now survives via its own
+    // protective copy, minted in the SAME clear call that destroys Ky's shared file.
+    //   - "in-memory-twin-clear-destroys-degraded-file" promotes the ORIGINAL report-only half to full
+    //     assertions: Ky's physical file is still correctly deleted (Y legitimately owns Ky now), but X
+    //     survives — enforced, findable by its own path, and durable across ≥3 reboots with a STABLE
+    //     file count (no new protective copy minted per boot).
+    //   - "in-memory-twin-clear-x-removes-safety-copy" (DoD extra (b)) continues from there: clearing X
+    //     BY ITS OWN PATH removes its protective copy too, with no residue left behind.
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const y = path.join(os.tmpdir(), `loom-mqp1mu-y-imt-${freshSfx()}`);
     fs.mkdirSync(y, { recursive: true });
@@ -548,26 +562,368 @@ try {
     check("(precondition) X's backing file exists before any clear", fs.existsSync(xFile));
     check("(precondition) Y's own stale source exists before any clear", fs.existsSync(yFile));
     check("(precondition) Y reads quarantined before any clear", !!activeMergeQuarantineFor(y));
+    // No protective copy exists yet — this card's fix is deliberately CLEAR-TIME, never preemptive at
+    // boot (a preemptive copy caused a measured double-report regression — see the decision record).
+    check("(precondition) no protective copy exists before the clear runs", fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-")).length === 0);
 
-    // THE CHECK — a human issues the ordinary, legitimate clear for Y (the resolvable repo).
+    // THE CHECK — a human issues the ordinary, legitimate clear for Y (the resolvable repo). This still
+    // PROCEEDS (e1cb7d33's own retraction) and still deletes Ky's shared physical file — but X's own
+    // content is copied aside to a new protective file in the SAME call, before the delete.
     clearMergeQuarantine(y);
 
-    const xFileSurvived = fs.existsSync(xFile);
-    if (xFileSurvived) {
-      report("in-memory-twin", "DID NOT REPRODUCE — X's own backing file survived clearMergeQuarantine(y). See the decision record for why (if determined) before relying on this as a general guarantee.");
-    } else {
-      report("in-memory-twin", "REPRODUCED — clearMergeQuarantine(y) deleted X's own backing file (sha(Ky).json) as a side effect of lifting the in-memory union's shared armedKeys. This is the in-memory twin of 4480b077's own on-disk defect, NOT fixed by card d4b25feb — split out and tracked on card c9114934.");
-    }
-    console.log(`(in-memory-twin) X's backing file exists after clearMergeQuarantine(y): ${xFileSurvived}`);
-
-    // *** THE FIX (finding 2) *** — Y's own stale source must be swept too (via the fold into the
-    // shared union's own orphanLatchFiles, consumed by clearMergeQuarantineByKey's existing orphan-sweep
-    // loop), or it survives untouched and resurrects Y's quarantine on the next boot.
+    check("Ky's shared physical file is still correctly deleted — Y legitimately owns Ky now", !fs.existsSync(xFile));
+    // *** THE FIX *** — Y's own stale source must be swept too (via the fold into the shared union's own
+    // orphanLatchFiles, consumed by clearMergeQuarantineByKey's existing orphan-sweep loop), or it
+    // survives untouched and resurrects Y's quarantine on the next boot.
     check("*** THE FIX *** Y's own stale source is swept by the SAME clear (folded into the union's orphanLatchFiles)", !fs.existsSync(yFile));
+    const protectiveFilesAfterClear = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+    check("*** THE FIX *** X's protective copy was minted by the SAME clear that destroyed Ky's shared file", protectiveFilesAfterClear.length === 1);
+    const xProtectiveFile = path.join(MERGE_QUARANTINE_DIR, protectiveFilesAfterClear[0]);
+    // *** ROUND 3, MAJOR #2 *** — the protective copy's own DURABLE content must be X's own, never
+    // bled from the live boot-time union `armQuarantineKey` already merged Y's own token into.
+    const onDiskProtective = JSON.parse(fs.readFileSync(xProtectiveFile, "utf8"));
+    check("*** THE FIX (round 3) *** X's protective copy carries x-token", (onDiskProtective.tokens ?? []).includes("x-token"));
+    check("*** THE FIX (round 3) *** X's protective copy does NOT durably carry y-token (no bleed from the boot-time union)", !(onDiskProtective.tokens ?? []).includes("y-token"));
+    const activeXAfterClear = activeMergeQuarantineFor(x);
+    check("*** THE FIX *** X is STILL enforced, findable by its own path, with its own token intact", !!activeXAfterClear && (activeXAfterClear.tokens ?? []).includes("x-token"));
+
+    if (scenarioName === "in-memory-twin-clear-destroys-degraded-file") {
+      // *** ROUND 4, ITEM 1 — PIN THE atFinalBasenameIdx `.entry` OVERWRITE *** — every check above only
+      // ever reads the DURABLE FILE (already correct by the time the mutated line would run) or a FRESH
+      // reboot (same thing, re-read from disk) — neither can see a stale IN-MEMORY ref left behind by a
+      // regressed re-point. This checks the LIVE in-memory object directly, in THIS SAME process, no
+      // reboot — the only way a regression here is ever actually caught.
+      check("*** THE FIX (round 4, PIN) *** activeMergeQuarantineFor(x) in-process does NOT carry y-token right after the clear", !(activeXAfterClear.tokens ?? []).includes("y-token"));
+
+      // Trigger a SECOND, independent protect for X in THIS SAME process (no reboot) — a genuinely NEW
+      // degraded collision at a DIFFERENT key `kw`. If the FIRST protect's own in-memory ref was left
+      // stale (the regression), this SECOND protect's own union reads it via `atFilenameIdx` and durably
+      // bleeds y-token into the SECOND write too — proving the pin actually matters downstream, not just
+      // for the one query above.
+      const w = path.join(os.tmpdir(), `loom-mqp1mu-w-imt-pin-${freshSfx()}`);
+      fs.mkdirSync(w, { recursive: true });
+      tmpDirs.push(w);
+      fs.writeFileSync(path.join(w, "README.md"), "# in-memory-twin-pin (w)\n");
+      execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: w });
+      commitAll(w, "init", GIT_ID);
+      const kw = canonicalRepoLockKey(w);
+      const xAtKwFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+      fs.writeFileSync(xAtKwFile, JSON.stringify({
+        repoPath: x, branch: "x-branch", reason: "X's SECOND manufactured resolvedKey collision, with w",
+        enteredAt: Date.now() - 60_000, tokens: ["x-token-2"], resolvedKey: kw,
+      }, null, 2) + "\n");
+      reenterMergeQuarantinesAtBoot([w, x]); // in-process re-scan (no reimport) — arms X at kw too
+      clearMergeQuarantine(w); // triggers the SECOND protect call
+
+      const pendingAfterSecondProtect = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+      check("*** THE FIX (round 4, PIN) *** still exactly one protective copy after the second, in-process protect", pendingAfterSecondProtect.length === 1);
+      const onDiskAfterSecondProtect = pendingAfterSecondProtect[0] ? JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, pendingAfterSecondProtect[0]), "utf8")) : {};
+      check("*** THE FIX (round 4, PIN) *** the second protect's own written file carries x-token", (onDiskAfterSecondProtect.tokens ?? []).includes("x-token"));
+      check("*** THE FIX (round 4, PIN) *** the second protect's own written file carries x-token-2", (onDiskAfterSecondProtect.tokens ?? []).includes("x-token-2"));
+      check("*** THE FIX (round 4, PIN) *** the second protect's own written file does NOT carry y-token (no re-bleed via a stale atFilenameIdx ref)", !(onDiskAfterSecondProtect.tokens ?? []).includes("y-token"));
+    }
+
+    // ≥3 reboots: Y must never resurrect, X must stay enforced, and the quarantine dir's file count must
+    // be STABLE — no new protective copy minted per boot (DoD extra (a)).
+    const filesAfterBoot1 = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json")).length;
+    let lastReboot;
+    for (let i = 0; i < 3; i++) {
+      lastReboot = await rebootSim();
+      const foundAfterClear = lastReboot.reenterMergeQuarantinesAtBoot([y, x]);
+      check(`*** THE FIX *** Y does NOT resurrect on reboot #${i + 1} — the human's clear actually stuck`, !foundAfterClear.some((e) => e.repoPath === y));
+      const xAfterClearEntry = foundAfterClear.find((e) => e.repoPath === x);
+      check(`*** THE FIX *** X STILL enforced on reboot #${i + 1}, with its own token`, !!xAfterClearEntry && (xAfterClearEntry.tokens ?? []).includes("x-token"));
+      // (nitpick) find/every, never some — some(e => cond && !other) passes if ANY x-entry lacks
+      // y-token even while a DIFFERENT x-entry carries it; this must check THE entry, not "any entry".
+      check(`*** THE FIX (round 3) *** X does NOT carry y-token on reboot #${i + 1} either`, !!xAfterClearEntry && !(xAfterClearEntry.tokens ?? []).includes("y-token"));
+      // (nitpick #7) assert assertRepoNotQuarantined(x) DIRECTLY, not just via reenterMergeQuarantinesAtBoot's own return array.
+      check(`*** THE FIX *** assertRepoNotQuarantined(x) directly reports x BLOCKED on reboot #${i + 1}`, lastReboot.assertRepoNotQuarantined(x).ok === false);
+      const filesThisBoot = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json")).length;
+      check(`*** THE FIX (DoD a) *** quarantine dir file count STABLE after reboot #${i + 1} (no new protective copy minted)`, filesThisBoot === filesAfterBoot1);
+    }
+
+    if (scenarioName === "in-memory-twin-clear-x-removes-safety-copy") {
+      // DoD extra (b) — clearing X BY ITS OWN PATH removes its protective copy too, with no residue.
+      check("(precondition) X's protective copy still exists before clearing X by its own path", fs.existsSync(xProtectiveFile));
+      lastReboot.clearMergeQuarantineByRecordedPath(x);
+      check("*** THE FIX (DoD b) *** clearing X by its own path removes its protective copy — no residue", !fs.existsSync(xProtectiveFile));
+      check("*** THE FIX (DoD b) *** X no longer reads quarantined after clearing it by its own path", !lastReboot.activeMergeQuarantineFor(x));
+      check("(nitpick #7) assertRepoNotQuarantined(x) directly confirms x is now FREE", lastReboot.assertRepoNotQuarantined(x).ok === true);
+      const reboot4 = await rebootSim();
+      const foundAfterXClear = reboot4.reenterMergeQuarantinesAtBoot([y, x]);
+      check("*** THE FIX (DoD b) *** X does NOT resurrect on a later boot either", !foundAfterXClear.some((e) => e.repoPath === x));
+    }
+  } else if (scenarioName === "gone-subdir-reblocks-once-then-clearable") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // ROUND 3 — Lead ruling: FAIL CLOSED. Round 2's `occupantKey === key` skip (this scenario's own
+    // former name, `gone-subdir-not-foreign`) is REVERTED — it cannot tell a stale same-repo subdir
+    // apart from a genuinely FOREIGN nested repo whose checkout is currently missing (both ancestor-walk
+    // to the SAME key right now; see `foreign-nested-repo-quarantine-survives` below for that case). A
+    // fail-OPEN loss of a foreign repo's quarantine is unrecoverable; this scenario pins the cost of
+    // failing CLOSED instead for the harmless same-repo-subdir case: ONE spurious re-block, cleanly and
+    // permanently resolved by the very next ordinary clear once the path is recognizably resolvable.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqp1mu-y-gsf-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# gone-subdir-reblocks-once-then-clearable\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+    const z = path.join(y, "gone-subdir"); // deliberately never created yet — "gone"
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const finalPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    // `resolvedKey: ky` is set here purely so PASS 1 arms this directly (rather than diverting it to
+    // `pendingUnresolvedQuarantines` for having no resolvedKey at all) — z's own ancestor walk would
+    // compute the SAME ky even without it.
+    fs.writeFileSync(finalPath, JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "a stale same-repo subdir path, now gone", enteredAt: Date.now(), tokens: ["z-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, z]);
+    check("(precondition) z's own ancestor-walked key is the SAME as y's (a plain subdir, no own .git)", canonicalRepoLockKey(z) === ky);
+    check("(precondition) z is currently unresolvable (gone)", !fs.existsSync(z));
+    check("(precondition) y reads quarantined (z's content occupies y's own key)", !!activeMergeQuarantineFor(y));
+
+    // STEP 1 — clear(y) ⇒ a protective copy IS minted (FAIL CLOSED, even for this same-repo subdir).
+    clearMergeQuarantine(y);
+    check("y's own physical file is correctly deleted", !fs.existsSync(finalPath));
+    const pendingAfterClear = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+    check("*** FAIL CLOSED *** a protective (pending-divert) copy IS minted for the same-repo subdir path too", pendingAfterClear.length === 1);
+    // (nitpick) guard the index — a RED run with ZERO protective copies must still report the rest of
+    // this scenario's own checks (a bare `pendingAfterClear[0]` would be `undefined` there, crashing
+    // `path.join` and losing every later assertion to an uncaught exception instead of a clean FAIL).
+    const onDiskPending = pendingAfterClear[0] ? JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, pendingAfterClear[0]), "utf8")) : {};
+    check("the protective copy carries z's own token", (onDiskPending.tokens ?? []).includes("z-token"));
+
+    // While the subdir is STILL gone, a reboot keeps the protective copy PENDING (not yet resolvable, so
+    // never armed at any key) — y stays free in the meantime. `reenterMergeQuarantinesAtBoot`'s own
+    // return value legitimately still NAMES z (its pending data survives, which is the entire point of
+    // protecting it) — the real assertion is that nothing is ARMED at y's own key, checked directly.
+    const rebootWhileGone = await rebootSim();
+    rebootWhileGone.reenterMergeQuarantinesAtBoot([y, z]);
+    check("(while gone) y stays free — the protective copy hasn't resolved to anything yet", !rebootWhileGone.activeMergeQuarantineFor(y));
+    check("(while gone) assertRepoNotQuarantined(y) directly confirms y is free", rebootWhileGone.assertRepoNotQuarantined(y).ok === true);
+
+    // STEP 2 — "subdir restored" ⇒ Y re-blocked ONCE. z now genuinely exists again (a plain subdir, no
+    // own `.git`) — on the NEXT boot, its pending-divert entry (no resolvedKey) resolves to ky directly
+    // and migrates into a real latch there, re-occupying Y's own key.
+    fs.mkdirSync(z, { recursive: true });
+    check("(precondition) z now resolves", fs.existsSync(z));
+    const rebootAfterRestore = await rebootSim();
+    const foundAfterRestore = rebootAfterRestore.reenterMergeQuarantinesAtBoot([y, z]);
+    check("*** FAIL CLOSED (the cost) *** Y is RE-BLOCKED once the subdir is restored and a boot runs", !!rebootAfterRestore.activeMergeQuarantineFor(y));
+    check("the re-block is z's own migrated entry", foundAfterRestore.some((e) => e.repoPath === z && (e.tokens ?? []).includes("z-token")));
+
+    // STEP 3 — an ORDINARY clear(y) now removes it for good: `differentUnresolvableOccupantRepoPathAt`
+    // returns `undefined` for z this time (different identity, but now CURRENTLY RESOLVABLE — "today's
+    // behavior" branch) — no new protective copy is minted, the physical file is just deleted outright.
+    rebootAfterRestore.clearMergeQuarantine(y);
+    const pendingAfterSecondClear = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+    check("*** THE FIX *** the second, ordinary clear mints NO new protective copy (z is resolvable now)", pendingAfterSecondClear.length === 0);
+    check("*** THE FIX *** y is free immediately after this second clear", !rebootAfterRestore.activeMergeQuarantineFor(y));
+
+    const finalReboot = await rebootSim();
+    const foundFinal = finalReboot.reenterMergeQuarantinesAtBoot([y, z]);
+    check("*** THE FIX *** nothing resurrects on a further reboot — cleared for good", !foundFinal.some((e) => e.repoPath === y || e.repoPath === z));
+    check("*** THE FIX *** assertRepoNotQuarantined(y) confirms y is free for good", finalReboot.assertRepoNotQuarantined(y).ok === true);
+  } else if (scenarioName === "foreign-nested-repo-quarantine-survives") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // ROUND 3 — the CR's own counter-example to round 2's (reverted) `occupantKey === key` skip: a
+    // GENUINELY FOREIGN nested repo (`Y/vendor/foreign-repo`, its OWN `.git`, a real distinct key)
+    // whose checkout is simply MISSING at the moment Y is cleared. From THIS process's own inputs at
+    // clear time, this is INDISTINGUISHABLE from `gone-subdir-reblocks-once-then-clearable`'s own same-
+    // repo subdir (both ancestor-walk to Y's own key while absent) — only what the path turns out to BE
+    // once restored tells the two apart, and that information does not exist yet at clear time. FAIL
+    // CLOSED protects both; this scenario proves the foreign one survives for real, not just in theory.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqp1mu-y-fnr-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# foreign-nested-repo-quarantine-survives\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+    const foreignRepo = path.join(y, "vendor", "foreign-repo"); // checkout MISSING — not created yet
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const finalPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    fs.writeFileSync(finalPath, JSON.stringify({
+      repoPath: foreignRepo, branch: "foreign-branch", reason: "a foreign nested repo, checkout currently missing", enteredAt: Date.now(), tokens: ["foreign-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, foreignRepo]);
+    check("(precondition) foreignRepo's own ancestor-walked key is the SAME as y's while its checkout is missing", canonicalRepoLockKey(foreignRepo) === ky);
+    check("(precondition) foreignRepo is currently unresolvable (checkout missing)", !fs.existsSync(foreignRepo));
+    check("(precondition) y reads quarantined (foreignRepo's content occupies y's own key)", !!activeMergeQuarantineFor(y));
+
+    // clear(y) — FAIL CLOSED protects foreignRepo's own content before Ky's shared physical file is destroyed.
+    clearMergeQuarantine(y);
+    const pendingAfterClear = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+    check("*** THE FIX *** a protective copy is minted for the foreign nested repo too", pendingAfterClear.length === 1);
+    check("*** THE FIX *** foreignRepo is still enforced immediately after the clear", !!activeMergeQuarantineFor(foreignRepo));
+
+    // "checkout restored" — foreignRepo now genuinely exists, as its OWN SEPARATE repo (own `.git`, a
+    // real, distinct key — never Y's own ky).
+    fs.mkdirSync(foreignRepo, { recursive: true });
+    fs.writeFileSync(path.join(foreignRepo, "README.md"), "# foreign-repo\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: foreignRepo });
+    commitAll(foreignRepo, "init", GIT_ID);
+    const kForeign = canonicalRepoLockKey(foreignRepo);
+    check("(precondition) foreignRepo's own REAL key is genuinely different from Y's", kForeign !== ky);
 
     const reboot1 = await rebootSim();
-    const foundAfterClear = reboot1.reenterMergeQuarantinesAtBoot([y, x]);
-    check("*** THE FIX *** Y does NOT resurrect on a later boot — the human's clear actually stuck", !foundAfterClear.some((e) => e.repoPath === y));
+    const found1 = reboot1.reenterMergeQuarantinesAtBoot([y, foreignRepo]);
+    check("*** THE FIX *** X (foreignRepo) is STILL quarantined after the reboot — nothing was lost", found1.some((e) => e.repoPath === foreignRepo && (e.tokens ?? []).includes("foreign-token")));
+    // (nitpick) assert the ACTUAL claim — armed under kForeign's own canonical slot — not merely that
+    // nothing in `found1` happens to carry y's repoPath (a much weaker, indirect proxy for "migrated").
+    const kForeignFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kForeign)}.json`);
+    check("*** THE FIX *** foreignRepo migrated to its OWN real key (kForeign), never Y's", fs.existsSync(kForeignFile));
+    check("*** THE FIX *** Y itself is NOT re-blocked this time (foreignRepo is a genuinely different identity/key)", !reboot1.activeMergeQuarantineFor(y));
+
+    // Cleanup: clear foreignRepo by its own path, leaving no residue.
+    reboot1.clearMergeQuarantine(foreignRepo);
+    check("(cleanup) foreignRepo's own quarantine is lifted", !reboot1.activeMergeQuarantineFor(foreignRepo));
+  } else if (scenarioName === "dual-collision-union-survives-second-protect") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // ROUND 2, MAJOR #2 + MINOR #5 — ONE degraded identity X collides (via its own trusted resolvedKey,
+    // same shape as the already-fixed in-memory-twin scenarios) with TWO SEPARATE, otherwise-innocent
+    // resolvable repos t1/t2 at TWO DIFFERENT keys. Clearing t1 protects X (mints pending-<hash(x)>.json
+    // holding X's t1-side token). The OLD, buggy code then EARLY-RETURNED when clearing t2 found that
+    // pending file already existed — silently DROPPING t2's own token and never re-persisting anything
+    // before t2's own physical collision file was destroyed. The fix unions the SECOND collision's
+    // tokens into the EXISTING pending record instead of early-returning or overwriting it.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const t1 = path.join(os.tmpdir(), `loom-mqp1mu-t1-dcu-${freshSfx()}`);
+    fs.mkdirSync(t1, { recursive: true });
+    tmpDirs.push(t1);
+    fs.writeFileSync(path.join(t1, "README.md"), "# dual-collision-union-survives-second-protect (t1)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: t1 });
+    commitAll(t1, "init", GIT_ID);
+    const k1 = canonicalRepoLockKey(t1);
+
+    const t2 = path.join(os.tmpdir(), `loom-mqp1mu-t2-dcu-${freshSfx()}`);
+    fs.mkdirSync(t2, { recursive: true });
+    tmpDirs.push(t2);
+    fs.writeFileSync(path.join(t2, "README.md"), "# dual-collision-union-survives-second-protect (t2)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: t2 });
+    commitAll(t2, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(t2);
+    check("(precondition) t1 and t2 have genuinely different canonical keys", k1 !== k2);
+
+    const x = path.join(os.tmpdir(), `loom-mqp1mu-x-dcu-never-exists-${freshSfx()}`); // deliberately never created
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    // X's own TWO independent physical backings — one per colliding key, each with its own trusted
+    // resolvedKey and its own distinct token (two separate in-memory armed objects; nothing links them
+    // except sharing X's own `repoPath` string — exactly what `pendingDivertFilenameFor` keys on).
+    const xAtK1 = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k1)}.json`);
+    const xAtK2 = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK1, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with t1",
+      enteredAt: Date.now() - 60_000, tokens: ["x-t1-token"], resolvedKey: k1,
+    }, null, 2) + "\n");
+    fs.writeFileSync(xAtK2, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with t2",
+      enteredAt: Date.now() - 60_000, tokens: ["x-t2-token"], resolvedKey: k2,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([t1, t2, x]);
+    check("(precondition) t1 reads quarantined (X occupies K1)", !!activeMergeQuarantineFor(t1));
+    check("(precondition) t2 reads quarantined (X occupies K2)", !!activeMergeQuarantineFor(t2));
+    check("(precondition) no protective copy exists before any clear", fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-")).length === 0);
+
+    // Clear t1 FIRST — mints X's protective pending record, holding ONLY x-t1-token so far.
+    clearMergeQuarantine(t1);
+    const pendingAfterT1 = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+    check("(after clearing t1) exactly one protective copy exists", pendingAfterT1.length === 1);
+    const pendingPath = path.join(MERGE_QUARANTINE_DIR, pendingAfterT1[0]);
+    const afterT1 = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+    check("(after clearing t1) the protective copy carries x-t1-token", (afterT1.tokens ?? []).includes("x-t1-token"));
+    check("(after clearing t1) the protective copy does NOT yet carry x-t2-token", !(afterT1.tokens ?? []).includes("x-t2-token"));
+
+    // THE CHECK — clear t2 SECOND. The old code's own "already protected" early return would discard
+    // x-t2-token entirely right here, right before t2's own physical file is unconditionally destroyed.
+    clearMergeQuarantine(t2);
+
+    check("t2's own physical file is destroyed (the clear always proceeds, protected or not)", !fs.existsSync(xAtK2));
+    const pendingAfterT2 = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+    check("*** THE FIX *** still exactly ONE protective copy — union into the existing one, never a second file", pendingAfterT2.length === 1);
+    const afterT2 = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+    check("*** THE FIX *** x-t1-token SURVIVES clearing t2 (never overwritten)", (afterT2.tokens ?? []).includes("x-t1-token"));
+    check("*** THE FIX *** x-t2-token is now ALSO present — unioned, never dropped by the early return", (afterT2.tokens ?? []).includes("x-t2-token"));
+    const activeXAfterBoth = activeMergeQuarantineFor(x);
+    check("*** THE FIX *** clearing t2 alone still leaves X quarantined — enforced, findable by its own path",
+      !!activeXAfterBoth && (activeXAfterBoth.tokens ?? []).includes("x-t1-token") && (activeXAfterBoth.tokens ?? []).includes("x-t2-token"));
+
+    const reboot1 = await rebootSim();
+    const found1 = reboot1.reenterMergeQuarantinesAtBoot([t1, t2, x]);
+    check("(reboot-sim) neither t1 nor t2 resurrects", !found1.some((e) => e.repoPath === t1 || e.repoPath === t2));
+    check("(reboot-sim) X is still enforced with BOTH tokens",
+      found1.some((e) => e.repoPath === x && (e.tokens ?? []).includes("x-t1-token") && (e.tokens ?? []).includes("x-t2-token")));
+    const filesAfterReboot = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+    check("(reboot-sim) still exactly one protective copy — no duplicate minted on reboot", filesAfterReboot.length === 1);
+  } else if (scenarioName === "reversed-tie-break-no-protection-report-only") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // ROUND 2, MAJOR #3 (REPORT-ONLY, DEFERRED to card 398f476c per Lead ruling) — TWO wholly
+    // unresolvable identities (X, Y) each carry a manufactured, "trusted" `resolvedKey` pointing at the
+    // SAME key Ky, armed DIRECTLY via `armQuarantineKey` in PASS 1's own main loop (never the
+    // resolvable-sibling migrate-fold shape the already-fixed scenarios above exercise) — the SAME
+    // mechanism `c9114934`'s own decision record investigated for its "Hook 2" question, mirroring
+    // `merge-quarantine-pass1-degraded-union-guard.mjs`'s own `deferred-flush-no-stale-snapshot` fixture.
+    // `unionQuarantineEntries` keeps the OLDER side's own identity — when Y is older, the union's own
+    // resulting `repoPath` becomes Y's, so a clear naming `y` as its `identityRepoPath` finds
+    // `entry.repoPath === identityRepoPath` and `protectDegradedOccupantBeforeDelete` is never even
+    // attempted: this is `a2f381dc`'s own M-2 residual one level over (no surviving object represents
+    // X's own identity to protect at all). PRINTED, never asserted — mirroring a2f381dc's own precedent
+    // of documenting M-2 without a new assertion.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const anchor = path.join(os.tmpdir(), `loom-mqp1mu-anchor-rtb-${freshSfx()}`);
+    fs.mkdirSync(anchor, { recursive: true });
+    tmpDirs.push(anchor);
+    fs.writeFileSync(path.join(anchor, "README.md"), "# reversed-tie-break-no-protection-report-only\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: anchor });
+    commitAll(anchor, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(anchor); // a real, stable key — never queried by its own path below
+
+    const x = path.join(os.tmpdir(), `loom-mqp1mu-x-rtb-never-exists-${freshSfx()}`);
+    const y = path.join(os.tmpdir(), `loom-mqp1mu-y-rtb-never-exists-${freshSfx()}`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // X sits at Ky's own "correct" hash-named physical slot (the shape every other scenario's X uses).
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    // Y sits at an arbitrary, non-hash-matching name — its own `resolvedKey` is what routes it into Ky's
+    // union directly via armQuarantineKey, never by filename.
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `stale-y-rtb-${freshSfx()}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision", enteredAt: Date.now(), tokens: ["x-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's own manufactured resolvedKey collision — OLDER than X", enteredAt: Date.now() - 60_000, tokens: ["y-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([anchor, x, y]);
+    // Query by Y's OWN identity (the expected winner, being older) — `activeMergeQuarantineFor`'s own
+    // pending-tier identity match (see its doc) only finds the union's object via whichever side's own
+    // repoPath the union actually kept; querying by the LOSING side's identity finds nothing at all, which
+    // is itself part of what this scenario is documenting (X's own identity becomes unqueryable).
+    const entryAtKy = activeMergeQuarantineFor(y);
+    check("(precondition) a single union entry is armed at Ky", !!entryAtKy);
+    console.log(`(reversed-tie-break-no-protection-report-only) union winner's own repoPath: ${entryAtKy?.repoPath === y ? "Y (older)" : entryAtKy?.repoPath === x ? "X" : "neither (unexpected)"}`);
+
+    if (entryAtKy?.repoPath === y) {
+      // THE DEFERRED GAP (MAJOR #3, card 398f476c) — identityRepoPath === entry.repoPath, so
+      // `clearMergeQuarantineByKey`'s own `clearingRepoPath` computation is `undefined`: no protection is
+      // even attempted before the unconditional unlink destroys Ky's shared physical file, and X's own
+      // token/identity has no surviving record anywhere. PRINTED, never asserted — see the decision
+      // record and card 398f476c.
+      clearMergeQuarantineByKey(ky, y);
+      const pendingAfter = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-"));
+      console.log(`(reversed-tie-break-no-protection-report-only) *** DEFERRED GAP (398f476c) *** protective copies minted: ${pendingAfter.length} (expected 0 — X's own identity has no surviving record)`);
+      console.log(`(reversed-tie-break-no-protection-report-only) *** DEFERRED GAP (398f476c) *** X still enforced anywhere: ${!!activeMergeQuarantineFor(x)} (expected false)`);
+    } else {
+      console.log("(reversed-tie-break-no-protection-report-only) union did not pick Y as the winner on this run — nothing to report for the reversed-ordering shape this scenario targets.");
+    }
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

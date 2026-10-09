@@ -350,13 +350,16 @@ function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: str
  * to get its data back, so `final` is its sole durable copy, exactly the hazard `degradedOccupiedKeys`
  * exists to prevent at boot.
  *
- * Used ONLY by {@link wouldOverwriteDifferentUnresolvableOccupant} (gates a WRITE) — NOT by
- * {@link deleteMergeQuarantineLatchByKey}/{@link clearMergeQuarantineByKey}, despite the identical-looking
- * hazard: an ordinary CLEAR/DELETE of a resolvable repo colliding with a degraded occupant's own key is
- * OUT OF SCOPE for this guard (a draft that gated the delete side too was tried and RETRACTED — see the
- * decision record's "Do not" section for why).
+ * Used by {@link wouldOverwriteDifferentUnresolvableOccupant} (gates a WRITE — refuses it outright) AND,
+ * since card `c9114934`, by {@link protectDegradedOccupantBeforeDelete} (gates a CLEAR's own unconditional
+ * unlink — never refuses it, only copies the occupant's own content aside first, right before the delete
+ * that would otherwise destroy it as collateral). The two callers answer this SAME question for two
+ * different consequences — a write that refuses outright vs. a delete that proceeds anyway and must not
+ * destroy the occupant's only copy — never confuse one caller's semantics for the other's.
  *
- * @decision e1cb7d33 — see the decision record.
+ * @decision e1cb7d33 — see the decision record (the WRITE-side refusal).
+ * @decision c9114934 (round 3, FAIL CLOSED) — this function's own result alone IS the clear-side
+ * decision now — `protectDegradedOccupantBeforeDelete` protects every hit, unconditionally.
  */
 function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoPath: string): string | undefined {
   let existingRaw: string;
@@ -660,12 +663,17 @@ function consumeMatchedPendingsIntoArmedEntry(
  * @decision 54054c01 — takes a raw KEY, never a repoPath: a clear must address BOTH a key an entry is
  * armed under, not just the one `canonicalRepoLockKey(repoPath)` recomputes fresh right now.
  *
- * @decision e1cb7d33 — an ordinary clear through this function is OUT OF SCOPE for the degraded-occupant
- * guard (card d4b25feb already owns, and deliberately defers, the "clearing a resolvable repo collaterally
- * destroys a degraded sibling's own file" consequence — see the decision record). This stays unconditional.
+ * @decision e1cb7d33 — an ordinary clear through this function is OUT OF SCOPE for the WRITE-side
+ * degraded-occupant guard (never refused — `d4b25feb`/`e1cb7d33` already ruled the clear must proceed).
+ *
+ * @decision c9114934 — `clearingRepoPath`, when passed, durably copies a DIFFERENT degraded occupant's
+ * content aside BEFORE the unconditional unlink below — see the decision record. The unlink itself is
+ * unaffected either way: this never refuses, only protects.
  */
-function deleteMergeQuarantineLatchByKey(key: string): void {
-  try { fs.unlinkSync(quarantinePathForKey(key)); } catch { /* ENOENT is the common case */ }
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string): void {
+  const final = quarantinePathForKey(key);
+  if (clearingRepoPath) protectDegradedOccupantBeforeDelete(final, clearingRepoPath);
+  try { fs.unlinkSync(final); } catch { /* ENOENT is the common case */ }
   // @decision be79f4d5 (round 3) — reference-aware, never the unconditional-by-hash sibling: a same-hash
   // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
   // because THIS key's own entry is being legitimately cleared.
@@ -776,6 +784,62 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): 
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] FAILED to durably persist the pending-divert latch for ${entry.repoPath} (branch '${entry.branch}'): ${(e as Error).message}`);
     return false;
+  }
+}
+
+/**
+ * @decision c9114934 — called right BEFORE `final` is unlinked by a clear for a DIFFERENT identity. Never
+ * preemptively at boot — see the decision record for the double-report regression that caused.
+ *
+ * @decision c9114934 (round 3, Lead ruling — FAIL CLOSED) — protects EVERY `differentUnresolvableOccupantRepoPathAt`
+ * hit, no further "is this really foreign" check: that question is undecidable from this process's own
+ * inputs, and losing a foreign repo's quarantine is unrecoverable where a stale-subdir re-block is not.
+ */
+function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string): void {
+  const occupantRepoPath = differentUnresolvableOccupantRepoPathAt(final, clearingRepoPath);
+  if (!occupantRepoPath) return;
+  let raw: string;
+  try { raw = fs.readFileSync(final, "utf8"); } catch { return; }
+  let parsed: Partial<MergeQuarantineEntry> & { token?: string };
+  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return; }
+  if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return;
+  const tokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
+    ? parsed.tokens
+    : [typeof parsed.token === "string" ? parsed.token : randomUUID()];
+  const toPersist: MergeQuarantineEntry = {
+    repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
+    opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
+    enteredAt: typeof parsed.enteredAt === "number" ? parsed.enteredAt : Date.now(),
+    tokens,
+    orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
+      ? parsed.orphanLatchFiles : undefined,
+  };
+  const filename = pendingDivertFilenameFor(occupantRepoPath);
+  const finalBasename = path.basename(final);
+  const atFilenameIdx = pendingUnresolvedQuarantines.findIndex((p) => p.sourceFile === filename);
+  const atFinalBasenameIdx = finalBasename === filename ? -1 : pendingUnresolvedQuarantines.findIndex((p) => p.sourceFile === finalBasename);
+  // @decision c9114934 (round 3, MAJOR #2) — union ONLY from `atFilenameIdx`'s own entry (a ref THIS
+  // function itself wrote, never stale) — NEVER from `atFinalBasenameIdx`'s, which can be a live
+  // boot-time union `armQuarantineKey` already bled a colliding sibling's tokens into.
+  const priorEntry = atFilenameIdx >= 0 ? pendingUnresolvedQuarantines[atFilenameIdx]!.entry : undefined;
+  const toWrite = priorEntry ? unionQuarantineEntries(priorEntry, toPersist) : toPersist;
+  if (!writePendingDivertFile(filename, toWrite)) {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] could not durably protect degraded occupant ${occupantRepoPath}'s own content before ${path.basename(final)} is destroyed by clearing ${clearingRepoPath} — it stays enforced in-memory only for this process; a later boot can retry.`);
+    return;
+  }
+  // Commit the DURABLE (never the stale boot-time) content to memory too, so a later in-process query —
+  // or a later protect call that finds this same ref via `atFilenameIdx` — never sees the contaminated
+  // object again. Re-point any EXISTING pending reference to `final`'s own basename (e.g. its boot-time
+  // degraded-divert push) onto the new, durable filename — never leave it dangling at the name about to
+  // be deleted.
+  if (atFilenameIdx >= 0) {
+    pendingUnresolvedQuarantines[atFilenameIdx] = { entry: toWrite, sourceFile: filename };
+    if (atFinalBasenameIdx >= 0) pendingUnresolvedQuarantines.splice(atFinalBasenameIdx, 1);
+  } else if (atFinalBasenameIdx >= 0) {
+    pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: toWrite, sourceFile: filename };
+  } else {
+    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
   }
 }
 
@@ -1220,9 +1284,9 @@ function pendingEntryStillOwnsKey(key: string, pendingEntry: MergeQuarantineEntr
  * directPathIdentity}, never a freshly-recomputed walking `canonicalRepoLockKey` — see the decision
  * record for the reverse-drift repro this closes.
  *
- * @decision e1cb7d33 — an ordinary clear through this function is OUT OF SCOPE for the degraded-occupant
- * guard — see the decision record for why (card d4b25feb already owns this consequence, and the
- * established precedent, 4480b077/883e29bc, is that the clear proceeds).
+ * @decision e1cb7d33 — this clear is OUT OF SCOPE for the WRITE-side guard, never REFUSED — but since
+ * `c9114934` it still durably PROTECTS a foreign degraded occupant's content before the unconditional
+ * unlink destroys it; see `deleteMergeQuarantineLatchByKey`.
  */
 export function clearMergeQuarantineByKey(key: string, identityRepoPath: string): { wasQuarantined: true; latchKept: true; referencingRepoPaths: string[] } | void {
   const entry = activeQuarantines.get(key);
@@ -1235,7 +1299,13 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // because the registered path was unresolvable at boot (PASS 1 never migrates on an unverifiable key).
   // Sweep every armed key's own latch path, or a stale file survives a "successful" clear and resurrects
   // the quarantine on the next boot.
-  for (const k of keysToLift) deleteMergeQuarantineLatchByKey(k);
+  //
+  // @decision c9114934 — gate on the in-memory `entry.repoPath` actually being cleared, never a bare
+  // on-disk repoPath-string compare per key — UNION-KEYS' own second key can show a stale, pre-union
+  // repoPath on disk for the SAME entity; see the decision record for why that must never "protect" it.
+  const clearingRepoPath = entry && directPathIdentity(entry.repoPath) !== directPathIdentity(identityRepoPath)
+    ? identityRepoPath : undefined;
+  for (const k of keysToLift) deleteMergeQuarantineLatchByKey(k, clearingRepoPath);
   // A pending (boot-unverifiable, no-resolvedKey) entry isn't keyed into activeQuarantines at all — see
   // reenterMergeQuarantinesAtBoot's PASS 1 and activeMergeQuarantineFor's lazy re-resolve. Match it by
   // DIRECT identity against `identityRepoPath` (never a fresh walking recompute — see this function's own
