@@ -113,10 +113,19 @@ check("(2) that SAME run-set would have exceeded the ORIGINAL 50% skip threshold
   const capped = M.formatDistImporterResultNudge({ landedSha: "abcdef1234567890", touchedDistPaths: ["packages/daemon/dist/sessions/service.js"], ranSize: 976, matchedSize: 1200, passed: true });
   check("(4) a CAPPED passing nudge says 'ran N of M' and names what's left over + the cap", capped.includes("ran 976 of 1200") && capped.includes("224 not run") && capped.includes("cap 60% of corpus"));
 
-  const fail = M.formatDistImporterResultNudge({ landedSha: "abcdef1234567890", touchedDistPaths: ["packages/daemon/dist/pty/host.js"], ranSize: 5, matchedSize: 5, passed: false, failingFiles: ["worker-lineage-scope.mjs", "sibling-session-sweep.mjs"] });
-  check("(4) a failing nudge names every failing file", fail.includes("worker-lineage-scope.mjs") && fail.includes("sibling-session-sweep.mjs"));
+  // @decision 2f0b2e57 — failingTest is a matching LINE, never a file (or file list); the nudge must say
+  // so, and must say when it's an incomplete account (failingTestCount > 1).
+  const fail = M.formatDistImporterResultNudge({ landedSha: "abcdef1234567890", touchedDistPaths: ["packages/daemon/dist/pty/host.js"], ranSize: 5, matchedSize: 5, passed: false, failingTest: "FAIL worker-lineage-scope.mjs", failingTestCount: 1 });
+  check("(4) a failing nudge names the failing line and labels it a LINE, not a file", fail.includes("FAIL worker-lineage-scope.mjs") && fail.includes("matching LINE, not an attributed file"));
+  check("(4) a complete-account (failingTestCount===1) nudge never adds the '1 of N' incomplete-account caveat", !fail.includes("1 of 1") && !fail.includes(" of "));
   check("(4) a failing nudge states a red here is a CANDIDATE, not a verdict, and tells the manager to re-run on main first", fail.includes("candidate, not a verdict") && fail.toLowerCase().includes("re-run"));
   check("(4) a failing nudge ALSO states it never touches the gate interval counter or gateOwed", fail.includes("gate interval counter") && fail.includes("gateOwed"));
+
+  const failMulti = M.formatDistImporterResultNudge({ landedSha: "abcdef1234567890", touchedDistPaths: ["packages/daemon/dist/pty/host.js"], ranSize: 5, matchedSize: 5, passed: false, failingTest: "FAIL worker-lineage-scope.mjs", failingTestCount: 3 });
+  check("(4) failingTestCount > 1: the nudge names the ONE line it has AND says it's only 1 of N, not a complete account", failMulti.includes("FAIL worker-lineage-scope.mjs") && failMulti.includes("1 of 3 matching lines") && failMulti.toLowerCase().includes("don't size a fix from this line alone"));
+
+  const failUnnamed = M.formatDistImporterResultNudge({ landedSha: "abcdef1234567890", touchedDistPaths: ["packages/daemon/dist/pty/host.js"], ranSize: 5, matchedSize: 5, passed: false, failingTest: undefined, failingTestCount: undefined });
+  check("(4) failingTest undefined: the nudge says (unnamed), never a blank/empty failure clause, and never claims a '1 of N' caveat with nothing to count", failUnnamed.includes("(unnamed") && !failUnnamed.includes("1 of"));
 
   const mech = M.formatDistImporterMechanismFailureNudge({ landedSha: "abcdef1234567890", reason: "could not build the isolated worktree" });
   check("(4) a mechanism-failure nudge is worded distinctly from a real test failure", mech.includes("mechanism failure, not a test result") && mech.includes("could not build the isolated worktree"));

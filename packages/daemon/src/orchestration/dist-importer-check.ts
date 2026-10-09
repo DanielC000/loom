@@ -144,10 +144,12 @@ function shortDistModuleLabel(distPath: string): string {
  *  ruling, 2026-10-09 — replaces the old oversize-SKIP nudge; a capped run still fires this SAME
  *  pass/fail nudge, never a separate skip-shaped one, since something always runs now).
  *
- * @decision cee17efe — `timedOut` is a third failure shape, never folded into `failingFiles ?? "(unnamed)"`. */
+ * @decision cee17efe — `timedOut` is a third failure shape, never folded into the failing-line clause.
+ * @decision 2f0b2e57 — `failingTest` names a matching LINE, never an attributed file (or file list);
+ * complete only when `failingTestCount === 1`. Never present it as a file name. */
 export function formatDistImporterResultNudge(args: {
   landedSha: string; touchedDistPaths: readonly string[]; ranSize: number; matchedSize: number;
-  passed: boolean; failingFiles?: readonly string[]; timedOut?: boolean;
+  passed: boolean; failingTest?: string; failingTestCount?: number; timedOut?: boolean;
 }): string {
   const modules = args.touchedDistPaths.map(shortDistModuleLabel).join(", ") || "(none)";
   const countClause = args.ranSize === args.matchedSize
@@ -158,8 +160,12 @@ export function formatDistImporterResultNudge(args: {
   if (args.timedOut) {
     return `${head} — TIMED OUT before any test file reported completion (possibly resource-starved under load — see gate_status for the full diagnosis). This is a timeout, not a confirmed test red. This did not block the landing and does not affect the gate interval counter or gateOwed.`;
   }
-  const failing = (args.failingFiles ?? []).join(", ") || "(unnamed)";
-  return `${head} — FAILED: ${failing}. ⚠️ Re-run each failing file directly on main before carding — this ran on a possibly-loaded host, so a red here is a candidate, not a verdict. This did not block the landing and does not affect the gate interval counter or gateOwed.`;
+  // @decision 2f0b2e57 — name this as a matching LINE, never a file, and say when it's an incomplete
+  // account (failingTestCount > 1) instead of presenting one line as the whole failure.
+  const failingClause = args.failingTest
+    ? `first matching failure line: ${args.failingTest}${args.failingTestCount != null && args.failingTestCount > 1 ? ` (1 of ${args.failingTestCount} matching lines — names only one of them; run the file(s) directly to see the rest, don't size a fix from this line alone)` : ""}`
+    : "(unnamed — no identifiable failing line)";
+  return `${head} — FAILED: ${failingClause}. ⚠️ This names a matching LINE, not an attributed file — re-run it directly on main before carding; this ran on a possibly-loaded host, so a red here is a candidate, not a verdict. This did not block the landing and does not affect the gate interval counter or gateOwed.`;
 }
 
 /** A diagnostic-only failure shape for the scan/build/run machinery itself (not a test FAILURE — a

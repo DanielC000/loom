@@ -22008,8 +22008,13 @@ export class SessionService {
       }));
       return;
     }
-    const failingFiles = gateResult.failingTest ? [gateResult.failingTest] : undefined;
-    pushNudge(formatDistImporterResultNudge({ landedSha, touchedDistPaths, ranSize, matchedSize, passed: gateResult.passed, failingFiles, timedOut }));
+    // @decision 2f0b2e57 — forward failingTest/failingTestCount, never a wrapped-into-array "failingFiles";
+    // see dist-importer-check.ts's own anchor for why.
+    pushNudge(formatDistImporterResultNudge({
+      landedSha, touchedDistPaths, ranSize, matchedSize, passed: gateResult.passed,
+      failingTest: gateResult.failingTest, failingTestCount: gateResult.failingTest ? gateResult.failingTestCount : undefined,
+      timedOut,
+    }));
   }
 
   /**

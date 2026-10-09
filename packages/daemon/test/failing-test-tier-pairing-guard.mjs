@@ -44,7 +44,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // pair"). This is why the rule below triggers on `failingTestCount:`, not on bare `failingTest:` — the
 // wider rule would have to re-litigate every file above one by one; this one needs zero of that.
 //
-// THE ONE FILE-LEVEL EXEMPTION THIS NARROWER RULE STILL CAN'T DERIVE STRUCTURALLY:
+// FILE-LEVEL EXEMPTIONS THIS NARROWER RULE STILL CAN'T DERIVE STRUCTURALLY:
 // `merge-gate-concurrency-verdict.mjs` sets `failingTestCount: 2` (twice) with NO `failTierTest`/
 // `failTierAll` at all, and reaches `confirmWorkerMergeTracked` (the SAME merge-retry-eligible path the
 // real bugs lived in) — so by the reasoning above it LOOKS like a violation. It isn't, for a reason no
@@ -69,6 +69,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // ONLY for a file where a human has confirmed the reasoning above genuinely applies — never to silence a
 // fresh failure without reading it first.
 //
+// SECOND EXEMPTION (card accd4872): `dist-importer-check.mjs` calls `formatDistImporterResultNudge`
+// directly with `failingTest:`/`failingTestCount:` args — a pure nudge-text formatter, never a
+// `GateSequentialResult`-shaped double, and this file never calls `identifyRetriableTestFiles` or touches
+// merge-gate retry at all (it tests ONLY the dist-importer advisory's own pure logic — no git/worktree/
+// child process). The field names are a deliberate, same-meaning naming convention, not a retry-eligible
+// fixture; pairing them with `failTierTest`/`failTierTestCount`/`failTierAll` would assert fields that
+// function doesn't even accept.
+//
 // SCOPE: `packages/daemon/test/*.mjs` only (source text, never `dist/` — no build required to run this).
 // Run: node packages/daemon/test/failing-test-tier-pairing-guard.mjs
 import fs from "node:fs";
@@ -87,7 +95,14 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // (CORRECTED by card 67030bb9: safe because this fixture never sets failTierTest/failTierAll at all, which
 // identifyRetriableTestFiles refuses on before the count is ever consulted — NOT because "count > 1 always
 // refuses", which is no longer true under the bounded multi-file retry).
-const EXEMPT_FILES = new Set(["merge-gate-concurrency-verdict.mjs"]);
+// Card accd4872: dist-importer-check.mjs's own `failingTest:`/`failingTestCount:` sites are call ARGS to
+// `formatDistImporterResultNudge` (orchestration/dist-importer-check.ts) — a pure nudge-text formatter that
+// never reaches `identifyRetriableTestFiles`/merge-gate retry at all (this file tests ONLY the dist-importer
+// advisory, no git/worktree/child process — see its own header). The field names collide with
+// GateSequentialResult's by deliberate convention (same meaning: a matching line + how many lines matched),
+// not because these literals are GateSequentialResult-shaped retry doubles; pairing them with failTierTest/
+// failTierTestCount/failTierAll would assert fields this function doesn't even accept.
+const EXEMPT_FILES = new Set(["merge-gate-concurrency-verdict.mjs", "dist-importer-check.mjs"]);
 
 /**
  * Replaces every `//` line comment, `/* ... *\/` block comment, `'...'`/`"..."`/`\`...\`` string body, AND

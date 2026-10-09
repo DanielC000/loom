@@ -16,6 +16,20 @@ Card 2f0b2e57, specimen 2 — a WEAKER hypothesis than the PASS-line bug (specim
 - Do not assume an unanchored tier (`UNCAUGHT`/`AssertionError`/`error TS\d+`) is safe because it "looks like" a failure marker — a passing assertion's own prose LABEL can contain that same keyword and must still lose to the PASS check.
 - Do not treat `result()`/`failingTest` as attributing a specific FAILING FILE under multi-lane concurrency — it only names a matching LINE, and the specimen-2 limitation above means that line can belong to the wrong lane when more than one file's FAIL-tier line is present.
 
+## Second decision, same card id: the dist-importer-check nudge named a line as if it were a file list
+
+Card `accd4872` (deferred from CR2 on `cee17efe`, blocked until that card landed): `formatDistImporterResultNudge` (`orchestration/dist-importer-check.ts`) took its caller's single `failingTest` line, wrapped it in a one-element array, and passed it as `failingFiles` — so the manager-facing `[loom:dist-importer-check]` red nudge read as if it named failing FILES, when `failingTest` is (per this record's own opening narrative) a matching LINE, complete only when `failingTestCount === 1`. The caller (`sessions/service.ts`) never even forwarded `failingTestCount` to the formatter, so a multi-match red gave no signal that more failures existed.
+
+Fixed by renaming the formatter's param to `failingTest?: string` + `failingTestCount?: number` and wording the nudge as "first matching failure line: …", appending "(1 of N matching lines — …)" only when `failingTestCount > 1` — the same convention already used by the merge-gate rejection nudge and `gate_status`'s own text (`sessions/service.ts`, the `failing: ${failingTest}${failingTestCount > 1 ? ... : ""}` shape). Deriving real failing FILE names (e.g. via `identifyRetriableTestFiles`/`failTierAll`) was considered and rejected for this nudge specifically: that helper is tuned for safe multi-file RETRY eligibility (requires `cwd`, a hardcoded file-count cap, a `test-daemon.mjs`-specific naming convention) and declines outright on several conditions unrelated to whether a human could still be told something useful — reusing it here would silently drop the "incomplete account" signal on every decline, trading a known honest label for an unreliable one.
+
+### Do not (2)
+
+- Do not pass `formatDistImporterResultNudge` a `failingFiles` array built by wrapping `failingTest` — the param is `failingTest?: string` + `failingTestCount?: number`; a single matching line is never multiple files.
+- Do not drop `failingTestCount` at the call site — forward it whenever `failingTest` is set, or the nudge can never say "1 of N" for a multi-match red.
+- Do not route this nudge through `identifyRetriableTestFiles` to "name real files" — that helper is fail-closed for RETRY eligibility (cwd, cap, naming-convention checks) and its decline paths are not failure signal for a human reader; it would silently regress "an incomplete account" back to a bare single-line claim.
+
 ## Source
 
 JSDoc comment in `packages/daemon/src/orchestration/gate-runner.ts`, above `PASS_LINE_RE`: originally lines 180-194, as of this tranche's HEAD. Relocated by card `b80a2d76` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The "Known limitation, specimen 2" section above was originally part of `createFailingTestTracker`'s own JSDoc (lines 165-177 as of tranche 1's HEAD, commit `18bb69e3`); extracted here (rather than into the sibling `55cba5c5` record) by tranche 2 because it names this same card id.
+
+The second-decision section above (the dist-importer-check nudge) is the narrative behind `orchestration/dist-importer-check.ts`'s own `@decision 2f0b2e57` anchor on `formatDistImporterResultNudge`, card `accd4872`.
