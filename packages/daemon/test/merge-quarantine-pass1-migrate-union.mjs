@@ -53,6 +53,9 @@ const SCENARIOS = [
   "foreign-nested-repo-quarantine-survives",
   "dual-collision-union-survives-second-protect",
   "reversed-tie-break-no-protection-report-only",
+  "clear-by-id-refused-on-canonical-collision",
+  "clear-by-id-ordinary-unchanged",
+  "collision-refusal-text-names-clear-by-path",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -924,6 +927,122 @@ try {
     } else {
       console.log("(reversed-tie-break-no-protection-report-only) union did not pick Y as the winner on this run — nothing to report for the reversed-ordering shape this scenario targets.");
     }
+  } else if (scenarioName === "clear-by-id-refused-on-canonical-collision") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 9a55fb90 — clear-by-id must FAIL CLOSED when a different, currently-resolvable identity also
+    // canonically owns the matched key, never silently pick one side. Same X/Y fixture as
+    // in-memory-twin-clear-destroys-degraded-file, but clearing by the bare latch id (hash(Ky)) instead
+    // of by Y's own repoPath. X's own refusal and Y's own refusal resolve to the SAME latch id (X's entry
+    // wins activeMergeQuarantineFor's direct-tier unconditionally) — a human reading EITHER refusal and
+    // using this id has no way to discriminate, so clear-by-id must refuse rather than guess which side
+    // was meant. RED on pre-fix HEAD: this exact call hard-deletes X with no protective copy.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqp1mu-y-cbic-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# clear-by-id-refused-on-canonical-collision\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-mqp1mu-x-cbic-never-exists-${freshSfx()}`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `stale-y-cbic-${freshSfx()}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's real, genuine unconfirmed-kill reason", enteredAt: Date.now(), tokens: ["y-token"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, x]);
+    check("(precondition) X's backing file exists before any clear", fs.existsSync(xFile));
+    check("(precondition) X reads quarantined", !!activeMergeQuarantineFor(x));
+    check("(precondition) Y reads quarantined too (blocked by X's own degraded occupation)", !!activeMergeQuarantineFor(y));
+    const xBytesBefore = fs.readFileSync(xFile);
+
+    const result = clearMergeQuarantineLatchFile(hashForKey(ky));
+
+    check("*** THE FIX *** clear-by-id REFUSES on the collision (ok:false)", result.ok === false);
+    check("*** THE FIX *** the refusal names BOTH candidate repoPaths", result.ok === false && result.reason.includes(x) && result.reason.includes(y));
+    check("*** THE FIX *** the refusal points at clear-by-path", result.ok === false && result.reason.includes("clear-by-path"));
+    check("*** THE FIX *** X's physical file is byte-identical — NEVER touched", fs.existsSync(xFile) && Buffer.compare(xBytesBefore, fs.readFileSync(xFile)) === 0);
+    check("*** THE FIX *** no protective copy was minted (nothing was ever deleted, so nothing needed protecting)", fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-")).length === 0);
+    check("*** THE FIX *** X still reads quarantined after the refused clear", !!activeMergeQuarantineFor(x));
+    check("*** THE FIX *** Y still reads quarantined (blocked) after the refused clear", !!activeMergeQuarantineFor(y));
+    check("*** THE FIX *** Y's own stale source file still exists, untouched", fs.existsSync(yFile));
+  } else if (scenarioName === "clear-by-id-ordinary-unchanged") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 9a55fb90, regression guard — an ORDINARY, non-colliding clear-by-id (the overwhelming
+    // majority of real clears) must stay byte-identical: canonicalSiblingsFor finds nothing (no other
+    // resolvable identity canonically owns this key), so the new refusal branch never fires.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const z = path.join(os.tmpdir(), `loom-mqp1mu-z-ordinary-${freshSfx()}`);
+    fs.mkdirSync(z, { recursive: true });
+    tmpDirs.push(z);
+    fs.writeFileSync(path.join(z, "README.md"), "# clear-by-id-ordinary-unchanged\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: z });
+    commitAll(z, "init", GIT_ID);
+    const kz = canonicalRepoLockKey(z);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const zFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kz)}.json`);
+    fs.writeFileSync(zFile, JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "Z's own genuine, uncontested quarantine", enteredAt: Date.now(), tokens: ["z-token"], resolvedKey: kz,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([z]);
+    check("(precondition) Z reads quarantined before the clear", !!activeMergeQuarantineFor(z));
+
+    const result = clearMergeQuarantineLatchFile(hashForKey(kz));
+
+    check("*** UNCHANGED *** an ordinary, non-colliding clear-by-id still SUCCEEDS", result.ok === true);
+    check("*** UNCHANGED *** liftedRepoPaths names Z", result.ok === true && result.liftedRepoPaths.includes(z));
+    check("*** UNCHANGED *** Z's physical file is actually deleted", !fs.existsSync(zFile));
+    check("*** UNCHANGED *** no spurious protective copy was minted", fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith("pending-")).length === 0);
+    check("*** UNCHANGED *** Z no longer reads quarantined", !activeMergeQuarantineFor(z));
+  } else if (scenarioName === "collision-refusal-text-names-clear-by-path") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 9a55fb90 — assertRepoNotQuarantined's own refusal text must drop the bare-id shortcut (which
+    // would now be refused as ambiguous anyway) and name only clear-by-path, for BOTH x's own refusal
+    // AND y's (they resolve to the IDENTICAL q/latchId, per activeMergeQuarantineFor's direct-tier —
+    // this is the exact fact that makes "pick the other identity" wrong and FAIL CLOSED the right call).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqp1mu-y-crt-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# collision-refusal-text-names-clear-by-path\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-mqp1mu-x-crt-never-exists-${freshSfx()}`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `stale-y-crt-${freshSfx()}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's real, genuine unconfirmed-kill reason", enteredAt: Date.now(), tokens: ["y-token"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([y, x]);
+
+    const checkX = assertRepoNotQuarantined(x);
+    const checkY = assertRepoNotQuarantined(y);
+    check("(precondition) both x and y are refused", checkX.ok === false && checkY.ok === false);
+    check("*** THE FIX *** x's own refusal points at clear-by-path", checkX.ok === false && checkX.reason.includes("clear-by-path"));
+    check("*** THE FIX *** x's own refusal does NOT offer the ambiguous bare-id shortcut", checkX.ok === false && !/\{"id":/.test(checkX.reason));
+    check("*** THE FIX *** y's own refusal (the byte-identical blocker) ALSO points at clear-by-path", checkY.ok === false && checkY.reason.includes("clear-by-path"));
+    check("*** THE FIX *** y's own refusal ALSO omits the ambiguous bare-id shortcut", checkY.ok === false && !/\{"id":/.test(checkY.reason));
+    check("*** THE FIX *** both refusals name both candidate repoPaths",
+      checkX.ok === false && checkY.ok === false && checkX.reason.includes(x) && checkX.reason.includes(y) && checkY.reason.includes(x) && checkY.reason.includes(y));
+    check("x's and y's refusals are byte-identical (same blocker, same id — exactly why a bare id can't discriminate)",
+      checkX.ok === false && checkY.ok === false && checkX.reason === checkY.reason);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

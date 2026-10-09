@@ -163,6 +163,28 @@ function isKeyVerifiedFor(repoPath: string, key: string): boolean {
   return isRepoPathCurrentlyResolvable(repoPath) && canonicalRepoLockKey(repoPath) === key;
 }
 
+/** Every PENDING entry whose own repoPath is CURRENTLY RESOLVABLE and genuinely, freshly
+ *  canonically-keyed at `key` (same predicate as {@link collectCrossTierSiblingIndices}/{@link
+ *  isKeyVerifiedFor}), excluding whichever entry shares `ownIdentityRepoPath`'s own {@link
+ *  directPathIdentity} — i.e. a DIFFERENT, resolvable identity that right now genuinely owns this exact
+ *  key, distinct from whatever is actually armed/matched there.
+ *
+ *  A bare latch id addressed at `key` cannot tell apart "clear the entry armed here" from "clear by the
+ *  id this OTHER identity's own refusal happened to name, because this is what's blocking it" — both
+ *  shapes produce the SAME id and, per {@link activeMergeQuarantineFor}'s own `direct`-wins-over-siblings
+ *  tier, the SAME refusal text.
+ *
+ *  @decision 9a55fb90 — a non-empty result here means that ambiguity is real right now, for this exact
+ *  key. {@link clearMergeQuarantineLatchFile} and {@link assertRepoNotQuarantined} both read it, so the
+ *  two can never disagree about when a bare latch id is unsafe to clear by. See the decision record. */
+function canonicalSiblingsFor(key: string, ownIdentityRepoPath: string): PendingUnresolvedQuarantine[] {
+  const ownIdentity = directPathIdentity(ownIdentityRepoPath);
+  return pendingUnresolvedQuarantines.filter((p) =>
+    isRepoPathCurrentlyResolvable(p.entry.repoPath) &&
+    canonicalRepoLockKey(p.entry.repoPath) === key &&
+    directPathIdentity(p.entry.repoPath) !== ownIdentity);
+}
+
 export const MERGE_QUARANTINE_DIR = path.join(LOOM_HOME, "merge-quarantines");
 
 /** Hash a raw canonical-repo-lock KEY directly (never a repoPath) — the primitive every other
@@ -1798,6 +1820,21 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // first found — see the decision record for the multi-pending-entries-per-id repro this closes.
   const matchedPending = pendingUnresolvedQuarantines.filter((p) => pendingLatchIdFor(p.sourceFile) === id);
   if (activeMatch) {
+    // @decision 9a55fb90 — a bare id cannot tell "clear the entry armed here" apart from "clear by the
+    // id a DIFFERENT, currently-resolvable canonical owner's own refusal happened to name" — both
+    // produce this SAME id and the SAME refusal text. FAIL CLOSED: refuse rather than guess.
+    const canonicalSiblings = canonicalSiblingsFor(activeMatch.key, activeMatch.entry.repoPath);
+    if (canonicalSiblings.length > 0) {
+      const candidates = [activeMatch.entry.repoPath, ...canonicalSiblings.map((p) => p.entry.repoPath)];
+      return {
+        ok: false,
+        reason: `latch id '${id}' is ambiguous: it is currently armed by '${activeMatch.entry.repoPath}', but ${canonicalSiblings.length} ` +
+          `other, currently-resolvable repo${canonicalSiblings.length === 1 ? "" : "s"} (${canonicalSiblings.map((p) => `'${p.entry.repoPath}'`).join(", ")}) ` +
+          `also canonically own this exact key right now — a bare id cannot tell which identity you mean to clear, and a refusal naming this id reads IDENTICALLY ` +
+          `whichever one you're actually trying to resolve. Nothing was cleared. Clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify(candidates)} ` +
+          `— that route discriminates correctly and durably protects whichever identity you don't name.`,
+      };
+    }
     const activeIdentity = directPathIdentity(activeMatch.entry.repoPath);
     const differentRepoPending = matchedPending.filter((p) => directPathIdentity(p.entry.repoPath) !== activeIdentity);
     if (differentRepoPending.length > 0) {
@@ -1916,12 +1953,21 @@ export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok:
   const q = resolveQuarantineFor(repoPath);
   if (!q) return { ok: true };
   const latchId = quarantineLatchFileIdsFor(q)[0];
+  // @decision 9a55fb90 — a collision at this key makes the bare-id clear option ambiguous; name only
+  // the repoPath route (which discriminates correctly) rather than a shortcut that reads equally valid.
+  const armedKey = q.armedKeys?.[0];
+  const siblings = armedKey ? canonicalSiblingsFor(armedKey, q.repoPath) : [];
+  const clearGuidance = siblings.length > 0
+    ? `a human clears it: this latch id is ambiguous right now (${siblings.length} other, currently-resolvable repo${siblings.length === 1 ? "" : "s"} — ` +
+      `${siblings.map((p) => `'${p.entry.repoPath}'`).join(", ")} — also canonically own this exact key), so clear by repoPath instead: ` +
+      `POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })}`
+    : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })} or ${JSON.stringify({ id: latchId })}`;
   return {
     ok: false,
     reason: `canonical repo is QUARANTINED after an earlier operation's git process tree could not be confirmed dead ` +
       `(blocking repo '${q.repoPath}', latch id '${latchId}', branch '${q.branch}'${q.opId ? `, op ${q.opId}` : ""}, entered ${new Date(q.enteredAt).toISOString()}): ${q.reason} — ` +
       `refusing further canonical-repo mutations here until that kill is confirmed dead (auto-clears, same process only) ` +
-      `or a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })} or ${JSON.stringify({ id: latchId })} ` +
+      `or ${clearGuidance} ` +
       `(the project-resolved POST /internal/merge-quarantine/clear works only if a registered project's repo resolves to this entry).`,
   };
 }

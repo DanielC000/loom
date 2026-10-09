@@ -1220,17 +1220,48 @@ try {
       boot1Count === 1 && boot2Count === 1 && boot3Count === 1,
     );
 
-    // CR baecb690, Minor 2 -- clear by ID (not just by repoPath) AFTER the re-point, to prove the
-    // union's own single id lifts X without disturbing sub's own differently-identified pending ref
-    // (the exact ambiguity fd189d91's own id-collision backstop exists to police).
+    // CR baecb690, Minor 2 -- clear by ID (not just by repoPath) AFTER the re-point, to prove X's own
+    // single id can lift it without disturbing sub's own differently-identified pending ref (the exact
+    // ambiguity fd189d91's own id-collision backstop exists to police).
+    //
+    // @decision 9a55fb90 -- the clear-by-ID step below was CHANGED from a direct success assertion to a
+    // refusal assertion, plus a follow-up clear-by-PATH. `sub` is a real, resolvable repo whose own
+    // canonical key genuinely IS Ksub, surviving here as its own independent pending record (this
+    // scenario's own same-boot safety-tmp-recovery route, rather than `9a55fb90`'s original migrate-
+    // refusal route) -- a SECOND, genuine instance of the exact id ambiguity that card targets: a bare
+    // latch id cannot tell "clear X" apart from "clear by the id sub's own refusal would ALSO name" (both
+    // resolve to the SAME q/latch id, same as that card's own X/Y verification). Narrowing the fix to
+    // exclude this safety-tmp-reached shape would reopen the hole for exactly this collision route, so
+    // clear-by-id correctly refuses here too -- it is not a false positive. See that decision record.
     const xAfterBoot3 = bootThree.activeMergeQuarantineFor(x);
     check("(precondition) X is still active going into the id-based clear", !!xAfterBoot3);
     const xIds = bootThree.quarantineLatchFileIdsFor(xAfterBoot3);
     check(`(precondition) X resolves to exactly one latch id (found ${xIds.length})`, xIds.length === 1);
+    const xBytesBeforeIdClear = fs.readFileSync(xAtKsubPath);
     const clearByIdResult = bootThree.clearMergeQuarantineLatchFile(xIds[0]);
     check(
-      "*** THE FIX, CLEAR-BY-ID *** clearing X's own id reports wasQuarantined:true",
-      clearByIdResult.ok === true && clearByIdResult.wasQuarantined === true,
+      "*** THE FIX (9a55fb90) *** clear-by-id REFUSES on this second collision route too (ok:false)",
+      clearByIdResult.ok === false,
+    );
+    check(
+      "*** THE FIX (9a55fb90) *** the refusal points at clear-by-path",
+      clearByIdResult.ok === false && clearByIdResult.reason.includes("clear-by-path"),
+    );
+    check(
+      "*** THE FIX (9a55fb90) *** the refused clear-by-id deleted nothing -- X's physical file is byte-identical",
+      Buffer.compare(xBytesBeforeIdClear, fs.readFileSync(xAtKsubPath)) === 0,
+    );
+    check("*** THE FIX (9a55fb90) *** X is STILL active after the refused clear-by-id", !!bootThree.activeMergeQuarantineFor(x));
+
+    // Clear-by-PATH is what actually lifts X -- it already discriminates correctly (c9114934) and keeps
+    // the original "no collateral loss to sub" intent this scenario was written to pin.
+    const clearByPathResult = bootThree.clearMergeQuarantine(x);
+    check("*** THE FIX (9a55fb90) *** clear-by-path(x) lifts X", clearByPathResult?.wasQuarantined === true);
+    check("*** THE FIX (9a55fb90) *** X is no longer active immediately after clear-by-path", !bootThree.activeMergeQuarantineFor(x));
+    const subRightAfterPathClear = bootThree.activeMergeQuarantineFor(sub);
+    check(
+      "*** THE FIX, NO COLLATERAL LOSS *** sub still holds its own token immediately after clearing X by path",
+      !!subRightAfterPathClear && (subRightAfterPathClear.tokens ?? []).includes("token-sub-rev"),
     );
 
     const bootFour = await freshBootModule();
@@ -1242,11 +1273,27 @@ try {
     // exactly what keeps it un-swept by a clear scoped to X's own key -- assert it survives, not just log.
     const subAfterXCleared = bootFour.activeMergeQuarantineFor(sub);
     check(
-      "*** THE FIX, NO COLLATERAL LOSS *** sub still holds its own token after clearing X by id, then a further reboot",
+      "*** THE FIX, NO COLLATERAL LOSS *** sub still holds its own token after clearing X by path, then a further reboot",
       !!subAfterXCleared && (subAfterXCleared.tokens ?? []).includes("token-sub-rev"),
     );
-    bootFour.clearMergeQuarantine(teamA);
-    bootFour.clearMergeQuarantine(sub);
+    // Ksub is vacated now that X is genuinely gone -- sub's own content should migrate to its OWN real
+    // key (never Ksub-via-degraded-walk) on this boot.
+    check(
+      "*** THE FIX (9a55fb90) *** sub migrated to its OWN canonical key once Ksub was vacated",
+      subAfterXCleared?.resolvedKey === ksub && !!subAfterXCleared?.armedKeys?.includes(ksub),
+    );
+
+    const bootFive = await freshBootModule();
+    bootFive.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check("*** STABLE ACROSS A FURTHER REBOOT *** X still stays cleared", !bootFive.activeMergeQuarantineFor(x));
+    const subAfterSecondReboot = bootFive.activeMergeQuarantineFor(sub);
+    check(
+      "*** STABLE ACROSS A FURTHER REBOOT *** sub stays correct -- own token, own key, still migrated (never re-degraded)",
+      !!subAfterSecondReboot && (subAfterSecondReboot.tokens ?? []).includes("token-sub-rev") &&
+        subAfterSecondReboot.resolvedKey === ksub && !!subAfterSecondReboot.armedKeys?.includes(ksub),
+    );
+    bootFive.clearMergeQuarantine(teamA);
+    bootFive.clearMergeQuarantine(sub);
   } else if (scenarioName === "round4-finding1b-sub-older") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // Reparametrization of finding1b over the OTHER age order (card 97cff6db round 4, Lead condition 6)
