@@ -140,6 +140,18 @@ export function PlanUsageStrip() {
  */
 export type AttentionRowItem = Omit<AttentionItem, "notify"> & Partial<Pick<AttentionItem, "notify">>;
 
+// Card 611e76ba, design rule 3 — the half of the dismiss tooltip that is true of EVERY kind, so the X
+// can never read as "this resolves the thing". Dismissing is a VIEW action: it hides the row and stops
+// its browser notification, and touches nothing else. Kept beside AttentionRow (the one renderer of the X)
+// rather than in lib/attention, so a new dismissable row picks it up by rendering through this component.
+// @decision 611e76ba — a dismiss hides the row and its notification, and changes nothing underneath.
+const DISMISS_INVARIANT =
+  "It only hides this alert and its notification — it never answers, cancels, or changes the underlying request, session, or board.";
+// Used when a row supplies no `dismissHint` of its own. Deliberately generic: the old default described
+// STUCK-BUSY's re-appearance rule specifically, which silently mis-described every other kind that
+// borrowed it.
+const DISMISS_FALLBACK_HINT = "Hide this alert — it comes back only if something new happens.";
+
 export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionRowItem; onOpen?: () => void; onDismiss?: () => void }) {
   // A pending Request of ANY type (live or orphaned) reads as an answerable ask: a cyan left-edge, a
   // PENDING state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE
@@ -168,14 +180,14 @@ export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionRowIt
       {item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />}
       {item.staleQuestionId && <SnoozeButton questionId={item.staleQuestionId} />}
       {onOpen && <Button variant={decision ? "primary" : "default"} onClick={onOpen}>{decision ? "Answer →" : "Open"}</Button>}
-      {/* Dismiss — passed whenever item.dismissKey is set. STUCK-BUSY (the heuristic false-positives on a
-          legitimately long turn; this hides THIS episode and it re-appears on the next one) and CODEX
-          ISOLATION GAP (card ed0858dc). The default wording below is STUCK-BUSY's, which is NOT true of
-          every dismissable kind — a kind whose dismiss means something else supplies its own
-          `dismissHint` rather than letting this row describe it wrongly. */}
+      {/* Dismiss — passed whenever item.dismissKey is set, which since card 611e76ba is every kind the
+          attention queue builds (owner ruling 2026-10-12: everything shown here must be hideable). The
+          hover title is assembled from TWO halves: the item's own `dismissHint` names what makes THIS
+          kind come back, and DISMISS_INVARIANT below states what dismissing does NOT do. The invariant
+          is appended here, once, rather than restated by 18 builders that could each drift from it. */}
       {onDismiss && (
         <Button variant="ghost" onClick={onDismiss} aria-label="Dismiss this alert"
-          title={item.dismissHint || "Dismiss — hides this stuck-busy alert until the session acts again"}
+          title={`${item.dismissHint || DISMISS_FALLBACK_HINT} ${DISMISS_INVARIANT}`}
           style={{ padding: "0 6px", fontSize: 15, lineHeight: 1 }}>×</Button>
       )}
     </div>

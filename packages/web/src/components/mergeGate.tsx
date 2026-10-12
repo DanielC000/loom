@@ -5,8 +5,12 @@
 // strip inside A's expanded editor. Mockups + the state vocabulary: vault `Projects/Loom/Mockups/
 // 2026-09-25 Merge Gate Interval/`.
 //
-// The strip is instrumentation, not a notification banner: never dismissable, and it states a plain
+// The STRIP is instrumentation, not a notification banner: never dismissable, and it states a plain
 // sentence rather than an alert. That sentence is why A won — "3 / 5 ungated" is not self-evident.
+// That applies to the strip ALONE. The Attention-row escalation below IS dismissable, by owner ruling
+// 2026-10-12 (card 611e76ba): everything in the attention queue must be hideable with one ×. The two are
+// not in tension — the strip is a persistent read-out you go and look at, the row is a notification that
+// comes to you, and only the second one can nag. Do not "restore consistency" by removing that ×.
 //
 // Everything visual comes from the existing kit + tokens; the ONE new primitive is the tick track, which
 // degrades to the kit's own Meter above TICK_TRACK_MAX (a track you have to count is not glanceable).
@@ -19,6 +23,7 @@ import { api } from "../lib/api";
 import { color, font, radius, tone as toneMap, type Tone } from "../theme";
 import { Badge, Button, Chip, Input, Meter, Segmented } from "./ui";
 import { AttentionRow } from "./fleet";
+import { dismissAttention } from "../lib/attention";
 import { errorText } from "../lib/loopbackCredential";
 import {
   ago, badgeForInterval, bisectLabel, cadenceConfigWrite, cadenceOf, gateFailureAttentionText,
@@ -397,16 +402,31 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
 // The strip is enough to notice a failure while you are looking at Overview; the Attention row is what
 // makes it survive you NOT looking. Rendered as the ordinary AttentionRow shape, so it reads as one of
 // Loom's existing escalations rather than new alarm chrome.
+//
+// Card 611e76ba — this row is dismissable like every other attention row, but it is NOT built by
+// `useAttention`, so its key carries the reserved `mg:` prefix that lib/attention's `pruneDismissed`
+// knows not to prune (it cannot derive this key and would otherwise wipe it on the next poll). The key
+// is the failing gate RUN — its opId, falling back to the failure's own timestamp when the run has no
+// opId — never anything that moves on its own: the row's text contains a live "N minutes ago", and
+// keying on that would re-show the row every minute.
 
+// @decision 611e76ba — this row keeps its ×, and its `mg:` prefix must stay reserved in pruneDismissed.
 export function MergeGateAttention({ status }: { status: MergeGateStatus | null | undefined }) {
   const navigate = useNavigate();
   const text = status ? gateFailureAttentionText(status) : null;
   if (!status || !text) return null;
+  const failure = status.lastFailure;
+  const dismissKey = `mg:${status.repoKey}:${failure?.opId ?? failure?.at ?? ""}`;
   return (
     <div data-testid="merge-gate-attention">
       <AttentionRow
-        item={{ key: `merge-gate-failed:${status.lastFailure?.at ?? ""}`, tone: "red", kind: "MERGE GATE", text }}
+        item={{
+          key: `merge-gate-failed:${failure?.at ?? ""}`, tone: "red", kind: "MERGE GATE", text,
+          dismissKey,
+          dismissHint: "Hide this alert — it returns when a later periodic gate fails. The default branch stays unverified and every merge stays gated until one passes.",
+        }}
         onOpen={() => navigate("/gates")}
+        onDismiss={() => dismissAttention(dismissKey)}
       />
     </div>
   );

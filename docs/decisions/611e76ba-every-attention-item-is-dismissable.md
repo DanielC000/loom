@@ -1,0 +1,34 @@
+# 611e76ba — every attention-queue item is dismissable, and a dismiss key is identity + the state that fired
+
+## Do not
+
+- Do not reintroduce an undismissable attention kind. Owner ruling 2026-10-12, overruling the previous "the actionable kinds deliberately have none": an item that keeps re-appearing, and keeps re-firing its browser notification, with no way to silence it is the friction the owner actually reported. A new kind added to `useAttention` ships with a `dismissKey` and a `dismissHint`; `packages/web/test/attention-dismiss.mjs` scans the source and fails the build if a builder omits one.
+- Do not derive a dismiss key from anything that moves on its own — an elapsed age, a re-derived `Date.now()`, a rolling counter, a remaining-time figure. It compiles, it renders identically, and it quietly makes × useless: the row returns on the next poll under a new key. The same test greps every `dismissKey:` line for `Date.now()`/`new Date(` for exactly this.
+- Do not key on bare identity either (the session id alone, the request id alone). That is the opposite failure and it is worse: the alert is retired forever, so the next genuine incident never surfaces. Both halves — stable within an episode, different on a new one — are asserted per kind.
+- Do not key QUEUE DRAINED on its own event id. `idle_report` is AGENT-filed, so a manager that stays drained re-files `state:"done"` on every nudge cycle. It is the one kind whose source repeats within a single episode; it keys on `idleDoneEpisodeStarts` (lib/fleet.ts) instead. Every OTHER escalation kind may key on its event id, because its daemon watcher emits once per episode — verified at source: `idle_escalated` flips the nudge policy to `suppressed` ("we emit EXACTLY ONCE"), `board_quiet_cause` / `context_escalated` / `give_up_recovery_escalated` escalate once, `vault_index_lock_stale` dedupes on the lock's own `mtimeMs` via an on-disk marker.
+- Do not let a dismiss change anything underneath. Dismissing hides the row and stops its browser notification; the Request stays pending and answerable, the session keeps running, the board is untouched. `AttentionRow` appends `DISMISS_INVARIANT` to every × tooltip so no builder can describe it otherwise, and no builder restates it (18 copies would drift).
+- Do not fold the dismiss-prune `loaded` gate and `resolved` into one expression. @decision 3157a563 forbade it on the grounds that their POPULATIONS differ; since this card those populations are identical (every kind is dismissable, so "every query a dismissable kind derives from" is "every query"). Their PREDICATES still differ and that is now the whole reason both exist: `resolved` tests `!isPending` (fail-OPEN — an errored query must not suppress notifications forever), the prune gate tests `data !== undefined` (fail-CLOSED — an errored query contributes no derivable keys, and pruning against that absence wipes valid dismisses). Collapsing them has to pick one predicate and breaks the other half.
+- Do not let `pruneDismissed` judge a key it cannot derive. A dismissable row built OUTSIDE `useAttention` must reserve its prefix in `FOREIGN_DISMISS_PREFIXES`, or its × appears to work and silently un-sticks on the next poll. Today that is `mg:` (MERGE GATE, components/mergeGate.tsx).
+- Do not add an × to the Overview's merge-review cards. Deliberate exception, see below.
+
+## What changed
+
+Every kind `useAttention` builds now carries a `dismissKey` (15 newly; STUCK-BUSY, CODEX ISOLATION GAP and the archived CRASH-LOOPED variant already had one and keep their exact stored keys, so existing dismisses survive the upgrade). Two families:
+
+- **source event is filed once per episode** ⇒ the event id already IS "identity + state": MERGE REQUEST, BOOT STUCK, MANAGER ASLEEP, CONTEXT OVERFLOW, VAULT LOCK STUCK, RECYCLE LINEAGE CONSOLIDATED, GIVE-UP RECOVERY, QUIET BOARD.
+- **source repeats, or there is no event** ⇒ identity + a derived state token: Requests (`q:<id>:<pending|stale|orphaned>` — the branch is the state, so a snooze that expires flips pending→stale and the row returns), QUEUE DRAINED (the episode-start event id), RATE-LIMITED (`rateLimitedUntil`, frozen per park), CRASH-LOOPED and ORPHANED FLEET (`lastActivity`, frozen on an exited row and advancing only on a human resume).
+
+Notifications needed no per-producer plumbing: every announcing surface — the browser `Notification` and the toast stack (both via `useNewAttention`), the request count pill, the sidebar badges, the command palette — reads `useAttention().items`, which is the already-dismiss-filtered array. One filter, applied once, covers all of them. That is why rule 2 holds structurally rather than by convention.
+
+MERGE GATE (components/mergeGate.tsx) renders an `AttentionRow` into the Overview's Attention section without going through `useAttention`, so it is dismissable too, under the reserved `mg:` prefix, keyed on the failing gate RUN (`opId`, falling back to the failure's `at`) — never on the live "N minutes ago" its own text contains.
+
+## Residual, accepted
+
+- **The companion attention-push is not covered.** `packages/daemon/src/companion/attention-push.ts` pushes several of these same kinds to the owner's chat. It is daemon-side; the dismiss store is browser-local by design rule 4 (no daemon API for this). A dismissed alert can therefore still reach chat. Named rather than silently skipped; a follow-up card covers it.
+- **The Overview's merge-review cards keep no ×.** A pending MERGE REQUEST renders there as a rich `ReviewQueue` card carrying "Approve & merge", not as an `AttentionRow`. Dismissing it on Mission Control still removes it from `items` and therefore from the Overview too, but the Overview itself offers no dismiss affordance. Deliberate: that card is action-bearing, and a one-click hide next to a merge button is a foot-gun worth more than the consistency.
+- `FOREIGN_DISMISS_PREFIXES` keys are never pruned, so `mg:` entries accumulate — one per distinct failing gate run, on a row that only exists while a project is in escalated-failure state. Bounded in practice, not in principle.
+
+## Coverage
+
+- `packages/web/test/attention-dismiss.mjs` — 24 hermetic checks: both halves of the stability property per key family, the snooze/stale/orphaned branch precedence, the QUEUE DRAINED episode derivation (repeated-done no-churn, done→working→done re-occurrence, unsorted input, unrelated kinds), plus the source scan that every builder sets a `dismissKey` and that none derives one from the clock. The absence-claim scan ships with a positive control that removes one `dismissKey` and requires the scan to report it.
+- `packages/web/e2e/attention-dismiss-every-kind.spec.ts` — in a real browser: the X appears on the empty-board (QUIET BOARD) item and on a Request item, hides each on click, the dismiss survives a reload, and no browser notification re-fires for a dismissed item on the next poll or across that reload.

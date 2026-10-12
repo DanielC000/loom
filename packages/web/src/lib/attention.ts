@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, isActiveWaitingSnooze, isRateLimited, isStuckBusy } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -36,11 +36,28 @@ export function isOrphanedFleet(s: SessionListItem): boolean {
   return s.processState === "exited" && !!s.lastError && s.lastError.startsWith(ORPHANED_FLEET_PREFIX);
 }
 
-// User-dismissable attention items (STUCK-BUSY only) carry a `dismissKey` — see the dismiss store
-// below. Keyed on `${sessionId}:${lastActivity}`, NOT the session id alone: lastActivity is frozen
-// for the duration of one stuck episode (so a dismiss sticks for THIS episode), but advances the
-// moment the session acts again (so a fresh stuck episode re-surfaces instead of being suppressed
-// forever). Only an item with a dismissKey is dismissable; the actionable kinds deliberately have none.
+// EVERY attention item carries a `dismissKey` — see the dismiss store below. Owner ruling 2026-10-12
+// (card 611e76ba), overruling the previous "the actionable kinds deliberately have none": anything shown
+// in the attention queue must be hideable with one ×, because an item that keeps re-appearing (and
+// re-firing its browser notification) with no way to silence it is the friction the owner actually hit.
+//
+// @decision 611e76ba — a dismissKey is ALWAYS `identity + the state that made the item fire`, and NEVER a
+// value that moves on its own. Key it on something that changes every poll (an elapsed age, a re-derived
+// "now", a rolling counter) and × stops meaning anything: the row returns seconds later under a new key.
+// Two families, and which one a kind belongs to is a fact about its SOURCE, not a style choice:
+//   • the source event is filed ONCE PER EPISODE by a daemon watcher ⇒ the event id already IS that pair,
+//     so key on the event id (idle_escalated flips the nudge policy to 'suppressed'; board_quiet_cause /
+//     context_escalated / give_up_recovery_escalated escalate once; vault_index_lock_stale dedupes on the
+//     lock's own mtime; merge_request / claude_boot_dialog_stuck are filed per request/episode).
+//   • the source can REPEAT within one episode ⇒ key on identity + a derived state token instead. Today:
+//     QUEUE DRAINED (agent-filed `idle_report`, re-filed on every nudge cycle → `idleDoneEpisodeStarts`,
+//     lib/fleet.ts) and the session-row kinds, which pair the session id with the field that is frozen for
+//     the episode and advances only when the session genuinely acts again (`lastActivity`,
+//     `rateLimitedUntil`).
+//
+// Dismissing hides the ROW and its browser notification, and nothing else — it never answers, cancels or
+// alters the underlying Request/session/board. That holds structurally, not by convention: the filter is
+// applied once, below, to the array every surface reads (see `visible`).
 const DISMISS_STORAGE_KEY = "loom.attention.dismissed";
 
 function loadDismissed(): Set<string> {
@@ -76,13 +93,22 @@ export function dismissAttention(dismissKey: string): void {
   persistDismissed();
 }
 
-// Drop stored dismiss keys that are no longer derivable from a live STUCK-BUSY session (it recovered,
-// exited, or acted again → a new key), so localStorage can't grow unbounded. Callers pass the set of
-// currently-derivable keys; pruning is gated on real session data upstream so a transient empty poll
-// can't wipe a still-valid dismiss.
+// Dismiss-key prefixes belonging to a dismissable row that is NOT built by `useAttention`, so the prune
+// below must never judge them stale: it has no way to derive them and would wipe them on its first pass.
+// Today: `mg:` — MERGE GATE (components/mergeGate.tsx), which renders an AttentionRow straight onto the
+// Overview from its own project-scoped merge-gate query (card 611e76ba). A new dismissable row built
+// OUTSIDE this hook must reserve its prefix here, or its × will appear to work and silently un-stick.
+const FOREIGN_DISMISS_PREFIXES = ["mg:"] as const;
+
+// Drop stored dismiss keys that are no longer derivable from a currently-rendered item (the session
+// recovered, exited, or acted again → a new key; the episode ended), so localStorage can't grow
+// unbounded. Callers pass the set of currently-derivable keys; pruning is gated on real data upstream so
+// a transient empty poll can't wipe a still-valid dismiss.
 function pruneDismissed(derivable: Set<string>): void {
   const next = new Set<string>();
-  for (const k of dismissedSet) if (derivable.has(k)) next.add(k);
+  for (const k of dismissedSet) {
+    if (derivable.has(k) || FOREIGN_DISMISS_PREFIXES.some((pre) => k.startsWith(pre))) next.add(k);
+  }
   if (next.size === dismissedSet.size) return; // nothing pruned → no churn
   dismissedSet = next;
   persistDismissed();
@@ -148,12 +174,14 @@ export interface AttentionItem {
   // toast stack and the pending-Request count pill ignore it entirely.
   notify: BrowserNotificationKind;
   text: string;
-  // Set on a user-dismissable kind — STUCK-BUSY (`${sessionId}:${lastActivity}`) and CODEX ISOLATION GAP
-  // (`${agent}:${itemsKey}`, card ed0858dc). Its presence is what makes a row dismissable (AttentionRow
-  // renders × off it); the actionable kinds leave it unset.
+  // REQUIRED in practice on every kind this hook builds (card 611e76ba — the owner's ruling that every
+  // attention row gets an ×). Still typed optional because `AttentionRowItem` is also borrowed by a
+  // render-only row that supplies its own; a builder here that omits it ships a row with no × at all.
+  // See the dismiss store above for the keying rule — it is a correctness constraint, not a convention.
   dismissKey?: string | null;
-  // The hover title for the × affordance. Optional because the wording is kind-specific ("until the
-  // session acts again" is true of STUCK-BUSY only); omitted ⇒ AttentionRow keeps its STUCK-BUSY default.
+  // The hover title for the × affordance: the kind-specific half, naming THIS kind's re-appearance
+  // condition ("until the session acts again" is true of STUCK-BUSY only). AttentionRow appends the
+  // invariant half (dismissing changes nothing underneath) itself, so no builder restates it.
   dismissHint?: string | null;
   // Card ed0858dc — the full detail behind a row whose one-line `text` can only carry a summary (the
   // isolation-gap `reason` strings are paragraph-length). Rendered as the row's `title`, i.e. on hover;
@@ -332,6 +360,11 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       latestIdle.set(e.managerSessionId, e);
     }
   }
+  // Card 611e76ba - QUEUE DRAINED's dismiss key. `idle_report` is AGENT-filed, so a manager that stays
+  // drained re-files state:"done" on every nudge cycle and the event id churns; this collapses the
+  // current consecutive done-run to the id that started it. See idleDoneEpisodeStarts' own doc for why
+  // this one kind cannot key on its event id when every other escalation kind can.
+  const idleDoneEpisodes = idleDoneEpisodeStarts(sortedEvents);
 
   // Context-recycle escalation (ContextWatcher twin of idle_escalated): a context-heavy manager that
   // ignored every recycle nudge → a human-facing alert. There's no "context_report" answer to clear it
@@ -385,23 +418,36 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     // Card 889ae619 (iii-a): a durable, human-set `acknowledgedUntil` SUPPRESSES the STALE presentation
     // while it's still in the future — a snooze, never a retirement (state/escalatedAt are untouched, so
     // the row RE-REDDENS the instant acknowledgedUntil passes, with no separate "cleared" event to miss).
-    const snoozed = q.acknowledgedUntil != null && new Date(q.acknowledgedUntil).getTime() > now;
-    const stale = q.escalatedAt != null && !snoozed;
+    // Card 611e76ba — `requestAttentionBranch` (lib/fleet.ts) is now the ONE derivation behind both the
+    // rendered branch and the dismiss key, so the two can never disagree. It folds in the same unexpired-
+    // snooze suppression this line used to do inline.
+    const stale = requestAttentionBranch(q, now) === "stale";
     // Card 5ced500b — `projectId` comes straight off the Request row, so a pending owner Request stays on
     // its project's Overview even once the asking manager has exited and ARCHIVED (previously it resolved
     // only through the live session feed and vanished from the owner's primary board). It is the ONLY
     // project key the ORPHANED branch can ever have: `sessionOrphaned` means that session row is gone for
     // good, so there is nothing left for a session lookup to find.
+    // Card 611e76ba — the dismiss key pairs the Request's own id with WHICH presentation branch fired,
+    // so hiding the ordinary cyan row does not also pre-hide the red STALE escalation it may later become
+    // (or the amber ORPHANED one). Deliberately NOT keyed on `escalatedAt`/`acknowledgedUntil` values:
+    // the branch IS the state, and a snooze that later expires flips pending → stale → a new key → the
+    // row returns, which is the point. Hiding never touches the Request: it stays pending and answerable
+    // in the inbox either way.
+    const qDismissKey = requestDismissKey(q, now);
     items.push(q.sessionOrphaned
       ? {
           key: `q-${q.id}`, tone: "amber", notify: "request", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
+          dismissKey: qDismissKey,
+          dismissHint: "Hide this alert — this request can never be consumed by its asking session; it stays in the inbox for you to cancel or answer.",
           text: `${decisionAttentionText(q)} — asking session is gone; may never be consumed`,
         }
       : stale
       ? {
           key: `q-${q.id}`, tone: "red", notify: "request", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
+          dismissKey: qDismissKey,
+          dismissHint: "Hide this alert — it returns if this request's asking session dies. Snooze instead to have it re-flag itself later; the request stays pending and answerable either way.",
           // Structural marker for the Snooze affordance (AttentionRow) — set ONLY on this exact branch, so
           // "snooze" never shows on a cyan/amber/orphaned row where there's nothing stale to suppress.
           staleQuestionId: q.id,
@@ -410,6 +456,8 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       : {
           key: `q-${q.id}`, tone: "cyan", notify: "request", kind: label, questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
+          dismissKey: qDismissKey,
+          dismissHint: "Hide this alert — it returns if this request goes stale or its asking session dies. The request stays pending and answerable in the inbox.",
           text: decisionAttentionText(q),
         });
   }
@@ -427,6 +475,11 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     if (e.kind === "merge_request" && liveWorker(e.workerSessionId)) {
       items.push({
         key: `m-${e.id}`, tone: "phosphor", notify: "merge-request", kind: "MERGE REQUEST", workerSessionId: e.workerSessionId,
+        // Card 611e76ba — the merge_request event id: filed once per review request, so a new review round
+        // after a rejection (or another worker's branch) mints a new key. Hiding the alert never touches
+        // the branch — it stays unmerged and reviewable at /review/<worker>.
+        dismissKey: `m:${e.id}`,
+        dismissHint: "Hide this alert — it returns when a worker requests review again. The branch stays unmerged and reviewable.",
         text: `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)} ` : ""}${e.taskId ? `task ${e.taskId.slice(0, 8)} ` : ""}— awaiting review`,
       });
     }
@@ -435,6 +488,8 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const detail = (e.detail ?? {}) as { signatureName?: string | null; role?: string | null; timeoutMs?: number };
     items.push({
       key: `bs-${e.id}`, tone: "red", notify: "boot-stuck", kind: "BOOT STUCK", sessionId: sid,
+      dismissKey: `bs:${e.id}`, // one claude_boot_dialog_stuck event per stuck boot episode (card 611e76ba)
+      dismissHint: "Hide this alert — it returns if a session gets stuck booting again. The session itself is untouched.",
       text: `${detail.role ?? "session"} ${sid.slice(0, 8)} never reached SessionStart — possible blocking CLI dialog (${detail.signatureName ?? "none recognized"})`,
     });
   }
@@ -443,11 +498,21 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     if (e.kind === "idle_escalated") {
       items.push({
         key: `ie-${e.id}`, tone: "red", notify: "manager-asleep", kind: "MANAGER ASLEEP", sessionId: e.managerSessionId,
+        // Card 611e76ba — idle-watcher.ts emits idle_escalated EXACTLY ONCE per episode (it flips the
+        // nudge policy to 'suppressed', and the policy gate then skips this manager until real activity
+        // re-arms it), so the event id is already "this manager, this sleeping episode".
+        dismissKey: `ie:${e.id}`,
+        dismissHint: "Hide this alert — it returns if this manager sleeps through its nudges again. The manager keeps running.",
         text: `manager ${e.managerSessionId.slice(0, 8)} — ${detail.unanswered ?? "?"} unanswered idle nudges, escalated`,
       });
     } else if (detail.state === "done") {
       items.push({
         key: `id-${e.id}`, tone: "amber", notify: "queue-drained", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
+        // Card 611e76ba — the EPISODE id, never this event's own id: a drained manager re-files
+        // idle_report("done") on every nudge cycle. Falls back to the event id only if the episode map
+        // somehow has no entry (it always should — this branch only runs for a done-state idle_report).
+        dismissKey: `id:${e.managerSessionId}:${idleDoneEpisodes.get(e.managerSessionId) ?? e.id}`,
+        dismissHint: "Hide this alert — it returns if this manager's board drains again after it picks work back up. The board and the session are untouched.",
         text: `manager ${e.managerSessionId.slice(0, 8)} — queue drained; reclaim/close the session${detail.detail ? ` (${detail.detail})` : ""}`,
       });
     }
@@ -457,6 +522,8 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const detail = (e.detail ?? {}) as { unanswered?: number; pct?: number };
     items.push({
       key: `ce-${e.id}`, tone: "red", notify: "context-overflow", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
+      dismissKey: `ce:${e.id}`, // context_escalated escalates once per episode (card 611e76ba)
+      dismissHint: "Hide this alert — it returns on the next context escalation for this manager. The manager keeps running and still needs a handoff.",
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
     });
   }
@@ -465,6 +532,10 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const ageMin = typeof detail.ageMs === "number" ? Math.round(detail.ageMs / 60000) : null;
     items.push({
       key: `vl-${e.id}`, tone: "red", notify: "vault-lock-stuck", kind: "VAULT LOCK STUCK",
+      // Card 611e76ba — vault/versioner.ts files this at most once per distinct lock instance (it dedupes
+      // on the lock's own mtimeMs via an on-disk marker), so the event id IS the lock instance.
+      dismissKey: `vl:${e.id}`,
+      dismissHint: "Hide this alert — it returns for a different stuck lock. The lock itself is untouched; clear it with the command shown.",
       // Card 5ced500b — this item carries NO session id at all (it keys on `detail.repoPath`; no session
       // owns a vault watcher), so before this it resolved to no project and showed on NO project Overview,
       // ever. The daemon has always filed `detail.projectId` alongside repoPath (vault/versioner.ts), so
@@ -518,6 +589,8 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     items.push({
       key: `rlc-${e.id}`, tone: "red", notify: "recycle-lineage-consolidated", kind: "RECYCLE LINEAGE CONSOLIDATED",
       sessionId: predecessorId,
+      dismissKey: `rlc:${e.id}`, // one recycle_split_lineage_consolidated event per consolidation (card 611e76ba)
+      dismissHint: "Hide this alert — it returns if another recycle lineage is consolidated. The fleet still has no owner until you resume, reassign, or start a new manager.",
       projectId: p?.projectId ?? null,
       text: `${p ? `${p.projectName} · ${p.role ?? "session"} ` : "session "}${predecessorId.slice(0, 8)} — a halted recycle's successor died too; its fleet was consolidated back here. No automatic owner exists — resume this session, reassign its workers, or start a new manager.`,
     });
@@ -527,6 +600,8 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const windowMin = detail.windowMs ? Math.round(detail.windowMs / 60_000) : null;
     items.push({
       key: `gr-${e.id}`, tone: "red", notify: "give-up-recovery", kind: "GIVE-UP RECOVERY", sessionId: e.managerSessionId,
+      dismissKey: `gr:${e.id}`, // one give_up_recovery_escalated event per episode (card 611e76ba)
+      dismissHint: "Hide this alert — it returns on the next give-up-recovery episode for this manager.",
       text: `manager ${e.managerSessionId.slice(0, 8)} — submit give-up recovery fired ${detail.count ?? "?"}x${windowMin ? ` in ~${windowMin}m` : ""}; its composer submissions may be unreliable`,
     });
   }
@@ -559,6 +634,11 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
         (questionCount > 0 ? `; answering ${questionCount} pending Request(s) releases ${releasedCardCount} card(s)` : "");
     items.push({
       key: `bq-${e.id}`, tone: "amber", notify: "quiet-board", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
+      // Card 611e76ba — idle-watcher.ts emits board_quiet_cause exactly once per quiet episode, so the
+      // event id is "this manager, this quiet episode": the board going quiet AGAIN after work picks back
+      // up files a new event and the row returns, which is the owner's own stated expectation.
+      dismissKey: `bq:${e.id}`,
+      dismissHint: "Hide this alert — it returns if this board goes quiet again after work picks back up. Nothing on the board changes.",
     });
   }
   // Defense-in-depth: only a LIVE session is actionably rate-limited. The durable fix clears
@@ -567,6 +647,10 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const s of all.filter((s) => isRateLimited(s) && s.processState === "live")) {
     items.push({
       key: `r-${s.id}`, tone: "red", notify: "rate-limited", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
+      // Card 611e76ba — the park's own end timestamp is frozen for this park and differs for the next one,
+      // so it is the state token. Hiding the row does NOT clear the park (that is the Clear/retry button).
+      dismissKey: rateLimitDismissKey(s),
+      dismissHint: "Hide this alert — it returns on the next rate-limit park. The session stays parked until it resumes on its own or you clear it.",
       // Card 5ced500b — this row carries `rateLimitSessionId` (the clear/retry action's target), never
       // `sessionId`, so the old session-id-only resolver found nothing and the item surfaced GLOBALLY only.
       // A comment on the Overview used to call that deliberate; it wasn't — it described the missing field,
@@ -596,6 +680,11 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const s of all.filter(isCrashLooped)) {
     items.push({
       key: `cl-${s.id}`, tone: "red", notify: "crash-looped", kind: "CRASH-LOOPED", sessionId: s.id,
+      // Card 611e76ba — same shape as STUCK-BUSY's own key, and strictly safer here: this row is `exited`,
+      // so lastActivity is frozen. It advances only if a human resumes the session, so a session that
+      // crash-loops AGAIN after a manual resume mints a new key and the alert returns.
+      dismissKey: sessionEpisodeDismissKey("cl", s),
+      dismissHint: "Hide this alert — it returns if this session crash-loops again after you resume it. Auto-resume stays stopped either way.",
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
       // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
       projectId: s.projectId,
@@ -635,6 +724,10 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     if (recycleConsolidatedPredecessorIds.has(s.id)) continue;
     items.push({
       key: `of-${s.id}`, tone: "red", notify: "orphaned-fleet", kind: "ORPHANED FLEET", sessionId: s.id,
+      // Card 611e76ba — exited row, so lastActivity is frozen for this strand and advances only on a
+      // resume; exiting again while still owning live workers mints a new key.
+      dismissKey: sessionEpisodeDismissKey("of", s),
+      dismissHint: "Hide this alert — it returns if this session is resumed and again exits owning live workers. The workers stay parentless until you reparent or stop them.",
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
       // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
       projectId: s.projectId,
@@ -651,17 +744,30 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // still-loading/empty poll yields no derivable keys, which must NOT wipe a valid dismiss. Keyed on the
   // sorted derivable signature so the effect only fires when that set changes.
   //
-  // ⚠️ THE GATE MUST NAME EVERY QUERY A DISMISSABLE KIND IS DERIVED FROM, not just the sessions poll.
-  // STUCK-BUSY comes from `sessions` alone, but CODEX ISOLATION GAP (card ed0858dc) comes from its own
-  // events query — and the two resolve independently. With the gate on `sessions` alone, a page load where
-  // sessions landed FIRST ran the prune against an `items` that had no isolation-gap row yet, silently
-  // wiping its dismiss key; the row then reappeared the moment the events landed, so a dismiss never
-  // survived a reload. Caught by codex-isolation-gap-attention.spec.ts's post-reload assertion. Any future
-  // dismissable kind must add its own source here too.
-  // Card 7be85378 — the archived-surviving CRASH-LOOPED item is dismissable too; same rule, same two
-  // queries it's built from.
-  const loaded = sessions.data !== undefined && codexGapEventsQuery.data !== undefined
-    && crashLoopAbandonedEventsQuery.data !== undefined && crashLoopRecoveredEventsQuery.data !== undefined;
+  // ⚠️ THE GATE MUST NAME EVERY QUERY A DISMISSABLE KIND IS DERIVED FROM. The original defect: with the
+  // gate on `sessions` alone, a page load where sessions landed FIRST ran the prune against an `items`
+  // that had no isolation-gap row yet, silently wiping its dismiss key; the row reappeared the moment the
+  // events landed, so a dismiss never survived a reload (caught by codex-isolation-gap-attention.spec.ts's
+  // post-reload assertion).
+  //
+  // Since card 611e76ba EVERY kind is dismissable, so "every query a dismissable kind derives from" is now
+  // "every query", the per-manager `eventQueries` fan-out included — six of the newly-dismissable kinds
+  // (MERGE REQUEST / MANAGER ASLEEP / QUEUE DRAINED / CONTEXT OVERFLOW / GIVE-UP RECOVERY / QUIET BOARD)
+  // are built from it alone.
+  //
+  // @decision 3157a563 forbids folding this gate and `resolved` into each other. Their POPULATIONS have
+  // now converged by construction, but their PREDICATES must stay different and deliberately do:
+  //   • `resolved` (below) tests `!isPending`, so an ERRORED query counts as settled — fail-OPEN, because
+  //     a permanently-undefined `data` after one failed fetch would otherwise suppress notifications
+  //     forever.
+  //   • this gate tests `data !== undefined` — fail-CLOSED, because an errored query contributes no
+  //     derivable keys, and pruning against that absence is exactly the wipe described above.
+  // Collapsing them to one expression would have to pick one predicate and would break the other half.
+  const loaded = sessions.data !== undefined && questions.data !== undefined
+    && bootStuckEventsQuery.data !== undefined && vaultLockEventsQuery.data !== undefined
+    && codexGapEventsQuery.data !== undefined && recycleConsolidatedEventsQuery.data !== undefined
+    && crashLoopAbandonedEventsQuery.data !== undefined && crashLoopRecoveredEventsQuery.data !== undefined
+    && eventQueries.every((q) => q.data !== undefined);
   const derivableSig = items.filter((it) => it.dismissKey).map((it) => it.dismissKey!).sort().join("\n");
   useEffect(() => {
     if (!loaded) return;

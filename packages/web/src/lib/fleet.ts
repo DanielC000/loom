@@ -48,6 +48,103 @@ export function isActiveWaitingSnooze(e: OrchestrationEvent | undefined, now: nu
   return d.state === "waiting" && !!d.snoozeUntil && new Date(d.snoozeUntil).getTime() > now;
 }
 
+// ── Dismiss-key derivation (card 611e76ba) ────────────────────────────────────────────────────────────
+// The two attention-kind families whose dismiss key is NOT simply its source event's id live here, pure
+// and JSX-free, so test/attention-dismiss.mjs can assert the property that actually matters: the key is
+// STABLE while the state that raised the alert is unchanged, and DIFFERENT once there is genuinely new
+// news. Inline template literals in lib/attention would be untestable without React, and these two
+// encode a real judgement (WHICH field is the state token) that a later edit could silently break —
+// swapping `lastActivity` for a re-derived `Date.now()` would compile, render identically, and quietly
+// make every × useless.
+//
+// @decision 611e76ba — never key a dismiss on a value that moves on its own, and never on bare identity.
+
+/** The minimum shape of a pending Request that {@link requestAttentionBranch} needs. Structural on
+ *  purpose, so this module keeps its "no runtime relative imports" property and the test can build one. */
+export interface RequestDismissInput {
+  id: string;
+  sessionOrphaned?: boolean | null;
+  escalatedAt?: string | null;
+  acknowledgedUntil?: string | null;
+}
+
+/**
+ * WHICH of the three presentations lib/attention renders a pending Request as. Extracted so the dismiss
+ * key and the rendered branch can never disagree — they are now the same derivation, called once.
+ *
+ * Precedence matches the renderer: `orphaned` outranks `stale` ("the asking session is gone" is the more
+ * actionable fact), and an unexpired human snooze (`acknowledgedUntil` in the future) suppresses `stale`
+ * back to `pending` without touching the row's state.
+ */
+export function requestAttentionBranch(q: RequestDismissInput, now: number = Date.now()): "pending" | "stale" | "orphaned" {
+  if (q.sessionOrphaned) return "orphaned";
+  const snoozed = q.acknowledgedUntil != null && new Date(q.acknowledgedUntil).getTime() > now;
+  return q.escalatedAt != null && !snoozed ? "stale" : "pending";
+}
+
+/**
+ * A pending Request's dismiss key: its own id plus WHICH branch fired. Hiding the ordinary cyan row must
+ * not also pre-hide the red STALE escalation it may later become, so the branch is part of the key.
+ * Deliberately NOT the `escalatedAt`/`acknowledgedUntil` VALUES — the branch is the state, and keying on
+ * a snooze deadline would mint a new key every time the human re-snoozed.
+ */
+export function requestDismissKey(q: RequestDismissInput, now: number = Date.now()): string {
+  return `q:${q.id}:${requestAttentionBranch(q, now)}`;
+}
+
+/**
+ * The dismiss key for a kind derived by iterating the live session feed, where the alert's state lives on
+ * the session ROW rather than in an event: STUCK-BUSY, CRASH-LOOPED (the live-feed variant) and ORPHANED
+ * FLEET. `lastActivity` is the state token because it is frozen for the duration of one episode and
+ * advances the moment the session genuinely acts again — so a dismiss holds for THIS episode and a real
+ * new one re-surfaces. For the two exited-row kinds it is frozen outright and can only move via a human
+ * resume, which is exactly the "new occurrence" each of them means.
+ */
+export function sessionEpisodeDismissKey(prefix: string, s: Pick<SessionListItem, "id" | "lastActivity">): string {
+  return `${prefix}:${s.id}:${s.lastActivity}`;
+}
+
+/**
+ * RATE-LIMITED's dismiss key. The park's own END timestamp is the state token: frozen for this park,
+ * different for the next one. Never the session id alone (one dismiss would hide every future park) and
+ * never a remaining-time figure (it moves every poll).
+ */
+export function rateLimitDismissKey(s: Pick<SessionListItem, "id" | "rateLimitedUntil">): string {
+  return `r:${s.id}:${s.rateLimitedUntil}`;
+}
+
+// ── QUEUE DRAINED episode derivation (card 611e76ba) ───────────────────────────────────
+// The QUEUE DRAINED attention item needs a dismiss key that is STABLE for one drained episode but NEW
+// when the board drains AGAIN after being busy — and its source event cannot supply one.
+//
+// Every OTHER escalation kind the attention queue renders is filed by a daemon watcher that emits exactly
+// once per episode (idle_escalated flips the nudge policy to 'suppressed'; board_quiet_cause /
+// context_escalated / give_up_recovery_escalated escalate once; vault_index_lock_stale dedupes on the
+// lock's own mtime), so for those the EVENT ID already IS "identity + the state that made it fire".
+// `idle_report` is different in kind: it is AGENT-filed, once per `idle_report` tool call, so a manager
+// that stays drained re-files state:"done" on every nudge cycle. Keying the dismiss on that event id
+// would mint a fresh key every few minutes and the × would do nothing — the exact friction card 611e76ba
+// exists to remove.
+//
+// So: collapse the manager's CURRENT consecutive run of done-dispositions to the id of the event that
+// STARTED it. Any other idle event (an idle_report of working/waiting, or an idle_escalated) breaks the
+// run, so the next done after it starts a new episode and mints a new key.
+//
+// Events may arrive unsorted; this sorts ascending itself rather than relying on the caller (the one
+// existing caller does sort, but a second one must not have to know that).
+// @decision 611e76ba — QUEUE DRAINED must never key its dismiss on its own event id.
+export function idleDoneEpisodeStarts(events: readonly OrchestrationEvent[]): Map<string, string> {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const starts = new Map<string, string>();
+  for (const e of sorted) {
+    if (e.kind !== "idle_report" && e.kind !== "idle_escalated") continue;
+    const isDone = e.kind === "idle_report" && (e.detail as { state?: string } | undefined)?.state === "done";
+    if (!isDone) { starts.delete(e.managerSessionId); continue; } // run broken — the next done starts fresh
+    if (!starts.has(e.managerSessionId)) starts.set(e.managerSessionId, e.id); // first done of this run
+  }
+  return starts;
+}
+
 // A compact FleetCard folds a project's ARCHIVED (exited) sessions in alongside the running set, so the
 // card still reads meaningfully the moment a wave auto-archives (its workers exit → the running set
 // empties, and the card would otherwise go blank). Archived rows are muted history: CAP how many feed the
