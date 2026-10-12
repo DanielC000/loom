@@ -81,6 +81,23 @@ If you ever need to run any of these by hand (no CI, or a recovery), the manual 
 
 `.github/workflows/release.yml` automates the publish + GitHub Release from a pushed `v*` tag (it also accepts a manual **workflow_dispatch** run, which releases the version currently in `package.json`). A companion `.github/workflows/ci.yml` runs the **build + daemon test gate** on every PR and `main` push (no publish, no secrets) — the same gate the release runs before shipping.
 
+**The `build-windows-launcher` job builds win-job-launcher.exe (card `1718416d`) on `windows-latest`
+before the main `release` job runs at all** — `release` `needs` it. It compiles the exe via the in-box
+**.NET Framework `csc.exe`** (never the .NET SDK's own `csc` — a dev worktree's `build:native` uses the
+same compiler), then load-smokes the REAL binary (`scripts/smoke-win-job-launcher.mjs`: a real spawn, a
+confirmed abort, and git's own exit-code passthrough) and **hard-fails the release** on any problem —
+unlike a dev `build:native`'s loud no-op, a release shipping silently without the launcher is not
+acceptable. The built exe is uploaded as an artifact and downloaded back into `release`'s own checkout
+before packing, since `release` itself runs on `ubuntu-latest` (no `csc.exe` there at all).
+**`ci.yml` does NOT build or smoke this launcher** — it runs on `ubuntu-latest` only, so
+`isWinJobLauncherAvailable()` is always `false` there and the four `win-job-launcher-*.mjs` real-exe
+tests print an explicit `SKIP` and exit 0 (see each test's own win32/exe-existence gate); only
+`build-windows-launcher` on an actual Windows runner ever exercises the real binary before a release.
+**A merged `launcher.cs` fix is NOT picked up by `daemon_restart`** — that tool rebuilds the daemon's own
+TypeScript, never `packages/daemon/native/win-job-launcher/`; after merging a launcher.cs change, run
+`pnpm --filter @loom/daemon build:native` by hand in the main checkout for the self-hosting daemon to
+pick it up (the next tagged release rebuilds it fresh regardless, via this job).
+
 **Owner one-time setup (the release workflow is inert until all are done):**
 
 1. **The public GitHub repo must exist.** Pushing tags + Actions + Releases all require the repo to

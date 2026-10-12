@@ -27,7 +27,57 @@ permissions:
   actions: read # scripts/check-release-ci.mjs reads ci.yml's run conclusion for the released sha
 
 jobs:
+  # Card 1718416d — builds win-job-launcher.exe (the Windows Job Object containment launcher for
+  # canonical git calls; docs/decisions/1718416d-win-job-launcher-containment.md) and load-smokes the
+  # REAL binary (spawn, run a trivial job, confirm an abort settles confirmed; also smokes git's own
+  # exit-code passthrough — scripts/smoke-win-job-launcher.mjs) before the main `release` job ever packs
+  # it. Deliberately HARD-FAILS on any problem — unlike `build:native`'s own dev-time loud-no-op posture
+  # (missing csc.exe there just means the daemon falls back), a RELEASE that silently ships without the
+  # launcher is not an acceptable outcome; `release` below `needs` this job.
+  build-windows-launcher:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # round 3, BLOCKING-1: both scripts below live at packages/daemon/scripts/, not repo-root
+      # scripts/ (that directory holds a DIFFERENT, unrelated set — build-npm-package.mjs etc.) — a
+      # bare `node scripts/...mjs` from this job's default (repo-root) cwd was MODULE_NOT_FOUND on every
+      # real run; `working-directory` fixes the cwd for every `run:` step in this job (`uses:` steps,
+      # e.g. the later actions/upload-artifact@v4, read `path:` repo-root-relative regardless, so that
+      # one stays untouched).
+      - name: Build win-job-launcher.exe (in-box .NET Framework csc.exe)
+        shell: pwsh
+        working-directory: packages/daemon
+        run: |
+          node scripts/build-native-launcher.mjs
+          $exe = "assets/native/win-job-launcher.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "win-job-launcher.exe was not produced (build-native-launcher.mjs no-op'd — likely csc.exe missing on this runner). Failing the release rather than shipping silently without it."
+            exit 1
+          }
+          Write-Host "Built: $exe"
+
+      # round 2, MINOR c: moved out of inline PowerShell — a Start-Process-returned object needs its
+      # own .Handle read once before .ExitCode/.HasExited can be trusted afterward (a known PowerShell
+      # gotcha the old inline step didn't do), and its abort fired after a FIXED 300ms sleep rather than
+      # an observable "has the hook actually started" signal. A plain Node ChildProcess avoids both: its
+      # own "close" event carries the exit code directly, no separate handle-retention step needed. Also
+      # now smokes git's own exit-code passthrough, which the old inline step never exercised at all.
+      - name: Load-smoke the real binary (spawn, abort settles confirmed, git exit-code passthrough)
+        shell: pwsh
+        working-directory: packages/daemon
+        run: node scripts/smoke-win-job-launcher.mjs
+
+      - name: Upload win-job-launcher.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-job-launcher-exe
+          path: packages/daemon/assets/native/win-job-launcher.exe
+          retention-days: 7
+
   release:
+    needs: build-windows-launcher
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -72,6 +122,15 @@ jobs:
 
       - name: Run daemon test suite (hermetic gate)
         run: pnpm --filter @loom/daemon test:daemon
+
+      - name: Download win-job-launcher.exe (card 1718416d, built + load-smoked on windows-latest above)
+        uses: actions/download-artifact@v4
+        with:
+          name: win-job-launcher-exe
+          path: packages/daemon/assets/native
+
+      - name: Verify win-job-launcher.exe landed where build-npm-package.mjs expects it
+        run: test -f packages/daemon/assets/native/win-job-launcher.exe
 
       - name: Resolve release version & channel
         id: meta

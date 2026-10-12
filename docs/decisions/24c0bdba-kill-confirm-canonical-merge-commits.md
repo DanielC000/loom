@@ -389,10 +389,15 @@ disk; a reboot re-quarantined both all over again) and GREEN after this fix.
   `docs/decisions/b966962b-unconfirmed-kill-windows-msys-hook-guidance.md`. The quarantine still fires
   (via `withTimeoutKillingChild`'s own give-up path, correctly tagged) and PROTECTS the repo for this case
   exactly as for the double-forked one; only a human can clear it (REST route, round 4), never a restart.
-  The one approach that would structurally close this residual — a Job Object, native dependency, out of
-  scope here — is filed as its own card (`1718416d`), still open, accepted as-is; the quarantine reason
-  (`git/merge-quarantine.ts`'s `unconfirmedKillReason()`, card `b966962b`) now names this cause and a
-  concrete pre-clear check in every raise, rather than leaving a human to guess why.
+  **CLOSED (card `1718416d`):** a Windows Job Object launcher (`native/win-job-launcher/launcher.cs`,
+  wired into `spawnCanonicalGitTree`'s win32 branch) now genuinely CONTAINS this shape — the double-forked
+  descendant dies with the rest of the tree, confirmed, instead of escaping — with a mandatory,
+  byte-identical fallback to this exact taskkill/quarantine path whenever the launcher is unavailable
+  (missing, non-win32, or a per-call refusal). See `docs/decisions/1718416d-win-job-launcher-containment.md`
+  for the full mechanism; the taskkill path documented here remains exactly as described, as the
+  fallback. The quarantine reason (`git/merge-quarantine.ts`'s `unconfirmedKillReason()`, card `b966962b`)
+  still names this cause and a concrete pre-clear check in every raise on that fallback path, rather than
+  leaving a human to guess why.
 - **POSIX `setsid` escapes.** `spawnCanonicalGitTree`'s POSIX kill signals the process GROUP
   (`process.kill(-pid, SIGKILL)`) — a descendant that calls `setsid` (or is otherwise detached into its
   own session) leaves that group and is not reached. Same consequence as the Windows case above: the

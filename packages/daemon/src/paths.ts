@@ -204,6 +204,16 @@ export function resolveWebDistDir(): string {
 
 /** hook-relay.mjs ships as an asset alongside the built daemon. */
 export const RELAY_SCRIPT = path.join(__dirname, "..", "assets", "hook-relay.mjs");
+/**
+ * win-job-launcher.exe (card 1718416d) — the Windows-only Job Object containment launcher for canonical
+ * git calls, built by `pnpm --filter @loom/daemon build:native` (never the default `build`) or by the
+ * release CI's windows-latest job, from `native/win-job-launcher/launcher.cs`. A FIXED, package-relative
+ * path only — never `LOOM_HOME`, never a `PATH` lookup — so its presence/absence is a build-time fact,
+ * never something a running session (or a worker with Bash) can influence. See
+ * {@link git/bounded.ts!isWinJobLauncherAvailable} for the memoized existence check this path feeds, and
+ * docs/decisions/1718416d-*.md for why this mechanism exists and its mandatory taskkill-based fallback.
+ */
+export const WIN_JOB_LAUNCHER_PATH = path.join(__dirname, "..", "assets", "native", "win-job-launcher.exe");
 /** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */
 export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lint.mjs");
 /**

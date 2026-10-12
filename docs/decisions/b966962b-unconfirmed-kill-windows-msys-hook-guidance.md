@@ -40,11 +40,14 @@ fix that depends on walking a parent-id chain, Windows' or MSYS's:
   specific observable lock/handle; the actual threat (a stray later write) isn't gated behind one.
 
 The one approach that would actually close this — a Windows Job Object, whose membership is enforced by
-the kernel at process-creation time independent of the (broken) PPID chain — needs either a native addon
-or an inline P/Invoke-via-PowerShell helper spawned per canonical git call: real new machinery, already
-filed as its own backlog card (`1718416d`, "contain canonical merge hook processes in a Windows job
-object") and already named in `24c0bdba`'s own Residuals section as "a Job Object (native dependency, out
-of scope here)". This card does not attempt that.
+the kernel at process-creation time independent of the (broken) PPID chain — needed real new machinery.
+This card did not attempt that; **card `1718416d` since built it** (a small native launcher, never a
+PowerShell helper — see that record for why: `CreateProcess`+`AssignProcessToJobObject`, wired into
+`spawnCanonicalGitTree`'s win32 branch, with a mandatory fallback to exactly the taskkill-based path this
+record describes whenever the launcher is unavailable). The MSYS PPID-bookkeeping finding above (why no
+enumeration-based fix can work) is unaffected and still the reason a PID-walking approach was never
+viable — `1718416d`'s fix does not walk the PPID chain at all; it contains the process tree at creation
+time instead, structurally sidestepping the broken bookkeeping this record diagnoses.
 
 ## Fix
 

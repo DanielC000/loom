@@ -71,6 +71,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build daemon (pnpm build), 2) node test/merge-commit-kill-confirm.mjs
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertNeverWithControl, pollUntil } from "./_timing-guard.mjs";
@@ -87,6 +88,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const { mergeBranch } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
 const { activeMergeQuarantineFor } = await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
+const { setWinJobLauncherOverrideForTest } = await import(pathToFileURL(path.join(distGitDir, "bounded.js")).href);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -465,7 +467,35 @@ console.log(`[scenario 4] info: merge1=${JSON.stringify({ ok: s4.merge1?.ok, rea
   `merge2=${JSON.stringify({ ok: s4.merge2?.ok, reason: s4.merge2?.reason })}`);
 
 // SCENARIO 5 (round 3) — drive the unconfirmed path itself and prove the full quarantine lifecycle.
-const s5 = await runScenario5(tag);
+// @decision 1718416d — this scenario's whole point is a hook shape that ESCAPES taskkill's PPID walk;
+// card 1718416d's win-job-launcher.exe genuinely CONTAINS it (that is the fix, proven separately by
+// test/win-job-launcher-spawn.mjs). So on a host where that launcher is built, this exact scenario no
+// longer produces an unconfirmed kill at all — which would make every assertion below fail for the
+// RIGHT reason (the bug is fixed) while looking like a regression. Force the pre-1718416d taskkill path
+// for THIS scenario only, via the test-only override — NEVER rename/unlink/overwrite the REAL exe (it
+// backs the self-hosting daemon live, the merge gate runs test files concurrently, and a gate-timeout
+// SIGKILL would skip any rename-based cleanup forever) — so it keeps testing what it was written to
+// test: the quarantine mechanism's own handling of a genuinely unconfirmed kill, independent of whether
+// a given host happens to have the launcher built. See docs/decisions/1718416d-win-job-launcher-containment.md.
+const launcherExe = path.join(__dirname, "..", "assets", "native", "win-job-launcher.exe");
+const launcherExeExistedAtStart = fs.existsSync(launcherExe);
+const launcherExeHashAtStart = launcherExeExistedAtStart ? crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex") : null;
+setWinJobLauncherOverrideForTest(null);
+let s5;
+try {
+  s5 = await runScenario5(tag);
+} finally {
+  setWinJobLauncherOverrideForTest(undefined);
+}
+// The real exe was NEVER touched by this scenario — assert it, not just assume it.
+const launcherExeExistedAtEnd = fs.existsSync(launcherExe);
+check("[scenario 5] the real win-job-launcher.exe's existence is unchanged across this scenario",
+  launcherExeExistedAtEnd === launcherExeExistedAtStart);
+if (launcherExeExistedAtStart && launcherExeExistedAtEnd) {
+  const launcherExeHashAtEnd = crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex");
+  check("[scenario 5] the real win-job-launcher.exe's content hash is UNCHANGED (this scenario never touched it)",
+    launcherExeHashAtEnd === launcherExeHashAtStart);
+}
 console.log(`[scenario 5] info: merge1=${JSON.stringify({ ok: s5.merge1?.ok, reason: s5.merge1?.reason })} ` +
   `merge2=${JSON.stringify({ ok: s5.merge2?.ok, reason: s5.merge2?.reason })}`);
 check("[scenario 5] merge1 (whose hook's own descendant escapes the tree-kill) is refused",

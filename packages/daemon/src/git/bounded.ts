@@ -1,9 +1,12 @@
+import fs from "node:fs";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
 import { killGateProcessTree } from "../orchestration/gate-runner.js";
 import { assertRepoNotQuarantined } from "./merge-quarantine.js";
 import { RepoQuarantinedError } from "./repo-lock.js";
+import { WIN_JOB_LAUNCHER_PATH } from "../paths.js";
 
 /**
  * Neutral extraction (card 9df3ea71) of the bounded-git primitives six independent copies across this
@@ -163,6 +166,129 @@ export function withTimeoutKillingChild<T>(
   });
 }
 
+/** {@link rawViaWinJobLauncher}'s exit-code contract — see native/win-job-launcher/launcher.cs's own
+ *  file-header doc for the authoritative definition; these consts just mirror it for TS callers.
+ *  Exported (round 3, optional) so a test imports the REAL values rather than keeping its own copy —
+ *  {@link LAUNCHER_EXIT_UNCONFIRMED_KILLED} is unused inside this file (bounded.ts only ever checks
+ *  "is it the confirmed code", everything else is unconfirmed by construction) but is still exported for
+ *  exactly that reason: a test simulating the launcher's own close code needs the real UNCONFIRMED value.
+ *
+ * @decision 1718416d — moved out of 0-255 (git's own exit-code range) and collapsed every "git never
+ * ran" reason into the ONE refusal code; see the decision record's "round 2" update for why. */
+export const LAUNCHER_EXIT_CONFIRMED_KILLED = 0x4c4f0001;
+export const LAUNCHER_EXIT_UNCONFIRMED_KILLED = 0x4c4f0002;
+export const LAUNCHER_EXIT_REFUSED = 0x4c4f0003;
+
+/** @decision 1718416d — never rename/unlink/overwrite the REAL `win-job-launcher.exe` from a test to
+ *  force the fallback (it backs the self-hosting daemon live); use this override instead. Test-only. */
+let winJobLauncherOverrideActive = false;
+let winJobLauncherOverrideValue: string | null = null;
+export function setWinJobLauncherOverrideForTest(pathOrNull: string | null | undefined): void {
+  winJobLauncherOverrideActive = pathOrNull !== undefined;
+  winJobLauncherOverrideValue = pathOrNull ?? null;
+  winJobLauncherAvailableCache = undefined;
+  loggedWinJobLauncherUnavailable = false;
+  // round 3, nit: without this, a test that triggers a real spawn-failure log in an EARLIER case stays
+  // permanently silent for every LATER case in the same process — this flag is otherwise never reset.
+  loggedWinJobLauncherSpawnFailure = false;
+}
+
+/** The path `rawViaWinJobLauncher`/`signalWinJobLauncherAbort` actually spawn — the test override when
+ *  one is active, else the real fixed build path. Never read directly elsewhere; go through this. */
+function resolveWinJobLauncherPath(): string {
+  return winJobLauncherOverrideActive && winJobLauncherOverrideValue !== null ? winJobLauncherOverrideValue : WIN_JOB_LAUNCHER_PATH;
+}
+
+/** Memoized (never re-`fs.existsSync`'d after the first check — the file is a build-time artifact, not
+ *  something that appears mid-process) win32-only check for whether `win-job-launcher.exe` was built.
+ *  Logs ONCE, the first time it resolves `false`, so a host that never ran `build:native` doesn't get a
+ *  log line per canonical git call. {@link setWinJobLauncherOverrideForTest} is the ONLY sanctioned way
+ *  to force a fresh re-check within one process — a real build never appears mid-process either. */
+let winJobLauncherAvailableCache: boolean | undefined;
+let loggedWinJobLauncherUnavailable = false;
+export function isWinJobLauncherAvailable(): boolean {
+  if (winJobLauncherAvailableCache === undefined) {
+    if (winJobLauncherOverrideActive) {
+      winJobLauncherAvailableCache = process.platform === "win32" && winJobLauncherOverrideValue !== null && fs.existsSync(winJobLauncherOverrideValue);
+    } else {
+      winJobLauncherAvailableCache = process.platform === "win32" && fs.existsSync(WIN_JOB_LAUNCHER_PATH);
+    }
+    if (!winJobLauncherAvailableCache && process.platform === "win32" && !loggedWinJobLauncherUnavailable) {
+      loggedWinJobLauncherUnavailable = true;
+      // round 2, nit (e): a test override forcing `null` is a DELIBERATE test setup, not a missing build
+      // — say so, rather than printing "not found at null" as if `build:native` were the fix for it.
+      const reason = winJobLauncherOverrideActive && winJobLauncherOverrideValue === null
+        ? "disabled by test override (setWinJobLauncherOverrideForTest(null))"
+        : `not found at ${resolveWinJobLauncherPath()} — run \`pnpm --filter @loom/daemon build:native\` to build it`;
+      // eslint-disable-next-line no-console
+      console.log(`[git] win-job-launcher.exe ${reason} — falling back to the taskkill-based kill-confirm path for every canonical git call this process makes.`);
+    }
+  }
+  return winJobLauncherAvailableCache;
+}
+
+/**
+ * round 3, MINOR-1: EACCES (permission denied) and ENOENT (path vanished) are properties of THIS exe —
+ * retrying it on a later call won't help. So is a Windows bad-executable-format failure, which libuv
+ * surfaces with no more specific code than `UNKNOWN`/errno `-4094` (verified directly against a real
+ * non-executable file in round 2's own smoke test — there is no finer-grained code to check for it).
+ * EAGAIN/EMFILE/ENFILE are host resource exhaustion — nothing to do with whether THIS exe works — and a
+ * `TypeError` means invalid `spawn()` arguments (a code bug), not an exe problem either; neither should
+ * disable the launcher for every later call over what's a one-off, call-scoped condition.
+ */
+function isPermanentLauncherSpawnFailure(e: unknown): boolean {
+  if (e instanceof TypeError) return false;
+  const err = e as NodeJS.ErrnoException;
+  if (err?.code === "EACCES" || err?.code === "ENOENT") return true;
+  if (err?.code === "UNKNOWN" || err?.errno === -4094) return true;
+  return false;
+}
+
+/**
+ * round 2, MAJOR 3: a REAL spawn attempt against the launcher failed for THIS call — the exe exists per
+ * {@link isWinJobLauncherAvailable} but could not actually run (Smart App Control, AppLocker/WDAC, an AV
+ * quarantine, or a corrupt binary). git never ran on this call, so falling back for it is always safe;
+ * whether this ALSO flips the memoized availability to `false` (so every LATER call skips straight to
+ * the fallback too) depends on {@link isPermanentLauncherSpawnFailure} — round 3, MINOR-1: a transient
+ * failure falls back for only THIS call, leaving the launcher available for the next one. Logged once
+ * per outcome KIND, the first time each fires.
+ */
+let loggedWinJobLauncherSpawnFailure = false;
+function markWinJobLauncherSpawnFailed(e: unknown): void {
+  if (!isPermanentLauncherSpawnFailure(e)) {
+    // eslint-disable-next-line no-console
+    console.log(`[git] win-job-launcher.exe spawn failed transiently (${(e as Error)?.message ?? e}) — falling back to the taskkill-based kill-confirm path for THIS call only; the launcher stays available for later calls.`);
+    return;
+  }
+  winJobLauncherAvailableCache = false;
+  if (loggedWinJobLauncherSpawnFailure) return;
+  loggedWinJobLauncherSpawnFailure = true;
+  // eslint-disable-next-line no-console
+  console.log(`[git] win-job-launcher.exe exists but could not be spawned (${(e as Error)?.message ?? e}) — likely blocked (Smart App Control / AppLocker / WDAC / antivirus) or corrupt. Falling back to the taskkill-based kill-confirm path for this and every later canonical git call this process makes.`);
+}
+
+/**
+ * round 3, MINOR-2: a caller whose `signal` is ALREADY aborted by the time one of
+ * {@link rawViaWinJobLauncher}'s three fallback paths is about to spawn a replacement `git` has nothing
+ * real to kill yet — rejecting immediately as a trivially CONFIRMED abort (an empty "tree", by
+ * construction, is fully dead) is both correct and avoids starting a now-pointless `git` process just to
+ * kill it again moments later. Returns `true` iff it rejected (the caller must not proceed to spawn).
+ */
+function abortedBeforeFallbackSpawn(signal: AbortSignal, reject: (e: Error) => void): boolean {
+  if (!signal.aborted) return false;
+  reject(markConfirmedKill(new Error("Abort signal received (never spawned the fallback — already aborted)")));
+  return true;
+}
+
+/** Logged every occurrence (never deduped — see {@link rawViaWinJobLauncher}'s own doc: each one is an
+ *  independently rare, diagnostic-worthy event, not "the feature is broken"). The launcher no longer
+ *  distinguishes WHY it refused (round 2, MAJOR 2 collapsed event-collision/CreateProcessW-failed/
+ *  assign-failed into one code) — there is nothing left to discriminate on here. */
+function logWinJobLauncherCallFallback(): void {
+  // eslint-disable-next-line no-console
+  console.log("[git] win-job-launcher.exe refused this call (git was never spawned) — falling back to the direct taskkill-based path for THIS call only; the launcher stays available for later calls.");
+}
+
 /**
  * {@link killableCanonicalRaw}'s tree-kill spawn primitive. Bypasses simple-git entirely so an abort kills
  * the WHOLE process tree, not just git's own direct child: simple-git's `abortPlugin` only ever sends
@@ -215,70 +341,249 @@ export function spawnCanonicalGitTree(
   const raw = (...callArgs: unknown[]): Promise<string> => {
     const rawArgs = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     const args = [...CANONICAL_GIT_CONFIG_ARGS, ...(extraConfigArgs ?? []), ...rawArgs];
-    return new Promise<string>((resolve, reject) => {
-      const child = spawnImpl("git", args, {
+    // @decision 1718416d — win32-only Job Object containment; unavailable/missing falls back byte-identical.
+    if (process.platform === "win32" && isWinJobLauncherAvailable()) {
+      return rawViaWinJobLauncher(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs);
+    }
+    return rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs);
+  };
+  return { raw } as unknown as Pick<SimpleGit, "raw">;
+}
+
+/** The pre-1718416d direct-spawn path, extracted verbatim (never edited) so it can also serve as the
+ *  per-call fallback {@link rawViaWinJobLauncher} reaches for on a launcher-side refusal — see that
+ *  function's own doc. This is what runs on every platform when the win32 launcher is unavailable. */
+function rawViaDirectSpawn(
+  repoPath: string,
+  env: Record<string, string | undefined> | undefined,
+  signal: AbortSignal,
+  killGraceMs: number,
+  onTreeDeathSettled: ((confirmed: boolean) => void) | undefined,
+  spawnImpl: typeof spawn,
+  args: string[],
+  rawArgs: string[],
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawnImpl("git", args, {
+      cwd: repoPath,
+      env: prepareCanonicalEnv(env),
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let aborted = false;
+    let killIssued: Promise<void> | undefined;
+    child.stdout?.on("data", (d: Buffer) => { stdout += d; });
+    child.stderr?.on("data", (d: Buffer) => { stderr += d; });
+    const onAbort = () => {
+      if (settled || aborted) return;
+      aborted = true;
+      // Captured (round 3, m-b), never `void`'d: the close handler below now AWAITS this — win32's own
+      // `taskkill /T /F` completing is part of what "confirmed" means there, not merely "issued".
+      killIssued = killGateProcessTree(child);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      if (!aborted) {
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        if (code === 0) { resolve(stdout); return; }
+        const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n") || `git ${rawArgs.join(" ")} exited with code ${code}`;
+        reject(new Error(detail));
+        return;
+      }
+      settled = true;
+      void (async () => {
+        if (killIssued) await killIssued;
+        const pid = child.pid;
+        if (pid == null || process.platform === "win32") {
+          // win32: taskkill /T /F (awaited above) has now itself completed walking + killing the whole
+          // subtree, and this child's own close firing here is confirmation on top of that — no further
+          // poll available without extra tooling. Residual: a descendant reparented BEFORE taskkill ran
+          // (round 3, Code Review B-2) is unreachable by a PPID-walking taskkill and can hold this same
+          // pipe open indefinitely instead — `close` then never fires at all, and the OUTER
+          // `withTimeoutKillingChild` give-up timer (itself now tagged unconfirmed) is what catches it.
+          onTreeDeathSettled?.(true);
+          reject(markConfirmedKill(new Error("Abort signal received")));
+          return;
+        }
+        const confirmed = await confirmProcessGroupDead(pid, killGraceMs);
+        onTreeDeathSettled?.(confirmed);
+        const e = new Error(confirmed ? "Abort signal received" : "Abort signal received (process tree not fully confirmed dead)");
+        if (confirmed) markConfirmedKill(e); else markUnconfirmedKill(e);
+        reject(e);
+      })();
+    });
+  });
+}
+
+/**
+ * @decision 1718416d — never infer "confirmed" from a raw launcher exit code alone (both launcher codes
+ * sit well outside git's own 0-255 range, but gate it on THIS call's own `aborted` flag regardless); a
+ * launcher-side refusal routes back through {@link rawViaDirectSpawn} rather than git's own exit.
+ */
+function rawViaWinJobLauncher(
+  repoPath: string,
+  env: Record<string, string | undefined> | undefined,
+  signal: AbortSignal,
+  killGraceMs: number,
+  onTreeDeathSettled: ((confirmed: boolean) => void) | undefined,
+  spawnImpl: typeof spawn,
+  args: string[],
+  rawArgs: string[],
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    // 128 bits, so two concurrent canonical git calls never accidentally collide on the same
+    // abort-event name. NOT a secret (round 2, nit e): any same-user process can already read this
+    // call's own command line (e.g. via WMI) — see docs/decisions/1718416d-*.md for why that's harmless.
+    const nonce = crypto.randomBytes(16).toString("hex");
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawnImpl(resolveWinJobLauncherPath(), ["run", nonce, ...args], {
         cwd: repoPath,
         env: prepareCanonicalEnv(env),
         windowsHide: true,
-        detached: process.platform !== "win32",
+        detached: false,
       });
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      let aborted = false;
-      let killIssued: Promise<void> | undefined;
-      child.stdout?.on("data", (d: Buffer) => { stdout += d; });
-      child.stderr?.on("data", (d: Buffer) => { stderr += d; });
-      const onAbort = () => {
-        if (settled || aborted) return;
-        aborted = true;
-        // Captured (round 3, m-b), never `void`'d: the close handler below now AWAITS this — win32's own
-        // `taskkill /T /F` completing is part of what "confirmed" means there, not merely "issued".
-        killIssued = killGateProcessTree(child);
-      };
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-      child.on("error", (e) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        reject(e);
-      });
-      child.on("close", (code) => {
-        if (settled) return;
-        if (!aborted) {
-          settled = true;
-          signal.removeEventListener("abort", onAbort);
-          if (code === 0) { resolve(stdout); return; }
-          const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n") || `git ${rawArgs.join(" ")} exited with code ${code}`;
-          reject(new Error(detail));
-          return;
-        }
-        settled = true;
+    } catch (e) {
+      // round 2 (found via real-spawn testing against a genuine non-executable file, not a simulation):
+      // Node's `spawn()` can throw SYNCHRONOUSLY on Windows for a bad-executable-format target, instead
+      // of returning a child that later emits an async "error" event — so `child.on("error", ...)` below
+      // is NEVER reached (there's no `child` to attach it to). Handle this identically to that async path:
+      // fall back for THIS call, flip availability for later ones. Never let this throw escape and reject
+      // the whole call outright, which would skip the fallback MAJOR 3 exists to provide.
+      markWinJobLauncherSpawnFailed(e);
+      void (async () => {
+        if (abortedBeforeFallbackSpawn(signal, reject)) return; // round 3, MINOR-2
+        try {
+          resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs));
+        } catch (e2) { reject(e2); }
+      })();
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let aborted = false;
+    let spawnedOk = false; // round 3, MAJOR-A — see the "error" handler below for why this matters.
+    let killIssued: Promise<void> | undefined;
+    child.on("spawn", () => { spawnedOk = true; });
+    child.stdout?.on("data", (d: Buffer) => { stdout += d; });
+    child.stderr?.on("data", (d: Buffer) => { stderr += d; });
+    const onAbort = () => {
+      if (settled || aborted) return;
+      aborted = true;
+      killIssued = signalWinJobLauncherAbort(nonce, spawnImpl, child);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      if (!spawnedOk) {
+        // round 2, MAJOR 3: a spawn error here (and the child never reached "spawn" at all) means the
+        // exe exists (isWinJobLauncherAvailable() already checked that) but could not actually run —
+        // Smart App Control, AppLocker/WDAC, an AV quarantine, or a corrupt binary. git never ran on
+        // THIS call either way, so fall back for it safely, and flip the memoized availability so later
+        // calls don't keep re-attempting a spawn already shown to fail.
+        markWinJobLauncherSpawnFailed(e);
         void (async () => {
-          if (killIssued) await killIssued;
-          const pid = child.pid;
-          if (pid == null || process.platform === "win32") {
-            // win32: taskkill /T /F (awaited above) has now itself completed walking + killing the whole
-            // subtree, and this child's own close firing here is confirmation on top of that — no further
-            // poll available without extra tooling. Residual: a descendant reparented BEFORE taskkill ran
-            // (round 3, Code Review B-2) is unreachable by a PPID-walking taskkill and can hold this same
-            // pipe open indefinitely instead — `close` then never fires at all, and the OUTER
-            // `withTimeoutKillingChild` give-up timer (itself now tagged unconfirmed) is what catches it.
-            onTreeDeathSettled?.(true);
-            reject(markConfirmedKill(new Error("Abort signal received")));
-            return;
-          }
-          const confirmed = await confirmProcessGroupDead(pid, killGraceMs);
-          onTreeDeathSettled?.(confirmed);
-          const e = new Error(confirmed ? "Abort signal received" : "Abort signal received (process tree not fully confirmed dead)");
-          if (confirmed) markConfirmedKill(e); else markUnconfirmedKill(e);
-          reject(e);
+          if (killIssued) await killIssued; // best-effort; nothing real to wait on if it never truly spawned
+          if (abortedBeforeFallbackSpawn(signal, reject)) return; // round 3, MINOR-2
+          try {
+            resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs));
+          } catch (e2) { reject(e2); }
         })();
-      });
+        return;
+      }
+      // round 3, MAJOR-A: the child DID spawn — Node also emits "error" on a still-RUNNING child when
+      // `.kill()` fails with anything but ESRCH (e.g. EPERM), and `signalWinJobLauncherAbort`'s own
+      // `killLauncherDirectly()` calls `launcherChild.kill()` on a missed/failed --signal. Falling back
+      // here would be UNSAFE: the real launcher (and the git it may still be running) could still be
+      // alive, so spawning a SECOND, independent git on the same repo is not idempotent, and whichever
+      // one's verdict we'd report would be the WRONG one. Never fall back and never flip availability
+      // for this shape — we simply don't know the real tree's fate, so fail closed as unconfirmed.
+      void (async () => {
+        if (killIssued) await killIssued;
+        reject(markUnconfirmedKill(new Error(`win-job-launcher.exe reported an error after spawning (its kill may have failed): ${(e as Error)?.message ?? e}`)));
+      })();
     });
-  };
-  return { raw } as unknown as Pick<SimpleGit, "raw">;
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      if (code === LAUNCHER_EXIT_REFUSED) {
+        logWinJobLauncherCallFallback();
+        void (async () => {
+          if (killIssued) await killIssued; // best-effort; git was never actually spawned on this path
+          if (abortedBeforeFallbackSpawn(signal, reject)) return; // round 3, MINOR-2
+          try {
+            resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs));
+          } catch (e) { reject(e); }
+        })();
+        return;
+      }
+      if (!aborted) {
+        // We did not request a kill — every exit code passes through as git's OWN, exactly like the
+        // direct-spawn path. Never infer "confirmed" from LAUNCHER_EXIT_CONFIRMED_KILLED here (round 3
+        // nit — this comment used to cite the retired 214/215 codes); see this function's own doc.
+        if (code === 0) { resolve(stdout); return; }
+        const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n") || `git ${rawArgs.join(" ")} exited with code ${code}`;
+        reject(new Error(detail));
+        return;
+      }
+      void (async () => {
+        if (killIssued) await killIssued;
+        const confirmed = code === LAUNCHER_EXIT_CONFIRMED_KILLED;
+        onTreeDeathSettled?.(confirmed);
+        const e = new Error(confirmed ? "Abort signal received" : "Abort signal received (process tree not fully confirmed dead)");
+        if (confirmed) markConfirmedKill(e); else markUnconfirmedKill(e);
+        reject(e);
+      })();
+    });
+  });
+}
+
+/**
+ * Best-effort — the real outcome is observed via the MAIN launcher's own `close` event (see
+ * {@link rawViaWinJobLauncher}), never via this signaler invocation's own exit code — EXCEPT that a
+ * non-zero/missing signal (round 2, MINOR a) means the main launcher (`launcherChild`) was never
+ * actually told to abort, so this kills it directly instead: its job handle closing on exit fires
+ * KILL_ON_JOB_CLOSE on the whole tree, same as a clean signal, just without the launcher's own
+ * TerminateJobObject confirmation poll — so the caller correctly reports this path as UNCONFIRMED.
+ * Mirrors the shape (and the `spawnImpl` test seam) {@link killGateProcessTree} uses for taskkill.
+ */
+function signalWinJobLauncherAbort(nonce: string, spawnImpl: typeof spawn, launcherChild: ReturnType<typeof spawn>): Promise<void> {
+  return new Promise((resolve) => {
+    const killLauncherDirectly = () => {
+      try { launcherChild.kill(); } catch { /* already gone */ }
+    };
+    try {
+      const signaler = spawnImpl(resolveWinJobLauncherPath(), ["--signal", nonce], { windowsHide: true, detached: false });
+      signaler.on("close", (code) => {
+        if (code !== 0) killLauncherDirectly();
+        resolve();
+      });
+      signaler.on("error", () => {
+        killLauncherDirectly();
+        resolve();
+      });
+    } catch {
+      killLauncherDirectly();
+      resolve();
+    }
+  });
 }
 
 /**

@@ -41,6 +41,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build daemon (pnpm build), 2) node test/union-merge-kill-confirm.mjs
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { pollUntil, assertNeverWithControl } from "./_timing-guard.mjs";
@@ -50,6 +51,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const { mergeMainIntoWorktree } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
 const { activeMergeQuarantineFor, assertRepoNotQuarantined } = await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
+const { setWinJobLauncherOverrideForTest } = await import(pathToFileURL(path.join(distGitDir, "bounded.js")).href);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -281,6 +283,19 @@ const tag = `${process.pid}-${Date.now()}`;
 //    project's own sessions/service.ts code splices in (`assertRepoNotQuarantined`) names the concrete
 //    remedy — never new prose written at the call site. ────────────────────────────────────────────────
 {
+  // @decision 1718416d — this scenario's whole point is a hook shape that ESCAPES taskkill's PPID walk.
+  // Card 1718416d's win-job-launcher.exe genuinely CONTAINS it (proven separately by
+  // test/win-job-launcher-spawn.mjs), so on a host where it's built this block no longer produces an
+  // unconfirmed kill at all — every assertion below would fail for the RIGHT reason while looking like a
+  // regression. Force the pre-1718416d taskkill path for THIS block only, via the test-only override —
+  // NEVER rename/unlink/overwrite the REAL exe (it backs the self-hosting daemon live, the merge gate
+  // runs test files concurrently, and a gate-timeout SIGKILL would skip any rename-based cleanup
+  // forever) — restored in `finally`.
+  const launcherExe = path.join(__dirname, "..", "assets", "native", "win-job-launcher.exe");
+  const launcherExeExistedAtStart = fs.existsSync(launcherExe);
+  const launcherExeHashAtStart = launcherExeExistedAtStart ? crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex") : null;
+  setWinJobLauncherOverrideForTest(null);
+  try {
   const { repo, wt } = makeRepoAndWorktree(`g2-${tag}`);
   const markerName = "escaped-descendant.marker";
   // Comfortably past KILL_CONFIRM_WINDOW_MS's own kill-timer + its own give-up grace window (killGraceMs
@@ -345,6 +360,18 @@ const tag = `${process.pid}-${Date.now()}`;
   const autoClearPollMs = 3_000;
   const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: autoClearPollMs });
   console.log(`[green-2] info: quarantine auto-cleared within ${autoClearPollMs}ms poll: ${autoCleared} (best-effort — see note above)`);
+  } finally {
+    setWinJobLauncherOverrideForTest(undefined);
+  }
+  // The real exe was NEVER touched by this block — assert it, not just assume it.
+  const launcherExeExistedAtEnd = fs.existsSync(launcherExe);
+  check("[green-2] the real win-job-launcher.exe's existence is unchanged across this block",
+    launcherExeExistedAtEnd === launcherExeExistedAtStart);
+  if (launcherExeExistedAtStart && launcherExeExistedAtEnd) {
+    const launcherExeHashAtEnd = crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex");
+    check("[green-2] the real win-job-launcher.exe's content hash is UNCHANGED (this block never touched it)",
+      launcherExeHashAtEnd === launcherExeHashAtStart);
+  }
 }
 
 // ── GREEN 3 — a hook that is slow enough to trigger the kill-timer, but whose own work (the merge commit

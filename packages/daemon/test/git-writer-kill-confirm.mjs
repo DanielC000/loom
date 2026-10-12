@@ -16,6 +16,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // Run: 1) build daemon (pnpm build), 2) node test/git-writer-kill-confirm.mjs
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
@@ -32,6 +34,29 @@ requireHermeticEnv();
 
 const { GitWriter } = await import("../dist/git/writer.js");
 const { activeMergeQuarantineFor, enterMergeQuarantine, clearMergeQuarantine } = await import("../dist/git/merge-quarantine.js");
+const { setWinJobLauncherOverrideForTest } = await import("../dist/git/bounded.js");
+
+// @decision 1718416d — this WHOLE file is built on a hook shape that ESCAPES taskkill's PPID walk (see
+// the header doc above, which names merge-commit-kill-confirm.mjs scenario 5 as its source). Card
+// 1718416d's win-job-launcher.exe genuinely CONTAINS that shape (proven separately by
+// test/win-job-launcher-spawn.mjs), so on a host where it's built this file's own escape no longer
+// produces an unconfirmed kill — every assertion below would fail for the RIGHT reason (the bug is
+// fixed) while looking like a regression. Force the pre-1718416d taskkill path for this file's whole
+// run via the test-only override (NEVER rename/unlink/overwrite the REAL exe — it backs the self-
+// hosting daemon live, the merge gate runs test files concurrently, and a gate-timeout SIGKILL would
+// skip any rename-based cleanup forever), restored at the very end, so it keeps testing GitWriter's own
+// quarantine wiring independent of whether a given host happens to have the launcher built.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const launcherExe = path.join(__dirname, "..", "assets", "native", "win-job-launcher.exe");
+const launcherExeExistedAtStart = fs.existsSync(launcherExe);
+const launcherExeHashAtStart = launcherExeExistedAtStart ? crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex") : null;
+setWinJobLauncherOverrideForTest(null);
+// Best-effort safety net: an uncaught exception anywhere below must not leave the override stuck —
+// restore on ANY process exit, not just the clean path at the bottom of this file. Since the override
+// is in-memory only (never touches disk), this is purely about not leaving a LATER import of this same
+// module (within one process) stuck on the override — unlike a renamed file, it can never outlive the
+// process itself.
+process.on("exit", () => { try { setWinJobLauncherOverrideForTest(undefined); } catch { /* best-effort */ } });
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -252,6 +277,19 @@ check("[6] third's `warning` text also mentions the residue count", typeof third
 const cwdEntriesAfter = fs.readdirSync(process.cwd());
 check(`[cwd] the test created no new entries in the CWD (before: [${cwdEntriesBefore.join(", ")}], after: [${cwdEntriesAfter.join(", ")}])`,
   cwdEntriesAfter.length === cwdEntriesBefore.length && cwdEntriesAfter.every((e) => cwdEntriesBefore.includes(e)));
+
+setWinJobLauncherOverrideForTest(undefined);
+
+// The real exe was NEVER touched by this file (only an in-memory override was) — assert it, not just
+// assume it.
+const launcherExeExistedAtEnd = fs.existsSync(launcherExe);
+check("[launcher] the real win-job-launcher.exe's existence is unchanged across this test",
+  launcherExeExistedAtEnd === launcherExeExistedAtStart);
+if (launcherExeExistedAtStart && launcherExeExistedAtEnd) {
+  const launcherExeHashAtEnd = crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex");
+  check("[launcher] the real win-job-launcher.exe's content hash is UNCHANGED (this test never touched it)",
+    launcherExeHashAtEnd === launcherExeHashAtStart);
+}
 
 console.log(failures === 0
   ? "\nALL PASS — GitWriter.commit()/checkout()/createBranch() are kill-confirmed: a quarantine raised MID-SEQUENCE (between add and commit) is caught by the NEW per-call re-check (section [0]); an unconfirmed kill quarantines the canonical repo, and every later call on it (all three methods) refuses — via the pre-existing entry check — until the escaped descendant's own eventual exit lets the auto-clear fire; once cleared, a fresh commit surfaces any swept-in residue structurally (section [6]); `paths`-scoped residue now matches REAL git pathspec semantics across trailing-slash/./glob spellings, with no false positives on an unstaged edit or untracked file (section [7])."

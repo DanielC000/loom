@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
+    "build:native": "node scripts/build-native-launcher.mjs",
     "test:mcp": "node test/mcp-scope.mjs",
     "test:orch-scope": "node test/orch-scope.mjs",
     "test:orch-spawn": "node test/orch-spawn.mjs",

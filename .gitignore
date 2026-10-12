@@ -24,6 +24,10 @@ spike/
 __pycache__/
 *.pyc
 
+# win-job-launcher build output (scripts/build-native-launcher.mjs, from native/win-job-launcher/
+# launcher.cs) — compiled, never committed; the SOURCE lives in packages/daemon/native/ and IS tracked.
+packages/daemon/assets/native/
+
 # Transient verify-run SQLite DBs (migration/backup verification) + their sidecars
 tmp-*verify.db*
 
