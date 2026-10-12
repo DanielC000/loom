@@ -13,6 +13,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged } from "./_tmp-fixture.mjs";
+import { envWithoutPnpmScriptRecursionMarkers } from "./_nested-pnpm-env.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -119,7 +120,11 @@ const run = async () => {
     const command = `pnpm --filter @loom/daemon test:daemon --only-file=${JSON.stringify(spacedOnlyFilePath)}`;
     let child;
     try {
-      child = spawn(command, { cwd: repoRoot, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+      // Card e2df9f8e: this test file is itself a hermetic member of whatever `pnpm --filter
+      // @loom/daemon test:daemon` invocation discovered it — scrub pnpm's own script-recursion markers
+      // (see ./_nested-pnpm-env.mjs) so THIS nested same-script invocation isn't mistaken for a
+      // recursive one and silently resolved to an empty package selection.
+      child = spawn(command, { cwd: repoRoot, shell: true, stdio: ["ignore", "pipe", "pipe"], env: envWithoutPnpmScriptRecursionMarkers() });
     } catch (err) {
       resolve({ spawnThrew: true, code: null, out: "", err: String(err) });
       return;

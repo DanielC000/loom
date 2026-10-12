@@ -31,6 +31,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged } from "./_tmp-fixture.mjs";
+import { envWithoutPnpmScriptRecursionMarkers } from "./_nested-pnpm-env.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -163,8 +164,12 @@ const run = async () => {
       let child;
       try {
         // Mirrors gate-runner.ts's own real gate-step spawn EXACTLY (shell:true, cwd at repo root — a
-        // reduced gate's steps run with cwd=worktreePath, which for this test IS the repo root).
-        child = spawn(lastStep, { cwd: repoRoot, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+        // reduced gate's steps run with cwd=worktreePath, which for this test IS the repo root). Card
+        // e2df9f8e: this test file is itself a hermetic member of whatever `pnpm --filter @loom/daemon
+        // test:daemon` invocation discovered it — scrub pnpm's own script-recursion markers (see
+        // ./_nested-pnpm-env.mjs) so THIS nested same-script invocation isn't mistaken for a recursive
+        // one and silently resolved to an empty package selection.
+        child = spawn(lastStep, { cwd: repoRoot, shell: true, stdio: ["ignore", "pipe", "pipe"], env: envWithoutPnpmScriptRecursionMarkers() });
       } catch (err) {
         resolve({ spawnThrew: true, code: null, out: "", err: String(err) });
         return;
