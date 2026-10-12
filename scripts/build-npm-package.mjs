@@ -41,6 +41,25 @@ export const PACKAGED_ROOTS = {
   daemonAssets: path.join(repoRoot, "packages/daemon/assets"),
 };
 
+// Card 01d30507: `packages/daemon/test/graceful-teardown-hard-exit-backstop.mjs` used to write its
+// RED/GREEN dist-patch proofs as a uniquely-named SIBLING of dist/graceful-teardown.js, directly inside
+// `PACKAGED_ROOTS.daemonDist` — a gate-timeout SIGKILL could skip that sibling's own cleanup and leave it
+// behind. That test now copies its own patch target into a dir OUTSIDE dist/ instead (never writes here
+// at all), so this should never fire — kept as a belt-and-braces check since step 4 below copies
+// `daemonDist` WHOLESALE with no filtering (`fs.cpSync`, no include/exclude list), so any stray file
+// sitting there ships verbatim in the published tarball regardless of how it got there. Exported (like
+// `PACKAGED_ROOTS`) so a test can exercise this pure check against a throwaway fixture dir without
+// needing to run the whole packaging script.
+export function findStrayDistShims(daemonDistDir) {
+  let names;
+  try {
+    names = fs.readdirSync(daemonDistDir);
+  } catch {
+    return [];
+  }
+  return names.filter((name) => /^graceful-teardown\.(clockshim|winrace)-/.test(name));
+}
+
 // Everything below is the actual packaging side effects (build/verify/stage/pack) — guarded so this
 // module can be IMPORTED (for PACKAGED_ROOTS above) without running any of it. Only fires when this
 // file is executed directly (`node scripts/build-npm-package.mjs`), never on import.
@@ -127,6 +146,23 @@ for (const [label, p] of [
         `--no-build). If this fires on a build you believe is CORRECT — e.g. a new asset type the manifest ` +
         `doesn't track — check what actually changed in packages/web's build output before assuming it's ` +
         `this guard that's wrong.`,
+    );
+    process.exit(1);
+  }
+}
+
+// 2c. Refuse to ship a stray dist-patch TEST SHIM (card 01d30507) — same loud-refusal posture as the
+// orphaned-web-bundle guard above (2b), not a silent exclude: a stray test-patch file reaching a
+// published tarball is a real, if rare, defect worth stopping the release for rather than quietly
+// stripping and risking nobody ever noticing the underlying cleanup failure that produced it.
+{
+  const strays = findStrayDistShims(daemonDist);
+  if (strays.length > 0) {
+    console.error(
+      `[pack:npm] refusing to package ${daemonDist} — found stray dist-patch test shim file(s): ` +
+        `${strays.join(", ")}. These come from a graceful-teardown-hard-exit-backstop.mjs run that did ` +
+        "not clean up after itself (see card 01d30507) — delete them, confirm the test still passes " +
+        "cleanly, then rebuild (`pnpm --filter @loom/daemon build`) before packaging again.",
     );
     process.exit(1);
   }

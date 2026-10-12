@@ -36,3 +36,9 @@ tmp-*verify.db*
 # daemon build; never hand-edit those) and any personal, never-bundled skill dirs a dev/owner keeps here
 # too (e.g. ideate). Never commit this dir.
 /.claude/skills/
+
+# Runtime scratch dir graceful-teardown-hard-exit-backstop.mjs mkdtemps under packages/daemon/ (never
+# os.tmpdir() — see that file's own header for why) to patch a copy of graceful-teardown.js's own
+# relative-import closure without ever touching the real packages/daemon/dist (card 01d30507). Normally
+# cleaned up by the test itself; gitignored as a backstop in case a run is killed before cleanup.
+packages/daemon/.tmp-dist-shim-*/

@@ -50,6 +50,25 @@
 // Date.now() before arming (write-side proof). Every check measures the durable watchdog RECORD FILE's
 // appearance time, never process-exit timing, to stay immune to win32 kill-path overhead under load.
 //
+// Round 7 (card 01d30507): EVERY patch technique in this file (the win32 PS-script patch and both round-6
+// clock patches) used to write its patched module as a unique SIBLING FILE directly inside the real
+// packages/daemon/dist — the merge gate runs test files concurrently and a gate-timeout SIGKILL can skip
+// that sibling's own `finally` cleanup, leaving a stray `graceful-teardown.{clockshim,winrace}-*.js` shim
+// in dist, which scripts/build-npm-package.mjs then packages wholesale into a published loomctl tarball.
+// Fixed by `withDistMutation()`: it copies graceful-teardown.js's whole relative-import closure (traced
+// transitively from its own `^import`/`^export ... from`/`import(...)` lines, comment-stripped first) into
+// a fresh mkdtemp'd dir, patches ONLY the copied graceful-teardown.js, and imports the copy. The copy is
+// rooted under packages/daemon/ (NOT os.tmpdir() — a first draft tried that and broke bare-specifier
+// resolution for a closure member importing a real npm dep; see DAEMON_PKG_ROOT's own comment below), so
+// even a SIGKILLed lane leaks (at worst) an untracked directory INSIDE the worktree, never a file inside
+// the repo's own dist tree. That leftover is gitignored (root .gitignore) so it never shows up in `git
+// status`/the merge gate's dirty-worktree check/working-tree-eol-guard's untracked-file scan — verified
+// directly (see sweepStaleDistShimDirs's own comment below) — and swept by pid-liveness at this file's
+// own next run, the same shape `sweepStaleDistSiblings`/`isPidAlive` (the prior round's stale-sibling-
+// in-dist sweep, since removed — the dist/ hazard they policed no longer exists) used to police. A final
+// check asserts no stray `graceful-teardown.{clockshim,winrace}-*.js` shim exists in the real
+// dist/ after this file's own run.
+//
 // HERMETIC: no real daemon boot (dist/index.js is never spawned), no *-real-spawn* shape. Every real
 // child process here is one of this file's own tiny fixtures under test/fixtures/, spawned directly, and
 // each of THOSE fixtures now also calls requireHermeticEnv() itself (round 3 finding 8) — a real incident
@@ -60,8 +79,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mjs";
+import { useOwnLoomHome, finishAndExit, registerForCleanup, unregister } from "./_tmp-fixture.mjs";
 import { pollUntil } from "./_timing-guard.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 const loomHome = useOwnLoomHome("loom-graceful-teardown-backstop-");
 const {
@@ -85,40 +105,146 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const DIST_DIR = path.join(__dirname, "..", "dist");
 const REAL_DIST_PATH = path.join(DIST_DIR, "graceful-teardown.js");
+const DAEMON_PKG_ROOT = path.join(__dirname, ".."); // packages/daemon — see DIST_SHIM_TMP_ROOT below
 
-// Shared by every sibling-dist-patch technique in this file (win32 PS-script patch below, and the round 6
-// clock-monotonicity patch) — hoisted here (was previously nested inside the win32-only block) so both can
-// use the SAME pid-liveness check without duplicating it.
-function isPidAlive(pid) {
+// ---------------------------------------------------------------------------------------------------
+// Card 01d30507: every sibling-dist-patch technique in this file used to write its patched module
+// straight into a `graceful-teardown.<prefix>-<pid>-<rand>.js` SIBLING of the REAL installed
+// dist/graceful-teardown.js. The merge gate runs test files CONCURRENTLY and can SIGKILL a lane on
+// timeout, skipping that sibling's own `finally` cleanup — a leftover shim then sits in the real
+// packages/daemon/dist, which scripts/build-npm-package.mjs packages wholesale (fs.cpSync of the WHOLE
+// directory, no filtering at all — verified by reading that script), so a stray shim could ship inside a
+// published loomctl tarball. Fixed by copying dist/graceful-teardown.js's own minimal RELATIVE-IMPORT
+// CLOSURE into a fresh mkdtemp'd dir (never DIST_DIR), patching the COPY, and importing the copy — so
+// even a SIGKILLed lane leaks (at worst) a stray directory outside dist/, never a file inside the repo's
+// own dist tree (`PACKAGED_ROOTS.daemonDist` in scripts/build-npm-package.mjs is scoped to DIST_DIR
+// alone — nothing else under packages/daemon/ is ever packaged).
+//
+// ⚠ The copy dir is rooted under DAEMON_PKG_ROOT (packages/daemon/), NOT `os.tmpdir()` as a first draft
+// of this fix tried — verified directly: a copy placed under `os.tmpdir()` throws
+// `ERR_MODULE_NOT_FOUND: Cannot find package 'chokidar'` the moment the closure reaches
+// vault/versioner.js, because Node's ESM bare-specifier resolution walks up from the IMPORTING FILE's
+// own location looking for a `node_modules` ancestor — exactly the footgun this repo's own CLAUDE.md
+// names for a scratch script run from an unrelated temp dir. Rooting the copy under packages/daemon/
+// instead means that walk reaches packages/daemon/node_modules exactly as the real dist/** already does,
+// while still being safely outside DIST_DIR (so it's still never packaged).
+//
+// The closure is computed ONCE below (comment-stripped first — see _strip-comments.mjs's own doc for why
+// an unstripped scan can be fooled by a comment that happens to contain `from "..."` or `import("...")`
+// prose, which cost a round of this exact fix) — see the closure's computation just below, and this
+// file's own `worker_report` on the card for the full listed closure.
+// ---------------------------------------------------------------------------------------------------
+
+// Matches a real `^import ...` or `^export ... from "..."` statement's relative specifier (never a
+// comment mentioning the same shape in prose — see the header above). Anchored to the start of a
+// (comment-stripped) line, per the card's own instruction.
+const RELATIVE_IMPORT_FROM_RE = /^(?:import|export)\b[^\n]*?\bfrom\s+["']((?:\.\.?\/)[^"']+)["']/gm;
+// Matches a real `import("...")` dynamic-import call with a plain string literal, same anchoring.
+const RELATIVE_DYNAMIC_IMPORT_RE = /^[^\n]*\bimport\(\s*["']((?:\.\.?\/)[^"']+)["']\s*\)/gm;
+
+// Computes the full transitive closure of `entryRelPath`'s own relative imports (paths relative to
+// DIST_DIR), by reading each file's `^import`/`^export ... from`/`import(...)` lines transitively — a
+// bare npm package specifier (e.g. "chokidar", "simple-git") never starts with "./" or "../" and is
+// correctly left unfollowed, since node_modules is already present wherever the copy is imported from.
+function relativeImportClosure(entryRelPath) {
+  const visited = new Set();
+  const queue = [entryRelPath];
+  while (queue.length) {
+    const rel = queue.shift();
+    if (visited.has(rel)) continue;
+    visited.add(rel);
+    const stripped = stripComments(fs.readFileSync(path.join(DIST_DIR, rel), "utf8"));
+    const dir = path.dirname(rel);
+    for (const re of [RELATIVE_IMPORT_FROM_RE, RELATIVE_DYNAMIC_IMPORT_RE]) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(stripped))) {
+        let spec = m[1];
+        if (!spec.endsWith(".js") && !spec.endsWith(".json")) spec += ".js";
+        const resolvedRel = path.normalize(path.join(dir, spec)).split(path.sep).join("/");
+        if (!visited.has(resolvedRel)) queue.push(resolvedRel);
+      }
+    }
+  }
+  return [...visited].sort();
+}
+
+// Computed once, used by every withDistMutation() call below. See this file's own worker_report for the
+// full listed closure (31 files, including graceful-teardown.js itself, as traced 2026-10-10).
+const GRACEFUL_TEARDOWN_CLOSURE = relativeImportClosure("graceful-teardown.js");
+
+// Prefix for the mkdtemp'd copy dir, rooted under DAEMON_PKG_ROOT (see the header comment above for why
+// NOT os.tmpdir()) — gitignored (root .gitignore: `packages/daemon/.tmp-dist-shim-*/`) since it's pure
+// runtime scratch, never meant to be tracked. Embeds this process's own pid (before mkdtemp's own random
+// suffix) so a stale leftover from a KILLED prior run — one whose `finally` above never got to run — can
+// be told apart from a live sibling run's own dir; see sweepStaleDistShimDirs() just below.
+const DIST_SHIM_TMP_PREFIX = path.join(DAEMON_PKG_ROOT, `.tmp-dist-shim-${process.pid}-`);
+
+// Manager review (card 01d30507): a gate-timeout SIGKILL can still skip withDistMutation()'s own
+// `finally` and leave a `.tmp-dist-shim-<pid>-<rand>/` directory sitting inside the worktree as an
+// UNTRACKED path. The root .gitignore entry above already keeps that invisible to `git status
+// --porcelain` and to working-tree-eol-guard.mjs's untracked-file scan (both read `git ls-files
+// --others --exclude-standard`, which honours .gitignore) — verified directly: a hand-planted leftover
+// dir with a bare-LF .js file inside produced a clean `git status --porcelain` and a clean 30/30 guard
+// run. This sweep is the SECOND half: actually reclaiming the disk space a crashed prior run left behind,
+// the same pid-liveness approach the removed `sweepStaleDistSiblings`/`isPidAlive` used for the old
+// sibling-in-dist shim files. Scoped STRICTLY to `DAEMON_PKG_ROOT`'s own immediate children matching this
+// exact prefix shape — never a recursive scan, never any other directory.
+function isTmpDistShimPidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
   } catch (err) {
     // `EPERM` means the pid EXISTS but this process lacks permission to signal it (a different user's
-    // process, or a privilege gap) — that's still ALIVE, never grounds to delete its file. `ESRCH` (no
-    // such process) is the one outcome that actually means dead, which is what the bare `false` below
-    // still covers.
+    // process, or a privilege gap) — that's still ALIVE, never grounds to delete its directory. `ESRCH`
+    // (no such process) is the one outcome that actually means dead.
     return err?.code === "EPERM";
   }
 }
-
-// Sweeps a stale `graceful-teardown.<prefix>-<pid>-<rand>.js` sibling left behind by a prior run that
-// crashed/was killed before its own `finally` cleanup ran (a packed npm tarball never has one in the first
-// place, so this only ever prunes test-run debris). Never removes a LIVE sibling's file — a concurrently
-// running copy of this same test file has its own pid baked into its own filename and stays untouched.
-function sweepStaleDistSiblings(prefix) {
+function sweepStaleDistShimDirs() {
   let names = [];
-  try { names = fs.readdirSync(DIST_DIR); } catch { return 0; }
-  const re = new RegExp(`^graceful-teardown\\.${prefix}-(\\d+)-[a-z0-9]+\\.js$`);
+  try { names = fs.readdirSync(DAEMON_PKG_ROOT); } catch { return 0; }
+  const re = /^\.tmp-dist-shim-(\d+)-[A-Za-z0-9]+$/; // mkdtempSync's 6-char suffix alphabet is A-Za-z0-9, not lowercase-only
   let removed = 0;
   for (const name of names) {
     const m = re.exec(name);
     if (!m) continue;
     const pid = Number(m[1]);
-    if (pid === process.pid || isPidAlive(pid)) continue;
-    try { fs.unlinkSync(path.join(DIST_DIR, name)); removed++; } catch { /* best-effort */ }
+    if (pid === process.pid || isTmpDistShimPidAlive(pid)) continue;
+    try { fs.rmSync(path.join(DAEMON_PKG_ROOT, name), { recursive: true, force: true }); removed++; } catch { /* best-effort */ }
   }
   return removed;
+}
+{
+  const sweptCount = sweepStaleDistShimDirs();
+  if (sweptCount > 0) console.log(`  (swept ${sweptCount} stale .tmp-dist-shim-*/ dir(s) with no live owner)`);
+}
+
+/**
+ * Copies dist/graceful-teardown.js's whole relative-import closure into a fresh mkdtemp'd dir under
+ * packages/daemon/ (registered via `registerForCleanup` so even a SIGKILLed process's crash-survived
+ * directory is swept by this file's own guaranteed-cleanup registry on a normal exit path; see the
+ * header comment above for why this can't be `os.tmpdir()`), preserving the relative directory structure
+ * so every copied file's own relative imports still resolve to a sibling in the SAME copy. `patchFn
+ * (originalText)` is applied to the copied graceful-teardown.js only (every other file in the closure is
+ * copied byte-identical); `fn(entryFileUrl)` is then called with a pathToFileURL of the copy's own
+ * graceful-teardown.js. The whole copy is removed in `finally` — never mutates DIST_DIR itself.
+ */
+async function withDistMutation(patchFn, fn) {
+  const tmpDir = fs.mkdtempSync(DIST_SHIM_TMP_PREFIX);
+  registerForCleanup(tmpDir);
+  try {
+    for (const rel of GRACEFUL_TEARDOWN_CLOSURE) {
+      const srcText = fs.readFileSync(path.join(DIST_DIR, rel), "utf8");
+      const destAbs = path.join(tmpDir, rel);
+      fs.mkdirSync(path.dirname(destAbs), { recursive: true });
+      fs.writeFileSync(destAbs, rel === "graceful-teardown.js" ? patchFn(srcText) : srcText);
+    }
+    return await fn(pathToFileURL(path.join(tmpDir, "graceful-teardown.js")).href);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (!fs.existsSync(tmpDir)) unregister(tmpDir); // see _tmp-fixture.mjs's own unregister() doc: only after proven gone
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -515,18 +641,6 @@ for (const intendedExitCode of [0, 75]) {
 // RED/GREEN numbers and why.
 // ---------------------------------------------------------------------------------------------------
 if (process.platform === "win32") {
-  const distDir = DIST_DIR;
-
-  // Card 0dc09fab round 2 item 4: a stale `graceful-teardown.winrace-<pid>-*.js` sibling can survive a
-  // prior run that crashed/was killed before its own `finally` cleanup ran (and a packed npm tarball would
-  // never have one in the first place, so this only ever prunes test-run debris) — sweep anything whose
-  // pid is no longer alive before this run creates its own. Never removes a LIVE sibling's file: another
-  // concurrently-running copy of this same test file (the load-robustness proof) has its own pid baked
-  // into its own filename and stays untouched. (`isPidAlive`/the sweep mechanics are shared — see their
-  // hoisted definitions above, used by both this block and the round 6 clock-monotonicity patch below.)
-  const sweptCount = sweepStaleDistSiblings("winrace");
-  if (sweptCount > 0) console.log(`  (swept ${sweptCount} stale graceful-teardown.winrace-*.js sibling(s) with no live owner)`);
-
   // Card 0dc09fab round 2 item 1: the decision-point signal is a DURABLE FILE WRITE (the same
   // fs.writeSync-on-an-explicitly-opened-fd technique the REAL production record uses, never a
   // console.log/process.stdout.write) — confirmed directly that it has to be: a FIRST version of this
@@ -540,15 +654,16 @@ if (process.platform === "win32") {
   // that already-in-scope `recordPath`/`fsMod` pair rather than inventing a second mechanism.
   const WIN32_DECISION_MARKER_PATH = `${HARD_SHUTDOWN_WATCHDOG_RECORD_PATH}.win32-decision-marker`;
 
-  // Round 5 (card 0dc09fab): write the patched worker source to a UNIQUE SIBLING FILE under dist/, never
-  // mutate the shared installed graceful-teardown.js in place — that file is imported by OTHER
-  // concurrently-running test files/fixtures (e.g. daemon-restart-hard-exit-watchdog.mjs, and THIS SAME
-  // test file running concurrently with itself under the load-robustness proof below), so an in-place
-  // mutation would race them. The sibling file lives in the SAME directory so its own relative imports
-  // (./paths.js, ./vault/versioner.js, ./git/merge-danger-window.js) still resolve to the real, unmutated
-  // siblings. The fixture takes an OPTIONAL 4th argv — a module path/URL to import armHardShutdownWatchdog
-  // from instead of the real dist path — so every EXISTING caller (which never passes a 4th arg) is
-  // byte-identical.
+  // Card 01d30507: this patch used to write the patched worker source to a UNIQUE SIBLING FILE directly
+  // under the real dist/ (never mutating the shared installed graceful-teardown.js in place — that file
+  // is imported by OTHER concurrently-running test files/fixtures, e.g. daemon-restart-hard-exit-
+  // watchdog.mjs, and THIS SAME test file running concurrently with itself under the load-robustness
+  // proof — so an in-place mutation would race them). That sibling-in-dist/ technique is now replaced by
+  // withDistMutation() (see its own doc above): the WHOLE relative-import closure is copied into an
+  // os.mkdtempSync() dir instead, so a gate-timeout SIGKILL mid-run leaves nothing inside the repo's own
+  // dist tree. The fixture still takes an OPTIONAL 4th argv — a module path/URL to import
+  // armHardShutdownWatchdog from instead of the real dist path — so every EXISTING caller (which never
+  // passes a 4th arg) is byte-identical.
   //
   // Round 2 item 1: `mode` is `"confirmed"` or `"unconfirmed"` — the WHOLE `const ps = ...; execFileSync(
   // "powershell.exe", ...)` sequence is replaced (never just the `ps` script text, as the round-5 version
@@ -557,32 +672,25 @@ if (process.platform === "win32") {
   // the matched region; `"unconfirmed"` writes the marker then throws synchronously, landing in the
   // existing enclosing `catch {}` exactly as a real null-handle/false-TerminateProcess/execFileSync-throw
   // outcome would.
-  const realDistPath = path.join(distDir, "graceful-teardown.js");
   const WIN32_PS_ANCHOR = /const ps =[\s\S]*?execFileSync\("powershell\.exe", \["-NoProfile", "-NonInteractive", "-Command", ps\], \{ timeout: 10000, stdio: "ignore" \}\);/;
   async function withPatchedWin32PsScript(mode, fn) {
-    const original = fs.readFileSync(realDistPath, "utf8");
-    if (!WIN32_PS_ANCHOR.test(original)) {
-      throw new Error(
-        "withPatchedWin32PsScript: the expected win32 'const ps = ...; execFileSync(\"powershell.exe\", ...)' " +
-        "anchor was not found in dist/graceful-teardown.js — the patch is a no-op, refusing to silently test nothing",
-      );
-    }
-    // `recordPath` and `fsMod` are both ALREADY in scope at this point in the real worker source (see the
-    // decision note above for why this must be a durable fs write, never console/stdout output).
-    const markerWrite =
-      `try { const __mfd = fsMod.openSync(recordPath + ".win32-decision-marker", "w"); ` +
-      `try { fsMod.writeSync(__mfd, "x"); } finally { fsMod.closeSync(__mfd); } } catch {}`;
-    const replacement = mode === "confirmed"
-      ? `${markerWrite} /* test-patch (card 0dc09fab): simulated CONFIRMED success — no real powershell.exe spawn */`
-      : `${markerWrite} throw new Error("test-patch (card 0dc09fab): simulated unconfirmed");`;
-    const patched = original.replace(WIN32_PS_ANCHOR, replacement);
-    const patchedPath = path.join(distDir, `graceful-teardown.winrace-${process.pid}-${Math.random().toString(36).slice(2, 8)}.js`);
-    fs.writeFileSync(patchedPath, patched);
-    try {
-      return await fn(pathToFileURL(patchedPath).href);
-    } finally {
-      try { fs.unlinkSync(patchedPath); } catch { /* best-effort cleanup of this test's own scratch file */ }
-    }
+    return withDistMutation((original) => {
+      if (!WIN32_PS_ANCHOR.test(original)) {
+        throw new Error(
+          "withPatchedWin32PsScript: the expected win32 'const ps = ...; execFileSync(\"powershell.exe\", ...)' " +
+          "anchor was not found in dist/graceful-teardown.js — the patch is a no-op, refusing to silently test nothing",
+        );
+      }
+      // `recordPath` and `fsMod` are both ALREADY in scope at this point in the real worker source (see the
+      // decision note above for why this must be a durable fs write, never console/stdout output).
+      const markerWrite =
+        `try { const __mfd = fsMod.openSync(recordPath + ".win32-decision-marker", "w"); ` +
+        `try { fsMod.writeSync(__mfd, "x"); } finally { fsMod.closeSync(__mfd); } } catch {}`;
+      const replacement = mode === "confirmed"
+        ? `${markerWrite} /* test-patch (card 0dc09fab): simulated CONFIRMED success — no real powershell.exe spawn */`
+        : `${markerWrite} throw new Error("test-patch (card 0dc09fab): simulated unconfirmed");`;
+      return original.replace(WIN32_PS_ANCHOR, replacement);
+    }, fn);
   }
 
   // Spawns the sync-hang fixture against the patched module, waits (bounded) for the decision-point
@@ -758,9 +866,6 @@ if (process.platform === "win32") {
 // Every wait below is bounded via pollUntil (no fixed sleep-then-assume anywhere in this section).
 // ---------------------------------------------------------------------------------------------------
 {
-  const sweptCount = sweepStaleDistSiblings("clockshim");
-  if (sweptCount > 0) console.log(`  (swept ${sweptCount} stale graceful-teardown.clockshim-*.js sibling(s) with no live owner)`);
-
   const originalDistTextBeforeClockTest = fs.readFileSync(REAL_DIST_PATH, "utf8");
   const LEGACY_REMAINING_ANCHOR = "const remaining = Number(Atomics.load(deadline, 0)) - monotonicNowMs();";
   const LEGACY_REMAINING_REPLACEMENT = "const remaining = Number(Atomics.load(deadline, 0)) - Date.now();";
@@ -783,52 +888,41 @@ if (process.platform === "win32") {
     }
   }
 
-  // Builds a sibling dist file for the WORKER-READ dimension: `variant` controls whether the worker's
+  // Builds a CLOSURE COPY for the WORKER-READ dimension: `variant` controls whether the worker's
   // deadline READ uses the real fixed monotonic clock ("fixed") or is regex-reverted to the pre-fix
   // Date.now() read ("legacy"); `jumpByMs` injects a constant offset applied to the WORKER's OWN Date.now()
-  // from its very first call onward (never the main thread's). Writes to a unique sibling path under
-  // dist/ (never mutates the real file in place — see the byte-identical check at the end of this section).
+  // from its very first call onward (never the main thread's). Routed through withDistMutation() (card
+  // 01d30507) — never writes into the real dist/ (see the byte-identical check at the end of this section).
   async function withWorkerReadClockJump(variant, jumpByMs, fn) {
-    let text = originalDistTextBeforeClockTest;
-    if (variant === "legacy") {
-      text = text.replace(LEGACY_REMAINING_ANCHOR, LEGACY_REMAINING_REPLACEMENT);
-    }
-    const shimSnippet =
-      `${WORKERDATA_ANCHOR}\n` +
-      `// TEST-PATCH (card e34cb710): simulate a wall-clock jump — affects ONLY this worker's own ` +
-      `Date.now(), never the main thread's.\n` +
-      `const __clockShimRealDateNow = Date.now.bind(Date);\n` +
-      `Date.now = function() { return __clockShimRealDateNow() + (${jumpByMs}); };`;
-    text = text.replace(WORKERDATA_ANCHOR, shimSnippet);
-    const patchedPath = path.join(DIST_DIR, `graceful-teardown.clockshim-${process.pid}-${Math.random().toString(36).slice(2, 8)}.js`);
-    fs.writeFileSync(patchedPath, text);
-    try {
-      return await fn(pathToFileURL(patchedPath).href);
-    } finally {
-      try { fs.unlinkSync(patchedPath); } catch { /* best-effort cleanup of this test's own scratch file */ }
-    }
+    return withDistMutation((original) => {
+      let text = original;
+      if (variant === "legacy") {
+        text = text.replace(LEGACY_REMAINING_ANCHOR, LEGACY_REMAINING_REPLACEMENT);
+      }
+      const shimSnippet =
+        `${WORKERDATA_ANCHOR}\n` +
+        `// TEST-PATCH (card e34cb710): simulate a wall-clock jump — affects ONLY this worker's own ` +
+        `Date.now(), never the main thread's.\n` +
+        `const __clockShimRealDateNow = Date.now.bind(Date);\n` +
+        `Date.now = function() { return __clockShimRealDateNow() + (${jumpByMs}); };`;
+      return text.replace(WORKERDATA_ANCHOR, shimSnippet);
+    }, fn);
   }
 
-  // Builds a sibling dist file for the MAIN-THREAD-WRITE dimension: "legacy-main" regex-reverts BOTH the
+  // Builds a CLOSURE COPY for the MAIN-THREAD-WRITE dimension: "legacy-main" regex-reverts BOTH the
   // arm and step() deadline writes back to literal Date.now(); "fixed" passes an empty module override
-  // (every OTHER non-win32 test in this file does the same — imports the REAL dist directly, no sibling
+  // (every OTHER non-win32 test in this file does the same — imports the REAL dist directly, no copy
   // needed). The clock skew itself is applied in the FIXTURE's own process (spawnAndObserveRecord's
   // `parentSkewMs`), never inside this patch — this patch only controls which clock the write sites
-  // literally reference.
+  // literally reference. Routed through withDistMutation() (card 01d30507) — never writes into dist/.
   async function withMainThreadWriteVariant(variant, fn) {
     if (variant === "fixed") {
       return fn("");
     }
-    const text = originalDistTextBeforeClockTest
-      .replace(MAIN_ARM_ANCHOR, MAIN_ARM_REPLACEMENT)
-      .replace(MAIN_STEP_ANCHOR, MAIN_STEP_REPLACEMENT);
-    const patchedPath = path.join(DIST_DIR, `graceful-teardown.clockshim-${process.pid}-${Math.random().toString(36).slice(2, 8)}.js`);
-    fs.writeFileSync(patchedPath, text);
-    try {
-      return await fn(pathToFileURL(patchedPath).href);
-    } finally {
-      try { fs.unlinkSync(patchedPath); } catch { /* best-effort cleanup of this test's own scratch file */ }
-    }
+    return withDistMutation(
+      (original) => original.replace(MAIN_ARM_ANCHOR, MAIN_ARM_REPLACEMENT).replace(MAIN_STEP_ANCHOR, MAIN_STEP_REPLACEMENT),
+      fn,
+    );
   }
 
   // Spawns the sync-hang fixture and measures how long it takes the durable watchdog RECORD FILE to
@@ -984,12 +1078,13 @@ if (process.platform === "win32") {
     console.log(`  (elapsedAtRecordMs=${r.recordAppeared ? Math.round(r.elapsedAtRecordMs) : "never"}, hardExitMs=${clockHardExitMs} — expected ~on time)`);
   }
 
-  // Requirement: the sibling-dist patch technique must restore byte-identically — the REAL installed file
-  // is never mutated in place (every patch above wrote to its own unique sibling and unlinked it), proven
-  // directly here rather than assumed from the mechanism's own construction.
+  // Requirement: the withDistMutation() closure-copy technique must leave the REAL installed file
+  // byte-identical — every patch above was applied to a copy in its own os.mkdtempSync() dir, never to
+  // dist/graceful-teardown.js itself (card 01d30507) — proven directly here rather than assumed from the
+  // mechanism's own construction.
   const originalDistTextAfterClockTest = fs.readFileSync(REAL_DIST_PATH, "utf8");
   check(
-    "[round 6] dist/graceful-teardown.js is byte-identical before and after every sibling-dist-patch run " +
+    "[round 6] dist/graceful-teardown.js is byte-identical before and after every withDistMutation() run " +
     "in this section (the real file was never mutated in place)",
     originalDistTextAfterClockTest === originalDistTextBeforeClockTest,
   );
@@ -1031,6 +1126,22 @@ if (process.platform === "win32") {
     "[structural] the old round-2 'killedWithCustomCode' short-circuit identifier is gone (superseded by " +
     "winCustomExitConfirmed)",
     !distSource.includes("killedWithCustomCode"),
+  );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Card 01d30507: the structural guarantee behind the whole fix above — no `*.clockshim-*.js` or
+// `*.winrace-*.js` stray shim ever landed in the REAL dist directory. withDistMutation() writes every
+// patched module into its own os.mkdtempSync() copy, never DIST_DIR, so this should be vacuously true by
+// construction — asserted directly here (rather than merely assumed) since this is exactly the invariant
+// a gate-timeout SIGKILL used to be able to violate.
+// ---------------------------------------------------------------------------------------------------
+{
+  const strayShimNames = fs.readdirSync(DIST_DIR).filter((name) => /^graceful-teardown\.(clockshim|winrace)-/.test(name));
+  check(
+    "[card 01d30507] no stray graceful-teardown.clockshim-*.js or graceful-teardown.winrace-*.js shim " +
+    `exists in the real dist/ after this run (found: ${JSON.stringify(strayShimNames)})`,
+    strayShimNames.length === 0,
   );
 }
 
