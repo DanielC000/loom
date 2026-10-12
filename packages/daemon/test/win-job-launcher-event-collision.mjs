@@ -34,6 +34,15 @@ if (!fs.existsSync(EXE)) {
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const { LAUNCHER_EXIT_REFUSED } = await import(pathToFileURL(path.join(distGitDir, "bounded.js")).href);
 
+// Card 5b50eede: the launcher's argv now carries a resolved absolute git.exe path as args[2] — imported
+// from the compiled resolver (the SAME one bounded.ts uses) rather than a second hand-rolled PATH walk.
+const { resolveExecutable } = await import(pathToFileURL(path.join(__dirname, "..", "dist", "pty", "resolve-bin.js")).href);
+const GIT_EXE = resolveExecutable("git");
+if (GIT_EXE === "git" || !/\.exe$/i.test(GIT_EXE)) {
+  console.log(`SKIP  win-job-launcher-event-collision — could not resolve an absolute git.exe on PATH (got ${JSON.stringify(GIT_EXE)}).`);
+  process.exit(0);
+}
+
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
@@ -47,7 +56,7 @@ function makeRepo(tag) {
 
 function spawnLauncher(repo, nonce, msg) {
   return new Promise((resolve) => {
-    const child = spawn(EXE, ["run", nonce, "commit", "--allow-empty", "-m", msg], { cwd: repo, windowsHide: true });
+    const child = spawn(EXE, ["run", nonce, GIT_EXE, "commit", "--allow-empty", "-m", msg], { cwd: repo, windowsHide: true });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));

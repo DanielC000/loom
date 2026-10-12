@@ -22,6 +22,30 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const EXE = process.argv[2] ? path.resolve(process.argv[2]) : path.join(repoRoot, "packages/daemon/assets/native/win-job-launcher.exe");
 
+// Card 5b50eede: the launcher's argv now carries a resolved absolute git.exe path as args[2]. This
+// script stays DELIBERATELY STANDALONE (see the file header) — the release job that runs it never runs
+// `pnpm build`, so it can't import bounded.ts's own compiled resolver; this duplicates the SAME rules
+// (round 2, CR 792785cb) rather than a looser copy: SKIP any PATH entry that isn't itself drive-rooted
+// or UNC (never `path.isAbsolute`, true for a current-drive-relative "\foo" too — a relative entry's own
+// `fs.existsSync` hit resolves to a RELATIVE string, a real hijack if ever spawned with a repo cwd), and
+// test ONLY "git.exe" per entry (never PATHEXT order, so an earlier git.cmd can't mask a later git.exe).
+function isAbsoluteWindowsExePath(p) {
+  if (p.length >= 3 && /^[A-Za-z]$/.test(p[0] ?? "") && p[1] === ":" && (p[2] === "\\" || p[2] === "/")) return true;
+  if (p.startsWith("\\\\") || p.startsWith("//")) return true;
+  return false;
+}
+function resolveGitExePath() {
+  const PATH = process.env.PATH || process.env.Path || "";
+  const dirs = PATH.split(";").filter(Boolean);
+  for (const dir of dirs) {
+    if (!isAbsoluteWindowsExePath(dir)) continue;
+    const candidate = path.join(dir, "git.exe");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+const GIT_EXE = resolveGitExePath();
+
 // Mirrors native/win-job-launcher/launcher.cs's own exit-code contract (see that file's header doc) —
 // not exported anywhere TS-side either; pinned here the same way the test suite pins it.
 const EXIT_CONFIRMED_KILLED = 0x4c4f0001;
@@ -68,7 +92,7 @@ async function smokeAbortConfirmed() {
   fs.chmodSync(hookPath, 0o755);
 
   const nonce = crypto.randomBytes(16).toString("hex");
-  const child = spawn(EXE, ["run", nonce, "commit", "--allow-empty", "-m", "smoke abort"], { cwd: repo, windowsHide: true });
+  const child = spawn(EXE, ["run", nonce, GIT_EXE, "commit", "--allow-empty", "-m", "smoke abort"], { cwd: repo, windowsHide: true });
   const exitPromise = new Promise((resolve) => child.on("close", (code) => resolve(code)));
 
   const markerSeen = await waitForFile(path.join(repo, "wjl-smoke.marker"));
@@ -99,7 +123,7 @@ async function smokeGitExitCodePassthrough() {
   const nonce = crypto.randomBytes(16).toString("hex");
   const code = await withTimeout(
     new Promise((resolve) => {
-      const child = spawn(EXE, ["run", nonce, ...args], { cwd: repo, windowsHide: true });
+      const child = spawn(EXE, ["run", nonce, GIT_EXE, ...args], { cwd: repo, windowsHide: true });
       child.on("close", (c) => resolve(c));
     }),
     15000, "exit-code passthrough smoke: waiting for the launcher-spawned git to exit",
@@ -114,6 +138,10 @@ async function main() {
   }
   if (!fs.existsSync(EXE)) {
     console.error(`[smoke:win-job-launcher] ERROR: exe not found at ${EXE}. Build it first (pnpm --filter @loom/daemon build:native).`);
+    return 1;
+  }
+  if (!GIT_EXE) {
+    console.error("[smoke:win-job-launcher] ERROR: could not resolve an absolute git.exe on PATH — card 5b50eede requires one.");
     return 1;
   }
   await smokeAbortConfirmed();

@@ -2,8 +2,12 @@
 // in a Win32 Job Object, closing the taskkill-/T escape documented at docs/decisions/1718416d-*.md.
 //
 // Three modes, selected by argv[0]:
-//   launcher.exe <signalMarker> <nonceHex> <git-args...>   — normal mode (signalMarker is the literal
-//                                                             string "run"; see USAGE below)
+//   launcher.exe run <nonceHex> <absoluteGitExePath> <git-args...> — normal mode. Card 5b50eede: the
+//                                                             caller resolves git to an absolute, PATH-
+//                                                             only `.exe` path ONCE and passes it in —
+//                                                             this launcher never searches for git
+//                                                             itself, and refuses (EXIT_REFUSED) rather
+//                                                             than run a non-absolute path.
 //   launcher.exe --signal <nonceHex>                        — signal mode: opens the SAME nonce-derived
 //                                                             named event and sets it, then exits.
 //   launcher.exe --probe <nonceHex>                         — probe mode: opens the SAME nonce-derived
@@ -34,8 +38,9 @@
 //   0x4C4F0003 (1280245763) — REFUSED: git.exe was NEVER spawned (a squatted/collided abort-event name,
 //                             a SetInformationJobObject/CreateProcessW/AssignProcessToJobObject failure —
 //                             the suspended process, if one was ever created, is TerminateProcess'd before
-//                             this returns — or malformed argv). The caller must treat this call as if the
-//                             launcher were unavailable and fall back for THIS call only.
+//                             this returns — malformed argv — or, card 5b50eede, a git path that isn't a
+//                             drive-rooted or UNC absolute path). The caller must treat this call as if
+//                             the launcher were unavailable and fall back for THIS call only.
 //
 // All three launcher-originated codes are well below 2^31 (Int32.MaxValue), so they read as ordinary
 // positive integers however Node's child_process surfaces a Windows DWORD exit code — never a
@@ -207,13 +212,25 @@ internal static class Launcher
     private const int TERMINATE_CONFIRM_POLL_COUNT = 25;
     private const int TERMINATE_CONFIRM_POLL_INTERVAL_MS = 200;
 
-    // A bare "git.exe" token, never an absolute path: with lpApplicationName null, CreateProcessW's own
-    // documented search sequence (app dir, current dir, system dirs, then every entry of PATH) resolves
-    // it — the SAME PATH value Node already passed this launcher via its own `env` spawn option, so this
-    // resolves to the IDENTICAL binary today's bare spawn("git", ...) would have found. No node-pty-style
-    // "doesn't search PATH" limitation applies here — that is specific to node-pty's own spawn mechanism,
-    // not a general CreateProcessW constraint (verified against the documented search order).
-    private const string GitExePath = "git.exe";
+    // @decision 5b50eede — never resolve git ourselves (a bare "git.exe" token under CreateProcessW's own
+    // search sequence also checks THIS launcher's own directory and the caller's cwd before PATH — a
+    // wider, more hijackable order than Node's own bare spawn("git") ever used); the caller passes an
+    // already-resolved absolute path in argv, and IsAbsoluteGitExePath (below) is the independent check
+    // that refuses anything else rather than trusting the caller alone.
+
+    /// <summary>
+    /// Card 5b50eede: true only for a drive-rooted ("C:\...") or UNC ("\\server\share\...") absolute path.
+    /// Deliberately NOT `Path.IsPathRooted` — that returns true for a bare "\foo", which is rooted but
+    /// relative to the CURRENT DRIVE, not an actual absolute path; accepting that shape here would still
+    /// let CreateProcessW's resolution depend on ambient state (the current drive) we don't control.
+    /// </summary>
+    private static bool IsAbsoluteGitExePath(string p)
+    {
+        if (string.IsNullOrEmpty(p)) return false;
+        if (p.Length >= 3 && char.IsLetter(p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) return true;
+        if (p.StartsWith("\\\\") || p.StartsWith("//")) return true;
+        return false;
+    }
 
     private static string EventNameFor(string nonceHex) { return "Local\\LoomWinJobAbort_" + nonceHex; }
 
@@ -227,15 +244,21 @@ internal static class Launcher
         {
             return RunProbeMode(args[1]);
         }
-        if (args.Length < 2 || args[0] != "run")
+        if (args.Length < 3 || args[0] != "run")
         {
-            return EXIT_REFUSED; // malformed argv — git was never spawned; same fallback posture as
-                                  // every other refusal (round 2, MAJOR 2: formerly a distinct 251).
+            return EXIT_REFUSED; // malformed argv (missing nonce or git path) — git was never spawned;
+                                  // same fallback posture as every other refusal (round 2, MAJOR 2:
+                                  // formerly a distinct 251).
         }
         string nonceHex = args[1];
-        string[] gitArgs = new string[args.Length - 2];
-        Array.Copy(args, 2, gitArgs, 0, gitArgs.Length);
-        return RunMode(nonceHex, gitArgs);
+        string gitExePath = args[2];
+        if (!IsAbsoluteGitExePath(gitExePath))
+        {
+            return EXIT_REFUSED; // card 5b50eede — never run a non-absolute git target, caller bug or not.
+        }
+        string[] gitArgs = new string[args.Length - 3];
+        Array.Copy(args, 3, gitArgs, 0, gitArgs.Length);
+        return RunMode(nonceHex, gitExePath, gitArgs);
     }
 
     private static int RunSignalMode(string nonceHex)
@@ -270,7 +293,7 @@ internal static class Launcher
         return 1;
     }
 
-    private static int RunMode(string nonceHex, string[] gitArgs)
+    private static int RunMode(string nonceHex, string gitExePath, string[] gitArgs)
     {
         IntPtr hJob = CreateJobObjectW(IntPtr.Zero, null);
         if (hJob == IntPtr.Zero) return EXIT_REFUSED;
@@ -333,11 +356,15 @@ internal static class Launcher
             si.lpAttributeList = attrList;
 
             StringBuilder cmdLine = new StringBuilder();
-            cmdLine.Append(QuoteWindowsArg(GitExePath));
+            cmdLine.Append(QuoteWindowsArg(gitExePath));
             foreach (var a in gitArgs) { cmdLine.Append(' '); cmdLine.Append(QuoteWindowsArg(a)); }
 
+            // card 5b50eede: lpApplicationName is now the validated absolute path (was null) — per
+            // CreateProcessW's own docs, a non-null lpApplicationName skips its multi-location search
+            // sequence entirely; the matching quoted token in cmdLine (argv[0]) is kept too, both for
+            // convention and as a second, independent guarantee if lpApplicationName were ever ignored.
             PROCESS_INFORMATION pi;
-            bool created = CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, true,
+            bool created = CreateProcessW(gitExePath, cmdLine, IntPtr.Zero, IntPtr.Zero, true,
                 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, IntPtr.Zero, null, ref si, out pi);
             if (!created)
             {

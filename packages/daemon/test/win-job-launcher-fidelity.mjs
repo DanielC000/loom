@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { mkdtempManaged } from "./_tmp-fixture.mjs";
 
 if (process.platform !== "win32") {
@@ -24,6 +24,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EXE = path.join(__dirname, "..", "assets", "native", "win-job-launcher.exe");
 if (!fs.existsSync(EXE)) {
   console.log("SKIP  win-job-launcher-fidelity — win-job-launcher.exe not built. Run `pnpm --filter @loom/daemon build:native` first.");
+  process.exit(0);
+}
+
+// Card 5b50eede: the launcher's argv now carries a resolved absolute git.exe path as args[2] — imported
+// from the compiled resolver (the SAME one bounded.ts uses) rather than a second hand-rolled PATH walk.
+const { resolveExecutable } = await import(pathToFileURL(path.join(__dirname, "..", "dist", "pty", "resolve-bin.js")).href);
+const GIT_EXE = resolveExecutable("git");
+if (GIT_EXE === "git" || !/\.exe$/i.test(GIT_EXE)) {
+  console.log(`SKIP  win-job-launcher-fidelity — could not resolve an absolute git.exe on PATH (got ${JSON.stringify(GIT_EXE)}).`);
   process.exit(0);
 }
 
@@ -43,7 +52,7 @@ function makeRepo(tag) {
 
 function runLauncher(repo, nonce, args, env) {
   return new Promise((resolve) => {
-    const child = spawn(EXE, ["run", nonce, ...args], { cwd: repo, windowsHide: true, env: env ?? process.env });
+    const child = spawn(EXE, ["run", nonce, GIT_EXE, ...args], { cwd: repo, windowsHide: true, env: env ?? process.env });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));

@@ -205,10 +205,16 @@ sole verification for anything touching real OS process semantics):
 - Do not assume `csc.exe`'s presence is guaranteed off this card's own verification — it was confirmed
   present and working on ONE real host; `build:native`'s existence check (and its loud no-op) is the
   actual safety net, not an assumption.
-- Do not resolve git via an absolute, build-time-baked path inside the launcher — a bare `"git.exe"` token
-  with `lpApplicationName=null` is resolved via `CreateProcessW`'s own documented search sequence
-  (ending in `PATH`), using the SAME `PATH` Node already passed the launcher — this is what keeps the
-  resolved binary identical to today's bare `spawn("git", …)`.
+- **SUPERSEDED by card `5b50eede`** (`docs/decisions/5b50eede-absolute-git-path.md`) — this bullet
+  originally argued against resolving git to an absolute path at all, on the premise that a bare
+  `"git.exe"` token under `CreateProcessW`'s own search sequence resolves identically to today's bare
+  `spawn("git", …)`. That premise is FALSE: `CreateProcessW`'s own documented search (launcher's own
+  directory, then cwd, then system dirs, then PATH) is a wider, more hijackable order than libuv's own
+  `search_path()` (cwd, then PATH) — the launcher's own directory stage has no analogue in Node's
+  resolution at all, and is attacker-reachable. The launcher now runs git via a resolved absolute path
+  (Node resolves it at RUNTIME via the existing `resolveExecutable()`, never a path baked in at build
+  time) and refuses a non-absolute value; see `5b50eede`'s own record for the fix and what was and wasn't
+  empirically reproducible.
 - Do not assume a historical repro test (`merge-commit-kill-confirm.mjs` scenario 5,
   `git-writer-kill-confirm.mjs`, `union-merge-kill-confirm.mjs`'s GREEN 2) still produces an unconfirmed
   kill once this launcher is built — it doesn't; that's the fix working. Each of those forces the

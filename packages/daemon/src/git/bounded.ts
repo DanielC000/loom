@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
@@ -228,6 +229,40 @@ export function isWinJobLauncherAvailable(): boolean {
 }
 
 /**
+ * @decision 5b50eede — "absolute" means drive-rooted or UNC ONLY, never `path.isAbsolute` (also `true`
+ * for a current-drive-relative `\foo`) — the SAME predicate launcher.cs's `IsAbsoluteGitExePath` uses.
+ */
+export function isAbsoluteWindowsExePath(p: string): boolean {
+  if (p.length >= 3 && /^[A-Za-z]$/.test(p[0] ?? "") && p[1] === ":" && (p[2] === "\\" || p[2] === "/")) return true;
+  if (p.startsWith("\\\\") || p.startsWith("//")) return true;
+  return false;
+}
+
+/**
+ * @decision 5b50eede — round 2 (CR `792785cb`): SKIP a PATH entry failing {@link isAbsoluteWindowsExePath}
+ * (a relative hit used to resolve to a repo-reachable RELATIVE spawn target); test ONLY `<dir>\git.exe`.
+ */
+export function resolveAbsoluteGitExePath(pathOverride?: string): string | null {
+  const PATH = pathOverride ?? (process.env.PATH || process.env.Path || "");
+  const dirs = PATH.split(";").filter(Boolean);
+  for (const dir of dirs) {
+    if (!isAbsoluteWindowsExePath(dir)) continue;
+    const candidate = path.join(dir, "git.exe");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  logGitPathUnresolvedOnce();
+  return null;
+}
+
+let loggedGitPathUnresolved = false;
+function logGitPathUnresolvedOnce(): void {
+  if (loggedGitPathUnresolved) return;
+  loggedGitPathUnresolved = true;
+  // eslint-disable-next-line no-console
+  console.log(`[git] could not resolve an absolute git.exe on PATH — the win32 job-launcher path is skipped for THIS call (resolution is retried on every call, never cached as permanently unresolved); the direct-spawn fallback keeps today's bare "git" resolution.`);
+}
+
+/**
  * round 3, MINOR-1: EACCES (permission denied) and ENOENT (path vanished) are properties of THIS exe —
  * retrying it on a later call won't help. So is a Windows bad-executable-format failure, which libuv
  * surfaces with no more specific code than `UNKNOWN`/errno `-4094` (verified directly against a real
@@ -341,18 +376,28 @@ export function spawnCanonicalGitTree(
   const raw = (...callArgs: unknown[]): Promise<string> => {
     const rawArgs = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     const args = [...CANONICAL_GIT_CONFIG_ARGS, ...(extraConfigArgs ?? []), ...rawArgs];
+    // @decision 5b50eede — win32 resolves git to an absolute .exe ONCE per call, shared by both paths
+    // below (round 2, CR 792785cb: re-checked against isAbsoluteWindowsExePath here too — never trust
+    // the walker alone); POSIX never calls this (gitBin stays the literal "git", byte-identical).
+    const resolvedGitExeRaw = process.platform === "win32" ? resolveAbsoluteGitExePath() : null;
+    const resolvedGitExe = resolvedGitExeRaw && isAbsoluteWindowsExePath(resolvedGitExeRaw) ? resolvedGitExeRaw : null;
+    const directSpawnTarget = process.platform === "win32" ? (resolvedGitExe ?? "git") : "git";
     // @decision 1718416d — win32-only Job Object containment; unavailable/missing falls back byte-identical.
-    if (process.platform === "win32" && isWinJobLauncherAvailable()) {
-      return rawViaWinJobLauncher(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs);
+    // @decision 5b50eede — ALSO requires a resolved absolute git.exe; an unresolved git skips the launcher
+    // for this call (same as "unavailable") rather than handing it a bare/relative target.
+    if (process.platform === "win32" && resolvedGitExe && isWinJobLauncherAvailable()) {
+      return rawViaWinJobLauncher(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, resolvedGitExe);
     }
-    return rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs);
+    return rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, directSpawnTarget);
   };
   return { raw } as unknown as Pick<SimpleGit, "raw">;
 }
 
-/** The pre-1718416d direct-spawn path, extracted verbatim (never edited) so it can also serve as the
- *  per-call fallback {@link rawViaWinJobLauncher} reaches for on a launcher-side refusal — see that
- *  function's own doc. This is what runs on every platform when the win32 launcher is unavailable. */
+/** The pre-1718416d direct-spawn path (now also the per-call fallback {@link rawViaWinJobLauncher}
+ *  reaches for on a launcher-side refusal — see that function's own doc). This is what runs on every
+ *  platform when the win32 launcher is unavailable OR its own git resolution came up empty.
+ *  @decision 5b50eede — `gitBin` is a resolved absolute `.exe` path on win32 (or the literal `"git"` on an
+ *  unresolved win32 host, same as before this card), and always the literal `"git"` on POSIX. */
 function rawViaDirectSpawn(
   repoPath: string,
   env: Record<string, string | undefined> | undefined,
@@ -362,9 +407,10 @@ function rawViaDirectSpawn(
   spawnImpl: typeof spawn,
   args: string[],
   rawArgs: string[],
+  gitBin: string,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawnImpl("git", args, {
+    const child = spawnImpl(gitBin, args, {
       cwd: repoPath,
       env: prepareCanonicalEnv(env),
       windowsHide: true,
@@ -441,6 +487,7 @@ function rawViaWinJobLauncher(
   spawnImpl: typeof spawn,
   args: string[],
   rawArgs: string[],
+  gitExePath: string,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     // 128 bits, so two concurrent canonical git calls never accidentally collide on the same
@@ -449,7 +496,9 @@ function rawViaWinJobLauncher(
     const nonce = crypto.randomBytes(16).toString("hex");
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawnImpl(resolveWinJobLauncherPath(), ["run", nonce, ...args], {
+      // @decision 5b50eede — gitExePath is a resolved absolute .exe (the caller already checked); the
+      // launcher independently refuses a non-absolute value too (defense in depth, never trust-only).
+      child = spawnImpl(resolveWinJobLauncherPath(), ["run", nonce, gitExePath, ...args], {
         cwd: repoPath,
         env: prepareCanonicalEnv(env),
         windowsHide: true,
@@ -466,7 +515,7 @@ function rawViaWinJobLauncher(
       void (async () => {
         if (abortedBeforeFallbackSpawn(signal, reject)) return; // round 3, MINOR-2
         try {
-          resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs));
+          resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, gitExePath));
         } catch (e2) { reject(e2); }
       })();
       return;
@@ -502,7 +551,7 @@ function rawViaWinJobLauncher(
           if (killIssued) await killIssued; // best-effort; nothing real to wait on if it never truly spawned
           if (abortedBeforeFallbackSpawn(signal, reject)) return; // round 3, MINOR-2
           try {
-            resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs));
+            resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, gitExePath));
           } catch (e2) { reject(e2); }
         })();
         return;
@@ -529,7 +578,7 @@ function rawViaWinJobLauncher(
           if (killIssued) await killIssued; // best-effort; git was never actually spawned on this path
           if (abortedBeforeFallbackSpawn(signal, reject)) return; // round 3, MINOR-2
           try {
-            resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs));
+            resolve(await rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, gitExePath));
           } catch (e) { reject(e); }
         })();
         return;

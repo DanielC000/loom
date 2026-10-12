@@ -50,14 +50,17 @@ function fakeChild() {
 }
 
 /** Discriminates by which binary bounded.ts asked to spawn: the dummy launcher path in "run" mode, the
- *  same path in "--signal" mode, or a literal "git" for the direct-spawn fallback — exactly the three
- *  shapes `rawViaWinJobLauncher`/`signalWinJobLauncherAbort`/`rawViaDirectSpawn` produce. */
+ *  same path in "--signal" mode, or the direct-spawn fallback target — exactly the three shapes
+ *  `rawViaWinJobLauncher`/`signalWinJobLauncherAbort`/`rawViaDirectSpawn` produce. Card 5b50eede: the
+ *  fallback target is now a RESOLVED ABSOLUTE git.exe path (or the literal "git" if unresolved), never
+ *  always the bare literal "git" — discriminate by "anything that isn't the launcher path" instead of a
+ *  fixed `cmd === "git"` match, since the exact resolved value is host-dependent. */
 function makeFakeSpawn(launcherPath, { onLauncherRun, onLauncherSignal, onGit } = {}) {
   return function fakeSpawn(cmd, args) {
     const child = fakeChild();
     if (cmd === launcherPath && args[0] === "run") onLauncherRun?.(child, args);
     else if (cmd === launcherPath && args[0] === "--signal") onLauncherSignal?.(child, args);
-    else if (cmd === "git") onGit?.(child, args);
+    else onGit?.(child, args);
     return child;
   };
 }
