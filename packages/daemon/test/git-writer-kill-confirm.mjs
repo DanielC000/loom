@@ -141,11 +141,19 @@ git("commit", "-q", "--allow-empty", "-m", "init");
 // tree-kill walks the process tree, the intermediate subshell that spawned the inner one has already
 // exited, so the escaped descendant is unreachable by a PID-walking tree-kill (see 24c0bdba's decision
 // record, round 3, Code Review B-2, for the full mechanism this reproduces).
+// @decision f59ca98a — that PPID-walk escape is win32-only; the POSIX branch below is load-bearing, not
+// decoration — see the record for why.
 const markerName = "escaped-descendant.marker";
 const markerPath = path.join(repo, markerName);
 const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
 fs.writeFileSync(hookPath,
-  `#!/bin/sh\n( (sleep ${HOLD_MS / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}) & )\nsleep ${MAIN_MS / 1000}\n`);
+  `#!/bin/sh\n` +
+  `if command -v setsid >/dev/null 2>&1; then\n` +
+  `  ( setsid sh -c 'sleep ${HOLD_MS / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}' & )\n` +
+  `else\n` +
+  `  ( (sleep ${HOLD_MS / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}) & )\n` +
+  `fi\n` +
+  `sleep ${MAIN_MS / 1000}\n`);
 fs.chmodSync(hookPath, 0o755);
 
 const writer = new GitWriter(repo, { gitLocalMs: SMALL_MS });

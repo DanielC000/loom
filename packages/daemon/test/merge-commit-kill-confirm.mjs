@@ -307,19 +307,24 @@ async function runScenario4(tag) {
 // one and returns immediately — by the time the kill-trigger's tree-kill walks the tree, the intermediate
 // subshell that spawned the inner one has already exited, breaking the parent-child chain a PPID-walking
 // tree-kill (win32 `taskkill /T`) relies on to find it (measured on Windows 11: git.exe dies ~300ms after
-// the kill, but the escaped descendant survives and keeps the pipe open for tens of seconds). On POSIX
-// without `setsid` the inner subshell stays in the SAME process group and IS still reached by
-// `process.kill(-pid, SIGKILL)` — an accepted, documented residual difference (see the decision record),
-// not a bug in this test.
+// the kill, but the escaped descendant survives and keeps the pipe open for tens of seconds).
 // `markerName` is written via a plain relative shell redirect (git always invokes a hook with cwd at the
 // worktree root, so `repo`-relative is all that's needed) — NOT `node -e` with an embedded absolute path:
 // a Windows-absolute path threaded through Git-Bash's MSYS argv translation for a NATIVE (non-MSYS)
 // program corrupted the path entirely in manual testing (a real footgun, not a hypothetical one — see
 // CLAUDE.md's own "isolated-daemon testing on Windows" section for the sibling class of this bug).
+// @decision f59ca98a — the comment this replaced called the POSIX gap "accepted... not a bug"; it was
+// wrong. The POSIX branch below is load-bearing, not decoration — see the record for why.
 function installDoubleForkedPreCommitHook(repo, markerName, holdMs, mainMs) {
   const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
   fs.writeFileSync(hookPath,
-    `#!/bin/sh\n( (sleep ${holdMs / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}) & )\nsleep ${mainMs / 1000}\n`);
+    `#!/bin/sh\n` +
+    `if command -v setsid >/dev/null 2>&1; then\n` +
+    `  ( setsid sh -c 'sleep ${holdMs / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}' & )\n` +
+    `else\n` +
+    `  ( (sleep ${holdMs / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}) & )\n` +
+    `fi\n` +
+    `sleep ${mainMs / 1000}\n`);
   fs.chmodSync(hookPath, 0o755);
 }
 // Comfortably past withTimeoutKillingChild's own give-up deadline (2*SMALL_MS from call start) — the

@@ -172,10 +172,18 @@ function installSlowPostMergeHook(repo, ticks, tickMs) {
 // OUTER subshell backgrounds an INNER one and returns immediately, breaking the parent-child chain a
 // PPID-walking tree-kill relies on — the escaped descendant survives the kill, so confirmation can never
 // positively arrive within grace.
+// @decision f59ca98a — that PPID-walk escape is win32-only; the POSIX branch below is load-bearing, not
+// decoration — see the record for why.
 function installDoubleForkedPreMergeCommitHook(repo, markerName, holdMs, mainMs) {
   const hookPath = path.join(repo, ".git", "hooks", "pre-merge-commit");
   fs.writeFileSync(hookPath,
-    `#!/bin/sh\n( (sleep ${holdMs / 1000}; echo escaped > ${markerName}) & )\nsleep ${mainMs / 1000}\n`);
+    `#!/bin/sh\n` +
+    `if command -v setsid >/dev/null 2>&1; then\n` +
+    `  ( setsid sh -c 'sleep ${holdMs / 1000}; echo escaped > ${markerName}' & )\n` +
+    `else\n` +
+    `  ( (sleep ${holdMs / 1000}; echo escaped > ${markerName}) & )\n` +
+    `fi\n` +
+    `sleep ${mainMs / 1000}\n`);
   fs.chmodSync(hookPath, 0o755);
 }
 function removeHooks(repo) {
