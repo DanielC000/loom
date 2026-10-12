@@ -12963,11 +12963,16 @@ export class PtyHost {
    * @decision 850eb55c — the SessionStart case's own convergence callback. Never call `markReady` again
    * directly from there — its own-once guard silently no-ops once `READY_FALLBACK_MS` already latched
    * `ready` first, stranding a held kickoff behind `reconcile()`'s slow + race-prone backstop. See record.
+   *
+   * @decision d2bd6255 — heal here too, right before draining, not only via `enqueueStdin`'s own call —
+   * that earlier call fires too early (before the cycle itself runs) to reliably clear a stuck `busy`.
+   * See record.
    */
   private releaseBootModeCycle(sessionId: string): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     if (!live.ready) { this.markReady(sessionId); return; }
+    this.healIfStuck(live, sessionId);
     this.drainPending(sessionId);
   }
 

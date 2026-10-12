@@ -318,6 +318,12 @@ try {
     // whole point — this file has nothing to do with creation-time matching.
     const TRIPWIRE_CREATION_TIME = Date.now() - 1_000;
     class RealKillRootHost extends PtyHost {
+      // Card d2bd6255 — force win32 regardless of the REAL host platform: this scenario's whole point is
+      // reaching the real killRoot (per this block's own header), and its owner/probe below are win32-shaped
+      // (creationTime only, no startTicksLinux/creationTicks) — on an unforced real Linux host, guard 2's
+      // Linux-ticks branch always refused for lack of those fields before ever reaching killRoot, which is
+      // a test gap (an encoded win32 assumption), not a product bug.
+      resolveRootReapPlatform() { return "win32"; }
       reapExitedDescendants(_rootPid, _sessionId) { /* never used — verifyRootDeadOrForceKill is called directly */ }
       async probeRootSurvival(_rootPid, _sessionId) {
         return { foundAlive: true, identityConfirmed: true, enumerationFailed: false, creationTime: TRIPWIRE_CREATION_TIME };

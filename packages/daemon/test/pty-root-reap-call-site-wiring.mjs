@@ -93,6 +93,13 @@ class SpyHost extends createSeamHost(PtyHost) {
   // map, so they keep getting that same stubbed response as before this round).
   sweepCalls = [];
   probeOverrides = new Map();
+  // Card d2bd6255 — force win32 regardless of the REAL host platform: this file tests call-site WIRING
+  // only (round-1 identity/platform-branch logic is pty-root-reap-identity.mjs's job), and scenario (7)'s
+  // `captureRootCreationRow`/probe overrides below are win32-shaped (creationTime only, no
+  // startTicksLinux/creationTicks) — on an unforced real Linux host, guard 2's Linux-ticks branch always
+  // refused for lack of those fields, which is a test gap (an encoded win32 assumption), not a product bug.
+  platformOverride = "win32";
+  resolveRootReapPlatform() { return this.platformOverride; }
   createPty(_opts) { return makeFakeClaudePty(nextClaudeExitOnCtrlC); }
   createCodexPty(opts) {
     const fake = makeFakeCodexPty();
