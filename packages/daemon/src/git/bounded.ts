@@ -259,7 +259,7 @@ function logGitPathUnresolvedOnce(): void {
   if (loggedGitPathUnresolved) return;
   loggedGitPathUnresolved = true;
   // eslint-disable-next-line no-console
-  console.log(`[git] could not resolve an absolute git.exe on PATH — the win32 job-launcher path is skipped for THIS call (resolution is retried on every call, never cached as permanently unresolved); the direct-spawn fallback keeps today's bare "git" resolution.`);
+  console.log(`[git] could not resolve an absolute git.exe on PATH — the win32 job-launcher path is skipped for THIS call (resolution is retried on every call, never cached as permanently unresolved); the direct-spawn fallback and canonical simple-git calls (canonicalGit) both keep today's bare "git" resolution.`);
 }
 
 /**
@@ -878,6 +878,10 @@ export function deleteEnvKeys(env: Record<string, string | undefined>, names: re
  * them. The codex auto-commit path (`git/worktrees.ts`'s `attemptCodexAutoCommit`) is the one caller
  * that passes `{ allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }` here, via its OWN dedicated
  * `gitFactory` — see that function's own doc for why it needs both.
+ *
+ * @decision 5b50eede (round 3, card `cf9a32cf`) — `binary` auto-enables `allowUnsafeCustomBinary`; a real
+ * Windows git path (`C:\Program Files\Git\...`) fails simple-git's own binary regex on the space alone,
+ * so leaving it off would throw on construction instead of resolving. OMIT `binary` for the unchanged default.
  */
 export function boundedSimpleGit(
   repoPath: string,
@@ -886,17 +890,48 @@ export function boundedSimpleGit(
   abortSignal?: AbortSignal,
   extraUnsafe?: SimpleGitOptions["unsafe"],
   config?: string[],
+  binary?: string,
 ): SimpleGit {
   const scrubbedEnv = env ? scrubGitEnv(env) : undefined;
   const hasEnv = !!scrubbedEnv && Object.keys(scrubbedEnv).length > 0;
-  const unsafe: SimpleGitOptions["unsafe"] = { allowUnsafeConfigPaths: true, ...extraUnsafe };
-  const git = simpleGit(repoPath, {
+  const unsafe: SimpleGitOptions["unsafe"] = {
+    allowUnsafeConfigPaths: true,
+    ...(binary ? { allowUnsafeCustomBinary: true } : {}),
+    ...extraUnsafe,
+  };
+  const buildGit = () => simpleGit(repoPath, {
     timeout: { block: blockTimeoutMs },
     ...(abortSignal ? { abort: abortSignal } : {}),
-    ...(hasEnv || extraUnsafe ? { unsafe } : {}),
+    ...(hasEnv || extraUnsafe || binary ? { unsafe } : {}),
     ...(config && config.length > 0 ? { config } : {}),
+    ...(binary ? { binary } : {}),
   });
+  // @decision 5b50eede (round 3) — simple-git still console.warns on a regex-failing `binary` even WITH
+  // allowUnsafeCustomBinary; suppressed (synchronous construction only) as benign, expected noise.
+  const git = binary ? withConsoleWarnSuppressed(buildGit) : buildGit();
   return hasEnv ? git.env(scrubbedEnv as Record<string, string | undefined>) : git;
+}
+
+/** Substring of simple-git's `WRONG_CHARS_ERR` (`custom-binary.plugin.ts`, verified against the installed
+ *  `simple-git@3.36.0`) — the ONE warning {@link withConsoleWarnSuppressed} drops; anything else still
+ *  reaches the real `console.warn`, so an unrelated future construction-time warning is never swallowed. */
+const SIMPLE_GIT_CUSTOM_BINARY_WARNING = "restricted characters must be removed or supply the unsafe.allowUnsafeCustomBinary option";
+
+/** Filters OUT only simple-git's own "binary has restricted characters" warning around a synchronous
+ *  call, then restores `console.warn` unconditionally — see {@link boundedSimpleGit}'s own doc for the
+ *  one caller. Every other `console.warn` (from simple-git or anything else) is forwarded unchanged. */
+function withConsoleWarnSuppressed<T>(fn: () => T): T {
+  const original = console.warn;
+  // eslint-disable-next-line no-console
+  console.warn = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && args[0].includes(SIMPLE_GIT_CUSTOM_BINARY_WARNING)) return;
+    original(...args);
+  };
+  try {
+    return fn();
+  } finally {
+    console.warn = original;
+  }
 }
 
 /**
@@ -1062,16 +1097,28 @@ export function canonicalGit(
   abortSignal?: AbortSignal,
   extraUnsafe?: SimpleGitOptions["unsafe"],
 ): SimpleGit {
+  // @decision 5b50eede (round 3, card `cf9a32cf`) — the SAME resolver `spawnCanonicalGitTree` uses, so
+  // every non-killable canonical simple-git call also runs an absolute git.exe, not a bare "git" PATH
+  // lookup. Unresolved stays undefined (simple-git's own default "git"); POSIX never calls it.
+  const resolvedGitExeRaw = process.platform === "win32" ? resolveAbsoluteGitExePath() : null;
+  const resolvedGitExe = resolvedGitExeRaw && isAbsoluteWindowsExePath(resolvedGitExeRaw) ? resolvedGitExeRaw : undefined;
   // `allowUnsafeMergeDriver` is required for simple-git to pass OUR `-c merge.<x>.driver=` (a blanking, never a set).
   // `boundedSimpleGit` re-applies `scrubGitEnv` to whatever `prepareCanonicalEnv` already scrubbed — idempotent, kept for its own unconditional-at-construction guarantee (f7a80d76).
-  const git = boundedSimpleGit(repoPath, blockTimeoutMs, prepareCanonicalEnv(env), abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
+  const git = boundedSimpleGit(repoPath, blockTimeoutMs, prepareCanonicalEnv(env), abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG], resolvedGitExe);
   const raw = async (...callArgs: unknown[]): Promise<string> => {
     const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     return canonicalRaw(git, args);
   };
+  // @decision 5b50eede (round 3, CR `18aac4c9`) — refuse `customBinary(` on a canonicalGit instance
+  // (fail-closed): win32's `allowUnsafeCustomBinary:true` would let a later caller silently swap the
+  // resolved binary with no validation at all. Nothing calls it today (grep-confirmed).
+  const customBinaryRefused = () => {
+    throw new Error("canonicalGit: customBinary() is refused — the canonical path's git binary is resolved once at construction; call canonicalGit(...) again instead of swapping the binary on an existing instance.");
+  };
   return new Proxy(git, {
     get(target, prop) {
       if (prop === "raw") return raw;
+      if (prop === "customBinary") return customBinaryRefused;
       const v = Reflect.get(target, prop, target);
       return typeof v === "function" ? v.bind(target) : v;
     },

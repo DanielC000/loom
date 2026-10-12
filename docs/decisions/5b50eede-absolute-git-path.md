@@ -50,6 +50,57 @@ reproduced.
 - Log wording fixed: "skipped for THIS call … resolution is retried on every call" (was worded as if
   permanently skipped for the rest of the process, which it never was).
 
+## Round 3 (card `cf9a32cf`) — the simple-git-based canonical calls were still a bare `"git"`
+
+Rounds 1-2 only closed the hazard for `spawnCanonicalGitTree`'s two raw-spawn paths
+(`rawViaWinJobLauncher`/`rawViaDirectSpawn`) — the ones `killableCanonicalRaw` reaches. But every
+NON-killable canonical call (ordinary reads/writes through `canonicalGit(...).raw(...)`, which runs on
+simple-git's own spawn, not `spawnCanonicalGitTree`) still constructed `boundedSimpleGit` with no binary
+override, so simple-git resolved a bare `"git"` through Node's own PATH search — the identical
+cwd/PATH-entry hijack surface rounds 1-2 closed for the other half of the canonical path.
+
+**Fix:** `canonicalGit` resolves the SAME `resolveAbsoluteGitExePath()` on win32 (never a second resolver)
+and threads the result into `boundedSimpleGit`'s new optional `binary` parameter; unresolved stays
+`undefined`, giving simple-git's own default `"git"` — identical to today. POSIX never calls the resolver
+(binary stays `undefined`, byte-identical).
+
+**simple-git validates (and this card had to work around it):** `customBinaryPlugin`'s `isBadArgument`
+regex (`/^([a-z]:)?([a-z0-9/.\\_~-]+)$/i`) rejects any character outside that class — a space included.
+A real installed git on Windows commonly resolves to `C:\Program Files\Git\cmd\git.exe` (verified on the
+dev host via `where git`), which fails that regex on the space in "Program Files" alone. Left unaddressed,
+passing that path as `binary` would THROW `GitPluginError` at construction (the plugin's default
+`allowUnsafe=false`) instead of silently falling back — worse than the pre-fix bare `"git"`, not better.
+`boundedSimpleGit` auto-sets `unsafe.allowUnsafeCustomBinary: true` whenever `binary` is supplied: the
+value itself is never caller-supplied free text, only ever the resolver's own drive/UNC-rooted,
+`fs.existsSync`-checked result, so bypassing simple-git's generic string-shape check here is the same
+defense-in-depth posture as round 2's own site-level re-check, not a widening of what can reach `binary`.
+Checked once with `GitExecutorChain`'s real spawn call (`child_process.spawn(command, args, spawnOptions)`,
+no `shell: true`): a space in `command` needs no shell-quoting at all on this path, so the regex rejection
+is simple-git's OWN conservatism, not a real spawn hazard.
+
+**Test trap avoided:** a planted `git.exe` in the canonical repo's own cwd must be asserted against the
+binary simple-git was actually CONFIGURED with (`git.raw` doesn't expose the resolved spawn target
+directly — assert via a `gitFactory`/spawn-impl seam, or on `resolveAbsoluteGitExePath`'s own return
+value plus `isAbsoluteWindowsExePath`), never merely that some git ran successfully — a resilient
+fallback absorbing a hijack would still "pass" a test that only checks the command's exit status.
+`git._executor._plugins.exec("spawn.binary", "", { method: "", commands: [] })` reads back the exact
+configured binary without spawning anything — the SAME internal hook `GitExecutorChain.attemptRemoteTask`
+itself calls before every real spawn, verified directly against the live library at `node_modules/
+.pnpm/simple-git@3.36.0/.../dist/cjs/index.js`.
+
+**Residual noise, filtered (round 3, CR `18aac4c9`):** `customBinaryPlugin`'s `toBinaryConfig` still
+`console.warn`s on a regex-failing `binary` even with `allowUnsafeCustomBinary` set — the warn and the
+throw are gated by the SAME flag, but the warn fires either way. Left alone, that would print "Invalid
+value supplied for custom binary…" on every single canonical git call on an ordinary Windows install (the
+common case — the self-hosting daemon itself runs on Windows), reading as a real problem when it is the
+expected, benign echo of our own deliberate opt-in. `boundedSimpleGit` wraps `console.warn` around the
+synchronous `simpleGit(...)` construction call ONLY, and ONLY when `binary` is supplied, dropping ONLY a
+message containing `SIMPLE_GIT_CUSTOM_BINARY_WARNING` (a substring of simple-git's own `WRONG_CHARS_ERR`)
+— anything else still reaches the real `console.warn` unchanged, so an unrelated future
+construction-time warning (from simple-git or anything else) is never swallowed. The window has no
+`await` in it, so nothing else in the (single-threaded) process can log through the swapped reference
+before it's restored.
+
 ## Do not
 
 - Do not revert to bare `"git.exe"`/`null` `lpApplicationName` "to match bare spawn" — the two search
@@ -66,6 +117,24 @@ reproduced.
   travels through afterward (here: `rawViaDirectSpawn`'s `cwd: repoPath`) — round 1's "accepted
   defense-in-depth" framing was exactly the trap: a real exploit existed the whole time, via a different
   resolver defect than the one round 1 tested for.
+- Do not write a second absolute-git resolver for simple-git calls — `canonicalGit` (round 3) reuses
+  `resolveAbsoluteGitExePath()` verbatim; a second copy is exactly how the two paths drift again.
+- Do not pass a resolved absolute path as simple-git's `binary` option without also setting
+  `unsafe.allowUnsafeCustomBinary` — simple-git's own regex throws on the space in a real
+  `C:\Program Files\...` install path, turning a silent hazard into a loud construction-time crash.
+- Do not widen `allowUnsafeCustomBinary` to any OTHER `boundedSimpleGit` caller's `extraUnsafe` — it is
+  derived automatically and only from `binary` being set, never passed in free-form by a caller.
+- Do not widen the `console.warn` filter beyond the single synchronous `simpleGit(...)` construction call
+  (no `await` inside that window, and it must stay that way) or beyond matching
+  `SIMPLE_GIT_CUSTOM_BINARY_WARNING` specifically — a blanket no-op swallows every OTHER future
+  construction-time warning too, not just the one this card knows is benign.
+- Do not let `canonicalGit`'s returned instance forward a real `.customBinary(` call (CR `18aac4c9`) —
+  the win32+resolved case's `allowUnsafeCustomBinary: true` is scoped at construction to OUR OWN resolved
+  path, but `customBinaryPlugin`'s `allowUnsafe` flag is captured once and reused for every LATER
+  `.customBinary()` call too; forwarding it would let any future caller silently swap in an unvalidated
+  binary on an already-constructed canonical instance. The Proxy refuses it outright instead (nothing
+  calls it today — grep-confirmed); if a genuine need ever appears, construct a fresh `canonicalGit(...)`
+  with a different resolved binary rather than mutating an existing instance.
 
 ## Source
 
