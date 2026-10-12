@@ -39,10 +39,31 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { mergeBranch, createWorktree, findLandedSquashCommit, resolveGitRef } = await import("../dist/git/worktrees.js");
 
+console.log(`git --version: ${execFileSync("git", ["--version"]).toString().trim()}`);
+
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const GIT_ID = "-c user.email=pcd@loom -c user.name=pcd";
 const ID_ARGS = GIT_ID.split(" ").filter(Boolean);
+
+// card cceb62fd — CI (and only CI) fails this file's very first precondition; this worker could not
+// reproduce it despite real effort (bare, harness, harness-under-pool-contention), so rather than guess a
+// fix, this surfaces WHY on CI's own next run. Never changes an assertion or its pass condition — purely
+// diagnostic, printed next to the existing FAIL line.
+function logLandingDiagnostic(label, repo, land) {
+  console.log(`DIAG  ${label}: land=${JSON.stringify(land ?? null).slice(0, 2000)}`);
+  console.log(`DIAG  ${label}: git --version: ${execFileSync("git", ["--version"]).toString().trim()}`);
+  try {
+    console.log(`DIAG  ${label}: branch --show-current: ${execFileSync("git", ["-C", repo, "branch", "--show-current"]).toString().trim()}`);
+  } catch (e) {
+    console.log(`DIAG  ${label}: branch --show-current FAILED: ${e.message}`);
+  }
+  try {
+    console.log(`DIAG  ${label}: status --porcelain:\n${execFileSync("git", ["-C", repo, "status", "--porcelain"]).toString()}`);
+  } catch (e) {
+    console.log(`DIAG  ${label}: status --porcelain FAILED: ${e.message}`);
+  }
+}
 
 function headSha(repo) {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo }).toString().trim();
@@ -87,6 +108,7 @@ async function makeWorktree(repo, projId, taskId) {
 
   const land = await mergeBranch(repo, branch, "feature landed");
   check("(1) precondition: landed cleanly", land.ok === true);
+  if (land.ok !== true) logLandingDiagnostic("(1)", repo, land);
   const X = headSha(repo);
 
   const preLanded = await findLandedSquashCommit(repo, branch, "HEAD");
@@ -123,6 +145,7 @@ async function makeWorktree(repo, projId, taskId) {
 
   const land = await mergeBranch(repo, branch, "feature landed");
   check("(2) precondition: landed cleanly", land.ok === true);
+  if (land.ok !== true) logLandingDiagnostic("(2)", repo, land);
   const X = headSha(repo);
 
   revert(repo, X); // lands BEFORE the re-confirm's own producer ever reads anything
@@ -163,6 +186,7 @@ async function makeWorktree(repo, projId, taskId) {
 
   const land = await mergeBranch(repo, branch, "feature landed");
   check("(3) precondition: landed cleanly", land.ok === true);
+  if (land.ok !== true) logLandingDiagnostic("(3)", repo, land);
   const X = headSha(repo);
 
   const preLanded = await findLandedSquashCommit(repo, branch, "HEAD");
@@ -193,6 +217,7 @@ async function makeWorktree(repo, projId, taskId) {
 
   const land = await mergeBranch(repo, branch, "feature landed");
   check("(4) precondition: landed cleanly", land.ok === true);
+  if (land.ok !== true) logLandingDiagnostic("(4)", repo, land);
   const X = headSha(repo);
 
   const preLanded = await findLandedSquashCommit(repo, branch, "HEAD");
@@ -224,6 +249,7 @@ async function makeWorktree(repo, projId, taskId) {
 
   const land = await mergeBranch(repo, branch, "feature landed");
   check("(5) precondition: landed cleanly", land.ok === true);
+  if (land.ok !== true) logLandingDiagnostic("(5)", repo, land);
   const X = headSha(repo);
 
   revert(repo, X);

@@ -124,23 +124,23 @@ try {
   // the OUTER subshell backgrounds an INNER one and returns immediately, so by the time the kill-trigger's
   // tree-kill walks the tree, the escaped descendant is already unreachable by a PPID-walking kill. Here
   // it's installed on a branch's SECOND commit, landing mid-batch (not the solo squash path).
-  // Card 5126718f: these were 2000/8000/15000. Diagnosed a host-load flake in scenario (E) (and, per a
-  // later baseline measurement, (B) too — both share these consts) — reproduced at ~1/20 and ~9/40 under
-  // real, saturating 100%-CPU host contention (14 genuine OS processes, not async callbacks in one
-  // thread) vs. 0/25 at idle. Root cause is test-only: the plain git-spawn-and-complete overhead for this
-  // call chain (canonical-index lock + HEAD read + the `--ff-only` merge itself, BEFORE the hook is even
-  // reached) was measured up to ~7.2s under that load — exceeding the OLD 2000ms kill-trigger budget
-  // before the hook's escaping descendant ever got forked, so the kill either lands on a bare unescaped
-  // "git" child (a correctly-CONFIRMED, non-quarantined failure — production behaved exactly as designed,
-  // just not the shape this scenario means to exercise) or, when the merge happens to finish first, a
-  // bare `{ok:true}` with no hook invocation at all (confirmed via an added "hook-invoked.marker" written
-  // as the hook's own first line, before its sleep: it was absent in the reproduced failures).
-  // SMALL_MS gives ~40% headroom over that measured 7.2s worst case — the hook only needs to OUTLIVE the
-  // kill-trigger deadline (2*SMALL_MS) by a margin, not hold for some large multiple of it, so S_HOLD_MS
-  // keeps the ORIGINAL file's own margin convention (+4000 over the give-up deadline) scaled to the new
-  // SMALL_MS, to bound this file's own standalone wall time (merge-quarantine-batch.mjs carries a
-  // test-daemon.mjs per-file timeout override sized off a measured max — see that file's own comment).
-  const SMALL_MS = 10000;
+  // Card 5126718f: these were 2000/8000/15000, then raised to 10000 (~40% headroom over a measured 7.2s
+  // worst case under "100%-CPU, 14 genuine OS processes" synthetic contention). Card cceb62fd: that 10000
+  // figure still reliably reproduces the SAME documented failure shape — a bare `{ok:true}` with no hook
+  // invocation at all (the hook-invoked marker absent) — on real ubuntu-latest CI (every push since
+  // 2026-10-03) AND under this worker's own local Linux repro (WSL, both a synthetic multi-process CPU
+  // stress and a REALISTIC concurrent-real-test-file load, CPU-constrained to 2 cores to approximate a
+  // weaker CI runner): the pre-hook git-spawn-and-complete overhead this scenario races against evidently
+  // exceeds 7.2s under real CI/suite-wide contention, not just the narrower synthetic stress the 10000
+  // figure was sized against. Raised to 20000 (2x) — the hook only needs to OUTLIVE the kill-trigger
+  // deadline (2*SMALL_MS) by a margin, not hold for some large multiple of it, so S_HOLD_MS keeps the
+  // ORIGINAL file's own margin convention (+4000 over the give-up deadline) scaled to the new SMALL_MS, to
+  // bound this file's own standalone wall time (merge-quarantine-batch.mjs carries a test-daemon.mjs
+  // per-file timeout override sized off a measured max — see that file's own comment, raised alongside
+  // this change). This is a MITIGATION, not a structural fix — the test still races a wall-clock budget
+  // against host load; a signal-based redesign (confirm the hook has started before the kill-trigger's
+  // clock matters) would close the residual gap but is a larger change, left to a follow-up.
+  const SMALL_MS = 20000;
   const S_HOLD_MS = 2 * SMALL_MS + 4000; // comfortably past withTimeoutKillingChild's own give-up deadline (2*SMALL_MS)
   const S_MAIN_MS = SMALL_MS + 10000;
   const AUTO_CLEAR_POLL_MS = S_HOLD_MS + 10000;

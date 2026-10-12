@@ -526,7 +526,16 @@ try {
     check("(precondition) D never exists at all", !fs.existsSync(d));
 
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-    const dHash = createHash("sha256").update(d).digest("hex").slice(0, 24); // any filename works — content-matched
+    // This filename must NOT equal `freshHashForKey(canonicalRepoLockKey(d))`, or PASS 1's own
+    // `freshHash !== hash` stale-key gate reads D as "already correctly keyed" and skips the branch that
+    // adds `Ke` to `degradedOccupiedKeys` entirely — silently defeating this whole scenario. Hashing `d`
+    // directly (the prior form) coincided with that value on Linux specifically: `canonicalRepoLockKey`
+    // does no case-folding there, and `d`'s own ancestor walk (no `.git` anywhere above a never-created
+    // path) degrades to the literal path unchanged — the exact same bytes a bare `sha256(d)` would hash.
+    // Windows only avoided the collision by accident (its `.toLowerCase()` step changes the value). Hash
+    // something OTHER than `d` so the mismatch holds on every platform, not just the ones that happen to
+    // transform the path.
+    const dHash = createHash("sha256").update(`${d}\u0000manufactured-stale-key`).digest("hex").slice(0, 24);
     const dLatchPath = path.join(MERGE_QUARANTINE_DIR, `${dHash}.json`);
     const dContent = JSON.stringify({
       repoPath: d, branch: "d-branch", reason: "D's own prior raise, resolvedKey manufactured to collide with E",
