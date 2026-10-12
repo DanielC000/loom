@@ -138,30 +138,42 @@ function run(entryPath, decoyHome, extra = {}) {
   }
 }
 
-// --- (9) CASE-INSENSITIVITY: an explicit path to the same real prod DB, typed in a DIFFERENT case,
+// --- (9)/(10) CASE-INSENSITIVITY: an explicit path to the same real prod DB, typed in a DIFFERENT case,
 // still refuses (card 45fba6cf's Code Review finding — a bare path.resolve string compare is
 // case-SENSITIVE, but Windows paths are not). HOME/USERPROFILE stay at the decoy's own exact case;
-// only the FILE argument passed to `new Db(...)` is case-flipped. ---
-{
-  const decoyHome = makeDecoyHome();
-  const realFile = path.join(decoyHome, ".loom", "loom.db");
-  const differentlyCasedFile = realFile === realFile.toUpperCase() ? realFile.toLowerCase() : realFile.toUpperCase();
-  const result = run(fixtureOutsideTestDir, decoyHome, { LOOM_FIXTURE_DB_FILE: differentlyCasedFile });
-  check("(9) a differently-cased explicit path to the same real prod db still refuses (no declare/opt-in)",
-    result.status === 1 && /THREW:refusing to open the prod DB/.test(result.stdout || ""));
-}
+// only the FILE argument passed to `new Db(...)` is case-flipped.
+// win32-only: `normalizeForProdDbCompare` (db.ts) folds case ONLY on win32 (matching the product's own
+// documented premise — "Windows paths are case-insensitive but a bare string compare is not"), never on
+// POSIX. On a case-SENSITIVE filesystem (Linux), `realFile.toUpperCase()` is not an alternate spelling of
+// the same file — it is a different, nonexistent path, so the guard CORRECTLY treats it as unrelated to
+// the real prod DB and does not refuse it. That is the guard working as designed, not a bypass; asserting
+// a refusal here on a case-sensitive FS would be asserting a premise ("same real file, different case")
+// that is simply false on that platform. ---
+if (process.platform === "win32") {
+  {
+    const decoyHome = makeDecoyHome();
+    const realFile = path.join(decoyHome, ".loom", "loom.db");
+    const differentlyCasedFile = realFile === realFile.toUpperCase() ? realFile.toLowerCase() : realFile.toUpperCase();
+    const result = run(fixtureOutsideTestDir, decoyHome, { LOOM_FIXTURE_DB_FILE: differentlyCasedFile });
+    check("(9) a differently-cased explicit path to the same real prod db still refuses (no declare/opt-in)",
+      result.status === 1 && /THREW:refusing to open the prod DB/.test(result.stdout || ""));
+  }
 
-// --- (10) CASE-INSENSITIVITY + TEST MARKER: the same differently-cased path, now with LOOM_TEST=1 ---
-// Proves normalization happens BEFORE the test-marker branch even engages — if case-folding failed, the
-// path would never be recognized as prod at all, and this would open instead of hitting the test-marker
-// wording specifically.
-{
-  const decoyHome = makeDecoyHome();
-  const realFile = path.join(decoyHome, ".loom", "loom.db");
-  const differentlyCasedFile = realFile === realFile.toUpperCase() ? realFile.toLowerCase() : realFile.toUpperCase();
-  const result = run(fixtureOutsideTestDir, decoyHome, { LOOM_TEST: "1", LOOM_FIXTURE_DB_FILE: differentlyCasedFile });
-  check("(10) a differently-cased path is STILL vetoed under LOOM_TEST (test-marker wording, not default-refuse)",
-    result.status === 1 && /THREW:refusing to open the prod DB \(~\/\.loom\/loom\.db\) from a daemon test/.test(result.stdout || ""));
+  // --- (10) CASE-INSENSITIVITY + TEST MARKER: the same differently-cased path, now with LOOM_TEST=1 ---
+  // Proves normalization happens BEFORE the test-marker branch even engages — if case-folding failed, the
+  // path would never be recognized as prod at all, and this would open instead of hitting the test-marker
+  // wording specifically.
+  {
+    const decoyHome = makeDecoyHome();
+    const realFile = path.join(decoyHome, ".loom", "loom.db");
+    const differentlyCasedFile = realFile === realFile.toUpperCase() ? realFile.toLowerCase() : realFile.toUpperCase();
+    const result = run(fixtureOutsideTestDir, decoyHome, { LOOM_TEST: "1", LOOM_FIXTURE_DB_FILE: differentlyCasedFile });
+    check("(10) a differently-cased path is STILL vetoed under LOOM_TEST (test-marker wording, not default-refuse)",
+      result.status === 1 && /THREW:refusing to open the prod DB \(~\/\.loom\/loom\.db\) from a daemon test/.test(result.stdout || ""));
+  }
+} else {
+  console.log("SKIP  (9) differently-cased-path refusal — win32-only (normalizeForProdDbCompare case-folds on win32 only; not the same file on a case-sensitive FS)");
+  console.log("SKIP  (10) differently-cased-path + LOOM_TEST refusal — win32-only (same reason as (9))");
 }
 
 // --- (11) JUNCTION ALIAS: the same real prod DB, reached through a directory junction pointing at the

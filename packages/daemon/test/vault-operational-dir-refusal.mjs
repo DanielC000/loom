@@ -202,10 +202,29 @@ const scratchRoot = fs.realpathSync(mkdtempManaged("loom-op-dir-refusal-scratch-
   // Non-canonical spelling of LOOM_HOME (manager constraint: mixed case + a trailing separator on
   // win32) must still be caught — isOperationalVaultDir itself already realpath/case-normalizes both
   // sides, so this proves the NEW call site actually threads the raw argument through to it unmangled.
-  const nonCanonical = loomHome.toUpperCase() + path.sep;
-  const rNonCanonical = await resolveVaultGitTarget(nonCanonical);
-  check("resolveVaultGitTarget refuses a non-canonically-spelled LOOM_HOME (mixed case + trailing sep) too",
-    rNonCanonical.ok === false && rNonCanonical.reason === "operational-dir");
+  // win32-only: both `isOperationalVaultDir`'s case-fold (`normLoomPath`, versioner.ts) and the real
+  // filesystem itself only treat a case-flipped path as the SAME directory on win32 (case-insensitive).
+  // On a case-sensitive FS (Linux), `loomHome.toUpperCase()` is a different, NONEXISTENT path — not a
+  // "non-canonical spelling" of LOOM_HOME at all — so isOperationalVaultDir correctly does not flag it,
+  // and resolveVaultGitTarget falls through to resolveVaultRepoContext's real git discovery against that
+  // nonexistent directory, which simple-git refuses to even construct against (GitConstructError), rather
+  // than returning a clean ok:false. Asserting the SAME outcome here on Linux would assert a premise
+  // ("same real directory, different case") that is simply false on that platform.
+  {
+    const nonCanonical = loomHome.toUpperCase() + path.sep;
+    const rNonCanonical = await resolveVaultGitTarget(nonCanonical);
+    if (process.platform === "win32") {
+      check("resolveVaultGitTarget refuses a non-canonically-spelled LOOM_HOME (mixed case + trailing sep) too",
+        rNonCanonical.ok === false && rNonCanonical.reason === "operational-dir");
+    } else {
+      // POSIX: the uppercased spelling is a genuinely different, nonexistent path on a case-sensitive
+      // FS — isOperationalVaultDir correctly does not flag it as LOOM_HOME, so this is caught instead by
+      // the fs.existsSync short-circuit added to resolveVaultGitTarget (same mechanism block (h2) below
+      // proves directly) rather than the operational-dir path. Still refused either way.
+      check("resolveVaultGitTarget(posix) still refuses a nonexistent case-flipped LOOM_HOME spelling (via no-repo, not operational-dir)",
+        rNonCanonical.ok === false && rNonCanonical.reason === "no-repo");
+    }
+  }
 
   // NEGATIVE CONTROL: an ordinary vault with a real repo (the SAME sibling (g) above already created at
   // this path) still resolves ok:true — the new check doesn't misfire on the legitimate case.
@@ -213,6 +232,20 @@ const scratchRoot = fs.realpathSync(mkdtempManaged("loom-op-dir-refusal-scratch-
   const rNormal = await resolveVaultGitTarget(siblingVault);
   check("negative control: resolveVaultGitTarget on an ordinary vault still resolves ok:true", rNormal.ok === true);
   check("negative control: …and the resolved repoPath actually has a .git", fs.existsSync(path.join(rNormal.repoPath ?? "", ".git")));
+}
+
+// (h2) PLATFORM-INDEPENDENT robustness finding from this card's own Linux-CI investigation (card
+// 536780d6): resolveVaultGitTarget used to crash (an uncaught GitConstructError, never caught by its one
+// real caller) when given ANY vaultPath pointing at a directory that does not exist on disk at all — not
+// specific to case-folding. RED-provable by reverting versioner.ts's fs.existsSync short-circuit: the
+// call below would then throw "Cannot use simple-git on a directory that does not exist" instead of
+// returning a clean ok:false. Runs on every platform (no case-sensitivity involved — the path is simply
+// absent).
+{
+  const neverExisted = path.join(fixtureRoot, "this-directory-was-never-created");
+  const rMissing = await resolveVaultGitTarget(neverExisted);
+  check("resolveVaultGitTarget on a nonexistent vaultPath returns a clean ok:false (never throws)",
+    rMissing.ok === false && rMissing.reason === "no-repo");
 }
 
 // (i) Card a018fb5a, shape (a): a vault inside a REAL linked worktree directly under WORKTREES_DIR, whose

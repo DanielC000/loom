@@ -131,7 +131,13 @@ try {
     const dryLiveJunction = pruneDeadWorktreeClaudeConfigEntries({ dryRun: true, worktreesRoot });
     check("junction: a LIVE junction-aliased worktree is classified ALIVE, not dead", dryLiveJunction.deadCount === 0);
 
-    fs.rmdirSync(junctionPath); // removes the junction point itself, never junctionTarget
+    // Removes the junction point itself, never junctionTarget. On win32, fs.symlinkSync(..., "junction")
+    // creates a REAL reparse point, which lstat reports as a directory — rmdirSync removes just that
+    // reparse point. On POSIX, Node's symlinkSync ignores the `type` argument entirely and always creates
+    // a plain symlink (verified: lstat reports isSymbolicLink(), not isDirectory()) — POSIX rmdir(2)
+    // requires the path to BE a directory, not a symlink to one, so rmdirSync on it throws ENOTDIR; unlink
+    // it instead, exactly as removing any other symlink.
+    if (process.platform === "win32") fs.rmdirSync(junctionPath); else fs.unlinkSync(junctionPath);
     const dryDeadJunction = pruneDeadWorktreeClaudeConfigEntries({ dryRun: true, worktreesRoot });
     check("junction: once the junction point itself is removed, it's classified dead",
       dryDeadJunction.deadCount === 1 && dryDeadJunction.deadKeysSample.includes(keyFor(junctionPath)));

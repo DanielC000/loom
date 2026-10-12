@@ -1272,6 +1272,13 @@ export async function resolveVaultGitTarget(vaultPath: string, deps: VaultGitDep
   const trimmed = vaultPath?.trim();
   if (!trimmed) return { ok: false, reason: "no-vault" };
   if (isOperationalVaultDir(trimmed)) return { ok: false, reason: "operational-dir" };
+  // A nonexistent `trimmed` can never be a repo (there is nothing to resolve, let alone push to) — refuse
+  // it the same clean way as "exists but isn't a repo yet" rather than letting resolveVaultRepoContext's
+  // simple-git construction throw: `boundedSimpleGit` refuses to even construct against a directory that
+  // isn't there (`GitConstructError: Cannot use simple-git on a directory that does not exist`), which
+  // would otherwise surface as an uncaught rejection to this function's only caller (the companion
+  // git-push capability, which does not wrap this call in a try/catch).
+  if (!fs.existsSync(trimmed)) return { ok: false, reason: "no-repo" };
   const ctx = await resolveVaultRepoContext(trimmed, deps);
   if (isOperationalVaultDir(ctx.commitPath)) return { ok: false, reason: "operational-dir" };
   if (ctx.externallyManaged) return { ok: false, reason: "externally-managed" };

@@ -164,7 +164,20 @@ try {
       }
     }
 
-    // --- A3: the `\\?\` extended-length prefix, missing-tail candidate. ---
+    // --- A3: the `\\?\` extended-length prefix, missing-tail candidate. win32-only: `\\?\<drive>:\…` is
+    // the ONE exempt-as-safe form in `isUnsafeToCanonicalize` (vault-path.ts) specifically BECAUSE it
+    // canonicalizes correctly through realpath on win32 — the exemption regex requires a drive letter
+    // (`[A-Za-z]:`), which a POSIX repo path never has. On Linux, `repo` is something like
+    // `/tmp/loom-xxx/extended/repo`, so `"\\?\" + repo` has NO drive letter and is NOT exempt — but it
+    // ALSO never reaches isUnsafeToCanonicalize (or the containment check) at all: a backslash-leading
+    // string doesn't start with "/", so it fails the plain absolute-path gate (validateVaultPath) first,
+    // an even earlier refusal than A9's. That is still a correct refusal, just via a different gate — this
+    // isn't a bypass, it's a test asserting a win32-only exemption path that POSIX has no equivalent of.
+    // Candidate built by PLAIN STRING CONCATENATION, never path.join — path.join is platform-aware and
+    // path.posix.join (what runs on Linux) silently collapses the leading `\\?\` down to a single `\`
+    // before any guard ever sees it, which would make this probe test an accidentally-mangled string
+    // instead of the real spelling under test (verified directly: with path.join, this candidate is
+    // actually ACCEPTED on POSIX — a false "no bypass" that reflects a test artifact, not the guard). ---
     {
       const { repo, parent: repoParent } = mkRepoWithParent("extended");
       cleanupDirs.push(repoParent);
@@ -172,11 +185,21 @@ try {
       db.insertProject({ id: "pExtended", name: "Extended", repoPath: repo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
       db.insertAgent({ id: "aExtended", projectId: "pExtended", name: "Mgr", startupPrompt: "", position: 0, profileId: null });
       db.insertSession({ id: "SExtended", projectId: "pExtended", agentId: "aExtended", engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
-      const extendedCandidate = path.join("\\\\?\\" + repo, "docs");
+      const extendedCandidate = "\\\\?\\" + repo + "\\docs";
       let err = null;
       try { await svc.updateProjectStructural("SExtended", "pExtended", { vaultPath: extendedCandidate }); }
       catch (e) { err = e instanceof Error ? e.message : String(e); }
-      check("(A3) vaultPath = \\\\?\\<repoPath>\\docs (missing tail) → rejected", typeof err === "string" && /(inside the code repo|equals\/aliases)/.test(err));
+      if (process.platform === "win32") {
+        check("(A3) vaultPath = \\\\?\\<repoPath>\\docs (missing tail) → rejected", typeof err === "string" && /(inside the code repo|equals\/aliases)/.test(err));
+      } else {
+        // POSIX: a BACKSLASH-prefixed candidate doesn't even start with "/", so it fails the plain
+        // absolute-path gate (validateVaultPath) BEFORE ever reaching isUnsafeToCanonicalize or the
+        // containment check — a third, earlier-still refusal shape, verified directly (repo has no
+        // drive letter here, so there is no exemption to even consider). Still a correct refusal, just
+        // via the absolute-path gate rather than either guard this file's other checks exercise.
+        check("(A3, posix) vaultPath = \\\\?\\<repoPath>\\docs → refused (absolute-path gate; a backslash-leading string isn't absolute on POSIX)",
+          typeof err === "string" && /must be an absolute path/.test(err));
+      }
     }
 
     // --- A4: the UNC admin-share loopback alias (`\\localhost\c$\...`) — REFUSED outright (cannot be
@@ -288,7 +311,15 @@ try {
 
     // --- A9 (round-3 review request): the FORWARD-SLASH spelling of the safe extended-length local form
     // (`//?/<drive>:/...`) — regression: this one is NOT refused, and still correctly resolves through
-    // containment exactly like A3's backslash form (`\\?\<drive>:\...`). ---
+    // containment exactly like A3's backslash form (`\\?\<drive>:\...`). win32-only, same reason as A3:
+    // the exemption in isUnsafeToCanonicalize (vault-path.ts) requires a drive letter (`[A-Za-z]:`), which
+    // a POSIX repo path never has — on Linux, `"//?/" + repo` has no drive letter, so it falls into the
+    // broader "any other \\/\\...-form is unsafe" branch and is refused with the network/device-form
+    // message instead of the containment message this check's regex expects. Still a correct refusal on
+    // Linux, just a different (and, there, more directly applicable) one.
+    // Same path.join trap as A3 above: path.posix.join mangles the leading `//?/` before
+    // isUnsafeToCanonicalize ever sees it (verified: with path.join this candidate is silently ACCEPTED
+    // on POSIX). Built by plain string concatenation instead. ---
     {
       const { repo, parent: repoParent } = mkRepoWithParent("fwdslash-extended");
       cleanupDirs.push(repoParent);
@@ -296,11 +327,18 @@ try {
       db.insertProject({ id: "pFwdSlash", name: "FwdSlash", repoPath: repo, vaultPath: separateVault, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
       db.insertAgent({ id: "aFwdSlash", projectId: "pFwdSlash", name: "Mgr", startupPrompt: "", position: 0, profileId: null });
       db.insertSession({ id: "SFwdSlash", projectId: "pFwdSlash", agentId: "aFwdSlash", engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null });
-      const fwdSlashCandidate = path.join("//?/" + repo, "docs");
+      const fwdSlashCandidate = "//?/" + repo + "/docs";
       let err = null;
       try { await svc.updateProjectStructural("SFwdSlash", "pFwdSlash", { vaultPath: fwdSlashCandidate }); }
       catch (e) { err = e instanceof Error ? e.message : String(e); }
-      check("(A9) vaultPath = //?/<repoPath>/docs (forward-slash safe form) → still correctly rejected as containment, NOT refused as unsafe", typeof err === "string" && /is inside the code repo at/.test(err));
+      if (process.platform === "win32") {
+        check("(A9) vaultPath = //?/<repoPath>/docs (forward-slash safe form) → still correctly rejected as containment, NOT refused as unsafe", typeof err === "string" && /is inside the code repo at/.test(err));
+      } else {
+        // POSIX: same reasoning as (A3, posix) above — no drive-letter exemption, so this is caught by
+        // the unsafe-form branch rather than ever reaching the containment check.
+        check("(A9, posix) vaultPath = //?/<repoPath>/docs → refused (unsafe-form branch; no drive-letter exemption on POSIX)",
+          typeof err === "string" && /network\/device form/.test(err));
+      }
     }
 
     db.close();
