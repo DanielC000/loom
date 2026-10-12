@@ -14,6 +14,9 @@ import {
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
   requestProvenanceText,
 } from "../lib/questions";
+import {
+  EMPTY_REQUEST_DRAFT, clearRequestDraft, getRequestDraft, isRequestDraftDirty, setRequestDraft,
+} from "../lib/requestDrafts";
 
 // The REQUESTS INBOX (card 695ebab0 — the durable Requests object generalized from the decision inbox).
 // A manager/orchestrator asks the human NON-BLOCKING for one of four kinds of Request — decision · input ·
@@ -297,16 +300,33 @@ export function RequestsInbox() {
 
 // ── RequestModal ──────────────────────────────────────────────────────────────────
 // The detail/response as a centered dialog OVER the current page (Mission/Overview/Board/Requests) — the
-// owner picked "answer without leaving the page you're on". Backdrop or ✕ closes; the same content also
-// renders at /question/:id as a deep-link (see pages/QuestionAnswer.tsx).
+// owner picked "answer without leaving the page you're on". ✕ closes; the backdrop and Escape close only
+// while the answer form is CLEAN (card 544960ed — a stray click outside used to destroy a typed draft),
+// and otherwise say what they refused to do. The same content also renders at /question/:id as a
+// deep-link (see pages/QuestionAnswer.tsx).
 export function RequestModal({ id, onClose }: { id: string; onClose: () => void }) {
+  // The copy of the last refused close, or null. Read from the draft store at refusal time rather than
+  // subscribed to, so typing in the form never re-renders the dialog.
+  const [refused, setRefused] = useState<string | null>(null);
+  const tryClose = useCallback(() => {
+    if (!isRequestDraftDirty(id)) { onClose(); return; }
+    // A credential secret is deliberately NOT retained (see requestDrafts.ts) — say so instead of
+    // promising a draft that is about to be discarded by the one close path that still works.
+    setRefused(getRequestDraft(id).secretDirty ? "Secret not kept — ✕ discards it" : "Draft kept — ✕ to close");
+  }, [id, onClose]);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") tryClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [tryClose]);
+  // The notice is transient — it answers "why did nothing happen?" and then gets out of the way.
+  useEffect(() => {
+    if (!refused) return;
+    const t = setTimeout(() => setRefused(null), 4000);
+    return () => clearTimeout(t);
+  }, [refused]);
   return (
-    <div onClick={onClose} role="dialog" aria-modal
+    <div onClick={tryClose} role="dialog" aria-modal
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 60, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
@@ -314,6 +334,10 @@ export function RequestModal({ id, onClose }: { id: string; onClose: () => void 
           borderRadius: radius.base, padding: 16, display: "flex", flexDirection: "column", gap: 12, boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <SectionLabel style={{ margin: 0, flex: 1 }}>Request · {id.slice(0, 8)}</SectionLabel>
+          {refused && (
+            <span data-testid="request-close-refused" role="status" aria-live="polite"
+              style={{ fontFamily: font.mono, fontSize: 11, color: color.amber }}>{refused}</span>
+          )}
           <Button onClick={onClose} title="Close (Esc)">✕</Button>
         </div>
         <RequestDetail id={id} onClose={onClose} />
@@ -361,6 +385,19 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
   const q = useQuery({ queryKey: ["question", id], queryFn: () => api.question(id), enabled: !!id, retry: false });
   const question = q.data;
   const now = Date.now();
+
+  // A request can stop being answerable OUT OF BAND — the owner answers it in chat (question_resolve),
+  // from another tab, or a manager cancels it. The control then simply stops mounting, so its own
+  // clear-on-submit never runs and the store would keep a dirty flag for an answer that can never be
+  // sent: reopening would refuse the backdrop/Escape close with "Draft kept" and no form on screen to
+  // explain why. Retiring on ANY non-pending state is the one place that covers every such path.
+  // Deliberately NOT extended to q.isError: `retry:false` turns a transient blip into an error, and
+  // clearing there would destroy a draft the human is still typing — the exact thing this card exists to
+  // prevent. A vanished request can still always be closed with ✕.
+  const questionState = question?.state;
+  useEffect(() => {
+    if (questionState && questionState !== "pending") clearRequestDraft(id);
+  }, [id, questionState]);
 
   // Best-effort linked-task title (soft link — tolerate a dangling id). Only fetched when a taskId is set.
   const tasks = useQuery({
@@ -491,12 +528,14 @@ function RequestControl({ q }: { q: QuestionInboxItem }) {
 }
 
 // Shared submit-invalidation + a small success flash. Every control funnels its answer through here so the
-// inbox + this question both refetch the moment the write lands.
+// inbox + this question both refetch the moment the write lands — and so the ONE place that knows an
+// answer actually landed is the one place that retires its draft (card 544960ed).
 function useAnswerMutation(id: string, mutationFn: () => Promise<unknown>) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn,
     onSuccess: () => {
+      clearRequestDraft(id);
       qc.invalidateQueries({ queryKey: ["question", id] });
       qc.invalidateQueries({ queryKey: ["openQuestions"] });
     },
@@ -511,11 +550,16 @@ const textareaStyle = {
 // decision — options as selectable choices (recommendation flagged) + an always-optional note. Picking an
 // offered option is a convenience; a human may answer by free-text note alone (mirrors the answer route).
 function DecisionControl({ q }: { q: QuestionInboxItem }) {
-  const [choice, setChoice] = useState<string | null>(null);
-  const [note, setNote] = useState("");
+  const [choice, setChoice] = useState<string | null>(() => getRequestDraft(q.id).choice);
+  const [note, setNote] = useState(() => getRequestDraft(q.id).note);
   const hasOptions = !!q.options && q.options.length > 0;
   const answer = useAnswerMutation(q.id, () => api.answerQuestion(q.id, { chosenOption: choice, note: note.trim() || undefined }));
   const canSubmit = choice != null || note.trim().length > 0;
+  // Mirror the unsent answer into the draft store: `canSubmit` IS dirtiness here (a pick or any note), and
+  // a landed answer must never read dirty again — it would refuse the close of an already-answered dialog.
+  useEffect(() => {
+    setRequestDraft(q.id, { ...EMPTY_REQUEST_DRAFT, choice, note }, canSubmit && !answer.isSuccess);
+  }, [q.id, choice, note, canSubmit, answer.isSuccess]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {hasOptions && (
@@ -552,8 +596,11 @@ function DecisionControl({ q }: { q: QuestionInboxItem }) {
 
 // input — a single required free-text answer (no options). The note IS the answer.
 function InputControl({ q }: { q: QuestionInboxItem }) {
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState(() => getRequestDraft(q.id).note);
   const answer = useAnswerMutation(q.id, () => api.answerQuestion(q.id, { note: note.trim() }));
+  useEffect(() => {
+    setRequestDraft(q.id, { ...EMPTY_REQUEST_DRAFT, note }, note.trim().length > 0 && !answer.isSuccess);
+  }, [q.id, note, answer.isSuccess]);
   return (
     <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <SectionLabel style={{ margin: 0 }}>Your answer (required)</SectionLabel>
@@ -573,9 +620,12 @@ function InputControl({ q }: { q: QuestionInboxItem }) {
 // itself enforce or re-check it — a manager must read the grant and honor it.
 const PERMISSION_EXPIRY_MS: Record<string, number> = { "24h": 24 * 60 * 60 * 1000, "7d": 7 * 24 * 60 * 60 * 1000, "30d": 30 * 24 * 60 * 60 * 1000 };
 function PermissionControl({ q }: { q: QuestionInboxItem }) {
-  const [scope, setScope] = useState<PermissionScope>(q.permissionScopeHint ?? "once");
-  const [expiry, setExpiry] = useState<string>("");
-  const [note, setNote] = useState("");
+  // The asker's hint is this form's DEFAULT scope, so "dirty" means the human moved it off that default —
+  // scope always holds a value and can never be judged dirty by emptiness the way the other fields are.
+  const defaultScope = q.permissionScopeHint ?? "once";
+  const [scope, setScope] = useState<PermissionScope>(() => getRequestDraft(q.id).scope ?? defaultScope);
+  const [expiry, setExpiry] = useState<string>(() => getRequestDraft(q.id).expiry);
+  const [note, setNote] = useState(() => getRequestDraft(q.id).note);
   const expiresAtIso = (): string | undefined => {
     if (scope !== "standing" || !expiry) return undefined;
     const ms = PERMISSION_EXPIRY_MS[expiry];
@@ -584,6 +634,11 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
   const authorize = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "authorize", { scope, expiresAt: expiresAtIso(), note: note.trim() || undefined }));
   const deny = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "deny", { note: note.trim() || undefined }));
   const pending = authorize.isPending || deny.isPending;
+  const answered = authorize.isSuccess || deny.isSuccess;
+  useEffect(() => {
+    const dirty = note.trim().length > 0 || scope !== defaultScope || expiry !== "";
+    setRequestDraft(q.id, { ...EMPTY_REQUEST_DRAFT, note, scope, expiry }, dirty && !answered);
+  }, [q.id, note, scope, expiry, defaultScope, answered]);
   const kv = (label: string, value: string) => (
     <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: 13 }}>
       <span style={{ color: color.textMuted, minWidth: 90 }}>{label}</span>
@@ -647,6 +702,16 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
   const [secret, setSecret] = useState("");
   const [reveal, setReveal] = useState(false);
   const answer = useAnswerMutation(q.id, () => api.answerCredentialQuestion(q.id, secret));
+  // Only the FACT that a secret is half-typed reaches the draft store — never the value (see
+  // requestDrafts.ts). That is enough for the backdrop/Escape guard, which is what the stray click needed;
+  // the secret itself stays in this component's state and dies with it.
+  useEffect(() => {
+    setRequestDraft(q.id, { ...EMPTY_REQUEST_DRAFT, secretDirty: true }, secret.length > 0 && !answer.isSuccess);
+  }, [q.id, secret, answer.isSuccess]);
+  // The other three controls restore their draft on mount, so a dirty flag outliving the form is correct
+  // for them. This one restores NOTHING, so its flag must die with it — a stale one would refuse the
+  // backdrop close of a reopened, genuinely empty credential form.
+  useEffect(() => () => clearRequestDraft(q.id), [q.id]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <Panel style={{ borderLeft: `3px solid ${color.amber}`, display: "flex", flexDirection: "column", gap: 4 }}>
