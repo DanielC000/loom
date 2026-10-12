@@ -54,10 +54,29 @@ function initRepo(root) {
 
 // A lock file old enough to clear VAULT_LOCK_STALE_THRESHOLD_MS (15min) without waiting: backdate its
 // mtime by well over an hour.
+//
+// Card 52cb9d19 (root-caused on real WSL Ubuntu-22.04, reproduced ~12% of unmodified runs): two
+// back-to-back calls to this function on the SAME root (e.g. the "genuinely NEW lock instance" scenario,
+// which removes the old lock and immediately plants a new one) can land in the SAME real-clock
+// millisecond on a fast Linux host — the whole write/stat/utimes/dedupe-check round trip between the two
+// `Date.now()` reads is synchronous fs I/O that can complete in under 1ms when the page cache is warm.
+// Both calls then compute the byte-identical "2h ago" Date, so the new lock's mtime is byte-identical to
+// the one `maybeAlertStaleVaultLock` already dedupe-marked, and the detector — correctly, per its own
+// mtime-keyed dedupe contract (decision 227d9f0b) — treats them as the SAME lock instance and never
+// re-fires. This is a TEST-fixture race, not a product bug: the implicit assumption that two consecutive
+// `Date.now()` reads always differ happens to hold on Windows (slower synchronous I/O between the two
+// reads) but not on a fast Linux host with a warm cache — confirmed by instrumenting the real race
+// window: ANY extra synchronous work inserted between two consecutive calls (even a single harmless
+// fs.statSync) reliably suppressed the flake across hundreds of trials, which is the signature of a
+// sub-millisecond timing coincidence, not a persistent inode/ctime/filesystem-identity bug. Fix: force
+// each call strictly past the last one, independent of real clock resolution.
+let lastPlantedMs = 0;
 function plantStaleLock(root) {
   const lockPath = path.join(root, ".git", "index.lock");
   fs.writeFileSync(lockPath, "");
-  const old = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2h ago
+  const nowMs = Math.max(Date.now(), lastPlantedMs + 1);
+  lastPlantedMs = nowMs;
+  const old = new Date(nowMs - 2 * 60 * 60 * 1000); // 2h ago
   fs.utimesSync(lockPath, old, old);
   return lockPath;
 }

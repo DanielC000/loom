@@ -53,7 +53,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil, deferred } from "./_wait.mjs";
@@ -167,7 +167,10 @@ function onlyKnownWorktreeDirsLeft(projectId, knownTaskIds) {
  *  rejected as racy (`kickDistImporterCheck` fires fire-and-forget from inside the merge call itself, so
  *  a "before" snapshot taken after `confirm()` resolves can already contain the check's own branch). */
 function listLoomBranches(repoPath) {
-  const out = execSync("git branch --list \"loom/*\" --format=%(refname:short)", { cwd: repoPath }).toString().trim();
+  // execFileSync with an argv array — never a shell — so "%(refname:short)" (a sh-breaking token:
+  // /bin/sh parses the unquoted "(" as a syntax error; cmd.exe tolerates it) never passes through a
+  // shell parser on any platform.
+  const out = execFileSync("git", ["branch", "--list", "loom/*", "--format=%(refname:short)"], { cwd: repoPath }).toString().trim();
   return out ? out.split("\n").sort() : [];
 }
 
@@ -214,7 +217,13 @@ async function survivorBranches(repoPath, knownBranch) {
 /** mkService + the dist-importer-check-specific spies/seams this file needs on top of merge-gate-interval.mjs's own. */
 function mkService(db, extra = {}) {
   const gate = { calls: 0, pass: true, failNext: false, distHold: null, distFailingTest: undefined, distMechanismLike: false, distHarnessNotExecuted: false, distTimedOut: false, lastDistCall: null };
-  const sessions = new SessionService(db, { stop() {}, isAlive() { return false; }, enqueueStdin() {} }, new OrchestrationControl(), {
+  // enqueueStdin() must return an EnqueueResult shape (see pty/host.ts), never undefined — this file's
+  // own nudge-push scenarios drive enqueueDurableMessage for real (unlike merge-gate-interval.mjs, whose
+  // own identical stub never exercises that path), and enqueueDurableMessage reads `r.delivered`
+  // unconditionally. An empty-body stub crashed every pushNudge call with "Cannot read properties of
+  // undefined (reading 'delivered')" — caught non-fatally by pushNudge's own try/catch, so no assertion
+  // here depended on it, but it's the stub, not a product bug (see CI run 38234820974 / card 52cb9d19).
+  const sessions = new SessionService(db, { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; } }, new OrchestrationControl(), {
     syncAttachBudgetMs: 60_000,
     runGate: async (gateCmd, cwd, timeoutMs, runStep, envOverride, allowExtend, cancelSignal, hooks, spillFile) => {
       // Card cee17efe (LEAD round-2 ruling 1): the real gate command now delivers its selection via
