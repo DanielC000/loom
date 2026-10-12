@@ -6972,6 +6972,24 @@ export class Db {
     return r ? toOrchestrationEvent(r) : undefined;
   }
   /**
+   * @decision 3d5fcd00 — never derive this from the manager's CURRENT state as of now (e.g. by replaying
+   * the whole history and asking "is a run active") — a run that already ended BEFORE this lookup fires
+   * must still answer correctly for an event positioned BEFORE that ending.
+   *
+   * Returns the most recent `idle_report`/`idle_escalated` event for `managerSessionId` with `seq`
+   * strictly less than `beforeSeq` — "what immediately preceded event X in this manager's own
+   * idle-episode timeline" — or `undefined` when none exists. Keyed on `seq` (never-reused, monotonic),
+   * deliberately NOT sqlite's own rowid, for the same reason `listEventsSince`/`getMaxEventSeq` are (see
+   * `orchestration_events`'s own `seq` doc in SCHEMA) — an indexed (`idx_orch_events_mgr`) manager-scoped
+   * point lookup, bounded by that one manager's own idle-event history, never the whole table.
+   */
+  getLatestIdleEpisodeEventBefore(managerSessionId: string, beforeSeq: number): OrchestrationEvent | undefined {
+    const r = this.db.prepare(
+      "SELECT * FROM orchestration_events WHERE manager_session_id = ? AND kind IN ('idle_report','idle_escalated') AND seq < ? ORDER BY seq DESC LIMIT 1",
+    ).get(managerSessionId, beforeSeq) as Row | undefined;
+    return r ? toOrchestrationEvent(r) : undefined;
+  }
+  /**
    * @decision 7955458e — once-per-(lineage, item-set) dedup for `codex_isolation_gap_disclosed`'s
    * manager nudge, replacing the wrong agentId-keyed version. `nudged===true` only, so a PARENTLESS prior
    * occurrence (recorded, never sent) never suppresses a later one that has a recipient.

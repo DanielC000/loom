@@ -113,37 +113,12 @@ export function rateLimitDismissKey(s: Pick<SessionListItem, "id" | "rateLimited
   return `r:${s.id}:${s.rateLimitedUntil}`;
 }
 
-// ── QUEUE DRAINED episode derivation (card 611e76ba) ───────────────────────────────────
-// The QUEUE DRAINED attention item needs a dismiss key that is STABLE for one drained episode but NEW
-// when the board drains AGAIN after being busy — and its source event cannot supply one.
-//
-// Every OTHER escalation kind the attention queue renders is filed by a daemon watcher that emits exactly
-// once per episode (idle_escalated flips the nudge policy to 'suppressed'; board_quiet_cause /
-// context_escalated / give_up_recovery_escalated escalate once; vault_index_lock_stale dedupes on the
-// lock's own mtime), so for those the EVENT ID already IS "identity + the state that made it fire".
-// `idle_report` is different in kind: it is AGENT-filed, once per `idle_report` tool call, so a manager
-// that stays drained re-files state:"done" on every nudge cycle. Keying the dismiss on that event id
-// would mint a fresh key every few minutes and the × would do nothing — the exact friction card 611e76ba
-// exists to remove.
-//
-// So: collapse the manager's CURRENT consecutive run of done-dispositions to the id of the event that
-// STARTED it. Any other idle event (an idle_report of working/waiting, or an idle_escalated) breaks the
-// run, so the next done after it starts a new episode and mints a new key.
-//
-// Events may arrive unsorted; this sorts ascending itself rather than relying on the caller (the one
-// existing caller does sort, but a second one must not have to know that).
-// @decision 611e76ba — QUEUE DRAINED must never key its dismiss on its own event id.
-export function idleDoneEpisodeStarts(events: readonly OrchestrationEvent[]): Map<string, string> {
-  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
-  const starts = new Map<string, string>();
-  for (const e of sorted) {
-    if (e.kind !== "idle_report" && e.kind !== "idle_escalated") continue;
-    const isDone = e.kind === "idle_report" && (e.detail as { state?: string } | undefined)?.state === "done";
-    if (!isDone) { starts.delete(e.managerSessionId); continue; } // run broken — the next done starts fresh
-    if (!starts.has(e.managerSessionId)) starts.set(e.managerSessionId, e.id); // first done of this run
-  }
-  return starts;
-}
+// QUEUE DRAINED episode derivation (card 611e76ba) — moved to @loom/shared (card 3d5fcd00) so the
+// companion attention-push chat twin (packages/daemon/src/companion/attention-push.ts) can derive the
+// SAME episode boundary instead of growing its own, independently-drifting copy. Re-exported here
+// unchanged so every existing web caller/import path stays byte-identical; see the shared definition's
+// own decision note (611e76ba) for the rationale.
+export { idleDoneEpisodeStarts } from "@loom/shared";
 
 // A compact FleetCard folds a project's ARCHIVED (exited) sessions in alongside the running set, so the
 // card still reads meaningfully the moment a wave auto-archives (its workers exit → the running set

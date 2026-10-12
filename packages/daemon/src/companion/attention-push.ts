@@ -605,6 +605,33 @@ export class AttentionPushWatcher {
           seenConsolidatedLineageKeysThisTick.add(lineageKey);
         }
       }
+      // Card 3d5fcd00: `idle_report(done)` is the one kind this far down the switch whose SOURCE repeats
+      // within a single episode — it's agent-filed, so a manager that stays drained re-files
+      // `state:"done"` on every nudge cycle (classify() already narrowed `cls === "manager-idle"` to
+      // exactly this shape for `idle_report`; `idle_escalated` also classifies "manager-idle" but fires
+      // at most once per episode at its own source, so it's excluded from this check by kind, same
+      // discipline as the platform_escalate/claude_boot_dialog_stuck split above).
+      //
+      // @decision 3d5fcd00 — never derive this from the manager's CURRENT state as of now (e.g. via the
+      // web's `idleDoneEpisodeStarts`, which reads the whole history and can be wrong by the time `e` is
+      // classified if the run already ended) — look only BACKWARD from `e`'s own fixed position instead.
+      //
+      // `e.kind === "idle_report"` only — `idle_escalated` also classifies "manager-idle" but fires at
+      // most once per episode at its own source (same discipline as the platform_escalate/
+      // claude_boot_dialog_stuck split above), so it's never suppressed here and always pushes. For a
+      // qualifying `idle_report(done)`, push `e` unless the latest `idle_report`/`idle_escalated` for
+      // this SAME manager, strictly BEFORE `e` (by `seq`, never sqlite's rowid —
+      // `getLatestIdleEpisodeEventBefore`, db.ts), is ITSELF an `idle_report(done)` — a continuation of a
+      // run already surfaced. Looking only backward means this can never be invalidated by anything that
+      // happens AFTER `e` (a digest's not-yet-due re-scan, a no-stacking/rate-limit defer, or two events
+      // landing in one tail-scan window can all put a later `working`/`waiting`/`idle_escalated` durably
+      // on record before `e` is ever looked at) — it fails toward VISIBLE (a since-ended drain still
+      // pages once) rather than toward silently dropping `e`.
+      if (e.kind === "idle_report") {
+        const prior = db.getLatestIdleEpisodeEventBefore(e.managerSessionId, e.seq);
+        const priorIsDone = !!prior && prior.kind === "idle_report" && (prior.detail as { state?: string } | undefined)?.state === "done";
+        if (priorIsDone) continue; // a 'done' immediately precedes this one — a continuation, already surfaced
+      }
       const projectName = db.getProject(projectId)?.name ?? "?";
       // Card 91b9105e: `cls === "escalation"` is NOT only ever `platform_escalate` any more — round 2
       // (card e2a3c613) added `claude_boot_dialog_stuck` to the same class. Only `platform_escalate`'s

@@ -2033,6 +2033,34 @@ export interface OrchestrationEvent {
   detail?: Record<string, unknown>;
 }
 
+/**
+ * @decision 611e76ba — `idle_report` is agent-filed, so a drained manager re-files `state:"done"` every
+ * nudge cycle; keying an episode on the event id would mint a fresh one each cycle and nothing could stay
+ * dismissed/suppressed for that episode.
+ *
+ * A LEVEL-TRIGGERED read: collapses a manager's CURRENT consecutive run of `idle_report(done)` events to
+ * the id of the one that STARTED it, as of the full `events` list handed in — any `idle_report` of
+ * `working`/`waiting`, or an `idle_escalated`, for that manager breaks the run, so the next `done` after
+ * it starts a new episode under a new id. Sorts `events` ascending by `ts` itself, so a caller never
+ * needs to pre-sort. Lives here (not `packages/web/src/lib/fleet.ts`, which re-exports it unchanged) so
+ * every consumer shares ONE derivation.
+ *
+ * @decision 3d5fcd00 — never call this from `packages/daemon/src/companion/attention-push.ts`: a
+ * tail-poll watcher can classify an event well after its run already ended, so this level-triggered read
+ * would report no active run and silently drop it. That file uses a positional rule instead.
+ */
+export function idleDoneEpisodeStarts(events: readonly OrchestrationEvent[]): Map<string, string> {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const starts = new Map<string, string>();
+  for (const e of sorted) {
+    if (e.kind !== "idle_report" && e.kind !== "idle_escalated") continue;
+    const isDone = e.kind === "idle_report" && (e.detail as { state?: string } | undefined)?.state === "done";
+    if (!isDone) { starts.delete(e.managerSessionId); continue; } // run broken — the next done starts fresh
+    if (!starts.has(e.managerSessionId)) starts.set(e.managerSessionId, e.id); // first done of this run
+  }
+  return starts;
+}
+
 /** A session enriched with its project/agent names — for the global Live Terminals grid. */
 export interface SessionListItem extends Session {
   projectName: string;

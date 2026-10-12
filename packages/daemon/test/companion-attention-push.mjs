@@ -1024,6 +1024,233 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   cleanupEnv(e);
 }
 
+// --- 36. CARD 3d5fcd00 — idle_report(done) EPISODE DEDUPE: `idle_report` is agent-filed, so a drained
+//     manager re-files `state:"done"` on every nudge cycle. Collapse that to ONE push per episode — but,
+//     per Code Review 10713b51's MAJOR on an earlier version of this fix, NEVER via the web's
+//     `idleDoneEpisodeStarts` (a CURRENT-run, level-triggered read of the whole history as of now): a
+//     digest's not-yet-due re-scan, a no-stacking/rate-limit defer, or two events landing in one
+//     tail-scan window can all let a run-breaking event land durably BEFORE a still-unclassified `done`
+//     is ever looked at, so a current-run read reports no active run and SILENTLY DROPS a real drain
+//     that was never actually pushed. The fix is POSITIONAL instead (`getLatestIdleEpisodeEventBefore`,
+//     db.ts): push `e` unless the latest idle_report/idle_escalated for the SAME manager strictly BEFORE
+//     `e` (by `seq`, never rowid) is itself an idle_report(done) — a question about `e`'s own fixed
+//     position, never invalidated by anything landing after it. Record: docs/decisions/3d5fcd00-*.md. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["manager-idle"] } });
+  e.watcher.start(); e.watcher.stop();
+
+  // 36a. N re-filed `done` reports for the SAME drained episode ⇒ exactly ONE push.
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // the episode's starter
+  e.watcher.tick(new Date());
+  check("idle-episode: the FIRST done in a drained episode pushes", e.enqueued.length === 1);
+  e.clearPending();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // re-filed on the next nudge cycle — SAME episode
+  e.watcher.tick(new Date());
+  check("idle-episode: a 2nd done re-filed for the SAME unbroken episode is suppressed, not re-pushed", e.enqueued.length === 1);
+  e.clearPending();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // a 3rd re-file — still the same episode
+  e.watcher.tick(new Date());
+  check("idle-episode: a 3rd re-file of the SAME episode is STILL suppressed", e.enqueued.length === 1);
+  check("idle-episode: only ONE companion_alert_pushed row exists for the whole run, not three", events(e, "companion_alert_pushed").length === 1);
+
+  // 36b. done → working → done: `working` breaks the run, so the NEXT done starts a genuinely NEW
+  // episode and pushes again (a second push, not a suppressed repeat).
+  e.clearPending();
+  fire(e, "idle_report", e.mgrA, { state: "working" }); // breaks the run (classify() → null, never pushed itself)
+  e.watcher.tick(new Date());
+  check("idle-episode: a 'working' report itself never pushes (not a manager-idle alert)", e.enqueued.length === 1);
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // a NEW episode, after the break
+  e.watcher.tick(new Date());
+  check("idle-episode: a done AFTER a working break starts a new episode and pushes a 2nd turn", e.enqueued.length === 2);
+  cleanupEnv(e);
+}
+
+// --- 36c. idle_escalated ALSO breaks the run (same as a 'working'/'waiting' idle_report) — and, being
+//     the owner's own once-per-episode escalation (not an idle_report at all), it is never itself
+//     suppressed by this check: it always pushes its own turn regardless of any prior done-run state. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["manager-idle"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // starter of run #1
+  e.watcher.tick(new Date());
+  check("idle-escalated-break: the starter pushes", e.enqueued.length === 1);
+  e.clearPending();
+  fire(e, "idle_escalated", e.mgrA, {}); // breaks run #1 — and is itself a genuine (never-suppressed) push
+  e.watcher.tick(new Date());
+  check("idle-escalated-break: idle_escalated is never suppressed by the idle_report episode check — it pushes on its own", e.enqueued.length === 2);
+  e.clearPending();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // starter of a genuinely NEW run #2, after the escalation
+  e.watcher.tick(new Date());
+  check("idle-escalated-break: a done AFTER idle_escalated starts a new episode and pushes again", e.enqueued.length === 3);
+  cleanupEnv(e);
+}
+
+// --- 36d. RESTART MID-RUN: a daemon restart (fresh watcher instance, re-seeded watermark) partway
+//     through an already-surfaced episode must NOT re-push the still-ongoing run's later re-files — the
+//     fresh instance's watermark seeds past the STARTER event (the only one ever actually pushed/stamped),
+//     so an in-memory-only "first done I've ever seen ⇒ treat it as the starter" rule would wrongly
+//     re-push the very next scanned done. The fix re-derives the starter from durable history every time,
+//     never from this watcher instance's own state, so it must stay correctly suppressed. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["manager-idle"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // D1 — the run's starter; the ONLY event ever pushed
+  e.watcher.tick(new Date());
+  check("restart-mid-run: D1 (the starter) pushes", e.enqueued.length === 1);
+  e.clearPending();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // D2 — same run, suppressed by the ORIGINAL watcher
+  e.watcher.tick(new Date());
+  check("restart-mid-run: D2 (same run) is suppressed by the original watcher", e.enqueued.length === 1);
+  e.clearPending();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // D3 — same run, also suppressed by the ORIGINAL watcher
+  e.watcher.tick(new Date());
+  check("restart-mid-run: D3 (same run) is also suppressed by the original watcher", e.enqueued.length === 1);
+
+  // Simulate the daemon restart: a FRESH watcher instance re-seeds its watermark from the durable log —
+  // to MAX(sourceSeq) across companion_alert_pushed rows, i.e. D1's seq (the only event ever pushed), so
+  // it will scan D2 and D3 as "new" on its very first tick, having never itself observed D1.
+  e.clearPending();
+  const fresh = e.freshWatcher();
+  fresh.start(); fresh.stop();
+  fresh.tick(new Date());
+  // `enqueued` is a CUMULATIVE record across this whole block (clearPending only resets the pty's own
+  // pending-turn queue, used by the no-stacking guard) — it already sat at 1 from D1's own push above, so
+  // "does not re-push" means it STAYS at 1, never that it resets to 0.
+  check("restart-mid-run: a FRESH (post-restart) watcher does NOT re-push D2/D3 of the already-surfaced episode",
+    e.enqueued.length === 1);
+  check("restart-mid-run: no new companion_alert_pushed row was recorded for the restart tick", events(e, "companion_alert_pushed").length === 1);
+
+  // And the run is still genuinely live afterward: a break + a new done still pushes normally post-restart.
+  fire(e, "idle_report", e.mgrA, { state: "working" });
+  fresh.tick(new Date());
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // a genuinely new episode, observed by the fresh watcher
+  fresh.tick(new Date());
+  check("restart-mid-run: a fresh watcher still correctly starts + pushes a genuinely NEW episode afterward", e.enqueued.length === 2);
+  cleanupEnv(e);
+}
+
+// --- 36e. A DIGEST/BURST MUST NOT COUNT A SUPPRESSED ROW EITHER: a pile of `done` re-files for the SAME
+//     unbroken episode, all landing in ONE scanned window, must still count as exactly ONE qualifying
+//     event — never inflate the immediate-mode burst coalesce or a digest's bundled line count. A
+//     pre-fix implementation that only suppressed at a later stage (or not at all) would either push once
+//     per repeat, or wrongly coalesce many repeats into one digest-style "N alerts" turn whose N counts
+//     the suppressed rows too. ---
+{
+  // Immediate mode: more than IMMEDIATE_BURST_CAP (10) repeats of the SAME unbroken episode in ONE tick
+  // must still resolve to exactly ONE qualifying event — never trip the burst-coalesce path (which would
+  // mis-render as "11 alerts:" etc. if the suppressed repeats were still being counted).
+  const eBurst = makeEnv({ configA: { alertClasses: ["manager-idle"] } });
+  eBurst.watcher.start(); eBurst.watcher.stop();
+  for (let i = 0; i < 15; i++) fire(eBurst, "idle_report", eBurst.mgrA, { state: "done" }); // 15 repeats, one episode, one tick
+  eBurst.watcher.tick(new Date());
+  check("idle-episode burst: 15 repeats of ONE unbroken episode in one tick still push exactly once",
+    eBurst.enqueued.length === 1);
+  check("idle-episode burst: the single push is an ordinary per-event alert, never a coalesced 'N alerts' digest turn",
+    eBurst.enqueued[0]?.text.startsWith(ALERT_TAG) && !/\d+ alerts?:/.test(eBurst.enqueued[0]?.text ?? ""));
+  check("idle-episode burst: exactly ONE companion_alert_pushed row recorded, not fifteen", events(eBurst, "companion_alert_pushed").length === 1);
+  cleanupEnv(eBurst);
+
+  // Digest mode: the same pile, under digestMinutes>0 — the bundled flush must carry exactly ONE line for
+  // this episode, not N, and the audit trail must likewise carry exactly one row.
+  const eDigest = makeEnv({ configA: { alertClasses: ["manager-idle"], digestMinutes: 10 } });
+  eDigest.watcher.start(); eDigest.watcher.stop();
+  for (let i = 0; i < 5; i++) fire(eDigest, "idle_report", eDigest.mgrA, { state: "done" }); // 5 repeats, one episode
+  eDigest.watcher.tick(new Date()); // first-ever flush is immediate
+  check("idle-episode digest: 5 repeats of ONE unbroken episode flush as exactly ONE bundled line",
+    eDigest.enqueued.length === 1 && eDigest.enqueued[0].text.includes("1 alert:"));
+  check("idle-episode digest: exactly ONE companion_alert_pushed row recorded for the whole run, not five",
+    events(eDigest, "companion_alert_pushed").length === 1);
+  cleanupEnv(eDigest);
+}
+
+// --- 36f. CODE REVIEW 10713b51 MAJOR, REPRODUCED DIRECTLY: a `done` A immediately followed by a
+//     run-breaking `working` B, BOTH ALREADY DURABLE before the watcher ever ticks, in ONE scanned
+//     window. A current-run read (idleDoneEpisodeStarts over the FULL history) would see A set the
+//     run's starter and then B break it in the SAME replay — leaving NO entry for this manager — so A's
+//     own id never matches "the current starter" and A is silently dropped, even though nothing before
+//     A ever surfaced it. The positional fix looks only BACKWARD from A's own position (nothing there),
+//     so A must still push exactly once; B (classify() → null) never pushes on its own. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["manager-idle"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // A — never ticked yet
+  fire(e, "idle_report", e.mgrA, { state: "working" }); // B — lands durably BEFORE A is ever classified
+  e.watcher.tick(new Date()); // scans [A, B] together
+  check("MAJOR repro: A still pushes even though a run-breaking B already landed before A was classified",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("manager queue drained"));
+  check("MAJOR repro: exactly one companion_alert_pushed row (A's), B never pushes on its own",
+    events(e, "companion_alert_pushed").length === 1);
+  cleanupEnv(e);
+}
+
+// --- 36g. CODE REVIEW 10713b51 MAJOR, THE DIGEST SHAPE: `done` A is buffered (not yet due to flush),
+//     then a run-breaking `working` B lands BEFORE the flush fires. A must still be IN the digest when
+//     it finally flushes — the positional check re-evaluates A on every re-scan from A's own fixed
+//     position, so B landing later (and being re-scanned alongside A) must never retroactively drop A. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["manager-idle", "merge-gate"], digestMinutes: 10 } });
+  e.watcher.start(); e.watcher.stop();
+  const t0 = new Date();
+  // Seed an unrelated first-ever flush (merge-gate) so idle_report's own later flush is NOT the
+  // first-ever one — that one bundles the SAME tick's own non-idle qualifying events alongside
+  // whatever idle state had already landed by t0 (fine either way; isolated below).
+  fire(e, "merge_rejected", e.mgrA);
+  e.watcher.tick(t0); // first-ever flush is immediate
+  check("digest MAJOR repro setup: the seed merge_rejected flushed immediately", e.enqueued.length === 1);
+  e.clearPending();
+
+  // `enqueued` is CUMULATIVE for this whole block (clearPending only resets the pty's own pending-turn
+  // queue) — it already sits at 1 from the seed flush above, so "still buffered" means it STAYS at 1.
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // A
+  e.watcher.tick(new Date(t0.getTime() + 2 * 60_000)); // within the 10min cadence — buffers, does not flush
+  check("digest MAJOR repro: A alone, within cadence, buffers (no flush yet)", e.enqueued.length === 1);
+
+  fire(e, "idle_report", e.mgrA, { state: "working" }); // B — breaks the run BEFORE the flush
+  e.watcher.tick(new Date(t0.getTime() + 3 * 60_000)); // still within cadence — re-scans [A, B], still buffers
+  check("digest MAJOR repro: still buffered after B lands (still not due)", e.enqueued.length === 1);
+
+  e.watcher.tick(new Date(t0.getTime() + 11 * 60_000)); // past cadence — flushes
+  check("digest MAJOR repro: the flush fires", e.enqueued.length === 2);
+  check("digest MAJOR repro: A survived into the flushed digest despite B landing first", e.enqueued[1]?.text.includes("manager queue drained") === true);
+  cleanupEnv(e);
+}
+
+// --- 36h. done → idle_escalated IN ONE WINDOW (never across separate ticks): both must push — A because
+//     nothing precedes it, the escalation because it is never suppressed by this check at all (kind-
+//     scoped to idle_report only). Proves the same-tick interleaving doesn't regress the non-suppression
+//     half either. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["manager-idle"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // A
+  fire(e, "idle_escalated", e.mgrA, {}); // C — same window, no tick in between
+  e.watcher.tick(new Date());
+  check("same-window done+escalated: BOTH push (2 turns from one tick)", e.enqueued.length === 2);
+  check("same-window done+escalated: two companion_alert_pushed rows, one per source", events(e, "companion_alert_pushed").length === 2);
+  cleanupEnv(e);
+}
+
+// --- 36i. TWO MANAGERS INTERLEAVED IN ONE WINDOW: the positional lookup is manager-scoped
+//     (`WHERE manager_session_id = ?`), so one manager's idle-episode timeline must never see — or be
+//     broken by — a DIFFERENT manager's events landing in between, however they interleave. ---
+{
+  const e = makeEnv({
+    configA: { alertClasses: ["manager-idle"] },
+    configB: { alertClasses: ["manager-idle"] },
+  });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // A1 — mgrA's starter
+  fire(e, "idle_report", e.mgrB, { state: "done" }); // B1 — mgrB's starter, interleaved
+  fire(e, "idle_report", e.mgrA, { state: "done" }); // A2 — mgrA repeat, must suppress regardless of B1 in between
+  fire(e, "idle_report", e.mgrB, { state: "working" }); // breaks mgrB's run
+  fire(e, "idle_report", e.mgrB, { state: "done" }); // B2 — mgrB's genuinely new episode
+  e.watcher.tick(new Date()); // all five in ONE scanned window
+  check("interleaved managers: exactly 3 pushes (A1, B1, B2) — A2 suppressed, mgrB's working never pushes",
+    e.enqueued.length === 3);
+  check("interleaved managers: 3 companion_alert_pushed rows, matching the 3 real pushes", events(e, "companion_alert_pushed").length === 3);
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped, and claude_boot_dialog_stuck reaches the owner via the non-FLEET_OPS 'escalation' class exactly when nobody else was addressed (parentNudged:false), never otherwise."
   : `\n❌ ${failures} FAILURE(S).`);
