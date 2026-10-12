@@ -70,8 +70,15 @@ const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMc
 
 try {
   // --- role gate: the tool only exists for a platform session (handle() 404s a non-platform role) ---
+  // resolveRole() ALSO requires isLoomDev() (card 280b1e44, mcp/platform.ts) — force LOOM_DEV=1 for this
+  // block only, rather than relying on it being set in the ambient host env (true on the owner's
+  // self-hosting Windows box, which defaults it on, but unset on a clean CI runner — the PL-session
+  // assertion was silently riding that difference). Restore immediately after.
+  const savedLoomDev = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   check("role gate: platform session HAS the surface", !!router.resolveRole("PL"));
   check("role gate: manager session gets NO surface (resolveRole null)", router.resolveRole("M") === null);
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
 
   // --- connect a REAL MCP client to the router's server over an in-memory transport (no HTTP) ---
   const server = router.buildServer();

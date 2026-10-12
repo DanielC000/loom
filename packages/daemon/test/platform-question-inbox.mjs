@@ -81,7 +81,14 @@ async function connect(server) {
 
 try {
   // ===================== (T) tool surface + real handler behavior, keyed on the Lead's OWN session =====
+  // resolveRole() ALSO requires isLoomDev() (card 280b1e44, mcp/platform.ts) — force LOOM_DEV=1 for this
+  // check only, rather than relying on it being set in the ambient host env (true on the owner's
+  // self-hosting Windows box, which defaults it on, but unset on a clean CI runner — this assertion was
+  // silently riding that difference). Restore immediately after.
+  const savedLoomDev = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   check("(T) the platform session HAS the platform surface", !!platform.resolveRole("PL"));
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
 
   const client = await connect(platform.buildServer("PL"));
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args ?? {} }));

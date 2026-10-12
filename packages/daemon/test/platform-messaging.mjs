@@ -112,9 +112,16 @@ async function connect(server) {
 try {
   // ===================== (a) session_message — PLATFORM-gated; cross-hierarchy delivery =====================
   // Role gate: only a platform session gets the platform surface (manager/worker/unknown → null).
+  // resolveRole() ALSO requires isLoomDev() (card 280b1e44, mcp/platform.ts) — force LOOM_DEV=1 for this
+  // block only, rather than relying on it being set in the ambient host env (true on the owner's
+  // self-hosting Windows box, which defaults it on, but unset on a clean CI runner — the PL-session
+  // assertion was silently riding that difference). Restore immediately after.
+  const savedLoomDev = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   check("(a) platform session PL HAS the platform surface", !!platform.resolveRole("PL"));
   check("(a) manager session MGR gets NO platform surface (resolveRole null)", platform.resolveRole("MGR") === null);
   check("(a) worker session W gets NO platform surface (resolveRole null)", platform.resolveRole("W") === null);
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
 
   const platformClient = await connect(platform.buildServer());
   const pCall = async (name, args) => parse(await platformClient.callTool({ name, arguments: args }));
