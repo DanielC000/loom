@@ -1,14 +1,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import chokidar, { type FSWatcher } from "chokidar";
 import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
-import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed } from "../git/bounded.js";
+import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn } from "../git/bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 
@@ -620,8 +620,12 @@ async function hasConfiguredGitIdentity(
  */
 function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeout: number; env: NodeJS.ProcessEnv; maxBuffer: number }): boolean {
   try {
-    const name = execSync("git config user.name", opts).toString().trim();
-    const email = execSync("git config user.email", opts).toString().trim();
+    // @decision 5b50eede (round 4 follow-up, CR 201f0c7e) — was a shell-string execSync("git ...") call,
+    // the SAME bare-PATH-lookup hazard every other site here was fixed for; switched to execFileSync +
+    // the shared resolver ("config user.name" has no shell operators, so this is a drop-in).
+    const gitBin = resolveGitBinaryForSpawn();
+    const name = execFileSync(gitBin, ["config", "user.name"], opts).toString().trim();
+    const email = execFileSync(gitBin, ["config", "user.email"], opts).toString().trim();
     return !!name && !!email;
   } catch {
     return false;
@@ -1853,14 +1857,18 @@ export class VaultVersioner {
       // Test-only override (see VaultGitDeps.flushExecFileSyncImpl's own doc) — real callers never set
       // this, so production always calls the real execFileSync.
       const runGit = this.gitDeps.flushExecFileSyncImpl ?? execFileSync;
+      // @decision 5b50eede (round 4, card `b5416a46`) — resolved via the shared chokepoint, never a
+      // literal "git", so this raw execFileSync path gets the same win32 absolute-binary resolution
+      // every simple-git-based call already gets through boundedSimpleGit.
+      const gitBin = resolveGitBinaryForSpawn();
 
       // @decision ffe98495 — never move `add`/`status` back to shell-string `execSync`: `VAULT_GIT_SAFETY_ARGS`
       //  interpolates a real path into these calls, so they need the same execFileSync argument-safety
       //  `commit`'s own doc below already claims for itself.
       currentOp = { label: "git add -A", timeoutMs: addTimeoutMs };
-      runGit("git", [...VAULT_GIT_SAFETY_ARGS, "add", "-A"], addOpts);
+      runGit(gitBin, [...VAULT_GIT_SAFETY_ARGS, "add", "-A"], addOpts);
       currentOp = { label: "git status --porcelain", timeoutMs: cheapTimeoutMs };
-      const staged = runGit("git", [...VAULT_GIT_SAFETY_ARGS, "status", "--porcelain"], cheapOpts).toString().trim();
+      const staged = runGit(gitBin, [...VAULT_GIT_SAFETY_ARGS, "status", "--porcelain"], cheapOpts).toString().trim();
       if (!staged) return false; // nothing to commit — no-op
       const message = `loom: auto-commit ${new Date().toISOString()} (shutdown flush)`;
       currentOp = { label: "git commit", timeoutMs: commitTimeoutMs };
@@ -1875,10 +1883,10 @@ export class VaultVersioner {
       // doc's "Identity fallback" paragraph below claims.
       // @decision ffe98495 — `--no-verify` PLUS the hooksPath/fsmonitor overrides on every branch here.
       if (hasConfiguredGitIdentitySync(cheapOpts)) {
-        runGit("git", [...VAULT_GIT_SAFETY_ARGS, "commit", "--no-verify", "-m", message], commitOpts);
+        runGit(gitBin, [...VAULT_GIT_SAFETY_ARGS, "commit", "--no-verify", "-m", message], commitOpts);
       } else {
         runGit(
-          "git",
+          gitBin,
           [...VAULT_GIT_SAFETY_ARGS, "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`, "commit", "--no-verify", "-m", message],
           commitOpts,
         );

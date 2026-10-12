@@ -34,7 +34,7 @@ const check = (label, cond, detail) => {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const boundedModuleUrl = pathToFileURL(path.join(distGitDir, "bounded.js")).href;
-const { canonicalGit, boundedSimpleGit, resolveAbsoluteGitExePath, isAbsoluteWindowsExePath } = await import(boundedModuleUrl);
+const { canonicalGit, boundedSimpleGit, resolveAbsoluteGitExePath, isAbsoluteWindowsExePath, resolveWin32GitBinary, resolveGitBinaryForSpawn } = await import(boundedModuleUrl);
 
 function mkRepo(prefix) {
   const repo = mkdtempManaged(prefix);
@@ -86,16 +86,57 @@ if (process.platform !== "win32") {
         check("(2) …and resolves to the real repo (not a result from the planted junk)", out.trim().toLowerCase() === normalizedRepo.toLowerCase(), `got=${JSON.stringify(out.trim())} want=${JSON.stringify(normalizedRepo)}`);
       }
     }
+
+    // --- 2b. The shared chokepoint exports themselves (card b5416a46) agree with GIT_EXE/the raw walker.
+    check("(2b) resolveWin32GitBinary() returns the same resolved absolute git.exe as GIT_EXE", resolveWin32GitBinary() === GIT_EXE);
+    check("(2b) resolveGitBinaryForSpawn() returns that SAME resolved value (never the bare \"git\" literal) when one resolves", resolveGitBinaryForSpawn() === GIT_EXE);
+
+    // --- 2c. Code Review 201f0c7e: the customBinary() refusal used to live ONLY in canonicalGit's own
+    // Proxy — a PLAIN boundedSimpleGit instance (GitWriter/GitReader/vault/etc.) got the SAME
+    // allowUnsafeCustomBinary:true (round 4 made that automatic for every win32 caller) with no refusal
+    // wrapping it at all. boundedSimpleGit now refuses it itself, so BOTH shapes must throw.
+    {
+      const repo = mkRepo("loom-cf9a32cf-custombinary-canonical-");
+      const git = canonicalGit(repo, 10_000);
+      let threw = null;
+      try { git.customBinary("C:\\attacker\\git.exe"); } catch (e) { threw = e; }
+      check("(2c) a canonicalGit instance still refuses a real .customBinary() call", threw !== null && /customBinary\(\) is refused/.test(threw?.message ?? ""), threw?.message);
+    }
+    {
+      const repo = mkRepo("loom-cf9a32cf-custombinary-plain-");
+      const git = boundedSimpleGit(repo, 10_000);
+      let threw = null;
+      try { git.customBinary("C:\\attacker\\git.exe"); } catch (e) { threw = e; }
+      check("(2c) a PLAIN (non-canonical) boundedSimpleGit instance ALSO refuses .customBinary() — the exact gap CR 201f0c7e closed", threw !== null && /customBinary\(\) is refused/.test(threw?.message ?? ""), threw?.message);
+    }
+    // ...and forwarding still works THROUGH the refusal wrapper: an ordinary method call on the SAME
+    // plain instance above must behave identically to before this card (never silently broken by the Proxy).
+    {
+      const repo = mkRepo("loom-cf9a32cf-custombinary-forward-");
+      const git = boundedSimpleGit(repo, 10_000);
+      const toplevel = (await git.revparse(["--show-toplevel"])).trim().replace(/\\/g, "/");
+      check("(2c) …and an ordinary method call through the SAME wrapped instance still works (forwarding intact)", toplevel.toLowerCase() === repo.replace(/\\/g, "/").toLowerCase(), toplevel);
+    }
   }
 }
 
-// --- 3. POSIX / unresolved-git byte-identical: boundedSimpleGit without a `binary` override is
-// configured with simple-git's own default "git" literal — on EVERY platform (runs regardless of host).
+// --- 3. Card b5416a46 (round 4): `boundedSimpleGit` with NO `binary` override is no longer always
+// simple-git's bare "git" default — it is now the chokepoint that resolves win32's absolute git.exe
+// ITSELF (not just canonicalGit's own instance), so a PLAIN boundedSimpleGit caller (GitWriter, GitReader,
+// etc.) gets the same hijack-resistant resolution automatically. Expected value depends on the host:
+// win32 with a resolvable git.exe -> that resolved absolute path; POSIX, or win32 with nothing resolvable
+// -> simple-git's own bare "git" default, byte-identical to before this round.
 {
   const repo = mkRepo("loom-cf9a32cf-default-");
   const git = boundedSimpleGit(repo, 10_000);
   const binary = configuredBinary(git);
-  check("(3) boundedSimpleGit with no `binary` override stays simple-git's own default \"git\" (byte-identical)", binary === "git", `got=${JSON.stringify(binary)}`);
+  if (process.platform === "win32") {
+    const resolved = resolveAbsoluteGitExePath();
+    const want = resolved && isAbsoluteWindowsExePath(resolved) ? resolved : "git";
+    check("(3) boundedSimpleGit with no `binary` override auto-resolves win32's absolute git.exe itself (round 4)", binary === want, `got=${JSON.stringify(binary)} want=${JSON.stringify(want)}`);
+  } else {
+    check("(3) boundedSimpleGit with no `binary` override stays simple-git's own default \"git\" on POSIX (byte-identical)", binary === "git", `got=${JSON.stringify(binary)}`);
+  }
 }
 
 // --- 4. canonicalGit's OWN non-win32 branch, not just boundedSimpleGit's — real on a non-win32 host
@@ -110,6 +151,7 @@ if (process.platform === "win32") {
   const git = canonicalGit(repo, 10_000);
   const binary = configuredBinary(git);
   check("(4) canonicalGit on a non-win32 host stays simple-git's own default \"git\" (never attempts an absolute resolution)", binary === "git", `got=${JSON.stringify(binary)}`);
+  check("(4) resolveWin32GitBinary()/resolveGitBinaryForSpawn() on a non-win32 host: undefined / bare \"git\" (never attempt resolution)", resolveWin32GitBinary() === undefined && resolveGitBinaryForSpawn() === "git");
 }
 
 // --- 5. isAbsoluteWindowsExePath / resolveAbsoluteGitExePath are REUSED verbatim, never re-implemented —

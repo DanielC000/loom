@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { loomRepoRoot } from "../paths.js";
 import { nonInteractiveEnv } from "../git/writer.js";
+import { resolveGitBinaryForSpawn } from "../git/bounded.js";
 import type { SkillStoreStaleness } from "./store.js";
 
 /**
@@ -53,7 +54,7 @@ const GIT_TIMEOUT_MS = 1000;
 const ASSET_SKILLS_PATHSPEC = "packages/daemon/assets/skills";
 
 function runGit(repoRoot: string, args: string[], timeoutMs: number): string {
-  return execFileSync("git", ["-C", repoRoot, ...args], {
+  return execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, ...args], {
     encoding: "utf8",
     timeout: timeoutMs,
     windowsHide: true,

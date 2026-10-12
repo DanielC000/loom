@@ -259,7 +259,37 @@ function logGitPathUnresolvedOnce(): void {
   if (loggedGitPathUnresolved) return;
   loggedGitPathUnresolved = true;
   // eslint-disable-next-line no-console
-  console.log(`[git] could not resolve an absolute git.exe on PATH — the win32 job-launcher path is skipped for THIS call (resolution is retried on every call, never cached as permanently unresolved); the direct-spawn fallback and canonical simple-git calls (canonicalGit) both keep today's bare "git" resolution.`);
+  console.log(`[git] could not resolve an absolute git.exe on PATH — the win32 job-launcher path is skipped for THIS call (resolution is retried on every call, never cached as permanently unresolved); every other git spawn keeps today's bare "git" resolution for this call too.`);
+}
+
+/**
+ * The ONE chokepoint every caller shares for "what absolute git.exe should THIS win32 call use" — wraps
+ * {@link resolveAbsoluteGitExePath} + the SAME {@link isAbsoluteWindowsExePath} re-check applied at the
+ * use site (round 2, CR `792785cb`), re-resolved on every call (never cached). `undefined` on POSIX or
+ * when unresolved. {@link boundedSimpleGit} calls this automatically; {@link resolveGitBinaryForSpawn} is
+ * the sibling for a raw child-process spawn that can't go through simple-git.
+ *
+ * @decision 5b50eede — never add a second resolver; every simple-git AND raw-spawn git call in this
+ * codebase funnels through this one function (or its `resolveGitBinaryForSpawn` sibling below).
+ */
+export function resolveWin32GitBinary(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const resolved = resolveAbsoluteGitExePath();
+  return resolved && isAbsoluteWindowsExePath(resolved) ? resolved : undefined;
+}
+
+/**
+ * For a raw `execFileSync`/`execFile`/`spawn`/`spawnSync`("git", …) site that cannot go through
+ * simple-git (so {@link boundedSimpleGit}'s own auto-resolution never reaches it): the absolute git.exe
+ * on win32 when {@link resolveWin32GitBinary} resolves one, else the literal `"git"` — always `"git"` on
+ * POSIX.
+ *
+ * @decision 5b50eede — never hand-roll a literal `"git"` spawn argument anywhere in this codebase; call
+ * this instead, so a caller can't forget the resolution the way the pre-this-card raw
+ * `execFileSync("git", …)`/`spawn("git", …)` sites did.
+ */
+export function resolveGitBinaryForSpawn(): string {
+  return resolveWin32GitBinary() ?? "git";
 }
 
 /**
@@ -376,12 +406,10 @@ export function spawnCanonicalGitTree(
   const raw = (...callArgs: unknown[]): Promise<string> => {
     const rawArgs = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     const args = [...CANONICAL_GIT_CONFIG_ARGS, ...(extraConfigArgs ?? []), ...rawArgs];
-    // @decision 5b50eede — win32 resolves git to an absolute .exe ONCE per call, shared by both paths
-    // below (round 2, CR 792785cb: re-checked against isAbsoluteWindowsExePath here too — never trust
-    // the walker alone); POSIX never calls this (gitBin stays the literal "git", byte-identical).
-    const resolvedGitExeRaw = process.platform === "win32" ? resolveAbsoluteGitExePath() : null;
-    const resolvedGitExe = resolvedGitExeRaw && isAbsoluteWindowsExePath(resolvedGitExeRaw) ? resolvedGitExeRaw : null;
-    const directSpawnTarget = process.platform === "win32" ? (resolvedGitExe ?? "git") : "git";
+    // @decision 5b50eede — resolved ONCE per call via the shared chokepoint, shared by both paths below
+    // (never a second copy of the resolve-and-re-check logic); POSIX never resolves (stays "git").
+    const resolvedGitExe = resolveWin32GitBinary() ?? null;
+    const directSpawnTarget = resolvedGitExe ?? "git";
     // @decision 1718416d — win32-only Job Object containment; unavailable/missing falls back byte-identical.
     // @decision 5b50eede — ALSO requires a resolved absolute git.exe; an unresolved git skips the launcher
     // for this call (same as "unavailable") rather than handing it a bare/relative target.
@@ -879,10 +907,40 @@ export function deleteEnvKeys(env: Record<string, string | undefined>, names: re
  * that passes `{ allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }` here, via its OWN dedicated
  * `gitFactory` — see that function's own doc for why it needs both.
  *
- * @decision 5b50eede (round 3, card `cf9a32cf`) — `binary` auto-enables `allowUnsafeCustomBinary`; a real
- * Windows git path (`C:\Program Files\Git\...`) fails simple-git's own binary regex on the space alone,
- * so leaving it off would throw on construction instead of resolving. OMIT `binary` for the unchanged default.
+ * @decision 5b50eede (round 3, card `cf9a32cf`) — a resolved `binary` auto-enables `allowUnsafeCustomBinary`;
+ * a real Windows git path (`C:\Program Files\Git\...`) fails simple-git's own binary regex on the space
+ * alone, so leaving it off would throw on construction instead of resolving.
+ *
+ * @decision 5b50eede (round 4, card `b5416a46`) — THIS is now the chokepoint that calls
+ * {@link resolveWin32GitBinary} itself when `binaryOverride` is omitted, so every caller (not just
+ * `canonicalGit`) gets the resolved absolute git.exe on win32 automatically, with no opt-in needed.
+ *
+ * Unresolved/POSIX still falls back to simple-git's bare `"git"` default, byte-identical to before this
+ * round; `binaryOverride` remains for pinning a specific value (a test seam).
  */
+/**
+ * A Proxy wrapping `git` that refuses a real `.customBinary(` call with `message`, forwarding every
+ * other property/method bound to the real target — the shared shape {@link boundedSimpleGit} and
+ * {@link canonicalGit} both need (fail-closed): `allowUnsafeCustomBinary:true` is scoped at construction
+ * to OUR OWN resolved path, but simple-git's own `customBinaryPlugin` captures that flag once and reuses
+ * it for every LATER `.customBinary()` call too — unwrapped, any later caller holding the instance could
+ * silently swap in an unvalidated binary with no check at all.
+ *
+ * @decision 5b50eede (round 4 follow-up, CR `201f0c7e`) — this used to live ONLY in canonicalGit's own
+ * Proxy; a plain `boundedSimpleGit` caller got the SAME flag (round 4 made it automatic) with no refusal.
+ * `boundedSimpleGit` now applies this itself, so protection travels with the flag, not each caller's memory.
+ */
+function refuseCustomBinaryProxy(git: SimpleGit, message: string): SimpleGit {
+  const refuse = (): never => { throw new Error(message); };
+  return new Proxy(git, {
+    get(target, prop) {
+      if (prop === "customBinary") return refuse;
+      const v = Reflect.get(target, prop, target);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+}
+
 export function boundedSimpleGit(
   repoPath: string,
   blockTimeoutMs: number,
@@ -890,10 +948,11 @@ export function boundedSimpleGit(
   abortSignal?: AbortSignal,
   extraUnsafe?: SimpleGitOptions["unsafe"],
   config?: string[],
-  binary?: string,
+  binaryOverride?: string,
 ): SimpleGit {
   const scrubbedEnv = env ? scrubGitEnv(env) : undefined;
   const hasEnv = !!scrubbedEnv && Object.keys(scrubbedEnv).length > 0;
+  const binary = binaryOverride ?? resolveWin32GitBinary();
   const unsafe: SimpleGitOptions["unsafe"] = {
     allowUnsafeConfigPaths: true,
     ...(binary ? { allowUnsafeCustomBinary: true } : {}),
@@ -909,7 +968,13 @@ export function boundedSimpleGit(
   // @decision 5b50eede (round 3) — simple-git still console.warns on a regex-failing `binary` even WITH
   // allowUnsafeCustomBinary; suppressed (synchronous construction only) as benign, expected noise.
   const git = binary ? withConsoleWarnSuppressed(buildGit) : buildGit();
-  return hasEnv ? git.env(scrubbedEnv as Record<string, string | undefined>) : git;
+  const final = hasEnv ? git.env(scrubbedEnv as Record<string, string | undefined>) : git;
+  // @decision 5b50eede (round 4 follow-up, CR `201f0c7e`) — only when `binary` actually resolved: an
+  // unresolved/POSIX instance never set `allowUnsafeCustomBinary` in the first place, so simple-git's own
+  // default (`allowUnsafe:false`) already refuses `.customBinary()` with no wrapping needed here.
+  return binary
+    ? refuseCustomBinaryProxy(final, "boundedSimpleGit: customBinary() is refused — this instance's git binary was resolved once at construction (win32's absolute-path resolution); construct a fresh boundedSimpleGit(...) instead of swapping the binary on an existing instance.")
+    : final;
 }
 
 /** Substring of simple-git's `WRONG_CHARS_ERR` (`custom-binary.plugin.ts`, verified against the installed
@@ -1097,21 +1162,20 @@ export function canonicalGit(
   abortSignal?: AbortSignal,
   extraUnsafe?: SimpleGitOptions["unsafe"],
 ): SimpleGit {
-  // @decision 5b50eede (round 3, card `cf9a32cf`) — the SAME resolver `spawnCanonicalGitTree` uses, so
-  // every non-killable canonical simple-git call also runs an absolute git.exe, not a bare "git" PATH
-  // lookup. Unresolved stays undefined (simple-git's own default "git"); POSIX never calls it.
-  const resolvedGitExeRaw = process.platform === "win32" ? resolveAbsoluteGitExePath() : null;
-  const resolvedGitExe = resolvedGitExeRaw && isAbsoluteWindowsExePath(resolvedGitExeRaw) ? resolvedGitExeRaw : undefined;
+  // @decision 5b50eede (round 4, card `b5416a46`) — no longer resolves its OWN absolute git.exe here;
+  // `boundedSimpleGit` below now resolves it itself for every caller, canonicalGit included (never
+  // double-resolve by passing an explicit `binary` again here).
+  //
   // `allowUnsafeMergeDriver` is required for simple-git to pass OUR `-c merge.<x>.driver=` (a blanking, never a set).
   // `boundedSimpleGit` re-applies `scrubGitEnv` to whatever `prepareCanonicalEnv` already scrubbed — idempotent, kept for its own unconditional-at-construction guarantee (f7a80d76).
-  const git = boundedSimpleGit(repoPath, blockTimeoutMs, prepareCanonicalEnv(env), abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG], resolvedGitExe);
+  const git = boundedSimpleGit(repoPath, blockTimeoutMs, prepareCanonicalEnv(env), abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
   const raw = async (...callArgs: unknown[]): Promise<string> => {
     const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     return canonicalRaw(git, args);
   };
-  // @decision 5b50eede (round 3, CR `18aac4c9`) — refuse `customBinary(` on a canonicalGit instance
-  // (fail-closed): win32's `allowUnsafeCustomBinary:true` would let a later caller silently swap the
-  // resolved binary with no validation at all. Nothing calls it today (grep-confirmed).
+  // @decision 5b50eede (round 3, CR `18aac4c9`; unchanged by round 4 follow-up CR `201f0c7e`) — refuse
+  // `customBinary(` with canonicalGit's own message. `git` already carries boundedSimpleGit's OWN
+  // refusal underneath too (round 4 follow-up); this is canonicalGit-specific messaging layered on top.
   const customBinaryRefused = () => {
     throw new Error("canonicalGit: customBinary() is refused — the canonical path's git binary is resolved once at construction; call canonicalGit(...) again instead of swapping the binary on an existing instance.");
   };

@@ -6,6 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { strictShape } from "./arg-alias.js";
 import { DECISION_RECORD_INJECTION_LOG } from "../paths.js";
+import { resolveGitBinaryForSpawn } from "../git/bounded.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -42,7 +43,7 @@ function verifyCommitShas(repoRoot: string, ids: readonly string[], timeoutMs = 
     const finish = () => { if (!settled) { settled = true; resolve(result); } };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn("git", ["cat-file", "--batch-check=%(objectname) %(objecttype) %(rest)"], {
+      child = spawn(resolveGitBinaryForSpawn(), ["cat-file", "--batch-check=%(objectname) %(objecttype) %(rest)"], {
         cwd: repoRoot,
         stdio: ["pipe", "pipe", "ignore"],
         windowsHide: true,

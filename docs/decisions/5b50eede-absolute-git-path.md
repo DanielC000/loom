@@ -101,6 +101,32 @@ construction-time warning (from simple-git or anything else) is never swallowed.
 `await` in it, so nothing else in the (single-threaded) process can log through the swapped reference
 before it's restored.
 
+## Round 4 (card `b5416a46`, Code Review `18aac4c9` of round 3) — one chokepoint, not a per-caller opt-in
+
+Round 3 made `canonicalGit` resolve-and-pass `binary` to `boundedSimpleGit` itself — an opt-in every
+OTHER `boundedSimpleGit` caller (`GitWriter`, `GitReader`, `runs/snapshot.ts`, `setup/bootstrap.ts`,
+`sessions/service.ts`, `orchestration/restart.ts`, `vault/versioner.ts`'s ordinary-vault construction)
+had to remember and didn't — each still constructed with no `binary`, so simple-git resolved a bare
+`"git"` for every one of them on win32. Separately, a repo-wide re-grep (never trust the card's own
+caller list as a fence) found two more bare `spawn("git", [...CANONICAL_GIT_CONFIG_ARGS, ...])` sites on
+the canonical merge path itself (`git/worktrees.ts`'s `repoTreeHasJsTsSourceFile`/
+`repoTreeReferencesInertPrefix`, cwd: the canonical repo) plus several raw `execFileSync`/`spawn("git", …)`
+sites off it (`deploy-staleness.ts`, `skills/assets-git-status.ts`, `mcp/decisions.ts`,
+`vault/versioner.ts`'s `flushSync`).
+
+**Fix:** `resolveWin32GitBinary()` (`git/bounded.ts`) is now the ONE resolver every path funnels through.
+`boundedSimpleGit` calls it ITSELF, unconditionally, when its caller doesn't pass an explicit `binary`
+override — so every simple-git-based caller gets the resolved absolute git.exe automatically, with no
+opt-in. `canonicalGit` no longer resolves or passes `binary` at all (double-resolution removed); it
+relies on `boundedSimpleGit`'s own auto-resolution, byte-identical outcome. `spawnCanonicalGitTree`'s
+`raw()` closure now calls the same shared resolver instead of its own duplicated resolve-and-re-check
+lines. For a raw child-process spawn that cannot go through simple-git, `resolveGitBinaryForSpawn()` (the
+same resolve-or-fall-back-to-bare-`"git"` rule, as a ready-to-spawn string) replaces every literal `"git"`
+command argument across the daemon.
+
+Unresolved still falls back to the literal `"git"` everywhere, exactly as before this card; POSIX never
+calls either resolver (both return the POSIX/unresolved-win32 value unconditionally).
+
 ## Do not
 
 - Do not revert to bare `"git.exe"`/`null` `lpApplicationName` "to match bare spawn" — the two search
@@ -135,6 +161,18 @@ before it's restored.
   binary on an already-constructed canonical instance. The Proxy refuses it outright instead (nothing
   calls it today — grep-confirmed); if a genuine need ever appears, construct a fresh `canonicalGit(...)`
   with a different resolved binary rather than mutating an existing instance.
+- Do not require a `boundedSimpleGit` caller to resolve-and-pass `binary` itself (round 4) — that's
+  exactly the per-caller opt-in that left every non-`canonicalGit` caller on a bare `"git"`. Let
+  `boundedSimpleGit`'s own auto-resolution handle it; pass `binary` explicitly only to pin a specific
+  value (a test seam).
+- Do not hand-roll a literal `"git"` as a raw child-process command argument anywhere in the daemon
+  (round 4) — call `resolveGitBinaryForSpawn()` (`git/bounded.ts`) instead. `canonical-git-helper-guard.
+  mjs`'s global check (widened by Code Review `201f0c7e`) catches this CALLEE-AGNOSTICALLY for the
+  array-argument shape (`fn("git", [...])`, whatever `fn` is named or aliased to) and for the
+  shell-string shape SPECIFICALLY when spawned via `exec`/`execSync` by those exact names
+  (`execSync("git ...")`) — it does NOT catch a RENAMED/aliased `exec`/`execSync` import, nor a command
+  built as a variable/template-literal/`cmd /c git ...` shape; see that guard's own header for the full,
+  honestly-named gap list. Never read "the guard is green" as "no bare-git-literal risk remains."
 
 ## Source
 

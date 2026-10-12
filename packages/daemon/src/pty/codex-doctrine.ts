@@ -8,6 +8,7 @@ import { resolveExecutable } from "./resolve-bin.js";
 import { SKILLS_DIR } from "../paths.js";
 import { roleDoctrineSkillName } from "../skills/inject.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
+import { resolveGitBinaryForSpawn } from "../git/bounded.js";
 import { CLAUDE_DOCTRINE_DIR } from "./claude-dirname.js";
 
 /**
@@ -938,7 +939,7 @@ const CODEX_DOCTRINE_LS_FILES_TIMEOUT_MS = 5_000;
 function isAgentsMdTracked(cwd: string): Promise<boolean> {
   return new Promise((resolve, reject) => {
     execFile(
-      "git",
+      resolveGitBinaryForSpawn(),
       ["-C", cwd, "ls-files", "--", CODEX_DOCTRINE_FILE],
       { timeout: CODEX_DOCTRINE_LS_FILES_TIMEOUT_MS, windowsHide: true },
       (err, stdout) => {

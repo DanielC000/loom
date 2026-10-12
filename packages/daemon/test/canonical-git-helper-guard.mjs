@@ -8,13 +8,29 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //  (1) STRICT files — `git/worktrees.ts`, `git/batch-merge.ts` and `git/mainline-watch.ts` (the canonical merge path + the mainline tripwire, card 4fa36502): no `boundedSimpleGit(` /
 //      `simpleGit(` call; every `spawn("git", [` carries `...CANONICAL_GIT_CONFIG_ARGS` as its first args; no other raw
 //      child-process git (`execFile*`/`exec*`/`spawnSync`).
-//  (2) WHOLE-TREE: any OTHER `packages/daemon/src/**/*.ts` file that constructs git directly must appear in ALLOWLIST below,
-//      each with a one-line reason. A NEW bypass site therefore fails here until someone decides, in writing, that it is
-//      genuinely off the canonical path (or routes it through the helper).
+//  (2) WHOLE-TREE: any OTHER `packages/daemon/src/**/*.ts` file that constructs git directly via a LITERAL
+//      `boundedSimpleGit(`/`simpleGit(`/bare-`"git"`-string spawn must appear in ALLOWLIST below, each with a one-line
+//      reason. A NEW bypass site therefore fails here until someone decides, in writing, that it is genuinely off the
+//      canonical path (or routes it through the helper).
+//  (3) GLOBAL, NO ALLOWLIST (card b5416a46, widened by Code Review 201f0c7e): no file anywhere under src/** spawns
+//      git via a literal bare "git" command, in EITHER of two shapes — see this check's own comment, below, for the
+//      full reasoning: an ARGUMENT-shaped match (`("git", ` — CALLEE-AGNOSTIC, catches an aliased/local-variable
+//      wrapper around spawn/execFile*/exec* just as readily as the real name) and a SHELL-STRING-shaped match
+//      (`exec(`/`execSync("git ` — callee-SCOPED to those two specific names, deliberately NOT widened further; see
+//      the check's own comment for the false-positive trap that scoping avoids). Every such site (strict,
+//      allowlisted, or not) must resolve the binary via the shared chokepoint instead (`boundedSimpleGit`'s own
+//      internal `resolveWin32GitBinary()`, or `resolveGitBinaryForSpawn()` for a raw child-process spawn) so win32
+//      never falls back to a bare, hijackable PATH lookup. This is WHY (1)'s/(2)'s own literal-`"git"` patterns
+//      above now find nothing real post-b5416a46 — every legitimate site calls the resolver instead of writing the
+//      literal.
 //
 // GAPS, NAMED (this does NOT cover): a git call reached through a factory that returns a NON-canonical instance
-// (e.g. an injected `gitFactory` test seam — used as-is by design); a `simple-git` import spelled differently (aliased
-// import); `node:child_process` calls whose command is built dynamically (`spawn(cmd, …)` with `cmd === "git"`).
+// (e.g. an injected `gitFactory` test seam — used as-is by design); a `simple-git` import spelled differently
+// (aliased import); a raw child-process git call whose command is a variable NOT sourced from the shared resolver
+// (check (3) only catches the LITERAL `"git"` string shape, not an arbitrary unresolved variable); an ALIASED/
+// renamed `exec`/`execSync` import feeding the shell-string shape (PAT_SHELLSTRING is callee-scoped, by design —
+// see that check's own comment); a shell-string command built via `cmd /c git ...`, a template-literal
+// interpolation, or any other shape that doesn't literally start the string with the bare word `git`.
 //
 // Run: node packages/daemon/test/canonical-git-helper-guard.mjs (no build needed — pure source-text scan)
 import fs from "node:fs";
@@ -41,11 +57,15 @@ const ALLOWLIST = {
   "setup/bootstrap.ts": "`git init` of a brand-new project dir; no shared worker-writable .git exists yet",
   "orchestration/restart.ts": "supervisor-liveness ancestry check; reads only",
   "vault/versioner.ts": "an ordinary (non-merge-eligible) vault is the human's OWN notes repo, never touched by a worker/merge, so plain boundedSimpleGit is fine there; a merge-eligible shared vault (card bf11ac3f) IS a real canonical repo a worker merge can touch, but that path's own add/commit already route through the shared killableCanonicalRaw — the canonical shape is never left unprotected, only the ordinary-vault construction is off-path",
-  "deploy-staleness.ts": "deploy-time staleness diff over the running daemon's own checkout (execFileSync); reads only, not a merge",
-  "skills/assets-git-status.ts": "reads the assets tree status for the Skills UI (execFileSync); not a merge",
-  "mcp/decisions.ts": "resolves a cited `sha:` anchor via rev-parse --verify (execFileSync); a comment-anchor lookup, not a merge",
-  "pty/codex-doctrine.ts": "read-only `git ls-files` tracked-status probe in a worker's own worktree (isAgentsMdTracked); off the canonical merge path",
 };
+// NOTE (card b5416a46): `deploy-staleness.ts`, `skills/assets-git-status.ts`, `mcp/decisions.ts` and
+// `pty/codex-doctrine.ts` used to be allowlisted here for a raw literal `execFileSync("git", …)`/
+// `spawn("git", …)`/`execFile("git", …)` — each now resolves the binary via the shared chokepoint
+// (`resolveGitBinaryForSpawn()`) instead, so none of them match `constructsGit()`'s literal-"git" pattern
+// any more and they were REMOVED from ALLOWLIST (a listed-but-no-longer-matching entry fails the
+// stale-entry check below by design). They're still read-only, still off the canonical merge path — they
+// just no longer need a carve-out from check (2) because they no longer spawn a bare, unresolved "git" at
+// all; check (3) below is what now covers them (and every other file) instead.
 
 // `canonicalRaw(` is the exported test seam that takes a caller-supplied prefix-builder: no production caller may use it (canonicalGit's own `raw` is the only one).
 const BARE_SIMPLE_GIT = /\b(?:boundedSimpleGit|simpleGit|canonicalRaw)\s*\(/;
@@ -94,8 +114,9 @@ function walk(dir, out = []) {
   }
   return out;
 }
+const allSrcFiles = walk(SRC_DIR);
 const found = [];
-for (const abs of walk(SRC_DIR)) {
+for (const abs of allSrcFiles) {
   const rel = path.relative(SRC_DIR, abs).replace(/\\/g, "/");
   if (STRICT.includes(rel)) continue;
   if (constructsGit(fs.readFileSync(abs, "utf8"))) found.push(rel);
@@ -105,6 +126,53 @@ check(`(tree) every OTHER file constructing git directly is in the allowlist wit
 const stale = Object.keys(ALLOWLIST).filter((r) => !found.includes(r));
 check(`(tree) no STALE allowlist entry (each listed file still constructs git directly)${stale.length ? ` — STALE: ${stale.join(", ")}` : ""}`, stale.length === 0);
 check("(tree) the scan is non-vacuous: it saw the helper module and at least 5 constructing files", found.includes("git/bounded.ts") && found.length >= 5);
+
+// ── (3) GLOBAL, NO ALLOWLIST (card b5416a46, widened by Code Review 201f0c7e): nothing anywhere under
+// src/** spawns git via a literal bare "git" command — the absolute-resolution chokepoint
+// (`resolveWin32GitBinary()` / `resolveGitBinaryForSpawn()`, both in git/bounded.ts) replaces every such
+// call. Unlike (1)/(2) above, this scans STRICT and allowlisted files too: there is no legitimate reason
+// for ANY file, anywhere, to write the literal "git" as a direct spawn command once every real call site
+// resolves it instead.
+//
+// TWO independent shapes, CALLEE-AGNOSTIC where that's actually possible:
+//  PAT_ARRAY — `(` + optional space + a quoted "git"/"git.exe" token + a comma, with NO requirement on
+//    what precedes the `(`. This is what the original (pre-201f0c7e) version of this check missed: it
+//    only matched a FIXED callee-name list (spawn/spawnSync/execFile/execFileSync/exec/execSync), so a
+//    local alias — `const runGit = execFileSync; runGit("git", [...])` (the EXACT shape
+//    `vault/versioner.ts`'s `flushSync` used before card b5416a46 fixed it, via `this.gitDeps.
+//    flushExecFileSyncImpl ?? execFileSync`) — passed clean. Matching on the ARGUMENT shape instead of
+//    the callee name closes that gap regardless of what the function is named or imported as.
+//  PAT_SHELLSTRING — `exec`/`execSync` specifically (NOT callee-agnostic — see the reason below) + `(` +
+//    a quoted string starting with "git" followed by whitespace (the git subcommand continues inside
+//    that SAME string, e.g. `execSync("git config user.name")` — the exact shape this check's own
+//    development found LIVE and unfixed in `hasConfiguredGitIdentitySync` (vault/versioner.ts), closed by
+//    this same commit). Scoped to `exec`/`execSync` BY DESIGN, not widened to every callee name the way
+//    PAT_ARRAY is: `spawn`/`spawnSync`/`execFile`/`execFileSync` all take an args ARRAY as a separate
+//    parameter and structurally cannot have a "whole command as one string" shape at all, so there is
+//    nothing for a callee-agnostic version of this fragment to generalize over — widening the argument
+//    pattern itself (`["'\`]git\s` with no callee anchor) was tried and REJECTED: on this real repo it
+//    false-positived on nine genuinely unrelated call sites, all of them a plain diagnostic/log STRING
+//    that happens to start with the English word "git " (e.g. `unavailable("git log returned no HEAD
+//    commit...")`, `warnDegraded(\`git grep exceeded ...\`)`) — those are messages, not spawns, and a
+//    check that can't tell the two apart stops being trustworthy. A RENAMED/aliased `exec`/`execSync`
+//    import is therefore a residual gap for THIS fragment specifically (named below), accepted rather
+//    than chasing it into the same false-positive trap.
+const PAT_ARRAY = /\(\s*["'`]git(?:\.exe)?["'`]\s*,/;
+const PAT_SHELLSTRING = /\b(?:exec|execSync)\s*\(\s*["'`]git(?:\.exe)?\s/;
+const BARE_GIT_LITERAL_SPAWN = new RegExp(`${PAT_ARRAY.source}|${PAT_SHELLSTRING.source}`);
+check("(self) a literal bare git spawn (array form) is flagged by the global no-allowlist check", BARE_GIT_LITERAL_SPAWN.test(stripComments('execFileSync("git", ["log"]);')));
+check("(self) a literal bare git spawn via an ALIASED callee (the exact vault/versioner.ts flushSync shape) is flagged — callee-agnostic", BARE_GIT_LITERAL_SPAWN.test(stripComments('const runGit = execFileSync;\nrunGit("git", ["status", "--porcelain"], opts);')));
+check("(self) a literal bare git spawn via an aliased IMPORT is flagged — callee-agnostic", BARE_GIT_LITERAL_SPAWN.test(stripComments('import { execFileSync as runGit } from "node:child_process";\nrunGit("git", ["add", "-A"], opts);')));
+check("(self) a literal bare git shell-string spawn (the hasConfiguredGitIdentitySync shape) is flagged", BARE_GIT_LITERAL_SPAWN.test(stripComments('const name = execSync("git config user.name", opts).toString();')));
+check("(self) a spawn via the resolver (not a literal) is NOT flagged by the global check", !BARE_GIT_LITERAL_SPAWN.test(stripComments('execFileSync(resolveGitBinaryForSpawn(), ["log"]);')));
+check("(self) a mention inside a comment is NOT flagged by the global check", !BARE_GIT_LITERAL_SPAWN.test(stripComments('// execFileSync("git", []);\nconst a = 1;')));
+check("(self) an unrelated diagnostic/log string starting with the word \"git\" is NOT flagged — the false-positive trap PAT_SHELLSTRING's callee scoping avoids", !BARE_GIT_LITERAL_SPAWN.test(stripComments('unavailable("git log returned no HEAD commit (a commitless repo?)", "could-not-measure", baked);')));
+const bareLiteralHits = [];
+for (const abs of allSrcFiles) {
+  const rel = path.relative(SRC_DIR, abs).replace(/\\/g, "/");
+  if (BARE_GIT_LITERAL_SPAWN.test(stripComments(fs.readFileSync(abs, "utf8")))) bareLiteralHits.push(rel);
+}
+check(`(global) no file anywhere under src/** spawns git via a literal bare "git" command, array- or shell-string-form (every site resolves the binary via the shared chokepoint)${bareLiteralHits.length ? ` — FOUND: ${bareLiteralHits.join(", ")}` : ""}`, bareLiteralHits.length === 0);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

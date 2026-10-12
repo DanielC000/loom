@@ -8,7 +8,7 @@ import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, resolveGitDirsSync } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -3923,7 +3923,7 @@ function repoTreeHasJsTsSourceFile(
   repoPath: string, treeish: string, timeoutMs: number,
 ): Promise<{ applicable: boolean; degradedReason?: string }> {
   return new Promise((resolve) => {
-    const child = spawn("git", [...CANONICAL_GIT_CONFIG_ARGS, "ls-tree", "-r", "--name-only", treeish], {
+    const child = spawn(resolveGitBinaryForSpawn(), [...CANONICAL_GIT_CONFIG_ARGS, "ls-tree", "-r", "--name-only", treeish], {
       cwd: repoPath,
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
@@ -3977,7 +3977,7 @@ export async function repoTreeReferencesInertPrefix(
     // gated on above — without this pathspec the scan searched the WHOLE tree (markdown included), so a
     // doc merely QUOTING this pattern as a literal example (a real docs/decisions/1c0d4aa4-*.md hit) could
     // falsely confirm the token "referenced" and disable the docs/-inert skip repo-wide.
-    const child = spawn("git", [...CANONICAL_GIT_CONFIG_ARGS, "grep", "-I", "-l", "-E", pattern, treeish, "--", ...JS_TS_SOURCE_EXTENSIONS.map((ext) => `*.${ext}`)], {
+    const child = spawn(resolveGitBinaryForSpawn(), [...CANONICAL_GIT_CONFIG_ARGS, "grep", "-I", "-l", "-E", pattern, treeish, "--", ...JS_TS_SOURCE_EXTENSIONS.map((ext) => `*.${ext}`)], {
       cwd: repoPath,
       stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,

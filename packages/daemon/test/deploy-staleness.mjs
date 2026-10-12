@@ -179,9 +179,18 @@ export async function load(url, context, nextLoad) {
   if (url === "virtual:deploy-staleness-cp-fault") {
     const src = \`
       import { execFileSync as real } from "node:child_process";
+      // Card b5416a46: deploy-staleness.ts now resolves an absolute git.exe on win32 (via
+      // resolveGitBinaryForSpawn()) instead of the bare literal "git", so this match can no longer pin an
+      // exact string — it matches any path whose basename (case-insensitive, optional .exe) is "git".
+      // The backslash count below looks wrong but isn't: this text sits inside TWO nested template
+      // literals (this whole CP_FAULT_HOOK_SOURCE string, then this "src" string within it), each of
+      // which collapses "\\\\" to one real backslash — verified empirically against the real two-level
+      // load path (not just a standalone sweep) before landing; don't "simplify" the backslash count
+      // without re-verifying against a live run, the same way this count was derived.
+      const isGitBinary = (f) => /(^|[\\\\\\\\/])git(\\\\.exe)?$/i.test(f);
       export const execFileSync = (file, args, opts) => {
         const fault = globalThis.__dsGitFault;
-        if (fault && fault.armed && file === "git" && Array.isArray(args) && args.includes("show") && fault.fired < fault.maxFires) {
+        if (fault && fault.armed && isGitBinary(file) && Array.isArray(args) && args.includes("show") && fault.fired < fault.maxFires) {
           fault.fired++;
           const sab = new Int32Array(new SharedArrayBuffer(4));
           Atomics.wait(sab, 0, 0, fault.delayMs);
@@ -1274,6 +1283,15 @@ try {
   const capOptions = { distEntry: atCap.capDistEntry, repoRoot: atCap.capRepo, processBuiltSha: atCap.capBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START };
   globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
   const rFaultRaw = computeDeployStalenessRaw(capOptions);
+  // Code Review 201f0c7e: assert the fault ACTUALLY fired, directly — not merely inferred from the
+  // downstream shape below. `fired === 1` proves `isGitBinary(file)` matched the real (now win32-resolved
+  // on this host, see card b5416a46) git binary AND `args.includes("show")` matched a real per-file
+  // `git show` call; `fired === 0` would mean the fault never engaged at all, and the checks below would
+  // then be asserting against an UNFAULTED (ordinary, successful) run instead of the injected hazard —
+  // a shape that could coincidentally look identical if `computeAncestorBehaviouralMatch` ever started
+  // returning null/true for some OTHER reason, silently defeating this whole positive control.
+  check("(23m-fault-proof) POSITIVE CONTROL, DIRECT: the injected fault actually fired exactly once",
+    globalThis.__dsGitFault.fired === 1, `fired=${globalThis.__dsGitFault.fired}`);
   check("(23m-fault-proof) THE HAZARD: a single transient git-show ETIMEDOUT inside computeAncestorBehaviouralMatch is swallowed to builtContentMatchesHead:null/stale:true even though every file is genuinely comment-only" + reasonSuffix(rFaultRaw),
     rFaultRaw.builtContentMatchesHead === null && rFaultRaw.stale === true);
   check("(23m-fault-proof) THE GAP: available stays true throughout, so the existing top-level isTransientGitTimeout retry structurally cannot see this failure at all",
@@ -1281,6 +1299,8 @@ try {
 
   globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
   const rFaultRetried = computeAtCapWithRetry(capOptions, "23m-fault-proof-retry");
+  check("(23m-fault-proof) POSITIVE CONTROL, DIRECT: the SAME fault fired exactly once here too (same reasoning as the direct check above)",
+    globalThis.__dsGitFault.fired === 1, `fired=${globalThis.__dsGitFault.fired}`);
   check("(23m-fault-proof) THE FIX: the SAME injected fault recovers to builtContentMatchesHead:true/stale:false once computeAtCapWithRetry's elapsed-time-evidenced retry re-attempts against the now-unarmed fault",
     rFaultRetried.builtContentMatchesHead === true && rFaultRetried.stale === false);
   globalThis.__dsGitFault = null;

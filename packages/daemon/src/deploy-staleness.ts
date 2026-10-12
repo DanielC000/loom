@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
 import { loomRepoRoot } from "./paths.js";
 import { nonInteractiveEnv } from "./git/writer.js";
+import { resolveGitBinaryForSpawn } from "./git/bounded.js";
 import { DEPLOY_PACKAGES } from "./deploy-packages.js";
 import {
   emitCompareSoundnessOk,
@@ -270,7 +271,7 @@ const GIT_TIMEOUT_MS = 1000;
 const UNIT_SEP = "\x1f";
 
 function runGit(repoRoot: string, args: string[]): string {
-  return execFileSync("git", ["-C", repoRoot, ...args], {
+  return execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, ...args], {
     encoding: "utf8",
     timeout: GIT_TIMEOUT_MS,
     windowsHide: true,
@@ -453,7 +454,7 @@ export const MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES = 25;
 function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSha: string): boolean | null {
   let diffOut: string;
   try {
-    diffOut = execFileSync("git", [
+    diffOut = execFileSync(resolveGitBinaryForSpawn(), [
       "-C", repoRoot, "-c", "core.quotePath=false", "diff", "--name-status", "--no-renames",
       fromSha, toSha, "--", ...RESTART_RELEVANT_PATHSPECS,
     ], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() }).trim();
@@ -482,12 +483,12 @@ function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSh
     let before: string;
     let after: string;
     try {
-      before = execFileSync("git", ["-C", repoRoot, "show", `${fromSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
+      before = execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, "show", `${fromSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
     } catch {
       return null;
     }
     try {
-      after = execFileSync("git", ["-C", repoRoot, "show", `${toSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
+      after = execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, "show", `${toSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
     } catch {
       return null;
     }
