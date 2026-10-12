@@ -851,7 +851,10 @@ function consumeMatchedPendingsIntoArmedEntry(
   const sourceFiles = matched.map((p) => p.sourceFile);
   const strippedOrphanLatchFiles = unioned.orphanLatchFiles?.filter((f) => !sourceFiles.includes(f));
   const armedKeys = [...new Set([...(unioned.armedKeys ?? []), key])];
-  let armed: MergeQuarantineEntry = { ...unioned, resolvedKey: key, armedKeys, orphanLatchFiles: strippedOrphanLatchFiles };
+  // @decision 500e307a — stamp provenanceTracked on the newly-armed in-memory entry too; never a
+  // launder, since provenanceUnknown (if any) already arrived via unioned's own sticky OR and wins at
+  // the next boot's parse regardless. See the decision record.
+  let armed: MergeQuarantineEntry = { ...unioned, resolvedKey: key, armedKeys, orphanLatchFiles: strippedOrphanLatchFiles, provenanceTracked: true };
   // @decision 96e6aa58 (round 2) — anchor set = extra (if any) + every matched pending entry's own object;
   // each is being consumed into this union, so re-pointing what it already owns is correct and matches
   // main. Gate non-anchor keys on ownership by ANY anchor, then replaceEntryEverywhere per anchor.
@@ -1314,7 +1317,10 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     }
     return token;
   }
-  const entry: MergeQuarantineEntry = { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token], resolvedKey: key, armedKeys: [key] };
+  // @decision 500e307a — stamp provenanceTracked on the in-memory entry at the instant it is CREATED,
+  // not only on writeMergeQuarantineLatch's own serialized bytes — this is the brand-new, genuinely
+  // fresh raise, so there is nothing legacy to launder: unconditionally true is correct here.
+  const entry: MergeQuarantineEntry = { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token], resolvedKey: key, armedKeys: [key], provenanceTracked: true };
   activeQuarantines.set(key, entry);
   const persisted = writeMergeQuarantineLatch(entry, false, undefined, true);
   if (!persisted) {
