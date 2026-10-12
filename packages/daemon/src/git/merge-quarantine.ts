@@ -426,6 +426,23 @@ function directPathIdentity(repoPath: string): string {
 }
 
 /**
+ * Reads a quarantine latch file at `absolutePath` and returns the {@link directPathIdentity} of its OWN
+ * recorded `repoPath` field — `undefined` when the file is missing, unparsable, or has no `repoPath`
+ * field at all. Never throws.
+ *
+ * @decision d163aef5 (round 5) — the primitive the clear-side primary check uses to tell "this file's
+ * content genuinely belongs to identity X" from "some entry merely CLAIMS this filename as its own
+ * `sourceFile`" (a claim that can be wrong) — the file's own on-disk `repoPath` is the ground truth.
+ */
+function quarantineFileRepoPathIdentity(absolutePath: string): string | undefined {
+  let raw: string;
+  try { raw = fs.readFileSync(absolutePath, "utf8"); } catch { return undefined; }
+  let parsed: Partial<MergeQuarantineEntry>;
+  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return undefined; }
+  return typeof parsed.repoPath === "string" ? directPathIdentity(parsed.repoPath) : undefined;
+}
+
+/**
  * A SEPARATE, newer comparison identity (card abccee85, round 7) — never folded into
  * {@link directPathIdentity} itself, which is frozen (its legacy hash depends on it byte-for-byte). When
  * `repoPath` doesn't currently resolve, `directPathIdentity`'s own fallback is a plain `path.resolve` —
@@ -566,18 +583,23 @@ function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: str
  * to get its data back, so `final` is its sole durable copy, exactly the hazard `degradedOccupiedKeys`
  * exists to prevent at boot.
  *
- * Used by {@link wouldOverwriteDifferentUnresolvableOccupant} (gates a WRITE — refuses it outright) AND,
- * since card `c9114934`, by {@link protectDegradedOccupantBeforeDelete} (gates a CLEAR's own unconditional
- * unlink — never refuses it, only copies the occupant's own content aside first, right before the delete
- * that would otherwise destroy it as collateral). The two callers answer this SAME question for two
- * different consequences — a write that refuses outright vs. a delete that proceeds anyway and must not
- * destroy the occupant's only copy — never confuse one caller's semantics for the other's.
+ * Used by {@link wouldOverwriteDifferentUnresolvableOccupant} (gates a WRITE — refuses it outright,
+ * `protectResolvableToo: false`, unchanged) AND, since card `c9114934`, by {@link
+ * protectDegradedOccupantBeforeDelete} (gates a CLEAR's own unconditional unlink — never refuses it, only
+ * copies the occupant's own content aside first, right before the delete that would otherwise destroy it
+ * as collateral). The two callers answer this SAME question for two different consequences — a write
+ * that refuses outright vs. a delete that proceeds anyway and must not destroy the occupant's only copy —
+ * never confuse one caller's semantics for the other's.
  *
- * @decision e1cb7d33 — see the decision record (the WRITE-side refusal).
+ * @decision e1cb7d33 — see the decision record (the WRITE-side refusal; `protectResolvableToo` never
+ * widens this side — a resolvable different occupant's leftover stays legitimately overwritable there).
  * @decision c9114934 (round 3, FAIL CLOSED) — this function's own result alone IS the clear-side
  * decision now — `protectDegradedOccupantBeforeDelete` protects every hit, unconditionally.
+ * @decision d163aef5 (round 3) — `protectResolvableToo` (clear-side only, default false): a RESOLVABLE
+ * entry's OWN file can end up backing an unresolvable winner's walked-up key, never rewritten there this
+ * boot — clearing that winner must not destroy it either. See the decision record's "Round 3" repro.
  */
-function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoPath: string): string | undefined {
+function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoPath: string, protectResolvableToo = false): string | undefined {
   let existingRaw: string;
   try {
     existingRaw = fs.readFileSync(final, "utf8");
@@ -592,7 +614,39 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
   }
   if (typeof existing.repoPath !== "string") return undefined;
   if (directPathIdentity(existing.repoPath) === directPathIdentity(ownIdentityRepoPath)) return undefined; // same identity
-  if (isRepoPathCurrentlyResolvable(existing.repoPath)) return undefined; // different but resolvable — today's behavior
+  // "different but resolvable" is the write-side's own today's-behavior exclusion (e1cb7d33) — but the
+  // clear-side (`protectResolvableToo: true`) must NOT share it; see this function's own doc for why.
+  if (!protectResolvableToo && isRepoPathCurrentlyResolvable(existing.repoPath)) return undefined;
+  return existing.repoPath;
+}
+
+/**
+ * The CLEAR-side twin of {@link differentUnresolvableOccupantRepoPathAt}, for when `clearedEntry`'s own
+ * claim to this key could be a degraded, tautological walk-up that never actually wrote `final`.
+ *
+ * @decision d163aef5 (round 3) — token OVERLAP, never repoPath identity, discriminates a genuine union
+ * (safe — already in `clearedEntry.tokens`) from a truly foreign raise (protect); a repoPath compare
+ * false-positived on the former (merge-quarantine-unresolvable-path.mjs's UNION-KEYS repro).
+ */
+function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuarantineEntry): string | undefined {
+  let existingRaw: string;
+  try {
+    existingRaw = fs.readFileSync(final, "utf8");
+  } catch {
+    return undefined; // missing — nothing to protect
+  }
+  let existing: { repoPath?: unknown; tokens?: unknown; token?: unknown };
+  try {
+    existing = JSON.parse(existingRaw);
+  } catch {
+    return undefined; // corrupt — nothing to protect
+  }
+  if (typeof existing.repoPath !== "string") return undefined;
+  if (directPathIdentity(existing.repoPath) === directPathIdentity(clearedEntry.repoPath)) return undefined; // same identity
+  const existingTokens = Array.isArray(existing.tokens) && existing.tokens.every((t): t is string => typeof t === "string")
+    ? existing.tokens
+    : typeof existing.token === "string" ? [existing.token] : [];
+  if (existingTokens.length > 0 && existingTokens.some((t) => clearedEntry.tokens.includes(t))) return undefined; // already incorporated
   return existing.repoPath;
 }
 
@@ -908,10 +962,24 @@ function consumeMatchedPendingsIntoArmedEntry(
  * @decision c9114934 — `clearingRepoPath`, when passed, durably copies a DIFFERENT degraded occupant's
  * content aside BEFORE the unconditional unlink below — see the decision record. The unlink itself is
  * unaffected either way: this never refuses, only protects.
+ *
+ * @decision d163aef5 (round 4) — supersedes round 3's resolvability gate: `clearIdentity` is a PRIMARY
+ * ownership check; `clearedEntry`'s token-overlap protect is now an UNCONDITIONAL backstop. Neither
+ * gates on resolvability. See the decision record's "Round 4" section.
+ *
+ * @decision d163aef5 (round 5) — a `foreignPending` claim can name THIS file even when its on-disk
+ * content is genuinely the clearer's own (a prior eviction's inference, see
+ * `armKeyUnlessDegradedCollision`); gate the protect on content identity, not the claim alone.
  */
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string): void {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string, clearedEntry?: MergeQuarantineEntry, clearIdentity?: string): void {
   const final = quarantinePathForKey(key);
   if (clearingRepoPath) protectDegradedOccupantBeforeDelete(final, clearingRepoPath);
+  if (clearIdentity) {
+    const finalBasename = path.basename(final);
+    const foreignPending = pendingUnresolvedQuarantines.find((p) => p.sourceFile === finalBasename && directPathIdentity(p.entry.repoPath) !== clearIdentity);
+    if (foreignPending && quarantineFileRepoPathIdentity(final) !== clearIdentity) protectOccupantContentBeforeDelete(final, foreignPending.entry.repoPath, clearIdentity);
+  }
+  if (clearedEntry) protectUnincorporatedOccupantBeforeDelete(final, clearedEntry);
   try { fs.unlinkSync(final); } catch { /* ENOENT is the common case */ }
   // @decision be79f4d5 (round 3) — reference-aware, never the unconditional-by-hash sibling: a same-hash
   // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
@@ -1060,12 +1128,30 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): 
  * preemptively at boot — see the decision record for the double-report regression that caused.
  *
  * @decision c9114934 (round 3, Lead ruling — FAIL CLOSED) — protects EVERY `differentUnresolvableOccupantRepoPathAt`
- * hit, no further "is this really foreign" check: that question is undecidable from this process's own
- * inputs, and losing a foreign repo's quarantine is unrecoverable where a stale-subdir re-block is not.
+ * hit, no further "is this really foreign" check: losing a foreign repo's quarantine is unrecoverable
+ * where a stale-subdir re-block is not. `protectResolvableToo` (default false) is per call site below.
  */
-function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string): void {
-  const occupantRepoPath = differentUnresolvableOccupantRepoPathAt(final, clearingRepoPath);
+function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string, protectResolvableToo = false): void {
+  const occupantRepoPath = differentUnresolvableOccupantRepoPathAt(final, clearingRepoPath, protectResolvableToo);
   if (!occupantRepoPath) return;
+  protectOccupantContentBeforeDelete(final, occupantRepoPath, clearingRepoPath);
+}
+
+/**
+ * @decision d163aef5 (round 3) — the TOKEN-OVERLAP-gated twin of {@link protectDegradedOccupantBeforeDelete},
+ * for when `clearedEntry`'s own claim to this key could be a tautological walk-up; see {@link
+ * unincorporatedOccupantRepoPathAt}'s own doc for why this needs a different gate.
+ */
+function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: MergeQuarantineEntry): void {
+  const occupantRepoPath = unincorporatedOccupantRepoPathAt(final, clearedEntry);
+  if (!occupantRepoPath) return;
+  protectOccupantContentBeforeDelete(final, occupantRepoPath, clearedEntry.repoPath);
+}
+
+/** Shared tail for both protect-before-delete wrappers above — durably copies `final`'s own content
+ *  aside (under `occupantRepoPath`'s own pending-divert filename) before the caller's own unconditional
+ *  unlink proceeds. `describeClearer` is used only for the failure log's own wording. */
+function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: string, describeClearer: string): void {
   let raw: string;
   try { raw = fs.readFileSync(final, "utf8"); } catch { return; }
   let parsed: Partial<MergeQuarantineEntry> & { token?: string };
@@ -1102,7 +1188,7 @@ function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: st
   const toWrite = priorEntry ? unionQuarantineEntries(priorEntry, toPersist) : toPersist;
   if (!writePendingDivertFile(filename, toWrite)) {
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] could not durably protect degraded occupant ${occupantRepoPath}'s own content before ${path.basename(final)} is destroyed by clearing ${clearingRepoPath} — it stays enforced in-memory only for this process; a later boot can retry.`);
+    console.error(`[merge-quarantine] could not durably protect degraded occupant ${occupantRepoPath}'s own content before ${path.basename(final)} is destroyed by clearing ${describeClearer} — it stays enforced in-memory only for this process; a later boot can retry.`);
     return;
   }
   // Commit the DURABLE (never the stale boot-time) content to memory too, so a later in-process query —
@@ -1353,7 +1439,8 @@ function clearPendingEntryByToken(repoPath: string, token: string): void {
     for (const k of pending.entry.armedKeys ?? []) {
       if (!entryStillOwnsKey(k, pending.entry)) continue;
       activeQuarantines.delete(k);
-      deleteMergeQuarantineLatchByKey(k);
+      // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
+      deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity);
     }
     sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile);
     for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
@@ -1653,13 +1740,16 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // repoPath on disk for the SAME entity; see the decision record for why that must never "protect" it.
   const clearingRepoPath = entry && directPathIdentity(entry.repoPath) !== directPathIdentity(identityRepoPath)
     ? identityRepoPath : undefined;
-  for (const k of keysToLift) deleteMergeQuarantineLatchByKey(k, clearingRepoPath);
   // A pending (boot-unverifiable, no-resolvedKey) entry isn't keyed into activeQuarantines at all — see
   // reenterMergeQuarantinesAtBoot's PASS 1 and activeMergeQuarantineFor's lazy re-resolve. Match it by
   // DIRECT identity against `identityRepoPath` (never a fresh walking recompute — see this function's own
   // doc comment) so a clear issued while still unresolvable actually lifts it, and delete its OWN source
   // file too (round 2 finding 1), or it survives to resurrect the quarantine.
   const identity = directPathIdentity(identityRepoPath);
+  // @decision d163aef5 (round 4) — neither protect pass below gates on resolvability anymore (round 3's
+  // own gate let a RESOLVABLE eviction winner's clear destroy a foreign file at one of its OTHER armed
+  // keys); the PRIMARY ownership check and the token-overlap BACKSTOP both run for every key, every clear.
+  for (const k of keysToLift) deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity);
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   const sourceFilesToSweep: string[] = [];
   pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => {
@@ -1683,7 +1773,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
     for (const k of p.entry.armedKeys ?? []) {
       if (!entryStillOwnsKey(k, p.entry)) continue;
       activeQuarantines.delete(k);
-      deleteMergeQuarantineLatchByKey(k);
+      // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
+      deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity);
     }
     sourceFilesToSweep.push(p.sourceFile);
     return false;
@@ -1822,7 +1913,8 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
       for (const k of p.entry.armedKeys ?? []) {
         if (!entryStillOwnsKey(k, p.entry)) continue;
         activeQuarantines.delete(k);
-        deleteMergeQuarantineLatchByKey(k);
+        // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
+        deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity);
       }
       // @decision 883e29bc (round 4) — never a bare unlink: `p` is already removed from
       // pendingUnresolvedQuarantines above, so this correctly checks whether a SURVIVING entry (e.g. a
@@ -1863,22 +1955,14 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
  * (a pending nested-path latch queried later via a different same-repo path, once resolvable again) — see
  * the decision record's "Round 7" section for the repro and the two fallback passes' own safety argument.
  */
-export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry | undefined {
-  const key = canonicalRepoLockKey(repoPath);
-  const direct = activeQuarantines.get(key);
-  if (pendingUnresolvedQuarantines.length === 0) return direct;
-  if (direct) {
-    // @decision 8a1bc2ef (round 2, Code Review) — only absorb into `direct` when IT is genuinely
-    // key-verified, never when it merely occupies `key` via PASS 1's degraded dual-arm fallback — see the
-    // decision record for the nested-repo repro this guard closes.
-    if (!isKeyVerifiedFor(direct.repoPath, key)) return direct;
-    // @decision 8a1bc2ef — a sibling pending entry (card 7673d096) can share this exact key without ever
-    // matching the identity that originally armed `direct` — absorb it now, or this fast path never
-    // looks at `pendingUnresolvedQuarantines` again for this key. See the decision record for the repro.
-    const siblingIndices = collectCrossTierSiblingIndices(key, []);
-    if (siblingIndices.length === 0) return direct;
-    return consumeMatchedPendingsIntoArmedEntry(siblingIndices, key, direct).armed;
-  }
+/**
+ * The shared tier chain `activeMergeQuarantineFor` uses to find a pending entry genuinely matching
+ * `repoPath` (never a positional/first-hit guess — card `188b145f`): direct identity, ancestor-alias,
+ * resolvable-and-freshly-keyed, then a still-unresolvable entry gated on its OWN trusted `resolvedKey`
+ * (card `883e29bc`). Factored out so the `direct`-exists-but-unverified branch (card `d163aef5`) can
+ * reuse the EXACT same matcher the no-`direct` branch already uses, rather than inventing a second one.
+ */
+function findPendingIndicesFor(repoPath: string, key: string): number[] {
   const identity = directPathIdentity(repoPath);
   // @decision 188b145f — collect EVERY identity-matching index at the winning tier, never just the first
   // (mirrors `clearMergeQuarantineLatchFile`'s/`clearMergeQuarantineByRecordedPath`'s own `.filter(...)`
@@ -1896,6 +1980,46 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
     // 1/1b's divert); never a bare never-resolved no-resolvedKey latch (abccee85/r7's "nothing to walk").
     indices = collectPendingIndices((p) => !isRepoPathCurrentlyResolvable(p.entry.repoPath) && !!p.entry.resolvedKey && canonicalRepoLockKey(p.entry.repoPath) === key);
   }
+  return indices;
+}
+
+export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry | undefined {
+  const key = canonicalRepoLockKey(repoPath);
+  const direct = activeQuarantines.get(key);
+  if (pendingUnresolvedQuarantines.length === 0) return direct;
+  if (direct) {
+    // @decision 8a1bc2ef (round 2, Code Review) — only absorb into `direct` when IT is genuinely
+    // key-verified, never when it merely occupies `key` via PASS 1's degraded dual-arm fallback — see the
+    // decision record for the nested-repo repro this guard closes.
+    if (!isKeyVerifiedFor(direct.repoPath, key)) {
+      // `direct` occupying `key` only via a SECOND/stale arm is not proof it's the right answer for THIS
+      // repoPath — but ONLY when `repoPath` ITSELF is not currently resolvable: a resolvable `repoPath`
+      // whose own fresh key genuinely IS `key` (e.g. a subdir of a real enclosing repo that `direct`
+      // coincidentally also shares the key with) is EXACTLY the shape `direct-verified-guard`'s own test
+      // requires `direct` to keep answering for, unsubstituted — that query's own resolvability, by
+      // itself, says nothing about whether `direct`'s presence is legitimate. Restricting to an
+      // UNRESOLVABLE `repoPath` is what makes this safe: only then can a genuinely-matching PENDING
+      // entry (the SAME tier chain findPendingIndicesFor's own doc describes) answer more precisely.
+      //
+      // @decision d163aef5 — changes WHICH entry is returned, never WHETHER one is; no match (or a
+      // resolvable `repoPath`) still returns `direct` exactly as before, and the verified-`direct`
+      // branch below stays untouched.
+      if (!isRepoPathCurrentlyResolvable(repoPath)) {
+        const matchIndices = findPendingIndicesFor(repoPath, key);
+        if (matchIndices.length > 0) {
+          return (pendingUnresolvedQuarantines[matchIndices[0]!] as PendingUnresolvedQuarantine).entry;
+        }
+      }
+      return direct;
+    }
+    // @decision 8a1bc2ef — a sibling pending entry (card 7673d096) can share this exact key without ever
+    // matching the identity that originally armed `direct` — absorb it now, or this fast path never
+    // looks at `pendingUnresolvedQuarantines` again for this key. See the decision record for the repro.
+    const siblingIndices = collectCrossTierSiblingIndices(key, []);
+    if (siblingIndices.length === 0) return direct;
+    return consumeMatchedPendingsIntoArmedEntry(siblingIndices, key, direct).armed;
+  }
+  const indices = findPendingIndicesFor(repoPath, key);
   if (indices.length === 0) return undefined;
   const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine); // indices are verified hits above
   const first = matched[0] as PendingUnresolvedQuarantine;
@@ -2571,16 +2695,132 @@ function reenterMergeQuarantinesAtBootImpl(
   // CLEAN parse here, never on `byRepoKey.has(...)` alone (a corrupt-but-hash-matched placeholder also
   // lands in `byRepoKey`, even when its own self-heal write failed).
   const cleanlyParsedKeys = new Set<string>();
-  // @decision 883e29bc — a degraded-divert's pending copy must reference byRepoKey's FINAL value, never
-  // a mid-loop snapshot a later same-pass union would make stale; collect then flush after each pass.
-  const degradedDivertsToFlush: { resolvedKey: string; sourceFile: string }[] = [];
+  // @decision d163aef5 (round 3) — each record carries the ENTRY OBJECT + its OWN sourceFile, captured
+  // AT DIVERT TIME, never a `resolvedKey` re-read against `byRepoKey` at flush time (883e29bc's retired
+  // design — see the decision record's "Round 3" section). Never read or mutated by eviction below.
+  const degradedDivertsToFlush: { entry: MergeQuarantineEntry; sourceFile: string }[] = [];
   const flushDegradedDiverts = () => {
-    for (const { resolvedKey, sourceFile } of degradedDivertsToFlush) {
-      const finalEntry = byRepoKey.get(resolvedKey);
-      if (finalEntry) pendingUnresolvedQuarantines.push({ entry: finalEntry, sourceFile });
+    for (const { entry, sourceFile } of degradedDivertsToFlush) {
+      pendingUnresolvedQuarantines.push({ entry, sourceFile });
     }
     degradedDivertsToFlush.length = 0;
   };
+  /**
+   * Routes EVERY `armQuarantineKey` call in this function's read loops through here instead, never a
+   * bare call — covering both a PRIMARY arm (`key` is `entry`'s own just-computed `currentKey` — pass
+   * `entryClaimIsTautological: true`) and a SECONDARY arm (`key` is a persisted, trusted-but-unverified
+   * `resolvedKey` — either side's — pass `false`).
+   *
+   * If `key` is unoccupied, occupied by the SAME identity, or occupied by an entry whose own
+   * resolvability matches `entry`'s (both verified, or both degraded — the legitimate same-tier union
+   * 883e29bc itself still allows, e.g. two degraded entries sharing a manufactured collision), this is a
+   * plain pass-through to `armQuarantineKey`. A cross-identity, cross-resolvability collision is
+   * special-cased UNLESS `key` is genuinely backed — by SOME `registeredRepoPaths` entry's own fresh,
+   * current identity (checked via {@link isKeyVerifiedFor}, the SAME predicate `activeMergeQuarantineFor`'s
+   * own `direct` fast-path guard already uses) — in which case it's `armQuarantineKey`'s own intended
+   * same-toplevel-collapse union, unchanged (card `9a55fb90`'s own dual-armed shape: the real owner need
+   * not be `prior` or `entry` themselves, so every registered path is checked, not just these two).
+   *
+   * When NOT backed: a PRIMARY arm's `entry` claim is tautological (the caller computed `key` FROM
+   * `entry.repoPath` in this exact call, a fact no persisted field could misrepresent) — it always wins,
+   * evicting `prior`. A SECONDARY arm has no such guarantee on EITHER side — whichever side is NOT
+   * currently resolvable loses (its own trusted-but-unverifiable claim yields to the other's live one);
+   * if that's `entry`, this returns `undefined` and the CALLER must divert `entry` to
+   * `pendingUnresolvedQuarantines` itself and `continue` (only the caller knows the right warning text
+   * and `sourceFile` for its own call site) — a primary arm never does this (always returns the armed
+   * entry), since `entry` itself never loses there.
+   *
+   * Evicting `prior` removes it from ONLY `key` — not blindly every key in its own `armedKeys` — so a
+   * `prior` that legitimately holds OTHER keys too (e.g. its own real primary key, while `key` here was
+   * merely its own stale secondary one) keeps them untouched, via `replaceEntryEverywhere` (which also
+   * re-points any EXISTING pending reference to `prior` onto the trimmed survivor). Only when `key` was
+   * its LAST key is it diverted to `pendingUnresolvedQuarantines` as its own standalone entry — NEVER
+   * discarded, degraded OR genuinely RESOLVABLE alike (round 3 ruling: three prior rounds each tried to
+   * keep `degradedDivertsToFlush`'s own bookkeeping re-bound across an eviction instead, and each one
+   * opened a new hole — see the decision record's "Round 3" section). Its real sourceFile is recovered
+   * from an ALREADY-FLUSHED `pendingUnresolvedQuarantines` reference when one exists (by object
+   * identity — this never reads or mutates `degradedDivertsToFlush` itself, which is flushed on its own
+   * schedule regardless), else inferred deterministically via `quarantinePathForKey` (correct only when
+   * `prior` reached `key` via its own self-consistent primary arm, degraded or resolvable). A push is
+   * skipped only when the EXACT (entry, sourceFile) pair is already present — never on entry identity
+   * alone, so a second, genuinely different sourceFile for the same entry is never silently swallowed.
+   * A duplicate pending reference is an accepted, harmless outcome; a lost one is not.
+   *
+   * @decision d163aef5 — a degraded entry never unions into, nor overwrites, a key no registered repo's
+   * own fresh identity backs; EITHER side of this eviction — degraded or genuinely resolvable — can
+   * reach the zero-remaining-keys branch, and NEITHER is ever dropped. See the decision record.
+   */
+  const armKeyUnlessDegradedCollision = (
+    key: string,
+    entry: MergeQuarantineEntry,
+    entryClaimIsTautological: boolean,
+  ): MergeQuarantineEntry | undefined => {
+    const prior = byRepoKey.get(key);
+    if (prior && directPathIdentity(prior.repoPath) !== directPathIdentity(entry.repoPath)) {
+      const priorResolvable = isRepoPathCurrentlyResolvable(prior.repoPath);
+      const entryResolvable = isRepoPathCurrentlyResolvable(entry.repoPath);
+      if (priorResolvable !== entryResolvable && !registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key))) {
+        if (!entryClaimIsTautological && !entryResolvable) return undefined; // `entry` is the losing side
+        // `prior` loses `key` — evict it from THIS key only; it may still legitimately hold others.
+        const remainingKeys = (prior.armedKeys ?? [key]).filter((k) => k !== key);
+        if (remainingKeys.length > 0) {
+          const trimmedPrior: MergeQuarantineEntry = { ...prior, armedKeys: remainingKeys };
+          // replaceEntryEverywhere re-points EVERY existing byRepoKey/pendingUnresolvedQuarantines
+          // reference to `prior` (including any pending twin an EARLIER flush already pushed) onto
+          // `trimmedPrior` — so a prior already-pending entry stays correct without a separate step.
+          replaceEntryEverywhere(byRepoKey, prior, trimmedPrior);
+          byRepoKey.delete(key); // replaceEntryEverywhere re-points EVERY ref including this one; undo it
+        } else {
+          // `key` was prior's ONLY key — it's displaced entirely. NEVER discarded (card d163aef5, round
+          // 3 ruling: three prior rounds each tried to keep this re-bound across an eviction instead, and
+          // each opened a new hole) — always pushed to `pendingUnresolvedQuarantines`, degraded OR
+          // genuinely resolvable alike. This never reads or mutates `degradedDivertsToFlush` — that
+          // array is flushed on its own, independent schedule, and a duplicate push across the two is an
+          // accepted, harmless outcome (a duplicate beats a loss).
+          byRepoKey.delete(key);
+          degradedOccupiedKeys.delete(key);
+          // Recover `prior`'s own real sourceFile from an ALREADY-FLUSHED pending reference, by object
+          // identity, before ever falling back to inference.
+          const tracked = pendingUnresolvedQuarantines.find((p) => p.entry === prior);
+          let priorSourceFile: string;
+          if (tracked) {
+            priorSourceFile = tracked.sourceFile;
+          } else {
+            // No tracked reference — `prior` reached `key` via its own self-consistent primary arm
+            // (degraded or resolvable), so its real backing file, if it has one at all, is
+            // deterministically `quarantinePathForKey(key)`'s own basename.
+            priorSourceFile = path.basename(quarantinePathForKey(key));
+            // eslint-disable-next-line no-console
+            console.error(`[merge-quarantine] evicting ${prior.repoPath} from ${key} with no tracked pending reference of its own — inferring its real source file as ${priorSourceFile} (card d163aef5, round 3 ruling: never discarding it either way).`);
+          }
+          // Dedup on the EXACT (entry, sourceFile) pair only, never on entry identity alone — a second,
+          // genuinely different sourceFile for the same entry must still get its own reference.
+          if (!pendingUnresolvedQuarantines.some((p) => p.entry === prior && p.sourceFile === priorSourceFile)) {
+            pendingUnresolvedQuarantines.push({ entry: prior, sourceFile: priorSourceFile });
+          }
+        }
+        // else (backed by a registered repo): legitimate same-toplevel union, unchanged below.
+      }
+    }
+    // `prior` genuinely still occupies `key` here (never evicted above — eviction already deleted it)
+    // whenever we reach this point with it non-empty: a same-identity match, a same-tier union, or a
+    // registered-backed collision all fall through without ever deleting it.
+    const priorStillAtKey = prior && byRepoKey.get(key) === prior ? prior : undefined;
+    const result = armQuarantineKey(byRepoKey, key, entry);
+    // @decision d163aef5 (round 3) — rebind a degradedDivertsToFlush record still naming the PRE-union
+    // object onto the fresh `result`, on a real union — else its later flush pushes a stale snapshot
+    // alongside the real union (97cff6db round 4 minor 1's shape). Never fires for an evicted `prior`.
+    if (priorStillAtKey && result !== priorStillAtKey) {
+      for (const deferred of degradedDivertsToFlush) {
+        if (deferred.entry === priorStillAtKey) deferred.entry = result;
+      }
+    }
+    return result;
+  };
+  /** A PRIMARY arm (`key` freshly computed from `entry.repoPath` in this exact call) — `entry`'s own
+   *  claim is tautological, so this never diverts `entry` itself; see {@link armKeyUnlessDegradedCollision}. */
+  const armCurrentKeyUnlessDegradedCollision = (key: string, entry: MergeQuarantineEntry): MergeQuarantineEntry =>
+    armKeyUnlessDegradedCollision(key, entry, true)!;
   // @decision 4480b077 (round 2) — the .json migrate-write is DEFERRED to one pass after every file is
   // read (never mid-loop), so a not-yet-read sibling's own file can't be clobbered before it's read.
   // Keyed by canonical key; value is the superseded source filenames to delete once that key's write succeeds.
@@ -2693,14 +2933,23 @@ function reenterMergeQuarantinesAtBootImpl(
           //
           // @decision 883e29bc — never arm at the degraded walked-up `currentKey` directly, only at
           // resolvedKey; divert the degraded key's signal to pendingUnresolvedQuarantines instead.
+          //
+          // @decision d163aef5 — but never union at resolvedKey either, if that key is ALREADY occupied
+          // by a different, currently-verified entry — see armKeyUnlessDegradedCollision's own doc.
+          const armedAtResolvedKey = armKeyUnlessDegradedCollision(entry.resolvedKey!, entry, false);
+          if (armedAtResolvedKey === undefined) {
+            // eslint-disable-next-line no-console
+            console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and its own recorded resolvedKey (${entry.resolvedKey}) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); leaving ${entry.repoPath} as a standalone, fail-closed pending entry instead.`);
+            pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+            continue;
+          }
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the latch file AS WRITTEN rather than risk migrating/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
-          armQuarantineKey(byRepoKey, entry.resolvedKey!, entry);
           // @decision 4480b077 (round 2) — this entry's own backing file physically lives at
           // sha(resolvedKey); record it so no write pass below ever writes there.
           degradedOccupiedKeys.add(entry.resolvedKey!);
           if (currentKey !== entry.resolvedKey) {
-            degradedDivertsToFlush.push({ resolvedKey: entry.resolvedKey!, sourceFile: f });
+            degradedDivertsToFlush.push({ entry: armedAtResolvedKey, sourceFile: f });
           }
           continue;
         }
@@ -2709,10 +2958,19 @@ function reenterMergeQuarantinesAtBootImpl(
       // `armedKeys`, so the SECOND call must build on the FIRST's output, not the original `entry`, or the
       // first key's own slot ends up missing the second key from its armedKeys (see PASS 1/1b "Do not" in
       // docs/decisions/54054c01-clear-lifts-every-key-an-entry-was-armed-under.md, round 2 finding 2).
-      let armedEntry = armQuarantineKey(byRepoKey, currentKey, entry);
+      // @decision d163aef5 — `entry` can ALSO be degraded here (self-consistently named at its own
+      // degenerate key) — a primary arm's claim is tautological either way; see the helper's own doc.
+      let armedEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
       if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
-        armedEntry = armQuarantineKey(byRepoKey, entry.resolvedKey, armedEntry);
-        byRepoKey.set(currentKey, armedEntry);
+        // `entry` can ALSO be degraded here — self-consistently NAMED (so the degraded-divert branch
+        // above never ran) yet still carrying a STALE `resolvedKey` field that differs from its own
+        // currentKey (the Code Review's own `X` repro). The helper itself is symmetric either way; this
+        // is a plain secondary arm, never the tautological one.
+        const secondArm = armKeyUnlessDegradedCollision(entry.resolvedKey, armedEntry, false);
+        if (secondArm !== undefined) {
+          armedEntry = secondArm;
+          byRepoKey.set(currentKey, armedEntry);
+        }
       }
     } catch (e) {
       // BLOCKER 2 fix: an unparsable/corrupt latch must never fail OPEN (a 0-byte file at boot used to
@@ -2769,7 +3027,9 @@ function reenterMergeQuarantinesAtBootImpl(
       reason: `boot found a CORRUPT/unparsable quarantine latch (${f}) matching this repo's hash — fail-closed rather than risk discarding a real quarantine`,
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
     };
-    armQuarantineKey(byRepoKey, key, entry);
+    // @decision d163aef5 — `matchedRepo` is resolvable (gated above), so this placeholder's own primary
+    // arm is tautological too — never diverts `entry`, only ever evicts an illegitimate degraded prior.
+    armCurrentKeyUnlessDegradedCollision(key, entry);
     const migratedList = migratedSourcesByKey.get(key) ?? [];
     migratedList.push(f);
     migratedSourcesByKey.set(key, migratedList);
@@ -2867,20 +3127,33 @@ function reenterMergeQuarantinesAtBootImpl(
       if (!isRepoPathCurrentlyResolvable(entry.repoPath) && entry.resolvedKey && entry.resolvedKey !== currentKey) {
         // @decision 883e29bc — mirror PASS 1's own fix above: never arm this tmp-sourced entry at its
         // degraded walked-up `currentKey`, only at resolvedKey; divert the degraded signal to pending.
+        //
+        // @decision d163aef5 — but never union at resolvedKey either, if that key is ALREADY occupied by
+        // a different, currently-verified entry — mirrors PASS 1's own fix above.
+        const armedAtResolvedKey = armKeyUnlessDegradedCollision(entry.resolvedKey, entry, false);
+        if (armedAtResolvedKey === undefined) {
+          // eslint-disable-next-line no-console
+          console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and its own recorded resolvedKey (${entry.resolvedKey}) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); leaving ${entry.repoPath} as a standalone, fail-closed pending entry instead.`);
+          pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+          continue;
+        }
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the tmp file AS WRITTEN rather than risk promoting/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
-        armQuarantineKey(byRepoKey, entry.resolvedKey, entry);
         // @decision 4480b077 (round 2) — same tracking as PASS 1's own degraded branch, shared across
         // both passes so EITHER one's degraded find protects BOTH write passes below.
         degradedOccupiedKeys.add(entry.resolvedKey);
-        degradedDivertsToFlush.push({ resolvedKey: entry.resolvedKey, sourceFile: f });
+        degradedDivertsToFlush.push({ entry: armedAtResolvedKey, sourceFile: f });
         continue;
       }
       // See PASS 1's identical threading note above — the second call must build on the first's result.
-      const armedTmpEntry = armQuarantineKey(byRepoKey, currentKey, entry);
+      // @decision d163aef5 — mirrors PASS 1's own primary arm: `entry` can be degraded here too (same
+      // no-mismatch, self-consistent shape) — its claim is tautological either way.
+      const armedTmpEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
       if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
-        const dualArmed = armQuarantineKey(byRepoKey, entry.resolvedKey, armedTmpEntry);
-        byRepoKey.set(currentKey, dualArmed);
+        // `entry` can ALSO be degraded here — mirrors PASS 1's own second-arm note above (a
+        // self-consistently-named entry with a stale, diverging `resolvedKey`); the helper is symmetric.
+        const dualArmed = armKeyUnlessDegradedCollision(entry.resolvedKey, armedTmpEntry, false);
+        if (dualArmed !== undefined) byRepoKey.set(currentKey, dualArmed);
       }
       // Collect this tmp for the single per-key write/unlink pass below, grouped by the entry's OWN
       // canonical key — the same key `writeMergeQuarantineLatch` physically writes to.
@@ -2988,10 +3261,14 @@ function reenterMergeQuarantinesAtBootImpl(
         continue;
       }
       const currentKey = canonicalRepoLockKey(entry.repoPath);
-      const armedSafety = armQuarantineKey(byRepoKey, currentKey, entry);
+      // @decision d163aef5 — `entry` is always resolvable here (the unresolvable branch above always
+      // `continue`s) — this primary arm's own claim is tautological anyway; only a degraded PRIOR
+      // sharing `currentKey` only via some unrelated secondary claim could ever be evicted.
+      const armedSafety = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
       if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
-        const dualArmed = armQuarantineKey(byRepoKey, entry.resolvedKey, armedSafety);
-        byRepoKey.set(currentKey, dualArmed);
+        // This second arm can only decline-and-evict a DIFFERENT, degraded occupant at this stale key.
+        const dualArmed = armKeyUnlessDegradedCollision(entry.resolvedKey, armedSafety, false);
+        if (dualArmed !== undefined) byRepoKey.set(currentKey, dualArmed);
       }
       safetyTmpRecoveryByFile.set(f, currentKey);
       // @decision 97cff6db (round 3, finding E) — when degraded-occupied, give this source its OWN
@@ -3237,7 +3514,9 @@ function reenterMergeQuarantinesAtBootImpl(
       reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, with no real sibling data — fail-closed rather than risk discarding a real quarantine`,
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
     };
-    const armed = armQuarantineKey(byRepoKey, key, entry);
+    // @decision d163aef5 — `matchedRepo` is resolvable (gated above), so this placeholder's own primary
+    // arm is tautological too — never diverts `entry`, only ever evicts an illegitimate degraded prior.
+    const armed = armCurrentKeyUnlessDegradedCollision(key, entry);
     byRepoKey.set(key, armed);
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable with no real sibling data recovered for registered repo ${matchedRepo} — quarantining THAT repo rather than risk discarding a real quarantine (bootWriteLatch may still refuse — see its own log line above/below for why).`);

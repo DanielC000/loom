@@ -84,7 +84,15 @@ loop: for each `[key, sources]` in `migratedSourcesByKey`:
   resolves itself (the degraded entry is cleared, or remounts).
 - Else: `unionEntry = byRepoKey.get(key)` is guaranteed to exist and be resolvable (every constituent
   that reaches this point came through the resolvable fall-through; the only way a degraded constituent
-  could be involved was excluded above). Atomic write via the existing `writeMergeQuarantineLatch`
+  could be involved was excluded above). **CORRECTED by `d163aef5`:** this "guaranteed resolvable" claim
+  was FALSE for `byRepoKey` itself — `armQuarantineKey`'s own `armedKeys` propagation could silently carry
+  a degraded constituent onto a key never added to `degradedOccupiedKeys` at all (a key the exclusion above
+  never saw, because it tracks only a degraded entry's OWN `resolvedKey`, not every OTHER key a union at
+  that key could subsequently spread the contamination to). Fixed at the source — `reenterMergeQuarantinesAtBootImpl`
+  now never unions a degraded entry into a slot a verified, resolvable entry already occupies via only a
+  SECONDARY/stale key, in either direction (a genuine same-toplevel collapse — some registered repo's own
+  fresh identity actually backing that key — still unions exactly as before) — see
+  `docs/decisions/d163aef5-dualarm-sibling-key-contamination.md`. Atomic write via the existing `writeMergeQuarantineLatch`
   (unchanged primitive — tmp + fsync + rename; only *when* it's called changed, once per key instead of
   once per file). On success, attempt `deleteSourceLatchIfSuperseded` on every source; fold any failures
   into `orphanLatchFiles` and re-persist once (see "Folded in: c870618c" below). On a write failure, fold

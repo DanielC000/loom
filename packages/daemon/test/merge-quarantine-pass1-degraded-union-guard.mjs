@@ -68,6 +68,15 @@ const SCENARIOS = [
   "clear-x-unmounted", "clear-r-truthful-reporting",
   "stale-armedkeys-no-collateral", "clear-unmasks-different-blocker", "clear-stale-pending-not-blocking",
   "token-clear-identity-drift", "deferred-flush-no-stale-snapshot",
+  "dualarm-sibling-key-contamination", "dualarm-sibling-key-contamination-d-first",
+  "degraded-divert-rebind-survives-trim-eviction", "degraded-divert-no-duplicate-across-flushes",
+  "round3-two-diverts-at-one-key-eviction", "round3-degraded-walkup-to-resolvable-key",
+  "round3-chained-eviction-three-parties",
+  "round4-p1-resolvable-winner-clear-destroys-loser-file",
+  "round4-p2-remounted-walkup-clear-destroys-winner-file",
+  "round5-own-raise-lifts-past-inferred-evictee",
+  "round6-union-constituent-survives-eviction",
+  "round6-mismatch-evictee-survives-clear",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -113,7 +122,7 @@ const {
   clearMergeQuarantineByKey, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot,
   listActiveMergeQuarantines, MERGE_QUARANTINE_DIR, clearMergeQuarantine, clearMergeQuarantineReporting,
   quarantineLatchFileIdsFor, clearMergeQuarantineByRecordedPath, enterMergeQuarantine,
-  clearMergeQuarantineByToken, quarantineLatchIdFor,
+  clearMergeQuarantineByToken, quarantineLatchIdFor, assertRepoNotQuarantined,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -822,14 +831,15 @@ try {
     check("*** THE FIX *** no entry anywhere still carries tokX (not left dangling)", !listActiveMergeQuarantines().some((q) => (q.tokens ?? []).includes(tokX)));
   } else if (scenarioName === "deferred-flush-no-stale-snapshot") {
     // ══════════════════════════════════════════════════════════════════════════════════════════════════
-    // SCENARIO deferred-flush-no-stale-snapshot — discriminates round 2's own finding-5 fix (deferred
-    // divert flush) directly: X1 and X2 are BOTH unresolvable, BOTH with resolvedKey manufactured to the
-    // SAME colliding value — a legitimate same-pass union at that key (armQuarantineKey unions
-    // unconditionally, by design, for two entries genuinely sharing a key). Whichever is processed FIRST
-    // (readdir order, never assumed) would have its OWN immediate push be a STALE pre-union snapshot if
-    // PASS 1 pushed right away instead of deferring — this assertion is order-independent: it only checks
-    // the FINAL listing is consistent (exactly one entry for this key, carrying BOTH tokens), which a
-    // stale snapshot would violate regardless of which side went stale.
+    // SCENARIO deferred-flush-no-stale-snapshot — card `d163aef5`, round 3 retires the mechanism this
+    // scenario originally discriminated (round 2's own "re-read byRepoKey at flush time" deferral) in
+    // favor of capturing each divert's own entry snapshot AT DIVERT TIME — but the SAME invariant this
+    // scenario has always asserted (exactly one, fully-unioned listing) still holds: `armKeyUnlessDegradedCollision`
+    // now rebinds any `degradedDivertsToFlush` record still naming a PRE-union object onto the fresh
+    // merged result whenever a real union happens (see its own doc), so X1's divert record (pushed
+    // first, before X2 ever unions into it) gets rebound the moment X2 arrives — never left pointing at
+    // a stale, pre-union snapshot. X1 and X2 are BOTH unresolvable, BOTH with resolvedKey manufactured to
+    // the SAME colliding value — a legitimate same-pass union at that key.
     // ══════════════════════════════════════════════════════════════════════════════════════════════════
     const kxx = `/synthetic/deferred-flush-collision-${freshSfx()}`;
     const x1 = path.join(os.tmpdir(), `loom-mqp1dug-dfns-x1-${freshSfx()}`);
@@ -852,6 +862,952 @@ try {
     const matching = listActiveMergeQuarantines().filter((q) => (q.tokens ?? []).includes("x1-token") || (q.tokens ?? []).includes("x2-token"));
     check("*** THE FIX *** exactly ONE consistent listing for the colliding key — never a stale duplicate", matching.length === 1);
     check("*** THE FIX *** that ONE listing carries BOTH tokens (the genuine same-pass union)", matching.length === 1 && (matching[0].tokens ?? []).includes("x1-token") && (matching[0].tokens ?? []).includes("x2-token"));
+  } else if (scenarioName === "dualarm-sibling-key-contamination" || scenarioName === "dualarm-sibling-key-contamination-d-first") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO dualarm-sibling-key-contamination[-d-first] — card `d163aef5`'s re-scoped, still-open
+    // angle: `armQuarantineKey`'s `armedKeys` propagation could carry a DEGRADED constituent onto a key
+    // that is NOT in `degradedOccupiedKeys`, clobbering the in-memory (and, on a later query, the
+    // ON-DISK) entry for an ENCLOSING/sibling key that is otherwise fully verified and resolvable —
+    // falsifying `4480b077`'s "unionEntry guaranteed resolvable" claim.
+    //
+    // Z is a real, resolvable repo. Z's own `.json` final is correctly named at hash(K1) (K1 = Z's TRUE,
+    // current canonical key) — but the FILE's own persisted `resolvedKey` field is K2, a STALE value that
+    // no longer equals K1 (models a second key Z was dual-armed under at some earlier point and never got
+    // overwritten back to K1 — PASS 1's fallthrough dual-arm does not require resolvedKey to equal
+    // currentKey; it only skips the SECOND arm when they're already equal). D never exists on disk at
+    // all (permanently unresolvable); D's own recorded resolvedKey is manufactured to COLLIDE with Z's
+    // own stale K2 — exactly PASS 1's trusted-resolvedKey divert (`883e29bc`/`7673d096`) reaching a key
+    // that ALREADY, independently, holds Z's verified entry (via Z's own dual-arm at K1+K2).
+    //
+    // THE BUG (pre-fix): `armQuarantineKey(byRepoKey, K2, D)` unioned Z's entry (occupying K2 via its own
+    // dual-arm) with D — then spread the RESULT to EVERY key in the union's own `armedKeys`, including K1
+    // (inherited from Z's PRIOR dual-arm, nothing to do with D at all). K1 was never added to
+    // `degradedOccupiedKeys` (only K2, D's own resolvedKey, was) — so Z's own entry at K1 was silently
+    // overwritten with a union carrying D's token, and a later query for Z durably wrote the contaminated
+    // union to Z's own, genuinely-verified latch file on disk.
+    //
+    // THE FIX: `armKeyUnlessDegradedCollision` declines the union in EITHER direction — see its own doc
+    // comment. The base scenario forces D's filename to sort strictly AFTER Z's (so Z is armed first,
+    // exercising the degraded-divert call site's own guard deciding against an ALREADY-present verified
+    // occupant); the `-d-first` variant forces the OPPOSITE order (D arms at K2 standalone BEFORE Z is
+    // ever processed), exercising the OTHER call site (Z's own normal dual-arm fallthrough
+    // declining-and-evicting an already-degraded occupant). Both orders are forced DETERMINISTICALLY
+    // (Code Review, SHOULD-FIX 4) — leaving this to filename-hash luck would make one of the two decline
+    // branches above pass only by coincidence, exactly as happened for `82032b5c`'s own fixture.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const dFirst = scenarioName === "dualarm-sibling-key-contamination-d-first";
+    const tag = dFirst ? "dsc-df" : "dsc";
+    const z = path.join(os.tmpdir(), `loom-mqp1dug-${tag}-z-${freshSfx()}`);
+    fs.mkdirSync(z, { recursive: true });
+    tmpDirs.push(z);
+    fs.writeFileSync(path.join(z, "README.md"), `# ${scenarioName}\n`);
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: z });
+    commitAll(z, "init", GIT_ID);
+    const K1 = canonicalRepoLockKey(z);
+    const K2 = `/synthetic/${tag}-stale-second-key-${freshSfx()}`; // arbitrary, never a real resolvable key
+    const K1hash = createHash("sha256").update(K1).digest("hex").slice(0, 24);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const zLatchPath = path.join(MERGE_QUARANTINE_DIR, `${K1hash}.json`);
+    fs.writeFileSync(zLatchPath, JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "Z's own genuine, currently-active raise",
+      enteredAt: Date.now() - 60_000, tokens: ["z-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+
+    const d = path.join(os.tmpdir(), `loom-mqp1dug-${tag}-d-never-exists-${freshSfx()}`);
+    check("(precondition) D never exists at all", !fs.existsSync(d));
+    // d-first: force D's filename to sort strictly BEFORE K1hash. Not-d-first (z-first): force it to
+    // sort strictly AFTER — "f" repeated sorts after any lowercase-hex digest of the same length.
+    const dFilename = dFirst ? "000000000000000000000000.json" : "ffffffffffffffffffffffff.json";
+    if (dFirst) check("(precondition) D's forced filename sorts before Z's real hash filename", dFilename < `${K1hash}.json`);
+    else check("(precondition) D's forced filename sorts after Z's real hash filename", dFilename > `${K1hash}.json`);
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, dFilename), JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own manufactured resolvedKey collision with Z's own stale K2",
+      enteredAt: Date.now(), tokens: ["d-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([z, d]); // THE SINGLE BOOT CALL UNDER TEST
+
+    const activeZAfterBoot = activeMergeQuarantineFor(z);
+    check("(sanity) Z's own token survives regardless", !!activeZAfterBoot && (activeZAfterBoot.tokens ?? []).includes("z-token"));
+    check("*** THE FIX (card d163aef5) *** Z's own entry, at its OWN verified key K1, is NEVER unioned with D's degraded token", !!activeZAfterBoot && !(activeZAfterBoot.tokens ?? []).includes("d-token"));
+    check("*** THE FIX (card d163aef5) *** Z's own reason is untouched by D's own, unrelated reason text", activeZAfterBoot?.reason === "Z's own genuine, currently-active raise");
+
+    const onDiskAfterBoot = JSON.parse(fs.readFileSync(zLatchPath, "utf8"));
+    check("*** THE FIX (card d163aef5) *** Z's own ON-DISK latch file is never durably contaminated with D's token either", !(onDiskAfterBoot.tokens ?? []).includes("d-token"));
+
+    // Code Review, SHOULD-FIX 3 — also assert through the PRODUCTION path (assertRepoNotQuarantined ->
+    // resolveQuarantineFor -> activeMergeQuarantineFor), not only the internal function. For a
+    // CURRENTLY-RESOLVABLE query like `z`, resolveQuarantineFor's own `ownIdentityEntryFor` short-circuit
+    // never fires (that's gated on the query being unresolvable) — so this exercises the SAME
+    // activeMergeQuarantineFor code path already asserted above, just through its real caller.
+    const assertZAfterBoot = assertRepoNotQuarantined(z);
+    check("(production path) assertRepoNotQuarantined(z) is blocked by Z's OWN reason, never D's", assertZAfterBoot.ok === false && assertZAfterBoot.reason.includes("Z's own genuine, currently-active raise") && !assertZAfterBoot.reason.includes("d-branch"));
+
+    // Requirement 1 — D must stay FAIL-CLOSED: querying D directly must still report it quarantined
+    // (via the existing 883e29bc 4th pending tier — D's own degenerate key, recomputed fresh from D's
+    // own unresolvable repoPath, never from the manufactured K2 collision).
+    const activeDAfterBoot = activeMergeQuarantineFor(d);
+    check("(requirement 1) D itself is STILL reported quarantined, with ONLY its own token", !!activeDAfterBoot && (activeDAfterBoot.tokens ?? []).length === 1 && activeDAfterBoot.tokens.includes("d-token"));
+    // Code Review, SHOULD-FIX 3 — same production-path assertion for D. D is UNRESOLVABLE, so this DOES
+    // route through `resolveQuarantineFor`'s `ownIdentityEntryFor` short-circuit first — but that
+    // branch's own result still has to come from the SAME in-memory state this fix protects.
+    check("(production path) assertRepoNotQuarantined(d) is ALSO still blocked", assertRepoNotQuarantined(d).ok === false);
+
+    // Requirement 2 — D must never be re-absorbed into Z LATER through consumeMatchedPendingsIntoArmedEntry
+    // / cross-tier-sibling absorption. That path matches via `isRepoPathCurrentlyResolvable(p.entry.repoPath)
+    // && canonicalRepoLockKey(p.entry.repoPath) === key` (genuine identity, never a stale resolvedKey) —
+    // D's own repoPath is permanently unresolvable, so this predicate can never match it for K1. Querying
+    // Z SEVERAL more times must stay clean (not just the first query, in case absorption were order- or
+    // count-sensitive).
+    for (let i = 0; i < 3; i++) {
+      const repeat = activeMergeQuarantineFor(z);
+      check(`(requirement 2, query ${i + 1}) repeated queries for Z never absorb D`, !!repeat && !(repeat.tokens ?? []).includes("d-token"));
+    }
+
+    // RESTART — the durable proof for BOTH requirements across a reboot.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([z, d]);
+    const activeZAfterRestart = fresh.activeMergeQuarantineFor(z);
+    check("(restart) Z's quarantine SURVIVES a fresh boot, with ONLY its own token and its own reason", !!activeZAfterRestart && (activeZAfterRestart.tokens ?? []).length === 1 && activeZAfterRestart.tokens.includes("z-token") && activeZAfterRestart.reason === "Z's own genuine, currently-active raise");
+    const activeDAfterRestart = fresh.activeMergeQuarantineFor(d);
+    check("(requirement 1, restart) D is STILL reported quarantined after a reboot too, with ONLY its own token", !!activeDAfterRestart && (activeDAfterRestart.tokens ?? []).length === 1 && activeDAfterRestart.tokens.includes("d-token"));
+    // Code Review, SHOULD-FIX 3 — production path, post-restart.
+    const assertZAfterRestart = fresh.assertRepoNotQuarantined(z);
+    check("(production path, restart) assertRepoNotQuarantined(z) is still blocked by Z's OWN reason only", assertZAfterRestart.ok === false && assertZAfterRestart.reason.includes("Z's own genuine, currently-active raise") && !assertZAfterRestart.reason.includes("d-branch"));
+    check("(production path, restart) assertRepoNotQuarantined(d) is ALSO still blocked", fresh.assertRepoNotQuarantined(d).ok === false);
+    const onDiskAfterRestart = JSON.parse(fs.readFileSync(zLatchPath, "utf8"));
+    check("(restart) Z's own ON-DISK latch file is still never contaminated after a reboot", !(onDiskAfterRestart.tokens ?? []).includes("d-token"));
+  } else if (scenarioName === "degraded-divert-rebind-survives-trim-eviction") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review of 7545166b, BLOCKING 1 (CRITICAL, reviewer-reproduced) — a regression THIS card's own
+    // fix introduced. X and D are BOTH degraded (X self-consistently named at hash(K3), dual-arming
+    // K3+K2; D a mismatched-name divert, resolvedKey=K2 too) — SAME resolvability, so they legitimately
+    // UNION at K2 (883e29bc's own accepted "two degraded entries sharing a manufactured collision"
+    // case, unaffected by this card). D's own degraded-divert processing pushes
+    // `{resolvedKey:K2, sourceFile:D's file}` into `degradedDivertsToFlush`, NOT YET flushed.
+    //
+    // Z (real, resolvable) then arms its own SECOND key at K2 too, finds the X+D union there, and
+    // (legitimately, since nothing registered backs K2) EVICTS it — trimming the union down to K3 (X's
+    // own real key) via the TRIM branch, since the union's `armedKeys` is `[K3,K2]`.
+    //
+    // THE BUG: `flushDegradedDiverts` (called once, after this entire PASS 1 loop) re-reads
+    // `byRepoKey.get(K2)` AT FLUSH TIME — by then K2 holds Z's own clean entry (the eviction's winner),
+    // NOTHING to do with D. The pre-fix code pushed `{entry: Z, sourceFile: D's own file}` into
+    // `pendingUnresolvedQuarantines` — a later verified query for Z then absorbed this as a "sibling"
+    // and durably unlinked D's OWN latch file as a superseded duplicate, even though D's real data
+    // (merged into X) was never written to disk anywhere. After a reboot, D's data is gone for good.
+    //
+    // THE FIX: the TRIM branch now re-binds any `degradedDivertsToFlush` record still targeting the
+    // evicted key onto one of the union's OWN surviving keys (K3) — so the deferred flush correctly
+    // finds the TRIMMED union (still carrying D's own token, merged with X's) there instead.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const z = path.join(os.tmpdir(), `loom-mqp1dug-b1-z-${freshSfx()}`);
+    fs.mkdirSync(z, { recursive: true });
+    tmpDirs.push(z);
+    fs.writeFileSync(path.join(z, "README.md"), "# degraded-divert-rebind-survives-trim-eviction\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: z });
+    commitAll(z, "init", GIT_ID);
+    const K1 = canonicalRepoLockKey(z);
+    const K1hash = createHash("sha256").update(K1).digest("hex").slice(0, 24);
+    const K2 = `/synthetic/b1-shared-K2-${freshSfx()}`; // manufactured, shared by X, D, AND Z
+
+    // X: nonexistent, self-consistently named at hash(canonical(X))=K3 — retried (free; X never touches
+    // disk) until K3's own hash sorts strictly BEFORE Z's real hash, so X (and D, forced first below)
+    // are both read and armed before Z ever is.
+    let x, K3, K3hash;
+    for (let attempt = 0; ; attempt++) {
+      x = path.join(os.tmpdir(), `loom-mqp1dug-b1-x-never-exists-${freshSfx()}`);
+      K3 = canonicalRepoLockKey(x);
+      K3hash = createHash("sha256").update(K3).digest("hex").slice(0, 24);
+      if (K3hash < K1hash) break;
+      if (attempt > 200_000) throw new Error("could not force X before Z after 200,000 attempts");
+    }
+    check("(precondition) X's own hash sorts before Z's", K3hash < K1hash);
+
+    const d = path.join(os.tmpdir(), `loom-mqp1dug-b1-d-never-exists-${freshSfx()}`);
+    check("(precondition) D never exists at all", !fs.existsSync(d));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const zFile = path.join(MERGE_QUARANTINE_DIR, `${K1hash}.json`);
+    fs.writeFileSync(zFile, JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "Z's own genuine, currently-active raise",
+      enteredAt: Date.now() - 30_000, tokens: ["z-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${K3hash}.json`), JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own prior raise", enteredAt: Date.now() - 60_000,
+      tokens: ["x-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    // D's own filename is a forced-first sentinel (never a real hash) — guaranteed to sort before BOTH
+    // X's and Z's own hash-named files, matching the Code Review's own "readdir order X, D, Z" shape
+    // (the actual requirement is just "X and D both process before Z"; their own relative order is not
+    // load-bearing — see 883e29bc's own order-independent same-tier union design).
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "000000000000000000000000.json"), JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own manufactured resolvedKey collision with X and Z's shared K2",
+      enteredAt: Date.now(), tokens: ["d-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([z, x, d]); // THE SINGLE BOOT CALL UNDER TEST
+
+    const activeZ = activeMergeQuarantineFor(z);
+    check("(sanity) Z's own token survives, never contaminated", !!activeZ && (activeZ.tokens ?? []).length === 1 && activeZ.tokens.includes("z-token"));
+
+    // THE FIX — querying X (the identity that WON the X+D union by age) must still carry D's own token,
+    // merged in, exactly as 883e29bc's own accepted same-tier-union design intends. D itself is never
+    // independently queryable once merged (same pre-existing residual any two-degraded-entry union
+    // carries) — the correctness bar is that its DATA is never lost, not that it stays separately named.
+    const activeX = activeMergeQuarantineFor(x);
+    check("*** THE FIX (Code Review BLOCKING 1) *** X's own query STILL carries D's token, merged — never lost by the eviction", !!activeX && (activeX.tokens ?? []).includes("x-token") && (activeX.tokens ?? []).includes("d-token"));
+
+    // RESTART — the durable proof; this is where the pre-fix bug actually manifested (D's file had
+    // already been unlinked as a wrongly-attributed "superseded duplicate" of Z by this point).
+    const fresh1 = await freshBootModule();
+    fresh1.reenterMergeQuarantinesAtBoot([z, x, d]);
+    const activeXAfterRestart = fresh1.activeMergeQuarantineFor(x);
+    check("*** THE FIX (Code Review BLOCKING 1) *** D's token SURVIVES a reboot, still merged into X's own entry", !!activeXAfterRestart && (activeXAfterRestart.tokens ?? []).includes("x-token") && (activeXAfterRestart.tokens ?? []).includes("d-token"));
+    const activeZAfterRestart = fresh1.activeMergeQuarantineFor(z);
+    check("(restart) Z's own entry is STILL clean, with ONLY its own token", !!activeZAfterRestart && (activeZAfterRestart.tokens ?? []).length === 1 && activeZAfterRestart.tokens.includes("z-token"));
+  } else if (scenarioName === "degraded-divert-no-duplicate-across-flushes") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review of 7545166b, BLOCKING 2 (MAJOR, reviewer-measured) — the zero-remaining-keys (full
+    // divert) branch re-pushed a `prior` that an EARLIER `flushDegradedDiverts()` call had ALREADY
+    // pushed to `pendingUnresolvedQuarantines`. `degradedDivertsToFlush` is flushed TWICE in one boot —
+    // once after PASS 1's own read loop, once after safety-tmp recovery — so a `prior` diverted and
+    // flushed during PASS 1 can still be sitting in `byRepoKey` when PASS 1b (or safety-tmp recovery)
+    // later evicts it via the SAME key, with `degradedDivertsToFlush` now EMPTY (already drained) —
+    // falling through to the `quarantinePathForKey(key)` inference, which is WRONG for this shape (D's
+    // real file is its own original, mismatched-name latch, never physically at that path) AND produces
+    // a DUPLICATE listing for the same logical entry under two different (one wrong) sourceFile/ids.
+    //
+    // D is degraded, resolvedKey=K(R) — R a REAL, RESOLVABLE repo that is NOT in `registeredRepoPaths`
+    // (so nothing legitimizes the collision). D's divert is pushed+flushed during PASS 1. R's own
+    // `.json.tmp-<pid>` torn-write residue is then recovered in PASS 1b, colliding with D (still armed
+    // at K(R) from PASS 1) via R's own PRIMARY arm — R wins (tautological), D is evicted a SECOND time.
+    //
+    // THE FIX: before pushing `prior` to `pendingUnresolvedQuarantines` in the full-divert branch, check
+    // whether it is ALREADY there (by object identity) — if so, skip the push entirely; it is already
+    // correctly represented with its own real sourceFile from whenever it was first flushed.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const r = path.join(os.tmpdir(), `loom-mqp1dug-b2-r-${freshSfx()}`);
+    fs.mkdirSync(r, { recursive: true });
+    tmpDirs.push(r);
+    fs.writeFileSync(path.join(r, "README.md"), "# degraded-divert-no-duplicate-across-flushes (r)\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: r });
+    commitAll(r, "init", GIT_ID);
+    const Kr = canonicalRepoLockKey(r);
+    const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+
+    const d = path.join(os.tmpdir(), `loom-mqp1dug-b2-d-never-exists-${freshSfx()}`);
+    check("(precondition) D never exists at all", !fs.existsSync(d));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // D's own file is a torn-write-looking but ordinary `.json` final, named NOTHING like hash(Kr) — a
+    // genuine degraded-divert (mismatched name), never self-consistent.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "d-divert-source.json"), JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own manufactured resolvedKey collision with R (unregistered)",
+      enteredAt: Date.now() - 30_000, tokens: ["d-token"], resolvedKey: Kr,
+    }, null, 2) + "\n");
+    // R's own torn-write tmp residue (PASS 1b), recovered AFTER PASS 1's own flush has already drained
+    // `degradedDivertsToFlush` once.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json.tmp-999`), JSON.stringify({
+      repoPath: r, branch: "r-branch", reason: "R's own genuine, torn-write-recovered raise",
+      enteredAt: Date.now(), tokens: ["r-token"],
+    }, null, 2) + "\n");
+
+    // `r` is deliberately NOT in registeredRepoPaths — nothing legitimizes the Kr collision.
+    reenterMergeQuarantinesAtBoot([d]);
+
+    const listingAfterBoot = listActiveMergeQuarantines().filter((q) => (q.tokens ?? []).includes("d-token"));
+    check("*** THE FIX (Code Review BLOCKING 2) *** D is listed EXACTLY ONCE, never duplicated across the two flush passes", listingAfterBoot.length === 1);
+    const activeRAfterBoot = activeMergeQuarantineFor(r);
+    check("(sanity) R's own recovered raise is active, with ONLY its own token", !!activeRAfterBoot && (activeRAfterBoot.tokens ?? []).length === 1 && activeRAfterBoot.tokens.includes("r-token"));
+
+    // RESTART ×2 — the Code Review's own repro named "reboots 2-3 list D TWICE under two different
+    // latch ids"; a single boot alone did not necessarily surface it (the duplicate's OWN on-disk shape
+    // matters), so this checks multiple consecutive reboots explicitly.
+    for (let i = 1; i <= 2; i++) {
+      const rebooted = await freshBootModule();
+      rebooted.reenterMergeQuarantinesAtBoot([d]);
+      const listingAfterReboot = rebooted.listActiveMergeQuarantines().filter((q) => (q.tokens ?? []).includes("d-token"));
+      check(`*** THE FIX (Code Review BLOCKING 2) *** D is STILL listed exactly once after reboot #${i}`, listingAfterReboot.length === 1);
+    }
+  } else if (scenarioName === "round3-two-diverts-at-one-key-eviction") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round3-two-diverts-at-one-key-eviction — Code Review round 2 (of `7545166b`), finding B1:
+    // armKeyUnlessDegradedCollision's zero-remaining-keys branch used to splice only ONE
+    // degradedDivertsToFlush record at the evicted key. D1 and D2 are BOTH degraded (nonexistent paths),
+    // BOTH with resolvedKey manufactured to the SAME colliding value K2 — a legitimate same-tier union at
+    // K2 (883e29bc's own accepted shape). Z is a real, resolvable repo whose own file carries a STALE
+    // secondary resolvedKey, ALSO K2 (same dual-arm shape as `dualarm-sibling-key-contamination`) — when
+    // Z arrives, its tautological primary arm (at its OWN key K1) is unaffected, but its SECONDARY arm at
+    // K2 evicts the D1+D2 union there to ZERO remaining keys (the union never held any other key).
+    //
+    // THE BUG (pre-round-3): the old zero-keys branch found and consumed only ONE of the two
+    // `degradedDivertsToFlush` records keyed at K2 (by `resolvedKey` lookup) — the OTHER stayed pointing
+    // at K2, and `flushDegradedDiverts` later re-read `byRepoKey.get(K2)` to find Z (the eviction's
+    // winner), wrongly attributing the other divert's own latch file to Z.
+    //
+    // THE FIX (round 3): `degradedDivertsToFlush` records now carry their own entry snapshot directly,
+    // never a `resolvedKey` to re-look-up — so BOTH D1's and D2's own records flush correctly regardless
+    // of what happens to K2 afterward, and the eviction's own push (recovering D1+D2's real sourceFile
+    // from whichever tracked pending reference already names it, or inferring one) never discards either.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const z = path.join(os.tmpdir(), `loom-mqp1dug-r3tdk-z-${freshSfx()}`);
+    fs.mkdirSync(z, { recursive: true });
+    tmpDirs.push(z);
+    fs.writeFileSync(path.join(z, "README.md"), "# round3-two-diverts-at-one-key-eviction\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: z });
+    commitAll(z, "init", GIT_ID);
+    const K1 = canonicalRepoLockKey(z);
+    const K1hash = createHash("sha256").update(K1).digest("hex").slice(0, 24);
+    const K2 = `/synthetic/r3tdk-shared-K2-${freshSfx()}`;
+
+    const d1 = path.join(os.tmpdir(), `loom-mqp1dug-r3tdk-d1-never-exists-${freshSfx()}`);
+    const d2 = path.join(os.tmpdir(), `loom-mqp1dug-r3tdk-d2-never-exists-${freshSfx()}`);
+    check("(precondition) D1 never exists at all", !fs.existsSync(d1));
+    check("(precondition) D2 never exists at all", !fs.existsSync(d2));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const zFile = path.join(MERGE_QUARANTINE_DIR, `${K1hash}.json`);
+    fs.writeFileSync(zFile, JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "Z's own genuine, currently-active raise",
+      enteredAt: Date.now() - 30_000, tokens: ["z-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    // D1/D2's own filenames are forced-first sentinels (never real hashes) — guaranteed to sort before
+    // Z's own real hash filename, so both diverts process (and union at K2) before Z ever does.
+    const d1Filename = "000000000000000000000001.json";
+    const d2Filename = "000000000000000000000002.json";
+    check("(precondition) D1's forced filename sorts before Z's real hash filename", d1Filename < `${K1hash}.json`);
+    check("(precondition) D2's forced filename sorts before Z's real hash filename", d2Filename < `${K1hash}.json`);
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, d1Filename), JSON.stringify({
+      repoPath: d1, branch: "d1-branch", reason: "D1's own manufactured resolvedKey collision with Z's own stale K2",
+      enteredAt: Date.now() - 10_000, tokens: ["d1-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, d2Filename), JSON.stringify({
+      repoPath: d2, branch: "d2-branch", reason: "D2's own manufactured resolvedKey collision with Z's own stale K2",
+      enteredAt: Date.now(), tokens: ["d2-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([z, d1, d2]); // THE SINGLE BOOT CALL UNDER TEST
+
+    const activeZ = activeMergeQuarantineFor(z);
+    check("(sanity) Z's own token survives, never contaminated", !!activeZ && (activeZ.tokens ?? []).length === 1 && activeZ.tokens.includes("z-token"));
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (Code Review B1) *** D1's token survives the eviction", allTokensAfterBoot.has("d1-token"));
+    check("*** THE FIX (Code Review B1) *** D2's token survives the eviction", allTokensAfterBoot.has("d2-token"));
+    check("(sanity) D1's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d1Filename)));
+    check("(sanity) D2's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d2Filename)));
+
+    // RESTART — the durable proof.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([z, d1, d2]);
+    const activeZAfterRestart = fresh.activeMergeQuarantineFor(z);
+    check("(restart) Z's own entry is STILL clean, with ONLY its own token", !!activeZAfterRestart && (activeZAfterRestart.tokens ?? []).length === 1 && activeZAfterRestart.tokens.includes("z-token"));
+    const allTokensAfterRestart = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (Code Review B1, restart) *** D1's token SURVIVES a reboot too", allTokensAfterRestart.has("d1-token"));
+    check("*** THE FIX (Code Review B1, restart) *** D2's token SURVIVES a reboot too", allTokensAfterRestart.has("d2-token"));
+    check("(restart) D1's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d1Filename)));
+    check("(restart) D2's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d2Filename)));
+  } else if (scenarioName === "round3-degraded-walkup-to-resolvable-key") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round3-degraded-walkup-to-resolvable-key — Code Review round 2 (of `7545166b`), finding
+    // B2: disproves the original "a resolvable prior can never reach armKeyUnlessDegradedCollision's
+    // zero-remaining-keys branch" proof. D's own repoPath is a NONEXISTENT subdirectory of R (a real,
+    // resolvable, UNREGISTERED repo) — so D's own `canonicalRepoLockKey` walks UP past its own absence to
+    // R's OWN real key K(R), and D's persisted `resolvedKey` field is ALSO K(R) — meaning D's PRIMARY arm
+    // (tautological, since currentKey===resolvedKey, so the degraded-divert branch never fires at all)
+    // lands at EXACTLY R's own key, self-consistently. R's own final (processed earlier in PASS 1, armed
+    // normally at K(R) with armedKeys=[K(R)] only) gets evicted to ZERO remaining keys when D's
+    // tautological primary arm (processed later, in PASS 1b) claims K(R) for itself.
+    //
+    // THE FIX (round 3): R is NEVER discarded by this eviction — it is pushed to
+    // `pendingUnresolvedQuarantines` with its own real sourceFile inferred deterministically (R reached
+    // K(R) via its own self-consistent primary arm, so `quarantinePathForKey(K(R))`'s basename IS R's own
+    // real backing file). R's quarantine survives both in-process and across a reboot.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const r = path.join(os.tmpdir(), `loom-mqp1dug-r3dwu-r-${freshSfx()}`);
+    fs.mkdirSync(r, { recursive: true });
+    tmpDirs.push(r);
+    fs.writeFileSync(path.join(r, "README.md"), "# round3-degraded-walkup-to-resolvable-key\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: r });
+    commitAll(r, "init", GIT_ID);
+    const Kr = canonicalRepoLockKey(r);
+    const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+    const d = path.join(r, "gone-subdir"); // never created — D's own repoPath, nonexistent subdir of R
+    check("(precondition) D (R/gone-subdir) never exists", !fs.existsSync(d));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const rFile = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+    fs.writeFileSync(rFile, JSON.stringify({
+      repoPath: r, branch: "r-branch", reason: "R's own genuine, currently-active raise",
+      enteredAt: Date.now() - 30_000, tokens: ["r-token"],
+    }, null, 2) + "\n");
+    // D's own PASS 1b tmp residue — resolvedKey manufactured to equal D's OWN walked-up currentKey
+    // (K(R), since D never exists and walks up to R) — a self-consistent, TAUTOLOGICAL primary arm.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json.tmp-999`), JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+      enteredAt: Date.now(), tokens: ["d-token"], resolvedKey: Kr,
+    }, null, 2) + "\n");
+
+    // `r` is deliberately NOT in registeredRepoPaths — nothing legitimizes the collision either way.
+    reenterMergeQuarantinesAtBoot([]);
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (Code Review B2) *** R's own token survives D's tautological-primary-arm eviction", allTokensAfterBoot.has("r-token"));
+    check("(sanity) D's own token is active too", allTokensAfterBoot.has("d-token"));
+    check("(production path) assertRepoNotQuarantined(r) is blocked", assertRepoNotQuarantined(r).ok === false);
+
+    // THE CR's own acceptance bar — clear D by its own token, then reboot: R must still block.
+    clearMergeQuarantineByToken(d, "d-token");
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    const assertRAfterClearAndRestart = fresh.assertRepoNotQuarantined(r);
+    check("*** THE FIX (Code Review B2) *** after clearing D by token + reboot, R STILL BLOCKS", assertRAfterClearAndRestart.ok === false);
+  } else if (scenarioName === "round3-chained-eviction-three-parties") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round3-chained-eviction-three-parties — LEAD gen 413, round-3 ruling's own test (c): a
+    // degraded record survives being evicted TWICE in the same boot — once by a TRIM (still holds
+    // another key afterward) and once by a later ZERO-REMAINING-KEYS full divert — with 3+ parties
+    // involved and no latch file or token lost across a reboot.
+    //
+    // D1, D2: both degraded (nonexistent paths), both resolvedKey=K2 — union legitimately at K2.
+    // X: degraded (nonexistent path), self-consistently named at its OWN key K3, but ALSO carrying a
+    // stale secondary resolvedKey=K2 — unions with D1+D2 at K2 (same tier), so the merged union now holds
+    // BOTH K2 and K3 (armedKeys=[K2,K3]).
+    // Z: a REAL, resolvable repo, own primary key K1, stale secondary resolvedKey=K2 — evicts the
+    // D1+D2+X union from K2 ONLY (a TRIM: the union still holds K3 afterward).
+    // W: a SECOND real, resolvable repo, own primary key K4, stale secondary resolvedKey=K3 (X's OWN
+    // key) — evicts the (already-trimmed) D1+D2+X union from K3 too — its LAST remaining key, so this is
+    // the ZERO-REMAINING-KEYS branch, reached a SECOND time for the SAME logical union. Z must process
+    // before W (forced via filename order) or W's own eviction would hit the union still holding K2.
+    //
+    // THE FIX (round 3): neither eviction ever discards the union — D1's, D2's, and X's own tokens all
+    // survive both evictions, and all three physical files (D1's, D2's, and X's own self-consistently-
+    // named final) are left untouched, in-process and across a reboot.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const z = path.join(os.tmpdir(), `loom-mqp1dug-r3ce-z-${freshSfx()}`);
+    fs.mkdirSync(z, { recursive: true });
+    tmpDirs.push(z);
+    fs.writeFileSync(path.join(z, "README.md"), "# round3-chained-eviction-three-parties (z)\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: z });
+    commitAll(z, "init", GIT_ID);
+    const K1 = canonicalRepoLockKey(z);
+    const K1hash = createHash("sha256").update(K1).digest("hex").slice(0, 24);
+
+    // W: retried (real I/O, but cheap) until its own hash sorts strictly AFTER Z's — so Z processes (and
+    // trims the union down to K3) before W ever reaches it, guaranteeing W's own eviction is the SECOND,
+    // zero-remaining-keys one, never a trim of its own.
+    let w, K4, K4hash;
+    for (let attempt = 0; ; attempt++) {
+      w = path.join(os.tmpdir(), `loom-mqp1dug-r3ce-w-${freshSfx()}`);
+      fs.mkdirSync(w, { recursive: true });
+      fs.writeFileSync(path.join(w, "README.md"), "# round3-chained-eviction-three-parties (w)\n");
+      execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: w });
+      commitAll(w, "init", GIT_ID);
+      K4 = canonicalRepoLockKey(w);
+      K4hash = createHash("sha256").update(K4).digest("hex").slice(0, 24);
+      if (K4hash > K1hash) break;
+      fs.rmSync(w, { recursive: true, force: true });
+      if (attempt > 1000) throw new Error("could not force W after Z after 1000 attempts");
+    }
+    tmpDirs.push(w);
+    check("(precondition) W's own hash sorts after Z's", K4hash > K1hash);
+
+    const K2 = `/synthetic/r3ce-shared-K2-${freshSfx()}`;
+
+    // X: nonexistent, self-consistently named at hash(canonical(X))=K3 — retried (free; X never touches
+    // disk) until K3's own hash sorts strictly BEFORE both Z's and W's own real hashes, so D1/D2/X are
+    // all read and armed before either real repo ever is.
+    let x, K3, K3hash;
+    for (let attempt = 0; ; attempt++) {
+      x = path.join(os.tmpdir(), `loom-mqp1dug-r3ce-x-never-exists-${freshSfx()}`);
+      K3 = canonicalRepoLockKey(x);
+      K3hash = createHash("sha256").update(K3).digest("hex").slice(0, 24);
+      if (K3hash < K1hash && K3hash < K4hash) break;
+      if (attempt > 200_000) throw new Error("could not force X before both Z and W after 200,000 attempts");
+    }
+    check("(precondition) X's own hash sorts before both Z's and W's", K3hash < K1hash && K3hash < K4hash);
+
+    const d1 = path.join(os.tmpdir(), `loom-mqp1dug-r3ce-d1-never-exists-${freshSfx()}`);
+    const d2 = path.join(os.tmpdir(), `loom-mqp1dug-r3ce-d2-never-exists-${freshSfx()}`);
+    check("(precondition) D1 never exists at all", !fs.existsSync(d1));
+    check("(precondition) D2 never exists at all", !fs.existsSync(d2));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const zFile = path.join(MERGE_QUARANTINE_DIR, `${K1hash}.json`);
+    fs.writeFileSync(zFile, JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "Z's own genuine, currently-active raise",
+      enteredAt: Date.now() - 40_000, tokens: ["z-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    const wFile = path.join(MERGE_QUARANTINE_DIR, `${K4hash}.json`);
+    fs.writeFileSync(wFile, JSON.stringify({
+      repoPath: w, branch: "w-branch", reason: "W's own genuine, currently-active raise",
+      enteredAt: Date.now() - 35_000, tokens: ["w-token"], resolvedKey: K3,
+    }, null, 2) + "\n");
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${K3hash}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own prior raise, self-consistently named",
+      enteredAt: Date.now() - 20_000, tokens: ["x-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    // D1/D2's own filenames are forced-first sentinels — sort before X's, Z's, AND W's own real hashes.
+    const d1Filename = "000000000000000000000001.json";
+    const d2Filename = "000000000000000000000002.json";
+    check("(precondition) D1's forced filename sorts before every real hash filename here", d1Filename < K3hash && d1Filename < K1hash && d1Filename < K4hash);
+    check("(precondition) D2's forced filename sorts before every real hash filename here", d2Filename < K3hash && d2Filename < K1hash && d2Filename < K4hash);
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, d1Filename), JSON.stringify({
+      repoPath: d1, branch: "d1-branch", reason: "D1's own manufactured resolvedKey collision at K2",
+      enteredAt: Date.now() - 10_000, tokens: ["d1-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, d2Filename), JSON.stringify({
+      repoPath: d2, branch: "d2-branch", reason: "D2's own manufactured resolvedKey collision at K2",
+      enteredAt: Date.now(), tokens: ["d2-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([z, w, x, d1, d2]); // THE SINGLE BOOT CALL UNDER TEST
+
+    const activeZ = activeMergeQuarantineFor(z);
+    check("(sanity) Z's own entry is clean, with ONLY its own token", !!activeZ && (activeZ.tokens ?? []).length === 1 && activeZ.tokens.includes("z-token"));
+    const activeW = activeMergeQuarantineFor(w);
+    check("(sanity) W's own entry is clean, with ONLY its own token", !!activeW && (activeW.tokens ?? []).length === 1 && activeW.tokens.includes("w-token"));
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 3, chained eviction) *** D1's token survives BOTH evictions", allTokensAfterBoot.has("d1-token"));
+    check("*** THE FIX (round 3, chained eviction) *** D2's token survives BOTH evictions", allTokensAfterBoot.has("d2-token"));
+    check("*** THE FIX (round 3, chained eviction) *** X's token survives BOTH evictions", allTokensAfterBoot.has("x-token"));
+    check("(sanity) D1's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d1Filename)));
+    check("(sanity) D2's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d2Filename)));
+    check("(sanity) X's own latch file still physically exists", fs.existsSync(xFile));
+
+    // RESTART — the durable proof.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([z, w, x, d1, d2]);
+    const activeZAfterRestart = fresh.activeMergeQuarantineFor(z);
+    check("(restart) Z's own entry is STILL clean", !!activeZAfterRestart && (activeZAfterRestart.tokens ?? []).length === 1 && activeZAfterRestart.tokens.includes("z-token"));
+    const activeWAfterRestart = fresh.activeMergeQuarantineFor(w);
+    check("(restart) W's own entry is STILL clean", !!activeWAfterRestart && (activeWAfterRestart.tokens ?? []).length === 1 && activeWAfterRestart.tokens.includes("w-token"));
+    const allTokensAfterRestart = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 3, chained eviction, restart) *** D1's token SURVIVES a reboot too", allTokensAfterRestart.has("d1-token"));
+    check("*** THE FIX (round 3, chained eviction, restart) *** D2's token SURVIVES a reboot too", allTokensAfterRestart.has("d2-token"));
+    check("*** THE FIX (round 3, chained eviction, restart) *** X's token SURVIVES a reboot too", allTokensAfterRestart.has("x-token"));
+    check("(restart) D1's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d1Filename)));
+    check("(restart) D2's own latch file still physically exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d2Filename)));
+    check("(restart) X's own latch file still physically exists", fs.existsSync(xFile));
+  } else if (scenarioName === "round4-p1-resolvable-winner-clear-destroys-loser-file") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round4-p1-resolvable-winner-clear-destroys-loser-file — CR round 3 (5bb32bae) on cde2bdb3,
+    // CRITICAL P1: round 3's own clear-side protect gated on "the entry being cleared is itself
+    // unresolvable" (deleteMergeQuarantineLatchByKey's old `clearedEntryIfUnresolvable` param) — but the
+    // entry actually being cleared can be a RESOLVABLE eviction WINNER holding a DIFFERENT key only via
+    // a STALE SECONDARY arm, and clearing it lifts EVERY one of its armed keys, including that stale
+    // one, where a DIFFERENT, degraded LOSER's own real file still physically sits.
+    //
+    // D's own file lives at ITS OWN natural (self-consistent) location — hash(K2), K2 being D's OWN
+    // real (degenerate, since D never exists) canonicalRepoLockKey — with `resolvedKey: K2` too (so D's
+    // own primary arm is tautological, not a degraded-divert). Z is a REAL, resolvable repo, correctly
+    // named at its OWN real key K1, but carrying a STALE secondary `resolvedKey: K2` — the SAME value as
+    // D's own real key, purely coincidental (K2 is D's own degenerate `os.tmpdir()`-ancestor-walk value,
+    // not backed by any registered repo). D is forced to process BEFORE Z (filename-sort), so D arms at
+    // K2 first; Z's own secondary arm then evicts D from K2 to zero remaining keys — PASS 1's own
+    // "never discard" fix (round 3) correctly diverts D to pending there. Z ends up dual-armed [K1,K2].
+    //
+    // THE BUG (round 3): `clearMergeQuarantineByToken(z, "z-token")` fully clears Z (its only token) —
+    // `clearMergeQuarantineByKey` lifts EVERY one of Z's armed keys, [K1,K2]. Z itself IS resolvable, so
+    // round 3's resolvability-gated protect never even ran for K2 — `deleteMergeQuarantineLatchByKey(K2)`
+    // unconditionally unlinked D's own real file as pure collateral, even though D was never part of
+    // this clear at all.
+    //
+    // THE FIX (round 4): the PRIMARY ownership check — gated on FILE OWNERSHIP via
+    // `pendingUnresolvedQuarantines`, never on the cleared entry's own resolvability — finds D's own
+    // surviving pending reference (identity `d`, differing from the clear's own identity `z`) naming
+    // this EXACT file and protects it before the unlink proceeds.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const z = path.join(os.tmpdir(), `loom-mqp1dug-r4p1-z-${freshSfx()}`);
+    fs.mkdirSync(z, { recursive: true });
+    tmpDirs.push(z);
+    fs.writeFileSync(path.join(z, "README.md"), "# round4-p1-resolvable-winner-clear-destroys-loser-file\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: z });
+    commitAll(z, "init", GIT_ID);
+    const K1 = canonicalRepoLockKey(z);
+    const K1hash = createHash("sha256").update(K1).digest("hex").slice(0, 24);
+
+    // D: nonexistent, retried (free; D never touches disk) until its own hash sorts strictly BEFORE Z's
+    // — D must be READ (and so ARMED at its own key) BEFORE Z, or Z's own secondary arm never reaches an
+    // already-occupied K2 at all (D would instead claim K2 outright once Z is merely trimmed to K1,
+    // never evicted to pending — a completely different, uninteresting shape).
+    let d, K2, K2hash;
+    for (let attempt = 0; ; attempt++) {
+      d = path.join(os.tmpdir(), `loom-mqp1dug-r4p1-d-never-exists-${freshSfx()}`);
+      K2 = canonicalRepoLockKey(d); // D's OWN real (degenerate) key — stable for as long as D never exists
+      K2hash = createHash("sha256").update(K2).digest("hex").slice(0, 24);
+      if (K2hash < K1hash) break;
+      if (attempt > 200_000) throw new Error("could not force D before Z after 200,000 attempts");
+    }
+    check("(precondition) D never exists at all", !fs.existsSync(d));
+    check("(precondition) D's own key differs from Z's own key", K2 !== K1);
+    check("(precondition) D's own hash sorts before Z's", K2hash < K1hash);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // D's own file at ITS OWN natural (self-consistent) location — resolvedKey matches its own currentKey.
+    const dFile = path.join(MERGE_QUARANTINE_DIR, `${K2hash}.json`);
+    fs.writeFileSync(dFile, JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own genuine raise, self-consistently named",
+      enteredAt: Date.now() - 10_000, tokens: ["d-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+    // Z's own file at ITS OWN natural location too, but with a STALE secondary resolvedKey coinciding
+    // (purely coincidentally) with D's own real key.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${K1hash}.json`), JSON.stringify({
+      repoPath: z, branch: "z-branch", reason: "Z's own genuine, currently-active raise",
+      enteredAt: Date.now(), tokens: ["z-token"], resolvedKey: K2,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([z, d]); // THE SINGLE BOOT CALL UNDER TEST
+
+    const activeZAfterBoot = activeMergeQuarantineFor(z);
+    check("(sanity) Z reads quarantined, dual-armed, with ONLY its own token", !!activeZAfterBoot && (activeZAfterBoot.tokens ?? []).length === 1 && activeZAfterBoot.tokens.includes("z-token"));
+    const activeDAfterBoot = activeMergeQuarantineFor(d);
+    check("(sanity) D is evicted to pending but still reported quarantined, with ONLY its own token", !!activeDAfterBoot && (activeDAfterBoot.tokens ?? []).length === 1 && activeDAfterBoot.tokens.includes("d-token"));
+
+    // THE CLEAR UNDER TEST — Z is the eviction WINNER, fully cleared by its only token.
+    clearMergeQuarantineByToken(z, "z-token");
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([z, d]);
+    const allTokensAfterRestart = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 4, P1) *** D's token SURVIVES clearing Z + a reboot", allTokensAfterRestart.has("d-token"));
+    check("(sanity) Z's own token is genuinely gone", !allTokensAfterRestart.has("z-token"));
+    check("*** THE FIX (round 4, P1) *** assertRepoNotQuarantined(d) STILL BLOCKS after clearing Z + a reboot", fresh.assertRepoNotQuarantined(d).ok === false);
+  } else if (scenarioName === "round4-p2-remounted-walkup-clear-destroys-winner-file") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round4-p2-remounted-walkup-clear-destroys-winner-file — CR round 3 (5bb32bae) on cde2bdb3,
+    // CRITICAL P2: the SAME `round3-degraded-walkup-to-resolvable-key` fixture (D's own repoPath is a
+    // nonexistent subdirectory of R, a real resolvable UNREGISTERED repo; D's own tautological primary
+    // arm evicts R to pending at K(R)) — but D is REMOUNTED (its own `gone-subdir` created, so D now
+    // resolves) BEFORE it is cleared, with no intervening query of R. Round 3's own resolvability-gated
+    // protect checked whether D (the entry being cleared) was unresolvable — now that D resolves, that
+    // gate skipped the protect entirely, and `clearMergeQuarantineByToken(d, "d-token")` unconditionally
+    // unlinked R's own real file as collateral, even though D never wrote there itself.
+    //
+    // THE FIX (round 4): the PRIMARY ownership check never looks at D's own resolvability at all — it
+    // finds R's own surviving pending reference (identity `r`, differing from the clear's own identity
+    // `d`) naming this exact file and protects it before the unlink proceeds.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const r = path.join(os.tmpdir(), `loom-mqp1dug-r4p2-r-${freshSfx()}`);
+    fs.mkdirSync(r, { recursive: true });
+    tmpDirs.push(r);
+    fs.writeFileSync(path.join(r, "README.md"), "# round4-p2-remounted-walkup-clear-destroys-winner-file\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: r });
+    commitAll(r, "init", GIT_ID);
+    const Kr = canonicalRepoLockKey(r);
+    const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+    const d = path.join(r, "gone-subdir"); // not created yet — D's own repoPath, nonexistent subdir of R
+    check("(precondition) D (R/gone-subdir) never exists yet", !fs.existsSync(d));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const rFile = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+    fs.writeFileSync(rFile, JSON.stringify({
+      repoPath: r, branch: "r-branch", reason: "R's own genuine, currently-active raise",
+      enteredAt: Date.now() - 30_000, tokens: ["r-token"],
+    }, null, 2) + "\n");
+    // D's own PASS 1b tmp residue — resolvedKey manufactured to equal D's OWN walked-up currentKey
+    // (K(R), since D never exists yet and walks up to R) — a self-consistent, TAUTOLOGICAL primary arm.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json.tmp-999`), JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+      enteredAt: Date.now(), tokens: ["d-token"], resolvedKey: Kr,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([]); // `r` deliberately NOT in registeredRepoPaths
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity) R's own token survives D's tautological-primary-arm eviction", allTokensAfterBoot.has("r-token"));
+    check("(sanity) D's own token is active too", allTokensAfterBoot.has("d-token"));
+
+    // D REMOUNTS — its own `gone-subdir` is created, so D now resolves — with NO query of R in between
+    // (an in-process query would lazily re-persist/graduate R, which is exactly what this scenario must
+    // NOT rely on to stay fail-closed).
+    fs.mkdirSync(d, { recursive: true });
+    check("(precondition) D now resolves", fs.existsSync(d));
+
+    // THE CLEAR UNDER TEST — D is cleared by its own (now-resolvable) identity.
+    clearMergeQuarantineByToken(d, "d-token");
+
+    // NOTE: D's own `.tmp-999` residue is a SEPARATE physical file from R's own final — clearing D's
+    // token only ever addresses the FINAL at Kr (now protected as R's own content, above); it was never
+    // the thing durably tracking D in the first place, and is left untouched on disk. On a fresh reboot
+    // it is read fresh — and since D genuinely resolves now (a real subdir of R), it legitimately
+    // UNIONS with R at their now-shared real key, same as any other now-resolvable sibling would. This
+    // scenario's own acceptance bar (per the CR) is R's own survival, never that D's leftover residue
+    // stops existing — asserting the latter would assert something this fix neither causes nor prevents.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterRestart = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 4, P2) *** R's token SURVIVES clearing the now-resolvable D + a reboot", allTokensAfterRestart.has("r-token"));
+    check("*** THE FIX (round 4, P2) *** assertRepoNotQuarantined(r) STILL BLOCKS after clearing D + a reboot", fresh.assertRepoNotQuarantined(r).ok === false);
+  } else if (scenarioName === "round5-own-raise-lifts-past-inferred-evictee") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round5-own-raise-lifts-past-inferred-evictee — LEAD gen 413, round 5 (CR round 4,
+    // 891bb19a, on f5e353bf), the ONE blocker: a MAJOR, fail-STUCK regression new in round 4. W is a
+    // real, UNREGISTERED repo with an active latch at its own natural file sha(K).json, K =
+    // canonicalRepoLockKey(W). D is a nonexistent path (never under W) carrying `resolvedKey: K` — the
+    // SAME key as W's own, purely manufactured — but D's OWN walked-up currentKey differs from K, so D is
+    // a genuine DEGRADED DIVERT (armKeyUnlessDegradedCollision's secondary, non-tautological arm), armed
+    // at K FIRST (D's forced filename sorts before W's real hash filename). W is then read, and its own
+    // TAUTOLOGICAL primary arm evicts D from K to zero remaining keys.
+    //
+    // THE BUG (round 4): with no tracked pending reference yet (D's own record still sits in
+    // `degradedDivertsToFlush`, not yet flushed), the eviction's OLD inference blindly trusted
+    // `quarantinePathForKey(K)`'s own basename as D's "real source file" — but that file is physically
+    // W's OWN final (sha(K).json), not D's. D is pushed to `pendingUnresolvedQuarantines` falsely
+    // CLAIMING W's own file as its `sourceFile`. Clearing W (by path OR by token) then finds this
+    // "foreign" pending claim naming W's own final, copies W's own content aside under D's own
+    // pending-divert name (a circular resurrection), and unlinks the original — w-token survives every
+    // clear and every reboot.
+    //
+    // THE FIX (round 5): the clear-side PRIMARY check now skips the protect when the file's own on-disk
+    // content already names the clearer (`quarantineFileRepoPathIdentity(final) === clearIdentity`) —
+    // copying it could only ever resurrect the clearer. (Round 5 ALSO shipped an eviction-side "belt" on
+    // top of this — round 6 REVERTED that belt byte-for-byte, after it opened two new CRITICAL fail-open
+    // losses of its own; see the decision record's "Round 6" section. This clear-side check alone is
+    // what fixes the blocker below — the belt was never load-bearing for it.)
+    //
+    // Both routes the CR named are exercised, each with its OWN fresh fixture: clear-by-path
+    // (`clearMergeQuarantineReporting`) and clear-by-token (`clearMergeQuarantineByToken`).
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // `mod` is a FRESH, dedicated module instance per route — `reenterMergeQuarantinesAtBoot` merges its
+    // own fresh results into module-level `activeQuarantines`/`pendingUnresolvedQuarantines` state rather
+    // than resetting it (see `freshBootModule`'s own doc), so two independent repro instances in one
+    // scenario must never share an instance, or route 2's own boot would read route 1's stale state.
+    const makeFixture = async (tag) => {
+      const mod = await freshBootModule();
+      const w = path.join(os.tmpdir(), `loom-mqp1dug-r5orl-w-${tag}-${freshSfx()}`);
+      fs.mkdirSync(w, { recursive: true });
+      tmpDirs.push(w);
+      fs.writeFileSync(path.join(w, "README.md"), `# round5-own-raise-lifts-past-inferred-evictee (${tag})\n`);
+      execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: w });
+      commitAll(w, "init", GIT_ID);
+      const K = canonicalRepoLockKey(w);
+      const Khash = createHash("sha256").update(K).digest("hex").slice(0, 24);
+
+      const d = path.join(os.tmpdir(), `loom-mqp1dug-r5orl-d-never-exists-${tag}-${freshSfx()}`); // never created
+      check(`(precondition, ${tag}) D never exists at all`, !fs.existsSync(d));
+      const dCurrentKey = canonicalRepoLockKey(d);
+      check(`(precondition, ${tag}) D's own walked-up key differs from K (a genuine degraded divert, not tautological)`, dCurrentKey !== K);
+
+      // D's forced sentinel filename — must sort BEFORE W's own real hash filename so D is read+armed at
+      // K first, and W's own LATER tautological primary arm is the one doing the evicting. Tag-suffixed
+      // so route 1's and route 2's own D files never collide on disk (both routes share one quarantine dir).
+      const dFilename = `0000000000000000000000${tag === "path" ? "01" : "02"}.json`;
+      check(`(precondition, ${tag}) D's forced filename sorts before W's own real hash filename`, dFilename < Khash);
+
+      fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+      fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, dFilename), JSON.stringify({
+        repoPath: d, branch: "d-branch", reason: `D's own manufactured resolvedKey collision at K (${tag}, W's own key)`,
+        enteredAt: Date.now() - 10_000, tokens: [`d-token-${tag}`], resolvedKey: K,
+      }, null, 2) + "\n");
+      fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Khash}.json`), JSON.stringify({
+        repoPath: w, branch: "w-branch", reason: `W's own genuine, currently-active raise (${tag})`,
+        enteredAt: Date.now(), tokens: [`w-token-${tag}`],
+      }, null, 2) + "\n");
+
+      mod.reenterMergeQuarantinesAtBoot([]); // `w` deliberately NOT registered — nothing legitimizes the collision
+
+      const activeWAfterBoot = mod.activeMergeQuarantineFor(w);
+      check(`(sanity, ${tag}) W reads quarantined, with ONLY its own token`, !!activeWAfterBoot && (activeWAfterBoot.tokens ?? []).length === 1 && activeWAfterBoot.tokens.includes(`w-token-${tag}`));
+      const allTokensAfterBoot = new Set(mod.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+      check(`(sanity, ${tag}) D's own token survives the eviction (never discarded)`, allTokensAfterBoot.has(`d-token-${tag}`));
+      check(`(sanity, ${tag}) D's own physical file is untouched`, fs.existsSync(path.join(MERGE_QUARANTINE_DIR, dFilename)));
+      return { mod, w, d, dFilename };
+    };
+
+    // ROUTE 1 — clear-by-path.
+    const { mod: modPath, w: w1, d: d1, dFilename: d1Filename } = await makeFixture("path");
+    const reportResult = modPath.clearMergeQuarantineReporting(w1);
+    check("(sanity, path) clear-by-path reports W genuinely lifted, no latch kept", reportResult.wasQuarantined === true && !reportResult.latchKept);
+    const freshPath = await freshBootModule();
+    freshPath.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterPathClear = new Set(freshPath.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 5, clear-by-path) *** w-token does NOT survive a clear + reboot", !allTokensAfterPathClear.has("w-token-path"));
+    check("(sanity, path) D's own token still survives the reboot", allTokensAfterPathClear.has("d-token-path"));
+    check("(sanity, path) D's own physical file is still untouched", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d1Filename)));
+    check("*** THE FIX (round 5, clear-by-path) *** assertRepoNotQuarantined(d) STILL BLOCKS after clearing W + a reboot", freshPath.assertRepoNotQuarantined(d1).ok === false);
+
+    // ROUTE 2 — clear-by-token, its own FRESH fixture AND module instance (W1 is already cleared above).
+    const { mod: modToken, w: w2, d: d2, dFilename: d2Filename } = await makeFixture("token");
+    modToken.clearMergeQuarantineByToken(w2, "w-token-token");
+    const freshToken = await freshBootModule();
+    freshToken.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterTokenClear = new Set(freshToken.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 5, clear-by-token) *** w-token does NOT survive a clear + reboot", !allTokensAfterTokenClear.has("w-token-token"));
+    check("(sanity, token) D's own token still survives the reboot", allTokensAfterTokenClear.has("d-token-token"));
+    check("(sanity, token) D's own physical file is still untouched", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, d2Filename)));
+    check("*** THE FIX (round 5, clear-by-token) *** assertRepoNotQuarantined(d) STILL BLOCKS after clearing W + a reboot", freshToken.assertRepoNotQuarantined(d2).ok === false);
+  } else if (scenarioName === "round6-union-constituent-survives-eviction") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round6-union-constituent-survives-eviction — CR round 5 (df708ec4) on 2ba1f25e, CRITICAL
+    // (a): round 5's own eviction-side "belt" (now REVERTED — see round 6 below) regressed the
+    // zero-keys branch's `queuedForFlush` early-skip. D is a degraded divert (resolvedKey=K, forced to
+    // sort first) that arms at K via its own secondary arm, queued in `degradedDivertsToFlush`. X = a
+    // nonexistent subdir of W (`W/gone-subdir`) that ALSO walks up to K and ALSO carries `resolvedKey:
+    // K` — a TAUTOLOGICAL, self-consistent entry physically living AT `sha(K).json` — unions with D
+    // (same-tier: both unresolvable) into U, and the existing general union-rebind (Round 3, Part A)
+    // correctly re-points D's OWN `degradedDivertsToFlush` record onto U. W (a real, UNREGISTERED repo)
+    // then migrates from a stale `ffff…ff.json` and its own TAUTOLOGICAL primary arm evicts U from K to
+    // zero remaining keys.
+    //
+    // THE BUG (round 5 belt): at THIS eviction, U is STILL queued in `degradedDivertsToFlush` (not yet
+    // flushed) — round 5's own `queuedForFlush` check saw this and skipped pushing {U, sha(K).json}
+    // ENTIRELY, trusting the LATER flush to cover it. But the flush only ever pushes U under D's OWN
+    // original sourceFile ("000...001.json") — it NEVER covers X's OWN physical file (`sha(K).json`,
+    // U's ACTUAL current backing, since X is the constituent that's physically AT that path). Phase 0
+    // never sees `sha(K).json` as at-risk, so W's own migrate write for K — admitted because `sha(K).json`
+    // is no longer `degradedOccupiedKeys`-gated once U is evicted (that gate is removed on eviction) —
+    // overwrites it UNPROTECTED. x-token is GONE after a plain reboot, no clear needed.
+    //
+    // THE FIX (round 6): REVERT the eviction-side belt to f5e353bf's exact behaviour (round 5's own
+    // "verify-then-claim-or-divert" inference is removed; the zero-keys branch falls straight back to
+    // f5e353bf's unconditional `quarantinePathForKey(key)` inference, with no `queuedForFlush` early-skip
+    // at all) — this card's own ROUND-4 shape (before round 5's belt) was independently CR-verified
+    // fail-open CLEAN. The CLEAR-side fix (`quarantineFileRepoPathIdentity`, kept — see round 5's own
+    // scenario above) is what alone fixes round 4's real blocker; the belt was never load-bearing.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqp1dug-r6uce-w-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# round6-union-constituent-survives-eviction\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const K = canonicalRepoLockKey(w);
+    const Khash = createHash("sha256").update(K).digest("hex").slice(0, 24);
+
+    const d = path.join(os.tmpdir(), `loom-mqp1dug-r6uce-d-never-exists-${freshSfx()}`); // never created
+    const x = path.join(w, "gone-subdir"); // never created — walks up to W's own key K
+    check("(precondition) D never exists at all", !fs.existsSync(d));
+    check("(precondition) X (W/gone-subdir) never exists", !fs.existsSync(x));
+
+    // D's forced sentinel filename — must sort BEFORE X's real hash filename so D arms at K FIRST (its
+    // own secondary arm), and X's later tautological primary arm unions with it rather than the reverse.
+    const dFilename = "000000000000000000000001.json";
+    check("(precondition) D's forced filename sorts before W's own real hash filename", dFilename < Khash);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, dFilename), JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own manufactured resolvedKey collision at K",
+      enteredAt: Date.now() - 10_000, tokens: ["d-token"], resolvedKey: K,
+    }, null, 2) + "\n");
+    // X: self-consistently named AT sha(K).json — its OWN real physical backing file.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Khash}.json`), JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own tautological entry, physically at sha(K).json",
+      enteredAt: Date.now() - 5_000, tokens: ["x-token"], resolvedKey: K,
+    }, null, 2) + "\n");
+    // W: real repo, migrating from a stale key — sorts LAST among plain .json files.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "ffffffffffffffffffffffff.json"), JSON.stringify({
+      repoPath: w, branch: "w-branch", reason: "W's own genuine, currently-active raise",
+      enteredAt: Date.now(), tokens: ["w-token"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([]); // `w` deliberately NOT registered — nothing legitimizes the collision
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity) w-token is active after boot", allTokensAfterBoot.has("w-token"));
+    check("(sanity) d-token survives the union+eviction", allTokensAfterBoot.has("d-token"));
+    check("*** THE FIX (round 6, finding a) *** x-token survives the union+eviction too", allTokensAfterBoot.has("x-token"));
+
+    // THE DURABLE PROOF — a PLAIN REBOOT, no clear needed (per the CR's own repro).
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterReboot = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity, reboot) w-token survives the reboot", allTokensAfterReboot.has("w-token"));
+    check("(sanity, reboot) d-token survives the reboot", allTokensAfterReboot.has("d-token"));
+    check("*** THE FIX (round 6, finding a, reboot) *** x-token SURVIVES a plain reboot (never discarded)", allTokensAfterReboot.has("x-token"));
+    // NOT a fix-detecting check — K itself stays blocked (by W) regardless of x-token's own fate, so
+    // this never went RED on 2ba1f25e; a sanity check only, kept for completeness.
+    check("(sanity, round 6, finding a) assertRepoNotQuarantined(x) still blocks after a reboot", fresh.assertRepoNotQuarantined(x).ok === false);
+  } else if (scenarioName === "round6-mismatch-evictee-survives-clear") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO round6-mismatch-evictee-survives-clear — CR round 5 (df708ec4) on 2ba1f25e, CRITICAL (b):
+    // round 5's own "verified-mismatch fallback" (now REVERTED — see round 6 above), when it fired,
+    // tracked the evicted entry under `pendingDivertFilenameFor(prior.repoPath)` — a name NEVER written
+    // to disk and never a member of `allBootWriteTargets`, so purely in-memory.
+    //
+    // W (real repo, migrating from a stale `ffff…ff.json`) arms at its own key K first (nothing occupies
+    // K yet). Y (`W/gone-two`, nonexistent, `resolvedKey: K`, a TAUTOLOGICAL tmp-residue entry — PASS 1b,
+    // so it is read strictly AFTER every plain `.json` final, regardless of filename) then evicts W
+    // (cross-tier: W resolvable, Y not) — W's own real backing (`ffff…ff.json`) differs from
+    // `quarantinePathForKey(K)` (`sha(K).json`, which does not even exist yet), so this is a genuine
+    // MISMATCH, not a verified match. `teamA` (`W/teamA`, a REAL, EXISTING plain subdir of W with no own
+    // `.git` — so ALSO resolvable, ALSO walks up to K) then evicts Y in turn (cross-tier the OTHER way:
+    // teamA resolvable, Y not) — Y's own real backing (its OWN tmp residue) ALSO differs from
+    // `sha(K).json`, a SECOND genuine mismatch. teamA — resolvable — becomes the final occupant, so its
+    // own migrate write for K (W's stale source) SUCCEEDS this time, genuinely overwriting `sha(K).json`.
+    //
+    // THE BUG (round 5 belt): BOTH W's and Y's evictions hit the verified-mismatch fallback, tracking
+    // each under its own NEVER-WRITTEN `pendingDivertFilenameFor` name. Phase 0's at-risk computation
+    // never sees either as colliding with `sha(K).json` (that bogus name is never a real write target),
+    // so NEITHER gets a protective safety-tmp before teamA's successful write. Both w-token and y-token
+    // are PERMANENTLY LOST the moment that write lands — no clear even needed, a plain reboot shows it.
+    //
+    // THE FIX (round 6): reverting the belt restores f5e353bf's unconditional (if occasionally
+    // over-eager) inference — `priorSourceFile = quarantinePathForKey(key)`'s own basename, ALWAYS —
+    // which correctly registers `sha(K).json` as at-risk for BOTH W's and Y's own pending claims, so
+    // Phase 0 durably safety-tmps each of their own reconstructed records before teamA's write proceeds.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqp1dug-r6mec-w-${freshSfx()}`);
+    const teamA = path.join(w, "teamA"); // REAL, EXISTING plain subdir, no own .git — ALSO resolvable
+    fs.mkdirSync(teamA, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# round6-mismatch-evictee-survives-clear\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const K = canonicalRepoLockKey(w);
+    const Khash = createHash("sha256").update(K).digest("hex").slice(0, 24);
+
+    const y = path.join(w, "gone-two"); // never created
+    check("(precondition) Y (W/gone-two) never exists", !fs.existsSync(y));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // W: real repo, migrating from a stale name.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "ffffffffffffffffffffffff.json"), JSON.stringify({
+      repoPath: w, branch: "w-branch", reason: "W's own genuine, currently-active raise",
+      enteredAt: Date.now() - 10_000, tokens: ["w-token"],
+    }, null, 2) + "\n");
+    // Y: nonexistent, tautological tmp residue, processed BEFORE teamA's own tmp (alphabetical).
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "aaaaaaaaaaaaaaaaaaaaaaaa.json.tmp-11111"), JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's own tautological entry, via a tmp residue",
+      enteredAt: Date.now() - 5_000, tokens: ["y-token"], resolvedKey: K,
+    }, null, 2) + "\n");
+    // teamA: REAL/resolvable, tautological tmp residue, processed AFTER Y's own tmp (alphabetical).
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "bbbbbbbbbbbbbbbbbbbbbbbb.json.tmp-22222"), JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's own tautological entry, via a tmp residue",
+      enteredAt: Date.now(), tokens: ["teamA-token"], resolvedKey: K,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([]); // nothing registered — nothing legitimizes any of these collisions
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity) teamA-token is active after boot (the final, resolvable occupant)", allTokensAfterBoot.has("teamA-token"));
+    check("*** THE FIX (round 6, finding b) *** w-token survives teamA's successful write", allTokensAfterBoot.has("w-token"));
+    check("*** THE FIX (round 6, finding b) *** y-token survives teamA's successful write too", allTokensAfterBoot.has("y-token"));
+
+    // THE DURABLE PROOF — a PLAIN REBOOT, no clear needed (per the CR's own repro).
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterReboot = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity, reboot) teamA-token survives the reboot", allTokensAfterReboot.has("teamA-token"));
+    check("*** THE FIX (round 6, finding b, reboot) *** w-token SURVIVES a plain reboot (never discarded)", allTokensAfterReboot.has("w-token"));
+    check("*** THE FIX (round 6, finding b, reboot) *** y-token SURVIVES a plain reboot too", allTokensAfterReboot.has("y-token"));
+    // NOT a fix-detecting check — K itself stays blocked (by teamA) regardless of y-token's own fate,
+    // so this never went RED on 2ba1f25e; a sanity check only, kept for completeness.
+    check("(sanity, round 6, finding b) assertRepoNotQuarantined(y) still blocks after a reboot", fresh.assertRepoNotQuarantined(y).ok === false);
+
+    // AND CLEAR — the DoD's own "(and clear)" assertion: w/teamA's own merged entry at K clears cleanly,
+    // Y's own SEPARATE pending entry is untouched by it, and both states survive one more reboot.
+    const activeAtK = fresh.activeMergeQuarantineFor(w);
+    check("(precondition, clear) W reads quarantined (merged with teamA) before the clear", !!activeAtK && (activeAtK.tokens ?? []).includes("w-token"));
+    fresh.clearMergeQuarantineReporting(w);
+    const freshAfterClear = await freshBootModule();
+    freshAfterClear.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterClearReboot = new Set(freshAfterClear.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity, clear) w/teamA's own merged token(s) are genuinely gone after the clear + reboot", !allTokensAfterClearReboot.has("w-token") && !allTokensAfterClearReboot.has("teamA-token"));
+    check("*** THE FIX (round 6, finding b, clear) *** y-token is UNAFFECTED by clearing the unrelated w/teamA entry", allTokensAfterClearReboot.has("y-token"));
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

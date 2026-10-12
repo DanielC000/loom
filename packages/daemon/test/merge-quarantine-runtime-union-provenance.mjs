@@ -78,6 +78,7 @@ const SCENARIOS = [
   // Round 2 (CR 82b5d95e on commit aa02ee8b) — five more findings, all reproduced against aa02ee8b first.
   "pending-twin-survives-reraise-while-unresolvable",
   "secondary-armed-key-never-overwrites-different-occupant",
+  "secondary-armed-key-never-overwrites-different-occupant-e-first",
   "partial-clear-syncs-every-armed-key",
   "pending-entry-with-contributors-refuses-clear-by-id",
   // Round 3 (CR 77e22256 on commit 4aee1942) — one MAJOR (blocking) plus two minors, all reproduced
@@ -192,7 +193,16 @@ function buildRuntimeUnionFixture(tag) {
 // (`armedKeys: [K1, K2]`), with NO physical write to K2 at all (dual-arming is pure in-memory bookkeeping
 // — see `armQuarantineKey`'s own doc). K2 is `canonicalRepoLockKey` of `w`, a path that never exists — the
 // SAME "degraded, walked-up key" technique `buildRuntimeUnionFixture` already uses for X.
-function buildDualArmFixture(tag) {
+// `orderHint` ("w-first" | "e-first" | undefined) forces WHICH of eFile/wFile's own hash-named filename
+// sorts first in `fs.readdirSync` — since boot-time PASS 1 processes files in readdir order, and
+// armKeyUnlessDegradedCollision's own behavior differs by which side is already in `byRepoKey` when the
+// other arrives (card d163aef5), both orders must be independently, deterministically testable rather
+// than left to filename-hash luck. Regenerating `w` (never touches disk — it never exists) is free;
+// regenerating `e` would mean a fresh `git init`, so only `w` is retried. The retry count needed is NOT
+// ~50/50 per attempt — comparing hex-digest STRINGS lexicographically means the hit rate depends on
+// `k1Hash`'s own numeric position (close to 0% or 100% if it happens to sit near either extreme), so the
+// cap is generous rather than assuming a coin flip.
+function buildDualArmFixture(tag, orderHint) {
   const e = path.join(os.tmpdir(), `loom-mqrup-e-${tag}-${freshSfx()}`);
   fs.mkdirSync(e, { recursive: true });
   tmpDirs.push(e);
@@ -200,9 +210,18 @@ function buildDualArmFixture(tag) {
   execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: e });
   commitAll(e, "init", GIT_ID);
   const k1 = canonicalRepoLockKey(e);
+  const k1Hash = hashForKey(k1);
 
-  const w = path.join(os.tmpdir(), `loom-mqrup-w-${tag}-never-exists-${freshSfx()}`);
-  const k2 = canonicalRepoLockKey(w);
+  let w, k2, k2Hash;
+  for (let attempt = 0; ; attempt++) {
+    w = path.join(os.tmpdir(), `loom-mqrup-w-${tag}-never-exists-${freshSfx()}`);
+    k2 = canonicalRepoLockKey(w);
+    k2Hash = hashForKey(k2);
+    if (!orderHint) break;
+    const wSortsFirst = k2Hash < k1Hash;
+    if ((orderHint === "w-first") === wSortsFirst) break;
+    if (attempt > 200_000) throw new Error(`buildDualArmFixture: could not force order=${orderHint} after 200,000 attempts`);
+  }
 
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   const eFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k1)}.json`);
@@ -380,15 +399,28 @@ try {
     check("*** THE FIX *** Ky's file STILL carries contributorRepoPaths naming y", !!afterReraise.contributorRepoPaths?.includes(y));
     const clearResult = clearMergeQuarantineLatchFile(hashForKey(ky));
     check("*** THE FIX *** clear-by-id still refuses (contributorRepoPaths survived the re-raise)", clearResult.ok === false);
-  } else if (scenarioName === "secondary-armed-key-never-overwrites-different-occupant") {
+  } else if (scenarioName === "secondary-armed-key-never-overwrites-different-occupant" || scenarioName === "secondary-armed-key-never-overwrites-different-occupant-e-first") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // ROUND 2, ITEM 2 (MAJOR) — writing EVERY armed key with `skipDegradedOccupantGuard=true` can
     // overwrite a DIFFERENT, unresolvable identity's only durable copy: a dual-armed E's SECONDARY key
     // (`armedKeys[1]`, in-memory bookkeeping from a legacy stale-resolvedKey shape) is not proof that its
     // CURRENT physical file still belongs to E — here it genuinely belongs to W, an unrelated identity.
     // RED on commit aa02ee8b: skip=true unconditionally for every armed key overwrites W's file outright.
+    //
+    // CARD d163aef5 (round 4 here) — the runtime-write half above was already correctly protected; the
+    // REBOOT half below used to accept TWO outcomes ("W's own token is STILL enforced after reboot —
+    // findable via its own path query — never truly lost, whether reported under its own identity OR a
+    // boot-time union with e"). The "union with e" half of that OR was ITSELF an instance of this card's
+    // own bug: reverting to pre-d163aef5 main and querying `activeMergeQuarantineFor(e)` directly (E's
+    // OWN, genuinely verified, primary key) returns `['e-token','w-token']` — W's degraded token leaking
+    // into E's own identity, 15/15 runs — never checked by this scenario before, since it only ever
+    // queried W, which happened to hit the SAME contaminated union and so looked "findable" either way.
+    // There is now exactly ONE correct outcome, true regardless of boot processing order (both orders are
+    // driven explicitly here, via `buildDualArmFixture`'s own `orderHint`): E's own query carries ONLY
+    // e-token, and W survives as its OWN independent, standalone entry — never merged, never lost.
     // ════════════════════════════════════════════════════════════════════════════════════════════════
-    const { e, w, k2, eFile, wFile } = buildDualArmFixture("collision");
+    const orderHint = scenarioName.endsWith("-e-first") ? "e-first" : "w-first";
+    const { e, w, k2, eFile, wFile } = buildDualArmFixture("collision", orderHint);
     check("(precondition) K2 has no physical file yet (free)", !fs.existsSync(wFile));
     // W's own content now genuinely occupies K2's physical slot — unknown to this process's in-memory
     // state (W was never registered/processed this boot), exactly as a real coincidental key collision
@@ -409,8 +441,31 @@ try {
 
     const reboot1 = await rebootSim();
     reboot1.reenterMergeQuarantinesAtBoot([e, w]);
+
+    const eQueryAfterReboot = reboot1.activeMergeQuarantineFor(e);
+    // E genuinely carries TWO of its OWN tokens (e-token from the fixture's initial raise, plus the
+    // random token enterMergeQuarantine minted for "e's second raise" above) — `length === 2` mirrors
+    // the precondition check two lines above this block, not a new expectation. The actual assertion is
+    // that NEITHER is w-token: E's own identity must never absorb W's.
+    check(`*** THE FIX (card d163aef5, order=${orderHint}) *** E's own query carries ONLY its own two tokens — never contaminated by W's degraded token`, !!eQueryAfterReboot && eQueryAfterReboot.tokens.length === 2 && eQueryAfterReboot.tokens.includes("e-token") && !eQueryAfterReboot.tokens.includes("w-token"));
+
     const wQueryAfterReboot = reboot1.activeMergeQuarantineFor(w);
-    check("*** THE FIX *** W's own token is STILL enforced after reboot (findable via its own path query — never truly lost, whether reported under its own identity or a boot-time union with e)", !!wQueryAfterReboot && wQueryAfterReboot.tokens.includes("w-token"));
+    check(`*** THE FIX (card d163aef5, order=${orderHint}) *** W's own query returns its OWN standalone entry, with ONLY its own token — never merged with E's`, !!wQueryAfterReboot && wQueryAfterReboot.tokens.length === 1 && wQueryAfterReboot.tokens.includes("w-token"));
+    check(`(order=${orderHint}) W's own standalone entry still names ITS OWN repoPath`, wQueryAfterReboot?.repoPath === w);
+
+    // Code Review, SHOULD-FIX 3 — also assert through the PRODUCTION path (assertRepoNotQuarantined),
+    // not only the internal activeMergeQuarantineFor.
+    const assertEAfterReboot = reboot1.assertRepoNotQuarantined(e);
+    check(`(production path, order=${orderHint}) assertRepoNotQuarantined(e) never names W's reason`, assertEAfterReboot.ok === false && !assertEAfterReboot.reason.includes("W's own genuine"));
+    check(`(production path, order=${orderHint}) assertRepoNotQuarantined(w) is ALSO blocked`, reboot1.assertRepoNotQuarantined(w).ok === false);
+
+    // A SECOND reboot — W must stay quarantined DURABLY, not just as an in-process artifact of the first.
+    const reboot2 = await rebootSim();
+    reboot2.reenterMergeQuarantinesAtBoot([e, w]);
+    const wAfterReboot2 = reboot2.activeMergeQuarantineFor(w);
+    check(`(order=${orderHint}, 2nd reboot) W is STILL quarantined, with ONLY its own token`, !!wAfterReboot2 && wAfterReboot2.tokens.length === 1 && wAfterReboot2.tokens.includes("w-token"));
+    const eAfterReboot2 = reboot2.activeMergeQuarantineFor(e);
+    check(`(order=${orderHint}, 2nd reboot) E is STILL clean, with its own two tokens and none of W's`, !!eAfterReboot2 && eAfterReboot2.tokens.length === 2 && eAfterReboot2.tokens.includes("e-token") && !eAfterReboot2.tokens.includes("w-token"));
   } else if (scenarioName === "partial-clear-syncs-every-armed-key") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // ROUND 2, ITEM 3 (MAJOR) — `clearActiveEntryTokenAtKey`'s partial-clear branch durably rewrote ONLY
