@@ -4858,7 +4858,14 @@ export class SessionService {
       // restart, the same way the real daemon would after actually relaunching.
       if (this.inFlightRestart?.promise === attempt) this.inFlightRestart = null;
     }, 300);
-    return { restarting: true, ...supervisorResponseFields, mergeDangerWait };
+    return {
+      restarting: true,
+      ...supervisorResponseFields,
+      mergeDangerWait,
+      // Card 0ec6fb57 — a non-fatal win-job-launcher.exe rebuild failure during the deploy build above;
+      // surfaced here so the requesting manager sees it on this SAME call, not just in daemon stdout.
+      ...(build.nativeLauncherWarning ? { nativeLauncherWarning: build.nativeLauncherWarning } : {}),
+    };
     } catch (err) {
       // Code Review (card 8e84e4a6), CRITICAL: the catch-all for the try{} opened above — see its own
       // comment for why this body must never let an exception escape as a rejection of `attempt`.

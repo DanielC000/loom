@@ -222,10 +222,18 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   add it there; a Windows-only, opt-in containment feature shouldn't make every ordinary build slower or
   depend on a toolchain most dev/CI hosts don't need. The shipped npm tarball gets a prebuilt copy from a
   dedicated `windows-latest` release-CI job (load-smoked + hard-failing the release on any build/smoke
-  failure — see `docs/releasing.md`), never a first-use compile. **`daemon_restart` does NOT build this —
-  it rebuilds the daemon's own TypeScript only, never `packages/daemon/native/win-job-launcher/`.** A
-  merged `launcher.cs` fix needs a manual `pnpm --filter @loom/daemon build:native` in the main checkout
-  to go live on the self-hosting daemon. **The gate/`ci.yml` SKIP the four real-exe `win-job-launcher-*.mjs`
+  failure — see `docs/releasing.md`), never a first-use compile. **`daemon_restart`'s deploy rebuild ALSO
+  runs `build:native` (card `0ec6fb57`)** — a third, win32-only step in `deployBuildSteps`, right after
+  the TypeScript build, so an ordinary merged `launcher.cs` fix now goes live through a normal restart; a
+  manual `build:native` in the main checkout is no longer needed for that. Unlike the install/build steps,
+  this one is deliberately NON-FATAL (`fatal:false`): a failure — a blocked `csc.exe`, or the exe being
+  locked because the live daemon still had it open for an in-flight git call — only logs a loud warning
+  (surfaced on the `daemon_restart` result as `nativeLauncherWarning`) and the deploy proceeds; it never
+  aborts the restart, since this containment is optional with an already-accepted fallback, not core
+  daemon correctness like install/build. **A failed compile leaves whatever exe was already in place —
+  stale or even planted — UNTOUCHED; it is NOT guaranteed overwritten until a LATER deploy's compile
+  actually succeeds** (see docs/decisions/0ec6fb57-*.md). Non-win32 hosts are untouched — the step is only
+  ever appended on win32. **The gate/`ci.yml` SKIP the four real-exe `win-job-launcher-*.mjs`
   tests** (print `SKIP`, exit 0) whenever the exe isn't built — `ci.yml` runs on `ubuntu-latest`, where it
   never is; only the release job's own Windows runner (see `docs/releasing.md`) exercises the real binary.
   Full mechanism, the STEP 0/0b investigation (libuv's own global job's

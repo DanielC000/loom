@@ -93,10 +93,12 @@ before packing, since `release` itself runs on `ubuntu-latest` (no `csc.exe` the
 `isWinJobLauncherAvailable()` is always `false` there and the four `win-job-launcher-*.mjs` real-exe
 tests print an explicit `SKIP` and exit 0 (see each test's own win32/exe-existence gate); only
 `build-windows-launcher` on an actual Windows runner ever exercises the real binary before a release.
-**A merged `launcher.cs` fix is NOT picked up by `daemon_restart`** — that tool rebuilds the daemon's own
-TypeScript, never `packages/daemon/native/win-job-launcher/`; after merging a launcher.cs change, run
-`pnpm --filter @loom/daemon build:native` by hand in the main checkout for the self-hosting daemon to
-pick it up (the next tagged release rebuilds it fresh regardless, via this job).
+**A merged `launcher.cs` fix now reaches the self-hosting daemon through an ordinary `daemon_restart`**
+(card `0ec6fb57`) — its deploy rebuild runs `build:native` as a third, win32-only, non-fatal step right
+after the TypeScript build, so no manual `build:native` is needed in the main checkout anymore; a
+compile failure there (a blocked `csc.exe`, or the exe locked by the live daemon) only warns and leaves
+the previous exe in place, it never blocks the restart. The next tagged release rebuilds the exe fresh
+regardless, via this job.
 
 **Owner one-time setup (the release workflow is inert until all are done):**
 

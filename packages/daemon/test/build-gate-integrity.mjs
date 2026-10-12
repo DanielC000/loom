@@ -62,11 +62,19 @@ const seedWebDist = () => {
 };
 seedWebDist();
 
+// Card 0ec6fb57: the third, win32-only "buildNative" step. `deployBuildSteps` reads the REAL
+// `process.platform`, so these checks branch on it rather than injecting a fake — this test's own host
+// (and the merge gate's, per CLAUDE.md) is a real Windows box, so the win32 branch is actually exercised
+// here, not just asserted in the abstract; a non-win32 host (e.g. ubuntu-latest CI) exercises the other
+// branch and proves "non-win32 stays byte-identical" for real, on that host.
+const IS_WIN32 = process.platform === "win32";
+const EXPECTED_LABELS = IS_WIN32 ? ["install", "build", "buildNative"] : ["install", "build"];
+
 try {
-  // --- (steps) the deploy build is exactly [install, build], with the right flags ---
+  // --- (steps) the deploy build is [install, build] (+ win32-only buildNative), with the right flags ---
   const steps = deployBuildSteps("/repo/root");
-  check("(steps) deploy build is two ordered steps: install then build",
-    steps.length === 2 && steps[0].label === "install" && steps[1].label === "build");
+  check(`(steps) deploy build is ${EXPECTED_LABELS.length} ordered steps: ${EXPECTED_LABELS.join(" then ")}`,
+    steps.length === EXPECTED_LABELS.length && steps.every((s, i) => s.label === EXPECTED_LABELS[i]));
 
   const install = steps[0];
   check("(B) install runs `pnpm install --frozen-lockfile` (frozen → reproducible, fail-closed on lockfile drift)",
@@ -101,13 +109,26 @@ try {
   check("(A) build is NOT the `pnpm run build --force` footgun shape (--force would forward to vite)",
     !/\bpnpm\b/.test(build.command) && !build.args.some((a) => /^pnpm$/.test(a)));
 
-  // --- (order) a green run executes install BEFORE build and returns code 0 ---
+  // --- (0ec6fb57, win32-only) the third "buildNative" step's shape ---
+  if (IS_WIN32) {
+    const buildNative = steps[2];
+    check("(0ec6fb57) buildNative invokes node directly on build-native-launcher.mjs (no shell, no PATH reliance)",
+      buildNative.shell === false && buildNative.command === process.execPath && buildNative.args.some((a) => /build-native-launcher\.mjs$/.test(a)));
+    check("(0ec6fb57) buildNative is BOUNDED (a wedged csc.exe can't hang the deploy)", buildNative.timeoutMs > 0);
+    check("(0ec6fb57) buildNative is marked NON-FATAL — unlike install/build, which stay fatal by default",
+      buildNative.fatal === false && install.fatal !== false && build.fatal !== false);
+  } else {
+    check("(0ec6fb57) non-win32 deploy build is untouched — no buildNative step at all", steps.length === 2);
+  }
+
+  // --- (order) a green run executes install THEN build (THEN buildNative on win32) and returns code 0 ---
   const calls = [];
   const okRunner = async (step) => { calls.push(step.label); return { code: 0, out: `${step.label} ok` }; };
   const green = await buildDaemon({ runStep: okRunner, root: bgiRoot });
-  check("(order) green deploy runs install THEN build", JSON.stringify(calls) === JSON.stringify(["install", "build"]));
+  check("(order) green deploy runs every step in order", JSON.stringify(calls) === JSON.stringify(EXPECTED_LABELS));
   check("(order) green deploy returns code 0", green.code === 0);
-  check("(order) green tail is the BUILD step's output (last step)", green.tail === "build ok");
+  check("(order) green tail is the LAST step's output", green.tail === `${EXPECTED_LABELS[EXPECTED_LABELS.length - 1]} ok`);
+  check("(order) an all-green deploy carries no nativeLauncherWarning", green.nativeLauncherWarning === undefined);
 
   // --- (B short-circuit) a failing install ABORTS before the build ---
   const calls2 = [];
@@ -124,6 +145,29 @@ try {
   check("(A) broken build (install green) returns non-zero — broken main can't verify green", badBuild.code === 2);
   check("(A) broken-build tail names the build step + surfaces the compiler error",
     /build FAILED/.test(badBuild.tail) && /TS2307/.test(badBuild.tail));
+
+  // --- (0ec6fb57, win32-only) a failing buildNative is NON-FATAL: the deploy still succeeds, every step
+  // still ran (no short-circuit), and the failure is reported ONLY via nativeLauncherWarning, never as
+  // the deploy's own code/tail — a blocked csc.exe or a locked in-use exe must never brick an ordinary
+  // code deploy. Contrasted against (B)/(A) above, which DO short-circuit — this step is deliberately
+  // the odd one out. ---
+  if (IS_WIN32) {
+    const calls5 = [];
+    const nativeFails = async (step) => { calls5.push(step.label); return { code: step.label === "buildNative" ? 1 : 0, out: step.label === "buildNative" ? "csc.exe exited 1" : `${step.label} ok` }; };
+    const nativeFailResult = await buildDaemon({ runStep: nativeFails, root: bgiRoot });
+    check("(0ec6fb57) a failing buildNative never short-circuits — every step still runs", JSON.stringify(calls5) === JSON.stringify(EXPECTED_LABELS));
+    check("(0ec6fb57) a failing buildNative still returns deploy code 0 (success)", nativeFailResult.code === 0);
+    check("(0ec6fb57) the deploy's own tail still reflects the last SUCCESSFUL step (build), never the failed buildNative's raw output",
+      nativeFailResult.tail === "build ok");
+    check("(0ec6fb57) nativeLauncherWarning is set, names the failure, and says the previous launcher stays in use",
+      typeof nativeFailResult.nativeLauncherWarning === "string"
+        && /csc\.exe exited 1/.test(nativeFailResult.nativeLauncherWarning)
+        && /previous launcher stays in use/.test(nativeFailResult.nativeLauncherWarning));
+    // Inverse control: a SUCCEEDING buildNative (the earlier (order) green case already covers this, but
+    // assert it explicitly here too, right next to the failing case, so the two can't drift apart).
+    const nativeOkResult = await buildDaemon({ runStep: okRunner, root: bgiRoot });
+    check("(0ec6fb57 control) a succeeding buildNative carries NO nativeLauncherWarning", nativeOkResult.nativeLauncherWarning === undefined);
+  }
 
   // --- (empty output) a failed step with NO captured output still yields a debuggable tail ---
   const silentFail = await buildDaemon({ runStep: async () => ({ code: 1, out: "   " }), root: bgiRoot });
@@ -246,7 +290,7 @@ try {
   const calls4 = [];
   const trackedRunner2 = async (step) => { calls4.push(step.label); return { code: 0, out: `${step.label} ok` }; };
   const clearedResult = await buildDaemon({ runStep: trackedRunner2, root: bgiRoot });
-  check("(D) control: once cleared, the SAME call succeeds and runs both steps", clearedResult.code === 0 && JSON.stringify(calls4) === JSON.stringify(["install", "build"]));
+  check("(D) control: once cleared, the SAME call succeeds and runs every step", clearedResult.code === 0 && JSON.stringify(calls4) === JSON.stringify(EXPECTED_LABELS));
 } finally {
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
   fs.rmSync(bgiRoot, { recursive: true, force: true });

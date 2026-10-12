@@ -614,6 +614,13 @@ function repoRoot(): string {
 const DEPLOY_INSTALL_TIMEOUT_MS = 180_000;
 
 /**
+ * Bound the deploy-time native-launcher compile (card 0ec6fb57) — a tiny single-file C# compile is
+ * normally seconds, so this only guards against a genuinely wedged/hanging `csc.exe`, independent of the
+ * non-fatal failure posture below (which is about a clean FAILURE, not a HANG).
+ */
+const DEPLOY_NATIVE_BUILD_TIMEOUT_MS = 120_000;
+
+/**
  * One ordered step of a deploy build. `shell` selects the spawn form: shell:true runs `command` through
  * the OS shell (PATH-resolves `pnpm`, exactly like the worktree provisioner + the merge-gate runner);
  * shell:false execs `command` with `args` directly — NO shell, NO PATH reliance — the 51522f05-proof
@@ -621,12 +628,15 @@ const DEPLOY_INSTALL_TIMEOUT_MS = 180_000;
  * commands + flags WITHOUT spawning anything.
  */
 export interface BuildStep {
-  label: "install" | "build";
+  label: "install" | "build" | "buildNative";
   command: string;
   args: string[];
   shell: boolean;
   /** Kill the child past this many ms; 0 = unbounded. */
   timeoutMs: number;
+  // @decision 0ec6fb57 — undefined/true short-circuits the whole deploy on a non-zero exit, unchanged;
+  // `false` (buildNative only) logs a warning and lets the deploy continue instead.
+  fatal?: boolean;
 }
 
 /**
@@ -672,6 +682,22 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // could read) could leave this checkout's .claude/skills mirror unrefreshed. Omitting it here would
     // silently stop self-hosting deploys from ever picking up a merged assets/skills/** change.
     { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", "skills-sync", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
+    // STEP 3 — BUILD-NATIVE, win32-only (card 0ec6fb57): recompiles the win-job-launcher.exe Windows Job
+    // Object launcher (docs/decisions/1718416d-*.md) from source on EVERY deploy, so a merged launcher.cs
+    // fix goes live through an ordinary restart with no manual `build:native` needed. ABSOLUTE node +
+    // ABSOLUTE script path, no shell — same no-PATH-reliance rationale as STEP 2. Omitted entirely on
+    // non-win32 — see docs/decisions/0ec6fb57-*.md for why.
+    ...(process.platform === "win32"
+      ? [{
+          label: "buildNative" as const,
+          command: process.execPath,
+          args: [path.join(root, "packages", "daemon", "scripts", "build-native-launcher.mjs")],
+          shell: false,
+          timeoutMs: DEPLOY_NATIVE_BUILD_TIMEOUT_MS,
+          // @decision 0ec6fb57 — deliberately non-fatal; see buildDaemon's own doc + the record file for why.
+          fatal: false,
+        }]
+      : []),
   ];
 }
 
@@ -908,8 +934,12 @@ function copyDirAtomic(src: string, dest: string): void {
  * On a green build also returns `deploySha` — `dist/build-info.json`'s freshly-written stamp, read the
  * SAME way `deploy-staleness.ts` reads it for the running process (card 3af8674e DoD-4: a real, structural
  * sha, never scraped from a manager's free-text restart `reason`). `null` if the stamp can't be read.
+ *
+ * @decision 0ec6fb57 — a `fatal:false` step (buildNative) that fails NEVER short-circuits this loop and
+ * never contributes to the returned `tail`/`code` — it's reported separately via `nativeLauncherWarning`
+ * so a win-job-launcher compile failure can't read as, or mask, an actual deploy failure.
  */
-export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail: string; deploySha?: string | null }> {
+export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail: string; deploySha?: string | null; nativeLauncherWarning?: string }> {
   const root = deps.root ?? repoRoot();
   const run = deps.runStep ?? runBuildStep;
   const attemptId = deps.attemptId ?? randomUUID();
@@ -922,6 +952,7 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
       return { code: 1, tail: `deploy build refused — ${quarantineCheck.reason}` };
     }
     let lastOut = "";
+    let nativeLauncherWarning: string | undefined;
     // Card 8e84e4a6 Code Review: whether THIS attempt's own snapshotWebDist actually wrote a backup —
     // threaded into restoreWebDist so it can tell "no snapshot was ever taken" (ordinary) apart from "one
     // WAS taken but is gone by restore time" (anomalous — see restoreWebDist's own doc).
@@ -932,8 +963,15 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
         catch (e) { console.log(`[restart] pre-build dist snapshot failed (deploy continues unprotected): ${e instanceof Error ? e.message : String(e)}`); }
       }
       const r = await run(step, root);
-      lastOut = r.out;
-      if (r.code === 0) continue;
+      if (r.code === 0) { lastOut = r.out; continue; }
+      if (step.fatal === false) {
+        // @decision 0ec6fb57 — do not claim a failed compile always overwrites a stale/planted exe: it
+        // leaves whatever was already on disk untouched, surviving this deploy.
+        const nativeOut = r.out.trim() ? r.out.trim().slice(-1000) : `(no ${step.label} output captured)`;
+        nativeLauncherWarning = `win-job-launcher.exe rebuild failed (code=${r.code}) — the previous launcher stays in use (containment is unchanged; still on it if one was already built, still on the taskkill-based fallback if not). This could be a locked exe (the live daemon may still have had it open for an in-flight git call), a blocked csc.exe, or a real compile error — whichever it is, this failed attempt did NOT overwrite whatever exe (if any, stale or even planted) was already on disk.\n${nativeOut}`;
+        console.log(`[restart] ${nativeLauncherWarning}`);
+        continue; // never short-circuits, never touches lastOut/code — see this function's own @decision note
+      }
       let restoreNote = "";
       if (step.label === "build") {
         try {
@@ -958,7 +996,7 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
     try { discardWebDistBackup(attemptId); }
     catch (e) { console.log(`[restart] post-deploy snapshot cleanup failed (harmless): ${e instanceof Error ? e.message : String(e)}`); }
     const deploySha = readBuildInfo(path.join(root, "packages", "daemon", "dist")).sha;
-    return { code: 0, tail: lastOut.trim().slice(-1500), deploySha };
+    return { code: 0, tail: lastOut.trim().slice(-1500), deploySha, ...(nativeLauncherWarning ? { nativeLauncherWarning } : {}) };
   })();
 }
 

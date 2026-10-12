@@ -244,6 +244,14 @@ sole verification for anything touching real OS process semantics):
   loud no-op is the actual mitigation.
 - A Job Object assign/suspend sequence this specific has not been tested on Windows builds older than
   the one used for this investigation, nor against non-Git-for-Windows MSYS distributions.
+- Card `0ec6fb57` wired `build:native` into `daemon_restart`'s own deploy rebuild (a third, win32-only
+  step in `deployBuildSteps`), so an ordinary restart now goes through the SAME compile this record
+  describes — but that step is deliberately non-fatal (`fatal:false`), so a failed compile (a blocked
+  `csc.exe`, or the exe being locked because the live daemon still has it open for an in-flight git call)
+  does NOT overwrite whatever exe was already on disk. Say this plainly rather than "always overwritten":
+  **a stale or even planted exe can survive an arbitrary number of failed deploys**, until one actually
+  succeeds. The deploy only logs a loud warning (`nativeLauncherWarning` on the `daemon_restart` result)
+  and keeps running on the previous containment state. See `docs/decisions/0ec6fb57-*.md`.
 
 ## Source
 
