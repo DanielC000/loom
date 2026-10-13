@@ -4,6 +4,8 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-10-13
+
 **A platform-hardening and cross-platform-reliability release.** Canonical git merges are now contained in a Windows job object and quarantine a repo instead of risking corruption when a kill can't be confirmed; agent-writable surfaces across profiles, platform, setup and companion routing were tightened to least privilege; the Telegram companion's chat-scope boundaries are enforced end to end; session and MCP tokens are compared and stored more defensively; and a long pass of POSIX process, path and test-harness fixes moves the daemon's own test suite — and the behavior it tests — toward parity on Linux, not just the Windows host it's usually developed on.
 
 ### Added
