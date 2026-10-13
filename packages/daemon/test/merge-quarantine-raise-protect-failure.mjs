@@ -687,6 +687,55 @@ try {
   check("*** THE FIX (round4-x) *** the sibling's token is NOT resurrected after a reboot (cleared in-process, never re-armed from an orphaned file)", !freshTokensX.has(sibToken));
   check("*** THE FIX (round4-x) *** t2 is NOT resurrected after a reboot", !freshTokensX.has(t2x));
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CR4 of 8db913e2, finding 1 ("d6efbc9b-z3", ported from CR4's own scratch probe Z3, commit cb461f56) —
+  // a BY-TOKEN release of the owner's LAST outstanding token, while `final`'s own read fails, must still
+  // land: `clearActiveEntryTokenAtKey`'s last-token branch hands off entirely to
+  // `clearMergeQuarantineByKey`, whose own `tombstoneIfNotSurviving` call is gated by condition (b) on
+  // `touchedFinalBasenames` — a read failure there keeps `final` kept-and-marked and returns early,
+  // WITHOUT tombstoning the token the owner just released. A later same-identity re-raise's own fold-in
+  // then reads that still-marked, un-tombstoned basename back and resurrects the released token. THE FIX:
+  // after `clearMergeQuarantineByKey` returns, tombstone `token` unconditionally (no touched list),
+  // matching `clearPendingEntryByToken`'s own last-token branch.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("d6efbc9b-z3");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+
+  const t1 = enterMergeQuarantine(r, "r-branch", "r raises itself (t1, its only token)");
+  check("(d6efbc9b-z3 precondition) `final` holds t1 before any failure", (contentIfExists(finalPath) ?? "").includes(t1));
+
+  // Release t1 — R's ONLY outstanding token — while `final`'s own read fails: `clearActiveEntryTokenAtKey`'s
+  // last-token branch keeps `final` (kept-and-marked), but the RELEASE of t1 must still take effect.
+  const injectClear = injectReadFailureOnlyNth(finalPath, 1);
+  clearMergeQuarantineByToken(r, t1);
+  injectClear.restore();
+  check("(d6efbc9b-z3 precondition) r is lifted IN-PROCESS after releasing its only token (measured via listActiveMergeQuarantines, never assertRepoNotQuarantined)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(t1));
+
+  // A fresh, FULLY-SUCCESSFUL re-raise of the SAME identity — no injection here at all. Pre-fix: the
+  // fold-in reads `final`'s own still-kept, still-marked bytes (which still physically hold t1, since the
+  // read failure above only kept the file, never unlinked it) and re-unions the released t1 back in.
+  const t2 = enterMergeQuarantine(r, "r-branch", "r re-raises itself (t2)");
+  const tokensAfterT2 = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (d6efbc9b-z3) *** released t1 is NOT resurrected by r's own re-raise, IN-PROCESS", !tokensAfterT2.has(t1));
+  check("(d6efbc9b-z3) t2 itself is enforced", tokensAfterT2.has(t2));
+
+  // Release t2 — R must be FULLY lifted, never left stuck on a resurrected, nobody-holds-it t1.
+  clearMergeQuarantineByToken(r, t2);
+  const tokensAfterT2Clear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (d6efbc9b-z3) *** r is FULLY lifted IN-PROCESS after releasing t2 — never stuck on a resurrected t1", !tokensAfterT2Clear.has(t1) && !tokensAfterT2Clear.has(t2));
+
+  // Measure tokens after a reboot through a FRESH module import (never `assertRepoNotQuarantined`) — the
+  // durable, on-disk proof that t1 was never resurrected and both tokens are genuinely gone.
+  const freshZ3 = await freshBootModule();
+  freshZ3.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensZ3 = new Set(freshZ3.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (d6efbc9b-z3, reboot) *** t1 is NOT resurrected after a reboot", !freshTokensZ3.has(t1));
+  check("*** THE FIX (d6efbc9b-z3, reboot) *** t2 is NOT resurrected after a reboot either", !freshTokensZ3.has(t2));
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -724,6 +773,10 @@ console.log(failures === 0
     "kept-until-reboot residual). `consumeMatchedPendingsIntoArmedEntry`'s own raise-divert branch now " +
     "folds every matched entry's own sourceFile into the diverted entry's orphanLatchFiles before " +
     "diverting, so a SIBLING pending entry consumed alongside the raiser is never silently orphaned on " +
-    "disk (round4-x)."
+    "disk (round4-x). " +
+    "FOLLOW-UP (CR4 of 8db913e2, finding 1, card d6efbc9b): a BY-TOKEN release of the owner's LAST " +
+    "outstanding token now tombstones that token unconditionally even when the delegated " +
+    "`clearMergeQuarantineByKey` call keeps `final` (read-failure-kept) and so skips its own tombstone — " +
+    "the owner's release of a token and the fate of the physical final are two separate facts (d6efbc9b-z3)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

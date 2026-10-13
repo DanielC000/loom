@@ -230,11 +230,18 @@ const clearedTokens = new Set<string>();
  * card: see the decision record's own Round 4 "Accepted residual" note.
  *
  * A BY-TOKEN clear ({@link clearActiveEntryTokenAtKey}/{@link clearPendingEntryByToken}) still goes
- * through this SAME helper (passing no `touchedFinalBasenames` — its own write is never the degraded
- * read-failure-kept shape (b) describes) — it never special-cases "the owner released the token, so
- * tombstone it unconditionally." Calling it right after that clear's own in-memory token-removal (before
- * arming any write) already makes scan (a) correctly find nothing surviving (tokens are process-unique
- * UUIDs), so the single invariant holds for both clear shapes without a second rule.
+ * through this SAME helper, passing no `touchedFinalBasenames` of its own — calling it right after that
+ * clear's own in-memory token-removal (before arming any write) already makes scan (a) correctly find
+ * nothing surviving (tokens are process-unique UUIDs). **Corrected (Follow-up `8db913e2`/`d6efbc9b`):**
+ * this is NOT true of every by-token call site, though — `clearActiveEntryTokenAtKey`'s own last-token
+ * branch (the owner's last outstanding token) hands off entirely to {@link clearMergeQuarantineByKey},
+ * which DOES pass `touchedFinalBasenames` for its own, unrelated reasons. That delegated call's own
+ * tombstone attempt is correctly gated by (b) for the PHYSICAL FINAL it's deciding whether to destroy —
+ * but the owner's RELEASE of `token` is a separate fact that must land regardless of what (b) decides
+ * about the final, so that branch makes a SECOND, unconditional call here (no touched list) right after,
+ * tombstoning `token` itself unconditionally on top of the shared, gated call. This is still not a
+ * special case of the single invariant above — it is the single invariant, applied twice, to two
+ * different questions ("is the final destroyed" vs. "is the owner's own token gone").
  */
 function tombstoneIfNotSurviving(tokens: string[], touchedFinalBasenames: string[] = []): void {
   if (tokens.length === 0) return;
@@ -2017,9 +2024,10 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     // re-deriving from a repoPath again — `entry.repoPath` can be a DIFFERENT, longer-outstanding
     // raiser's own identity (enterMergeQuarantine's `existing` branch).
     //
-    // @decision 8db913e2 (round 4) — `token`'s own tombstone decision lives entirely inside this call's
-    // own `tombstoneIfNotSurviving`, at ITS end; nothing extra needed here.
+    // @decision 8db913e2 (Follow-up d6efbc9b) — the delegated call's own touchedFinalBasenames-gated
+    // tombstone can leave a RELEASED token un-tombstoned; tombstone it unconditionally here too.
     clearMergeQuarantineByKey(key, entry.repoPath);
+    tombstoneIfNotSurviving([token]);
     return;
   }
   const updated: MergeQuarantineEntry = { ...entry, tokens: remaining };
