@@ -1346,6 +1346,10 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // per-key `.set()`: `existing` can ALSO be a PENDING 883e29bc boot-diverted twin's own reference,
     // left stale (and later durably re-written FROM) by a bare `.set()` — see the decision record.
     replaceEntryEverywhere(activeQuarantines, existing, entry);
+    // @decision e0192ffb — protect a foreign, unincorporated occupant's sole physical copy at `key`'s own
+    // final before this branch's two writes (both skip the degraded-occupant guard for `key` itself); must
+    // run before `siblingIndices` is collected below. See the decision record.
+    protectUnincorporatedOccupantBeforeDelete(quarantinePathForKey(key), entry);
     // @decision 8a1bc2ef (round 2, Code Review) — only absorb into `entry` when IT is genuinely
     // key-verified, never when `existing` merely occupies `key` via PASS 1's degraded dual-arm fallback —
     // see the decision record for the nested-repo repro this guard closes.

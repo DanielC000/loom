@@ -57,6 +57,9 @@ const SCENARIOS = [
   "pending-merge-fresh-raise-survives-reboot",
   "negative-control-resolvable-occupant-still-overwrites",
   "walkup-raise-protects-pending-occupant-then-clears",
+  "existing-branch-raise-protects-foreign-pending-occupant",
+  "existing-branch-raise-still-overwrites-own-union-content",
+  "existing-branch-raise-token-overlap-pins-no-spurious-divert",
   "round2-protect-splice-does-not-corrupt-own-sibling-index",
   "round2-protect-does-not-duplicate-already-active-occupant",
   "partial-overlap-pending-leftover-stays-blocked-until-both-tokens-cleared",
@@ -89,8 +92,11 @@ if (!scenarioArg) {
       + "separately (card d4b25feb — that branch no longer reaches writeMergeQuarantineLatch at all for an "
       + "unverified raiser). The guard still allows a legitimate resolvable-different-identity overwrite "
       + "THROUGH A GUARDED CALLER (never the opted-out enterMergeQuarantine path). clear(S) is deliberately "
-      + "out of scope — see the decision record."
-    : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board card e1cb7d33 / 1922be3a.`);
+      + "out of scope — see the decision record. (Card e0192ffb) the `existing`-truthy region's own two "
+      + "writes now ALSO durably protect a foreign, unresolvable pending occupant's sole physical copy "
+      + "first (token-overlap discriminated), while still legitimately overwriting the raiser's own "
+      + "already-won union content in place when no foreign occupant is present."
+    : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board card e1cb7d33 / 1922be3a / e0192ffb.`);
   process.exit(failedScenarios === 0 ? 0 : 1);
 }
 
@@ -619,6 +625,208 @@ try {
     );
     check("(sanity) W stays lifted after the reboot (the clear was durable)", !boot2.activeMergeQuarantineFor(w));
     check("*** THE FIX (card 1922be3a) *** assertRepoNotQuarantined(x) still blocks after a real reboot", boot2.assertRepoNotQuarantined(x).ok === false);
+  } else if (scenarioName === "existing-branch-raise-protects-foreign-pending-occupant") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD e0192ffb's OWN repro — unlike `walkup-raise-protects-pending-occupant-then-clears` above
+    // (which drives `enterMergeQuarantine`'s "no `existing`" region, 1922be3a's own scope), this scenario
+    // drives the `existing`-TRUTHY region's own two writes, which skipped the degraded-occupant guard for
+    // `key` itself without ever protecting a foreign occupant first. Shape: X is pure pending at Kw
+    // (never resolves); teamA (S) has its own stale pending latch (does NOT exist yet at boot) whose own
+    // key, once teamA resolves, collapses onto the SAME Kw as the enclosing repo W's own key (mirrors
+    // `runtime-lazy-graduation-refuses`). teamA graduates at Kw via the bottom tail — that write is
+    // correctly refused (X's file survives), but `existing` is now armed at Kw in-memory. `W` itself
+    // (teamA's own enclosing toplevel — its fresh key is ALSO Kw) then raises, reaching the `existing`
+    // branch pre-fix destroys X's file via its own primary-key write; post-fix it protects X aside first.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-existing-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# existing\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const teamA = path.join(w, "teamA"); // does NOT exist yet — created only after boot, below
+    const x = path.join(os.tmpdir(), `loom-mqdog-x-ghost-existing-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    check("(precondition) teamA does not exist yet at boot time", !fs.existsSync(teamA));
+
+    const xAtKwPath = writeXAsPurePendingAtKp(kw, x, "existing");
+    const staleTeamAPath = path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-existing-${freshSfx()}.json`);
+    fs.writeFileSync(staleTeamAPath, JSON.stringify({
+      repoPath: teamA, branch: "teamA-branch", reason: "teamA's real reason (existing)", enteredAt: Date.now(), tokens: ["token-teamA-existing"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([w, teamA, x]);
+    check("(sanity) X's file is untouched by boot", fs.readFileSync(xAtKwPath, "utf8").includes("token-x-existing"));
+    check("(sanity) teamA's stale source survives boot (still pending, unresolvable)", fs.existsSync(staleTeamAPath));
+    check("(precondition) nothing is armed at Kw yet (both X and teamA are pure pending)", !listActiveMergeQuarantines().some((e) => e.armedKeys?.includes(kw)));
+    check("(precondition) W has no quarantine of its own yet", !activeMergeQuarantineFor(w));
+
+    // Make teamA resolvable — the first query graduates it at Kw in-memory, with its own write refused
+    // (X's own foreign file untouched) — exactly `runtime-lazy-graduation-refuses`'s own shape.
+    fs.mkdirSync(teamA, { recursive: true });
+    fs.writeFileSync(path.join(teamA, "marker.txt"), "teamA now exists\n");
+    check("(precondition) canonicalRepoLockKey(teamA) now equals Kw (collapses via the toplevel walk)", canonicalRepoLockKey(teamA) === kw);
+
+    const teamAGraduated = activeMergeQuarantineFor(teamA);
+    check("(precondition) teamA graduated at Kw in-memory, carrying its own token", !!teamAGraduated && (teamAGraduated.tokens ?? []).includes("token-teamA-existing"));
+    check("(precondition) X's file is STILL untouched after the graduation's own refused write", fs.readFileSync(xAtKwPath, "utf8").includes("token-x-existing"));
+
+    // THE REPRO — W itself raises. W's own fresh key is ALSO Kw, so `enterMergeQuarantine(W)` takes the
+    // `existing` branch (`existing` = teamA's just-graduated entry).
+    // CR aad53fa6: neither of the next two checks discriminates the fix — the write ALWAYS succeeds here
+    // (skipDegradedOccupantGuard is true for this key regardless of this card's own fix), so both pass
+    // identically pre-fix and post-fix. Only the reboot checks below, which re-derive state purely from
+    // disk, actually discriminate (matches `walkup-raise-protects-pending-occupant-then-clears`'s own
+    // labeling convention above).
+    const wToken = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, hitting the `existing` branch over a foreign degraded occupant's exclusive backing");
+    const wEntry = activeMergeQuarantineFor(w);
+    check("(sanity) W's raise is enforced IN-MEMORY immediately, unioned with teamA", !!wEntry && wEntry.tokens.includes(wToken) && (wEntry.tokens ?? []).includes("token-teamA-existing"));
+    // X's own data is never absorbed into this union (its identity never matched teamA's or W's) — its
+    // ORIGINAL physical slot legitimately becomes the W/teamA union's own content (the write still lands
+    // there); X's own copy must live elsewhere, protected, per the full listing below — same shape as
+    // `walkup-raise-protects-pending-occupant-then-clears`'s own two checks above.
+    check(
+      "(sanity) X's own data is STILL tracked (via the full listing), carrying its own token",
+      listActiveMergeQuarantines().some((e) => (e.tokens ?? []).includes("token-x-existing")),
+    );
+    check(
+      "(sanity) X's ORIGINAL physical file is now the W/teamA union's own content (X's copy lives elsewhere, protected)",
+      JSON.parse(fs.readFileSync(xAtKwPath, "utf8")).repoPath === teamA,
+    );
+
+    // *** THE PROBE'S OWN SEQUENCE *** clear W by path, then reboot — X must survive BOTH, untouched by a
+    // clear addressed at an entirely different identity.
+    clearMergeQuarantine(w);
+    check("(sanity) clearing W by path lifts the W/teamA union", !activeMergeQuarantineFor(w) && !activeMergeQuarantineFor(teamA));
+    check(
+      "(sanity) X survives W's own clear, still active, still carrying its own token",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-existing"),
+    );
+    check("(sanity) assertRepoNotQuarantined(x) still blocks after W's clear", assertRepoNotQuarantined(x).ok === false);
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, teamA, x]);
+    check(
+      "*** THE FIX (card e0192ffb) *** X's token SURVIVES a real reboot too, after the clear",
+      (boot2.activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-existing"),
+    );
+    check("(sanity) W/teamA stay lifted after the reboot (the clear was durable)", !boot2.activeMergeQuarantineFor(w) && !boot2.activeMergeQuarantineFor(teamA));
+    check("*** THE FIX (card e0192ffb) *** assertRepoNotQuarantined(x) still blocks after a real reboot", boot2.assertRepoNotQuarantined(x).ok === false);
+  } else if (scenarioName === "existing-branch-raise-still-overwrites-own-union-content") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // NEGATIVE CONTROL for card e0192ffb — the exact false-positive risk `1922be3a`'s own scope note
+    // named: `existing`'s own winning identity can itself BE an unresolvable occupant (X), the result of
+    // an EARLIER boot-time tie-break union — in that case, `key`'s own physical final genuinely IS
+    // `entry.repoPath`'s (X's) own data, so a later raise must durably persist the bigger union WITHOUT
+    // the new protect call spuriously diverting it aside as if it were foreign.
+    //
+    // Reuses `makeFixture`'s X-OLDER tie-break shape (X's own `enteredAt` OLDER than teamA's own stale
+    // latch, so `unionQuarantineEntries` keeps X's identity as the winner, mirroring
+    // `runtime-sibling-absorb-refuses-direct-path`'s own "opposite age order" variant) — boot's own write
+    // for teamA's migrate-in is refused (Kp is a `degradedOccupiedKey`), so X's OWN original file is still
+    // physically at Kp, genuinely matching the in-memory union's own winning identity.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, teamA, kp, x } = makeFixture("ctrl2");
+    const xAtKpPath = writeXDirectlyAtKp(kp, x, "ctrl2", 120_000); // OLDER than teamA — wins the union tie-break
+    writeTeamAStaleLatch(teamA, "ctrl2", 60_000); // YOUNGER — loses the tie-break
+
+    reenterMergeQuarantinesAtBoot([repo, teamA, x]);
+    const unionBefore = listActiveMergeQuarantines().find((e) => e.repoPath === x);
+    check("(precondition) the in-memory union's winning identity is X, already carrying both tokens", !!unionBefore && (unionBefore.tokens ?? []).includes("token-teamA-ctrl2") && (unionBefore.tokens ?? []).includes("token-x-ctrl2"));
+    check(
+      "(precondition) X's own physical file at Kp is untouched (teamA's own migrate write was refused)",
+      fs.readFileSync(xAtKpPath, "utf8").includes("token-x-ctrl2") && !fs.readFileSync(xAtKpPath, "utf8").includes("teamA-branch"),
+    );
+    const divertPathForX = path.join(MERGE_QUARANTINE_DIR, divertFilenameFor(x));
+    check("(precondition) no divert file for X exists yet", !fs.existsSync(divertPathForX));
+
+    // `enterMergeQuarantine(teamA)` directly (never through `activeMergeQuarantineFor`'s own
+    // `isKeyVerifiedFor` gate, which would short-circuit on X's own unresolvability before ever reaching
+    // a write at all) reaches the SAME `existing` branch this card fixes — `existing.repoPath` is X's own
+    // identity, genuinely matching what's physically at Kp right now.
+    const teamAToken = enterMergeQuarantine(teamA, "teamA-branch", "a fresh raise over its own identity's already-won union, never a foreign occupant");
+    const afterRaise = activeMergeQuarantineFor(teamA);
+    check(
+      "(sanity) teamA's fresh raise is enforced in-memory, union still winning identity X",
+      !!afterRaise && afterRaise.repoPath === x && afterRaise.tokens.includes(teamAToken) && afterRaise.tokens.includes("token-x-ctrl2") && afterRaise.tokens.includes("token-teamA-ctrl2"),
+    );
+    const onDiskAfterRaise = JSON.parse(fs.readFileSync(xAtKpPath, "utf8"));
+    check(
+      "*** CONTROL *** the write legitimately overwrote X's own file IN PLACE (same identity, bigger union) — never refused, never diverted",
+      onDiskAfterRaise.repoPath === x && onDiskAfterRaise.tokens.includes(teamAToken) && onDiskAfterRaise.tokens.includes("token-x-ctrl2") && onDiskAfterRaise.tokens.includes("token-teamA-ctrl2"),
+    );
+    check("*** CONTROL *** no spurious divert file was created for X's own identity (the protect call correctly no-opped)", !fs.existsSync(divertPathForX));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([repo, teamA, x]);
+    const afterReboot = boot2.activeMergeQuarantineFor(teamA);
+    check(
+      "*** CONTROL *** the bigger union is durable across a reboot",
+      !!afterReboot && afterReboot.repoPath === x && afterReboot.tokens.includes(teamAToken) && afterReboot.tokens.includes("token-x-ctrl2") && afterReboot.tokens.includes("token-teamA-ctrl2"),
+    );
+    boot2.clearMergeQuarantine(teamA);
+  } else if (scenarioName === "existing-branch-raise-token-overlap-pins-no-spurious-divert") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CR aad53fa6 BLOCKER — the prior control (`existing-branch-raise-still-overwrites-own-union-content`)
+    // passes under an IDENTITY-ONLY mutant too, since its disk content's identity already matches
+    // `entry.repoPath` (the identity exemption alone already skips protection there, with or without
+    // token overlap). THIS scenario pins the card's own actual discriminator — TOKEN OVERLAP, never
+    // repoPath identity — via the one shape where identity DIFFERS but the disk occupant's own token is
+    // ALREADY a full subset of the fresh union: `teamA` wins the boot-time tie-break (its own `enteredAt`
+    // OLDER than X's), so the in-memory union's winning identity is `teamA`, already carrying X's own
+    // token from THAT union — but X's OWN original physical file (repoPath=x) is STILL what's at Kp,
+    // since teamA's own migrate write was refused (same refused-write shape as the sibling control). A
+    // later raise of teamA must recognize X's on-disk token is already incorporated and skip protection;
+    // an IDENTITY-ONLY check would instead flag X as foreign (its repoPath differs from teamA's, and X is
+    // unresolvable) and mint a spurious, never-synced divert for it — stranding X blocked forever, since
+    // no later clear of teamA ever looks at that independent record.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, teamA, kp, x } = makeFixture("pin3");
+    const xAtKpPath = writeXDirectlyAtKp(kp, x, "pin3", 60_000); // YOUNGER than teamA — LOSES the tie-break
+    writeTeamAStaleLatch(teamA, "pin3", 120_000); // OLDER than X — wins the union tie-break
+
+    reenterMergeQuarantinesAtBoot([repo, teamA, x]);
+    const unionBefore = listActiveMergeQuarantines().find((e) => e.repoPath === teamA);
+    check(
+      "(precondition) the in-memory union's winning identity is teamA, already carrying X's own token",
+      !!unionBefore && (unionBefore.tokens ?? []).includes("token-teamA-pin3") && (unionBefore.tokens ?? []).includes("token-x-pin3"),
+    );
+    check(
+      "(precondition) X's own physical file at Kp is STILL untouched (teamA's own migrate write was refused)",
+      fs.readFileSync(xAtKpPath, "utf8").includes("token-x-pin3") && !fs.readFileSync(xAtKpPath, "utf8").includes("teamA-branch"),
+    );
+    const divertPathForX = path.join(MERGE_QUARANTINE_DIR, divertFilenameFor(x));
+    check("(precondition) no divert file for X exists yet", !fs.existsSync(divertPathForX));
+
+    // THE PIN — teamA raises again. `existing.repoPath` is ALREADY teamA (the tie-break winner), so
+    // `entry.repoPath` stays teamA — but the physical file at Kp is X's own (a DIFFERENT identity). X's
+    // own on-disk token is already a member of `entry.tokens` (absorbed at BOOT time) — the real fix must
+    // recognize that and skip protection; an identity-only check cannot, since it never looks at tokens.
+    const teamAToken = enterMergeQuarantine(teamA, "teamA-branch", "a fresh raise over teamA's own already-won union, where X's own token is already incorporated but X's own file is a DIFFERENT identity");
+    const afterRaise = activeMergeQuarantineFor(teamA);
+    check(
+      "(sanity) teamA's fresh raise is enforced in-memory, union still winning identity teamA",
+      !!afterRaise && afterRaise.repoPath === teamA && afterRaise.tokens.includes(teamAToken) && afterRaise.tokens.includes("token-x-pin3") && afterRaise.tokens.includes("token-teamA-pin3"),
+    );
+    check(
+      "*** THE FIX (card e0192ffb, CR aad53fa6) *** NO spurious divert file was created for X's own identity — its on-disk token was already incorporated",
+      !fs.existsSync(divertPathForX),
+    );
+    check(
+      "*** THE FIX (card e0192ffb, CR aad53fa6) *** the write legitimately overwrote X's own file IN PLACE with the bigger union (teamA's identity, all three tokens)",
+      JSON.parse(fs.readFileSync(xAtKpPath, "utf8")).repoPath === teamA,
+    );
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([repo, teamA, x]);
+    boot2.clearMergeQuarantine(teamA);
+    boot2.clearMergeQuarantine(repo);
+    check(
+      "*** THE FIX (card e0192ffb, CR aad53fa6) *** X is FULLY FREED by clearing teamA/repo — no independent spurious record survived to strand it",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+    check("*** THE FIX (card e0192ffb, CR aad53fa6) *** no latch files remain in the quarantine dir", fs.readdirSync(MERGE_QUARANTINE_DIR).length === 0);
   } else if (scenarioName === "round2-protect-splice-does-not-corrupt-own-sibling-index") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // CODE REVIEW d3c36260, BLOCKER 1 — the protect call used to run AFTER pendingIndices/siblingIndices/
