@@ -627,8 +627,12 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
  * @decision d163aef5 (round 3) — token OVERLAP, never repoPath identity, discriminates a genuine union
  * (safe — already in `clearedEntry.tokens`) from a truly foreign raise (protect); a repoPath compare
  * false-positived on the former (merge-quarantine-unresolvable-path.mjs's UNION-KEYS repro).
+ *
+ * @decision d2582692 — `clearIdentity`, when given, is a second, independent skip: `final` genuinely
+ * belonging to the CLEAR'S OWN REQUESTER (never to `clearedEntry`, the in-memory entry merely ARMED at
+ * this key) is never foreign data to protect. See the decision record.
  */
-function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuarantineEntry): string | undefined {
+function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuarantineEntry, clearIdentity?: string): string | undefined {
   let existingRaw: string;
   try {
     existingRaw = fs.readFileSync(final, "utf8");
@@ -643,6 +647,7 @@ function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuar
   }
   if (typeof existing.repoPath !== "string") return undefined;
   if (directPathIdentity(existing.repoPath) === directPathIdentity(clearedEntry.repoPath)) return undefined; // same identity
+  if (clearIdentity && directPathIdentity(existing.repoPath) === clearIdentity) return undefined; // genuinely the clearer's own data
   const existingTokens = Array.isArray(existing.tokens) && existing.tokens.every((t): t is string => typeof t === "string")
     ? existing.tokens
     : typeof existing.token === "string" ? [existing.token] : [];
@@ -970,6 +975,10 @@ function consumeMatchedPendingsIntoArmedEntry(
  * @decision d163aef5 (round 5) — a `foreignPending` claim can name THIS file even when its on-disk
  * content is genuinely the clearer's own (a prior eviction's inference, see
  * `armKeyUnlessDegradedCollision`); gate the protect on content identity, not the claim alone.
+ *
+ * @decision d2582692 — `clearedEntry`'s protect now also receives `clearIdentity`, and {@link
+ * protectForeignTmpResidueBeforeSweep} protects a FOREIGN occupant's own tmp residue at this key before
+ * the unconditional sweep below. See the decision record.
  */
 function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string, clearedEntry?: MergeQuarantineEntry, clearIdentity?: string): void {
   const final = quarantinePathForKey(key);
@@ -979,8 +988,9 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
     const foreignPending = pendingUnresolvedQuarantines.find((p) => p.sourceFile === finalBasename && directPathIdentity(p.entry.repoPath) !== clearIdentity);
     if (foreignPending && quarantineFileRepoPathIdentity(final) !== clearIdentity) protectOccupantContentBeforeDelete(final, foreignPending.entry.repoPath, clearIdentity);
   }
-  if (clearedEntry) protectUnincorporatedOccupantBeforeDelete(final, clearedEntry);
+  if (clearedEntry) protectUnincorporatedOccupantBeforeDelete(final, clearedEntry, clearIdentity);
   try { fs.unlinkSync(final); } catch { /* ENOENT is the common case */ }
+  if (clearIdentity) protectForeignTmpResidueBeforeSweep(key, clearIdentity);
   // @decision be79f4d5 (round 3) — reference-aware, never the unconditional-by-hash sibling: a same-hash
   // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
   // because THIS key's own entry is being legitimately cleared.
@@ -1141,9 +1151,12 @@ function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: st
  * @decision d163aef5 (round 3) — the TOKEN-OVERLAP-gated twin of {@link protectDegradedOccupantBeforeDelete},
  * for when `clearedEntry`'s own claim to this key could be a tautological walk-up; see {@link
  * unincorporatedOccupantRepoPathAt}'s own doc for why this needs a different gate.
+ *
+ * @decision d2582692 — `clearIdentity` forwards to the SAME skip {@link unincorporatedOccupantRepoPathAt}
+ * now carries — see that function's own doc.
  */
-function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: MergeQuarantineEntry): void {
-  const occupantRepoPath = unincorporatedOccupantRepoPathAt(final, clearedEntry);
+function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: MergeQuarantineEntry, clearIdentity?: string): void {
+  const occupantRepoPath = unincorporatedOccupantRepoPathAt(final, clearedEntry, clearIdentity);
   if (!occupantRepoPath) return;
   protectOccupantContentBeforeDelete(final, occupantRepoPath, clearedEntry.repoPath);
 }
@@ -1627,6 +1640,55 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string): { kept: boolean; 
   if (referencingRepoPaths.size > 0) return { kept: true, referencingRepoPaths: [...referencingRepoPaths] };
   unlinkLatchFile(filename);
   return { kept: false, referencingRepoPaths: [] };
+}
+
+/**
+ * Before {@link sweepTmpResidueForHashIfUnreferenced} unconditionally sweeps every `.tmp-<pid>` residue
+ * matching `key`'s own hash, read each one's OWN on-disk content directly and durably protect it if it
+ * belongs to a DIFFERENT, currently-UNRESOLVABLE identity than `clearIdentity` — mirrors
+ * {@link protectDegradedOccupantBeforeDelete}'s content-aware protection for `final`, applied to tmp
+ * residue instead. `sweepTmpResidueForHashIfUnreferenced`'s own ownership check only ever consults
+ * `orphanLatchFiles`, never a tmp file's own on-disk identity — so an unresolvable occupant ARMED at
+ * `key` (e.g. via its own tautological primary arm) WITHOUT ever having its content promoted/written
+ * there (its `.tmp-<pid>` residue is its ONLY durable backing — {@link reenterMergeQuarantinesAtBootImpl}
+ * never promotes a tmp residue for a repoPath that doesn't currently resolve) is otherwise destroyed as
+ * pure collateral the instant a clear addressed at a wholly different identity sharing this exact key
+ * runs its own, unrelated sweep.
+ *
+ * A currently-RESOLVABLE different occupant's leftover is deliberately EXCLUDED (today's existing,
+ * legitimate stale-leftover-is-safe-to-overwrite case — mirrors {@link differentUnresolvableOccupantRepoPathAt}'s
+ * own `protectResolvableToo: false` default), as is content that already names `clearIdentity` itself
+ * (the clearer's own data, never foreign). A tmp file some SURVIVING entry's own `orphanLatchFiles`
+ * already self-references is ALSO skipped — it is already exactly as protected as
+ * {@link sweepTmpResidueForHashIfUnreferenced}'s own ownership check will honour, and re-protecting it
+ * anyway would re-point that entry's own pending reference onto a brand-new filename for no reason,
+ * silently changing its externally-visible latch id (card d2582692's own regression, caught by
+ * `merge-quarantine-latch-id-collision.mjs` going red: clearing an unrelated sibling at the same key
+ * changed Y's own already-correct clear-by-id).
+ *
+ * @decision d2582692 — see the decision record for the real repro this closes (a human REST clear of a
+ * resolvable repo R whose own key is squatted, in-memory, by an unrelated unresolvable degraded occupant
+ * D — clearing R used to silently destroy D's only durable copy as collateral).
+ */
+function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string): void {
+  const prefix = `${quarantineHashForKey(key)}.json.tmp-`;
+  let files: string[];
+  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return; }
+  for (const f of files) {
+    if (!f.startsWith(prefix)) continue;
+    const alreadyOwned = [...activeQuarantines.values()].some((e) => e.orphanLatchFiles?.includes(f))
+      || pendingUnresolvedQuarantines.some((p) => p.entry.orphanLatchFiles?.includes(f));
+    if (alreadyOwned) continue;
+    const tmpPath = path.join(MERGE_QUARANTINE_DIR, f);
+    let raw: string;
+    try { raw = fs.readFileSync(tmpPath, "utf8"); } catch { continue; } // gone/unreadable — nothing to protect
+    let parsed: { repoPath?: unknown };
+    try { parsed = JSON.parse(raw); } catch { continue; } // corrupt — nothing to protect
+    if (typeof parsed.repoPath !== "string") continue;
+    if (directPathIdentity(parsed.repoPath) === clearIdentity) continue; // genuinely the clearer's own data
+    if (isRepoPathCurrentlyResolvable(parsed.repoPath)) continue; // a resolvable leftover is safe to overwrite today
+    protectOccupantContentBeforeDelete(tmpPath, parsed.repoPath, clearIdentity);
+  }
 }
 
 /**

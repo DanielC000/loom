@@ -77,6 +77,8 @@ const SCENARIOS = [
   "round5-own-raise-lifts-past-inferred-evictee",
   "round6-union-constituent-survives-eviction",
   "round6-mismatch-evictee-survives-clear",
+  "d2582692-clear-resolvable-protects-foreign-occupant",
+  "d2582692-clearing-union-winner-keeps-loser-pending",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -1808,6 +1810,154 @@ try {
     const allTokensAfterClearReboot = new Set(freshAfterClear.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
     check("(sanity, clear) w/teamA's own merged token(s) are genuinely gone after the clear + reboot", !allTokensAfterClearReboot.has("w-token") && !allTokensAfterClearReboot.has("teamA-token"));
     check("*** THE FIX (round 6, finding b, clear) *** y-token is UNAFFECTED by clearing the unrelated w/teamA entry", allTokensAfterClearReboot.has("y-token"));
+  } else if (scenarioName === "d2582692-clear-resolvable-protects-foreign-occupant") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO d2582692-clear-resolvable-protects-foreign-occupant — board card d2582692 (from d163aef5
+    // CR round 4, 891bb19a, finding 2). Reuses the SAME round3-degraded-walkup-to-resolvable-key fixture
+    // (R, a real resolvable, UNREGISTERED repo; D = R/gone-subdir, a nonexistent subdir whose own
+    // tautological primary arm evicts R to pending, both sharing R's own key K(R)) — but this time clears
+    // R ITSELF (clearMergeQuarantineReporting), never D.
+    //
+    // THE BUG: a human REST clear of a RESOLVABLE repo R resolves R's own fresh key K(R) and treats
+    // WHATEVER is currently armed there (D, a foreign, unrelated, degraded occupant) as "the entry being
+    // cleared" — unconditionally deleting D's in-memory record and sweeping D's own physical backing (its
+    // own `.tmp-999` residue, via the key's unconditional sweepTmpResidueForHashIfUnreferenced) even
+    // though D was never raised by this clear's own requester at all. The pre-existing clear-side protect
+    // (protectUnincorporatedOccupantBeforeDelete) also mis-fires in the OPPOSITE direction: it reads
+    // `final`'s own on-disk content (which is genuinely R's OWN data — D never actually wrote there) and,
+    // comparing it only against D (the armed occupant), wrongly treats R's OWN file as a foreign
+    // "unincorporated occupant", duplicating it under a fresh pending-divert name. That duplicate then
+    // lazily re-graduates on the very next query, resurrecting R's own token and producing the confusing
+    // "quarantined by ANOTHER repo... repoPath R" message — self-referential nonsense, since R is the
+    // very identity that just asked to be cleared.
+    //
+    // THE FIX: a clear by a resolvable repoPath lifts only entries whose identity matches the requester;
+    // an armed occupant that is not itself currently verified to belong to this key (D) is left fully
+    // alone, in-memory and on disk. D's token and physical file survive untouched; R's own pending record
+    // and file are cleared cleanly; the confusing re-block message never appears.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const r = path.join(os.tmpdir(), `loom-mqp1dug-d2582692-r-${freshSfx()}`);
+    fs.mkdirSync(r, { recursive: true });
+    tmpDirs.push(r);
+    fs.writeFileSync(path.join(r, "README.md"), "# d2582692-clear-resolvable-protects-foreign-occupant\n");
+    execSync(`git init -q && git config user.email mqp1dug@loom && git config user.name mqp1dug`, { cwd: r });
+    commitAll(r, "init", GIT_ID);
+    const Kr = canonicalRepoLockKey(r);
+    const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+    const d = path.join(r, "gone-subdir"); // never created — D's own repoPath, nonexistent subdir of R
+    check("(precondition) D (R/gone-subdir) never exists", !fs.existsSync(d));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const rFile = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+    fs.writeFileSync(rFile, JSON.stringify({
+      repoPath: r, branch: "r-branch", reason: "R's own genuine, currently-active raise",
+      enteredAt: Date.now() - 30_000, tokens: ["r-token"],
+    }, null, 2) + "\n");
+    // D's own PASS 1b tmp residue — resolvedKey manufactured to equal D's OWN walked-up currentKey
+    // (K(R), since D never exists and walks up to R) — a self-consistent, TAUTOLOGICAL primary arm.
+    const dTmpFile = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json.tmp-999`);
+    fs.writeFileSync(dTmpFile, JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+      enteredAt: Date.now(), tokens: ["d-token"], resolvedKey: Kr,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([]); // `r` deliberately NOT in registeredRepoPaths
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity) R's own token survives D's tautological-primary-arm eviction", allTokensAfterBoot.has("r-token"));
+    check("(sanity) D's own token is active too", allTokensAfterBoot.has("d-token"));
+    check("(sanity) D's own tmp residue is still on disk before the clear", fs.existsSync(dTmpFile));
+
+    // THE CLEAR UNDER TEST — R itself (the human-REST route), while D (foreign) occupies R's own key.
+    const reportResult = clearMergeQuarantineReporting(r);
+
+    check("*** THE FIX *** D's own token SURVIVES clearing R", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token"));
+    // D's own ORIGINAL `.tmp-999` residue is swept once its content has been durably copied aside — same
+    // acceptance bar as round4-p2's own comment: the content surviving SOMEWHERE on disk is what matters,
+    // never that the original filename itself stops existing.
+    const survivingFiles = fs.readdirSync(MERGE_QUARANTINE_DIR);
+    const dContentSurvivesOnDisk = survivingFiles.some((f) => fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8").includes("d-token"));
+    check("*** THE FIX *** D's own content durably survives on disk clearing R (never destroyed as collateral)", dContentSurvivesOnDisk);
+    check("*** THE FIX *** assertRepoNotQuarantined(d) still blocks, by D's own identity, after clearing R", assertRepoNotQuarantined(d).ok === false);
+    check("*** THE FIX *** the still-quarantined reason never nonsensically names R itself as R's own blocker", !(reportResult.reason ?? "").includes(`repoPath '${r}'`));
+    // Code Review follow-up — assert R's OWN clear genuinely succeeded explicitly (ok:true), never only
+    // by the absence of a confusing reason string naming R.
+    check("*** THE FIX *** assertRepoNotQuarantined(r) is explicitly UNBLOCKED right after the clear", assertRepoNotQuarantined(r).ok === true);
+
+    // DURABLE — across a reboot, D's own token/file must still be there, never resurrected-then-lost.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterRestart = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (restart) *** D's own token SURVIVES clearing R + a reboot", allTokensAfterRestart.has("d-token"));
+    check("*** THE FIX (restart) *** assertRepoNotQuarantined(d) STILL BLOCKS after clearing R + a reboot", fresh.assertRepoNotQuarantined(d).ok === false);
+    check("*** THE FIX (restart) *** assertRepoNotQuarantined(r) stays explicitly UNBLOCKED after a reboot", fresh.assertRepoNotQuarantined(r).ok === true);
+  } else if (scenarioName === "d2582692-clearing-union-winner-keeps-loser-pending") {
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // SCENARIO d2582692-clearing-union-winner-keeps-loser-pending — Code Review follow-up on d2582692,
+    // pinning its own interaction with card 398f476c's own documented "MAJOR #3" residual
+    // (docs/decisions/c9114934-degraded-occupant-safety-copy-before-key-reclaim.md): TWO wholly
+    // unresolvable identities (L1, L2) sharing ONE manufactured `resolvedKey` KS, legitimately unioned
+    // in-memory via armQuarantineKey's own same-tier (both-degraded) union — `unionQuarantineEntries`
+    // keeps the OLDER side's own identity (L1 here), so the union's own `repoPath` IS L1, and
+    // `clearMergeQuarantineByKey`'s own `clearingRepoPath` computes `undefined`
+    // (`entry.repoPath === identityRepoPath`) — MAJOR #3's own documented gap, still open, deferred to
+    // card 398f476c's identity-model redesign.
+    //
+    // BEFORE d2582692, protectForeignTmpResidueBeforeSweep did not exist, so clearing L1 (the union's
+    // own winning identity) unconditionally swept BOTH L1's and L2's own tmp residue — L2 was silently
+    // lifted along with L1, with no copy anywhere, even though L2 was never the identity the clear was
+    // addressed at.
+    //
+    // d2582692's own fix is content-aware, not identity-aware (it reads each tmp file's OWN on-disk
+    // `repoPath` directly, never trusting whichever identity the in-memory union happens to report) — so
+    // it ALSO protects L2 here, as a side effect: L2's own tmp content differs from `clearIdentity` (L1)
+    // and is currently unresolvable, so it gets durably copied aside before the sweep, surviving as its
+    // own standalone pending entry. This PINS that side effect as the current, correct behaviour — card
+    // 398f476c's own identity-model redesign should start from "clearing L1 already keeps L2 blocked as
+    // pending", not from scratch.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    const l1 = path.join(os.tmpdir(), `loom-mqp1dug-398f476c-l1-never-exists-${freshSfx()}`);
+    const l2 = path.join(os.tmpdir(), `loom-mqp1dug-398f476c-l2-never-exists-${freshSfx()}`);
+    check("(precondition) L1 and L2 never exist", !fs.existsSync(l1) && !fs.existsSync(l2));
+    const KS = `/synthetic/398f476c-major3-shared-key-${freshSfx()}`; // manufactured, never a real resolvable key
+    const KShash = createHash("sha256").update(KS).digest("hex").slice(0, 24);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // Both L1's and L2's own tmp residue is named at KS's own hash prefix — mirrors the real shape of two
+    // separate torn-write raise attempts that BOTH correctly computed KS as their intended target key.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${KShash}.json.tmp-11111`), JSON.stringify({
+      repoPath: l1, branch: "l1-branch", reason: "L1's own manufactured collision (tmp residue)",
+      enteredAt: Date.now() - 60_000, tokens: ["l1-token"], resolvedKey: KS,
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${KShash}.json.tmp-22222`), JSON.stringify({
+      repoPath: l2, branch: "l2-branch", reason: "L2's own manufactured collision (tmp residue)",
+      enteredAt: Date.now() - 30_000, tokens: ["l2-token"], resolvedKey: KS,
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([]); // neither L1 nor L2 registered — nothing legitimizes the collision
+
+    const allTokensAfterBoot = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("(sanity) L1's own token is active after boot", allTokensAfterBoot.has("l1-token"));
+    check("(sanity) L2's own token is active too (the same-tier union)", allTokensAfterBoot.has("l2-token"));
+    const activeAtKS = activeMergeQuarantineFor(l1);
+    check("(sanity) the union's own winning identity is L1 (the older raise)", !!activeAtKS && activeAtKS.repoPath === l1);
+
+    // THE CLEAR UNDER TEST — L1, the union's own winning identity, cleared by its own recorded path.
+    const reportResult = clearMergeQuarantineReporting(l1);
+
+    check("*** PINNED (398f476c MAJOR #3) *** L2's own token SURVIVES clearing the union's winner L1", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("l2-token"));
+    check("(sanity) L1's own token is genuinely gone", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("l1-token"));
+    check("*** PINNED (398f476c MAJOR #3) *** assertRepoNotQuarantined(l2) still blocks, by L2's own identity, after clearing L1", assertRepoNotQuarantined(l2).ok === false);
+    check("*** PINNED (398f476c MAJOR #3) *** assertRepoNotQuarantined(l1) is explicitly UNBLOCKED", assertRepoNotQuarantined(l1).ok === true);
+    check("(sanity) clearing L1 reports wasQuarantined:true", reportResult.wasQuarantined === true);
+
+    // DURABLE — across a reboot, L2's own token must still be there, never resurrected-then-lost.
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    const allTokensAfterRestart = new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** PINNED (398f476c MAJOR #3, restart) *** L2's own token SURVIVES clearing L1 + a reboot", allTokensAfterRestart.has("l2-token"));
+    check("(sanity, restart) L1's own token stays gone after a reboot", !allTokensAfterRestart.has("l1-token"));
+    check("*** PINNED (398f476c MAJOR #3, restart) *** assertRepoNotQuarantined(l2) STILL BLOCKS after clearing L1 + a reboot", fresh.assertRepoNotQuarantined(l2).ok === false);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }
