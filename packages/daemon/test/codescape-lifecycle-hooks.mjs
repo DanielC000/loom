@@ -38,6 +38,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       itself is reused, never removed).
 //   (5)/(6) NEGATIVE CASES: LOOM_DEV off, OR the project not codescape-enabled, ⇒ the spy client is called
 //       ZERO times across an equivalent spawn/merge/gc lifecycle — byte-identical otherwise.
+//   (9)/(10) Card 73cc6d06: gcWorktreeDir now fires fireCodescapeDrop BEFORE attempting the actual
+//       removal, unconditionally, instead of only after a successful remove — closing the window where
+//       codescape's own fs.watch on the worktree dir spins (and leaks memory, Windows) if the dir is
+//       deleted while still watched, and the gap where a wedged/failed removal never dropped the
+//       registration at all. (9) proves the ORDERING directly at the removeDir call site: the fake
+//       codescape client's dropWorktree pushes into `calls.drop` synchronously, so a removeDir override
+//       that records `calls.drop.length` at ITS OWN first synchronous line must already see the drop.
+//       (10) proves drop still fires on the removal-FAILURE path (a removeDir override that always
+//       cleanly rejects ⇒ gcWorktreeDir's outcome is "left-on-disk", worktree retained) — the exact gap
+//       the bug report's 24 "could not remove dir" lines never dropped a registration for.
+//   (11) REGRESSION (card 73cc6d06 round 2, caught by code review): the (9)/(10) fix's first cut fired
+//       fireCodescapeDrop unconditionally, even when a NEW spawn has already reclaimed this EXACT
+//       worktree path (card f487a493's "claimed"/aborted race) — the reclaiming spawn registers the
+//       SAME worktreeId (codescapeWorktreeId is keyed by taskId, not session), so dropping it here would
+//       race that re-registration and could leave codescape believing a still-live, reused worktree is
+//       gone. Simulates the race deterministically by injecting directly into
+//       SessionService's own `claimedWorktreePaths` Set (the same technique
+//       merge-finalize-resilient.mjs's own CLAIMED-path case (4) already uses) BEFORE confirming the
+//       merge, and asserts ZERO drop calls landed for that worktreeId.
 //   (8) Card f11f3aae (investigate-first on a narrow timing residual left by 088afc94): a CODE-ORDERING
 //       regression guard — fireCodescapeRegisterWorktree is always ISSUED before pty.spawn, across all
 //       four lifecycle paths (fresh spawn / resume / forkSession / recycleWorker). Investigated FIRST
@@ -518,6 +537,200 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     for (const id of liveIdsN6) { try { sessions.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
     db.close();
     try { fs.rmSync(N.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+    delete process.env.LOOM_DEV;
+    delete process.env.LOOM_CODESCAPE_BIN;
+  }
+}
+
+// ===================== (9) ORDERING (card 73cc6d06): fireCodescapeDrop fires BEFORE removeWorktree ever
+// touches the dir, not after =====================
+// makeFakeCodescape's dropWorktree pushes into `calls.drop` SYNCHRONOUSLY, with no await before the push
+// (see its own doc above) — so a `removeDir` override that records `calls.drop.length` at ITS OWN first
+// synchronous line (before it does anything else) can only ever see the drop already landed if
+// gcWorktreeDir genuinely issues it before calling removeWorktree. On pre-fix code (drop fired only
+// inside the `removed` success branch, AFTER removeWorktree returns) this assertion would read 0, not
+// >= 1 — this is a real ordering proof, not a timing-sensitive sleep/race.
+{
+  process.env.LOOM_DEV = "1";
+  process.env.LOOM_CODESCAPE_BIN = fixtureCli;
+  const homeDir = path.join(tmpHome, `order-home-${sfx}`);
+  const O = { projId: `clh-order-${sfx}`, mgrAgentId: `clh-order-mgr-${sfx}`, workerAgentId: `clh-order-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-clh-order-${sfx}`), config: { codescape: { enabled: true }, orchestration: { maxConcurrentWorkers: 10 } } };
+  const codescapeId = `clh-order-codescape-${sfx}`;
+  initRepo(O.repo, "# clh order\n");
+  seedManifest(homeDir, O.repo, codescapeId);
+  const fake = makeFakeCodescape(homeDir);
+  const removeDirCalls = [];
+  const db = new Db();
+  const sessions = new SessionService(db, makeHost(db), new OrchestrationControl(), {
+    codescape: fake,
+    reapWorktreeProcesses: async () => ({ killedPids: [] }),
+    // Records how many drop-worktree calls had ALREADY landed the instant removeDir itself is first
+    // invoked, then ACTUALLY deletes the dir itself (the override replaces killableRemoveDir entirely —
+    // a stub that merely CLAIMS removed:true without deleting anything would leave the dir on disk and
+    // falsely fail this block's own "really removed" assertion) so the rest of the merge/gc completes
+    // the same way section (3) above already proves it does.
+    removeDir: async (target, _timeoutMs) => {
+      removeDirCalls.push({ dropCountAtCallTime: fake.calls.drop.length });
+      try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* best-effort, mirrors killableRemoveDir's own contract */ }
+      return { removed: true, killed: false };
+    },
+  });
+  seedProject(db, O);
+  const liveIdsO = [];
+  try {
+    const mgr = sessions.startManager(O.mgrAgentId);
+    liveIdsO.push(mgr.id);
+    const taskId = `clh-order-task-${sfx}`;
+    db.insertTask({ id: taskId, projectId: O.projId, title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+    const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: O.workerAgentId, kickoffPrompt: "GO" });
+    liveIdsO.push(worker.id);
+    check("(9) setup: register-worktree fired for the ordering worker", await waitFor(() => fake.calls.register.length >= 1));
+    const registeredWorktreeId = fake.calls.register[0]?.worktreeId;
+    fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
+    commitAll(worker.worktreePath, "change.txt", GIT_ID);
+    const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
+    check("(9) the merge lands", confirm.merged === true);
+    check("(9) the worktree was actually removed (removeDir override returned removed:true)", !fs.existsSync(worker.worktreePath));
+    check("(9) removeDir (the real removal) was actually invoked", removeDirCalls.length >= 1);
+    check("(9) fireCodescapeDrop already fired BEFORE removeDir's own first call — the ordering fix",
+      (removeDirCalls[0]?.dropCountAtCallTime ?? 0) >= 1);
+    check("(9) the drop that fired was for THIS worker's own registered worktreeId",
+      fake.calls.drop.some((c) => c.worktreeId === registeredWorktreeId));
+  } finally {
+    for (const id of liveIdsO) { try { sessions.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
+    db.close();
+    try { fs.rmSync(O.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+    delete process.env.LOOM_DEV;
+    delete process.env.LOOM_CODESCAPE_BIN;
+  }
+}
+
+// ===================== (10) FAILURE PATH (card 73cc6d06): drop still fires when the removal itself FAILS
+// =====================
+// Before the fix, fireCodescapeDrop lived INSIDE gcWorktreeDir's `removed` success branch only — a
+// worktree that was wedged or left-on-disk never deregistered at all (the bug report's 24 "could not
+// remove dir" lines, 2026-10-04). A removeDir override that always cleanly rejects (never "killed",
+// so removeWorktree retries REMOVE_DIR_CLEAN_RETRY_ATTEMPTS times and then gives up with `removed:false`)
+// drives gcWorktreeDir's outcome to "left-on-disk" — this proves the drop call still landed anyway.
+{
+  process.env.LOOM_DEV = "1";
+  process.env.LOOM_CODESCAPE_BIN = fixtureCli;
+  const homeDir = path.join(tmpHome, `failpath-home-${sfx}`);
+  const F = { projId: `clh-failpath-${sfx}`, mgrAgentId: `clh-failpath-mgr-${sfx}`, workerAgentId: `clh-failpath-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-clh-failpath-${sfx}`), config: { codescape: { enabled: true }, orchestration: { maxConcurrentWorkers: 10 } } };
+  const codescapeId = `clh-failpath-codescape-${sfx}`;
+  initRepo(F.repo, "# clh failpath\n");
+  seedManifest(homeDir, F.repo, codescapeId);
+  const fake = makeFakeCodescape(homeDir);
+  const db = new Db();
+  const sessions = new SessionService(db, makeHost(db), new OrchestrationControl(), {
+    codescape: fake,
+    reapWorktreeProcesses: async () => ({ killedPids: [] }),
+    // A clean (non-"killed") rejection on EVERY attempt — removeWorktree retries
+    // REMOVE_DIR_CLEAN_RETRY_ATTEMPTS times (worktrees.ts) and then gives up with removed:false,
+    // wedged:false ⇒ gcWorktreeDir's outcome is "left-on-disk"; the directory is never actually touched.
+    removeDir: async (_target, _timeoutMs) => ({ removed: false, killed: false }),
+  });
+  seedProject(db, F);
+  const liveIdsF = [];
+  let worker; // declared outside the try so `finally` can clean up its (never-removed-by-design) worktree
+  try {
+    const mgr = sessions.startManager(F.mgrAgentId);
+    liveIdsF.push(mgr.id);
+    const taskId = `clh-failpath-task-${sfx}`;
+    db.insertTask({ id: taskId, projectId: F.projId, title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+    worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: F.workerAgentId, kickoffPrompt: "GO" });
+    liveIdsF.push(worker.id);
+    check("(10) setup: register-worktree fired for the failure-path worker", await waitFor(() => fake.calls.register.length >= 1));
+    const registeredWorktreeId = fake.calls.register[0]?.worktreeId;
+    fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
+    commitAll(worker.worktreePath, "change.txt", GIT_ID);
+    const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
+    check("(10) the merge itself still lands (gc failure doesn't block the merge)", confirm.merged === true);
+    // confirmWorkerMerge surfaces the GC outcome as a human-readable `warning` string (worktreeGcWarning,
+    // service.ts) — there is no separate `worktreeGcOutcome` field on its own return.
+    check("(10) the merge's own warning names the removal-failure path (left-on-disk)", typeof confirm.warning === "string" && confirm.warning.includes("could not be removed"));
+    check("(10) the worktree directory is still on disk (removal genuinely failed)", fs.existsSync(worker.worktreePath));
+    check("(10) drop-worktree STILL fired despite the removal failure — the fix",
+      await waitFor(() => fake.calls.drop.some((c) => c.worktreeId === registeredWorktreeId)));
+  } finally {
+    for (const id of liveIdsF) { try { sessions.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
+    db.close();
+    // The worktree directory was never actually removed (that's the point of this test, via the
+    // always-rejecting removeDir override above) — clean up ONLY that specific worktree path by hand
+    // (never a parent directory — WORKTREES_DIR is a SIBLING of LOOM_HOME, outside tmpHome, so nothing
+    // else cleans this one up) so the test doesn't leak it.
+    if (worker?.worktreePath) { try { fs.rmSync(worker.worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ } }
+    try { fs.rmSync(F.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+    delete process.env.LOOM_DEV;
+    delete process.env.LOOM_CODESCAPE_BIN;
+  }
+}
+
+// ===================== (11) REGRESSION (card 73cc6d06 round 2): a reclaiming spawn's already-claimed
+// path must NEVER be dropped =====================
+// Caught by code review of the (9)/(10) fix's first cut: firing fireCodescapeDrop unconditionally,
+// BEFORE even checking whether a NEW spawn has already claimed this exact path (card f487a493's
+// "claimed"/aborted race), would race that spawn's own re-registration of the SAME worktreeId
+// (codescapeWorktreeId is keyed by taskId, not session id — the reclaiming spawn targets the SAME task,
+// hence the SAME path, hence the SAME worktreeId). Simulated the same way
+// merge-finalize-resilient.mjs's own CLAIMED-path case (4) simulates it: inject directly into
+// SessionService's own `claimedWorktreePaths` Set — the exact seam `reclaimWedgedWorktreePathForSpawn`
+// itself populates — BEFORE calling confirmWorkerMerge, so the race is deterministic rather than a real
+// concurrent spawn this hermetic test can't reliably schedule.
+{
+  process.env.LOOM_DEV = "1";
+  process.env.LOOM_CODESCAPE_BIN = fixtureCli;
+  const { normForCompare } = await import("../dist/git/worktrees.js");
+  const homeDir = path.join(tmpHome, `claimrace-home-${sfx}`);
+  const R = { projId: `clh-claimrace-${sfx}`, mgrAgentId: `clh-claimrace-mgr-${sfx}`, workerAgentId: `clh-claimrace-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-clh-claimrace-${sfx}`), config: { codescape: { enabled: true }, orchestration: { maxConcurrentWorkers: 10 } } };
+  const codescapeId = `clh-claimrace-codescape-${sfx}`;
+  initRepo(R.repo, "# clh claimrace\n");
+  seedManifest(homeDir, R.repo, codescapeId);
+  const fake = makeFakeCodescape(homeDir);
+  const db = new Db();
+  const sessions = new SessionService(db, makeHost(db), new OrchestrationControl(), {
+    codescape: fake,
+    reapWorktreeProcesses: async () => ({ killedPids: [] }),
+  });
+  seedProject(db, R);
+  const liveIdsR = [];
+  let worker; // declared outside the try so `finally` can clean up its never-actually-removed worktree
+  try {
+    const mgr = sessions.startManager(R.mgrAgentId);
+    liveIdsR.push(mgr.id);
+    const taskId = `clh-claimrace-task-${sfx}`;
+    db.insertTask({ id: taskId, projectId: R.projId, title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+    worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: R.workerAgentId, kickoffPrompt: "GO" });
+    liveIdsR.push(worker.id);
+    check("(11) setup: register-worktree fired for the claim-race worker", await waitFor(() => fake.calls.register.length >= 1));
+    const registeredWorktreeId = fake.calls.register[0]?.worktreeId;
+    fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
+    commitAll(worker.worktreePath, "change.txt", GIT_ID);
+
+    // The injected race: a reclaiming spawn has ALREADY claimed this EXACT path, mirroring
+    // reclaimWedgedWorktreePathForSpawn's own claim — this must land BEFORE confirmWorkerMerge so
+    // gcWorktreeDir's pre-check (right after it marks `removingWorktreePaths`) sees it.
+    const normPath = normForCompare(worker.worktreePath);
+    sessions.claimedWorktreePaths.add(normPath);
+    let confirm;
+    try {
+      confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
+    } finally {
+      sessions.claimedWorktreePaths.delete(normPath); // this test's own injected claim, not the daemon's
+    }
+    check("(11) the merge itself still lands despite the claim-abort", confirm.merged === true);
+    check("(11) the worktree was NEVER TOUCHED (still fully present, real .git linkage)",
+      fs.existsSync(worker.worktreePath) && fs.existsSync(path.join(worker.worktreePath, ".git")));
+    check("(11) drop-worktree did NOT fire for this worktreeId — THE REGRESSION FIX",
+      !fake.calls.drop.some((c) => c.worktreeId === registeredWorktreeId));
+    check("(11) no drop call fired AT ALL across this worker's whole lifecycle", fake.calls.drop.length === 0);
+  } finally {
+    for (const id of liveIdsR) { try { sessions.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
+    db.close();
+    // The worktree was never actually removed (that's the point of this test) — clean up ONLY that
+    // specific worktree path by hand (never a parent directory).
+    if (worker?.worktreePath) { try { fs.rmSync(worker.worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ } }
+    try { fs.rmSync(R.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
     delete process.env.LOOM_DEV;
     delete process.env.LOOM_CODESCAPE_BIN;
   }

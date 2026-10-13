@@ -23562,14 +23562,19 @@ export class SessionService {
   }
 
   /**
-   * Card 088afc94 (P4 wiring) — deregister a removed worktree (`DELETE
+   * Card 088afc94 (P4 wiring) — deregister a worktree about to be removed (`DELETE
    * /project/<codescapeId>/worktree/<worktreeId>`), which ALSO evicts that worktree's live streamable-HTTP
    * MCP sessions on codescape's side (their own `evictSessions`, confirmed in `worktreeRoute.ts`). Revives
    * the hook the C2/C3 rewrite (card e068a2ab) had left as an inert no-op "for a future C4… to fill back
    * in" — this is that future card. Fire-and-forget, best-effort: a deregister failure is logged, never
-   * blocks or fails the worktree removal it's called alongside (see {@link gcWorktreeDir}). Skipped
-   * entirely when `worktreeId` is null (a taskless worker was never registered in the first place — see
-   * {@link fireCodescapeRegisterWorktree}) or codescape isn't enabled/resolvable for this project.
+   * blocks or fails the worktree removal it's called alongside (see {@link gcWorktreeDir}).
+   *
+   * @decision 73cc6d06 — {@link gcWorktreeDir} calls this BEFORE attempting the actual removal, not
+   * after, and regardless of the removal's outcome — never skip/defer this call to "after removal succeeds" again.
+   *
+   * Skipped entirely when `worktreeId` is null (a taskless worker was never registered in the first
+   * place — see {@link fireCodescapeRegisterWorktree}) or codescape isn't enabled/resolvable for this
+   * project.
    */
   private fireCodescapeDrop(ctx?: { projectId: string; worktreeId: string | null }): void {
     if (!ctx?.worktreeId || !this.codescape) return;
@@ -23771,19 +23776,29 @@ export class SessionService {
     const normPath = normForCompare(worktreePath);
     this.removingWorktreePaths.add(normPath);
     try {
+      // @decision 73cc6d06 — a claim present here can only have landed BEFORE the `.add` above (round-3
+      // a5d9c458 mutex refuses any later one) ⇒ removal below is certain to abort — short-circuit
+      // WITHOUT firing fireCodescapeDrop, so it never races the reclaiming spawn's own re-registration.
+      if (this.claimedWorktreePaths.has(normPath)) {
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} not removed — a new spawn already claimed this path for reuse before removal began (expected, safe). Nothing was touched.`);
+        return { outcome: "claimed" };
+      }
+      // @decision 73cc6d06 — fired BEFORE removeWorktree, regardless of the removal's outcome; safe
+      // here because the check just above confirmed no reclaiming spawn can be mid-flight against this
+      // exact path.
+      this.fireCodescapeDrop(codescapeCtx);
       const { removed, wedged, aborted } = await removeWorktree(repoPath, worktreePath, {
         timeoutMs: this.gitOpMs,
         removeDir: this.removeDirOverride,
-        // Belt and braces: removeWorktree's OWN retry loop re-checks this before every attempt, in case a
-        // claim somehow lands despite the REMOVING mark above.
+        // Belt and braces: removeWorktree's OWN retry loop re-checks this before every attempt. Per the
+        // pre-check above, this should be structurally unreachable today — kept as a defensive backstop
+        // in case a future change to the claim mutual-exclusion ever reopens a window here.
         abortIfClaimed: () => this.claimedWorktreePaths.has(normPath),
       });
       if (aborted) {
-        // card f487a493: a NEW spawn claimed this path while removal was in flight — correct, safe
-        // behaviour (the exact race finalizeMerge's own, non-staleKnowledge call can hit on attempt 1,
-        // since it never checks claimedWorktreePaths before this call the way the staleKnowledge guard
-        // does). Non-alarming by design: never logged as a failed removal, never counted as wedged/
-        // left-on-disk.
+        // card f487a493 — see the pre-check above's doc for why this branch should no longer be
+        // reachable in production; kept non-alarming regardless, same wording posture as that check.
         // eslint-disable-next-line no-console
         console.warn(`[worktree] ${worktreePath} not removed — a new spawn claimed this path for reuse while removal was in flight (expected, safe). Nothing further was touched.`);
         return { outcome: "claimed" };
@@ -23794,12 +23809,9 @@ export class SessionService {
         // worktree it was tracking is gone, so an abandoned-while-tripped branch can't leak the entry forever.
         if (opts?.branch) this.gateTimeoutStreak.delete(opts.branch);
         // Card 498452c0: the worktree's own ~/.claude.json trust entry is now dead weight the CLI's trust
-        // check can never reach again — prune it. Best-effort, fire-and-forget, same posture as
-        // fireCodescapeDrop immediately below.
+        // check can never reach again — prune it. Best-effort, fire-and-forget.
         removeClaudeConfigEntryForWorktree(worktreePath);
-        // Codescape C3: this worktree is GENUINELY gone (never fired for recycleWorker reuse — that path
-        // never calls gcWorktreeDir at all) — deregister it. Fire-and-forget, best-effort.
-        this.fireCodescapeDrop(codescapeCtx);
+        // Codescape C3: the drop itself already fired BEFORE removeWorktree, above — see card 73cc6d06.
         return { outcome: "removed" };
       }
       if (wedged) {
