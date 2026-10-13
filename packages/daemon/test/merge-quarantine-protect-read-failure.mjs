@@ -56,13 +56,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // "Round 5" section — including its own scoped note on which new test actually discriminates against
 // round 4's code vs. which was proven correct by direct, local ablation instead.
 //
-// ⚠️ KNOWN GAP (Code Review fe4bb9ef, folded into card 8db913e2 — the RAISE side, NOT this card's scope):
-// `round5-rename-unmarks`'s own fixture (below) exposes a PRE-EXISTING defect in `enterMergeQuarantine`'s
-// brand-new-arm branch — a same-identity re-raise's own successful write OVERWRITES `final` without
-// unioning whatever token(s) were already outstanding there, silently losing them (no reboot recovery
-// either). This is NOT something round 5 introduces or fixes; that test's own unlink assertion is a
-// MECHANISM check (the rename cleared the keep-set's mark) only, never a certification that the token
-// loss itself is correct — see that scenario's own inline note for the exact repro.
+// CARD 8db913e2 (the RAISE side): `round5-rename-unmarks`'s own fixture (below) used to expose a
+// PRE-EXISTING defect in `enterMergeQuarantine`'s own raise-write call sites — a protect call's `false`
+// return (or a stale "none" against a MARKED basename) was ignored, so the guard-skipped raise write
+// could overwrite a kept occupant's file outright, or a same-identity re-raise could overwrite `final`
+// without unioning whatever token(s) were already outstanding there. Fixed by threading each protect
+// call's own return (plus a re-check against `keptUnreadableLatchFiles`) into a divert-or-carry-forward
+// decision at every raise write site — see `resolveRaiseOverwrite`/`divertRaiseEntry` in
+// merge-quarantine.ts and docs/decisions/8db913e2-*.md.
 //
 // Two scenarios, each with its own positive control (clean, non-injected) and an explicit ENOENT control:
 //   - final-path: the foreign occupant's content lives directly at `final` — reaches
@@ -887,30 +888,21 @@ try {
   check("*** THE FIX (round5-copy-aside, reboot) *** D's own token still SURVIVES", new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token-round5-copy-aside"));
   }
 
-  // ---- round5-rename-unmarks — a successful rename onto a marked basename clears the mark, so a LATER,
-  // wholly ORDINARY clear of whatever is now there is never falsely blocked by stale history ----
-  //
-  // ⚠️ KNOWN GAP (Code Review fe4bb9ef, folded into card 8db913e2 — the RAISE side, out of this card's
-  // own scope): the same-identity re-raise below OVERWRITES `final` without unioning the ORIGINAL,
-  // still-outstanding token that was sitting there (`d-token-round5-rename-unmarks`) — that token is
-  // LOST the instant the re-raise's own write succeeds, before the clear below even runs, and does NOT
-  // survive a reboot. This is a PRE-EXISTING defect in `enterMergeQuarantine`'s own brand-new-arm branch
-  // (it never reads/unions `final`'s own prior content before overwriting it), not something round 5
-  // introduces or fixes — round 5 only governs the keep-SET's own mark, never token union on a raise.
-  // The unlink assertion below is a MECHANISM check only (confirming the rename cleared the mark so a
-  // later clear isn't falsely blocked forever) — it does NOT certify the token loss as correct behavior.
-  // ----
+  // ---- round5-rename-unmarks — a successful rename onto a marked basename clears the mark, AND
+  // (card 8db913e2) a same-identity re-raise now UNIONS whatever token(s) were already outstanding at
+  // `final` into its own fresh write, rather than silently dropping them ----
   {
   const r = makeToplevelRepo("round5-rename-unmarks-r");
   const Kr = canonicalRepoLockKey(r);
   const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
   const d = path.join(r, "gone-subdir");
+  const origToken = "d-token-round5-rename-unmarks";
 
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
   fs.writeFileSync(finalPath, JSON.stringify({
     repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
-    enteredAt: Date.now(), tokens: ["d-token-round5-rename-unmarks"], resolvedKey: Kr,
+    enteredAt: Date.now(), tokens: [origToken], resolvedKey: Kr,
   }, null, 2) + "\n");
   reenterMergeQuarantinesAtBoot([]);
 
@@ -920,16 +912,30 @@ try {
   check("(round5-rename-unmarks) D's own file survives the marking clear", fs.existsSync(finalPath));
 
   // D becomes resolvable and re-raises ITSELF (same identity as the stale content at `final` — "none",
-  // no copy-aside needed) — its own write succeeds this time, renaming fresh content onto `final`.
-  // ⚠️ See the KNOWN GAP note above: this overwrite silently drops the ORIGINAL token that was there —
-  // a pre-existing raise-side defect, tracked by 8db913e2, NOT asserted here as correct.
+  // no copy-aside needed) — card 8db913e2: the write now carries `origToken` forward instead of
+  // silently overwriting it.
   fs.mkdirSync(d, { recursive: true });
   const t2 = enterMergeQuarantine(d, "d-branch-fresh", "a fresh raise overwriting its own stale content");
+  check("*** THE FIX (round5-rename-unmarks) *** the re-raise carries the ORIGINAL token forward",
+    new Set(activeMergeQuarantineFor(d)?.tokens ?? []).has(origToken));
 
-  // A later, wholly ORDINARY clear of D's OWN fresh entry must proceed normally — if the mark had
-  // survived the rename above, this legitimate, unrelated clear would be falsely blocked forever.
+  // Clearing ONLY the fresh token must be a PARTIAL clear — `origToken` is still outstanding, so the
+  // file must survive (it would NOT have, pre-fix: the original token was already gone by this point).
   clearMergeQuarantineByToken(d, t2);
-  check("(round5-rename-unmarks mechanism check) the later ordinary clear actually UNLINKS the file (the rename cleared the mark — NOT a certification of the known ORIG-token-loss gap noted above)", !fs.existsSync(finalPath));
+  check("*** THE FIX (round5-rename-unmarks) *** a partial clear of the fresh token alone leaves the file on disk (ORIG still outstanding)", fs.existsSync(finalPath));
+  check("*** THE FIX (round5-rename-unmarks) *** the ORIGINAL token is still listed as active after the partial clear",
+    new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(origToken));
+
+  const fresh = await freshBootModule();
+  fresh.reenterMergeQuarantinesAtBoot([]);
+  check("*** THE FIX (round5-rename-unmarks, reboot) *** the ORIGINAL token SURVIVES the reboot",
+    new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(origToken));
+
+  // Clearing the ORIGINAL token too (now, against the rebooted module's own state) must actually unlink
+  // the file — the rename's own mark-clear (round 5) is still intact; nothing about this fix leaves it
+  // falsely blocked forever.
+  fresh.clearMergeQuarantineByToken(d, origToken);
+  check("(round5-rename-unmarks mechanism check) clearing the LAST outstanding token actually UNLINKS the file", !fs.existsSync(finalPath));
   }
 } finally {
   for (const d of tmpDirs) {
@@ -967,11 +973,14 @@ console.log(failures === 0
     "wrong when disk and memory have diverged across raise generations — round5-b2 (the review's own " +
     "cross-call repro, with its control) is the one new assertion proven RED against round 4's own code; " +
     "round5-copy-aside (deleteMergeQuarantineLatchByKey's own foreignPending branch literally unlinks a " +
-    "marked file after a durable copy-aside, no duplicate left) and round5-rename-unmarks (a mechanism " +
-    "check only: a successful rename onto a marked basename clears it, so a later ordinary clear isn't " +
-    "falsely blocked forever — see its own KNOWN GAP note for a separate, pre-existing token-loss defect " +
-    "on that same fixture, tracked by card 8db913e2, never certified here as correct) were each proven " +
-    "by direct, local ablation of their own specific .delete() line instead, since round 4's own " +
-    "anyProtectRan happened to produce the same visible outcome in both of those exact scenarios."
+    "marked file after a durable copy-aside, no duplicate left) and round5-rename-unmarks (a successful " +
+    "rename onto a marked basename clears it, so a later ordinary clear isn't falsely blocked forever) " +
+    "were each proven by direct, local ablation of their own specific .delete() line instead, since " +
+    "round 4's own anyProtectRan happened to produce the same visible outcome in both of those exact " +
+    "scenarios. " +
+    "CARD 8db913e2 (the RAISE side): round5-rename-unmarks now ALSO asserts the re-raise carries the " +
+    "ORIGINAL token forward (instead of silently dropping it), that a partial clear of only the fresh " +
+    "token leaves the file on disk with the original still active, that the original survives a reboot, " +
+    "and that clearing it too finally unlinks the file."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
