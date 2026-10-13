@@ -777,6 +777,28 @@ function wouldOverwriteDifferentUnresolvableOccupant(final: string, entry: Merge
 }
 
 /**
+ * THE shared on-disk-token reader every caller that might resurrect a token from `final`'s own raw bytes
+ * goes through — parses `parsed.tokens` (array form) with `parsed.token` (legacy singular) as a fallback,
+ * then subtracts every {@link clearedTokens} token THIS PROCESS has already deliberately cleared. `raw`
+ * is the on-disk array BEFORE that subtraction (empty when neither field parses) — a caller that needs to
+ * know "every real on-disk token was already released" (never "there happened to be none at all") reads
+ * `raw.length` itself rather than re-deriving it from `surviving.length === 0`, which is ambiguous between
+ * the two. `surviving` is `raw` with every tombstoned token removed — this is what a resurrection union
+ * must use.
+ *
+ * @decision 7a7e041b — route every on-disk-token read through this ONE reader; a caller that re-parses
+ * `tokens`/`token` independently skips the subtraction and can resurrect an already-cleared token.
+ */
+function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }): { raw: string[]; surviving: string[] } {
+  const raw = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
+    ? parsed.tokens
+    : typeof parsed.token === "string" ? [parsed.token] : [];
+  // @decision 8db913e2 (round 3) — never let a stale on-disk copy resurrect a token THIS PROCESS already
+  // deliberately cleared; see clearedTokens' own doc comment for why subtracting it here is safe.
+  return { raw, surviving: raw.filter((t) => !clearedTokens.has(t)) };
+}
+
+/**
  * THE chokepoint for a MARKED basename ({@link keptUnreadableLatchFiles}) about to be renamed over by
  * ANY call to {@link writeMergeQuarantineLatch} — a raise, a lazy-graduation, a sibling-consume, or a
  * partial-clear rewrite all funnel through this one check, so none of them can independently reintroduce
@@ -817,12 +839,7 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
   try { parsed = JSON.parse(raw) as typeof parsed; } catch { return entry; } // corrupt — nothing usable
   if (typeof parsed.repoPath !== "string") return entry;
   if (directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) return entry; // a different identity — the pre-existing guard/protect rules already govern this
-  const onDiskTokens = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
-    ? parsed.tokens
-    : typeof parsed.token === "string" ? [parsed.token] : [];
-  // @decision 8db913e2 (round 3) — never let a stale on-disk copy resurrect a token THIS PROCESS already
-  // deliberately cleared; see clearedTokens' own doc comment for why subtracting it here is safe.
-  const resurrectable = onDiskTokens.filter((t) => !clearedTokens.has(t));
+  const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed);
   return resurrectable.length > 0 ? { ...entry, tokens: [...new Set([...resurrectable, ...entry.tokens])] } : entry;
 }
 
@@ -1502,7 +1519,11 @@ function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: 
  *
  * @decision 63e49ee2 — ALSO `false` on a non-ENOENT read failure of `final`: there is no parsed content
  * left to copy aside, so keeping `final` itself, unmodified, is the only remaining protection. See the
- * decision record. */
+ * decision record.
+ *
+ * @decision 7a7e041b — reads on-disk tokens via {@link readSurvivingOnDiskTokens} (shared with
+ * {@link reconcileMarkedBasenameBeforeWrite}) and skips the copy-aside when every real on-disk token is
+ * already cleared — see the decision record for why that's safe. */
 function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: string, describeClearer: string): boolean {
   let raw: string;
   try {
@@ -1520,9 +1541,13 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   let parsed: Partial<MergeQuarantineEntry> & { token?: string };
   try { parsed = JSON.parse(raw) as typeof parsed; } catch { return true; } // corrupt — nothing to protect
   if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return true;
-  const tokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
-    ? parsed.tokens
-    : [typeof parsed.token === "string" ? parsed.token : randomUUID()];
+  const { raw: rawTokens, surviving: survivingTokens } = readSurvivingOnDiskTokens(parsed);
+  // @decision 7a7e041b — every real on-disk token was already deliberately cleared by THIS process (a
+  // by-token or full clear that durably removed its own record before this exact copy-aside ran) — there
+  // is no owner left to protect, so skip the copy-aside entirely rather than persist an empty or
+  // random-token record. See this function's own jsdoc above for why this is safe.
+  if (rawTokens.length > 0 && survivingTokens.length === 0) return true;
+  const tokens = survivingTokens.length > 0 ? survivingTokens : [randomUUID()];
   const toPersist: MergeQuarantineEntry = {
     repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
     opId: typeof parsed.opId === "string" ? parsed.opId : undefined,

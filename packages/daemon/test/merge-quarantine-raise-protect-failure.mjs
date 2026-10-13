@@ -778,6 +778,122 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Code Review of d6efbc9b, card 7a7e041b ("7a7e041b-p3") — `protectOccupantContentBeforeDelete`'s own
+  // on-disk token read never subtracted `clearedTokens`, unlike its sibling reader
+  // `reconcileMarkedBasenameBeforeWrite`. A degraded foreign occupant's already-released token could ride
+  // back in via the copy-aside path a LATER raise's own protect call triggers. THE FIX: both readers now
+  // go through the SAME shared `readSurvivingOnDiskTokens`, and the copy-aside is SKIPPED entirely
+  // (nothing is persisted) when every real on-disk token has already been deliberately cleared.
+  //
+  // P3 below is the card's own repro, ported verbatim from its 8 numbered steps. By the time the
+  // copy-aside runs, EVERY token physically on `final` (just t1, by then) has already been deliberately
+  // cleared by this process — this IS the card's own "all-tokens-tombstoned" scenario.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("7a7e041b-p3");
+  const subD = path.join(r, "sub-d");
+  fs.mkdirSync(subD, { recursive: true });
+  const Kr = canonicalRepoLockKey(r);
+  check("(p3 precondition) sub-d shares R's own canonical key", canonicalRepoLockKey(subD) === Kr);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+
+  // Steps 1-3: d1 raises sub-d; t1 raises R at the same key — the existing branch takes d1's own
+  // identity (longest-outstanding raise wins), so `final` ends up {repoPath: sub-d, tokens: [d1, t1]}.
+  const d1 = enterMergeQuarantine(subD, "d-branch", "sub-d raises itself (d1)");
+  const t1 = enterMergeQuarantine(r, "r-branch", "r raises at the same key (existing branch)");
+  check("(p3 precondition) final holds both d1 and t1", (contentIfExists(finalPath) ?? "").includes(d1) && (contentIfExists(finalPath) ?? "").includes(t1));
+
+  // Step 4: clear d1 (a PARTIAL clear — t1 remains) — final now holds only t1.
+  clearMergeQuarantineByToken(subD, d1);
+  check("(p3 precondition) final holds only t1 after d1's partial clear", (contentIfExists(finalPath) ?? "").includes(t1) && !(contentIfExists(finalPath) ?? "").includes(d1));
+
+  // Step 5: sub-d's own identity is now unresolvable.
+  fs.rmSync(subD, { recursive: true, force: true });
+
+  // Step 6: release t1 — the LAST remaining in-memory token on that entry — while `final`'s own read
+  // fails: `clearMergeQuarantineByKey` keeps `final` (fail-closed), but d6efbc9b's own fix still
+  // tombstones t1 unconditionally. R is lifted in-process.
+  const injectClear = injectReadFailureOnlyNth(finalPath, 1);
+  clearMergeQuarantineByToken(r, t1);
+  injectClear.restore();
+  check("(p3 precondition) r is lifted IN-PROCESS after releasing t1", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(t1));
+
+  // Steps 7-8: a fresh raise of R — no injection here at all. `final` still physically holds [t1] (kept,
+  // fail-closed, by step 6), and sub-d's own identity is unresolvable, so this hits the "different,
+  // still-unresolvable identity" branch and calls `protectOccupantContentBeforeDelete(final, subD, r)`.
+  // Pre-fix: it copies [t1] aside into a BRAND-NEW pending sub-d record, resurrecting a token this
+  // process already tombstoned.
+  const t2 = enterMergeQuarantine(r, "r-branch", "r re-raises (t2)");
+  const tokensAfterT2 = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (p3) *** t1 is NOT resurrected by r's own re-raise's copy-aside", !tokensAfterT2.has(t1));
+  check("(p3) t2 itself is enforced", tokensAfterT2.has(t2));
+  check("*** THE FIX (p3) *** no brand-new sub-d pending record was minted for an already-fully-released occupant",
+    !listActiveMergeQuarantines().some((q) => q.repoPath === subD));
+
+  clearMergeQuarantineByToken(r, t2);
+  const tokensAfterT2Clear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (p3) *** r is FULLY lifted IN-PROCESS — never stuck on a resurrected t1", !tokensAfterT2Clear.has(t1) && !tokensAfterT2Clear.has(t2));
+
+  const freshP3 = await freshBootModule();
+  freshP3.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensP3 = new Set(freshP3.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (p3, reboot) *** t1 is NOT resurrected after a reboot", !freshTokensP3.has(t1));
+  check("*** THE FIX (p3, reboot) *** t2 is NOT resurrected after a reboot either", !freshTokensP3.has(t2));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 7a7e041b, MIXED SCENARIO ("7a7e041b-mixed") — `final` physically holds TWO tokens: one already
+  // tombstoned (an unrelated, fully-cleared raise that happens to reuse the identical token string — the
+  // tombstone set is keyed on the string alone, exactly like production), the other never cleared at
+  // all. The fix must drop ONLY the tombstoned token from the copy-aside, never discard the still-
+  // legitimately-outstanding survivor and never keep the dead one either.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("7a7e041b-mixed");
+  const d = path.join(r, "gone-subdir"); // never created — a phantom, unresolvable occupant identity
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+
+  // Mint a token via a wholly UNRELATED repo and fully clear it — this durably tombstones that exact
+  // string in `clearedTokens`, with no connection at all to r/d/finalPath below.
+  const scratch = makeToplevelRepo("7a7e041b-mixed-scratch");
+  const deadTok = enterMergeQuarantine(scratch, "scratch-branch", "scratch raise — becomes the tombstoned token");
+  clearMergeQuarantineByToken(scratch, deadTok);
+  check("(mixed precondition) deadTok is lifted in-process (tombstoned)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(deadTok));
+
+  // Hand-write `final` directly (never loaded into THIS process's memory at all — d is never booted),
+  // holding BOTH the already-tombstoned token and a genuinely fresh, never-cleared survivor.
+  const keepTok = "mixed-keep-token-7a7e041b";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, holding a mixed token set",
+    enteredAt: Date.now(), tokens: [keepTok, deadTok],
+  }, null, 2) + "\n");
+  check("(mixed precondition) final holds both tokens before r's raise", (contentIfExists(finalPath) ?? "").includes(keepTok) && (contentIfExists(finalPath) ?? "").includes(deadTok));
+
+  // r raises itself: nothing is armed at Kr in this process (d was never booted), so this hits the
+  // "no existing" / brand-new-entry region and calls protectOccupantContentBeforeDelete(final, d, r).
+  const rTok = enterMergeQuarantine(r, "r-branch", "r raises over the mixed-token foreign occupant");
+  const tokensAfterRaise = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (mixed) *** the tombstoned deadTok is dropped from the copy-aside, never resurrected", !tokensAfterRaise.has(deadTok));
+  check("*** THE FIX (mixed) *** the still-owed keepTok SURVIVES the copy-aside", tokensAfterRaise.has(keepTok));
+  check("(mixed) r's own raise is enforced too", tokensAfterRaise.has(rTok));
+
+  clearMergeQuarantineByToken(d, keepTok);
+  clearMergeQuarantineByToken(r, rTok);
+  const tokensAfterClear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(mixed) everything lifts in-process once genuinely released", !tokensAfterClear.has(keepTok) && !tokensAfterClear.has(deadTok) && !tokensAfterClear.has(rTok));
+
+  const freshMixed = await freshBootModule();
+  freshMixed.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensMixed = new Set(freshMixed.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (mixed, reboot) *** deadTok is NOT resurrected after a reboot", !freshTokensMixed.has(deadTok));
+  check("(mixed, reboot) keepTok/rTok also stay gone after a reboot (fully released)", !freshTokensMixed.has(keepTok) && !freshTokensMixed.has(rTok));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // CARD dd34da46, ITEM 1 ("dd34da46-item1") — an existing-branch divert leaves `final`'s own
   // `keptUnreadableLatchFiles` mark in place (no rename ever lands on `final`). A LATER full clear of the
   // armed identity (`clearMergeQuarantineByRecordedPath`) used to keep `final` unconditionally because of
@@ -1227,6 +1343,12 @@ console.log(failures === 0
     "FOLLOW-UP (CR4 of 8db913e2, finding 1, card d6efbc9b): a BY-TOKEN release of the owner's LAST " +
     "outstanding token now tombstones that token unconditionally even when the delegated " +
     "`clearMergeQuarantineByKey` call keeps `final` (read-failure-kept) and so skips its own tombstone — " +
-    "the owner's release of a token and the fate of the physical final are two separate facts (d6efbc9b-z3)."
+    "the owner's release of a token and the fate of the physical final are two separate facts (d6efbc9b-z3). " +
+    "FOLLOW-UP (CR of d6efbc9b, card 7a7e041b): `protectOccupantContentBeforeDelete`'s own copy-aside " +
+    "now reads on-disk tokens through the SAME shared, clearedTokens-subtracting reader " +
+    "`reconcileMarkedBasenameBeforeWrite` already used, so the two can never drift apart again — a " +
+    "degraded occupant whose every on-disk token is already tombstoned is copied aside NOT AT ALL (p3), " +
+    "and one whose on-disk tokens are a genuine mix of tombstoned and still-owed carries forward only the " +
+    "survivor (mixed)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
