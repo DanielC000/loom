@@ -165,7 +165,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
             <Dot tone={metaDot} glow={watchdog} />
             <span style={{ color: color.cyan }}>{q.projectName}</span>
             <span>· <RequestProvenance q={q} /></span>
-            <span>· {q.state === "pending" ? "asked" : "answered"} {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}</span>
+            <span>· {q.state === "pending" ? "asked" : q.state === "notice" ? "posted" : "answered"} {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}</span>
             {q.taskId && <LinkedTaskChip taskId={q.taskId} columnKey={q.linkedTaskColumnKey} />}
           </span>
         </div>
@@ -191,7 +191,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
         <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[typeTone] }}>{requestHint(q)}</span>
       ) : (
         <span style={{ fontFamily: font.mono, fontSize: 11, color: watchdog ? color.amber : color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {watchdog ? "answered, not picked up — " : "answered: "}
+          {q.state === "notice" ? "" : watchdog ? "answered, not picked up — " : "answered: "}
           {requestOutcome(q)}
         </span>
       )}
@@ -251,12 +251,17 @@ export function RequestsInbox() {
     (activeType === "all" || q.type === activeType) &&
     (activeProj === "all" || q.projectId === activeProj));
   const pending = filtered.filter((q) => q.state === "pending");
-  const answered = filtered.filter((q) => q.state !== "pending");
+  // A notice (card 59fa6403) is its own group, NOT "waiting on me" — nobody is waiting on anything for
+  // it, so it must never inflate the header count or sit under the "waiting on manager pickup" label,
+  // which would be a false claim for a self-terminal row. Checked BEFORE the generic "answered" bucket.
+  const notices = filtered.filter((q) => q.state === "notice");
+  const answered = filtered.filter((q) => q.state !== "pending" && q.state !== "notice");
+  const waitingCount = pending.length + answered.length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <SectionLabel style={{ margin: 0 }}>Waiting on me ({items.length})</SectionLabel>
+        <SectionLabel style={{ margin: 0 }}>Waiting on me ({waitingCount})</SectionLabel>
         <span style={{ flex: 1 }} />
         <Button variant="ghost" style={{ padding: "1px 8px", fontSize: 11 }} onClick={() => qc.invalidateQueries({ queryKey: ["openQuestions"] })}>Refresh</Button>
       </div>
@@ -292,6 +297,12 @@ export function RequestsInbox() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <SectionLabel style={{ margin: "4px 0 0", color: color.textMuted }}>Answered · waiting on manager pickup</SectionLabel>
           {answered.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={openRequest} />)}
+        </div>
+      )}
+      {notices.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <SectionLabel style={{ margin: "4px 0 0", color: color.textMuted }}>FYI · recent notices</SectionLabel>
+          {notices.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={openRequest} />)}
         </div>
       )}
     </div>
@@ -484,7 +495,8 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
 // provided, encrypted. Decision/input show the chosen option + note; permission shows the authorize/deny
 // outcome + note. A CANCELLED request was never answered at all — a distinct readout (never "Answered …"),
 // naming the reason + who cancelled it (question_cancel/dismiss, card feat(orchestration): question_cancel
-// + dismiss).
+// + dismiss). A NOTICE (card 59fa6403) was likewise never answered — it's its own terminal state, checked
+// by `state` (not `type`) so this stays correct even if a future type ever shares the notice state shape.
 function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
   if (q.state === "cancelled") {
     return (
@@ -496,6 +508,14 @@ function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
         <div style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
           by {q.cancelledBy === "agent" ? "the asking agent" : "a human"}
         </div>
+      </Panel>
+    );
+  }
+  if (q.state === "notice") {
+    return (
+      <Panel style={{ display: "flex", flexDirection: "column", gap: 6, borderLeft: `3px solid ${tone.muted}` }}>
+        <SectionLabel style={{ margin: 0 }}>FYI · no answer needed</SectionLabel>
+        <span style={{ color: color.textMuted, fontSize: 12 }}>—</span>
       </Panel>
     );
   }
@@ -770,17 +790,21 @@ export function RequestHistory() {
   const [search, setSearch] = useState("");
   const [typeF, setTypeF] = useState<QuestionType | "all">("all");
   const [projF, setProjF] = useState<string>("all");
-  const [outcomeF, setOutcomeF] = useState<"all" | "authorized" | "denied" | "answered" | "provided" | "cancelled">("all");
+  const [outcomeF, setOutcomeF] = useState<"all" | "authorized" | "denied" | "answered" | "provided" | "cancelled" | "notice">("all");
   const [dateF, setDateF] = useState<"all" | "24h" | "7d" | "30d">("all");
   const openRequest = useOpenRequest();
   const now = Date.now();
 
   const all = questions.data ?? [];
-  // Terminal history = 'consumed' (answered + pulled) AND 'cancelled' (question_cancel/dismiss — never
-  // answered at all, card feat(orchestration): question_cancel + dismiss) — both retained the same way,
-  // never a separate view.
-  const terminal = useMemo(() => all.filter((q) => q.state === "consumed" || q.state === "cancelled"), [all]);
+  // Terminal history = 'consumed' (answered + pulled), 'cancelled' (question_cancel/dismiss — never
+  // answered at all, card feat(orchestration): question_cancel + dismiss), AND 'notice' (card 59fa6403 —
+  // self-terminal at ask time, never answered either, but it's genuinely resolved history, not something
+  // still waiting on the owner) — all three retained the same way, never a separate view. Unlike the
+  // default "waiting on me" tab (db.listOpenQuestions' 7-day notice window), History shows EVERY notice
+  // regardless of age — it's the one place an old notice is still reachable.
+  const terminal = useMemo(() => all.filter((q) => q.state === "consumed" || q.state === "cancelled" || q.state === "notice"), [all]);
   const cancelledCount = useMemo(() => terminal.filter((q) => q.state === "cancelled").length, [terminal]);
+  const noticeCount = useMemo(() => terminal.filter((q) => q.state === "notice").length, [terminal]);
   const projects = useMemo(() => {
     const m = new Map<string, string>();
     for (const q of terminal) m.set(q.projectId, q.projectName);
@@ -789,11 +813,14 @@ export function RequestHistory() {
 
   // Outcome bucket for a terminal request — drives the outcome filter. Checked BEFORE the per-type
   // branches: a cancelled request was never answered, so it must never fall into "answered"/"provided".
-  const outcomeOf = (q: QuestionInboxItem): "authorized" | "denied" | "answered" | "provided" | "cancelled" =>
+  // A notice (card 59fa6403) was likewise never answered — its own bucket, checked right after cancelled
+  // and before any type branch, for the same reason.
+  const outcomeOf = (q: QuestionInboxItem): "authorized" | "denied" | "answered" | "provided" | "cancelled" | "notice" =>
     q.state === "cancelled" ? "cancelled"
-      : q.type === "credential" ? "provided"
-        : q.type === "permission" ? (q.chosenOption === "authorize" ? "authorized" : "denied")
-          : "answered";
+      : q.state === "notice" ? "notice"
+        : q.type === "credential" ? "provided"
+          : q.type === "permission" ? (q.chosenOption === "authorize" ? "authorized" : "denied")
+            : "answered";
   const withinDate = (iso: string | null): boolean => {
     if (dateF === "all") return true;
     if (!iso) return false;
@@ -814,7 +841,7 @@ export function RequestHistory() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <SectionLabel style={{ margin: 0 }}>History ({terminal.length - cancelledCount} consumed{cancelledCount > 0 ? ` · ${cancelledCount} cancelled` : ""})</SectionLabel>
+      <SectionLabel style={{ margin: 0 }}>History ({terminal.length - cancelledCount - noticeCount} consumed{cancelledCount > 0 ? ` · ${cancelledCount} cancelled` : ""}{noticeCount > 0 ? ` · ${noticeCount} notice${noticeCount === 1 ? "" : "s"}` : ""})</SectionLabel>
       {/* filter bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="search titles / answers / agents…"
@@ -834,6 +861,7 @@ export function RequestHistory() {
           <option value="answered">answered</option>
           <option value="provided">provided</option>
           <option value="cancelled">cancelled</option>
+          <option value="notice">notice (FYI)</option>
         </Select>
         <Select value={dateF} onChange={(e) => setDateF(e.target.value as typeof dateF)}>
           <option value="all">any time</option>

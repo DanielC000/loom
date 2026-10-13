@@ -3919,7 +3919,13 @@ export class OrchestrationMcpRouter {
           "to \"decision\"): \"decision\" — `options` is an OPTIONAL array of choices for the human to " +
           "pick between (omit for a pure blocker — free-text note only) and `recommendation` is an " +
           "OPTIONAL suggested answer shown as a nudge, not enforced. \"input\" — a freeform-text ask, no " +
-          "options. \"permission\" — ask the human to authorize/deny an irreversible/outward/spend " +
+          "options. \"notice\" — an FYI/status update that needs NO answer: it lands in the inbox " +
+          "immediately in its OWN terminal 'notice' state — it is NEVER 'pending', NEVER 'answered', and " +
+          "NEVER returned by question_pull (there's nothing to pull back, and you get no push nudge for " +
+          "it either — that nudge only ever fires for a real human answer). Rate-limited per agent " +
+          "lineage (a human-only, per-project cap — you cannot raise your own limit) — exceeding it " +
+          "REFUSES loudly, naming the limit; consolidate repeated status updates into fewer, more " +
+          "meaningful notices rather than filing one per increment. \"permission\" — ask the human to authorize/deny an irreversible/outward/spend " +
           "action; `action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", optional) is the " +
           "requested grant lifetime, `expiresAt` (optional ISO timestamp) is a requested expiry — this is " +
           "an ask/answer channel, not a second gate: it does not itself block anything, so if the action " +
@@ -4006,7 +4012,8 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Pull (return AND consume) every ANSWERED request you've asked via question_ask — your " +
-          "requests-inbox pickup. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
+          "requests-inbox pickup. A \"notice\" entry is NEVER returned here — it completes immediately at " +
+          "ask time, with nothing to pull back. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
           "\"input\" entry has {chosenOption, note} (chosenOption is one of the options you offered, or " +
           "null); a \"permission\" entry has {approved, note, scope, expiresAt, lapsed, fulfillment} — " +
           "`scope`/`expiresAt` are the human's ACTUAL decided grant (null/null if they never chose one, " +
@@ -4197,15 +4204,20 @@ export class OrchestrationMcpRouter {
           "`stale` (card 5ea0153c) is true only for a still-'pending' row whose CURRENT routing target " +
           "isn't live right now — a SOFT flag, never an auto-cancel: a moot-LOOKING ask can still be one " +
           "the human wants to answer, so amend it (question_amend) or cancel it (question_cancel) yourself " +
-          "rather than trusting this alone; always false for answered/consumed/cancelled. `total` is " +
+          "rather than trusting this alone; always false for answered/consumed/cancelled/notice. `total` is " +
           "the FULL matching count and `hasMore` tells you whether `items` was truncated. Filters (all optional, AND'd): state " +
-          "(pending|answered|consumed|cancelled — \"cancelled\" is a moot/superseded ask you or a human " +
-          "withdrew via question_cancel/dismiss, never an answer), type (decision|input|permission|" +
-          "credential), includeConsumed (false by default — folds already-consumed AND already-cancelled " +
-          "requests in alongside the rest; an explicit state:\"consumed\"/\"cancelled\" always shows those " +
-          "regardless of this flag), mine (false by default — " +
+          "(pending|answered|consumed|cancelled|notice — \"cancelled\" is a moot/superseded ask you or a " +
+          "human withdrew via question_cancel/dismiss, never an answer; \"notice\" is a self-terminal FYI " +
+          "that was never answered either), type (decision|input|permission|" +
+          "credential|notice), includeConsumed (false by default — folds already-consumed AND already-cancelled " +
+          "requests in alongside the rest, PLUS every notice regardless of age; without it, a notice older " +
+          "than the Inbox's own visibility window drops out of the default view too, same as the web UI — " +
+          "an explicit state:\"consumed\"/\"cancelled\"/\"notice\" always shows those regardless of this " +
+          "flag), mine (false by default — " +
           "when true, narrows to ONLY requests filed by YOUR OWN agent lineage, the same ownership scope " +
-          "question_pull consumes from, so a fresh successor session on the same agent still sees them). " +
+          "question_pull consumes from, so a fresh successor session on the same agent still sees them — " +
+          "a notice is never returned by question_pull, but `mine:true` still lists it here since this " +
+          "read is non-consuming). " +
           "`mine:true` is the dedup read for a scheduled/autonomous agent: before filing a new " +
           "question_ask, call this to check whether you (or a predecessor session on your agent) already " +
           "filed an equivalent request that's still pending or answered-but-unpulled, instead of re-filing " +

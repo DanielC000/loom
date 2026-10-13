@@ -28,7 +28,10 @@ export function relativeAge(iso: string | null | undefined, nowMs: number): stri
 }
 
 // The watchdog case (surface 4): an `answered` question whose asking manager never pulled it, older than
-// the threshold. `pending`/`consumed` are never watchdog. Drives the amber re-escalation + "Nudge mgr".
+// the threshold. `pending`/`consumed`/`notice` are never watchdog. Drives the amber re-escalation +
+// "Nudge mgr". Card 59fa6403 round 2: a `notice` is its OWN terminal state (never "answered" — see
+// QuestionState's own doc) precisely so this check (and every other `state === "answered"` reader)
+// excludes it BY CONSTRUCTION, with no separate `type` check needed here at all.
 export function isDecisionWatchdog(q: Pick<Question, "state" | "answeredAt">, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): boolean {
   if (q.state !== "answered" || !q.answeredAt) return false;
   const t = Date.parse(q.answeredAt);
@@ -40,12 +43,15 @@ export interface StateChipSpec { tone: Tone; label: string; }
 // The lifecycle chip (surface 4): pending (cyan, waiting on you) → answered (muted, waiting on the
 // manager's pickup) → consumed (muted ✓, terminal), with the watchdog re-escalating an ignored `answered`
 // to amber "WAITING ON MGR". `cancelled` (question_cancel/dismiss) is a FOURTH terminal state reachable
-// only from pending — red, never confusable with the muted "resolved with an answer" states. One source of
-// truth for every surface that renders a decision's state.
+// only from pending — red, never confusable with the muted "resolved with an answer" states. `notice`
+// (card 59fa6403) is a FIFTH, self-terminal state reading "FYI" — nobody answered it, so it must never
+// read "ANSWERED" nor trigger the watchdog. One source of truth for every surface that renders a request's
+// state.
 export function questionStateChip(q: Pick<Question, "state" | "answeredAt">, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): StateChipSpec {
   if (q.state === "pending") return { tone: "cyan", label: "PENDING" };
   if (q.state === "cancelled") return { tone: "red", label: "CANCELLED" };
   if (q.state === "consumed") return { tone: "muted", label: "CONSUMED ✓" };
+  if (q.state === "notice") return { tone: "muted", label: "FYI" };
   // answered
   return isDecisionWatchdog(q, nowMs, thresholdMs)
     ? { tone: "amber", label: "WAITING ON MGR" }
@@ -103,23 +109,29 @@ export function decisionAttentionText(q: Pick<Question, "sessionId" | "title"> &
 // hermetic web test imports them too.
 
 // Type → signal tone. Owner-locked: decision=cyan (actionable question), input=phosphor (open answer),
-// permission=red (irreversible/outward), credential=amber (secret).
+// permission=red (irreversible/outward), credential=amber (secret). notice=muted — deliberately NOT one
+// of the four "actionable" tones (card 59fa6403): nothing here asks for the human's attention the way the
+// other four do, so it gets the same quiet tone questionStateChip already uses for a settled row.
 export const REQUEST_TYPE_TONE: Record<QuestionType, Tone> = {
   decision: "cyan",
   input: "phosphor",
   permission: "red",
   credential: "amber",
+  notice: "muted",
 };
 
 // Display order for the type-filter chip row + any per-type enumeration — a stable, deliberate sequence
-// (the two everyday asks first, then the two trust-boundary asks).
-export const REQUEST_TYPE_ORDER: QuestionType[] = ["decision", "input", "permission", "credential"];
+// (the two everyday asks first, then the two trust-boundary asks, then the no-answer-needed FYI last).
+export const REQUEST_TYPE_ORDER: QuestionType[] = ["decision", "input", "permission", "credential", "notice"];
 
-// The pending row's primary action-button label, per type.
+// The pending row's primary action-button label, per type. `notice` never reaches this — it's never
+// `pending` (card 59fa6403) — but the switch stays exhaustive so a future caller can't accidentally pass
+// one and get a misleading "Answer →".
 export function requestActionLabel(type: QuestionType): string {
   switch (type) {
     case "permission": return "Review →";
     case "credential": return "Provide →";
+    case "notice": return "View";
     default: return "Answer →"; // decision / input
   }
 }
@@ -127,22 +139,27 @@ export function requestActionLabel(type: QuestionType): string {
 // The global attention-surface label (toast/bell/⌘K + Mission Control queue), per type — a pending
 // request is NOT always a "decision" (a credential ask is a secret, not a choice). Single source so the
 // label can't drift between surfaces; lib/attention derives every pending-request item's `kind` off this.
+// `notice` is never `pending` so this label is never actually shown for one in today's attention queue
+// (which only lists pending requests) — kept exhaustive anyway, see requestActionLabel's note above.
 export function requestAttentionLabel(type: QuestionType): string {
   switch (type) {
     case "credential": return "SECRET NEEDED";
     case "permission": return "PERMISSION NEEDED";
     case "input": return "INPUT NEEDED";
     case "decision": return "DECISION NEEDED";
+    case "notice": return "FYI";
   }
 }
 
-// The pending row's short "what's needed" state chip label, per type.
+// The pending row's short "what's needed" state chip label, per type. See requestActionLabel's note on
+// why `notice` is covered even though it never reaches a pending row.
 export function requestNeedsChip(type: QuestionType): string {
   switch (type) {
     case "decision": return "needs pick";
     case "input": return "needs answer";
     case "permission": return "needs auth";
     case "credential": return "needs secret";
+    case "notice": return "no answer needed";
   }
 }
 
@@ -154,6 +171,7 @@ export function requestAnswerBadge(q: Pick<Question, "type" | "options">): strin
     case "input": return "open answer";
     case "permission": return "authorize or deny";
     case "credential": return "write-only secret";
+    case "notice": return "FYI — no answer needed";
   }
 }
 
@@ -166,6 +184,8 @@ export function requestHint(q: Pick<Question, "type" | "options" | "recommendati
       return `irreversible · outward${q.permissionAction ? ` — ${q.permissionAction}` : ""}`;
     case "input":
       return "open answer · free text";
+    case "notice":
+      return "FYI · no answer needed";
     default: {
       // decision — options + recommendation, or a pure-blocker note-only ask.
       if (q.options && q.options.length > 0) {
@@ -180,7 +200,8 @@ export function requestHint(q: Pick<Question, "type" | "options" | "recommendati
 // readout). Never surfaces a secret — a credential always reads "provided · encrypted, not shown". A
 // cancelled request was NEVER answered — this must be checked BEFORE the per-type switch below, or a
 // cancelled decision/input would misleadingly fall through to "—" (indistinguishable from "answered with
-// no note") instead of naming what actually happened.
+// no note") instead of naming what actually happened. A "notice" is never cancellable (never pending) so
+// the cancelled branch above never actually reaches it — its own case below is what always applies.
 export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note" | "state" | "cancelledReason">): string {
   if (q.state === "cancelled") return q.cancelledReason ? `cancelled · ${q.cancelledReason}` : "cancelled";
   switch (q.type) {
@@ -192,6 +213,8 @@ export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note
         : `denied${q.note ? ` · ${q.note}` : ""}`;
     case "input":
       return q.note ? `“${q.note}”` : "—";
+    case "notice":
+      return "FYI — no answer needed";
     default: // decision
       return q.chosenOption ? `chose ${q.chosenOption}` : q.note ? `“${q.note}”` : "—";
   }

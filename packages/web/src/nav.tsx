@@ -81,12 +81,14 @@ export const NAV_PAGES: NavPage[] = [
   // api.projectMemory, is `enabled: !!projectId`).
   { label: "Memory", to: "/memory", element: <Memory />, group: "project", scoped: true },
   // ── Operate group (cont.) ────────────────────────────────────────────────────
-  // The GLOBAL manager→human Requests inbox (card 695ebab0, generalizing the decision inbox 8701bdbb) — a
-  // cross-project "waiting on me" queue of typed requests (decision · input · permission · credential), a
-  // god-eye destination like Mission Control (deliberately NOT project-scoped). The bell/toast/⌘K + the
-  // Mission Control attention queue are the primary surfacing; this is the fuller "see them all, filter by
-  // type/project" view + the consumed-history tab.
-  { label: "Requests", to: "/inbox", element: <RequestsPage />, group: "operate" },
+  // The GLOBAL manager→human Inbox (card 695ebab0, generalizing the decision inbox 8701bdbb; renamed from
+  // "Requests" by card 59fa6403) — a cross-project "waiting on me" + FYI queue of typed Requests (decision ·
+  // input · permission · credential · notice), a god-eye destination like Mission Control (deliberately
+  // NOT project-scoped). The bell/toast/⌘K + the Mission Control attention queue are the primary surfacing;
+  // this is the fuller "see them all, filter by type/project" view + the consumed-history tab. The label is
+  // "Inbox"; the route (`/inbox`) and the component/module names (RequestsPage, components/requests.tsx)
+  // deliberately did NOT change — see docs/decisions/59fa6403-requests-to-inbox.md §(f) for why.
+  { label: "Inbox", to: "/inbox", element: <RequestsPage />, group: "operate" },
   // Gates — the god-eye view of Loom's daemon-executed gates (merge, worker run_gate, deploy) across every
   // project, all serialized through one GateSemaphore. Active lane-hero (running + queued) on top, settled
   // history below, with its OWN per-project filter (default ALL) — so it's a cross-project god-eye view like

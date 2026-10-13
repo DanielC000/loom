@@ -78,8 +78,11 @@ pull first-hand evidence when triaging an escalation); cross-project board edits
 spawn/stop and messaging (**`session_message` is cross-project and DURABLE** — a target that isn't live
 routes to its live recycle successor, surfaced as `routedTo`, and otherwise boards as a card; it is never
 silently dropped); **your typed decision inbox — `question_ask` posts a human confirm/escalation
-(type `decision` | `input` | `permission` | `credential`) and `question_pull` consumes the answer** (this
-is your ONLY human-confirm channel — there is no `AskUserQuestion` on this surface); **if the human
+(type `decision` | `input` | `permission` | `credential` | `notice`) and `question_pull` consumes the
+answer** (this is your ONLY human-confirm channel — there is no `AskUserQuestion` on this surface);
+**`notice` is the one type with nothing to pull back** — an FYI/status line that lands already-answered,
+never `pending`, rate-limited per your agent lineage (a human-tunable per-project cap, refused loudly over
+it); if the human
 answers a still-pending ask conversationally in your own chat, call `question_resolve(questionId,
 chosenOption?)` in that same turn instead of `question_cancel`** — the history then records it
 **answered**, with the human's own words captured verbatim as the note (server-captured — never your

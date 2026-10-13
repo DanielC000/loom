@@ -3587,7 +3587,13 @@ export interface WebhookEndpointMetadata {
 // /api/questions/:id/dismiss` REST route. Never a hard delete — a cancelled row is retained exactly like an
 // answered/consumed one (see Question.cancelledReason/cancelledBy/cancelledAt below), closing the gap where
 // a moot/superseded pending ask had no exit besides being answered and sat in the human's inbox forever.
-export const QUESTION_STATES = ["pending", "answered", "consumed", "cancelled"] as const;
+//
+// "notice" (card 59fa6403) is a FIFTH, SELF-TERMINAL state: a `type:"notice"` ask (see QuestionType's own
+// doc) lands DIRECTLY here at creation, never passing through "pending" or "answered" at all.
+//
+// @decision b13df292 — never reuse "answered" for a notice; give any future self-terminal kind its own
+// state too, so every "answered" reader excludes it by construction rather than by remembering to.
+export const QUESTION_STATES = ["pending", "answered", "consumed", "cancelled", "notice"] as const;
 export type QuestionState = (typeof QUESTION_STATES)[number];
 
 /**
@@ -3601,8 +3607,14 @@ export type QuestionState = (typeof QUESTION_STATES)[number];
  * then use `permission` only to carry the human's authorize/deny answer. `credential` asks for a secret
  * the agent needs (an API key/token) under a NEVER-ECHO model: the plaintext never round-trips through
  * this object or any agent-readable response — see `credentialEnvVar` below and `Db.answerCredentialQuestion`.
+ * `notice` (card 59fa6403, the Inbox generalization) is an FYI/status line that needs NO human answer —
+ * UNLIKE every other type here, it is inserted already `state:"answered"` (self-terminal at ask time; see
+ * `buildQuestionAsk`) and is deliberately EXCLUDED from `question_pull`'s query (`Db.
+ * pullAnsweredQuestionsForAgentBounded`/`pullAnsweredQuestionsForAgent`) — there is nothing for its own
+ * asker to pull back. Rate-limited per asking agent lineage (`OrchestrationConfig.maxNoticesPerHour`,
+ * human-only) since nothing else backpressures it the way an awaited answer backpressures every other type.
  */
-export const QUESTION_TYPES = ["decision", "input", "permission", "credential"] as const;
+export const QUESTION_TYPES = ["decision", "input", "permission", "credential", "notice"] as const;
 export type QuestionType = (typeof QUESTION_TYPES)[number];
 
 /** A `permission` request's requested grant lifetime: `once` (this action only) or `standing` (keep

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
+import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, resolveConfig, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
 import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
@@ -138,6 +138,28 @@ export function buildQuestionAsk(
       return { error: "fulfillmentTarget requires non-empty `profileId` and `key`" };
     }
   }
+  // Card 59fa6403 — `type:"notice"` rate limit: a notice has no answer to wait on, so nothing else
+  // backpressures a chatty asker the way an awaited answer backpressures every other type. Refuse LOUDLY
+  // over the limit (never silently drop — same "never silently swallow the caller's intent" posture as
+  // applySupersede's own failed-supersede reporting below) — the only real fix for a repeat status update
+  // is simply not filing a fresh notice for every increment.
+  if (type === "notice") {
+    const askerSession = ctx.db.getSession(ctx.sessionId);
+    const agentId = askerSession?.agentId;
+    if (agentId) {
+      const limit = resolveConfig(ctx.db.getProject(ctx.projectId)?.config).orchestration.maxNoticesPerHour;
+      const sinceIso = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const recent = ctx.db.countRecentNoticesForAgent(agentId, sinceIso);
+      if (recent >= limit) {
+        return {
+          error: `notice rate limit reached: ${limit} notice(s) per hour per agent lineage (you've already ` +
+            `filed ${recent} in the last hour) — this is a human-tunable project setting, not something you ` +
+            `can raise yourself. Consolidate repeated status updates into fewer, more meaningful notices ` +
+            `instead of filing one per increment.`,
+        };
+      }
+    }
+  }
   let taskId: string | null = null;
   if (input.taskId) {
     const r = resolveIdPrefix(ctx.db.listTasks(ctx.projectId), input.taskId);
@@ -181,11 +203,17 @@ export function buildQuestionAsk(
       fulfillmentTarget: type === "permission" ? (input.fulfillmentTarget ?? null) : null,
       provisionConnectionId: null,
       provisionBindingState: "none",
-      state: "pending",
+      // A "notice" is SELF-TERMINAL: it lands directly in its OWN state, 'notice' (answeredAt =
+      // createdAt, for age display), since there is nothing for a human to answer. Every other type
+      // still starts 'pending'.
+      //
+      // @decision b13df292 — never 'answered' here: every "answered" reader in this codebase means "the
+      // owner answered, not yet pulled," which is NOT true of a notice.
+      state: type === "notice" ? "notice" : "pending",
       chosenOption: null,
       note: null,
       createdAt: now,
-      answeredAt: null,
+      answeredAt: type === "notice" ? now : null,
       consumedAt: null,
       cancelledReason: null,
       cancelledBy: null,

@@ -280,6 +280,26 @@ try {
   const cancelledCardList = await tCallList("task_requests_list", { taskId: cancelledTaskId });
   check("(I) task_requests_list also surfaces the cancelled row (pending+answered+consumed+cancelled alike)", cancelledCardList.some((r) => r.id === cancelledOnCard.questionId && r.state === "cancelled"));
 
+  // ============================ (J) card 59fa6403 round 2 (b13df292): a FIFTH bucket, `notices` — same
+  // shape as (I)'s cancelled-bucket regression test: a `type:"notice"` row is self-terminal (lands
+  // directly in its OWN 'notice' state, never 'pending'/'answered') and must be counted SEPARATELY, never
+  // folded into `answered` (the exact defect the Code Review caught in round 1). Dedicated task, same
+  // reasoning as (I)'s. ============
+  const noticeTaskId = "ffffffff-0000-4000-8000-000000000006";
+  db.insertTask({ id: noticeTaskId, projectId: projId, title: "card with a notice", body: "b", columnKey: "backlog", position: 6, priority: "p2", createdAt: now, updatedAt: now });
+  const pendingOnNoticeCard = await ask({ title: "Still pending too", body: "b", taskId: noticeTaskId });
+  const noticeOnCard = await ask({ type: "notice", title: "FYI: migration landed", body: "all good", taskId: noticeTaskId });
+  check("(J) the real question_ask call for a notice succeeds and stamps task_id", typeof noticeOnCard.questionId === "string" && db.getQuestion(noticeOnCard.questionId)?.taskId === noticeTaskId);
+
+  const taskWithNotice = await tCall("tasks_get", { id: noticeTaskId });
+  check("(J) requests.total counts both rows", taskWithNotice.requests.total === 2);
+  check("(J) requests.pending counts ONLY the still-pending row", taskWithNotice.requests.pending === 1);
+  check("(J) requests.answered is 0 — the notice is NOT folded into answered (the round-1 defect)", taskWithNotice.requests.answered === 0);
+  check("(J) requests.notices counts the notice separately", taskWithNotice.requests.notices === 1);
+  check("(J) the FOUR buckets sum to total (no row double-counted or dropped)", taskWithNotice.requests.pending + taskWithNotice.requests.answered + taskWithNotice.requests.cancelled + taskWithNotice.requests.notices === taskWithNotice.requests.total);
+  check("(J) requests.items reflects the notice row's real state", taskWithNotice.requests.items.find((it) => it.id === noticeOnCard.questionId)?.state === "notice");
+  void pendingOnNoticeCard;
+
   await tClient.close();
 } finally {
   try { db.close(); } catch { /* ignore */ }
@@ -288,5 +308,6 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a REAL question_ask call stamps task_id end-to-end; tasks_get's connected-requests summary ({total,answered,pending,cancelled,items}) is correct before/after an answer (real-agent MCP tool calls, not just unit tests); task_requests_list/task_request_get are NON-CONSUMING (re-readable across repeated calls AND after the asking agent's own question_pull has drained+consumed the row, whose own semantics stay unchanged); task_request_get never returns secret_blob/secret for a credential request (only a non-secret ack, null while pending); a pending permission reads approved:null rather than a misleading false; project/task scoping rejects a mismatched taskId and a cross-project request id — INCLUDING a foreign-project question_ask carrying another project's task id, now REJECTED OUTRIGHT at write time (card 9be9784a: taskId resolution is scoped to the caller's own project); task_requests_list resolves an unambiguous 8-char taskId prefix; question_ask itself resolves an 8-char taskId PREFIX to the full id and stores THAT — so the soft-link actually connects — while an ambiguous or unknown prefix is cleanly rejected instead of silently stored as a dead link; AND a CANCELLED connected request (question_cancel/dismiss) is counted in its OWN `cancelled` bucket, never folded into `answered` (the pending-as-proxy bug `total - pending` used to cause)."
+  + " A card 59fa6403 round 2 (b13df292) regression: a `type:\"notice\"` connected request is counted in its OWN `notices` bucket, never folded into `answered` — the same defect shape as the cancelled-row fix above, caught by Code Review for the new self-terminal 'notice' state."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

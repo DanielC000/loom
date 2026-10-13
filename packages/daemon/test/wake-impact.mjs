@@ -15,6 +15,7 @@ import {
   hasPendingBoardWork, hasUnconsumedAnswer, isEscalatedSuppression, isWatcherActiveForSession,
   strandedBoardWork, computeWakeImpact,
 } from "../dist/orchestration/wake-impact.js";
+import { buildQuestionAsk } from "../dist/mcp/questionTool.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -101,6 +102,20 @@ function cleanup(e) {
   check("(hasUnconsumedAnswer) a merely PENDING question → false", hasUnconsumedAnswer(e.db, "m2") === false);
   e.db.insertQuestion({ id: `q-answered-${randomUUID()}`, sessionId: "m2", projectId: e.projId, type: "decision", title: "t", body: "", state: "answered", chosenOption: "a", createdAt: e.now, answeredAt: e.now });
   check("(hasUnconsumedAnswer) an ANSWERED, not-yet-pulled question → true", hasUnconsumedAnswer(e.db, "m2") === true);
+  // Card 59fa6403 round 2 (b13df292), CR2 844bd6b8 follow-up: a manager holding ONLY a self-terminal
+  // 'notice' (own session, no 'answered' question at all) must read false — a notice is never
+  // 'answered', so it must never defeat isNoOpManagerWake the way a real unconsumed answer correctly does
+  // above. Seeded through the REAL buildQuestionAsk, not a hand-built `{state:"notice"}` row — a
+  // hand-built row never exercises the production state-assignment decision under test (it would pass
+  // identically on pre-fix code too).
+  seedSession(e, "m2-notice");
+  const noticeBuilt = buildQuestionAsk(
+    { type: "notice", title: "t", body: "" },
+    { sessionId: "m2-notice", projectId: e.projId, db: e.db, role: "manager" },
+  );
+  if (!("question" in noticeBuilt)) throw new Error(`buildQuestionAsk failed: ${noticeBuilt.error}`);
+  e.db.insertQuestion(noticeBuilt.question);
+  check("(hasUnconsumedAnswer) a manager holding ONLY a 'notice' → false", hasUnconsumedAnswer(e.db, "m2-notice") === false);
   cleanup(e);
 }
 

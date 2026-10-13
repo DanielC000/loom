@@ -664,6 +664,17 @@ export interface OrchestrationConfig {
    */
   staleRequestMinutes: number;
   /**
+   * Per-project, per-agent-lineage rate limit on `question_ask`'s `type:"notice"` kind (card 59fa6403):
+   * the max number of notices one agent lineage (manager or Platform Lead) may file within a rolling
+   * hour before `buildQuestionAsk` REFUSES loudly (naming the limit) rather than silently dropping the
+   * ask. Default 6 (owner ruling). 0 means "never allowed"; there is no "unlimited" sentinel.
+   *
+   * @decision b13df292 — HUMAN-only even on the ELEVATED Platform Lead's `project_configure` (listed in
+   * `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS`, `mcp/platform.ts`) — NOT the Lead-settable gateCommand/
+   * alertWebhook trust tier.
+   */
+  maxNoticesPerHour: number;
+  /**
    * Busy-worker LONG-TURN advisory: minutes a LIVE worker may sit `busy` in a SINGLE uninterrupted turn
    * (no turn boundary → `lastActivity` not advancing, since `setBusy` re-stamps it on every turn edge)
    * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an informational heads-up (a
@@ -1596,7 +1607,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -2200,6 +2211,9 @@ export function resolveConfig(
       idleWorkerMinutes: override.orchestration?.idleWorkerMinutes ?? d.orchestration.idleWorkerMinutes,
       // `??` (not `||`) so an explicit 0 (disables the stale-Request watchdog) survives the merge.
       staleRequestMinutes: override.orchestration?.staleRequestMinutes ?? d.orchestration.staleRequestMinutes,
+      // Card 59fa6403 — notice rate limit. `??` so an explicit 0 ("never allowed") survives the merge
+      // rather than falling back to the default; there is no "unlimited" sentinel.
+      maxNoticesPerHour: override.orchestration?.maxNoticesPerHour ?? d.orchestration.maxNoticesPerHour,
       // `??` (not `||`) so an explicit 0 (disables the watcher) survives the merge.
       stuckWorkerMinutes: override.orchestration?.stuckWorkerMinutes ?? d.orchestration.stuckWorkerMinutes,
       // Crash-recovery auto-resume cap (0 disables the watcher). `??` so an explicit 0 survives.

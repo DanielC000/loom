@@ -120,10 +120,14 @@ export class AuditMcpRouter {
           "(set once at ask time, null on a row that predates this field — that history is unrecoverable). " +
           "`stale` (card 5ea0153c) is true only for a still-'pending' row whose CURRENT routing target " +
           "isn't live right now — a SOFT flag, never an auto-cancel (a moot-LOOKING ask can still be one " +
-          "the owner wants to answer); always false for answered/consumed/cancelled. `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
+          "the owner wants to answer); always false for answered/consumed/cancelled/notice. `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
           "— never assume `items` is everything without checking it. Filters (all optional, AND'd): " +
-          "projectId (one project), state (pending|answered|consumed|cancelled — \"cancelled\" is a " +
-          "moot/superseded ask withdrawn via question_cancel/dismiss, never an answer), type, sinceMinutes (only requests " +
+          "projectId (one project), state (pending|answered|consumed|cancelled|notice — \"cancelled\" is a " +
+          "moot/superseded ask withdrawn via question_cancel/dismiss, never an answer; \"notice\" is a " +
+          "self-terminal FYI that was never answered either — this audit surface returns EVERY notice " +
+          "regardless of age, unlike the manager's own requests_list or the web Inbox, both of which drop " +
+          "an old one from their default view), type (decision|input|permission|credential|notice), " +
+          "sinceMinutes (only requests " +
           "created within the last N minutes). Newest-first (createdAt DESC); no filters returns the whole " +
           `platform. Bounded to ${DEFAULT_REQUESTS_LIST_CAP} rows by default (see \`hasMore\`) — pass an ` +
           "explicit limit/offset to page past it. `fields:[...]` (card 40f4cae9, same contract as " +

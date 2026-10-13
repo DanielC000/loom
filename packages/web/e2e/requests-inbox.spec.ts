@@ -48,6 +48,36 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(main.getByText(decTitle)).toBeVisible();
   });
 
+  test("a notice renders its own FYI chip, lands in the 'FYI · recent notices' group, and is not counted in 'Waiting on me' (card 59fa6403 round 2)", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NoticeMgr" });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    const waitingLabel = main.getByText(/^Waiting on me \(\d+\)$/);
+    await expect(waitingLabel).toBeVisible();
+    const before = await waitingLabel.textContent();
+
+    const noticeTitle = uniq("fyi-notice");
+    const now = new Date().toISOString();
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title: noticeTitle, type: "notice",
+      body: "status update", state: "notice", createdAt: now, answeredAt: now,
+    });
+    await page.reload();
+
+    // The notice must never inflate "Waiting on me" — the count stays IDENTICAL after seeding it (a
+    // relative comparison, robust against other seeded rows on this shared e2e daemon).
+    await expect(waitingLabel).toHaveText(before ?? "");
+    // It lands under its own group (never "Answered · waiting on manager pickup" — a notice was never
+    // answered). If the row were mis-grouped, this heading would never render at all (it's conditional on
+    // a non-empty notices bucket).
+    await expect(main.getByText("FYI · recent notices")).toBeVisible();
+    await expect(main.getByText(noticeTitle)).toBeVisible();
+    // Its lifecycle chip reads exactly "FYI" (DecisionStateChip's own label for state:"notice") — exact
+    // match so this can't accidentally match the group heading above, which also contains the word "FYI".
+    await expect(main.getByText("FYI", { exact: true })).toBeVisible();
+  });
+
   test("a permission request opens as a modal; the scope toggle enables the expiry select; Authorize resolves it", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "PermMgr" });
     const title = uniq("permission-ask");

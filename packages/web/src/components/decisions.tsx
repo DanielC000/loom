@@ -10,8 +10,9 @@ import { questionStateChip } from "../lib/questions";
 
 // ── DecisionStateChip ───────────────────────────────────────────────────────────
 // pending (cyan · waiting on you) → answered (muted · waiting on the manager's pickup) → consumed
-// (muted ✓ · terminal), with the watchdog re-escalating an ignored `answered` to amber "WAITING ON MGR".
-// A bordered dot-pill, tone-driven via the single questionStateChip source of truth.
+// (muted ✓ · terminal) → notice (muted · "FYI", card 59fa6403), with the watchdog re-escalating an
+// ignored `answered` to amber "WAITING ON MGR". A bordered dot-pill, tone-driven via the single
+// questionStateChip source of truth.
 export function DecisionStateChip({ q, now }: { q: Pick<QuestionInboxItem, "state" | "answeredAt">; now: number }) {
   const spec = questionStateChip(q, now);
   const c = tone[spec.tone];

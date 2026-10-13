@@ -31,6 +31,7 @@ import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 // ones for exactly this reason.
 useOwnLoomHome("answered-stuck-watcher-");
 const { Db } = await import("../dist/db.js");
+const { buildQuestionAsk } = await import("../dist/mcp/questionTool.js");
 const { IdleWatcher } = await import("../dist/orchestration/idle-watcher.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
@@ -79,17 +80,34 @@ function seedManager(e, id, { idleMin = 5, rateLimitedUntil = null, live = true,
   if (live) e.alive.add(id);
 }
 let qn = 0;
-function seedQuestion(e, sessionId, { state = "answered", answeredMinutesAgo = 30, title } = {}) {
+function seedQuestion(e, sessionId, { state = "answered", answeredMinutesAgo = 30, title, type = "decision" } = {}) {
   const id = `q-${++qn}-${Math.random().toString(36).slice(2, 6)}`;
   e.db.insertQuestion({
     id, sessionId, projectId: e.projId, title: title ?? `decision ${id}`, body: "please advise",
-    options: null, recommendation: null, state,
+    type, options: null, recommendation: null, state,
     chosenOption: null, note: state === "answered" || state === "consumed" ? "go ahead" : null,
     createdAt: minutesAgo(answeredMinutesAgo + 5),
     answeredAt: state === "pending" ? null : minutesAgo(answeredMinutesAgo),
     consumedAt: state === "consumed" ? minutesAgo(Math.max(answeredMinutesAgo - 1, 0)) : null,
   });
   return id;
+}
+// Card 59fa6403 round 2 (844bd6b8 CR2 follow-up): seed a NOTICE through the REAL buildQuestionAsk write
+// path, not a hand-built row — a hand-built `{state:"notice"}` row never exercises the production
+// decision that assigns that state, so it would pass identically whether or not that decision is
+// actually correct (vacuous). This still backdates createdAt/answeredAt afterward (buildQuestionAsk
+// always stamps "now") so the test can control age — only the TIMESTAMPS are post-patched, never `state`.
+function seedNoticeViaRealPath(e, sessionId, { answeredMinutesAgo = 60, title } = {}) {
+  const built = buildQuestionAsk(
+    { type: "notice", title: title ?? `notice for ${sessionId}`, body: "status update" },
+    { sessionId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  if (!("question" in built)) throw new Error(`seedNoticeViaRealPath: buildQuestionAsk failed: ${built.error}`);
+  const q = built.question;
+  q.createdAt = minutesAgo(answeredMinutesAgo + 5);
+  q.answeredAt = minutesAgo(answeredMinutesAgo);
+  e.db.insertQuestion(q);
+  return q.id;
 }
 function cleanup(e) {
   try { e.db.close(); } catch { /* ignore */ }
@@ -195,6 +213,20 @@ function cleanup(e) {
   seedQuestion(e, "mgr-6", { state: "consumed", answeredMinutesAgo: 30 });
   e.watcher.tick(NOW);
   check("(6) neither a pending nor an already-consumed question nudges", !e.enqueued.some((x) => x.id === "mgr-6"));
+  cleanup(e);
+}
+
+// ============ (6b) card 59fa6403 round 2 (b13df292): a 'notice' well past the stuck threshold never
+// nudges — it's a DIFFERENT state from 'answered' by construction, not merely a type that happens to be
+// excluded. Seeded through the REAL buildQuestionAsk (seedNoticeViaRealPath), not a hand-built row — this
+// proves the PRODUCTION state-assignment decision is what keeps it out, not just that this fixture says
+// so (CR2 844bd6b8: the hand-built version was vacuous — it passed even on pre-fix code). ============
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-6b");
+  seedNoticeViaRealPath(e, "mgr-6b", { answeredMinutesAgo: 60 }); // 60m >> 15m threshold
+  e.watcher.tick(NOW);
+  check("(6b) a 'notice' an hour old never nudges its manager — it is not 'answered'", !e.enqueued.some((x) => x.id === "mgr-6b"));
   cleanup(e);
 }
 

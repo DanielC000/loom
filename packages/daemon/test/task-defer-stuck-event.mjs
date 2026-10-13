@@ -149,6 +149,17 @@ try {
   const gotE = await getProjectTask(db, "pRepo", cardE.id);
   check("(E) NEGATIVE CONTROL: a CONSUMED key is likewise NOT stuck", gotE.deferredStuck === false);
 
+  // --- (I) card 59fa6403 round 2 (CR2 844bd6b8): a NOTICE key is UNFIREABLE, same as cancelled — a
+  // self-terminal state:"notice" row never transitions to "answered", so the annotated event can never
+  // fire either. Without this fix, resolveDeferredEventStuck's generic state === "cancelled" check missed
+  // it entirely and silently read stuck:false forever. ---
+  const qNotice = insertQuestion(db, "pRepo", sessId, "notice");
+  const cardI = createProjectTask(db, "pRepo", { title: "dependent card I (notice)" });
+  await updateProjectTask(db, "pRepo", cardI.id, { deferred: true, deferredReason: "waiting on an event that will never fire", deferredUntilEvent: { kind: "request-answered", key: qNotice } });
+  const gotI = await getProjectTask(db, "pRepo", cardI.id);
+  check("(I) a NOTICE request-answered key surfaces deferredStuck:true — it can never fire", gotI.deferredStuck === true);
+  check("(I) scope: stays deferred:true (annotation only, same as the cancelled case in (A))", gotI.deferred === true);
+
   // --- (F) NEGATIVE CONTROL — gate-fail-naming never triggers this detector, even naming a cancelled request's id ---
   const cardF = createProjectTask(db, "pRepo", { title: "dependent card F (gate-fail-naming)" });
   await updateProjectTask(db, "pRepo", cardF.id, { deferred: true, deferredReason: "waiting on a specific test to go red", deferredUntilEvent: { kind: "gate-fail-naming", key: qCancelled } });

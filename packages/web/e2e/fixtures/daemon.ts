@@ -438,11 +438,15 @@ export interface LoomDaemon {
     // Requests-object generalization (card 695ebab0): `type` + its per-type ask-time payload. The daemon
     // seed handler already forwards all of these to insertQuestion; a spec that omits `type` gets the
     // default "decision" shape (byte-identical to before).
-    type?: "decision" | "input" | "permission" | "credential";
+    type?: "decision" | "input" | "permission" | "credential" | "notice";
     options?: string[] | null; recommendation?: string | null; taskId?: string | null;
     permissionAction?: string | null; permissionScopeHint?: "once" | "standing" | null; permissionExpiresAt?: string | null;
     credentialEnvVar?: string | null;
-    state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
+    // Card 59fa6403 round 2 — "notice" widened in alongside the existing three. A self-terminal notice
+    // seeded with `state:"notice"` needs createdAt/answeredAt passed explicitly (below) for an
+    // age-dependent test (e.g. the Inbox's 7-day visibility window); the seed route never derives them
+    // for this state the way it does for "answered"/"consumed".
+    state?: "pending" | "answered" | "consumed" | "notice"; chosenOption?: string | null; note?: string | null;
     createdAt?: string; answeredAt?: string;
     // Stale-Request escalation (card 99d41588) + its durable snooze (card 889ae619, iii-a) — seed an
     // ALREADY-STALE (and optionally already-snoozed) pending row directly, since the real escalation path

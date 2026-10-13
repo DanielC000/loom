@@ -177,7 +177,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
   }, []);
   const c = tone.cyan;
   return (
-    <div onClick={onOpen} role="button" title="open the Requests inbox" data-testid="request-count-pill"
+    <div onClick={onOpen} role="button" title="open the Inbox" data-testid="request-count-pill"
       style={{
         display: "flex", alignItems: "center", gap: 8,
         background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${c}`,

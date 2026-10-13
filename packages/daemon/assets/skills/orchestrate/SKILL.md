@@ -211,6 +211,16 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   - **`credential`** — ask for a secret under a **never-echo** model: you will NEVER receive the
     plaintext, only an ack that it's been provisioned (optionally under the `envVar` you name) — use the
     secret via your environment/config, never expect it back in the tool result.
+  - **`notice`** — an FYI/status line that needs **no answer**: "the migration landed," "deploy succeeded,"
+    "I changed approach on X." It lands already-answered — **never** `pending`, **never** returned by
+    `question_pull` (there's nothing to pull back; don't wait on it). **Rate-limited per your agent
+    lineage** (a human-tunable per-project cap) — filing too many in an hour is REFUSED loudly, naming the
+    limit; consolidate a repeated status update into fewer, more meaningful notices rather than firing one
+    per increment. `supersedes` does **not** help here (it only cancels a still-`pending` ask, and a
+    notice is never pending) — just don't re-notice the same thing. **Workers relay through you, never
+    directly** — `question_ask` (every type, including this one) isn't on a worker's own surface at all;
+    if a worker's progress is worth the owner knowing, YOU file the notice on its behalf, composing the
+    body yourself (there's no structured "on behalf of worker X" field — name it in the text).
 
   It's NON-BLOCKING: keep orchestrating your other tracks, but don't guess past *this* point —
   `question_pull` the answer (which consumes it; a credential returns only the ack, a permission returns

@@ -32,9 +32,10 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     const attnRow = page.locator("main").getByText("DECISION NEEDED").first();
     await expect(attnRow).toBeVisible();
     await expect(page.locator("main").getByText(title)).toBeVisible();
-    // The Requests rail item shows a non-zero pending-requests count — a pending decision IS a request.
-    // (The footer Alerts badge is NOT expected to tick here: it counts only non-request attention now.)
-    await expect(page.locator(".loom-rail-item", { hasText: "Requests" }).locator(".loom-rail-badge"))
+    // The Inbox rail item (renamed from "Requests", card 59fa6403) shows a non-zero pending-requests
+    // count — a pending decision IS a request. (The footer Alerts badge is NOT expected to tick here: it
+    // counts only non-request attention now.)
+    await expect(page.locator(".loom-rail-item", { hasText: "Inbox" }).locator(".loom-rail-badge"))
       .toHaveText(/[1-9]/, { timeout: 10_000 });
 
     // (2) The global inbox lists it with a project facet.

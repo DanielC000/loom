@@ -1321,7 +1321,7 @@ CREATE TABLE IF NOT EXISTS questions (
                                             -- created before this column existed — see QUESTION_ADDED_COLUMNS'
                                             -- own doc for why that NULL is unrecoverable, not just unset.
   project_id TEXT NOT NULL REFERENCES projects(id),
-  type TEXT NOT NULL DEFAULT 'decision',   -- 'decision' | 'input' | 'permission' | 'credential'
+  type TEXT NOT NULL DEFAULT 'decision',   -- 'decision' | 'input' | 'permission' | 'credential' | 'notice'
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
   options_json TEXT,
@@ -1346,7 +1346,7 @@ CREATE TABLE IF NOT EXISTS questions (
   provision_binding_state TEXT,            -- 'pending' | 'applied' once provisioned; NULL ('none') otherwise
   fulfillment_target TEXT,                 -- ask-time JSON {profileId,key,expectedValue?} — grant-fulfilment
                                             -- observation (card 3880f783), 'permission' type only, INTENT only
-  state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed' | 'cancelled'
+  state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed' | 'cancelled' | 'notice'
   chosen_option TEXT,
   note TEXT,
   created_at TEXT NOT NULL,
@@ -1667,6 +1667,13 @@ export const DEFAULT_GATE_HISTORY_PAGE = 25;
  *  MAX_EVENTS_SEARCH_PAGE] so a huge value can't return an unbounded slice of the event log. Exported so
  *  the `events_search` MCP tool's description can cite the same number without redeclaring it. */
 export const MAX_EVENTS_SEARCH_PAGE = 200;
+
+/** Card 59fa6403 (owner ruling, round 2): how long a `type:"notice"` row stays in `listOpenQuestions`'
+ *  default "waiting on me" view (a notice never has anything PENDING to show, but a brand-new one is
+ *  still worth surfacing there) before it drops out to History-only. A deliberate, temporary stopgap —
+ *  Phase 2 (card 54007ab7, the read/unread layer) replaces this fixed window with `readAt`-driven
+ *  visibility; don't widen this constant as a substitute for landing that card. */
+export const NOTICE_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** The gate-run orchestration_event kinds that constitute Gates-page HISTORY — one row per daemon-executed
  *  lane run: a worker self-check (`worker_gate`), a merge gate + its transient-kill retry (`build_gate` /
@@ -9087,6 +9094,9 @@ export class Db {
    */
   pullAnsweredQuestionsForAgent(agentId: string, consumedAt: string): Question[] {
     return this.db.transaction((): Question[] => {
+      // Card 59fa6403 round 2 (b13df292): a `type:"notice"` row is never `state = 'answered'` at all (it
+      // lands self-terminal in its OWN state, `'notice'`, at ask time) — this query excludes it BY
+      // CONSTRUCTION, with no separate `type` filter needed. Do not re-add one.
       const rows = (this.db.prepare(
         `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
          WHERE s.agent_id = ? AND q.state = 'answered' ORDER BY q.answered_at`,
@@ -9118,6 +9128,8 @@ export class Db {
     agentId: string, consumedAt: string, budgetChars: number, sizeOf: (q: Question) => number,
   ): { consumed: Question[]; remaining: number } {
     return this.db.transaction((): { consumed: Question[]; remaining: number } => {
+      // A `type:"notice"` row excludes itself (state = 'notice', never 'answered') — same as
+      // pullAnsweredQuestionsForAgent's sibling query above; keep both in sync if this ever changes.
       const rows = (this.db.prepare(
         `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
          WHERE s.agent_id = ? AND q.state = 'answered' ORDER BY q.answered_at`,
@@ -9135,6 +9147,22 @@ export class Db {
       for (const r of consumed) flip.run(consumedAt, r.id);
       return { consumed, remaining: rows.length - consumed.length };
     })();
+  }
+  /**
+   * Count of `type:"notice"` rows filed by agent lineage `agentId` with `created_at >= sinceIso` —
+   * `buildQuestionAsk`'s rate-limit check (card 59fa6403, `OrchestrationConfig.maxNoticesPerHour`).
+   * Agent-lineage-scoped (the same `sessions.agent_id` join every other per-agent Requests read uses — a
+   * recycled successor shares its predecessor's limit, correctly: the limit protects the HUMAN from this
+   * lineage's notice volume, not any one session row). Deliberately NON-CONSUMING and reads every state a
+   * notice could be in (today always `answered`, since it's self-terminal at ask time) — this counts
+   * ATTEMPTS within the window, not outstanding/unconsumed rows.
+   */
+  countRecentNoticesForAgent(agentId: string, sinceIso: string): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM questions q JOIN sessions s ON s.id = q.session_id
+       WHERE s.agent_id = ? AND q.type = 'notice' AND q.created_at >= ?`,
+    ).get(agentId, sinceIso) as { n: number };
+    return row.n;
   }
   /**
    * Whether SESSION `sessionId` itself has ANY still-`pending` question_ask outstanding — the
@@ -9243,8 +9271,14 @@ export class Db {
     if (filters.projectId) { clauses.push("q.project_id = ?"); params.push(filters.projectId); }
     if (filters.state) { clauses.push("q.state = ?"); params.push(filters.state); }
     // 'cancelled' is EXCLUDED alongside 'consumed' by default (question_cancel/dismiss's terminal state is
-    // retained history exactly like 'consumed'), unless an explicit `state` filter asks for it.
-    else if (filters.excludeConsumed) { clauses.push("q.state NOT IN ('consumed','cancelled')"); }
+    // retained history exactly like 'consumed'), unless an explicit `state` filter asks for it. A 'notice'
+    // (card 59fa6403 round 2, CR2 844bd6b8) gets the SAME visibility window as listOpenQuestions: an old
+    // one is excluded too under this default, for consistency — without this, requests_list's default
+    // (excludeConsumed) view would keep every notice forever, unlike the web Inbox's own default view.
+    else if (filters.excludeConsumed) {
+      clauses.push("(q.state NOT IN ('consumed','cancelled','notice') OR (q.state = 'notice' AND q.created_at >= ?))");
+      params.push(new Date(Date.now() - NOTICE_INBOX_WINDOW_MS).toISOString());
+    }
     if (filters.type) { clauses.push("q.type = ?"); params.push(filters.type); }
     if (filters.since) { clauses.push("q.created_at >= ?"); params.push(filters.since); }
     if (filters.agentId) { clauses.push("s.agent_id = ?"); params.push(filters.agentId); }
@@ -9265,13 +9299,17 @@ export class Db {
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
    * ALL projects/sessions, enriched with the asking agent/project display names + whether the CURRENTLY
    * ROUTED session is still live (for the jump/nudge affordances). By default only the human-actionable
-   * states ('pending' + 'answered'); `includeConsumed` folds in the terminal history — 'consumed' AND
+   * states ('pending' + 'answered') PLUS a `type:"notice"` row created within {@link
+   * NOTICE_INBOX_WINDOW_MS} (card 59fa6403 round 2, owner ruling) — a notice has nothing pending to show,
+   * but a brand-new one is still worth surfacing in the default view; an OLDER notice drops out to
+   * History-only (`includeConsumed`). `includeConsumed` folds in the FULL terminal history — 'consumed',
    * 'cancelled' (question_cancel/dismiss's terminal state is retained history exactly like 'consumed',
-   * never a separate bucket). Newest-first. LEFT JOINs so a question whose filing/routed session or agent
-   * was hard-deleted still lists (name falls back to "?") rather than silently dropping — the human should
-   * still see and answer it. Same LEFT JOIN posture for the linked task (card 889ae619, iii-b): `task_id`
-   * is a soft, non-FK link (see `Question.taskId`'s own doc), so a dangling id or a null `task_id` both
-   * naturally yield `linked_task_column_key`/`linked_task_title` of `NULL` rather than dropping the row.
+   * never a separate bucket), AND EVERY 'notice' regardless of age. Newest-first. LEFT JOINs so a question
+   * whose filing/routed session or agent was hard-deleted still lists (name falls back to "?") rather than
+   * silently dropping — the human should still see and answer it. Same LEFT JOIN posture for the linked
+   * task (card 889ae619, iii-b): `task_id` is a soft, non-FK link (see `Question.taskId`'s own doc), so a
+   * dangling id or a null `task_id` both naturally yield `linked_task_column_key`/`linked_task_title` of
+   * `NULL` rather than dropping the row.
    *
    * `agent_name` is joined via `filed_by_session_id` (the IMMUTABLE filer), NOT `session_id` (the mutable
    * routing target `reparentQuestions` rewrites on every recycle) — before joining this off `session_id`
@@ -9283,6 +9321,11 @@ export class Db {
    * joined off `session_id` on purpose: those describe the CURRENT routed seat, not who filed it.
    */
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
+    const noticeWindowStart = new Date(Date.now() - NOTICE_INBOX_WINDOW_MS).toISOString();
+    const whereClause = includeConsumed
+      ? `q.state IN ('pending','answered','consumed','cancelled','notice')`
+      : `q.state IN ('pending','answered') OR (q.state = 'notice' AND q.created_at >= ?)`;
+    const params = includeConsumed ? [] : [noticeWindowStart];
     const rows = this.db.prepare(
       `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
               s.resumability AS session_resumability, t.column_key AS linked_task_column_key,
@@ -9293,9 +9336,9 @@ export class Db {
        LEFT JOIN agents a ON fs.agent_id = a.id
        LEFT JOIN projects p ON q.project_id = p.id
        LEFT JOIN tasks t ON q.task_id = t.id
-       WHERE q.state IN (${includeConsumed ? "'pending','answered','consumed','cancelled'" : "'pending','answered'"})
+       WHERE ${whereClause}
        ORDER BY q.created_at DESC`,
-    ).all() as Row[];
+    ).all(...params) as Row[];
     return rows.map(toQuestionInboxItem);
   }
   /**

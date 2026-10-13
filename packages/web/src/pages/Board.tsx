@@ -1292,6 +1292,10 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
   const answered = linked.filter((q) => q.state === "answered").length;
   const consumed = linked.filter((q) => q.state === "consumed").length;
   const cancelled = linked.filter((q) => q.state === "cancelled").length;
+  // Card 59fa6403 — a notice (web twin of mcp/tasks.ts's summarizeTaskRequests) gets its OWN bucket here
+  // too, for the same reason: it's state-distinct from pending/answered/consumed/cancelled, and folding
+  // it into any of those would make this line's counts stop summing to `linked.length`.
+  const notices = linked.filter((q) => q.state === "notice").length;
   return (
     <div data-testid="task-requests-rail"
       style={{ flex: "1 1 280px", minWidth: 240, maxWidth: "100%", display: "flex", flexDirection: "column",
@@ -1325,6 +1329,7 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
             <span aria-hidden>·</span>
             <span>{consumed} consumed</span>
             {cancelled > 0 && <><span aria-hidden>·</span><span style={{ color: color.red }}>{cancelled} cancelled</span></>}
+            {notices > 0 && <><span aria-hidden>·</span><span>{notices} notice{notices === 1 ? "" : "s"}</span></>}
           </div>
           {/* Signal rows — the lone scroll region so the header + summary stay pinned. */}
           <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, padding: 10 }}>
@@ -1391,6 +1396,17 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
       </div>
     );
   }
+  if (q.state === "notice") {
+    // Mirrors requests.tsx's AnsweredReadout: a notice was never answered — show the body (the FYI
+    // content) under its own label, never fall through to the generic decision/input "chose …/note"
+    // rendering below, which would show a misleading "—" (a notice never carries chosenOption/note).
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>FYI · no answer needed</span>
+        {q.body && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, whiteSpace: "pre-wrap" }}>{q.body}</span>}
+      </div>
+    );
+  }
   if (q.type === "credential") {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -1435,7 +1451,7 @@ function CollapsedRequestsStrip({ count, onExpand }: { count: number; onExpand: 
       <span aria-hidden style={{ color: color.textDim, fontSize: 14, lineHeight: 1 }}>‹</span>
       <span aria-hidden style={{ fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.14em",
         textTransform: "uppercase", color: color.textMuted, writingMode: "vertical-rl" }}>
-        Requests
+        Inbox
       </span>
       <span style={{ fontFamily: font.mono, fontSize: 11, fontWeight: 700, color: count > 0 ? color.cyan : color.textMuted }}>{count}</span>
     </button>

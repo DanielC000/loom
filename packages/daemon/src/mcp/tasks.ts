@@ -240,6 +240,10 @@ export async function resolveDeferredEffective(
  * a pointer" contract. Conflating "already fired" with "can never fire" would turn a working, quiet queue
  * into a wall of false alarms.
  *
+ * @decision 59fa6403 — a `type:"notice"` row (`state:"notice"`) is UNFIREABLE, same as `"cancelled"`: it
+ * is self-terminal and never transitions to `"answered"`, so a `deferredUntilEvent` naming one can never
+ * fire either.
+ *
  * `kind:"gate-fail-naming"` always returns `false` — see {@link DeferredUntilEventKind}'s own doc for why
  * that kind has no analogous dangling case to detect.
  */
@@ -247,7 +251,8 @@ function resolveDeferredEventStuck(db: Db, projectId: string, event: DeferredUnt
   if (!event || event.kind !== "request-answered") return false;
   const q = db.getQuestion(event.key);
   if (!q || q.projectId !== projectId) return true; // dangling / cross-project — can never resolve
-  return q.state === "cancelled"; // cancelled/superseded → unfireable; pending/answered/consumed are fine
+  // cancelled/superseded, or a self-terminal notice → unfireable; pending/answered/consumed are fine.
+  return q.state === "cancelled" || q.state === "notice";
 }
 
 /**
@@ -781,14 +786,18 @@ function resolveProjectTaskId(db: Db, projectId: string, taskId: string): Task |
  * ASKING agent already drained it via question_pull, not that the answer is unavailable here. `cancelled`
  * (question_cancel/dismiss, card feat(orchestration): question_cancel + dismiss) is counted SEPARATELY —
  * a cancelled request was NEVER answered, so it must never be folded into `answered` (nor derived as
- * `total - pending`, which would silently do exactly that once a fourth state exists). `total` still
- * counts every row regardless of state; `pending + answered + cancelled === total`.
+ * `total - pending`, which would silently do exactly that once a fourth state exists). `notices` (card
+ * 59fa6403 round 2, b13df292) is a FIFTH bucket, likewise counted SEPARATELY — a `type:"notice"` row is
+ * self-terminal and was never answered either, so it must never be folded into `answered` (the original
+ * defect this card's CR caught). `total` still counts every row regardless of state;
+ * `pending + answered + cancelled + notices === total`.
  */
 export interface TaskRequestsSummary {
   total: number;
   answered: number;
   pending: number;
   cancelled: number;
+  notices: number;
   items: Array<{ id: string; type: QuestionType; title: string; state: QuestionState }>;
 }
 
@@ -819,16 +828,18 @@ function resolveHeldRequestState(db: Db, task: Pick<Task, "heldRequestId">): Hel
 
 function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
   // Each bucket is derived EXPLICITLY by state — never `total - pending` (that silently mis-groups any
-  // state besides pending/answered/consumed, which is exactly the bug a cancelled row exposed here).
-  let pending = 0, answered = 0, cancelled = 0;
+  // state besides pending/answered/consumed, which is exactly the bug a cancelled row exposed here, and
+  // exactly the bug a `type:"notice"` row exposed again — see TaskRequestsSummary's own doc).
+  let pending = 0, answered = 0, cancelled = 0, notices = 0;
   for (const q of questions) {
     if (q.state === "pending") pending++;
     else if (q.state === "answered" || q.state === "consumed") answered++;
     else if (q.state === "cancelled") cancelled++;
+    else if (q.state === "notice") notices++;
   }
   return {
     total: questions.length,
-    pending, answered, cancelled,
+    pending, answered, cancelled, notices,
     items: questions.map((q) => ({ id: q.id, type: q.type, title: q.title, state: q.state })),
   };
 }

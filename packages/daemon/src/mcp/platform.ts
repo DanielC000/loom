@@ -301,6 +301,14 @@ const orchestrationOverride = z.object({
   idleNudgeMinutes: z.number().int().min(0).optional(),
   maxUnansweredNudges: z.number().int().min(0).optional(),
   idleDefaultSnoozeMinutes: z.number().int().min(0).optional(),
+  // Card 59fa6403 — per-agent-lineage `notice` rate limit (OrchestrationConfig.maxNoticesPerHour's own
+  // doc has the full rationale). HUMAN-only: an agent that could raise its own limit could silence the
+  // one mechanism protecting the human from its own notice flood, so it's omitted from the agent path
+  // below — and, per round 2's owner ruling (b13df292), blocked from the elevated Platform Lead too (see
+  // HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS) — the mergeGate trust tier, NOT the Lead-settable gateCommand/
+  // alertWebhook/deployCommand tier. 0 is honored as a real value ("never allowed"); a generous ceiling
+  // guards a fat-fingered value.
+  maxNoticesPerHour: z.number().int().min(0).max(1000).optional(),
   // Idle-WORKER re-nudge window (whole minutes; 0 disables). Same 0-floor rationale as above.
   idleWorkerMinutes: z.number().int().min(0).optional(),
   // Busy-worker stuck window (whole minutes; 0 disables the watcher). Same 0-floor rationale as above.
@@ -359,7 +367,13 @@ const harnessScope = z.enum(["workers", "fleet"]).refine((v) => v !== "fleet" ||
 export const HUMAN_ONLY_PROJECT_CONFIG_KEYS: readonly string[] = ["harness"];
 /** Dot-path human-only keys the elevated Platform `project_configure` also refuses (card e8df2659). The
  *  top-level list above is `Object.hasOwn`-only and cannot see a nested key. */
-export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = ["orchestration.mergeGate", "orchestration.mergeGateInterval", "permission.startupModeCycles"];
+export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = [
+  "orchestration.mergeGate", "orchestration.mergeGateInterval", "permission.startupModeCycles",
+  // Card 59fa6403 round 2 (b13df292, owner ruling): the notice rate limit is the SAME trust shape as
+  // mergeGate — the party it governs must never be able to loosen its own governor — so it's blocked
+  // even from the elevated Lead, not just the top-level omission below.
+  "orchestration.maxNoticesPerHour",
+];
 /** The single list driving the "human-only means BOTH directions" unset/replace-drop guard below (card
  *  74f27ab5) — every human-only key, top-level AND nested, as dot-paths. The separate WRITE-direction
  *  checks above stay split (raw-payload shape differs by depth); both resolve through the same dot-path
@@ -483,12 +497,16 @@ const projectConfigOverrideSchema = z.object({
 /**
  * Agent-facing config schema omits several orchestration keys — never restate the count here, it has
  * already gone stale once (card bd9a483b added two more); read the `.omit({...})` call immediately below
- * for the live, exact set. The omitted keys fall into three host-RCE/exfil-trust-class families:
- * gateCommand/deployCommand/ungatedLandingCheckCommand (host-RCE via spawnSync; see
+ * for the live, exact set. The omitted keys fall into FOUR trust-class families: three are host-RCE/
+ * exfil-capable — gateCommand/deployCommand/ungatedLandingCheckCommand (host-RCE via spawnSync; see
  * confirmWorkerMerge/deployOwnProject/runUngatedLandingCheck in sessions/service.ts), alertWebhook (a
- * data-exfiltration vector), and each one's own paired timeout — so `.strict()` REJECTS an agent setting
- * any of them (config left unchanged); the human REST PATCH path keeps the full schema, so all of them
- * stay human-settable there. DRY: only `orchestration` is narrowed, the rest reuses the same base shapes.
+ * data-exfiltration vector), and each one's own paired timeout — and a fourth is a self-serving-safety-net
+ * control: `maxNoticesPerHour` (card 59fa6403) is itself the backpressure on the asking agent, so letting
+ * that SAME agent raise it would let it silence its own throttle (same reasoning as `mergeGate`, below —
+ * a different mechanism, same "don't let the governed party loosen its own governor" shape). `.strict()`
+ * REJECTS an agent setting any of them (config left unchanged); the human REST PATCH path keeps the full
+ * schema, so all of them stay human-settable there. DRY: only `orchestration` is narrowed, the rest reuses
+ * the same base shapes.
  */
 const agentOrchestrationOverride = orchestrationOverride
   .omit({
@@ -496,6 +514,7 @@ const agentOrchestrationOverride = orchestrationOverride
     ungatedLandingCheckCommand: true, ungatedLandingCheckTimeoutMs: true,
     deployCommand: true, deployCommandTimeoutMs: true,
     alertWebhook: true, alertWebhookTimeoutMs: true,
+    maxNoticesPerHour: true,
   })
   .strict();
 // Agent-facing obsidian shape: `autoStart` only. `path` is omitted (host-launch capable, human-only), so
@@ -1607,11 +1626,14 @@ export class PlatformMcpRouter {
         if (humanOnlyKey) {
           return ok({ error: `invalid config: ${humanOnlyKey} may not be set via an agent MCP tool — it selects which vendor CLI spawns (human-only, via the REST config PATCH / Settings UI)`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS.filter((k) => !HUMAN_ONLY_PROJECT_CONFIG_KEYS.includes(k)) });
         }
-        // Card e8df2659: the NESTED human-only keys (`orchestration.mergeGate`) — the top-level check above
-        // cannot see them, and the full validator below would otherwise accept them on this elevated route.
+        // Card e8df2659 (widened by card 59fa6403 round 2, b13df292): the NESTED human-only keys — the
+        // top-level check above cannot see them, and the full validator below would otherwise accept them
+        // on this elevated route. The message stays generic (not "it changes the merge gate") now that
+        // this list covers more than one purpose (mergeGate/mergeGateInterval, permission.startupModeCycles,
+        // orchestration.maxNoticesPerHour).
         const humanOnlyNested = HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS.find((p) => hasNestedKey(config, p));
         if (humanOnlyNested) {
-          return ok({ error: `invalid config: ${humanOnlyNested} may not be set via an agent MCP tool — it changes the merge gate (human-only, via the REST config PATCH / Settings UI)` });
+          return ok({ error: `invalid config: ${humanOnlyNested} may not be set via an agent MCP tool — it is human-only, via the REST config PATCH / Settings UI` });
         }
         // Human-only means BOTH directions (card e8df2659, manager ruling; widened to top-level keys by
         // card 74f27ab5): the Lead may not CLEAR a stored human-only key either — top-level ("harness") or
@@ -3582,6 +3604,13 @@ export class PlatformMcpRouter {
           "\"decision\" — `options` is an OPTIONAL array of choices for the human to pick between (omit " +
           "for a pure blocker — free-text note only) and `recommendation` is an OPTIONAL suggested " +
           "answer shown as a nudge, not enforced. \"input\" — a freeform-text ask, no options. " +
+          "\"notice\" — an FYI/status update that needs NO answer: it lands in the inbox immediately in " +
+          "its OWN terminal 'notice' state — it is NEVER 'pending', NEVER 'answered', and NEVER returned " +
+          "by question_pull (there's nothing to pull back, and you get no push nudge for it either — " +
+          "that nudge only ever fires for a real human answer). Rate-limited per agent lineage (a " +
+          "human-only, per-project cap — you cannot raise your own limit) — exceeding it REFUSES loudly, " +
+          "naming the limit; consolidate repeated status updates into fewer, more meaningful notices " +
+          "rather than filing one per increment. " +
           "\"permission\" — ask the human to authorize/deny an irreversible/outward/spend action; " +
           "`action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", optional) is the requested " +
           "grant lifetime, `expiresAt` (optional ISO timestamp) is a requested expiry — this is an " +
@@ -3647,7 +3676,8 @@ export class PlatformMcpRouter {
       {
         description:
           "Pull (return AND consume) every ANSWERED request you've asked via question_ask — your " +
-          "requests-inbox pickup. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
+          "requests-inbox pickup. A \"notice\" entry is NEVER returned here — it completes immediately at " +
+          "ask time, with nothing to pull back. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
           "\"input\" entry has {chosenOption, note} (chosenOption is one of the options you offered, or " +
           "null); a \"permission\" entry has {approved, note, scope, expiresAt, lapsed, fulfillment} — " +
           "`scope`/`expiresAt` are the human's ACTUAL decided grant (null/null if they never chose one, " +
