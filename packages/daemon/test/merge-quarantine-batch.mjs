@@ -124,6 +124,18 @@ try {
   // the OUTER subshell backgrounds an INNER one and returns immediately, so by the time the kill-trigger's
   // tree-kill walks the tree, the escaped descendant is already unreachable by a PPID-walking kill. Here
   // it's installed on a branch's SECOND commit, landing mid-batch (not the solo squash path).
+  // @decision f59ca98a — this file's own copy of the shape was missed by that record's fix (which only
+  // touched git-writer-kill-confirm.mjs/merge-commit-kill-confirm.mjs/union-merge-kill-confirm.mjs): without
+  // `setsid`, the escaped descendant stays in the SAME process group as git's own hook child (bounded.ts's
+  // `spawnCanonicalGitTree` spawns with `detached: process.platform !== "win32"`, making the git child its
+  // own group leader) — POSIX's tree-kill is a process-GROUP kill (`process.kill(-pid, "SIGKILL")`,
+  // gate-runner.ts's `killGateProcessTree`), which reaches every member of that group regardless of PPID,
+  // so the "escapes a PPID-walking kill" framing above is win32-only; on POSIX the descendant must `setsid`
+  // to actually escape the SAME tree-kill. Confirmed by direct repro (real WSL Ubuntu-22.04): pre-fix, this
+  // scenario reproduces CI's exact failure set (TYPED quarantined flag unset, repo not quarantined, marker
+  // never observed, `runBatchedMerge` reports "every candidate was dropped" instead) — the descendant is
+  // killed by the group kill before it can write its marker, so the kill-confirm's tree death IS confirmed
+  // and no quarantine is ever raised.
   // Card 5126718f: these were 2000/8000/15000, then raised to 10000 (~40% headroom over a measured 7.2s
   // worst case under "100%-CPU, 14 genuine OS processes" synthetic contention). Card cceb62fd: that 10000
   // figure still reliably reproduces the SAME documented failure shape — a bare `{ok:true}` with no hook
@@ -148,7 +160,13 @@ try {
   function installDoubleForkedPreCommitHook(repo, holdMs, mainMs) {
     const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
     fs.writeFileSync(hookPath,
-      `#!/bin/sh\n( (sleep ${holdMs / 1000}; echo fixedY > fixedY.txt; git add fixedY.txt; echo done > ${markerName}) & )\nsleep ${mainMs / 1000}\n`);
+      `#!/bin/sh\n` +
+      `if command -v setsid >/dev/null 2>&1; then\n` +
+      `  ( setsid sh -c 'sleep ${holdMs / 1000}; echo fixedY > fixedY.txt; git add fixedY.txt; echo done > ${markerName}' & )\n` +
+      `else\n` +
+      `  ( (sleep ${holdMs / 1000}; echo fixedY > fixedY.txt; git add fixedY.txt; echo done > ${markerName}) & )\n` +
+      `fi\n` +
+      `sleep ${mainMs / 1000}\n`);
     fs.chmodSync(hookPath, 0o755);
   }
   {
@@ -301,10 +319,20 @@ try {
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const markerNameE = "escaped-descendant-e.marker";
+    // @decision f59ca98a — same POSIX setsid requirement as SCENARIO B's pre-commit hook above: without
+    // it, the escaped descendant shares git's own process GROUP (bounded.ts spawns the canonical git child
+    // `detached` on POSIX, making it its own group leader) and dies along with it under the tree-kill's
+    // process-group kill, so it never escapes on POSIX the way it does on win32's PPID-walking kill.
     function installDoubleForkedPostMergeHook(repo, holdMs, mainMs) {
       const hookPath = path.join(repo, ".git", "hooks", "post-merge");
       fs.writeFileSync(hookPath,
-        `#!/bin/sh\n( (sleep ${holdMs / 1000}; echo escaped > ${markerNameE}) & )\nsleep ${mainMs / 1000}\n`);
+        `#!/bin/sh\n` +
+        `if command -v setsid >/dev/null 2>&1; then\n` +
+        `  ( setsid sh -c 'sleep ${holdMs / 1000}; echo escaped > ${markerNameE}' & )\n` +
+        `else\n` +
+        `  ( (sleep ${holdMs / 1000}; echo escaped > ${markerNameE}) & )\n` +
+        `fi\n` +
+        `sleep ${mainMs / 1000}\n`);
       fs.chmodSync(hookPath, 0o755);
     }
 
