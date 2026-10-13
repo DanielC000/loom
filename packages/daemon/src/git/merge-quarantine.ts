@@ -1161,6 +1161,22 @@ function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: 
   protectOccupantContentBeforeDelete(final, occupantRepoPath, clearedEntry.repoPath);
 }
 
+/** A LIVE entry (active or pending, wherever it lives) sharing `occupantIdentity`'s own identity whose
+ *  OWN `tokens` already form a superset of `tokens` — i.e. this content is already fully represented
+ *  elsewhere, so minting an independent new tracking record for it would create a SECOND, never-cleared
+ *  copy of the same identity.
+ *
+ *  @decision 1922be3a (round 2, CRITICAL) — see the decision record. */
+function liveEntrySupersettingTokens(occupantIdentity: string, tokens: string[]): MergeQuarantineEntry | undefined {
+  for (const e of activeQuarantines.values()) {
+    if (directPathIdentity(e.repoPath) === occupantIdentity && tokens.every((t) => e.tokens.includes(t))) return e;
+  }
+  for (const p of pendingUnresolvedQuarantines) {
+    if (directPathIdentity(p.entry.repoPath) === occupantIdentity && tokens.every((t) => p.entry.tokens.includes(t))) return p.entry;
+  }
+  return undefined;
+}
+
 /** Shared tail for both protect-before-delete wrappers above — durably copies `final`'s own content
  *  aside (under `occupantRepoPath`'s own pending-divert filename) before the caller's own unconditional
  *  unlink proceeds. `describeClearer` is used only for the failure log's own wording. */
@@ -1215,7 +1231,16 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   } else if (atFinalBasenameIdx >= 0) {
     pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: toWrite, sourceFile: filename };
   } else {
-    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
+    // @decision 1922be3a (round 2, CRITICAL) — never mint an independent pending record when a live
+    // entry elsewhere already covers every token here; fold it into that entry's own orphanLatchFiles
+    // instead, or a clear of the live entry never reaches this copy. See the decision record.
+    const liveElsewhere = liveEntrySupersettingTokens(directPathIdentity(occupantRepoPath), toWrite.tokens);
+    if (liveElsewhere) {
+      const updated: MergeQuarantineEntry = { ...liveElsewhere, orphanLatchFiles: [...new Set([...(liveElsewhere.orphanLatchFiles ?? []), filename])] };
+      replaceEntryEverywhere(activeQuarantines, liveElsewhere, updated);
+    } else {
+      pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
+    }
   }
 }
 
@@ -1370,6 +1395,10 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     }
     return token;
   }
+  // @decision 1922be3a (round 2, CRITICAL) — protect BEFORE collecting the pending indices below, never
+  // after — the protect call can splice `pendingUnresolvedQuarantines`, corrupting indices collected
+  // first. See the decision record.
+  if (verified) protectDegradedOccupantBeforeDelete(quarantinePathForKey(key), repoPath);
   const identityForPendingMatch = directPathIdentity(repoPath);
   // @decision 188b145f (round 2) — collect EVERY identity-matching pending index, never just the first,
   // same reason and same fix shape as `activeMergeQuarantineFor`'s own lazy-graduation cascade: a second
@@ -1436,48 +1465,53 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
  * (never a fresh, possibly-degraded `canonicalRepoLockKey` recompute), mirroring every other pending-aware
  * clear path in this module.
  *
- * @decision d4b25feb (round 2, CRITICAL) — the LAST token lifts ONLY the one matched pending entry,
+ * @decision d4b25feb (round 2, CRITICAL) — the LAST token lifts ONLY the matched pending entry/entries
  * directly — never via {@link clearMergeQuarantineByRecordedPath}, which clears EVERY entry sharing this
  * identity and would destroy a wholly separate, still-armed ACTIVE entry for the same repoPath.
+ *
+ * @decision 1922be3a (round 3) — generalized from a single `findIndex` to every matching index, applying
+ * this same per-entry logic to each, in descending order. See the decision record.
  */
 function clearPendingEntryByToken(repoPath: string, token: string): void {
   const identity = directPathIdentity(repoPath);
-  const idx = pendingUnresolvedQuarantines.findIndex((p) => directPathIdentity(p.entry.repoPath) === identity && p.entry.tokens.includes(token));
-  if (idx === -1) return; // not ours — leave whatever is (or isn't) there alone
-  const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine;
-  const remaining = pending.entry.tokens.filter((t) => t !== token);
-  if (remaining.length === 0) {
-    pendingUnresolvedQuarantines.splice(idx, 1);
-    const orphanFilesToSweep = new Set(pending.entry.orphanLatchFiles ?? []);
+  const indices = collectPendingIndices((p) => directPathIdentity(p.entry.repoPath) === identity && p.entry.tokens.includes(token));
+  if (indices.length === 0) return; // not ours — leave whatever is (or isn't) there alone
+  for (const idx of [...indices].sort((a, b) => b - a)) { // descending so earlier (lower) indices stay valid
+    const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine;
+    const remaining = pending.entry.tokens.filter((t) => t !== token);
+    if (remaining.length === 0) {
+      pendingUnresolvedQuarantines.splice(idx, 1);
+      const orphanFilesToSweep = new Set(pending.entry.orphanLatchFiles ?? []);
+      for (const k of pending.entry.armedKeys ?? []) {
+        if (!entryStillOwnsKey(k, pending.entry)) continue;
+        activeQuarantines.delete(k);
+        // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
+        deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity);
+      }
+      sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile);
+      for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
+      continue;
+    }
+    const updated: MergeQuarantineEntry = { ...pending.entry, tokens: remaining };
+    // @decision d4b25feb (round 3) — re-point EVERY in-memory reference to this entry (883e29bc's own
+    // divert can make it the SAME object armed in activeQuarantines) before durably rewriting each owned key.
+    //
+    // @decision 64283e06 — ROUTED, DEFENSIVE (fd189d91's own posture): unreachable today ONLY because the
+    // caller's own identity-scan already catches any active twin first — do not remove this routing on
+    // that basis, or a future change to that scan silently reopens the bug class this call closes.
+    replaceEntryEverywhere(activeQuarantines, pending.entry, updated);
+    pendingUnresolvedQuarantines[idx] = { ...pending, entry: updated };
     for (const k of pending.entry.armedKeys ?? []) {
-      if (!entryStillOwnsKey(k, pending.entry)) continue;
-      activeQuarantines.delete(k);
-      // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-      deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity);
+      if (activeQuarantines.get(k) !== updated) continue; // no longer genuinely owned — do not write there
+      if (!writeMergeQuarantineLatch(updated, false, k)) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath}'s own armed copy at key ${k} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
+      }
     }
-    sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile);
-    for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
-    return;
-  }
-  const updated: MergeQuarantineEntry = { ...pending.entry, tokens: remaining };
-  // @decision d4b25feb (round 3) — re-point EVERY in-memory reference to this entry (883e29bc's own
-  // divert can make it the SAME object armed in activeQuarantines) before durably rewriting each owned key.
-  //
-  // @decision 64283e06 — ROUTED, DEFENSIVE (fd189d91's own posture): unreachable today ONLY because the
-  // caller's own identity-scan already catches any active twin first — do not remove this routing on
-  // that basis, or a future change to that scan silently reopens the bug class this call closes.
-  replaceEntryEverywhere(activeQuarantines, pending.entry, updated);
-  pendingUnresolvedQuarantines[idx] = { ...pending, entry: updated };
-  for (const k of pending.entry.armedKeys ?? []) {
-    if (activeQuarantines.get(k) !== updated) continue; // no longer genuinely owned — do not write there
-    if (!writeMergeQuarantineLatch(updated, false, k)) {
+    if (!writePendingDivertFile(pending.sourceFile, updated)) {
       // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath}'s own armed copy at key ${k} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
+      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
     }
-  }
-  if (!writePendingDivertFile(pending.sourceFile, updated)) {
-    // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] could not durably persist the reduced token set for ${repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
   }
 }
 
@@ -1495,11 +1529,11 @@ function clearPendingEntryByToken(repoPath: string, token: string): void {
  * because a human resolving this by hand does not necessarily hold (or need) every outstanding token.
  */
 /**
- * Shared compare-and-clear body for {@link clearMergeQuarantineByToken}'s own fast path AND its round-3
- * identity-scan fallback below — both have ALREADY matched a specific `key`/`entry` pair known to hold
- * `token`. Takes `key` explicitly and never re-derives a write target from `entry.repoPath` (which may not
- * currently resolve at all when this is reached via the identity scan) — same rule as every other
- * degraded-identity-aware write site in this module.
+ * Shared compare-and-clear body for every match {@link clearMergeQuarantineByToken}'s own identity scan
+ * finds — the caller has ALREADY matched a specific `key`/`entry` pair known to hold `token`. Takes `key`
+ * explicitly and never re-derives a write target from `entry.repoPath` (which may not currently resolve at
+ * all when reached via the identity scan) — same rule as every other degraded-identity-aware write site
+ * in this module.
  */
 function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, token: string): void {
   const remaining = entry.tokens.filter((t) => t !== token);
@@ -1544,27 +1578,26 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   }
 }
 
+/**
+ * @decision 1922be3a (round 3, CRITICAL) — lifts `token` from EVERY record sharing `repoPath`'s own
+ * identity OR its own canonical key, active AND pending, never stopping at the first match. See the
+ * decision record — the key-match half is load-bearing (`token-clear-identity-drift`).
+ */
 export function clearMergeQuarantineByToken(repoPath: string, token: string): void {
   const key = canonicalRepoLockKey(repoPath);
-  const current = activeQuarantines.get(key);
-  if (current?.tokens.includes(token)) {
-    clearActiveEntryTokenAtKey(key, current, token);
-    return;
-  }
-  // @decision d4b25feb (round 3) — repoPath's OWN token can still live in a SEPARATE active entry, armed
-  // at its historical TRUE key (captured while resolvable, before it raised again unverified) — scan by
-  // identity, not key, before giving up to the pending fallback.
   const identity = directPathIdentity(repoPath);
   const seen = new Set<MergeQuarantineEntry>();
   for (const [k, entry] of activeQuarantines) {
     if (seen.has(entry)) continue;
+    const matches = k === key || directPathIdentity(entry.repoPath) === identity;
+    if (!matches || !entry.tokens.includes(token)) continue;
+    // @decision 1922be3a (round 3) — mark `seen` only on an actual match, never on every key visited: an
+    // entry armed under several keys can hit a NON-matching key first in Map iteration order — marking it
+    // seen there would permanently hide the SAME entry's later, genuinely matching key.
     seen.add(entry);
-    if (directPathIdentity(entry.repoPath) !== identity || !entry.tokens.includes(token)) continue;
     clearActiveEntryTokenAtKey(k, entry, token);
-    return;
   }
-  // @decision d4b25feb (round 2, MAJOR) — fall back whenever nothing active holds `token` either way —
-  // repoPath's own raise may live ONLY in `pendingUnresolvedQuarantines` (never armed anywhere).
+  // @decision 1922be3a (round 3) — ALWAYS also sweep the pending side; see the decision record.
   clearPendingEntryByToken(repoPath, token);
 }
 

@@ -25,9 +25,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     (enforcement fails OPEN), which is WORSE than this card's own pre-existing behavior (the raise
 //     overwrites the degraded occupant's file, destroying its identity, but the raise itself survives).
 //     This file's `fresh-raise-survives-reboot` scenario proves the opt-out restores that pre-fix
-//     behavior for the raise (durable across a reboot) and documents the REMAINING residual: a raise in
-//     this exact shape still overwrites the degraded occupant's own file (pre-existing, unfixed by this
-//     card — see the decision record for the precise shape).
+//     behavior for the raise (durable across a reboot). The residual this card ITSELF documented (a
+//     raise in this exact shape overwrites the degraded occupant's own file) is now FIXED by card
+//     `1922be3a` — `enterMergeQuarantine` durably protects the occupant's content aside FIRST, reusing
+//     `d163aef5`'s own protect/ownership machinery, before either of its "no `existing`" writes can
+//     destroy it. See docs/decisions/1922be3a-*.md.
 // (4) clear(S) (an ORDINARY clear of a resolvable repo colliding with a degraded occupant's own key) is
 //     OUT OF SCOPE for this card — a draft ruling to refuse it was tried and RETRACTED: card `d4b25feb`
 //     already owns this exact consequence (deliberately deferred by 4480b077), and the established
@@ -54,6 +56,11 @@ const SCENARIOS = [
   "fresh-raise-survives-reboot",
   "pending-merge-fresh-raise-survives-reboot",
   "negative-control-resolvable-occupant-still-overwrites",
+  "walkup-raise-protects-pending-occupant-then-clears",
+  "round2-protect-splice-does-not-corrupt-own-sibling-index",
+  "round2-protect-does-not-duplicate-already-active-occupant",
+  "partial-overlap-pending-leftover-stays-blocked-until-both-tokens-cleared",
+  "extra-pending-token-stays-blocked-until-cleared",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -75,14 +82,15 @@ if (!scenarioArg) {
   console.log(failedScenarios === 0
     ? "\n✅ ALL SCENARIOS PASS — a runtime write never destroys a degraded occupant's only durable copy "
       + "(both the sibling-absorb and lazy-graduation branches refuse, in BOTH tie-break age orders); a "
-      + "fresh raise is durable across a reboot via BOTH of enterMergeQuarantine's own opt-out shapes. The "
-      + "brand-new-entry branch's own occupant-overwrite residual is reported, not fixed, here (a VERIFIED "
-      + "raiser — see card 2a6a8073); the pending-merge branch's own residual (an UNVERIFIED raiser) IS "
-      + "fixed (card d4b25feb — that branch no longer reaches writeMergeQuarantineLatch at all for an "
+      + "fresh raise is durable across a reboot via BOTH of enterMergeQuarantine's own opt-out shapes, and "
+      + "(card 1922be3a) now durably PROTECTS the occupant's own content aside first, in both the "
+      + "brand-new-entry branch (a VERIFIED raiser) and the literal walk-up-under-the-raiser shape, rather "
+      + "than overwriting it; the pending-merge branch's own residual (an UNVERIFIED raiser) IS fixed "
+      + "separately (card d4b25feb — that branch no longer reaches writeMergeQuarantineLatch at all for an "
       + "unverified raiser). The guard still allows a legitimate resolvable-different-identity overwrite "
       + "THROUGH A GUARDED CALLER (never the opted-out enterMergeQuarantine path). clear(S) is deliberately "
       + "out of scope — see the decision record."
-    : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board card e1cb7d33.`);
+    : `\n❌ ${failedScenarios} SCENARIO(S) FAILED — reproduces board card e1cb7d33 / 1922be3a.`);
   process.exit(failedScenarios === 0 ? 0 : 1);
 }
 
@@ -97,7 +105,7 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, enterMergeQuarantine, clearMergeQuarantine,
-  MERGE_QUARANTINE_DIR, listActiveMergeQuarantines,
+  clearMergeQuarantineByToken, MERGE_QUARANTINE_DIR, listActiveMergeQuarantines, assertRepoNotQuarantined,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -109,6 +117,14 @@ const freshSfx = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 
 function hashForKey(key) {
   return createHash("sha256").update(key).digest("hex").slice(0, 24);
+}
+
+/** Mirrors `pendingDivertFilenameFor`'s own computation (merge-quarantine.ts) for a NEVER-EXISTING
+ *  `repoPath` — `directPathIdentity`'s own fallback for a path that doesn't resolve is a plain
+ *  `path.resolve`, lower-cased on win32 (never a realpath, which would throw for a missing path). */
+function divertFilenameFor(repoPath) {
+  const identity = process.platform === "win32" ? path.resolve(repoPath).toLowerCase() : path.resolve(repoPath);
+  return `pending-${createHash("sha256").update(identity).digest("hex").slice(0, 24)}.json`;
 }
 
 /** `repo` (registered, real git repo, own key Kp) + `teamA` (a plain subdir of `repo` — collapses onto
@@ -341,8 +357,10 @@ try {
     // OPEN), strictly worse than this shape's own PRE-EXISTING behavior (the raise overwrites the
     // degraded occupant's file, destroying ITS identity, but the raise itself survives). enterMergeQuarantine
     // is therefore an explicit OPT-OUT of the guard, exactly like bootWriteLatch — this scenario proves
-    // the opt-out restores that pre-fix durability, and separately documents the REMAINING residual (the
-    // degraded occupant's own file is still destroyed in this exact shape — pre-existing, unfixed here).
+    // the opt-out restores that pre-fix durability. Card `1922be3a` additionally FIXES the residual this
+    // scenario used to document (the degraded occupant's own file being destroyed in this exact shape) —
+    // X's content is now durably protected aside, under its own disjoint divert name, BEFORE teamA's raise
+    // writes to X's former slot.
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const { repo, teamA, kp, x } = makeFixture("raise");
     // X is PURE PENDING here (no resolvedKey) — required so `activeQuarantines.get(kp)` is genuinely
@@ -361,8 +379,16 @@ try {
     const teamAEntry = activeMergeQuarantineFor(teamA);
     check("*** THE OPT-OUT *** teamA's fresh raise is enforced IN-MEMORY immediately", !!teamAEntry && teamAEntry.tokens.includes(token));
     check(
-      "(documented residual, pre-existing — see the decision record) the write proceeded and X's own physical file is now teamA's content, not X's",
+      "(sanity, unchanged by this card) teamA's write still landed at X's former slot (today's existing shape)",
       JSON.parse(fs.readFileSync(xAtKpPath, "utf8")).repoPath === teamA,
+    );
+    // (NOT a discriminating check: X's in-memory `pendingUnresolvedQuarantines` entry is untouched by
+    // the write itself either way — this passes identically with or without the fix. Only the REBOOT
+    // check below, which re-derives state purely from disk, actually discriminates.)
+    const xEntryAfterRaise = activeMergeQuarantineFor(x);
+    check(
+      "(sanity) X is still independently active IN-MEMORY, carrying its own token",
+      !!xEntryAfterRaise && (xEntryAfterRaise.tokens ?? []).includes("token-x-raise"),
     );
 
     // *** THE FIX FOR THIS RULING *** the raise is DURABLE — it survives a real reboot, unlike a
@@ -374,9 +400,10 @@ try {
       "*** THE FIX *** teamA's fresh raise SURVIVES a real reboot — still quarantined, carrying its own token",
       !!teamAAfterReboot && teamAAfterReboot.tokens.includes(token),
     );
+    const xAfterReboot = boot2.activeMergeQuarantineFor(x);
     check(
-      "(documented residual, pre-existing) X is no longer independently active after the reboot either — its data was genuinely overwritten, not merely subsumed into a union",
-      boot2.activeMergeQuarantineFor(x) === undefined,
+      "*** THE FIX (card 1922be3a) *** X is STILL independently active after a real reboot too, carrying its own token — its data was protected, not overwritten",
+      !!xAfterReboot && (xAfterReboot.tokens ?? []).includes("token-x-raise"),
     );
     boot2.clearMergeQuarantine(teamA);
   } else if (scenarioName === "pending-merge-fresh-raise-survives-reboot") {
@@ -522,6 +549,373 @@ try {
     check("(sanity) teamA is active, carrying its own token", !!teamAEntry && (teamAEntry.tokens ?? []).includes("token-teamA-ctrl"));
     check("(sanity) teamA's own stale pending source was superseded (deleted) by the successful write", !fs.existsSync(staleTeamAPath));
     clearMergeQuarantine(teamA);
+  } else if (scenarioName === "walkup-raise-protects-pending-occupant-then-clears") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 1922be3a's own literal repro shape (CR probe `--s=runtime`): X is a WALK-UP occupant — a
+    // nonexistent path literally UNDER W itself (`W/gone-subdir`), never a disjoint ghost — pure pending
+    // (no resolvedKey, required so PASS 1 defers to a lazy re-resolve rather than arming it directly; see
+    // `writeXAsPurePendingAtKp`'s own doc), physically backed by its own final AT sha(K).json where
+    // K = canonicalRepoLockKey(W). `enterMergeQuarantine(W)` then reaches the SAME "no existing armed
+    // entry" region as `fresh-raise-survives-reboot` above — this scenario's own distinct value is
+    // carrying the sequence through the probe's own full `clear(W) by path` + reboot steps, proving X's
+    // protected copy is untouched by a clear addressed at an entirely different identity (W's own).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const repo = path.join(os.tmpdir(), `loom-mqdog-repo-walkup-${freshSfx()}`);
+    fs.mkdirSync(repo, { recursive: true });
+    tmpDirs.push(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# walkup\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
+    const w = repo;
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — a literal walk-up path under W itself
+    check("(precondition) X (W/gone-subdir) never exists on disk", !fs.existsSync(x));
+    check("(precondition) X's own canonical key already walks up to W's own key, tautologically", canonicalRepoLockKey(x) === kw);
+    const xAtKwPath = writeXAsPurePendingAtKp(kw, x, "walkup");
+
+    reenterMergeQuarantinesAtBoot([w, x]);
+    check("(precondition) W has no quarantine of its own yet", !activeMergeQuarantineFor(w));
+    check("(sanity) X is active (pure pending, its own identity-only divert, physically at sha(Kw).json)", !!activeMergeQuarantineFor(x));
+
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over a walk-up occupant's own exclusive backing");
+    const wEntry = activeMergeQuarantineFor(w);
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", !!wEntry && wEntry.tokens.includes(token));
+    // `activeMergeQuarantineFor(x)` itself is NOT the right check here any more — X's own fresh
+    // canonical key is now tautologically identical to W's, and W is genuinely, verifiably active
+    // there, so the pre-existing `direct-verified-guard`/`8a1bc2ef` shortcut correctly answers with W's
+    // OWN entry for a query of `x` (never a regression to chase — `398f476c`'s own query/identity scope,
+    // unaffected by this card). What this card actually guarantees is DURABILITY of X's own DATA —
+    // checked via the full listing, which still carries X's own pending entry under its own, newly
+    // protected name.
+    // (NOT a discriminating check: X's in-memory pending entry is untouched by the raise's own write
+    // either way — this passes identically with or without the fix. Only the two REBOOT checks below,
+    // which re-derive state purely from disk, actually discriminate.)
+    check(
+      "(sanity) X's own data is STILL tracked (via the full listing), carrying its own token",
+      listActiveMergeQuarantines().some((e) => (e.tokens ?? []).includes("token-x-walkup")),
+    );
+    check(
+      "(sanity) X's ORIGINAL physical file is now W's own content (the write still lands there — X's copy lives elsewhere)",
+      JSON.parse(fs.readFileSync(xAtKwPath, "utf8")).repoPath === w,
+    );
+
+    // *** THE PROBE'S OWN SEQUENCE *** clear W by path, then reboot — X must survive BOTH, untouched by a
+    // clear addressed at a wholly different identity.
+    clearMergeQuarantine(w);
+    check("(sanity) clearing W by path lifts W's own quarantine", !activeMergeQuarantineFor(w));
+    // (ALSO not yet discriminating: the clear itself never touches X's in-memory entry either way —
+    // only the reboot after this re-derives it purely from disk, which is where the fix actually shows.)
+    check(
+      "(sanity) X survives W's own clear, still active, still carrying its own token",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-walkup"),
+    );
+    check("(sanity) assertRepoNotQuarantined(x) still blocks after W's clear", assertRepoNotQuarantined(x).ok === false);
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, x]);
+    check(
+      "*** THE FIX (card 1922be3a) *** X's token SURVIVES a real reboot too, after the clear",
+      (boot2.activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-walkup"),
+    );
+    check("(sanity) W stays lifted after the reboot (the clear was durable)", !boot2.activeMergeQuarantineFor(w));
+    check("*** THE FIX (card 1922be3a) *** assertRepoNotQuarantined(x) still blocks after a real reboot", boot2.assertRepoNotQuarantined(x).ok === false);
+  } else if (scenarioName === "round2-protect-splice-does-not-corrupt-own-sibling-index") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CODE REVIEW d3c36260, BLOCKER 1 — the protect call used to run AFTER pendingIndices/siblingIndices/
+    // allPendingIndices were collected, so protectOccupantContentBeforeDelete's own SPLICE (triggered
+    // here by X's "two-file" shape: one copy AT sha(Kw).json, a SEPARATE prior-divert copy at its own
+    // pending-divert name) corrupted every index already collected. Fixture: X's two files, teamA's own
+    // (S, a genuine sibling of W via siblingIndices) stale latch, and Z's own (an UNRELATED ghost) stale
+    // latch are all written before boot; teamA's and Z's filenames are forced (a "zz-"/"zzz-" prefix) to
+    // sort AFTER both of X's files — so REGARDLESS of which of X's two files boot assigns the lower
+    // array index, teamA and Z are always positioned after the one the splice removes, and their
+    // indices always shift down by exactly one. Pre-fix, W's OWN siblingIndices (collected BEFORE the
+    // splice) kept the STALE, now-shifted index — reading Z's new slot instead of teamA's, silently
+    // unioning W's own fresh token into the UNRELATED Z (the CR's own "(1b)" finding).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-r2splice-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# r2splice\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const teamA = path.join(w, "teamA"); // NOT created yet — stays genuinely pending at boot
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) teamA does not exist yet at boot time", !fs.existsSync(teamA));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // X's TWO files — one AT sha(Kw).json (the exact key this raise's own protect call targets), one at
+    // X's OWN pending-divert name (a PRIOR protect's own durable copy). Neither carries a resolvedKey,
+    // so BOTH defer cleanly to pending at boot — no migrate/collision interaction at all.
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    const xDivertPath = path.join(MERGE_QUARANTINE_DIR, divertFilenameFor(x));
+    const xContent = JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's two-file shape (r2splice)", enteredAt: Date.now() - 60_000, tokens: ["token-x-r2splice"] }, null, 2) + "\n";
+    fs.writeFileSync(xAtKwPath, xContent);
+    fs.writeFileSync(xDivertPath, xContent);
+    // teamA's (S) and Z's own stale latches, named to sort AFTER BOTH of X's files (a hex digest and a
+    // "pending-" prefix both sort before "zz-"/"zzz-" lexicographically) — so the splice ALWAYS shifts
+    // them, regardless of which of X's two files lands at the lower array index.
+    const teamAStalePath = path.join(MERGE_QUARANTINE_DIR, `zz-stale-teamA-r2splice-${freshSfx()}.json`);
+    fs.writeFileSync(teamAStalePath, JSON.stringify({ repoPath: teamA, branch: "teamA-branch", reason: "teamA's own pending latch (r2splice)", enteredAt: Date.now(), tokens: ["token-teamA-r2splice"] }, null, 2) + "\n");
+    const z = path.join(os.tmpdir(), `loom-mqdog-z-ghost-r2splice-${freshSfx()}`); // NEVER created — wholly unrelated to w/x
+    const zStalePath = path.join(MERGE_QUARANTINE_DIR, `zzz-stale-z-r2splice-${freshSfx()}.json`);
+    fs.writeFileSync(zStalePath, JSON.stringify({ repoPath: z, branch: "z-branch", reason: "an UNRELATED ghost's own pending latch (r2splice)", enteredAt: Date.now(), tokens: ["token-z-r2splice"] }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([w, teamA, x]);
+    check("(precondition) W has no quarantine of its own yet", !activeMergeQuarantineFor(w));
+    check("(sanity) teamA is pending (its own divert) before it ever resolves", !!activeMergeQuarantineFor(teamA));
+    check("(sanity) Z is pending too, wholly independent", (activeMergeQuarantineFor(z)?.tokens ?? []).includes("token-z-r2splice"));
+
+    // Make teamA resolvable NOW (after boot, so boot never saw it as resolvable — it stayed cleanly
+    // pending rather than triggering a migrate-vs-collision at boot time).
+    fs.mkdirSync(teamA, { recursive: true });
+    check("(precondition) canonicalRepoLockKey(teamA) now equals Kw (collapses via the toplevel walk)", canonicalRepoLockKey(teamA) === kw);
+
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over a two-file X occupant plus a sibling and an unrelated ghost");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+    check(
+      "*** THE FIX (card 1922be3a, round 2) *** teamA's OWN pending latch is correctly consumed into W's union — NOT lost, NOT misattributed to Z",
+      (activeMergeQuarantineFor(w)?.tokens ?? []).includes("token-teamA-r2splice"),
+    );
+    check(
+      "*** THE FIX (round 2) *** Z's OWN pending latch is COMPLETELY UNTOUCHED — still independently active, carrying ONLY its own token",
+      (activeMergeQuarantineFor(z)?.tokens ?? []).includes("token-z-r2splice") && !(activeMergeQuarantineFor(z)?.tokens ?? []).includes(token),
+    );
+    check(
+      "(sanity) X's own data is STILL tracked (via the full listing), protected aside before the overwrite",
+      listActiveMergeQuarantines().some((e) => (e.tokens ?? []).includes("token-x-r2splice")),
+    );
+  } else if (scenarioName === "round2-protect-does-not-duplicate-already-active-occupant") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CODE REVIEW d3c36260, BLOCKER 2 — when the occupant physically sitting at Kw's own final is
+    // ALREADY tracked as a LIVE, ACTIVE entry elsewhere (X armed at a wholly DIFFERENT key K2, via its
+    // own resolvedKey), the protect call used to mint a SECOND, independently-tracked pending record for
+    // the SAME identity. clearMergeQuarantineByToken(x, "token-x-r2dup") then found and lifted ONLY the
+    // active copy at K2 — the orphaned duplicate pending copy was never touched, leaving X reported as
+    // PERMANENTLY quarantined (fail-stuck) even after the real clear and a reboot.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-r2dup-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# r2dup\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-r2dup-${freshSfx()}`); // a SEPARATE real repo — just for a stable, distinct K2
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    // X's own LIVE raise — a resolvedKey pointing at K2 (a key wholly unrelated to Kw), so PASS 1 arms
+    // it DIRECTLY and ACTIVELY at K2 (e1cb7d33's own documented reachability note).
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK2Path, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own LIVE raise (r2dup)", enteredAt: Date.now(), tokens: ["token-x-r2dup"], resolvedKey: k2 }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("*** THE OPT-OUT (e1cb7d33) *** X is active AT K2, carrying its own token", (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-r2dup"));
+    // (NOT a precondition check: `activeMergeQuarantineFor(w)` legitimately surfaces X's own
+    // resolvedKey-dual-tracking pending-divert twin here — card 883e29bc's own design — via a KEY-based
+    // tier match (X's degraded `currentKey` happens to equal Kw too), unrelated to identity and
+    // unrelated to this card's own fix. `enterMergeQuarantine`'s OWN `activeQuarantines.get(kw)` check
+    // is what actually matters, and it is genuinely empty — confirmed by the raise below reaching the
+    // "no existing" region at all.)
+
+    // A SEPARATE, STALE leftover physically at Kw's OWN final — written DIRECTLY, AFTER boot, so
+    // nothing in THIS process's own memory has ever read or tracked it yet (the exact "neither
+    // atFilenameIdx nor atFinalBasenameIdx" shape the mint-vs-attach decision needs to discriminate).
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    fs.writeFileSync(xAtKwPath, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own STALE leftover, still at Kw (r2dup)", enteredAt: Date.now() - 120_000, tokens: ["token-x-r2dup"] }, null, 2) + "\n");
+
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over a stale leftover of an identity already LIVE elsewhere");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+    const xEntriesAfterRaise = listActiveMergeQuarantines().filter((e) => e.repoPath === x);
+    check(
+      "*** THE FIX (card 1922be3a, round 2) *** exactly ONE tracked record exists for X after the raise — no duplicate was minted",
+      xEntriesAfterRaise.length === 1 && (xEntriesAfterRaise[0]?.tokens ?? []).includes("token-x-r2dup"),
+    );
+
+    // P1 (manager ruling, round 3; CR e3b80d6d BLOCKER B1) — a REBOOT inserted HERE, between the raise
+    // and the clear, is what the round-2 fix's own protect call cannot survive: the fold into the live
+    // entry's own `orphanLatchFiles` (round 2's `liveEntrySupersettingTokens` branch) is IN-MEMORY ONLY —
+    // it never durably rewrites X's own live latch at K2 — so a boot that reads ONLY the still-stale
+    // on-disk sha(K2).json re-discovers the durably-protected divert file as an UNREFERENCED, independent
+    // pending record. (sanity, ACCEPTED residual — round 2's own in-memory fold is kept as-is, per the
+    // round-3 ruling; this card does not prevent the re-discovery) X now DOES carry two records on disk —
+    // the live one at K2, and the re-discovered orphaned pending one — both still carrying the token.
+    const bootAfterRaise = await freshBootModule();
+    bootAfterRaise.reenterMergeQuarantinesAtBoot([w, v, x]);
+    const xEntriesAfterRaiseReboot = bootAfterRaise.listActiveMergeQuarantines().filter((e) => e.repoPath === x);
+    check(
+      "(sanity, accepted residual) X carries (at least) one record after a reboot too, still carrying its own token — the fix's own scope is making the CLEAR below sweep every such record, not preventing the re-discovery",
+      xEntriesAfterRaiseReboot.length >= 1 && xEntriesAfterRaiseReboot.every((e) => (e.tokens ?? []).includes("token-x-r2dup")),
+    );
+
+    // *** THE PROBE'S OWN CONSEQUENCE, now AFTER the reboot *** clearing X's real token, then clearing W
+    // too (so Kw's own direct-verified-guard shortcut no longer shadows a query for X), must fully,
+    // durably lift X — no orphaned duplicate left behind to resurrect it, reboot or not.
+    bootAfterRaise.clearMergeQuarantineByToken(x, "token-x-r2dup");
+    bootAfterRaise.clearMergeQuarantine(w);
+    check(
+      "*** THE FIX (round 3) *** X is NO LONGER quarantined at all after its own clear, even when a reboot happened between the raise and the clear",
+      bootAfterRaise.activeMergeQuarantineFor(x) === undefined,
+    );
+    check("(sanity) assertRepoNotQuarantined(x) now SUCCEEDS", bootAfterRaise.assertRepoNotQuarantined(x).ok === true);
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX (round 3) *** X stays NOT quarantined after a SECOND real reboot too — nothing resurrects it",
+      boot2.activeMergeQuarantineFor(x) === undefined,
+    );
+  } else if (scenarioName === "partial-overlap-pending-leftover-stays-blocked-until-both-tokens-cleared") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // P8 (manager ruling, round 3; CR e3b80d6d BLOCKER B2) — a same-identity leftover pending record can
+    // carry a PARTIAL OVERLAP with a live active entry's own current tokens (a prior clear already lifted
+    // ONE of the live entry's own tokens, but a stale leftover — a separate, never-synced copy — still
+    // carries BOTH). The round-2 `liveEntrySupersettingTokens` check correctly refuses to fold this
+    // leftover into the live entry (no longer a superset) and mints an INDEPENDENT pending record instead
+    // — but the OLD `clearMergeQuarantineByToken` stopped at the first match (the active entry) and never
+    // swept that independent pending record at all, leaving X's own EXTRA token (tb) fail-stuck forever.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-p8-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# p8\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-p8-${freshSfx()}`); // a SEPARATE real repo — just for a stable, distinct K2
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    // X's own LIVE raise — armed directly at K2, carrying BOTH tokens.
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK2Path, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own LIVE raise (p8)", enteredAt: Date.now(), tokens: ["token-x-p8-ta", "token-x-p8-tb"], resolvedKey: k2 }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(precondition) X is active at K2, carrying BOTH tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p8-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p8-tb"),
+    );
+
+    // A STALE leftover, written DIRECTLY to Kw's own final WHILE X is still live at K2 holding both
+    // tokens — a snapshot of X's content at that moment, carrying the SAME two tokens, never synced since.
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    fs.writeFileSync(xAtKwPath, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own STALE leftover, still at Kw (p8)", enteredAt: Date.now() - 120_000, tokens: ["token-x-p8-ta", "token-x-p8-tb"] }, null, 2) + "\n");
+
+    // The human (or an auto-clear) lifts ONLY "tb" from the LIVE entry — the stale leftover is never told.
+    clearMergeQuarantineByToken(x, "token-x-p8-tb");
+    check(
+      "(precondition) X's LIVE entry now carries only ta — tb was lifted",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p8-ta") && !(activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p8-tb"),
+    );
+
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over a stale leftover that still outranks the live entry's own reduced token set");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("(sanity) X is still blocked after a real reboot (ta is live, tb is pending — both fail-closed)", boot2.assertRepoNotQuarantined(x).ok === false);
+
+    boot2.clearMergeQuarantineByToken(x, "token-x-p8-ta");
+    check(
+      "*** THE FIX (card 1922be3a, round 3) *** X is STILL blocked after clearing ta alone — tb's own independent pending record survives, fail-closed",
+      boot2.assertRepoNotQuarantined(x).ok === false,
+    );
+    boot2.clearMergeQuarantineByToken(x, "token-x-p8-tb");
+    // W's own raise is still armed at Kw too — x's degraded walked-up key collides with it, so
+    // assertRepoNotQuarantined(x) would read blocked on THAT basis alone until W is also cleared; clear
+    // it first so this check discriminates on X's own residual, not W's.
+    boot2.clearMergeQuarantine(w);
+    check(
+      "*** THE FIX (round 3) *** X is finally free once BOTH tokens are cleared",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+
+    const boot3 = await freshBootModule();
+    boot3.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("*** THE FIX (round 3) *** X stays free after a SECOND real reboot too", boot3.assertRepoNotQuarantined(x).ok === true);
+  } else if (scenarioName === "extra-pending-token-stays-blocked-until-cleared") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // P3 (manager ruling, round 3) — a same-identity leftover pending record can carry an EXTRA token the
+    // live active entry never held AT ALL (tc below) — distinct from P8's PARTIAL-OVERLAP shape (where
+    // the leftover and the live entry share SOME, but not all, tokens). Both shapes need the SAME fix:
+    // the pending side must be swept on EVERY clearByToken call, never only the one that happens to match
+    // the active entry first.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-p3-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# p3\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-p3-${freshSfx()}`);
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    // X's own LIVE raise — armed directly at K2, carrying ONLY "ta".
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK2Path, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own LIVE raise (p3)", enteredAt: Date.now(), tokens: ["token-x-p3-ta"], resolvedKey: k2 }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("(precondition) X is active at K2, carrying only ta", (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p3-ta"));
+
+    // A STALE leftover at Kw's own final, carrying BOTH "ta" AND an extra token "tc" the live entry never
+    // held — a distinct identity-matching record never folded into (or synced from) the live entry.
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    fs.writeFileSync(xAtKwPath, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own STALE leftover with an extra token, still at Kw (p3)", enteredAt: Date.now() - 120_000, tokens: ["token-x-p3-ta", "token-x-p3-tc"] }, null, 2) + "\n");
+
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over a stale leftover carrying an extra token the live entry never held");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("(sanity) X is still blocked after a real reboot", boot2.assertRepoNotQuarantined(x).ok === false);
+
+    boot2.clearMergeQuarantineByToken(x, "token-x-p3-tc");
+    check(
+      "*** THE FIX (card 1922be3a, round 3) *** X is STILL blocked after clearing the extra token tc alone — ta's own live entry survives, fail-closed",
+      boot2.assertRepoNotQuarantined(x).ok === false,
+    );
+    boot2.clearMergeQuarantineByToken(x, "token-x-p3-ta");
+    // W's own raise is still armed at Kw too — x's degraded walked-up key collides with it, so
+    // assertRepoNotQuarantined(x) would read blocked on THAT basis alone until W is also cleared; clear
+    // it first so this check discriminates on X's own residual, not W's.
+    boot2.clearMergeQuarantine(w);
+    check(
+      "*** THE FIX (round 3) *** X is finally free once BOTH ta and tc are cleared",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+
+    const boot3 = await freshBootModule();
+    boot3.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("*** THE FIX (round 3) *** X stays free after a SECOND real reboot too", boot3.assertRepoNotQuarantined(x).ok === true);
   }
 } finally {
   for (const d of tmpDirs) {
