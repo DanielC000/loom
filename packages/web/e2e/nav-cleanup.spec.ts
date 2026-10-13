@@ -34,7 +34,7 @@ test.describe("Instrument Rail — nav cleanup (Product Review §7)", () => {
     // Requests is deliberately god-eye (NOT scoped) — no dot. Proves the marker is truthful per-page, not
     // slapped on every operate-group row.
     await expect(navItem(page, "Requests").locator(".loom-rail-scopedot")).toHaveCount(0);
-    // Runs (also scoped) keeps its dot — the contrast pair within the same Operate group.
+    // Runs (also scoped) keeps its dot — the contrast pair, now in the Project group alongside Archive.
     await expect(navItem(page, "Runs").locator(".loom-rail-scopedot")).toHaveCount(1);
   });
 

@@ -87,13 +87,11 @@ export const NAV_PAGES: NavPage[] = [
   // Mission Control attention queue are the primary surfacing; this is the fuller "see them all, filter by
   // type/project" view + the consumed-history tab.
   { label: "Requests", to: "/inbox", element: <RequestsPage />, group: "operate" },
-  { label: "Runs", to: "/runs", element: <Runs />, group: "operate", scoped: true },
   // Gates — the god-eye view of Loom's daemon-executed gates (merge, worker run_gate, deploy) across every
   // project, all serialized through one GateSemaphore. Active lane-hero (running + queued) on top, settled
   // history below, with its OWN per-project filter (default ALL) — so it's a cross-project god-eye view like
-  // Mission Control / Runs, deliberately NOT `scoped` to the header picker.
+  // Mission Control, deliberately NOT `scoped` to the header picker.
   { label: "Gates", to: "/gates", element: <Gates />, group: "operate" },
-  { label: "Archive", to: "/archive", element: <Archive />, group: "operate", scoped: true },
   // ── Project group (cont.) ────────────────────────────────────────────────────
   // Repository — the consolidated Vault + Git surface (IA merge #3). One destination with a Files | Git
   // segmented switch above the two verbatim-lifted panes (Files = the vault tree + type-aware viewer;
@@ -101,6 +99,11 @@ export const NAV_PAGES: NavPage[] = [
   // this IS `scoped`: both panes are project-scoped (enabled:!!projectId) and rescope on the active-project
   // picker, so it keeps the scope dot. The old /vault and /git routes redirect here (App.tsx).
   { label: "Repository", to: "/repository", element: <Repository />, group: "project", scoped: true },
+  // Runs and Archive moved here from Operate (card fc65729d, owner request): both are per-project surfaces
+  // (scoped: true — see the `scoped` provenance note above) and read more naturally alongside Overview /
+  // Board / Memory / Repository than among the god-eye Operate destinations. Routes/behavior unchanged.
+  { label: "Runs", to: "/runs", element: <Runs />, group: "project", scoped: true },
+  { label: "Archive", to: "/archive", element: <Archive />, group: "project", scoped: true },
   // ── Config group ─────────────────────────────────────────────────────────────
   // Projects — the definition/config layer: create/manage projects + define their agents (assign a
   // Profile, edit the startup prompt). Renamed + repositioned from the old "Workspace" page (card
