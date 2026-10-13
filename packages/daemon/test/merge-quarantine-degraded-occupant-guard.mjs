@@ -68,6 +68,11 @@ const SCENARIOS = [
   "p5b-clear-by-latch-file-sweeps-subset-duplicate",
   "p5c-clear-by-key-sweeps-subset-duplicate",
   "p5d-clear-by-key-preserves-disjoint-later-raise",
+  "dual-partial-clear-rewrites-pending-twin-sourcefile",
+  "dual2-full-clear-before-any-reboot-stays-clean",
+  "dual-same-file-shape-preserves-provenance-tracked",
+  "dual-pass1b-tmp-shape-does-not-resurrect-swept-tmp",
+  "dual-existing-branch-union-then-full-clear",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -195,6 +200,54 @@ function writeTeamAStaleLatch(teamA, tag, enteredAtMsAgo = 0) {
     repoPath: teamA, branch: "teamA-branch", reason: `teamA's REAL reason (${tag})`, enteredAt: Date.now() - enteredAtMsAgo, tokens: [`token-teamA-${tag}`],
   }, null, 2) + "\n");
   return staleTeamAPath;
+}
+
+/** Card ae79d492's own "dual" fixture: X's degraded ghost latch at a LEGACY, non-canonical filename
+ *  (never `sha(resolvedKey).json`) — the 883e29bc dual-tracked shape where the pending twin's OWN
+ *  `sourceFile` is a DIFFERENT physical file from whatever a later runtime write durably targets at
+ *  `resolvedKey` (`sha(resolvedKey).json`). `k2` must be a real, distinct repo's own canonical key (never
+ *  the walk-up ancestor's own key) so PASS 1 arms X at `k2` directly and diverts the degraded walked-up
+ *  key to pending, pointing at the SAME object armed there. */
+function writeXAtLegacyNameWithResolvedKey(k2, x, tag, tokens) {
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const legacyPath = path.join(MERGE_QUARANTINE_DIR, `!legacy-${tag}-${freshSfx()}.json`);
+  fs.writeFileSync(legacyPath, JSON.stringify({
+    repoPath: x, branch: "x-branch", reason: `X's REAL reason (${tag}) — legacy-named, dual-tracked`,
+    enteredAt: Date.now() - 60_000, tokens, resolvedKey: k2,
+  }, null, 2) + "\n");
+  return legacyPath;
+}
+
+/** Round 2 (Code Review `f80250c9`, Minor 1) — the SAME-FILE dual shape: X's degraded ghost latch
+ *  written DIRECTLY at `sha(k2).json` (mirrors {@link writeXDirectlyAtKp}, parameterized over a full
+ *  `tokens` array instead of one hardcoded token) — the pending twin's own `sourceFile` IS the exact
+ *  basename a later partial clear's armed-key loop durably rewrites, so a second, unconditional rewrite
+ *  of the SAME file would drop the `provenanceTracked:true` stamp that write just applied. */
+function writeXDirectlyAtK2WithTokens(k2, x, tag, tokens) {
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+  fs.writeFileSync(xAtK2Path, JSON.stringify({
+    repoPath: x, branch: "x-branch", reason: `X's REAL reason (${tag}) — same-file dual, no provenanceTracked yet`,
+    enteredAt: Date.now() - 60_000, tokens, resolvedKey: k2,
+  }, null, 2) + "\n");
+  return xAtK2Path;
+}
+
+/** Round 2 (Code Review `f80250c9`, Minor 2) — the PASS 1b TMP-RESIDUE dual shape: X's degraded ghost
+ *  latch exists ONLY as a torn-write tmp residue, never a clean `.json` final, at the SAME hash prefix
+ *  `k2`'s own final uses (`${hashForKey(k2)}.json.tmp-999-deadbeef`) — PASS 1b's own degraded-divert
+ *  mirror (merge-quarantine.ts, the tmp-residue loop) arms it exactly like PASS 1's `.json`-final branch
+ *  does, but the pending twin's own `sourceFile` here is the TMP itself: a later partial clear's
+ *  armed-key loop writes a FRESH final at that same hash and sweeps same-hash tmp residue as superseded —
+ *  which can delete this exact file before the pending-rewrite loop ever runs. */
+function writeXAsTmpResidueWithResolvedKey(k2, x, tag, tokens) {
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const tmpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json.tmp-999-deadbeef`);
+  fs.writeFileSync(tmpPath, JSON.stringify({
+    repoPath: x, branch: "x-branch", reason: `X's REAL reason (${tag}) — PASS 1b tmp-residue dual shape`,
+    enteredAt: Date.now() - 60_000, tokens, resolvedKey: k2,
+  }, null, 2) + "\n");
+  return tmpPath;
 }
 
 let bootReimportCounter = 0;
@@ -1414,6 +1467,329 @@ try {
     check(
       "(sanity) X is finally free once its own independent 'tc' raise is cleared on its own terms",
       boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+  } else if (scenarioName === "dual-partial-clear-rewrites-pending-twin-sourcefile") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card ae79d492 (round-3 Code Review aad3dd72 of 1922be3a) — a partial token clear reached via the
+    // ACTIVE path (clearMergeQuarantineByToken -> clearActiveEntryTokenAtKey) durably rewrote only the
+    // armed key's own sha(K2).json final. For this dual-tracked shape, the pending twin's OWN physical
+    // backing is a LEGACY-named file, never sha(K2).json — pre-fix, that file was left stale, so a reboot
+    // re-unions the just-cleared token back in. Fail-closed, never a false lift.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-dual-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# dual\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-dual-${freshSfx()}`); // a SEPARATE real repo — just for a stable, distinct K2
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    const legacyPath = writeXAtLegacyNameWithResolvedKey(k2, x, "dual", ["token-x-dual-ta", "token-x-dual-tb"]);
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(precondition) X is active at K2, carrying BOTH tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-dual-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-dual-tb"),
+    );
+    const k2FinalPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    check("(precondition) no sha(K2).json exists yet — the legacy file is X's ONLY durable backing so far", !fs.existsSync(k2FinalPath));
+
+    clearMergeQuarantineByToken(x, "token-x-dual-ta");
+    check(
+      "(precondition) 'ta' is gone in-process right after the partial clear",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-dual-ta")),
+    );
+    const k2AfterClear = JSON.parse(fs.readFileSync(k2FinalPath, "utf8"));
+    check(
+      "(precondition) the clear durably wrote a fresh sha(K2).json, reduced to 'tb' only",
+      k2AfterClear.tokens.includes("token-x-dual-tb") && !k2AfterClear.tokens.includes("token-x-dual-ta"),
+    );
+
+    const legacyAfterClear = JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+    check(
+      "*** THE FIX (card ae79d492) *** the pending twin's own legacy sourceFile is ALSO durably rewritten, reduced to 'tb' only",
+      legacyAfterClear.tokens.includes("token-x-dual-tb") && !legacyAfterClear.tokens.includes("token-x-dual-ta"),
+    );
+
+    // Reboot — this is what pre-fix code could not survive: PASS 1 re-reads BOTH physical files
+    // independently and unions them back together, resurrecting the just-cleared token.
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX *** 'ta' stays cleared after a real reboot — no tracked record for X carries it",
+      boot2.listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-dual-ta")),
+    );
+    check(
+      "(sanity) X is still blocked after the reboot — 'tb' is still outstanding, fail-closed",
+      boot2.assertRepoNotQuarantined(x).ok === false,
+    );
+
+    boot2.clearMergeQuarantineByToken(x, "token-x-dual-tb");
+    check(
+      "*** THE FIX *** X is finally free once 'tb' is also cleared — 'ta' never came back to block it",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+
+    const boot3 = await freshBootModule();
+    boot3.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("*** THE FIX *** X stays free after a SECOND real reboot too", boot3.assertRepoNotQuarantined(x).ok === true);
+  } else if (scenarioName === "dual2-full-clear-before-any-reboot-stays-clean") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card ae79d492's own "dual2" control: the SAME dual-tracked fixture, but BOTH tokens are cleared —
+    // the first via the partial-clear branch this card fixes, the second via the pre-existing
+    // remaining.length===0 full-clear delegate (clearMergeQuarantineByKey) — all BEFORE any reboot.
+    // Asserts the fix does not regress the already-correct full-clear path for this dual-tracked shape.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-dual2-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# dual2\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-dual2-${freshSfx()}`);
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    writeXAtLegacyNameWithResolvedKey(k2, x, "dual2", ["token-x-dual2-ta", "token-x-dual2-tb"]);
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(precondition) X is active at K2, carrying BOTH tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-dual2-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-dual2-tb"),
+    );
+
+    clearMergeQuarantineByToken(x, "token-x-dual2-ta"); // partial clear — exercises this card's own fix
+    clearMergeQuarantineByToken(x, "token-x-dual2-tb"); // last token — delegates to clearMergeQuarantineByKey
+    check("(precondition) X is fully free in-process, no reboot yet", activeMergeQuarantineFor(x) === undefined);
+    check(
+      "(precondition) no tracked record for X survives in-process either",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 0,
+    );
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE CONTROL *** X stays fully clean after a real reboot — a full clear before any reboot leaves nothing to resurrect",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+    check(
+      "*** THE CONTROL *** no tracked record for X survives the reboot either",
+      boot2.listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 0,
+    );
+  } else if (scenarioName === "dual-same-file-shape-preserves-provenance-tracked") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round 2 (Code Review f80250c9, Minor 1) — the SAME-FILE dual shape: X's degraded latch lives
+    // DIRECTLY at sha(K2).json (the 4480b077 shape), so the armed-key loop's own writeMergeQuarantineLatch
+    // call durably stamps provenanceTracked:true into THAT exact file. Pre-fix, the pending-twin loop then
+    // unconditionally rewrote the SAME file via writePendingDivertFile (which never stamps
+    // provenanceTracked), silently erasing the stamp the armed-key loop just wrote.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-samefile-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# samefile\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-samefile-${freshSfx()}`);
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    const xAtK2Path = writeXDirectlyAtK2WithTokens(k2, x, "samefile", ["token-x-samefile-ta", "token-x-samefile-tb"]);
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(precondition) X is active at K2, carrying BOTH tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-samefile-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-samefile-tb"),
+    );
+    check("(precondition) the fixture's own on-disk bytes carry NO provenanceTracked yet", JSON.parse(fs.readFileSync(xAtK2Path, "utf8")).provenanceTracked !== true);
+
+    clearMergeQuarantineByToken(x, "token-x-samefile-ta");
+    const afterClear = JSON.parse(fs.readFileSync(xAtK2Path, "utf8"));
+    check(
+      "(precondition) the clear durably wrote the reduced token set to the SAME file",
+      afterClear.tokens.includes("token-x-samefile-tb") && !afterClear.tokens.includes("token-x-samefile-ta"),
+    );
+    check(
+      "*** THE FIX (Minor 1) *** provenanceTracked:true survives — the pending-twin loop never re-wrote the SAME file a second time, dropping it",
+      afterClear.provenanceTracked === true,
+    );
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(sanity) 'ta' stays cleared after a real reboot too",
+      boot2.listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-samefile-ta")),
+    );
+  } else if (scenarioName === "dual-pass1b-tmp-shape-does-not-resurrect-swept-tmp") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round 2 (Code Review f80250c9, Minor 2) — the PASS 1b TMP-RESIDUE dual shape: X's degraded latch
+    // exists ONLY as a torn-write tmp residue at the SAME hash prefix K2's own final uses. The armed-key
+    // loop's own writeMergeQuarantineLatch call creates a FRESH sha(K2).json final and its own
+    // sweepTmpResidueForHashIfUnreferenced call then deletes the now-superseded tmp. Pre-fix, the
+    // pending-twin loop then unconditionally RECREATED that exact tmp via writePendingDivertFile.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-tmpshape-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# tmpshape\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-tmpshape-${freshSfx()}`);
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    const tmpPath = writeXAsTmpResidueWithResolvedKey(k2, x, "tmpshape", ["token-x-tmpshape-ta", "token-x-tmpshape-tb"]);
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(precondition) X is active at K2, carrying BOTH tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-tmpshape-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-tmpshape-tb"),
+    );
+    const k2FinalPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    check("(precondition) no sha(K2).json FINAL exists yet — the tmp residue is X's ONLY durable backing so far (degradedOccupiedKeys protects it)", !fs.existsSync(k2FinalPath));
+    check("(precondition) the tmp residue is present on disk", fs.existsSync(tmpPath));
+
+    clearMergeQuarantineByToken(x, "token-x-tmpshape-ta");
+    check(
+      "(precondition) 'ta' is gone in-process right after the partial clear",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-tmpshape-ta")),
+    );
+    check("(precondition) the clear durably wrote a fresh sha(K2).json final, reduced to 'tb' only", fs.existsSync(k2FinalPath) && JSON.parse(fs.readFileSync(k2FinalPath, "utf8")).tokens.includes("token-x-tmpshape-tb"));
+    check(
+      "*** THE FIX (Minor 2) *** the just-swept tmp residue is NOT re-created by the pending-twin loop",
+      !fs.existsSync(tmpPath),
+    );
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX *** 'ta' stays cleared after a real reboot — the fresh final alone durably carries it",
+      boot2.listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-tmpshape-ta")),
+    );
+    check(
+      "(sanity) X is still blocked after the reboot — 'tb' is still outstanding, fail-closed",
+      boot2.assertRepoNotQuarantined(x).ok === false,
+    );
+
+    boot2.clearMergeQuarantineByToken(x, "token-x-tmpshape-tb");
+    check(
+      "*** THE FIX *** X is finally free once 'tb' is also cleared",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+  } else if (scenarioName === "dual-existing-branch-union-then-full-clear") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round 2 (Code Review f80250c9) — the reviewer's own UNION-SHAPE regression: a legacy dual-tracked X
+    // at V's own key K2; V (genuinely resolvable) then raises at RUNTIME, which unions V's own fresh token
+    // into the degraded entry via enterMergeQuarantine's `existing` branch — a wholly separate write path
+    // from clearActiveEntryTokenAtKey that never touches pendingUnresolvedQuarantines at all, so it never
+    // itself rewrites the legacy twin. A later PARTIAL clear (this card's own fix) must still durably
+    // rewrite the twin with the union's full post-raise token set. RED with this card's whole fix removed
+    // (HEAD~1, before card ae79d492); GREEN with it present.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-union-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# union\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-union-${freshSfx()}`);
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    const legacyPath = writeXAtLegacyNameWithResolvedKey(k2, x, "union", ["token-x-union-ta", "token-x-union-tb"]);
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(precondition) X is active at K2, carrying BOTH tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-union-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-union-tb"),
+    );
+
+    // V — a genuinely resolvable repo whose own real key COLLIDES with X's own recorded resolvedKey —
+    // raises at runtime. enterMergeQuarantine's `existing` branch unions V's fresh token into X's entry.
+    const vToken = enterMergeQuarantine(v, "v-branch", "V's own fresh runtime raise, unioning into the degraded X entry already armed at its own key");
+    check(
+      "(precondition) V's raise is unioned in-process — X's record now carries all THREE tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-union-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-union-tb") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes(vToken),
+    );
+
+    clearMergeQuarantineByToken(x, "token-x-union-ta");
+    check(
+      "(precondition) 'ta' is gone in-process right after the partial clear, post-union",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-union-ta")),
+    );
+    const legacyAfterClear = JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+    check(
+      "*** THE FIX *** the legacy twin is durably rewritten with the UNION's full post-raise token set, minus 'ta'",
+      !legacyAfterClear.tokens.includes("token-x-union-ta") && legacyAfterClear.tokens.includes("token-x-union-tb") && legacyAfterClear.tokens.includes(vToken),
+    );
+
+    // Reboot — pre-fix, PASS 1 re-reads the legacy file's stale, pre-clear token set (which never even
+    // carried vToken, since enterMergeQuarantine's `existing` branch never touches it) and re-unions 'ta'
+    // back in.
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX *** 'ta' stays cleared after a real reboot — no tracked record for X carries it",
+      boot2.listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-union-ta")),
+    );
+    check(
+      "(sanity) X is still blocked after the reboot — 'tb' and V's own token are still outstanding",
+      boot2.assertRepoNotQuarantined(x).ok === false,
+    );
+
+    boot2.clearMergeQuarantineByToken(x, vToken);
+    boot2.clearMergeQuarantineByToken(x, "token-x-union-tb");
+    check(
+      "*** THE FIX *** X is finally free once both remaining tokens are cleared too",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+    check(
+      "*** THE FIX *** V is ALSO free — the shared-key union never leaves V permanently blocked by X's own residual",
+      boot2.assertRepoNotQuarantined(v).ok === true,
+    );
+
+    const boot3 = await freshBootModule();
+    boot3.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX *** X and V both stay free after a SECOND real reboot too",
+      boot3.assertRepoNotQuarantined(x).ok === true && boot3.assertRepoNotQuarantined(v).ok === true,
     );
   }
 } finally {

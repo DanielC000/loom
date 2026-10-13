@@ -1547,15 +1547,36 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // @decision 82032b5c (round 2 CR, MAJOR) — write EVERY armed key, guarded by `entryStillOwnsKey`
   // (checks IDENTITY — same object OR same `directPathIdentity` — never bare `===` alone), now
   // meaningful since the in-memory update above is itself reference-scoped.
+  // @decision ae79d492 (round 2, Code Review f80250c9, Minor 1) — track which armed-key finals the loop
+  // below actually wrote, so the dual-tracked-twin loop after it never redundantly rewrites the SAME
+  // physical file a moment later — see that loop's own doc.
+  const writtenFinalBasenames = new Set<string>();
   for (const k of armedKeysForEntry) {
     if (!entryStillOwnsKey(k, updated)) continue;
     if (writeMergeQuarantineLatch(updated, false, k)) {
+      writtenFinalBasenames.add(`${quarantineHashForKey(k)}.json`);
       // @decision be79f4d5 (round 4) — reference-aware, same reason as the other two sites: a DIFFERENT,
       // surviving entry's own same-hash tmp must survive a partial clear here too.
       sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(k));
     } else {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath} at key ${k} after a partial clear — the PRE-EXISTING durable state (this repo's own latch file, final or tmp) is left UNTOUCHED there, so a restart before this is fixed may re-arm with the just-cleared token still counted as outstanding at THAT key (delays the eventual full lift; never a false lift).`);
+    }
+  }
+  // @decision ae79d492 — an 883e29bc dual-tracked twin's own sourceFile is a SEPARATE physical file from
+  // the armed key's final the loop above just wrote; never skip rewriting it too, or a reboot re-reads
+  // its stale, un-reduced copy and re-unions the just-cleared token back in. See the decision record.
+  //
+  // @decision ae79d492 (round 2) — skip when the twin's sourceFile IS a final the loop above just wrote
+  // (would drop provenanceTracked, db0a9db0) or no longer exists (its own tmp, just swept) — never when
+  // genuinely stale. See the decision record's round 2 section.
+  for (const idx of collectPendingIndices((p) => p.entry === updated)) {
+    const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine;
+    if (writtenFinalBasenames.has(pending.sourceFile)) continue;
+    if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, pending.sourceFile))) continue;
+    if (!writePendingDivertFile(pending.sourceFile, updated)) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
     }
   }
 }
