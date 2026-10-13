@@ -174,6 +174,13 @@ interface PendingUnresolvedQuarantine {
 }
 let pendingUnresolvedQuarantines: PendingUnresolvedQuarantine[] = [];
 
+/**
+ * @decision 63e49ee2 (round 5) — a fresh READ or a detector `"none"` never un-keeps a basename, from
+ * ANY caller, ANY identity comparison — only a durable overwrite-by-rename or copy-aside may. See the
+ * decision record's "Round 5"; the THREE call sites that may `.delete()` are each tagged with this id.
+ */
+const keptUnreadableLatchFiles = new Set<string>();
+
 /** Every `pendingUnresolvedQuarantines` index satisfying `pred` — never just the first (card 188b145f,
  *  round 2). Shared by {@link activeMergeQuarantineFor}'s lazy-graduation match cascade and
  *  {@link enterMergeQuarantine}'s own pending-merge branch: both used to `findIndex` a single match and
@@ -566,6 +573,13 @@ function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: str
 }
 
 /**
+ * @decision 63e49ee2 — tri-state result for a read-and-identify probe against a quarantine latch file's
+ * on-disk content; `"unknown"` (a read failure other than ENOENT) is treated like `"occupant"`, never
+ * `"none"`, by every caller below. See the decision record for the fail-open this replaces.
+ */
+type OccupantReadResult = { state: "occupant"; repoPath: string } | { state: "none" } | { state: "unknown" };
+
+/**
  * The runtime twin of {@link reenterMergeQuarantinesAtBoot}'s own `degradedOccupiedKeys` check —
  * `degradedOccupiedKeys` is a `Set` LOCAL to that one boot call, discarded the moment it returns, so a
  * runtime mutation (reached long after boot, once the in-memory state has already merged everything into
@@ -598,26 +612,30 @@ function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: str
  * @decision d163aef5 (round 3) — `protectResolvableToo` (clear-side only, default false): a RESOLVABLE
  * entry's OWN file can end up backing an unresolvable winner's walked-up key, never rewritten there this
  * boot — clearing that winner must not destroy it either. See the decision record's "Round 3" repro.
+ *
+ * @decision 63e49ee2 — returns a tri-state {@link OccupantReadResult}: a read failure other than ENOENT
+ * is `"unknown"`, never `"none"` — see the decision record for the fail-open this replaces.
  */
-function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoPath: string, protectResolvableToo = false): string | undefined {
+function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoPath: string, protectResolvableToo = false): OccupantReadResult {
   let existingRaw: string;
   try {
     existingRaw = fs.readFileSync(final, "utf8");
-  } catch {
-    return undefined; // missing — nothing to protect
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "none" }; // missing — nothing to protect
+    return { state: "unknown" }; // read failed for a reason other than missing
   }
   let existing: { repoPath?: unknown };
   try {
     existing = JSON.parse(existingRaw);
   } catch {
-    return undefined; // corrupt — nothing to protect
+    return { state: "none" }; // corrupt — nothing to protect
   }
-  if (typeof existing.repoPath !== "string") return undefined;
-  if (directPathIdentity(existing.repoPath) === directPathIdentity(ownIdentityRepoPath)) return undefined; // same identity
+  if (typeof existing.repoPath !== "string") return { state: "none" };
+  if (directPathIdentity(existing.repoPath) === directPathIdentity(ownIdentityRepoPath)) return { state: "none" }; // same identity
   // "different but resolvable" is the write-side's own today's-behavior exclusion (e1cb7d33) — but the
   // clear-side (`protectResolvableToo: true`) must NOT share it; see this function's own doc for why.
-  if (!protectResolvableToo && isRepoPathCurrentlyResolvable(existing.repoPath)) return undefined;
-  return existing.repoPath;
+  if (!protectResolvableToo && isRepoPathCurrentlyResolvable(existing.repoPath)) return { state: "none" };
+  return { state: "occupant", repoPath: existing.repoPath };
 }
 
 /**
@@ -631,28 +649,32 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
  * @decision d2582692 — `clearIdentity`, when given, is a second, independent skip: `final` genuinely
  * belonging to the CLEAR'S OWN REQUESTER (never to `clearedEntry`, the in-memory entry merely ARMED at
  * this key) is never foreign data to protect. See the decision record.
+ *
+ * @decision 63e49ee2 — returns a tri-state {@link OccupantReadResult}: a read failure other than ENOENT
+ * is `"unknown"`, never `"none"` — see the decision record for the fail-open this replaces.
  */
-function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuarantineEntry, clearIdentity?: string): string | undefined {
+function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuarantineEntry, clearIdentity?: string): OccupantReadResult {
   let existingRaw: string;
   try {
     existingRaw = fs.readFileSync(final, "utf8");
-  } catch {
-    return undefined; // missing — nothing to protect
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "none" }; // missing — nothing to protect
+    return { state: "unknown" }; // read failed for a reason other than missing
   }
   let existing: { repoPath?: unknown; tokens?: unknown; token?: unknown };
   try {
     existing = JSON.parse(existingRaw);
   } catch {
-    return undefined; // corrupt — nothing to protect
+    return { state: "none" }; // corrupt — nothing to protect
   }
-  if (typeof existing.repoPath !== "string") return undefined;
-  if (directPathIdentity(existing.repoPath) === directPathIdentity(clearedEntry.repoPath)) return undefined; // same identity
-  if (clearIdentity && directPathIdentity(existing.repoPath) === clearIdentity) return undefined; // genuinely the clearer's own data
+  if (typeof existing.repoPath !== "string") return { state: "none" };
+  if (directPathIdentity(existing.repoPath) === directPathIdentity(clearedEntry.repoPath)) return { state: "none" }; // same identity
+  if (clearIdentity && directPathIdentity(existing.repoPath) === clearIdentity) return { state: "none" }; // genuinely the clearer's own data
   const existingTokens = Array.isArray(existing.tokens) && existing.tokens.every((t): t is string => typeof t === "string")
     ? existing.tokens
     : typeof existing.token === "string" ? [existing.token] : [];
-  if (existingTokens.length > 0 && existingTokens.some((t) => clearedEntry.tokens.includes(t))) return undefined; // already incorporated
-  return existing.repoPath;
+  if (existingTokens.length > 0 && existingTokens.some((t) => clearedEntry.tokens.includes(t))) return { state: "none" }; // already incorporated
+  return { state: "occupant", repoPath: existing.repoPath };
 }
 
 /**
@@ -662,15 +684,23 @@ function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuar
  * lifetime of the process.
  *
  * @decision e1cb7d33 — see the decision record.
+ *
+ * @decision 63e49ee2 — an `"unknown"` read result (a non-ENOENT read failure) refuses the write exactly
+ * like a confirmed occupant — never like `"none"`. See the decision record.
  */
 function wouldOverwriteDifferentUnresolvableOccupant(final: string, entry: MergeQuarantineEntry): boolean {
-  const occupantRepoPath = differentUnresolvableOccupantRepoPathAt(final, entry.repoPath);
-  if (!occupantRepoPath) return false;
-  const dedupeKey = `${final}|${directPathIdentity(occupantRepoPath)}`;
+  const result = differentUnresolvableOccupantRepoPathAt(final, entry.repoPath);
+  if (result.state === "none") return false;
+  const dedupeKey = result.state === "unknown" ? `${final}|unknown` : `${final}|${directPathIdentity(result.repoPath)}`;
   if (!loggedDegradedOccupantRefusals.has(dedupeKey)) {
     loggedDegradedOccupantRefusals.add(dedupeKey);
-    // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] refusing to write ${path.basename(final)} for ${entry.repoPath} — this key's own physical file is a DIFFERENT, currently-unresolvable entry's own exclusive backing (${occupantRepoPath}); overwriting it would destroy that entry's only durable copy. ${entry.repoPath} stays enforced in-memory only for this process; a later boot (or this process re-reading the file) can still recover ${occupantRepoPath}'s own data untouched. (Logged once per key+occupant per process — this refusal recurs on every subsequent query.)`);
+    if (result.state === "unknown") {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] refusing to write ${path.basename(final)} for ${entry.repoPath} — this key's own physical file could not be read (for a reason other than being missing) to confirm whether it holds a different, unresolvable entry's own exclusive backing; treating this as UNKNOWN and refusing to overwrite rather than risk destroying foreign content. ${entry.repoPath} stays enforced in-memory only for this process; a later boot (or this process successfully re-reading the file) can resolve it. (Logged once per key per process — this refusal recurs on every subsequent query.)`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] refusing to write ${path.basename(final)} for ${entry.repoPath} — this key's own physical file is a DIFFERENT, currently-unresolvable entry's own exclusive backing (${result.repoPath}); overwriting it would destroy that entry's only durable copy. ${entry.repoPath} stays enforced in-memory only for this process; a later boot (or this process re-reading the file) can still recover ${result.repoPath}'s own data untouched. (Logged once per key+occupant per process — this refusal recurs on every subsequent query.)`);
+    }
   }
   return true;
 }
@@ -718,6 +748,9 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOn
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, final);
+    // @decision 63e49ee2 (round 5) — this rename just durably overwrote `final` with KNOWN, fresh
+    // content; any earlier read-failure mark on this exact basename no longer describes current reality.
+    keptUnreadableLatchFiles.delete(path.basename(final));
     // @decision 92c645cc (item 2) — only AFTER this write's own rename has durably superseded whatever was
     // there before (bde5d1fe's rule: sweep/unlink only follows a successful superseding write) — and only
     // when the CALLER has asserted the superset property holds for this entry.
@@ -848,6 +881,8 @@ function fsyncQuarantineDir(): void {
 function deleteSourceLatchIfSuperseded(sourceFile: string, writtenEntry: MergeQuarantineEntry, key: string): boolean {
   const writtenFile = path.basename(quarantinePathForKey(key));
   if (sourceFile === writtenFile) return true; // the "stale" source IS the file we just wrote — nothing to delete
+  // @decision 63e49ee2 (round 3) — defensive, same identity-less keep as every other unlink site here.
+  if (keptUnreadableLatchFiles.has(sourceFile)) return true;
   if (pendingUnresolvedQuarantines.some((p) => p.sourceFile === sourceFile)) return true; // a sibling still owns it
   // Excludes writtenEntry's OWN identity: a legitimately dual-armed entry can have ITS OWN alternate key
   // hash to this exact filename too (physicalOwnerRepoPaths doesn't special-case "the entry being
@@ -983,6 +1018,10 @@ function consumeMatchedPendingsIntoArmedEntry(
  * @decision 4900c365 — a protect call that FAILS to durably write must not be followed by the unlink it
  * was guarding against: `final` is left on disk (never unlinked) whenever any protect call above
  * returns `false` — the failed tmp-residue case protects itself (see that function's own doc).
+ *
+ * @decision 63e49ee2 — `false` now also covers a read failure of UNKNOWN cause (no content was ever
+ * parsed), for both `final` (this function's own unlink below) and a tmp residue (protected inside
+ * {@link protectForeignTmpResidueBeforeSweep} itself). See the decision record.
  */
 function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string, clearedEntry?: MergeQuarantineEntry, clearIdentity?: string): void {
   const final = quarantinePathForKey(key);
@@ -996,11 +1035,14 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
     }
   }
   if (clearedEntry) finalProtectOk = protectUnincorporatedOccupantBeforeDelete(final, clearedEntry, clearIdentity) && finalProtectOk;
+  // @decision 63e49ee2 (round 5) — ALWAYS, unconditionally: a fresh read or a detector "none" never
+  // overrides a mark — only a durable rename-over or copy-aside (both already removed it by this point).
+  if (keptUnreadableLatchFiles.has(path.basename(final))) finalProtectOk = false;
   if (finalProtectOk) {
     try { fs.unlinkSync(final); } catch { /* ENOENT is the common case */ }
   } else {
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — a foreign occupant's content could not be durably protected before this clear; see the error just above. It stays enforced in THIS PROCESS too (self-owned pending record), not only after a later boot.`);
+    console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — a foreign occupant's content could not be durably protected (or could not be read) before this clear; see the error just above. It also stays marked kept in THIS PROCESS (a real self-owned record, or a basename-only read-failure mark), not only after a later boot.`);
   }
   if (clearIdentity) protectForeignTmpResidueBeforeSweep(key, clearIdentity);
   // @decision be79f4d5 (round 3) — reference-aware, never the unconditional-by-hash sibling: a same-hash
@@ -1132,6 +1174,8 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): 
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, final);
+    // @decision 63e49ee2 (round 5) — same rule as writeMergeQuarantineLatch's own identical rename.
+    keptUnreadableLatchFiles.delete(filename);
     // @decision d4b25feb (round 2, MINOR) — this write is never batched the way boot's own safety-tmp
     // writes are (Phase 0 fsyncs the directory ONCE after the whole batch) — fsync the directory here,
     // per call, so the rename's own directory-entry visibility is durable too, not just the file's bytes.
@@ -1155,11 +1199,23 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): 
  *
  * @decision 4900c365 — `false` means a foreign occupant was found but its protective copy failed to
  * write; the caller must NOT unlink/sweep `final` on a `false`. See {@link deleteMergeQuarantineLatchByKey}.
+ *
+ * @decision 63e49ee2 — an `"unknown"` detector result also returns `false` (keep `final`, never unlink)
+ * — there is no parsed content to copy aside, so this never reaches {@link protectOccupantContentBeforeDelete}.
+ * See the decision record.
  */
 function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string, protectResolvableToo = false): boolean {
-  const occupantRepoPath = differentUnresolvableOccupantRepoPathAt(final, clearingRepoPath, protectResolvableToo);
-  if (!occupantRepoPath) return true;
-  return protectOccupantContentBeforeDelete(final, occupantRepoPath, clearingRepoPath);
+  const result = differentUnresolvableOccupantRepoPathAt(final, clearingRepoPath, protectResolvableToo);
+  if (result.state === "none") return true;
+  if (result.state === "unknown") {
+    // @decision 63e49ee2 (round 3) — mark this basename kept via the identity-less ownership set so
+    // every OTHER reference-aware sweep in this module also honours it. See {@link keptUnreadableLatchFiles}.
+    keptUnreadableLatchFiles.add(path.basename(final));
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — its content could not be read (for a reason other than being missing) while clearing ${clearingRepoPath}, so it may genuinely be a different, unresolvable entry's own exclusive backing; treating this as UNKNOWN rather than assuming nothing to protect. It is marked kept in THIS PROCESS too (fail-closed, over-broad until a reboot or a later successful read resolves it), and it survives on disk for either to recover.`);
+    return false;
+  }
+  return protectOccupantContentBeforeDelete(final, result.repoPath, clearingRepoPath);
 }
 
 /**
@@ -1171,11 +1227,22 @@ function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: st
  * now carries — see that function's own doc.
  *
  * @decision 4900c365 — same `false`-only-on-a-failed-write contract as {@link protectDegradedOccupantBeforeDelete}.
+ *
+ * @decision 63e49ee2 — same `"unknown"`-returns-`false`-without-content contract as
+ * {@link protectDegradedOccupantBeforeDelete}. See the decision record.
  */
 function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: MergeQuarantineEntry, clearIdentity?: string): boolean {
-  const occupantRepoPath = unincorporatedOccupantRepoPathAt(final, clearedEntry, clearIdentity);
-  if (!occupantRepoPath) return true;
-  return protectOccupantContentBeforeDelete(final, occupantRepoPath, clearedEntry.repoPath);
+  const result = unincorporatedOccupantRepoPathAt(final, clearedEntry, clearIdentity);
+  if (result.state === "none") return true;
+  if (result.state === "unknown") {
+    // @decision 63e49ee2 (round 3) — same identity-less ownership set as
+    // {@link protectDegradedOccupantBeforeDelete}'s own "unknown" branch.
+    keptUnreadableLatchFiles.add(path.basename(final));
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — its content could not be read (for a reason other than being missing) while clearing ${clearedEntry.repoPath}, so it may genuinely belong to an unincorporated foreign occupant; treating this as UNKNOWN rather than assuming nothing to protect. It is marked kept in THIS PROCESS too, fail-closed and over-broad until a reboot or a later successful read resolves it.`);
+    return false;
+  }
+  return protectOccupantContentBeforeDelete(final, result.repoPath, clearedEntry.repoPath);
 }
 
 /** Shared tail for both protect-before-delete wrappers above — durably copies `final`'s own content
@@ -1183,10 +1250,25 @@ function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: 
  *  unlink proceeds. `describeClearer` is used only for the failure log's own wording.
  *
  * @decision 4900c365 — `false` ONLY when genuine foreign content existed and its durable write failed;
- * every other outcome (nothing to protect, or a successful write) is `true`. See the decision record. */
+ * every other outcome (nothing to protect, or a successful write) is `true`. See the decision record.
+ *
+ * @decision 63e49ee2 — ALSO `false` on a non-ENOENT read failure of `final`: there is no parsed content
+ * left to copy aside, so keeping `final` itself, unmodified, is the only remaining protection. See the
+ * decision record. */
 function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: string, describeClearer: string): boolean {
   let raw: string;
-  try { raw = fs.readFileSync(final, "utf8"); } catch { return true; } // missing — nothing to protect
+  try {
+    raw = fs.readFileSync(final, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // missing — nothing to protect
+    // @decision 63e49ee2 (round 3) — the caller already confirmed `occupantRepoPath` via an EARLIER
+    // successful read; THIS read failing (a second, independent attempt) still needs the same
+    // identity-less ownership mark as every other "unknown" branch, or no one ever marks this file kept.
+    keptUnreadableLatchFiles.add(path.basename(final));
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] could not read ${path.basename(final)} (for a reason other than being missing) while protecting it for ${occupantRepoPath} before clearing ${describeClearer} — treating this as UNKNOWN rather than nothing to protect; it is marked kept in THIS PROCESS too, and ${path.basename(final)} is kept on disk, unmodified, instead of being overwritten or deleted.`);
+    return false;
+  }
   let parsed: Partial<MergeQuarantineEntry> & { token?: string };
   try { parsed = JSON.parse(raw) as typeof parsed; } catch { return true; } // corrupt — nothing to protect
   if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return true;
@@ -1240,6 +1322,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     console.error(`[merge-quarantine] could not durably write a fresh pending-divert copy for degraded occupant ${occupantRepoPath} before clearing ${describeClearer} — ${finalBasename} is kept on disk, as its OWN self-owned pending record, instead; ${occupantRepoPath} stays enforced in THIS PROCESS too (not only after a later boot).`);
     return false;
   }
+  // @decision 63e49ee2 (round 5) — `final`'s own content is now durably copied aside (the write above
+  // just succeeded) — a read-failure mark on `final`'s OWN basename (distinct from `filename`, already
+  // cleared inside writePendingDivertFile) no longer needs to block deleting `final` itself.
+  keptUnreadableLatchFiles.delete(finalBasename);
   // Commit the DURABLE (never the stale boot-time) content to memory too, so a later in-process query —
   // or a later protect call that finds this same ref via `atFilenameIdx` — never sees the contaminated
   // object again. Re-point any EXISTING pending reference to `final`'s own basename (e.g. its boot-time
@@ -1702,6 +1788,9 @@ function unlinkLatchFile(filename: string): void {
  * decision record for the fail-open repro this closes.
  */
 function sweepOrphanLatchFileIfUnreferenced(filename: string): { kept: boolean; referencingRepoPaths: string[] } {
+  // @decision 63e49ee2 (round 3) — a read-failure-kept file has no identity to attribute; keep it with
+  // no referencing repoPath, never gated on `orphanLatchFiles`/`physicalOwnerRepoPaths` alone.
+  if (keptUnreadableLatchFiles.has(filename)) return { kept: true, referencingRepoPaths: [] };
   const referencingRepoPaths = new Set<string>();
   for (const e of activeQuarantines.values()) {
     if (e.orphanLatchFiles?.includes(filename)) referencingRepoPaths.add(e.repoPath);
@@ -1746,6 +1835,10 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string): { kept: boolean; 
  * @decision 4900c365 (round 2) — a per-file FAILED protect no longer needs its own exclude-set plumbing:
  * {@link protectOccupantContentBeforeDelete} itself now self-owns a failed file via `orphanLatchFiles`,
  * which {@link sweepTmpResidueForHashIfUnreferenced}'s own EXISTING ownership check already honours.
+ *
+ * @decision 63e49ee2 (round 3) — a non-ENOENT READ failure here marks the basename in {@link
+ * keptUnreadableLatchFiles} — never the round-1 exclude-set/`Set<string>` return, and never round 2's
+ * identity-matchable pending stub. See the decision record.
  */
 function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string): void {
   const prefix = `${quarantineHashForKey(key)}.json.tmp-`;
@@ -1753,12 +1846,24 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string)
   try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return; }
   for (const f of files) {
     if (!f.startsWith(prefix)) continue;
+    // @decision 63e49ee2 (round 3) — also honour the identity-less ownership set, never only
+    // `orphanLatchFiles` — see {@link keptUnreadableLatchFiles}.
     const alreadyOwned = [...activeQuarantines.values()].some((e) => e.orphanLatchFiles?.includes(f))
-      || pendingUnresolvedQuarantines.some((p) => p.entry.orphanLatchFiles?.includes(f));
+      || pendingUnresolvedQuarantines.some((p) => p.entry.orphanLatchFiles?.includes(f))
+      || keptUnreadableLatchFiles.has(f);
     if (alreadyOwned) continue;
     const tmpPath = path.join(MERGE_QUARANTINE_DIR, f);
     let raw: string;
-    try { raw = fs.readFileSync(tmpPath, "utf8"); } catch { continue; } // gone/unreadable — nothing to protect
+    try {
+      raw = fs.readFileSync(tmpPath, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        keptUnreadableLatchFiles.add(f);
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] could not read tmp residue ${f} (for a reason other than being missing) while clearing ${clearIdentity} — treating its ownership as UNKNOWN; it is marked kept in THIS PROCESS too, rather than assuming it is safe to delete.`);
+      }
+      continue; // gone (ENOENT), or unreadable but now marked kept above
+    }
     let parsed: { repoPath?: unknown };
     try { parsed = JSON.parse(raw); } catch { continue; } // corrupt — nothing to protect
     if (typeof parsed.repoPath !== "string") continue;
@@ -1794,14 +1899,21 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string)
  * @decision 4900c365 (round 2) — this check, unmodified, is ALSO what keeps a FAILED {@link
  * protectOccupantContentBeforeDelete} copy alive — that function self-references a failed file into a
  * pending record's own `orphanLatchFiles`, so every call site finds it owned, not just the failing one.
+ *
+ * @decision 63e49ee2 (round 2) — a read-failure tmp residue is now protected by this function's own
+ * EXISTING, unmodified ownership check (no `excludeFilenames` param needed). See the decision record.
  */
 function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; referencingRepoPaths: string[] } {
   const prefix = `${hash}.json.tmp-`;
   let files: string[];
   try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [] }; }
   const referencingRepoPaths = new Set<string>();
+  // @decision 63e49ee2 (round 3) — tracked separately from `referencingRepoPaths`: a read-failure-kept
+  // file has no identity to attribute, but it must still suppress this file's own unlink below.
+  let anyKeptUnattributed = false;
   for (const f of files) {
     if (!f.startsWith(prefix)) continue;
+    if (keptUnreadableLatchFiles.has(f)) { anyKeptUnattributed = true; continue; }
     const owners = new Set<string>();
     for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
     for (const p of pendingUnresolvedQuarantines) if (p.entry.orphanLatchFiles?.includes(f)) owners.add(p.entry.repoPath);
@@ -1811,7 +1923,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; re
       try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
     }
   }
-  return { kept: referencingRepoPaths.size > 0, referencingRepoPaths: [...referencingRepoPaths] };
+  return { kept: referencingRepoPaths.size > 0 || anyKeptUnattributed, referencingRepoPaths: [...referencingRepoPaths] };
 }
 
 /**
@@ -1826,6 +1938,8 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; re
  * OTHER entry's stale `orphanLatchFiles` reference re-arms on the next boot. See the decision record.
  */
 function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string): { kept: boolean; referencingRepoPaths: string[] } {
+  // @decision 63e49ee2 (round 3) — same identity-less keep as {@link sweepOrphanLatchFileIfUnreferenced}.
+  if (keptUnreadableLatchFiles.has(filename)) return { kept: true, referencingRepoPaths: [] };
   const owners = physicalOwnerRepoPaths(filename);
   if (owners.length > 0) return { kept: true, referencingRepoPaths: owners };
   unlinkLatchFile(filename);
