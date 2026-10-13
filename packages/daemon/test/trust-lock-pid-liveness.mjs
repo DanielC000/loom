@@ -14,15 +14,18 @@
 // forever.
 //
 // Section (0) is the real-process lost-update repro this card's own investigation used, turned into a
-// committed RED/GREEN test — with a DELIBERATE LATE-ARRIVAL offset (see that section's own comment for
-// why): a same-start race (both processes polling from t=0) can't cleanly isolate "wrongly broke a live
-// holder's lock" from "gave up waiting and degraded to an unlocked write" — that second path is a
-// SEPARATE, still-accepted tradeoff this card does not eliminate (see EnsureTrustedResult's own doc),
-// and a same-start race triggers both mechanisms at nearly the same instant. A late-arriving waiter
-// separates them: on pre-fix code it loses one process's write (the OLD waiter breaks the still-live
-// holder well before its OWN deadline); on post-fix code both survive (the waiter patiently waits out
-// the holder's real completion, well inside its own deadline, and acquires normally with no break and
-// no degrade needed at all).
+// committed real-process regression test — with a DETERMINISTIC HANDSHAKE (see that section's own
+// comment) instead of a wall-clock margin: B waits for an OBSERVABLE signal that A actually holds the
+// lock (the lock file's own existence — attemptCreateLock's `wx` create succeeds, and ONLY THEN does
+// withTrustLock call `fn()`, so "lock file exists" IS "A is now in the lock"), then attempts with its
+// OWN acquire deadline (LOOM_TRUST_LOCK_MS) set far beyond ANY realistic hold A could have — so B never
+// reaches its own give-up-and-degrade path (a separate, still-accepted tradeoff, see
+// EnsureTrustedResult's own doc) regardless of how slow the host is. With B's own deadline taken out of
+// the race, the ONLY thing left that can decide the outcome is shouldBreakLock's pid-liveness check —
+// exactly the mechanism card 5b97da80 fixed.
+//
+// @decision cacc9f8a — this section no longer discriminates pre-/post-fix code by itself; do not
+// re-introduce a wall-clock margin to try to make it do so. See docs/decisions/cacc9f8a-trust-lock-case0-deadline.md.
 //
 // Run after build: node test/trust-lock-pid-liveness.mjs
 import fs from "node:fs";
@@ -114,27 +117,24 @@ const main = async () => {
   // === (0) THE LOST-UPDATE REPRO, as a committed test. Two REAL child processes against a big enough
   // file that the in-lock work genuinely takes a while (measured ~230-270ms at 60,000 entries on this
   // class of host) — the exact shape the investigation used to reproduce the bug against real
-  // production code, with a DELIBERATE LATE-ARRIVAL offset for B (see the module doc above for why a
-  // same-start race can't isolate this from the separate, still-accepted give-up-degrade tradeoff, and
-  // _trust-writer-delayed.mjs's own doc for why a shared wall-clock startAt can't reliably express a
-  // precise offset either — real node process startup jitter measured 130ms+ on this host):
+  // production code.
   //   - A starts immediately. Its hold has TWO phases that both matter here: a FAST-PATH read of the
   //     big (180,000-entry) file BEFORE it even attempts the lock (measured ~400-600ms on this host —
   //     ensureTrusted always does this, lock or no lock), then the actual in-lock read+merge+write
-  //     (measured ~600ms at this size). Total hold ≈1000ms.
-  //   - B waits for the lock to actually exist (an OBSERVABLE signal that A's fast-path phase has
-  //     finished and A is now genuinely IN the lock), then attempts immediately (delayMs=0 below) — no
-  //     extra sleep is needed: B's OWN fast-path read of the same big file (measured ~400-600ms, run
-  //     fresh in B's own process) is already, by itself, both (a) long enough that B's first REAL
-  //     acquire attempt lands well past T_lock=500ms of age on A's lock, and (b) short enough that it
-  //     still lands comfortably inside A's remaining in-lock window — so the race is genuine without
-  //     needing a manually-tuned sleep on top of it.
-  // On PRE-FIX code: B's first real attempt already has age (from A's lock creation) > timeout(500ms)
-  // → breaks A's still-genuinely-held lock (A is still mid-`fn()`) → a real double-execution clobber;
-  // one write is lost. On POST-FIX code: B's first attempt finds the recorded holder pid (A's)
-  // confirmed ALIVE, and age is nowhere near the hard ceiling (60s) — so B does not break it. It keeps
-  // polling every 50ms, well inside its own (B's own fast-path time + 500ms) deadline, until A
-  // naturally releases and B acquires normally — no break, no degrade, both writes survive. ===
+  //     (measured ~600ms at this size). Total hold ≈1000ms on a quiet host.
+  //   - B waits for the lock to actually exist (a DETERMINISTIC HANDSHAKE: `attemptCreateLock`'s `wx`
+  //     create succeeds, and ONLY THEN does `withTrustLock` call `fn()` — so "lock file exists" IS "A is
+  //     now genuinely in the lock", an OBSERVABLE signal, not an estimate), then attempts (delayMs=0
+  //     below — B's OWN fast-path read of the same big file already provides a realistic arrival delay).
+  // B's OWN acquire deadline (`BIG_DEADLINE_MS`, below) is set far beyond ANY realistic hold A could have
+  // — tens of seconds vs. A's ~1-2s — so B NEVER reaches its own give-up-and-degrade path (see
+  // EnsureTrustedResult's own doc for that separate, still-accepted tradeoff), regardless of host speed.
+  // With that deadline taken out of the race, B just keeps polling every 50ms until A naturally
+  // releases: on POST-FIX code, `shouldBreakLock` correctly refuses to break A's confirmed-alive-pid lock
+  // the whole time (the hard ceiling is nowhere near reached either), so B acquires normally once A
+  // releases — no break, no degrade, both writes survive, deterministically. See
+  // docs/decisions/cacc9f8a-trust-lock-case0-deadline.md for why this means pre-fix code now behaves
+  // identically here (this section is no longer the file's RED/GREEN proof — sections (1)/(3) are). ===
   {
     const configDir = path.join(root, "lost-update");
     fs.mkdirSync(configDir, { recursive: true });
@@ -151,7 +151,11 @@ const main = async () => {
 
     const dirA = path.join(root, "lost-update-A");
     const dirB = path.join(root, "lost-update-B");
-    const env = { LOOM_TRUST_LOCK_MS: "500" };
+    // Far beyond any realistic hold A could have (~1-2s even under heavy gate-lane contention) — see
+    // docs/decisions/cacc9f8a-trust-lock-case0-deadline.md for why this value must not be shrunk back
+    // down to "discriminate" pre-/post-fix code again.
+    const BIG_DEADLINE_MS = "20000";
+    const env = { LOOM_TRUST_LOCK_MS: BIG_DEADLINE_MS };
     const [codeA, codeB] = await Promise.all([
       run(configDir, dirA, Date.now(), env), // A: no deliberate wait, starts as soon as it's ready
       runDelayed(configDir, dirB, 0, env), // B: waits for A's lock to exist, then attempts immediately — see comment above
@@ -160,7 +164,7 @@ const main = async () => {
     const aSurvived = trusted(isoJson, keyFor(dirA));
     const bSurvived = trusted(isoJson, keyFor(dirB));
     check("(0) both children exited 0", codeA === 0 && codeB === 0);
-    check(`(0) NEITHER concurrent writer's trust entry was lost (A survived=${aSurvived}, B survived=${bSurvived}) — this is the RED/GREEN proof: FAILS on pre-fix code (the late waiter breaks the still-live holder), PASSES post-fix`,
+    check(`(0) NEITHER concurrent writer's trust entry was lost (A survived=${aSurvived}, B survived=${bSurvived}) — proves two REAL concurrent OS processes never lose a write under genuine filesystem lock contention, with B's own give-up deadline taken out of the race entirely`,
       aSurvived && bSurvived);
   }
 
