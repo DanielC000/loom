@@ -1188,6 +1188,32 @@ function consumeMatchedPendingsIntoArmedEntry(
   return { armed, matched, writeSucceeded };
 }
 
+/**
+ * A fresh, successful read of `final` RIGHT NOW, proving every token physically there is already one of
+ * `candidateTokens` — the tokens this clear is about to durably drop. ENOENT/EISDIR (nothing real there)
+ * and corrupt JSON (nothing usable) are trivially covered; any OTHER read failure, or a real on-disk
+ * token not in `candidateTokens`, cannot be proven safe.
+ *
+ * @decision 8db913e2 (Follow-up dd34da46, Item 1) — see the decision record for the stale-mark-outliving-a-transient-read-failure
+ * shape this closes, and why this content-containment check differs from round 5 of `63e49ee2`'s
+ * forbidden identity-only detector trust.
+ */
+function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]): boolean {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(final, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "EISDIR";
+  }
+  let parsed: { tokens?: unknown; token?: unknown };
+  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return true; } // corrupt — nothing to protect
+  const onDiskTokens = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
+    ? parsed.tokens
+    : typeof parsed.token === "string" ? [parsed.token] : [];
+  return onDiskTokens.every((t) => candidateTokens.includes(t));
+}
+
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
  *  residue for KEY — a failed write DELIBERATELY leaves its tmp behind (round 2: it's the only durable
  *  record of an active quarantine until resolved) — HERE, at clear time, is where it gets swept.
@@ -1236,9 +1262,29 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
   if (clearedEntry) finalProtectOk = protectUnincorporatedOccupantBeforeDelete(final, clearedEntry, clearIdentity) && finalProtectOk;
   // @decision 63e49ee2 (round 5) — ALWAYS, unconditionally: a fresh read or a detector "none" never
   // overrides a mark — only a durable rename-over or copy-aside (both already removed it by this point).
-  if (keptUnreadableLatchFiles.has(path.basename(final))) finalProtectOk = false;
+  //
+  // @decision 8db913e2 (Follow-up dd34da46, Item 1) — a THIRD way to settle a mark: a fresh content read
+  // proving every token in `final` is one THIS clear is dropping, with the mark itself dropped only AFTER
+  // the unlink below CONFIRMS removal. See the decision record for the N4 EPERM/EBUSY ordering fix.
+  const finalBasename = path.basename(final);
+  const marked = keptUnreadableLatchFiles.has(finalBasename);
+  const provenCoverage = marked && finalProtectOk && !!clearedEntry && markedFinalFullyCoveredByClear(final, clearedEntry.tokens);
+  if (marked && !provenCoverage) finalProtectOk = false;
   if (finalProtectOk) {
-    try { fs.unlinkSync(final); } catch { /* ENOENT is the common case */ }
+    let unlinkConfirmed = true;
+    try {
+      fs.unlinkSync(final);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") unlinkConfirmed = false;
+    }
+    if (provenCoverage) {
+      if (unlinkConfirmed) {
+        keptUnreadableLatchFiles.delete(finalBasename);
+      } else {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] ${finalBasename} could not be CONFIRMED removed (an EPERM/EBUSY-shaped unlink failure) even though its content was just proven fully covered by this clear — the mark stays set, fail-closed, until a later successful read or delete resolves it.`);
+      }
+    }
     // @decision 8db913e2 (round 4, CR3 BLOCKER 1) — NEVER tombstone here: `finalProtectOk` true also
     // covers "copied aside, still enforced". The caller's own top-level clear tombstones once, at its own
     // end, via `tombstoneIfNotSurviving` — the only place that knows the full outcome.
@@ -1665,6 +1711,40 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
 }
 
 /**
+ * Fallback for {@link divertRaiseEntry}'s own DOUBLE FAULT: the divert's own pending-divert write ALSO
+ * failed (e.g. ENOSPC), so `entry` is enforced in THIS PROCESS ONLY and would otherwise be silently lost
+ * on the next reboot. {@link writeSafetyTmpResidueAtHash}'s own output IS already recovered at boot
+ * (`reenterMergeQuarantinesAtBoot`'s dedicated safety-tmp recovery pass, which recomputes
+ * `canonicalRepoLockKey(entry.repoPath)` itself rather than trusting the hash embedded in the filename —
+ * so the hash passed here need not be "correct" for ANY given degraded/collided shape, only distinct from
+ * an unrelated final) — so a best-effort safety-tmp write here closes the reboot-survival gap the pending
+ * write's own failure opened, without inventing any new boot-recovery machinery.
+ *
+ * Returns the tmp's own basename on success — the CALLER must re-point its own pending record's
+ * `sourceFile` at it, and fold it into that entry's own `orphanLatchFiles` via `replaceEntryEverywhere`,
+ * mirroring Phase 0's established pattern (`ef651188`, round 2, ~L4163) — this function only writes the
+ * bytes (with `selfReference: true`, which bakes the self-reference into THOSE bytes alone), it never
+ * touches the in-memory `pendingUnresolvedQuarantines`/`activeQuarantines` structures itself. Returns
+ * `false` on failure (logs loudly either way).
+ *
+ * @decision 8db913e2 (Follow-up dd34da46, Item 3) — never throws. See the decision record's Round 2 note
+ * for the BLOCKER this signature closes: a round-1 version wrote the tmp but never re-pointed the
+ * pending record at it, leaving the write durably orphaned and the token lost on the next reboot anyway.
+ */
+function attemptDivertSafetyTmpFallback(entry: MergeQuarantineEntry): string | false {
+  const safetyTmp = writeSafetyTmpResidueAtHash(quarantineHashFor(entry.repoPath), entry, true);
+  if (safetyTmp) {
+    const basename = path.basename(safetyTmp);
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, its own pending-divert latch ALSO failed to write) — a SAFETY-TMP residue (${basename}) was written instead and WILL be recovered at the next boot (reenterMergeQuarantinesAtBoot's own safety-tmp recovery pass); investigate the pending-divert write failure anyway.`);
+    return basename;
+  }
+  // eslint-disable-next-line no-console
+  console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, its own pending-divert latch ALSO failed to write) — the SAFETY-TMP fallback ALSO failed to write (see the error just above) — this quarantine will NOT survive a restart; investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
+  return false;
+}
+
+/**
  * Divert a VERIFIED raise's own write away from `final` — the raise still durably persists (`e1cb7d33`),
  * just not at its own canonical key's physical file right now. Unions `entry` into EVERY pending record
  * already sharing its own identity by {@link directPathIdentity} (never just the first match), durably
@@ -1686,10 +1766,23 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   if (indices.length === 0) {
     const filename = pendingDivertFilenameFor(entry.repoPath);
     const persisted = writePendingDivertFile(filename, entry);
-    pendingUnresolvedQuarantines.push({ entry, sourceFile: filename });
-    if (!persisted) {
-      // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, its own key's physical final could not be safely overwritten) — the durable pending-divert latch ALSO failed to write; investigate immediately.`);
+    if (persisted) {
+      pendingUnresolvedQuarantines.push({ entry, sourceFile: filename });
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, its own key's physical final could not be safely overwritten) — the durable pending-divert latch ALSO failed to write; investigate immediately.`);
+    // @decision 8db913e2 (Follow-up dd34da46, Item 3) — the double fault: a safety-tmp residue is a
+    // recoverable fallback, but ONLY once this process's own pending record is re-pointed at it — never
+    // left pointing at `filename`, the file that was never actually written.
+    const safetyTmpBasename = attemptDivertSafetyTmpFallback(entry);
+    if (safetyTmpBasename) {
+      const secured: MergeQuarantineEntry = { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), safetyTmpBasename])] };
+      replaceEntryEverywhere(activeQuarantines, entry, secured);
+      pendingUnresolvedQuarantines.push({ entry: secured, sourceFile: safetyTmpBasename });
+    } else {
+      // Triple fault — nothing durable to re-point to; keep the pre-existing (accepted-residual) shape.
+      pendingUnresolvedQuarantines.push({ entry, sourceFile: filename });
     }
     return;
   }
@@ -1717,10 +1810,30 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
   replaceEntryEverywhere(activeQuarantines, entry, merged);
   const persisted = writePendingDivertFile(base.sourceFile, merged);
-  pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
-  if (!persisted) {
-    // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, merged into an existing pending record) — the durable pending-divert latch ALSO failed to re-write; investigate immediately.`);
+  if (persisted) {
+    pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, merged into an existing pending record) — the durable pending-divert latch ALSO failed to re-write; investigate immediately.`);
+  // @decision 8db913e2 (Follow-up dd34da46, Item 3) — same re-pointed fallback as the fresh-divert branch
+  // above, using `merged` (never the raw `entry`); `replaceEntryEverywhere` also reaches an ALREADY-ARMED
+  // twin (the existing-branch divert's own `baseEntry`), not just the pending side.
+  const safetyTmpBasename = attemptDivertSafetyTmpFallback(merged);
+  if (safetyTmpBasename) {
+    const secured: MergeQuarantineEntry = {
+      ...merged,
+      orphanLatchFiles: [...new Set([...(merged.orphanLatchFiles ?? []), safetyTmpBasename, base.sourceFile])],
+    };
+    replaceEntryEverywhere(activeQuarantines, merged, secured);
+    pendingUnresolvedQuarantines.push({ entry: secured, sourceFile: safetyTmpBasename });
+    // @decision 8db913e2 (Follow-up dd34da46, Round 2) — `base.sourceFile`'s own bytes are now STALE
+    // (never rewritten, since this write failed) and fully superseded by the safety-tmp; sweep it so it
+    // never survives as an untracked orphan a later boot could independently re-arm from (the P3g repro).
+    sweepOwnLatchFileUnlessOwnedElsewhere(base.sourceFile);
+  } else {
+    // Triple fault — nothing durable to re-point to; keep the pre-existing (accepted-residual) shape.
+    pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
   }
 }
 
