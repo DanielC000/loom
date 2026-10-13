@@ -112,13 +112,18 @@ function stageDirtClearedBeforeGateSpawns(sessions, branch, worktreePath) {
   };
 }
 
+// @decision 2e73af30 — persist identity via real `git config` writes, never a `-c` override, for a
+// canonical repo a later commit (mergeBranchLocked's own squash) will land with NO identity override of
+// its own.
 function makeRepo(prefix) {
   const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const repo = path.join(os.tmpdir(), `loom-pcdw-${prefix}-${sfx}`);
   registerForCleanup(repo);
   fs.mkdirSync(repo, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  execFileSync("git", [...ID_ARGS, "config", "core.autocrlf", "false"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "pcdw@loom"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "pcdw"], { cwd: repo });
+  execFileSync("git", ["config", "core.autocrlf", "false"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "README.md"), "# pcdw\n");
   commitAll(repo, "init", GIT_ID);
   return repo;
