@@ -64,6 +64,10 @@ const SCENARIOS = [
   "round2-protect-does-not-duplicate-already-active-occupant",
   "partial-overlap-pending-leftover-stays-blocked-until-both-tokens-cleared",
   "extra-pending-token-stays-blocked-until-cleared",
+  "p5a-partial-clear-before-reboot-does-not-resurrect-cleared-token",
+  "p5b-clear-by-latch-file-sweeps-subset-duplicate",
+  "p5c-clear-by-key-sweeps-subset-duplicate",
+  "p5d-clear-by-key-preserves-disjoint-later-raise",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -112,6 +116,7 @@ const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-qua
 const {
   reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, enterMergeQuarantine, clearMergeQuarantine,
   clearMergeQuarantineByToken, MERGE_QUARANTINE_DIR, listActiveMergeQuarantines, assertRepoNotQuarantined,
+  clearMergeQuarantineByKey, clearMergeQuarantineLatchFile,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -897,12 +902,20 @@ try {
     );
   } else if (scenarioName === "round2-protect-does-not-duplicate-already-active-occupant") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
-    // CODE REVIEW d3c36260, BLOCKER 2 — when the occupant physically sitting at Kw's own final is
-    // ALREADY tracked as a LIVE, ACTIVE entry elsewhere (X armed at a wholly DIFFERENT key K2, via its
-    // own resolvedKey), the protect call used to mint a SECOND, independently-tracked pending record for
-    // the SAME identity. clearMergeQuarantineByToken(x, "token-x-r2dup") then found and lifted ONLY the
-    // active copy at K2 — the orphaned duplicate pending copy was never touched, leaving X reported as
-    // PERMANENTLY quarantined (fail-stuck) even after the real clear and a reboot.
+    // CODE REVIEW d3c36260, BLOCKER 2 (round 2) — when the occupant physically sitting at Kw's own final
+    // is ALREADY tracked as a LIVE, ACTIVE entry elsewhere (X armed at a wholly DIFFERENT key K2, via its
+    // own resolvedKey), the protect call minted a SECOND, independently-tracked pending record for the
+    // SAME identity. At the time, `clearMergeQuarantineByToken` stopped at the FIRST match — lifting only
+    // the active copy at K2 and leaving the orphaned duplicate pending copy to report X as PERMANENTLY
+    // quarantined (fail-stuck). Round 3 fixed `clearMergeQuarantineByToken` itself to sweep EVERY record
+    // sharing an identity, active AND pending, unconditionally — which made round 2's own workaround (an
+    // in-memory-only fold into the live entry's `orphanLatchFiles`, so the duplicate was never minted in
+    // the first place) both redundant AND the direct cause of card 8567df22's own P5a bug (the fold's
+    // divert file is never durably kept in sync with a later partial clear, so a reboot's fresh read of
+    // its still-stale content can resurrect an already-cleared token). Round 4 (card 8567df22) removes
+    // the fold — a duplicate record is now ALWAYS minted immediately, exactly like the P8/P3 scenarios
+    // below — and this scenario now pins that round 3's own generalized sweep still fully, durably frees
+    // X regardless, reboot or not.
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const w = path.join(os.tmpdir(), `loom-mqdog-w-r2dup-${freshSfx()}`);
     fs.mkdirSync(w, { recursive: true });
@@ -947,24 +960,22 @@ try {
     check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
     const xEntriesAfterRaise = listActiveMergeQuarantines().filter((e) => e.repoPath === x);
     check(
-      "*** THE FIX (card 1922be3a, round 2) *** exactly ONE tracked record exists for X after the raise — no duplicate was minted",
-      xEntriesAfterRaise.length === 1 && (xEntriesAfterRaise[0]?.tokens ?? []).includes("token-x-r2dup"),
+      "(sanity, round 4) TWO tracked records now exist for X right after the raise — the fold is gone, so the leftover is minted as its own independent pending record immediately, durably, rather than folded in-memory",
+      xEntriesAfterRaise.length === 2 && xEntriesAfterRaise.every((e) => (e.tokens ?? []).includes("token-x-r2dup")),
     );
 
-    // P1 (manager ruling, round 3; CR e3b80d6d BLOCKER B1) — a REBOOT inserted HERE, between the raise
-    // and the clear, is what the round-2 fix's own protect call cannot survive: the fold into the live
-    // entry's own `orphanLatchFiles` (round 2's `liveEntrySupersettingTokens` branch) is IN-MEMORY ONLY —
-    // it never durably rewrites X's own live latch at K2 — so a boot that reads ONLY the still-stale
-    // on-disk sha(K2).json re-discovers the durably-protected divert file as an UNREFERENCED, independent
-    // pending record. (sanity, ACCEPTED residual — round 2's own in-memory fold is kept as-is, per the
-    // round-3 ruling; this card does not prevent the re-discovery) X now DOES carry two records on disk —
-    // the live one at K2, and the re-discovered orphaned pending one — both still carrying the token.
+    // P1 (manager ruling, round 3; CR e3b80d6d BLOCKER B1) — originally a REBOOT inserted HERE, between
+    // the raise and the clear, exposed round 2's own fold as IN-MEMORY ONLY (it never durably rewrote
+    // X's own live latch at K2, so a boot re-discovered the divert file as an UNREFERENCED duplicate).
+    // Round 4 removes the fold, so BOTH of X's two records are durable from the moment of the raise —
+    // the reboot below is kept to pin that it changes NOTHING (still exactly two records, both still
+    // carrying the token), never to re-derive a count that now holds trivially.
     const bootAfterRaise = await freshBootModule();
     bootAfterRaise.reenterMergeQuarantinesAtBoot([w, v, x]);
     const xEntriesAfterRaiseReboot = bootAfterRaise.listActiveMergeQuarantines().filter((e) => e.repoPath === x);
     check(
-      "(sanity, accepted residual) X carries (at least) one record after a reboot too, still carrying its own token — the fix's own scope is making the CLEAR below sweep every such record, not preventing the re-discovery",
-      xEntriesAfterRaiseReboot.length >= 1 && xEntriesAfterRaiseReboot.every((e) => (e.tokens ?? []).includes("token-x-r2dup")),
+      "(sanity, round 4) X still carries exactly two records after a reboot too, both still carrying its own token — the fix's own scope is making the CLEAR below sweep every such record, not preventing the duplication",
+      xEntriesAfterRaiseReboot.length === 2 && xEntriesAfterRaiseReboot.every((e) => (e.tokens ?? []).includes("token-x-r2dup")),
     );
 
     // *** THE PROBE'S OWN CONSEQUENCE, now AFTER the reboot *** clearing X's real token, then clearing W
@@ -1124,6 +1135,286 @@ try {
     const boot3 = await freshBootModule();
     boot3.reenterMergeQuarantinesAtBoot([w, v, x]);
     check("*** THE FIX (round 3) *** X stays free after a SECOND real reboot too", boot3.assertRepoNotQuarantined(x).ok === true);
+  } else if (scenarioName === "p5a-partial-clear-before-reboot-does-not-resurrect-cleared-token") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // P5a (card 8567df22, round 4) — the exact bug round 2's in-memory-only `liveEntrySupersettingTokens`
+    // fold caused, never exercised by P1 (duplicate-record, above) or P8/P3 (partial-overlap/extra-token):
+    // the leftover's own tokens are an EXACT SUPERSET match (identical to the live entry's), so the OLD
+    // code took the fold branch rather than minting an independent pending record. A clearMergeQuarantine-
+    // ByToken call IN-PROCESS (no reboot yet) durably rewrote the live entry at K2 with the reduced token
+    // set, but the fold's own divert FILE on disk was never told — `clearPendingEntryByToken` never found
+    // it (nothing in `pendingUnresolvedQuarantines` referenced it; it was reachable only via the live
+    // entry's in-memory `orphanLatchFiles`). A later reboot re-reads that still-stale divert file as its
+    // own independent record, still carrying the ALREADY-CLEARED token — resurrecting it.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-p5a-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# p5a\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-p5a-${freshSfx()}`); // a SEPARATE real repo — just for a stable, distinct K2
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    // 1) X is live at K2, carrying BOTH tokens, via its own resolvedKey. Boot.
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK2Path, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own LIVE raise (p5a)", enteredAt: Date.now(), tokens: ["token-x-p5a-ta", "token-x-p5a-tb"], resolvedKey: k2 }, null, 2) + "\n");
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "(precondition) X is active at K2, carrying BOTH tokens",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5a-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5a-tb"),
+    );
+
+    // 2) A leftover physically at Kw's own final, carrying the EXACT SAME two tokens as the live entry
+    // (an exact superset match — the shape the old fold branch specifically targeted).
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    fs.writeFileSync(xAtKwPath, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own STALE leftover, exact token match, still at Kw (p5a)", enteredAt: Date.now() - 120_000, tokens: ["token-x-p5a-ta", "token-x-p5a-tb"] }, null, 2) + "\n");
+
+    // 3) enterMergeQuarantine(W) protects the leftover aside before overwriting Kw's own final.
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over an exact-superset leftover of an identity already live elsewhere");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+
+    // 4) clearMergeQuarantineByToken(x, "ta") IN-PROCESS — no reboot yet. "tb" must still fail-closed X.
+    clearMergeQuarantineByToken(x, "token-x-p5a-ta");
+    check(
+      "(precondition) X's own tracked record(s) no longer carry 'ta' in-process, right after the partial clear",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-p5a-ta")),
+    );
+
+    // Now reboot — this is what the old fold could not survive: its own divert file was never told
+    // about the partial clear, so a fresh boot-time read of its still-stale on-disk content resurrects
+    // the already-cleared "ta".
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX (card 8567df22, round 4) *** 'ta' stays cleared after a real reboot — no tracked record for X carries it",
+      boot2.listActiveMergeQuarantines().filter((e) => e.repoPath === x).every((e) => !(e.tokens ?? []).includes("token-x-p5a-ta")),
+    );
+    check(
+      "(sanity) X is still blocked after the reboot — 'tb' is still outstanding, fail-closed",
+      boot2.assertRepoNotQuarantined(x).ok === false,
+    );
+
+    boot2.clearMergeQuarantineByToken(x, "token-x-p5a-tb");
+    // W's own raise is still armed at Kw too — x's degraded walked-up key collides with it, so
+    // assertRepoNotQuarantined(x) would read blocked on THAT basis alone until W is also cleared; clear
+    // it first so this check discriminates on X's own residual, not W's.
+    boot2.clearMergeQuarantine(w);
+    check(
+      "*** THE FIX (round 4) *** X is finally free once 'tb' is also cleared — 'ta' never came back to block it",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+
+    const boot3 = await freshBootModule();
+    boot3.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("*** THE FIX (round 4) *** X stays free after a SECOND real reboot too", boot3.assertRepoNotQuarantined(x).ok === true);
+  } else if (scenarioName === "p5b-clear-by-latch-file-sweeps-subset-duplicate") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // B1 (Code Review d2558a4b of card 8567df22's round-4 fix) — the KEY/ID clear route (clearMergeQuarantine-
+    // ByKey, reached here via clearMergeQuarantineLatchFile) is a wholly SEPARATE sweep mechanism from the
+    // TOKEN route's clearPendingEntryByToken: it never swept the round-4-minted duplicate pending record
+    // at all — the duplicate has no armedKeys, is never `===` the active entry, and is never named in the
+    // active entry's own orphanLatchFiles, so `tiedToThisEntity` treated it as a d4b25feb-style INDEPENDENT
+    // later raise and left it behind, reporting {liftedRepoPaths:[], stillQuarantined:true}.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-p5b-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# p5b\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-p5b-${freshSfx()}`); // a SEPARATE real repo — just for a stable, distinct K2
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    // X is live at K2, carrying BOTH tokens, via its own resolvedKey. Boot.
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK2Path, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own LIVE raise (p5b)", enteredAt: Date.now(), tokens: ["token-x-p5b-ta", "token-x-p5b-tb"], resolvedKey: k2 }, null, 2) + "\n");
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("(precondition) X is active at K2, carrying BOTH tokens", (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5b-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5b-tb"));
+
+    // A leftover at Kw's own final, carrying the EXACT SAME two tokens — the round-4 "always mint an
+    // independent record" path, over `enterMergeQuarantine(w)`'s own protect call.
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    fs.writeFileSync(xAtKwPath, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own STALE leftover, exact token match, still at Kw (p5b)", enteredAt: Date.now() - 120_000, tokens: ["token-x-p5b-ta", "token-x-p5b-tb"] }, null, 2) + "\n");
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over an exact-superset leftover of an identity already live elsewhere");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+    check(
+      "(precondition) X now carries two tracked records (round 4) — the duplicate the key-route clear below must also reach",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 2,
+    );
+
+    // *** THE PROBE *** clearMergeQuarantineLatchFile, by X's OWN active latch id at K2 — never the token
+    // route. Must fully, durably lift X in-process.
+    const clearResult = clearMergeQuarantineLatchFile(hashForKey(k2));
+    check("(precondition) the clear itself succeeds and reports wasQuarantined", clearResult.ok === true && clearResult.wasQuarantined === true);
+    check(
+      "*** THE FIX (card 8567df22, round 5) *** X is fully lifted IN-PROCESS — the subset duplicate is swept too, not left as an independent raise",
+      clearResult.liftedRepoPaths.includes(x) && !clearResult.stillQuarantined,
+    );
+
+    // Clear W too (its own raise at Kw is unrelated to this probe, but X's own degraded key walks up to
+    // Kw too — a direct query for X before clearing W would legitimately surface W's own entry via that
+    // KEY-based tier, confounding this probe's own signal; see the P1 scenario's own note on this above).
+    clearMergeQuarantine(w);
+    check("(sanity) a direct query for X now succeeds in-process", activeMergeQuarantineFor(x) === undefined);
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX (round 5) *** X stays fully free after a real reboot too — nothing resurrects the swept duplicate",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+  } else if (scenarioName === "p5c-clear-by-key-sweeps-subset-duplicate") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // B1 (CR d2558a4b), via the OTHER half of the manager's own repro — clearMergeQuarantineByKey called
+    // DIRECTLY (never through the id-addressed clearMergeQuarantineLatchFile wrapper above) must reach the
+    // SAME fix, since both routes share the one `tiedToThisEntity` check this card's round 5 corrects.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-p5c-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# p5c\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-p5c-${freshSfx()}`);
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK2Path, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own LIVE raise (p5c)", enteredAt: Date.now(), tokens: ["token-x-p5c-ta", "token-x-p5c-tb"], resolvedKey: k2 }, null, 2) + "\n");
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("(precondition) X is active at K2, carrying BOTH tokens", (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5c-ta") && (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5c-tb"));
+
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    fs.writeFileSync(xAtKwPath, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own STALE leftover, exact token match, still at Kw (p5c)", enteredAt: Date.now() - 120_000, tokens: ["token-x-p5c-ta", "token-x-p5c-tb"] }, null, 2) + "\n");
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over an exact-superset leftover of an identity already live elsewhere");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+    check(
+      "(precondition) X now carries two tracked records (round 4)",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 2,
+    );
+
+    // *** THE PROBE *** clearMergeQuarantineByKey called directly, exactly as the manager's own repro (b).
+    // `clearMergeQuarantineByKey`'s own return value reports `latchKept`, never "is this identity still
+    // quarantined" (that's `clearMergeQuarantineLatchFile`'s job, scenario p5b above) — query state after.
+    clearMergeQuarantineByKey(k2, x);
+    // Clear W too BEFORE querying X — X's own degraded key walks up to Kw too, so a query before clearing
+    // W would legitimately surface W's own entry via that KEY-based tier, confounding this probe's signal.
+    clearMergeQuarantine(w);
+    check(
+      "*** THE FIX (card 8567df22, round 5) *** X is fully lifted IN-PROCESS by a direct clearMergeQuarantineByKey call",
+      activeMergeQuarantineFor(x) === undefined,
+    );
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE FIX (round 5) *** X stays fully free after a real reboot too",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
+  } else if (scenarioName === "p5d-clear-by-key-preserves-disjoint-later-raise") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CONTROL (manager's own (c)) — d4b25feb's "two independent raise-groups" shape must still survive a
+    // key clear: a same-identity pending record carrying a token that is NOT in the entry being cleared
+    // (a genuinely LATER, independent raise, never a round-4 duplicate of the SAME content) must be left
+    // alone. This is what actually discriminates round 5's own SUBSET check from a blanket "sweep every
+    // same-identity pending record" — a blanket sweep would wrongly destroy this later raise too.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const w = path.join(os.tmpdir(), `loom-mqdog-w-p5d-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# p5d\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const x = path.join(w, "gone-subdir"); // NEVER created — the degraded walk-up occupant
+    const v = path.join(os.tmpdir(), `loom-mqdog-v-p5d-${freshSfx()}`);
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# v\n");
+    execSync(`git init -q && git config user.email mqdog@loom && git config user.name mqdog`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(v);
+    check("(precondition) X never exists on disk", !fs.existsSync(x));
+    check("(precondition) K2 (v's own key) differs from Kw", k2 !== kw);
+
+    // X's own LIVE raise, armed directly at K2 — carrying only "ta".
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xAtK2Path = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k2)}.json`);
+    fs.writeFileSync(xAtK2Path, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own LIVE raise (p5d)", enteredAt: Date.now(), tokens: ["token-x-p5d-ta"], resolvedKey: k2 }, null, 2) + "\n");
+    reenterMergeQuarantinesAtBoot([w, v, x]);
+    check("(precondition) X is active at K2, carrying only ta", (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5d-ta"));
+
+    // A SEPARATE, GENUINELY-LATER raise for the SAME identity, carrying a wholly DISJOINT token ("tc") the
+    // live entry never held at all — written directly, after boot, to Kw's own final (the walk-up
+    // collision this whole fixture shape depends on), so enterMergeQuarantine(w) mints it as its own
+    // independent pending record (never a duplicate of the live entry's own content).
+    const xAtKwPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`);
+    fs.writeFileSync(xAtKwPath, JSON.stringify({ repoPath: x, branch: "x-branch", reason: "X's own GENUINELY LATER raise, disjoint token, still at Kw (p5d)", enteredAt: Date.now() - 120_000, tokens: ["token-x-p5d-tc"] }, null, 2) + "\n");
+    const token = enterMergeQuarantine(w, "w-branch", "W's own fresh raise, over a disjoint-token later raise of an identity already live elsewhere");
+    check("*** THE OPT-OUT *** W's fresh raise is enforced IN-MEMORY immediately", (activeMergeQuarantineFor(w)?.tokens ?? []).includes(token));
+    check(
+      "(precondition) X now carries two tracked records — the live 'ta' entry and the independent, disjoint 'tc' raise",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 2,
+    );
+
+    // *** THE CONTROL *** clearing X's live entry by key must NOT touch the disjoint-token independent
+    // raise — "tc" is not a subset of the cleared entry's own tokens (["ta"]), so it survives untouched.
+    // `clearMergeQuarantineByKey`'s own return value reports `latchKept`, never "is this identity still
+    // quarantined" — check `listActiveMergeQuarantines` by X's own identity directly instead, which (unlike
+    // a key-based query) is never confounded by W's own still-live entry sharing the same degraded key.
+    clearMergeQuarantineByKey(k2, x);
+    const xRecordsAfterClear = listActiveMergeQuarantines().filter((e) => e.repoPath === x);
+    check(
+      "*** THE CONTROL (d4b25feb preserved) *** the disjoint-token independent raise survives the key clear — exactly one record, carrying ONLY 'tc'",
+      xRecordsAfterClear.length === 1 && xRecordsAfterClear[0].tokens.includes("token-x-p5d-tc") && !xRecordsAfterClear[0].tokens.includes("token-x-p5d-ta"),
+    );
+
+    // Clear W too BEFORE querying X by identity through the key-aware tiers below — X's own degraded key
+    // walks up to Kw too, so a query before clearing W would legitimately surface W's own entry instead.
+    clearMergeQuarantine(w);
+    check(
+      "*** THE CONTROL *** a direct query for X still refuses, carrying ONLY the independent 'tc' token — 'ta' is genuinely gone",
+      (activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5d-tc") && !(activeMergeQuarantineFor(x)?.tokens ?? []).includes("token-x-p5d-ta"),
+    );
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([w, v, x]);
+    check(
+      "*** THE CONTROL *** the independent 'tc' raise survives a real reboot too, still blocking X",
+      boot2.assertRepoNotQuarantined(x).ok === false,
+    );
+    boot2.clearMergeQuarantineByToken(x, "token-x-p5d-tc");
+    check(
+      "(sanity) X is finally free once its own independent 'tc' raise is cleared on its own terms",
+      boot2.assertRepoNotQuarantined(x).ok === true,
+    );
   }
 } finally {
   for (const d of tmpDirs) {

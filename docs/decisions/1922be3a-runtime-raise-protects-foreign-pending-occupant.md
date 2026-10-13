@@ -199,8 +199,123 @@ files re-verified individually (never the full gate, never `run_gate`), each run
 against the Map-iteration-order flake class this round's own fix closed. All 30 static guards (`pnpm
 --filter @loom/daemon guards`) re-verified green.
 
+## Round 4 (card 8567df22) — the round-2 fold is now removed; it was redundant AND the cause of P5a
+
+Round 3's own fix (above) generalized `clearMergeQuarantineByToken` to sweep EVERY record sharing an
+identity — active AND pending — unconditionally, never stopping at the first match. That made round 2's
+own `liveEntrySupersettingTokens` fold (the in-memory-only "don't mint a duplicate, fold into the live
+entry's `orphanLatchFiles` instead" branch in `protectOccupantContentBeforeDelete`) redundant: a later
+clear now finds and sweeps an independently-minted duplicate pending record just as reliably as it finds
+a folded one, so there is no longer a reason to avoid minting the duplicate in the first place.
+
+Worse, the fold was ALSO the cause of a real bug (P5a): the fold updates the live entry's own
+`orphanLatchFiles` field in memory, but the divert FILE it names on disk is never kept in sync with a
+LATER partial clear — `clearActiveEntryTokenAtKey`'s own non-empty-remainder branch durably rewrites the
+live entry's latch (carrying the already-reduced token set) but never rewrites, or even looks at, the
+folded-in divert file's own content, and `clearPendingEntryByToken` has nothing in
+`pendingUnresolvedQuarantines` to find (the fold deliberately never pushes one). A reboot's own PASS 1
+reads EVERY file in the directory independently, so it re-discovers that still-stale divert file (still
+carrying the already-cleared token) as its own record for the same identity — resurrecting a token that
+was genuinely, durably cleared.
+
+**The fix:** `protectOccupantContentBeforeDelete`'s "neither index matched" branch now ALWAYS mints an
+independent, durably-tracked pending record (`liveEntrySupersettingTokens` is deleted outright) — exactly
+the same path P8/P3 already took for a non-superset leftover. `clearMergeQuarantineByToken`'s round-3
+sweep reaches it either way — but see Round 5 below: that claim holds ONLY for the TOKEN clear route.
+The KEY/ID clear route (`clearMergeQuarantineByKey`) is a wholly separate sweep mechanism that did NOT
+reach the newly-always-minted duplicate, and round 4 (as originally shipped) regressed it.
+
+Checked whether `e0192ffb`'s `existing`-truthy region (`protectUnincorporatedOccupantBeforeDelete`,
+token-overlap discriminated) depends on the fold: it does not — that region shares the SAME
+`protectOccupantContentBeforeDelete` tail, and its own CR probe (b) (`existing-branch-raise-still-
+overwrites-own-union-content`) and the token-overlap-pinning scenario both still pass unchanged after the
+fold's removal (re-verified directly, including across a reboot).
+
+### Tests
+
+`packages/daemon/test/merge-quarantine-degraded-occupant-guard.mjs`:
+- `p5a-partial-clear-before-reboot-does-not-resurrect-cleared-token` (new) — the exact P5a shape: X live
+  at K2 with `[ta, tb]`; an exact-superset leftover at `sha(Kw)` also carrying `[ta, tb]`; `enterMergeQuarantine(W)`
+  (fold path on pre-fix code); `clearMergeQuarantineByToken(x, ta)` IN-PROCESS (no reboot yet); THEN a real
+  reboot. Asserts no tracked record for X carries `ta` after the reboot, X stays blocked on `tb` alone,
+  and clearing `tb` (plus `W`) fully frees X. Proven RED on pre-round-4 code and GREEN after, via
+  `scripts/negative-control.mjs`.
+- `round2-protect-does-not-duplicate-already-active-occupant` (rewritten in place) — its own "exactly ONE
+  tracked record, no duplicate was minted" assertion is gone; round 4 means a duplicate record is now
+  ALWAYS minted immediately (not just rediscovered after a stale reboot). It now asserts exactly TWO
+  tracked records exist for X both right after the raise and after a reboot (proving the fold's removal
+  changes nothing about *that* count across a reboot, since both copies are durable from the start), and
+  still asserts round 3's sweep fully, durably frees X regardless.
+- `partial-overlap-pending-leftover-stays-blocked-until-both-tokens-cleared` (P8) and
+  `extra-pending-token-stays-blocked-until-cleared` (P3) are unchanged and re-verified green — neither
+  ever took the fold branch (their leftovers are never an exact-superset match), so removing the fold
+  does not touch their own code path.
+
+All `merge-quarantine*.mjs` files (30 total) re-verified individually, each exit 0. All 30 static guards
+(`pnpm --filter @loom/daemon guards`) re-verified green.
+
+## Round 5 (Code Review d2558a4b of round 4, B1) — the KEY/ID clear route never swept the new duplicate
+
+Round 4's own reasoning above ("the round-3 sweep reaches it either way") is true ONLY for the TOKEN
+clear route (`clearMergeQuarantineByToken`, which unconditionally calls `clearPendingEntryByToken` — a
+sweep that matches by identity alone, with no `tiedToThisEntity`-style gate at all). It is FALSE for the
+KEY/ID clear route: `clearMergeQuarantineByKey` (and everything that delegates through it —
+`clearMergeQuarantineLatchFile`'s active-match branch, `clearMergeQuarantine`,
+`clearMergeQuarantineByRecordedPath`, and `clearActiveEntryTokenAtKey`'s own full-clear branch) sweeps a
+same-identity pending record only when `tiedToThisEntity` says so — and round 4's always-minted duplicate
+has no `armedKeys`, is never `===` the active entry, and is never named in the active entry's own
+`orphanLatchFiles`. `tiedToThisEntity` therefore misclassified it as a `d4b25feb`-style INDEPENDENT later
+raise and left it behind — `clearMergeQuarantineByKey`/`clearMergeQuarantineLatchFile` reported success
+(`{liftedRepoPaths:[], stillQuarantined:true}`) while the duplicate kept X quarantined, in-process and
+across a reboot.
+
+**The fix:** `tiedToThisEntity` ALSO treats as tied any same-identity pending record whose `tokens` are a
+non-empty SUBSET of the entry being cleared's own `tokens`. A genuine `d4b25feb` later, independent raise
+always carries a FRESH token the cleared entry lacks (never a subset), so it is unaffected and still
+survives untouched — and P8/P3's own extra-token/partial-overlap leftovers (which carry a token the live
+entry does NOT hold) are likewise never a subset, so they are unaffected too.
+
+### Tests
+
+`packages/daemon/test/merge-quarantine-degraded-occupant-guard.mjs`:
+- `p5b-clear-by-latch-file-sweeps-subset-duplicate` (new) — the manager's own repro (a): the round-4
+  duplicate, cleared via `clearMergeQuarantineLatchFile` (the id-addressed wrapper). Asserts the clear
+  reports `liftedRepoPaths` including X with no `stillQuarantined`, and X stays fully free in-process and
+  after a real reboot.
+- `p5c-clear-by-key-sweeps-subset-duplicate` (new) — the manager's own repro (b): the identical shape,
+  `clearMergeQuarantineByKey` called directly rather than through the id-addressed wrapper. Same result.
+- `p5d-clear-by-key-preserves-disjoint-later-raise` (new) — the manager's own control (c): a genuinely
+  independent LATER raise for the same identity, carrying a token the cleared entry never held at all
+  (not a subset), survives `clearMergeQuarantineByKey` untouched, in-process and across a reboot — proving
+  the fix discriminates by token-subset rather than sweeping every same-identity pending record blindly.
+- The manager's own item (d) — P8 (`partial-overlap-pending-leftover-stays-blocked-until-both-tokens-
+  cleared`) and P3 (`extra-pending-token-stays-blocked-until-cleared`) — needed no new assertions: neither
+  ever calls the key/id clear route, so they are unaffected by construction; re-verified green regardless.
+- The pre-existing `d4b25feb` coverage in `merge-quarantine-unverified-raise-divert.mjs`
+  (`clear-by-id-leaves-independent-pending-quarantined`, `clear-by-pending-id-leaves-independent-active-
+  quarantined`) re-verified green — their own independent-raise tokens (`t2`/`t1`) are never a subset of
+  the entry being cleared, so round 5's new condition never fires for them.
+
+All `p5b`/`p5c` scenarios proven RED on pre-round-5 code (round 4 as originally shipped) and GREEN after,
+via `scripts/negative-control.mjs`; `p5d` (a control, not a discriminator) correctly passes on BOTH sides,
+confirming it never depended on the fix it is pinning the absence of over-reach for. All `merge-
+quarantine*.mjs` files (30 total) re-verified individually, each exit 0, including
+`merge-quarantine-unverified-raise-divert.mjs`'s own `d4b25feb` scenarios. All 30 static guards
+(`pnpm --filter @loom/daemon guards`) re-verified green.
+
 ## Do not
 
+- **(Round 5)** Do not assume `clearMergeQuarantineByToken`'s round-3 sweep covers every clear route —
+  it covers only the TOKEN route. The KEY/ID route (`clearMergeQuarantineByKey` and everything that
+  delegates through it) has its OWN separate sweep gate (`tiedToThisEntity`), which must ALSO recognize a
+  round-4-minted duplicate (a non-empty token SUBSET of the entry being cleared) as tied — a future
+  change to either sweep must re-verify the OTHER route still reaches whatever shape it fixes.
+- **(Round 4)** Do not re-add an in-memory-only fold (`liveEntrySupersettingTokens` or any lookalike) to
+  `protectOccupantContentBeforeDelete`'s "neither index matched" branch, to avoid minting a duplicate
+  pending record "for efficiency" or to "keep the on-disk shape tidy" — every clear route now correctly
+  reaches the always-minted duplicate (round 3's token sweep, round 5's key/id subset check), so avoiding
+  it buys nothing; it ONLY reopens P5a (a durably-cleared token resurrected by a stale, un-synced divert
+  file a reboot re-discovers). Always mint the independent record.
 - **(Round 3)** Do not mark an entry `seen` in `clearMergeQuarantineByToken`'s active-side scan until it
   has actually MATCHED (by key or identity) and is about to be cleared — marking it on every key visited
   regardless of match reopens a Map-iteration-order-dependent bug where a non-matching key visited first
@@ -208,10 +323,12 @@ against the Map-iteration-order flake class this round's own fix closed. All 30 
 - **(Round 3)** Do not gate `clearPendingEntryByToken`'s own sweep on "nothing active matched" — a
   same-identity leftover can carry `token` in a pending record even while a SEPARATE active entry
   elsewhere also carries it; both need the token lifted, not just whichever is found first.
-- **(Round 3)** Do not attempt to make round 2's `liveEntrySupersettingTokens` fold durable as a way to
-  "fully fix" P1/P8 — the accepted ruling is FAIL-CLOSED on the leftover's own extra tokens, not a
-  guarantee of exactly one record after a reboot; a test asserting "exactly one record" after a reboot is
-  asserting something this fix does not (and is not ruled to) provide.
+- **(Round 3, SUPERSEDED BY ROUND 4)** The original text of this bullet read: "Do not attempt to make
+  round 2's `liveEntrySupersettingTokens` fold durable as a way to 'fully fix' P1/P8 — the accepted ruling
+  is FAIL-CLOSED on the leftover's own extra tokens, not a guarantee of exactly one record after a
+  reboot." Round 4 removed the fold entirely rather than making it durable, so this specific prohibition
+  no longer applies to any code that exists — see the round-4 bullet immediately above for the current
+  rule.
 
 - Do not call `protectDegradedOccupantBeforeDelete`/`protectUnincorporatedOccupantBeforeDelete`
   unconditionally at the TOP of `enterMergeQuarantine`, before `existing` is known — the `existing`-truthy

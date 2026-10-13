@@ -1161,22 +1161,6 @@ function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: 
   protectOccupantContentBeforeDelete(final, occupantRepoPath, clearedEntry.repoPath);
 }
 
-/** A LIVE entry (active or pending, wherever it lives) sharing `occupantIdentity`'s own identity whose
- *  OWN `tokens` already form a superset of `tokens` — i.e. this content is already fully represented
- *  elsewhere, so minting an independent new tracking record for it would create a SECOND, never-cleared
- *  copy of the same identity.
- *
- *  @decision 1922be3a (round 2, CRITICAL) — see the decision record. */
-function liveEntrySupersettingTokens(occupantIdentity: string, tokens: string[]): MergeQuarantineEntry | undefined {
-  for (const e of activeQuarantines.values()) {
-    if (directPathIdentity(e.repoPath) === occupantIdentity && tokens.every((t) => e.tokens.includes(t))) return e;
-  }
-  for (const p of pendingUnresolvedQuarantines) {
-    if (directPathIdentity(p.entry.repoPath) === occupantIdentity && tokens.every((t) => p.entry.tokens.includes(t))) return p.entry;
-  }
-  return undefined;
-}
-
 /** Shared tail for both protect-before-delete wrappers above — durably copies `final`'s own content
  *  aside (under `occupantRepoPath`'s own pending-divert filename) before the caller's own unconditional
  *  unlink proceeds. `describeClearer` is used only for the failure log's own wording. */
@@ -1231,16 +1215,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   } else if (atFinalBasenameIdx >= 0) {
     pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: toWrite, sourceFile: filename };
   } else {
-    // @decision 1922be3a (round 2, CRITICAL) — never mint an independent pending record when a live
-    // entry elsewhere already covers every token here; fold it into that entry's own orphanLatchFiles
-    // instead, or a clear of the live entry never reaches this copy. See the decision record.
-    const liveElsewhere = liveEntrySupersettingTokens(directPathIdentity(occupantRepoPath), toWrite.tokens);
-    if (liveElsewhere) {
-      const updated: MergeQuarantineEntry = { ...liveElsewhere, orphanLatchFiles: [...new Set([...(liveElsewhere.orphanLatchFiles ?? []), filename])] };
-      replaceEntryEverywhere(activeQuarantines, liveElsewhere, updated);
-    } else {
-      pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
-    }
+    // @decision 1922be3a (round 4) — ALWAYS mint an independent, durably-tracked pending record here;
+    // never fold into a live entry's own `orphanLatchFiles` (round 2's now-removed
+    // `liveEntrySupersettingTokens` branch resurrected a cleared token — see the decision record).
+    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
   }
 }
 
@@ -1863,7 +1841,12 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
     //
     // @decision d4b25feb (round 2) — outside those cases, a same-identity pending entry is a wholly
     // INDEPENDENT later raise (this card's own new shape) and must survive this clear untouched.
-    const tiedToThisEntity = !entry || p.entry === entry || keysToLift.some((k) => p.entry.armedKeys?.includes(k)) || !!entry.orphanLatchFiles?.includes(p.sourceFile);
+    //
+    // @decision 1922be3a (round 5) — ALSO tied: a non-empty SUBSET of `entry`'s own tokens (the
+    // 1922be3a-round-4 duplicate this key/id clear route must now reach too). A genuine d4b25feb later
+    // raise always carries a fresh token `entry` lacks, so it never matches this and still survives.
+    const subsetOfClearedTokens = !!entry && p.entry.tokens.length > 0 && p.entry.tokens.every((t) => entry.tokens.includes(t));
+    const tiedToThisEntity = !entry || p.entry === entry || keysToLift.some((k) => p.entry.armedKeys?.includes(k)) || !!entry.orphanLatchFiles?.includes(p.sourceFile) || subsetOfClearedTokens;
     if (!tiedToThisEntity) return true;
     for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
     // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too, but
