@@ -1208,12 +1208,16 @@ function consumeMatchedPendingsIntoArmedEntry(
 /**
  * A fresh, successful read of `final` RIGHT NOW, proving every token physically there is already one of
  * `candidateTokens` — the tokens this clear is about to durably drop. ENOENT/EISDIR (nothing real there)
- * and corrupt JSON (nothing usable) are trivially covered; any OTHER read failure, or a real on-disk
- * token not in `candidateTokens`, cannot be proven safe.
+ * is trivially covered; any OTHER read failure, corrupt/unparsable JSON, or a real on-disk token not in
+ * `candidateTokens`, cannot be proven safe.
  *
  * @decision 8db913e2 (Follow-up dd34da46, Item 1) — see the decision record for the stale-mark-outliving-a-transient-read-failure
  * shape this closes, and why this content-containment check differs from round 5 of `63e49ee2`'s
  * forbidden identity-only detector trust.
+ *
+ * @decision 95ea8d3f (Round 2) — corrupt/unparsable content is NO LONGER trivially covered — a corrupt
+ * latch can be a card-882d6cff shared backing for SEVERAL distinct claimants at once, and unparseable
+ * content can never prove it holds nothing but `candidateTokens`' own tokens. See the decision record.
  */
 function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]): boolean {
   let raw: string;
@@ -1224,7 +1228,7 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
     return code === "ENOENT" || code === "EISDIR";
   }
   let parsed: { tokens?: unknown; token?: unknown };
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return true; } // corrupt — nothing to protect
+  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return false; } // corrupt — cannot prove coverage
   const onDiskTokens = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
     ? parsed.tokens
     : typeof parsed.token === "string" ? [parsed.token] : [];
@@ -1264,8 +1268,12 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
  * @decision 63e49ee2 — `false` now also covers a read failure of UNKNOWN cause (no content was ever
  * parsed), for both `final` (this function's own unlink below) and a tmp residue (protected inside
  * {@link protectForeignTmpResidueBeforeSweep} itself). See the decision record.
+ *
+ * @decision 95ea8d3f (Round 2, Critical) — returns the repoPaths of every SURVIVING structural shared
+ * claimant ({@link survivingSharedClaimRepoPaths}) that kept `final` on disk (empty if none) — a check
+ * that never yields to `provenCoverage`. See the decision record.
  */
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string, clearedEntry?: MergeQuarantineEntry, clearIdentity?: string): void {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string, clearedEntry?: MergeQuarantineEntry, clearIdentity?: string): string[] {
   const final = quarantinePathForKey(key);
   let finalProtectOk = true;
   if (clearingRepoPath) finalProtectOk = protectDegradedOccupantBeforeDelete(final, clearingRepoPath) && finalProtectOk;
@@ -1287,6 +1295,11 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
   const marked = keptUnreadableLatchFiles.has(finalBasename);
   const provenCoverage = marked && finalProtectOk && !!clearedEntry && markedFinalFullyCoveredByClear(final, clearedEntry.tokens);
   if (marked && !provenCoverage) finalProtectOk = false;
+  // @decision 95ea8d3f (Round 2, Critical, CR c9af122d) — a SURVIVING structural shared claim on this
+  // exact file is NEVER overridden by provenCoverage (or anything else above) — see this function's own
+  // doc. Checked last, after every other signal, so it can only ever narrow `finalProtectOk` further.
+  const sharedClaimants = survivingSharedClaimRepoPaths(finalBasename);
+  if (sharedClaimants.length > 0) finalProtectOk = false;
   if (finalProtectOk) {
     let unlinkConfirmed = true;
     try {
@@ -1305,6 +1318,9 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
     // @decision 8db913e2 (round 4, CR3 BLOCKER 1) — NEVER tombstone here: `finalProtectOk` true also
     // covers "copied aside, still enforced". The caller's own top-level clear tombstones once, at its own
     // end, via `tombstoneIfNotSurviving` — the only place that knows the full outcome.
+  } else if (sharedClaimants.length > 0) {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] keeping ${finalBasename} on disk — ${sharedClaimants.length} other claimant(s) sharing this exact file still structurally depend on it (${sharedClaimants.join(", ")}); never destroyed, even though this clear's own content coverage would otherwise be proven.`);
   } else {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — a foreign occupant's content could not be durably protected (or could not be read) before this clear; see the error just above. It also stays marked kept in THIS PROCESS (a real self-owned record, or a basename-only read-failure mark), not only after a later boot.`);
@@ -1314,6 +1330,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
   // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
   // because THIS key's own entry is being legitimately cleared.
   sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key));
+  return sharedClaimants;
 }
 
 /**
@@ -2283,12 +2300,54 @@ function physicalOwnerRepoPaths(filename: string): string[] {
   return [...owners];
 }
 
+/**
+ * repoPaths of every SURVIVING entry that STRUCTURALLY depends on `filename` — a GENUINE PLACEHOLDER
+ * pending entry's own `sourceFile`, or a pending entry's own SELF-REFERENCING `orphanLatchFiles` (its own
+ * `sourceFile` IS `filename`, which is ALSO folded into its own `orphanLatchFiles`) — independent of
+ * `filename`'s own CONTENT. Deliberately narrower than, and never a substitute for,
+ * {@link physicalOwnerRepoPaths} (which also covers an active entry's own armed-key/fresh-write-target
+ * claim): this check exists specifically so a content-containment proof (e.g.
+ * {@link markedFinalFullyCoveredByClear}) can safely bypass THAT aspirational-claim half, while NEVER
+ * bypassing this one.
+ *
+ * @decision 95ea8d3f (Round 2) — a corrupt/unparsable latch can be diverted ONCE PER CLAIMANT (card
+ * 882d6cff); a prior round's own proven-coverage override skipped `physicalOwnerRepoPaths` entirely and
+ * destroyed a sibling claimant's only backing as collateral. See the decision record.
+ *
+ * @decision 95ea8d3f (Round 2, correction) — the `sourceFile` half is gated on `entry.placeholder`: an
+ * EVICTED, non-placeholder entry's own `sourceFile` can be a purely DEFENSIVE INFERENCE (card d163aef5
+ * round 3) with its REAL backing already verified safely elsewhere. See the decision record.
+ *
+ * @decision 95ea8d3f (Round 3 — SUPERSEDES Round 2's "any orphanLatchFiles" wording) — an
+ * `orphanLatchFiles` hit counts ONLY when that SAME entry's own `sourceFile` also equals `filename`
+ * (self-reference) — never a DIFFERENT entry merely LISTING `filename` (`9cabd143`'s forbidden shape).
+ */
+function survivingSharedClaimRepoPaths(filename: string): string[] {
+  const owners = new Set<string>();
+  for (const p of pendingUnresolvedQuarantines) {
+    if (p.sourceFile === filename && p.entry.placeholder) owners.add(p.entry.repoPath);
+  }
+  for (const p of pendingUnresolvedQuarantines) {
+    if (p.sourceFile === filename && p.entry.orphanLatchFiles?.includes(filename)) owners.add(p.entry.repoPath);
+  }
+  return [...owners];
+}
+
 function unlinkLatchFile(filename: string): void {
+  unlinkLatchFileConfirmed(filename);
+}
+
+/** {@link unlinkLatchFile}'s confirmed-outcome twin — `true` for a genuine success or ENOENT (nothing
+ *  left to remove either way), `false` for any other error (an EPERM/EBUSY-shaped failure). */
+function unlinkLatchFileConfirmed(filename: string): boolean {
   try {
     fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, filename));
     // eslint-disable-next-line no-console
     console.log(`[merge-quarantine] deleted orphan latch ${filename} — no remaining quarantine entry references it.`);
-  } catch { /* already gone, or never existed under that exact name — either way, nothing left to do */ }
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT";
+  }
 }
 
 /**
@@ -2460,13 +2519,30 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; re
  * @decision 9cabd143 — never gate this on check (1) — a cleared quarantine's own file kept alive by some
  * OTHER entry's stale `orphanLatchFiles` reference re-arms on the next boot. See the decision record.
  */
-function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string): { kept: boolean; referencingRepoPaths: string[] } {
+function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens?: string[]): { kept: boolean; referencingRepoPaths: string[] } {
   // @decision 63e49ee2 (round 3) — same identity-less keep as {@link sweepOrphanLatchFileIfUnreferenced}.
-  if (keptUnreadableLatchFiles.has(filename)) return { kept: true, referencingRepoPaths: [] };
+  //
+  // @decision 95ea8d3f — a stale mark must not outlive the resolved read failure that set it; see the
+  // decision record for the pending-sweep-vs-deleteMergeQuarantineLatchByKey gap this closes. Omitting
+  // `candidateTokens` (every pre-existing caller) keeps this byte-identical to before.
+  if (keptUnreadableLatchFiles.has(filename)) {
+    const provenCoverage = !!candidateTokens && markedFinalFullyCoveredByClear(path.join(MERGE_QUARANTINE_DIR, filename), candidateTokens);
+    if (!provenCoverage) return { kept: true, referencingRepoPaths: [] };
+    // @decision 95ea8d3f (Round 2, Critical) — proven coverage may settle ONLY the active-armed-key/
+    // fresh-write-target half of physicalOwnerRepoPaths below, NEVER a surviving pending entry's own
+    // sourceFile or any entry's orphanLatchFiles naming this file. See the decision record.
+    const sharedClaimants = survivingSharedClaimRepoPaths(filename);
+    if (sharedClaimants.length > 0) return { kept: true, referencingRepoPaths: sharedClaimants };
+    const unlinkConfirmed = unlinkLatchFileConfirmed(filename);
+    if (unlinkConfirmed) keptUnreadableLatchFiles.delete(filename);
+    // @decision 95ea8d3f (Round 2, nitpick) — an unconfirmed unlink (EPERM/EBUSY) must be reported as
+    // kept, never as plain success — the file is still physically there.
+    return { kept: !unlinkConfirmed, referencingRepoPaths: [] };
+  }
   const owners = physicalOwnerRepoPaths(filename);
   if (owners.length > 0) return { kept: true, referencingRepoPaths: owners };
-  unlinkLatchFile(filename);
-  return { kept: false, referencingRepoPaths: [] };
+  const unlinkConfirmed = unlinkLatchFileConfirmed(filename);
+  return { kept: !unlinkConfirmed, referencingRepoPaths: [] };
 }
 
 /** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `entry` itself — either the
@@ -2534,10 +2610,17 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // doc comment) so a clear issued while still unresolvable actually lifts it, and delete its OWN source
   // file too (round 2 finding 1), or it survives to resurrect the quarantine.
   const identity = directPathIdentity(identityRepoPath);
+  // @decision f5c42043 — CAPTURE and SURFACE every kept-file's own referencing repoPaths (previously
+  // discarded for the deleteMergeQuarantineLatchByKey calls below) instead of a bare unqualified success.
+  const keptReferencingRepoPaths = new Set<string>();
+  // @decision 95ea8d3f (Round 2, nitpick) — see the matching note at this function's own sourceFilesToSweep loop below.
+  let anyKeptUnattributed = false;
   // @decision d163aef5 (round 4) — neither protect pass below gates on resolvability anymore (round 3's
   // own gate let a RESOLVABLE eviction winner's clear destroy a foreign file at one of its OTHER armed
   // keys); the PRIMARY ownership check and the token-overlap BACKSTOP both run for every key, every clear.
-  for (const k of keysToLift) deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity);
+  for (const k of keysToLift) {
+    for (const rp of deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity)) keptReferencingRepoPaths.add(rp);
+  }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   const sourceFilesToSweep: string[] = [];
   pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => {
@@ -2569,7 +2652,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
       activeQuarantines.delete(k);
       touchedFinalBasenames.push(path.basename(quarantinePathForKey(k)));
       // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-      deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity);
+      for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity)) keptReferencingRepoPaths.add(rp);
     }
     sourceFilesToSweep.push(p.sourceFile);
     return false;
@@ -2581,17 +2664,23 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // @decision f5c42043 — CAPTURE and SURFACE this sweep's `{kept, referencingRepoPaths}` (previously
   // discarded) instead of a bare unqualified success, mirroring clearMergeQuarantineByRecordedPath's own
   // `latchKept` reporting for the SAME "a sibling still needs this file" shape.
-  const keptReferencingRepoPaths = new Set<string>();
+  //
+  // @decision 95ea8d3f (Round 2, nitpick) — `kept` with an EMPTY `referencingRepoPaths` (an unconfirmed
+  // EPERM/EBUSY unlink, or a marked-but-unprovable-coverage keep) still means something was kept — track
+  // it via `anyKeptUnattributed` so it surfaces as `latchKept:true` too, never as plain success.
   for (const f of sourceFilesToSweep) {
     const result = sweepOwnLatchFileUnlessOwnedElsewhere(f);
-    if (result.kept) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+    if (result.kept) {
+      if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+      else anyKeptUnattributed = true;
+    }
   }
   for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
   // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
   tombstoneIfNotSurviving(candidateTokens, [...touchedFinalBasenames, ...sourceFilesToSweep]);
-  if (keptReferencingRepoPaths.size > 0) {
+  if (keptReferencingRepoPaths.size > 0 || anyKeptUnattributed) {
     return { wasQuarantined: true, latchKept: true, referencingRepoPaths: [...keptReferencingRepoPaths] };
   }
 }
@@ -2677,12 +2766,19 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     matched.push({ key, repoPath: entry.repoPath });
   }
   const keptReferencingRepoPaths = new Set<string>();
+  // @decision 95ea8d3f (Round 2, nitpick) — see the matching note at the matchedPending loop's own
+  // sweepOwnLatchFileUnlessOwnedElsewhere call below: an unconfirmed EPERM/EBUSY unlink (or a
+  // marked-but-unprovable-coverage keep) still means something was kept, with no repoPath to name.
+  let anyKeptUnattributed = false;
   let wasQuarantined = false;
   if (matched.length > 0) {
     wasQuarantined = true;
     for (const m of matched) {
       const result = clearMergeQuarantineByKey(m.key, m.repoPath);
-      if (result?.latchKept) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+      if (result?.latchKept) {
+        if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+        else anyKeptUnattributed = true;
+      }
     }
   }
   // Also sweep every PENDING (boot-unverifiable) entry sharing this exact identity — UNCONDITIONALLY, never
@@ -2719,14 +2815,20 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
         activeQuarantines.delete(k);
         pendingTouchedBasenames.push(path.basename(quarantinePathForKey(k)));
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity);
+        for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity)) keptReferencingRepoPaths.add(rp);
       }
       pendingTouchedBasenames.push(p.sourceFile);
       // @decision 883e29bc (round 4) — never a bare unlink: `p` is already removed from
       // pendingUnresolvedQuarantines above, so this correctly checks whether a SURVIVING entry (e.g. a
       // fresh raise reusing the freed key) now physically owns this exact filename.
-      const sweepResult = sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile);
-      if (sweepResult.kept) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+      //
+      // @decision 95ea8d3f — `p.entry.tokens` as `candidateTokens`, so a stale keptUnreadableLatchFiles
+      // mark set by an unrelated identity's own earlier read failure can't outlive it forever here either.
+      const sweepResult = sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile, p.entry.tokens);
+      if (sweepResult.kept) {
+        if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+        else anyKeptUnattributed = true;
+      }
     }
     for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
     tombstoneIfNotSurviving(pendingCandidateTokens, pendingTouchedBasenames);
@@ -2745,9 +2847,20 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   }
   if (keptReferencingRepoPaths.size > 0) {
     const refs = [...keptReferencingRepoPaths];
+    // @decision 95ea8d3f (Round 3) — generalized from "sharing this exact degraded key" (true only for
+    // the 882d6cff shared-corrupt-latch shape): a self-referencing protected-copy/safety-tmp keep
+    // (4900c365/ef651188) is a DIFFERENT mechanism, and the old wording misdescribed its own keep cause.
     return {
       wasQuarantined: true, latchKept: true, referencingRepoPaths: refs,
-      reason: `this identity's own quarantine is lifted, but a SHARED latch file it referenced is still needed by ${refs.length} other claimant(s) sharing this exact degraded key (${refs.join(", ")}) — it stays on disk, and this (and every other) claimant sharing it WILL RE-DIVERT on the next restart until EVERY claimant sharing it has been cleared too. To lift all of them durably right now, clear the shared latch by its own 24-hex id (POST /internal/merge-quarantine/clear-by-path with {id}) instead of by repoPath.`,
+      reason: `this identity's own quarantine is lifted, but a latch file it referenced is still needed by ${refs.length} other claimant(s) that still structurally depend on it (${refs.join(", ")}) — it stays on disk, and this (and every other) claimant still depending on it WILL RE-DIVERT on the next restart until EVERY one of them has been cleared too. If they share this exact degraded key, you can lift all of them durably right now by clearing the shared latch by its own 24-hex id instead (POST /internal/merge-quarantine/clear-by-path with {id}); otherwise, clear each one by its own repoPath.`,
+    };
+  }
+  // @decision 95ea8d3f (Round 2, nitpick) — kept for an UNATTRIBUTED reason (an unconfirmed EPERM/EBUSY
+  // unlink, or a marked-but-unprovable-coverage keep) still reports latchKept:true, never plain success.
+  if (anyKeptUnattributed) {
+    return {
+      wasQuarantined: true, latchKept: true, referencingRepoPaths: [],
+      reason: "this identity's own quarantine is lifted, but a physical latch file it referenced is still on disk — its content could not be durably confirmed removed or fully covered, so no specific other claimant can be named; it will re-divert on the next restart until a later successful clear resolves it.",
     };
   }
   return { wasQuarantined: true };

@@ -1115,6 +1115,379 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 95ea8d3f ("95ea8d3f-p2d") — the dd34da46-item2 correction: following the refusal's own
+  // clear-by-path remedy, `clearMergeQuarantineByRecordedPath(d)` LIFTS D in-process, but pre-fix never
+  // durably persisted it — a stale `keptUnreadableLatchFiles` mark (left by R's own earlier read
+  // failure, which has since fully resolved) short-circuited `sweepOwnLatchFileUnlessOwnedElsewhere`
+  // before it ever re-checked D's own physical content, AND (once that mark check is fixed)
+  // `physicalOwnerRepoPaths` separately reported R as an "owner" of this exact filename purely because
+  // R is ARMED there in-memory — even though R's own write to it was refused and nothing of R's is
+  // physically backed by this file at all. THE FIX: `sweepOwnLatchFileUnlessOwnedElsewhere` accepts an
+  // optional `candidateTokens` and re-proves a marked file's coverage via the SAME content-containment
+  // check `deleteMergeQuarantineLatchByKey` already uses (`markedFinalFullyCoveredByClear`); proven
+  // coverage settles BOTH the mark and the ownership check in one step (a genuinely-written owner's own
+  // tokens would already be on disk, breaking coverage).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("p2d-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(r, "gone-subdir");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["d-token-p2d"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  const inject = injectPersistentReadFailure(finalPath);
+  let rToken;
+  try {
+    rToken = enterMergeQuarantine(r, "r-branch", "r raises over D's own key, unreadable throughout");
+  } finally {
+    inject.restore();
+  }
+  // The QUERY that triggers lazy graduation of r's own pending entry (same precondition as item2's own
+  // "shape-1 divert plus a query") — r is armed IN-MEMORY at d's own key, its own durable write refused.
+  activeMergeQuarantineFor(r);
+
+  const clearResult = clearMergeQuarantineByRecordedPath(d);
+  check("(p2d) clear-by-path(d) reports success, no shared-latch warning", clearResult?.wasQuarantined === true && !clearResult?.latchKept);
+  const tokensAfterClear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(p2d) d's token is lifted IN-PROCESS", !tokensAfterClear.has("d-token-p2d"));
+  check("(p2d) r's own raise is UNAFFECTED by d's clear", tokensAfterClear.has(rToken));
+
+  const freshP2d = await freshBootModule();
+  freshP2d.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensP2d = new Set(freshP2d.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (p2d, reboot) *** d's token does NOT come back", !freshTokensP2d.has("d-token-p2d"));
+  check("*** THE FIX (p2d, reboot) *** r's own raise SURVIVES (e1cb7d33) and is unaffected by d's clear", freshTokensP2d.has(rToken));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 95ea8d3f ("95ea8d3f-p2r") — CONTROL: the identical remedy applied to R (the raiser, never the
+  // diverted occupant) already survived a reboot BEFORE this card's own fix — pins that this card did
+  // not change R's own, already-correct clear-by-path behavior.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("p2r-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(r, "gone-subdir");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["d-token-p2r"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  const inject = injectPersistentReadFailure(finalPath);
+  let rToken;
+  try {
+    rToken = enterMergeQuarantine(r, "r-branch", "r raises over D's own key, unreadable throughout");
+  } finally {
+    inject.restore();
+  }
+  activeMergeQuarantineFor(r);
+
+  const clearResult = clearMergeQuarantineByRecordedPath(r);
+  check("(p2r control) clear-by-path(r) reports success", clearResult?.wasQuarantined === true);
+  const tokensAfterClear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(p2r control) r's own token is lifted IN-PROCESS", !tokensAfterClear.has(rToken));
+  check("(p2r control) d's own token is UNAFFECTED by r's clear", tokensAfterClear.has("d-token-p2r"));
+
+  const freshP2r = await freshBootModule();
+  freshP2r.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensP2r = new Set(freshP2r.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(p2r control, reboot) r's own token does NOT come back (already correct pre-fix)", !freshTokensP2r.has(rToken));
+  check("(p2r control, reboot) d's own token SURVIVES, unaffected by r's clear", freshTokensP2r.has("d-token-p2r"));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 95ea8d3f ("95ea8d3f-adversarial") — the SAME shape as p2d, but `final`'s own physical content
+  // ALSO carries a token NOT covered by d's own in-memory candidate tokens (a still-owed token this
+  // clear must never silently destroy). The fix's content-containment proof must correctly refuse to
+  // settle the mark here, keeping `final` on disk exactly as the pre-existing fail-closed behavior did.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("p2adv-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(r, "gone-subdir");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["d-token-adv"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  const inject = injectPersistentReadFailure(finalPath);
+  try {
+    enterMergeQuarantine(r, "r-branch", "r raises over D's own key, unreadable throughout");
+  } finally {
+    inject.restore();
+  }
+  activeMergeQuarantineFor(r);
+
+  // `final`'s own physical bytes now ALSO carry a token not covered by d's own in-memory tokens (a
+  // separate, still-owed token this clear must never destroy as collateral).
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["d-token-adv", "r-extra-token-adv"],
+  }, null, 2) + "\n");
+
+  clearMergeQuarantineByRecordedPath(d);
+  check("(adversarial) final is KEPT on disk (coverage NOT proven — a real token is uncovered)", fs.existsSync(finalPath));
+  check("(adversarial) final's own bytes are byte-for-byte unchanged", (contentIfExists(finalPath) ?? "").includes("r-extra-token-adv"));
+
+  const freshAdv = await freshBootModule();
+  freshAdv.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensAdv = new Set(freshAdv.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(adversarial, reboot) the still-owed token SURVIVES (never destroyed as collateral)", freshTokensAdv.has("r-extra-token-adv"));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // ROUND 2 (Code Review c9af122d, CRITICAL FAIL-OPEN REGRESSION in d78087d4) — CARD 95ea8d3f
+  // ("95ea8d3f-r2-shared") — the CR's own repro, ported verbatim. `d78087d4`'s own round-1 fix let a
+  // proven-coverage override skip `physicalOwnerRepoPaths` ENTIRELY — including its pending-sourceFile
+  // half. A corrupt/unparsable latch at ONE degraded hash can be diverted ONCE PER CLAIMANT (card
+  // 882d6cff): d1 and d2 are two DISTINCT, genuinely-pending identities sharing ONE physical sourceFile,
+  // with nothing in the file's own (unparseable) content to tell them apart. Clearing d1 alone used to
+  // unlink the shared file outright, destroying d2's own only backing as collateral.
+  //
+  // THE FIX: `sweepOwnLatchFileUnlessOwnedElsewhere`'s proven-coverage override now ALSO checks
+  // `survivingSharedClaimRepoPaths` (a surviving pending entry's own sourceFile, or any entry's
+  // orphanLatchFiles) before ever bypassing the ownership check — never overridden by content coverage.
+  // `markedFinalFullyCoveredByClear` also no longer counts corrupt/unparsable content as "covered".
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("r2shared-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d1 = path.join(r, "gone-a");
+  const d2 = path.join(r, "gone-b");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, "{ this is not json");
+
+  // Step 3: both d1, d2 unresolvable -> TWO pure-pending placeholders, both sourceFile=Krhash.json.
+  reenterMergeQuarantinesAtBoot([d1, d2]);
+  check("(r2-shared precondition) both d1 and d2 are pending, sharing the corrupt sourceFile",
+    listActiveMergeQuarantines().filter((q) => q.repoPath === d1 || q.repoPath === d2).length === 2);
+  const d1Token = listActiveMergeQuarantines().find((q) => q.repoPath === d1)?.tokens?.[0];
+  const d2Token = listActiveMergeQuarantines().find((q) => q.repoPath === d2)?.tokens?.[0];
+  check("(r2-shared precondition) d1's and d2's own tokens were captured", !!d1Token && !!d2Token);
+
+  // Step 4: r raises over the shared corrupt key, unreadable throughout -> diverts to its OWN
+  // pending-divert file (never touching `final`), and marks `final`'s basename kept-unreadable.
+  const inject = injectPersistentReadFailure(finalPath);
+  let rToken;
+  try {
+    rToken = enterMergeQuarantine(r, "r-branch", "r raises over the shared corrupt key, unreadable throughout");
+  } finally {
+    inject.restore(); // Step 5's own clear runs with reads restored
+  }
+
+  // Step 5: clear d1 by recorded path. *** THE FIX *** must keep `final` — d2 still needs it.
+  const clearResult = clearMergeQuarantineByRecordedPath(d1);
+  check("*** THE FIX (r2-shared) *** final is KEPT (d2's own surviving claim, never bypassed by coverage)", fs.existsSync(finalPath));
+  // Note: `final` is CORRUPT, so `markedFinalFullyCoveredByClear` cannot prove coverage at all (Rule 2)
+  // and this takes the early "mark not settled" return — kept, but with no repoPath to name (the nitpick-4
+  // anyKeptUnattributed bucket), never the sharedClaimants-naming bucket (that's r2-ddpath's own shape,
+  // reached through deleteMergeQuarantineLatchByKey's own UNCONDITIONAL survivingSharedClaimRepoPaths check).
+  check("*** THE FIX (r2-shared) *** the clear reports latchKept (kept, even with no repoPath to name)", clearResult?.latchKept === true);
+  const tokensAfterClear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(r2-shared) d1's own token is lifted IN-PROCESS", !tokensAfterClear.has(d1Token));
+  check("(r2-shared) d2's own token is UNAFFECTED by d1's clear", tokensAfterClear.has(d2Token));
+  check("(r2-shared) r's own raise is unaffected", tokensAfterClear.has(rToken));
+
+  // Step 6: fresh-import reboot, re-registering both d1 and d2. d2's own token is NOT expected to be
+  // byte-identical across boots — it is a GENERIC placeholder (nothing usable was ever parsed), so each
+  // boot mints a fresh randomUUID() to represent "still fail-closed quarantined here"; what matters is
+  // that d2's own IDENTITY (and its physical backing) survives, never destroyed as collateral.
+  const freshShared = await freshBootModule();
+  freshShared.reenterMergeQuarantinesAtBoot([d1, d2]);
+  const freshList = freshShared.listActiveMergeQuarantines();
+  check("*** THE FIX (r2-shared, reboot) *** d2 SURVIVES the reboot (never destroyed as collateral)", freshList.some((q) => q.repoPath === d2));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // ROUND 2 (Manager ruling point 3) — CARD 95ea8d3f ("95ea8d3f-r2-ddpath") — the SAME shared-corrupt-
+  // latch, two-claimant shape as r2-shared above, but reached through `deleteMergeQuarantineLatchByKey`'s
+  // own `provenCoverage` (the `dd34da46` path) instead of `sweepOwnLatchFileUnlessOwnedElsewhere`'s.
+  //
+  // d1 is made RESOLVABLE (a bare directory, no own `.git` — its canonicalRepoLockKey still walks up to
+  // r's own real key) and then QUERIED while `final` is unreadable: the graduation write is REFUSED, but
+  // (per the pre-existing "non-raise, unreadable -> arm unchanged, treat write as refused" rule) d1 is
+  // armed IN-MEMORY anyway, with `armedKeys=[Kr]` — `final` itself is NEVER touched (still corrupt), and
+  // its basename is marked kept-unreadable. d2 stays a separate, pure-pending placeholder sharing the
+  // SAME sourceFile. Clearing d1 (now ACTIVE) reaches `clearMergeQuarantineByKey` ->
+  // `deleteMergeQuarantineLatchByKey`, whose own `provenCoverage` (pre-fix: corrupt counted as "covered")
+  // used to unlink `final` outright, destroying d2's only backing.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("r2ddpath-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d1 = path.join(r, "gone-a");
+  const d2 = path.join(r, "gone-b");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, "{ this is not json");
+  reenterMergeQuarantinesAtBoot([d1, d2]);
+  const d2TokenDd = listActiveMergeQuarantines().find((q) => q.repoPath === d2)?.tokens?.[0];
+  check("(r2-ddpath precondition) d2's own token was captured", !!d2TokenDd);
+
+  fs.mkdirSync(d1, { recursive: true }); // bare dir, no own .git -> still walks up to Kr
+
+  const injectDd = injectPersistentReadFailure(finalPath);
+  let d1Active;
+  try {
+    d1Active = activeMergeQuarantineFor(d1); // graduation write refused, d1 armed anyway (armedKeys=[Kr])
+  } finally {
+    injectDd.restore();
+  }
+  check("(r2-ddpath precondition) d1 is now ACTIVE (armedKeys set)", (d1Active?.armedKeys ?? []).length > 0);
+  check("(r2-ddpath precondition) final is still physically corrupt (write refused)", contentIfExists(finalPath) === "{ this is not json");
+
+  const clearResultDd = clearMergeQuarantineByRecordedPath(d1);
+  check("*** THE FIX (r2-ddpath) *** final is KEPT (d2's own surviving claim, never bypassed by deleteMergeQuarantineLatchByKey's own coverage)", fs.existsSync(finalPath));
+  check("*** THE FIX (r2-ddpath) *** the clear reports latchKept, naming d2", clearResultDd?.latchKept === true && (clearResultDd?.referencingRepoPaths ?? []).includes(d2));
+  const tokensAfterClearDd = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(r2-ddpath) d2's own token is UNAFFECTED by d1's clear", tokensAfterClearDd.has(d2TokenDd));
+
+  // Remove the bare dir before rebooting — otherwise d1's own now-resolvable (but still-degraded) hash
+  // would hijack boot's claimant grouping away from d2 entirely (an artifact of this live-process test,
+  // not something this card's fix touches): `matchedRepo` wins over the unresolved-claimants list
+  // unconditionally, so d1 "winning" the hash would mean d2 is never even considered as a claimant.
+  fs.rmdirSync(d1);
+  const freshDd = await freshBootModule();
+  freshDd.reenterMergeQuarantinesAtBoot([d1, d2]);
+  const freshListDd = freshDd.listActiveMergeQuarantines();
+  // d2's own token is NOT expected to be byte-identical across boots (a generic placeholder mints a
+  // fresh randomUUID() each boot — see r2-shared's own note above); its IDENTITY surviving is what matters.
+  check("*** THE FIX (r2-ddpath, reboot) *** d2 SURVIVES the reboot", freshListDd.some((q) => q.repoPath === d2));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // ROUND 2 (Manager ruling point 4, nitpick) — CARD 95ea8d3f ("95ea8d3f-r2-eperm") — an unconfirmed
+  // unlink (EPERM/EBUSY) inside `sweepOwnLatchFileUnlessOwnedElsewhere`'s own proven-coverage branch must
+  // surface as KEPT, never as plain success — the file is still physically there.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("r2eperm-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(r, "gone-subdir");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["d-token-eperm"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  const injectRead = injectPersistentReadFailure(finalPath);
+  let rTokenEperm;
+  try {
+    rTokenEperm = enterMergeQuarantine(r, "r-branch", "r raises over D's own key, unreadable throughout");
+  } finally {
+    injectRead.restore();
+  }
+
+  // Proven-coverage would otherwise license the unlink (final genuinely holds only d's own token) — but
+  // the unlink itself fails with EPERM.
+  const injectUnlink = injectUnlinkFailureForPath(finalPath);
+  let clearResultEperm;
+  let threwEperm = false;
+  try {
+    clearResultEperm = clearMergeQuarantineByRecordedPath(d);
+  } catch {
+    threwEperm = true;
+  } finally {
+    injectUnlink.restore();
+  }
+  check("*** THE FIX (r2-eperm) *** nothing throws even though the unlink fails", !threwEperm);
+  check("(r2-eperm) the injected unlink failure was actually attempted", injectUnlink.count() >= 1);
+  check("*** THE FIX (r2-eperm) *** final is STILL on disk (unconfirmed unlink)", fs.existsSync(finalPath));
+  check("*** THE FIX (r2-eperm) *** the clear surfaces latchKept — NEVER plain success — on an unconfirmed unlink",
+    clearResultEperm?.latchKept === true);
+  const freshEperm = await freshBootModule();
+  freshEperm.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensEperm = new Set(freshEperm.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(r2-eperm, reboot) d's own token — backed only by the kept final — survives (unconfirmed unlink keeps the mark set)", freshTokensEperm.has("d-token-eperm"));
+  check("(r2-eperm, reboot) r's own raise also survives", freshTokensEperm.has(rTokenEperm));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // ROUND 3 (Code Review 4e500b66 of 8b9e3451, Major FAIL-CLOSED REGRESSION) — CARD 95ea8d3f
+  // ("95ea8d3f-r3-orphanref") — the reviewer's own repro, ported verbatim. Round 2's own
+  // `survivingSharedClaimRepoPaths` treated ANY entry's `orphanLatchFiles` naming a file as a veto — but
+  // PASS 2's own "an unmatched orphan latch is broadcast onto EVERY registered repo's own
+  // `orphanLatchFiles`" mechanism (so a human can eventually clear it) means A's own entry can list B's
+  // physical file purely DEFENSIVELY, with NO genuine structural dependency on it at all — this is
+  // exactly `9cabd143`'s own forbidden "another entry's orphanLatchFiles merely LISTING filename" shape.
+  // THE FIX: an orphan hit counts ONLY when that SAME entry's own `sourceFile` ALSO equals `filename`
+  // (a genuine self-reference) — A's own entry has no `sourceFile` pointing at B's file at all.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const A = makeToplevelRepo("r3orphanref-A");
+  const B = makeToplevelRepo("r3orphanref-B");
+  const KB = canonicalRepoLockKey(B);
+  const KBhash = createHash("sha256").update(KB).digest("hex").slice(0, 24);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const bFinalPath = path.join(MERGE_QUARANTINE_DIR, `${KBhash}.json`);
+  // Step 1: corrupt content at B's own real hash.
+  fs.writeFileSync(bFinalPath, "{not valid json");
+  // Step 2: boot with ONLY A registered — A is unrelated to B's hash, so the corrupt file falls into
+  // PASS 2's "no registered repo matches this hash" orphan bucket and gets broadcast into A's own
+  // orphanLatchFiles (card 9a55fb90/882d6cff-era PASS 2, round 7 M2).
+  reenterMergeQuarantinesAtBoot([A]);
+  check("(r3-orphanref precondition) A's own entry now names B's file in its orphanLatchFiles",
+    (listActiveMergeQuarantines().find((q) => q.repoPath === A)?.orphanLatchFiles ?? []).includes(`${KBhash}.json`));
+
+  // Step 3: B raises for real — the corrupt content at KBhash.json is "nothing usable," so the write
+  // proceeds and durably overwrites it with B's own real latch.
+  const bToken = enterMergeQuarantine(B, "b-branch", "b raises for real");
+  check("(r3-orphanref precondition) B's own real latch is now durably at KBhash.json",
+    (contentIfExists(bFinalPath) ?? "").includes(bToken));
+
+  // Step 4: clear B.
+  const clearResultOrphanref = clearMergeQuarantineByRecordedPath(B);
+  check("*** THE FIX (r3-orphanref) *** clearing B reports plain success — A's own broadcast orphan reference never vetoes it",
+    clearResultOrphanref?.wasQuarantined === true && !clearResultOrphanref?.latchKept);
+  check("*** THE FIX (r3-orphanref) *** B's own final is actually unlinked", !fs.existsSync(bFinalPath));
+  check("(r3-orphanref) B's own token is lifted IN-PROCESS", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(bToken));
+
+  // Step 5: fresh-import reboot, registering both A and B.
+  const freshOrphanref = await freshBootModule();
+  freshOrphanref.reenterMergeQuarantinesAtBoot([A, B]);
+  const freshListOrphanref = freshOrphanref.listActiveMergeQuarantines();
+  // This file runs MANY scenarios in one process, sharing one MERGE_QUARANTINE_DIR — by the time this
+  // fresh-import reboot runs, some OTHER, wholly unrelated scenario's own leftover corrupt/safety-tmp
+  // residue can ALREADY be sitting in that shared directory, and PASS 2's own broadcast mechanism (the
+  // very thing this card's fix is about) attaches ANY such unmatched orphan onto EVERY registered repo —
+  // including B, incidentally, for a reason that has nothing to do with B's own real quarantine. So
+  // "does B show up at all" is not the discriminating check here (and would flake on shared test-file
+  // pollution); "is B's OWN real raise durably gone" is — asserted directly via its own token.
+  check("*** THE FIX (r3-orphanref, reboot) *** B's own real token does NOT come back", !new Set(freshListOrphanref.flatMap((q) => q.tokens ?? [])).has(bToken));
+  const bAfterReboot = freshListOrphanref.find((q) => q.repoPath === B);
+  check("(r3-orphanref, reboot) if B shows up at all, it is NOT backed by its own real latch data",
+    !bAfterReboot || bAfterReboot.reason !== "b raises for real");
+  check("(r3-orphanref, reboot) A's own fail-closed orphan placeholder is unaffected", freshListOrphanref.some((q) => q.repoPath === A));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // ROUND 2 BLOCKER repro P3b (Code Review d42418af) — the SAME double fault as item3 above, but
   // followed by an IN-PROCESS clearByToken. Pre-fix (commit c5c17d17): attemptDivertSafetyTmpFallback
   // wrote the safety-tmp but never re-pointed the pushed pending record at it (selfReference:true only
