@@ -47,8 +47,11 @@ export type PendingOpOutcome = string;
  *  Card bd9a483b — "ungated-landing-check-failed": the safety-net check failed on an interval-skipped
  *  landing. A re-call after the human fixes it (or the command) must genuinely re-run, never replay.
  *  @decision 92be634e — "reduced-gate-only-file-failed": a transient prep-time failure, never about the
- *  branch's content — never cache or replay it; see the docs/decisions record for the full reasoning. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed"]);
+ *  branch's content — never cache or replay it; see the docs/decisions record for the full reasoning.
+ *  @decision 62c4953a — "canonical-index-lock-present": same reasoning as "quarantined" — a refusal about
+ *  the canonical repo's `.git/index.lock`, not the branch; a human removing it must see a fresh
+ *  re-confirm, never a stale cached refusal from before it was removed. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

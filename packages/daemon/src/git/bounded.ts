@@ -355,6 +355,59 @@ function logWinJobLauncherCallFallback(): void {
 }
 
 /**
+ * @decision 62c4953a — scrubs a `-m`/`--message=`/`-F`/`--file=` value (free-text commit message/body);
+ * every other arg (subcommands, flags, shas, branch/ref names) is safe to log as-is. Bounded length —
+ * diagnostic only, never parsed back.
+ */
+function summarizeGitArgsForLog(args: readonly string[]): string {
+  const MESSAGE_FLAGS = new Set(["-m", "--message", "-F", "--file"]);
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (MESSAGE_FLAGS.has(a)) { out.push(a, "<redacted>"); i++; continue; }
+    if (/^--(message|file)=/.test(a)) { out.push(`${a.split("=")[0]}=<redacted>`); continue; }
+    out.push(a);
+  }
+  const joined = out.join(" ");
+  return joined.length > 300 ? `${joined.slice(0, 300)}…` : joined;
+}
+
+// Subcommands safe to assume do NOT touch `.git/index.lock`, for logCanonicalGitAbnormalOutcome's WARN
+// classification ONLY — a DEDICATED set, never PURE_READ_SUBCOMMANDS (that one answers "could this run
+// a merge driver", a different question). `status`/`diff`/`ls-files` are excluded even though `status`
+// is in that other set: git opportunistically takes `.git/index.lock` to refresh stat-cache info on
+// `status` (and `diff`, per git's own GIT_OPTIONAL_LOCKS docs) unless GIT_OPTIONAL_LOCKS=0 is set (never
+// is, anywhere here); `ls-files` reads the index directly and can refresh it too. Every other member here
+// operates purely on refs/objects/a named tree, never the index.
+/** @decision 62c4953a (round 2, CR 6ed0d5da M4) — never fold `status`/`diff`/`ls-files` back into this
+ *  set; each can opportunistically take `.git/index.lock` and must keep getting the WARN. */
+const NEVER_INDEX_TOUCHING_SUBCOMMANDS = new Set([
+  "rev-parse", "rev-list", "log", "show", "cat-file", "ls-tree", "merge-base", "config", "diff-tree",
+  "update-ref", "symbolic-ref", "for-each-ref", "show-ref", "worktree", "remote",
+  "count-objects", "describe", "name-rev", "grep", "init", "reflog",
+]);
+
+/**
+ * @decision 62c4953a — log a canonical git call ONLY for an abnormal (killed/timed-out) outcome, never a
+ * normal success or ordinary git failure — must not flood daemon-output.log.
+ *
+ * `args` is the caller's own args (never the `CANONICAL_GIT_CONFIG_ARGS`/merge-driver-blanking prefix) —
+ * what a human actually needs to identify the culprit call.
+ */
+function logCanonicalGitAbnormalOutcome(repoPath: string, args: readonly string[], durationMs: number, outcome: string): void {
+  const summary = summarizeGitArgsForLog(args);
+  // eslint-disable-next-line no-console
+  console.log(`[git] canonical git call ${outcome} after ${Math.round(durationMs)}ms in ${repoPath}: git ${summary}`);
+  const sub = gitSubcommand(args);
+  // Deny-by-default: an unrecognised subcommand is assumed capable of touching the index.
+  const indexWriting = sub === undefined || !NEVER_INDEX_TOUCHING_SUBCOMMANDS.has(sub);
+  if (indexWriting) {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] canonical git call "git ${sub ?? summary}" in ${repoPath} was ${outcome} — its .git/index.lock may have been left behind; a later call refusing with canonical_index_lock_present is this.`);
+  }
+}
+
+/**
  * {@link killableCanonicalRaw}'s tree-kill spawn primitive. Bypasses simple-git entirely so an abort kills
  * the WHOLE process tree, not just git's own direct child: simple-git's `abortPlugin` only ever sends
  * `spawned.kill("SIGINT")` to that ONE process (verified on Windows 11 and Linux/WSL — a hook's own
@@ -413,10 +466,17 @@ export function spawnCanonicalGitTree(
     // @decision 1718416d — win32-only Job Object containment; unavailable/missing falls back byte-identical.
     // @decision 5b50eede — ALSO requires a resolved absolute git.exe; an unresolved git skips the launcher
     // for this call (same as "unavailable") rather than handing it a bare/relative target.
-    if (process.platform === "win32" && resolvedGitExe && isWinJobLauncherAvailable()) {
-      return rawViaWinJobLauncher(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, resolvedGitExe);
-    }
-    return rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, directSpawnTarget);
+    // @decision 62c4953a — `startedAt`/the `.catch` below cover BOTH dispatch targets (the win-job-launcher
+    // path and its own taskkill-based fallback) from this ONE chokepoint — see logCanonicalGitAbnormalOutcome.
+    const startedAt = performance.now();
+    const dispatched = (process.platform === "win32" && resolvedGitExe && isWinJobLauncherAvailable())
+      ? rawViaWinJobLauncher(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, resolvedGitExe)
+      : rawViaDirectSpawn(repoPath, env, signal, killGraceMs, onTreeDeathSettled, spawnImpl, args, rawArgs, directSpawnTarget);
+    return dispatched.catch((e: unknown) => {
+      if (treeDeathConfirmed(e)) logCanonicalGitAbnormalOutcome(repoPath, rawArgs, performance.now() - startedAt, "confirmed-killed");
+      else if (treeDeathUnconfirmed(e)) logCanonicalGitAbnormalOutcome(repoPath, rawArgs, performance.now() - startedAt, "kill-unconfirmed");
+      throw e;
+    });
   };
   return { raw } as unknown as Pick<SimpleGit, "raw">;
 }
@@ -1171,7 +1231,16 @@ export function canonicalGit(
   const git = boundedSimpleGit(repoPath, blockTimeoutMs, prepareCanonicalEnv(env), abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
   const raw = async (...callArgs: unknown[]): Promise<string> => {
     const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
-    return canonicalRaw(git, args);
+    const startedAt = performance.now();
+    try {
+      return await canonicalRaw(git, args);
+    } catch (e) {
+      // @decision 62c4953a — no abort-kill machinery on this path; label the honest weaker claim, never
+      // an affirmative "timed out" an ordinary same-duration slow failure would read identically to.
+      const elapsed = performance.now() - startedAt;
+      if (elapsed >= blockTimeoutMs) logCanonicalGitAbnormalOutcome(repoPath, args, elapsed, `slow failure (elapsed ${Math.round(elapsed)}ms >= idle bound ${blockTimeoutMs}ms)`);
+      throw e;
+    }
   };
   // @decision 5b50eede (round 3, CR `18aac4c9`; unchanged by round 4 follow-up CR `201f0c7e`) — refuse
   // `customBinary(` with canonicalGit's own message. `git` already carries boundedSimpleGit's OWN

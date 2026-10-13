@@ -10,7 +10,7 @@ import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn } from "../git/bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
-import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
+import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -1207,11 +1207,18 @@ export async function commitVault(
   // quarantine itself (AFTER acquiring the lock, which the pre-check above cannot see) — translate that
   // into commitVault's own established graceful quarantine-backoff shape rather than letting a new throw
   // type escape this function.
+  //
+  // @decision 62c4953a — `checkIndexLock:true`: whenever `mergeEligible` this IS the same canonical index
+  // a real merge/GitWriter write would hit; translate to the SAME graceful backoff as quarantine below.
   if (mergeEligible) {
     try {
-      return await withCanonicalIndexLock(vaultPath, runCommitSequence);
+      return await withCanonicalIndexLock(vaultPath, runCommitSequence, { checkIndexLock: true });
     } catch (err) {
       if (err instanceof RepoQuarantinedError) {
+        console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${err.message}`);
+        return { committed: false };
+      }
+      if (err instanceof CanonicalIndexLockPresentError) {
         console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${err.message}`);
         return { committed: false };
       }

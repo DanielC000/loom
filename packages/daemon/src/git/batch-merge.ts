@@ -1,7 +1,7 @@
 import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
-import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
+import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
@@ -894,6 +894,9 @@ export interface FastForwardResult {
    *  that's the only safe way to resolve it later, for the exact reason `unverified` was already excluded
    *  (see docs/decisions/b4080777-batch-ff-refused-terminal-event.md). */
   mayHaveLanded?: boolean;
+  /** @decision 62c4953a — same posture as `quarantined`: a real `.git/index.lock` was already present,
+   *  nothing ran, never a "fall back to per-branch re-gate" case. */
+  indexLockPresent?: boolean;
 }
 
 /**
@@ -1015,9 +1018,12 @@ export async function fastForwardCanonicalMain(
       } finally {
         resumeVaultAutoCommit(repoPath, pauseToken);
       }
-    });
+    // @decision 62c4953a (round 2 scope) — opts in: the ff-only writes the canonical index.
+    }, { checkIndexLock: true });
   } catch (e) {
     if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
+    // @decision 62c4953a — same posture as the quarantine branch above: nothing ran, never a fallback case.
+    if (e instanceof CanonicalIndexLockPresentError) return { ok: false, indexLockPresent: true, reason: e.message };
     throw e;
   }
 }
@@ -1121,6 +1127,9 @@ export interface RunBatchedMergeResult {
    *  MUST treat this as distinct from every other failure: no per-candidate fallback confirm, and no
    *  batch-worktree removal — leave it for a human. Never inferred from `reason` text. */
   quarantined?: boolean;
+  /** @decision 62c4953a — same posture as `quarantined`: {@link fastForwardCanonicalMain} found a real
+   *  `.git/index.lock` already present. Same no-fallback/no-cache treatment. */
+  indexLockPresent?: boolean;
   /** Card b4080777 — true from the point `onBeforeFastForward` is invoked onward (forfeited,
    *  branchDiverted, unverified, the ff-level `quarantined`/generic-failure shapes, and `ok:true`), false/
    *  absent on every EARLIER return (pre-/mid-assembly quarantine, `rollbackUnverified`, `landed.length
@@ -1212,7 +1221,8 @@ export async function runBatchedMerge(
     return {
       ok: false, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
       forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha, landingStarted: true,
-      ...(ff.quarantined ? { quarantined: true } : {}), ...(ff.branchDiverted ? { branchDiverted: true } : {}),
+      ...(ff.quarantined ? { quarantined: true } : {}), ...(ff.indexLockPresent ? { indexLockPresent: true } : {}),
+      ...(ff.branchDiverted ? { branchDiverted: true } : {}),
       ...(ff.unverified ? { unverified: true } : {}), ...(ff.observedBranch !== undefined ? { observedBranch: ff.observedBranch } : {}),
       ...(ff.mayHaveLanded ? { mayHaveLanded: true } : {}),
     };

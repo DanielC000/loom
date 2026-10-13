@@ -404,6 +404,8 @@ export class GitWriter {
           const current = (await withTimeout(git.branchLocal(), this.localMs, "git branch")).current;
           return { ok: true, branch: current };
         }),
+        // @decision 62c4953a (round 2 scope) — opts in: checkout writes the canonical index.
+        { checkIndexLock: true },
       );
     } catch (e) {
       return { ok: false, error: gitError(e) };
@@ -449,6 +451,8 @@ export class GitWriter {
           }
           return { ok: true, branch: target };
         }),
+        // @decision 62c4953a (round 2 scope) — opts in: checkout -b writes the canonical index.
+        { checkIndexLock: true },
       );
     } catch (e) {
       return { ok: false, error: gitError(e) };
@@ -552,6 +556,8 @@ export class GitWriter {
             ...(residue.length ? { residue } : {}),
           };
         }),
+        // @decision 62c4953a (round 2 scope) — opts in: add -A + commit write the canonical index.
+        { checkIndexLock: true },
       );
     } catch (e) {
       return { ok: false, error: gitError(e) };

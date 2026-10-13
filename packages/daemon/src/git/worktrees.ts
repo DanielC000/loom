@@ -9,7 +9,7 @@ import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn } from "./bounded.js";
-import { withCanonicalIndexLock, RepoQuarantinedError, resolveGitDirsSync } from "./repo-lock.js";
+import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
@@ -1080,6 +1080,8 @@ export async function createWorktree(
   // bare withTimeout race.
   const boundedLockedRaw = (args: string[], label: string): Promise<string> =>
     killableCanonicalRaw(repoPath, args, timeoutMs, label, gitDeps.gitFactory);
+  // @decision 62c4953a — deliberately NO `checkIndexLock`: a held lock must never block a worker/review
+  // spawn (`worktree prune`/`branch --list`/`worktree add` all work fine with one present, real git 2.47).
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
     await boundedLockedRaw(["worktree", "prune"], "git worktree prune"); // drop any stale admin record for a since-deleted dir
     const exists = (await boundedLockedRaw(["branch", "--list", branch], "git branch --list")).trim() !== "";
@@ -7825,7 +7827,7 @@ export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
   expectAlreadyLanded?: boolean,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -7847,10 +7849,15 @@ export async function mergeBranch(
       } finally {
         resumeVaultAutoCommit(repoPath, pauseToken);
       }
-    });
+    // @decision 62c4953a (round 2 scope) — opts in: the squash writes the canonical index.
+    }, { checkIndexLock: true });
   } catch (e) {
     // @decision 8d8fa497 — mirror every in-function quarantine site below: set `quarantined:true` here too.
     if (e instanceof RepoQuarantinedError) return { ok: false, reason: e.message, quarantined: true };
+    // @decision 62c4953a — a real `.git/index.lock` found present before this op ever touched the
+    // canonical index; typed distinctly so a caller can skip any "pre-existing residue" framing — nothing
+    // here ran at all.
+    if (e instanceof CanonicalIndexLockPresentError) return { ok: false, reason: e.message, indexLockPresent: true };
     throw e;
   }
 }

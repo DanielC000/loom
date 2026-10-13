@@ -22,6 +22,20 @@ const canonicalIndexLocks = new Map<string, Promise<unknown>>();
 export class RepoQuarantinedError extends Error {}
 
 /**
+ * Thrown by {@link withCanonicalIndexLock} (alongside {@link RepoQuarantinedError}), ONLY for a caller
+ * that opted in via `{checkIndexLock:true}` (round 2 scope ruling — see that option's own doc), when a
+ * real `.git/index.lock` already sits in the canonical repo at the moment this caller's turn to run
+ * arrives.
+ *
+ * Card `62c4953a`: a 0-byte canonical `.git/index.lock` was found abandoned for ~4h20m with no git
+ * process alive and nothing having signalled it — the next `worker_merge_confirm` failed with a generic,
+ * buried "rawError cleanup" message instead of a loud, actionable one. OWNER RULING (card `62c4953a`): NO
+ * auto-removal here — only detect + refuse. A human must confirm no git process is genuinely running
+ * against this repo before removing the lock by hand.
+ */
+export class CanonicalIndexLockPresentError extends Error {}
+
+/**
  * Realpath the NEAREST EXISTING ancestor (inclusive) of `bp`, then reattach whatever trailing segments
  * don't exist yet — so the result is the SAME value `bp` would realpath to once it exists, independent of
  * whether `bp` ITSELF happens to exist at the moment this is called (an unmounted drive, a cloud-synced
@@ -215,6 +229,53 @@ export function resolveGitMainCheckoutRootSync(bp: string): string | null {
   return commonDir;
 }
 
+// Card `62c4953a`: a SHORT, WITNESSED check (stat → brief wait → re-stat) — the same TECHNIQUE
+// `removeLeakedCanonicalIndexLockIfSafe` (git/worktrees.ts) uses for a SAFE-REMOVAL decision, but used
+// here only to INFORM a refusal message, never to decide whether to delete anything. A far shorter delay
+// than that function's own 1.5s is fine: a wrong guess here costs nothing beyond an imprecise message,
+// never a wrongly-removed lock.
+const INDEX_LOCK_LIVENESS_CHECK_DELAY_MS = 300;
+
+/** `ms` as a short human-readable age, coarsening as it grows (`"420ms"`, `"3.2s"`, `"7m"`, `"4h20m"`) —
+ *  for {@link checkCanonicalIndexLockNotPresent}'s refusal message only; never parsed back. */
+function formatLockAgeMs(ms: number): string {
+  const clamped = Math.max(0, ms);
+  if (clamped < 1000) return `${Math.round(clamped)}ms`;
+  if (clamped < 60_000) return `${(clamped / 1000).toFixed(1)}s`;
+  if (clamped < 3_600_000) return `${Math.round(clamped / 60_000)}m`;
+  const hours = Math.floor(clamped / 3_600_000);
+  const mins = Math.round((clamped % 3_600_000) / 60_000);
+  return `${hours}h${mins}m`;
+}
+
+/**
+ * @decision 62c4953a — do not add auto-removal of a detected `.git/index.lock` here; detect and refuse
+ * only, never delete, confirmed-live or not.
+ */
+export async function checkCanonicalIndexLockNotPresent(repoPath: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const dirs = resolveGitDirsSync(repoPath);
+  if (!dirs) return { ok: true };
+  const lockPath = path.join(dirs.privateDir, "index.lock");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(lockPath); } catch { return { ok: true }; }
+  await new Promise<void>((resolve) => setTimeout(resolve, INDEX_LOCK_LIVENESS_CHECK_DELAY_MS));
+  let restat: fs.Stats;
+  try {
+    restat = fs.statSync(lockPath);
+  } catch {
+    return { ok: true }; // removed by whatever held it during our own brief wait — nothing left to refuse
+  }
+  const changedDuringWait = restat.mtimeMs !== stat.mtimeMs || restat.size !== stat.size;
+  const ageMs = Date.now() - stat.mtimeMs;
+  const livenessNote = changedDuringWait
+    ? `it changed during a ${INDEX_LOCK_LIVENESS_CHECK_DELAY_MS}ms check — a git process appears to be actively using it right now; do not remove it while that may still be true`
+    : `it did not change during a ${INDEX_LOCK_LIVENESS_CHECK_DELAY_MS}ms check — consistent with (but not proof of) an abandoned lock`;
+  return {
+    ok: false,
+    reason: `canonical_index_lock_present: ${lockPath} exists (${stat.size}B, ${formatLockAgeMs(ageMs)} old) — ${livenessNote}. If you have confirmed no git process is running against this repo, remove it by hand before retrying.`,
+  };
+}
+
 /**
  * Serialize `fn` against every other in-flight caller for the SAME canonical repo path — FIFO via promise
  * chaining. `prior.then(fn, fn)` runs `fn` once `prior` SETTLES regardless of whether it resolved or
@@ -239,13 +300,36 @@ export function resolveGitMainCheckoutRootSync(bp: string): string | null {
  * `prior`, and checking only at enqueue time would miss that. Throws {@link RepoQuarantinedError} rather
  * than returning a sentinel — `T` is caller-defined, so there is no one refusal shape this generic helper
  * could return on every caller's behalf.
+ *
+ * INDEX-LOCK CHECK (card `62c4953a`, round 2 OWNER RULING — scope), `opts.checkIndexLock` OPT-IN ONLY
+ * (default OFF — every pre-round-2 caller is byte-identical unless it explicitly asks): a held
+ * `.git/index.lock` — including the owner's OWN interactive `git commit` with its editor still open —
+ * must never block a path that doesn't actually write the canonical index. Pass `true` only from a path
+ * that writes it: `mergeBranch`/`mergeBranchLocked`'s squash (`git/worktrees.ts`), the preflight probes
+ * `confirmWorkerMerge` runs immediately before it (`sessions/service.ts` — same canonical-index risk, one
+ * call earlier), `fastForwardCanonicalMain`'s ff-only (`git/batch-merge.ts`), and `GitWriter`'s
+ * checkout/createBranch/commit (`git/writer.ts`). Never from `createWorktree`'s fresh-cut path
+ * (`git/worktrees.ts`) — `worktree add`/`prune`/`branch --list` all work fine against a canonical repo
+ * holding `index.lock` (verified against real git 2.47) — nor from `vault/versioner.ts`'s `commitVault`
+ * (deliberately excluded; see the decision record's "Vault" section for why). Run immediately after the
+ * quarantine check, same timing reasoning: a real `.git/index.lock` can appear while this caller sat
+ * queued behind `prior` too. Throws {@link CanonicalIndexLockPresentError} — see {@link
+ * checkCanonicalIndexLockNotPresent}'s own doc.
  */
-export async function withCanonicalIndexLock<T>(repoPath: string, fn: () => Promise<T>): Promise<T> {
+export async function withCanonicalIndexLock<T>(
+  repoPath: string,
+  fn: () => Promise<T>,
+  opts?: { checkIndexLock?: boolean },
+): Promise<T> {
   const key = canonicalRepoLockKey(repoPath);
   const prior = canonicalIndexLocks.get(key) ?? Promise.resolve();
-  const guarded = (): Promise<T> => {
+  const guarded = async (): Promise<T> => {
     const q = assertRepoNotQuarantined(repoPath);
-    if (!q.ok) return Promise.reject(new RepoQuarantinedError(q.reason));
+    if (!q.ok) throw new RepoQuarantinedError(q.reason);
+    if (opts?.checkIndexLock) {
+      const lockCheck = await checkCanonicalIndexLockNotPresent(repoPath);
+      if (!lockCheck.ok) throw new CanonicalIndexLockPresentError(lockCheck.reason);
+    }
     return fn();
   };
   const run = prior.then(guarded, guarded);

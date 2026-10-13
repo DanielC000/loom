@@ -75,7 +75,7 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatically } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
-import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError } from "../git/repo-lock.js";
+import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
 import { isSupersededByRecycle, currentHaltedSuccessor, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
@@ -676,6 +676,9 @@ type MergeBatchResult = {
    *  no-start shape as `cancelled`), and the batch worktree was left on disk for a human, never removed.
    *  Absent on every other outcome. */
   quarantined?: boolean;
+  /** @decision 62c4953a — same posture as `quarantined`: `fastForwardCanonicalMain` found a real
+   *  `.git/index.lock` already present in the canonical repo. No per-candidate fallback either. */
+  indexLockPresent?: boolean;
   /** Card b801bad0 (fix round) — the fast-forward refused because canonical mainline's checkout was not
    *  on the expected branch, either before or after the `--ff-only` (see `FastForwardResult.branchDiverted`,
    *  git/batch-merge.ts). Like `quarantined`/`cancelled`, no per-candidate fallback was started — `fallback`
@@ -872,6 +875,10 @@ type ConfirmMergeResult = {
    *  of its own mutating merge calls). Distinct from an ordinary `union_conflict`/`union_merge_failed`:
    *  the canonical repo refuses EVERY merge until a human clears it, not just this one. */
   quarantined?: boolean;
+  /** @decision 62c4953a — same posture as `quarantined`: refused because a real `.git/index.lock` was
+   *  already present in the canonical repo; classified distinctly (`"canonical-index-lock-present"`,
+   *  `NEVER_CACHED_OUTCOMES`) so a human removing it sees a fresh re-confirm, never a stale refusal. */
+  indexLockPresent?: boolean;
   /** Card 344ce950 (bounded multi-file since card 67030bb9): the bare name(s) of the test file(s) this
    *  merge's gate retried together in isolation before reaching this verdict (see gate-runner.ts's
    *  `identifyRetriableTestFiles`) — `undefined` when no such retry fired (the overwhelming majority of
@@ -16852,8 +16859,14 @@ export class SessionService {
         stagedDirt: await detectCanonicalStagedDirt(repoPath, { timeoutMs: this.gitOpMs }),
         dirtyOverlap: await detectCanonicalDirtyOverlap(repoPath, branch, { timeoutMs: this.gitOpMs }),
         untrackedOverlap: await detectCanonicalUntrackedOverlap(repoPath, branch, { timeoutMs: this.gitOpMs }),
-      })));
+      // @decision 62c4953a — opts in: this preflight writes/reads the SAME canonical index the squash does.
+      }), { checkIndexLock: true }));
     } catch (e) {
+      if (e instanceof CanonicalIndexLockPresentError) {
+        const { suppressed, sha } = await rejectNotify("canonical_index_lock_present", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${e.message}; worktree retained.`);
+        evt("merge_rejected", { reason: "canonical_index_lock_present", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: e.message, notified: !suppressed, opId: thisOpId, gateRan: false, indexLockPresent: true };
+      }
       if (!(e instanceof RepoQuarantinedError)) throw e;
       const { suppressed, sha } = await rejectNotify("quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${e.message}`);
       evt("merge_rejected", { reason: "quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
@@ -19090,6 +19103,15 @@ export class SessionService {
         evt("merge_rejected", { reason: "solo_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: merge.reason, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, quarantined: true };
       }
+      // @decision 62c4953a — same posture as `quarantined` above: a real `.git/index.lock` was already
+      // present before this call ever touched the canonical index — nothing ran. Checked before the
+      // generic rejected fallback so this is never confused with an ordinary squash/commit failure.
+      if (merge.indexLockPresent) {
+        const detailText = `${merge.reason ?? "a .git/index.lock was already present in the canonical repo"}; worktree retained.`;
+        const { suppressed, sha } = await rejectNotify("canonical_index_lock_present", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "canonical_index_lock_present", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: merge.reason, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, indexLockPresent: true };
+      }
       // @decision 9f5ae011 — the squash/commit step's OWN cleanup can itself be CONFIRMED kill-timed-out
       // (even after its one retry), never an ordinary content failure — mirrors `union.transient` above,
       // checked before the generic rejected fallback so the cleared condition is never cached.
@@ -20460,7 +20482,9 @@ export class SessionService {
                 } catch (err) { console.warn(`[merge-batch] appendEvent(merge_landing_started) failed for worker ${c.workerSessionId.slice(0, 8)} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
               }
             });
-            batchQuarantined = !!result.quarantined; // round 4: read by the outer `finally`'s worktree-removal guard
+            // @decision 62c4953a — `indexLockPresent` folds into the SAME `batchQuarantined` flag: same
+            // "leave the batch worktree for a human" treatment the outer `finally`'s removal guard applies.
+            batchQuarantined = !!result.quarantined || !!result.indexLockPresent; // round 4: read by the outer `finally`'s worktree-removal guard
             // @decision 92eeb319 — see `onSettle`
             if (!batchGateRan && result.landed.length === 0) batchAllDropped = true;
             // @decision 0d372516 (round 2) — see `batchAssemblyAborted`'s own declaration above and `onSettle` below.
@@ -20578,6 +20602,16 @@ export class SessionService {
               ...strandedFallback,
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, quarantined: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
+          if (result.indexLockPresent) {
+            // @decision 62c4953a — same posture as `quarantined` above: a per-candidate fallback would just
+            // hit the SAME refusal at the solo path's own `withCanonicalIndexLock` check, so start nothing.
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "a .git/index.lock was already present in the canonical repo" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+            ], opId, undefined, true);
+            return { ok: false, opId, landed: [], fallback: notStarted, indexLockPresent: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
           if (result.branchDiverted) {
             // MAJOR fix (Code Review, fix round for card b801bad0): a branchDiverted refusal must NOT fall
@@ -20962,7 +20996,9 @@ export class SessionService {
         // describes the resolved candidate branches at all (they are facts about the CANONICAL CHECKOUT at
         // fast-forward time), so a cached replay would be stale the moment a human restores the checkout —
         // exactly the `"squash-refused"` reasoning that const's own doc already states for the solo path.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
+        // @decision 62c4953a — `quarantined`/`indexLockPresent` had NO arm here (fell to "rejected", which
+        // IS replayed) — same canonical-checkout-fact reasoning as branchDiverted/unverified above.
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.
         //
@@ -22560,7 +22596,10 @@ export class SessionService {
         // @decision 9f5ae011 — `soloMergeTransient` classifies distinctly too, same reasoning one layer
         // later: `resetOrSkip`'s own confirmed-kill cleanup clearing must see a fresh re-attempt, never a
         // stale cached rejection from before it cleared.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.merged ? "merged" : "rejected"),
+        // @decision 62c4953a — `indexLockPresent` classifies distinctly too, same reasoning as
+        // `quarantined`: a human removing the stale `.git/index.lock` must see a fresh re-confirm, never
+        // a stale cached refusal from before it was removed.
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
