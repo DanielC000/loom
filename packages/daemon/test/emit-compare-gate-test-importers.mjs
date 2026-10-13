@@ -332,7 +332,16 @@ try {
   //        synthetic fixture): proves the scan does NOT fail closed on the real corpus (card 72769424's own
   //        "zero such patterns exist" claim was false — 24 real files hit the old unconditional-abort path),
   //        and that the real fixed-wait-witness-guard.mjs/-selftest.mjs importer relationship is found
-  //        end-to-end, with buildReducedGateCommand naming both ───────────────────────────────────────────
+  //        end-to-end, with buildReducedGateCommand naming both.
+  //
+  //        Card 3493d0b6 (round 2, speed-up): (H) and (I) below used to each independently build their OWN
+  //        full real-1324-file-corpus worktree (two `writeRealTestDaemonScript` + `fs.cpSync` of the whole
+  //        test/** tree + `git init`/`add`/`commit` + `createWorktree` + a touch-commit). (I) now reuses
+  //        THIS block's already-built `worktreePath`/`baseSha`/`branch` instead of rebuilding its own —
+  //        safe because `computeEmitCompareGate` is documented (@decision 758486bc, `loadHarnessSetExports`'s
+  //        own doc, git/worktrees.ts) to ALWAYS spawn fresh with NO cross-call cache in front of it, so a
+  //        second call against the identical worktree/sha/branch genuinely re-runs the full real scan (the
+  //        exact thing (I)'s event-loop-blocking measurement needs), not a cached short-circuit. ──────────
   {
     const H = mk("h");
     fs.mkdirSync(H.repo, { recursive: true });
@@ -372,7 +381,6 @@ try {
     // worth it on this repo's real corpus, not just that the two named files are present.
     console.log(`(H) real-corpus reduced --only= population: ${onlyNames.length} file(s) of 1324 .mjs files in the corpus at write time`);
     console.log(`(H) real-corpus reduced --only= names: ${onlyNames.join(", ")}`);
-  }
 
   // ── (I) EVENT-LOOP NON-BLOCKING (round 4, bound hardened card 758486bc) — the real-corpus scan must run
   //        OFF the host event loop: a setInterval probe ticking every 20ms observes the max gap between
@@ -422,23 +430,12 @@ try {
   //        any later re-measurement); carry this paragraph as "what round 2 showed," not as round 3's own
   //        number. This remains a narrower, but non-zero, accepted gap in detection power either way — not a
   //        claim that the bound is tight, and no fixed n is a guarantee of its true ceiling under worse
-  //        contention than any one host showed during measurement. ─────────────────────────────────────────
-  {
-    const I = mk("i");
-    fs.mkdirSync(I.repo, { recursive: true });
-    registerForCleanup(I.repo);
-    fs.writeFileSync(path.join(I.repo, "README.md"), "# ecgti-event-loop\n");
-    writeRealTestDaemonScript(I.repo);
-    const REAL_TEST_DIR_I = path.join(path.dirname(fileURLToPath(import.meta.url)));
-    fs.cpSync(REAL_TEST_DIR_I, path.join(I.repo, "packages", "daemon", "test"), { recursive: true });
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: I.repo });
-    execSync(`git add -A && git ${GIT_ID} commit -q -m init`, { cwd: I.repo });
-    const baseShaI = execSync("git rev-parse HEAD", { cwd: I.repo }).toString().trim();
-    const { worktreePath: wtI, branch: branchI } = await createWorktree(I.repo, I.projId, I.taskId);
-    worktrees.push(wtI);
-    const guardPathI = path.join(wtI, "packages", "daemon", "test", "fixed-wait-witness-guard.mjs");
-    fs.appendFileSync(guardPathI, "\n// (I) event-loop probe touch — behaviorally inert.\n");
-    execSync(`git add -A && git ${GIT_ID} commit -q -m "fix: touch fixed-wait-witness-guard.mjs only"`, { cwd: wtI });
+  //        contention than any one host showed during measurement.
+  //
+  //        Card 3493d0b6 (round 2, speed-up): reuses (H)'s already-built `worktreePath`/`baseSha`/`branch`
+  //        directly (see the combined-block note above (H)) instead of building a second, independent
+  //        1324-file-corpus worktree — `wtI`/`baseShaI`/`branchI` below are gone; every reference is now
+  //        H's own `worktreePath`/`baseSha`/`branch`. ──────────────────────────────────────────────────────
 
     const PROBE_PERIOD_MS = 20;
     let maxGapMs = 0;
@@ -524,7 +521,7 @@ try {
     let directI;
     try {
       const t0I = performance.now();
-      directI = await computeEmitCompareGate(wtI, baseShaI, branchI);
+      directI = await computeEmitCompareGate(worktreePath, baseSha, branch);
       elapsedMsI = performance.now() - t0I;
       // @decision 758486bc — a `setInterval` overdue for the ENTIRE duration of the call above becomes due
       // the instant this continuation runs, but a plain promise continuation is a MICROTASK: it runs before

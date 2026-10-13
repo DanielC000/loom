@@ -40,14 +40,28 @@ const noReap = async () => ({ killedPids: [] });
 const FAIL = { passed: false, failedStep: "test", failedStatus: 1, steps: [] };
 const dbs = [];
 
+// Card 3493d0b6 (round 2, speed-up): each of the 6 scenarios below calls `setup()` fresh, which used to
+// pay a real `git init` + config + commit — replaced with a template-repo + `fs.cpSync` copy, the same
+// pattern `merge-gate-interval.mjs` (card 8b5e002d) already proved byte-identical for this exact shape.
+// Scoped strictly to this one step: each scenario still gets its own fully independent repo/worktrees/db
+// afterward (no state is shared ACROSS scenarios) — this does not touch the "could 4 scenarios share one
+// setup()" idea a round-2 reviewer also raised; that would reorder/share mutable state across what are
+// today fully isolated scenarios (two of the four fail-closed checks mutate the branch ref / project
+// config destructively) for a smaller gain than this already proved noise-level on a sibling file
+// (merge-confirm-solo-finalize-tip-cas.mjs's own measured before/after) — skipped as not worth the risk.
+const TEMPLATE_REPO = path.join(os.tmpdir(), `loom-bmlu-tmpl-${sfx}`);
+registerForCleanup(TEMPLATE_REPO);
+(() => {
+  fs.mkdirSync(TEMPLATE_REPO, { recursive: true });
+  fs.writeFileSync(path.join(TEMPLATE_REPO, "README.md"), "# bmlu\n");
+  fs.writeFileSync(path.join(TEMPLATE_REPO, "other.txt"), "x\n");
+  execSync(`git init -q && git config user.email bmlu@loom && git config user.name bmlu`, { cwd: TEMPLATE_REPO });
+  commitAll(TEMPLATE_REPO, "init", GIT_ID);
+})();
 async function setup(tag) {
   const repo = path.join(os.tmpdir(), `loom-bmlu-${tag}-${sfx}`);
-  fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "# bmlu\n");
-  fs.writeFileSync(path.join(repo, "other.txt"), "x\n");
-  execSync(`git init -q && git config user.email bmlu@loom && git config user.name bmlu`, { cwd: repo });
-  commitAll(repo, "init", GIT_ID);
+  fs.cpSync(TEMPLATE_REPO, repo, { recursive: true });
   const projId = `bmlu-proj-${tag}-${sfx}`, agentId = `bmlu-agent-${tag}-${sfx}`, mgrId = `bmlu-mgr-${tag}-${sfx}`;
   const cut = async (label, files) => {
     const taskId = `bmlu-task-${tag}-${label}-${sfx}`;

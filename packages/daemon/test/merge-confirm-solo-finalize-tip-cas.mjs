@@ -52,11 +52,22 @@ const PASS = { passed: true, steps: [] };
 const sfxOf = (tag) => `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const confirm = (sessions, mgrId, workerId) => settleTracked(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked" });
 
+// Card 3493d0b6 (round 2, speed-up): this file's 17 scenarios each called `makeRepo()` fresh — a real
+// `git init` + config + commit per call. `merge-gate-interval.mjs` (card 8b5e002d) already proved a
+// template-repo + `fs.cpSync` copy is byte-identical for this exact shape (~6x measured speedup on
+// Windows, where `git init` is ~300-450ms of subprocess spawn): build the baseline ONCE, then a plain
+// recursive filesystem copy per scenario needs no subprocess at all.
+const TEMPLATE_REPO = path.join(os.tmpdir(), `loom-mcsf-tmpl-${Date.now()}-${process.pid}`);
+registerForCleanup(TEMPLATE_REPO);
+(() => {
+  fs.mkdirSync(TEMPLATE_REPO, { recursive: true });
+  fs.writeFileSync(path.join(TEMPLATE_REPO, "README.md"), "# mcsf\n");
+  execSync(`git init -q && git config user.email mcsf@loom && git config user.name mcsf`, { cwd: TEMPLATE_REPO });
+  commitAll(TEMPLATE_REPO, "init", GIT_ID);
+})();
 function makeRepo(repo) {
-  fs.mkdirSync(repo, { recursive: true });
-  fs.writeFileSync(path.join(repo, "README.md"), "# mcsf\n");
-  execSync(`git init -q && git config user.email mcsf@loom && git config user.name mcsf`, { cwd: repo });
-  commitAll(repo, "init", GIT_ID);
+  fs.mkdirSync(path.dirname(repo), { recursive: true });
+  fs.cpSync(TEMPLATE_REPO, repo, { recursive: true });
 }
 
 // `hooks.onStop` runs inside the stub pty's stop() (the window after the squash lock released); `hooks.onReap` inside the worktree-GC reap step.
