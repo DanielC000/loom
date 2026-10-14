@@ -225,6 +225,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { PER_RECORD_MAX_BYTES, hasDoNotSection } from "./decision-records.mjs";
+import { resolveGitBinaryForSpawn } from "./git-resolve.mjs";
 
 // Comment-syntax-agnostic, byte-identical to decision-records.mjs's own ANCHOR_RE — kept as a separate
 // literal here (not imported) because assets ship as standalone files invoked by bare `node <path>`,
@@ -252,10 +253,13 @@ function parseAnchorMatch(m) {
  * own `verifyCommitSha` exactly (same doc there, including why any failure — including the bounded
  * `timeout` below firing, review S2 card 969b0e1c — reads as UNVERIFIED, never thrown). Used by this
  * lint's `orphanAnchors` check so a `sha:`-sigil'd anchor whose commit no longer verifies is correctly
- * reported as orphaned, not silently counted as resolved just because a same-named record file exists. */
+ * reported as orphaned, not silently counted as resolved just because a same-named record file exists.
+ *
+ * Card 61d0c029: spawns via `resolveGitBinaryForSpawn()` (git-resolve.mjs), never a bare "git" literal —
+ * mirrors decision-records.mjs's own `verifyCommitSha` fix exactly (same doc there). */
 function verifyCommitSha(repoRoot, sha) {
   try {
-    execFileSync("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
+    execFileSync(resolveGitBinaryForSpawn(), ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
       timeout: 5000,
@@ -294,12 +298,15 @@ function anchorResolves(repoRoot, a, recordIdSet, shaCache) {
  * non-git `repoRoot`, the bounded `timeout` firing) returns an empty set rather than throwing — mirroring
  * `verifyCommitSha`'s own "any failure reads as unverified" posture: a git failure here must never crash
  * the whole sweep, and must never falsely report a bare id as a commit-collision either.
+ *
+ * Card 61d0c029: spawns via `resolveGitBinaryForSpawn()` (git-resolve.mjs), never a bare "git" literal —
+ * same chokepoint `verifyCommitSha` above now uses.
  */
 function batchResolveCommits(repoRoot, ids) {
   if (ids.length === 0) return new Set();
   let out;
   try {
-    out = execFileSync("git", ["cat-file", "--batch-check"], {
+    out = execFileSync(resolveGitBinaryForSpawn(), ["cat-file", "--batch-check"], {
       cwd: repoRoot,
       input: ids.join("\n") + "\n",
       timeout: 15000,

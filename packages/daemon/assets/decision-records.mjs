@@ -55,6 +55,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveGitBinaryForSpawn } from "./git-resolve.mjs";
 
 // Deliberately comment-syntax-agnostic: matches the literal token regardless of what precedes it (`//`,
 // `#`, `--`, `/*`, ...), so the SAME anchor format works in .ts/.mjs/.py/.sql/.md source alike. Global
@@ -92,10 +93,14 @@ function parseAnchorMatch(m) {
  * every git call is timeout-bounded (CLAUDE.md; `git/writer.ts`, `vault/versioner.ts`) — this call is a
  * per-`Read` hook subprocess, so a hang can't wedge the daemon, but there's no reason to leave it
  * unbounded either; a timeout throws, which the `catch` below already reads as UNVERIFIED.
+ *
+ * Card 61d0c029: spawns via `resolveGitBinaryForSpawn()` (git-resolve.mjs), never a bare "git" literal —
+ * on win32 this resolves an absolute git.exe off PATH, same rule `git/bounded.ts`'s own resolver uses for
+ * every daemon-side git spawn; byte-identical bare "git" on POSIX.
  */
 function verifyCommitSha(repoRoot, sha) {
   try {
-    execFileSync("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
+    execFileSync(resolveGitBinaryForSpawn(), ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
       cwd: repoRoot,
       stdio: ["ignore", "ignore", "ignore"],
       timeout: 5000,

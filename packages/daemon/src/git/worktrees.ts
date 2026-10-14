@@ -4495,10 +4495,19 @@ export const STATIC_GUARD_REPO_PATHS = [
  *  needs no matching edit there.
  */
 export const ASSET_READING_TEST_REPO_PATHS = [
+  // Card 61d0c029: a corpus-wide readdirSync scan of the top-level packages/daemon/assets/*.mjs files
+  // asserting none spawns git via a literal bare "git" command (the sibling of
+  // canonical-git-helper-guard.mjs's check (3), which scans src/**/*.ts only and structurally cannot see
+  // this tree). Direct reader (route (1)): editing ANY file in that directory can flip what it finds.
+  "packages/daemon/test/assets-git-literal-guard.mjs",
   "packages/daemon/test/codescape-prompt-block.mjs",
   "packages/daemon/test/decision-records.mjs",
   "packages/daemon/test/dev-server.mjs",
   "packages/daemon/test/ensure-obsidian.mjs",
+  // Card 61d0c029: asserts packages/daemon/assets/git-resolve.mjs (the standalone win32 absolute-git-path
+  // resolver the two shipped session hooks import) stays behaviorally identical to its dist/git/bounded.js
+  // counterpart. Direct reader (route (1)): editing git-resolve.mjs changes what this test asserts.
+  "packages/daemon/test/git-resolve-assets-parity.mjs",
   "packages/daemon/test/kickoff-real-spawn.mjs",
   "packages/daemon/test/manager-context-block.mjs",
   "packages/daemon/test/merge-orphaned-to-main.mjs",
