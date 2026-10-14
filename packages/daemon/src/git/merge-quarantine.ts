@@ -1795,25 +1795,30 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.
     provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
   };
-  const filename = pendingDivertFilenameFor(occupantRepoPath);
   const finalBasename = path.basename(final);
+  // @decision 8db913e2 (Follow-up 6451a749) — route through the SAME chokepoint `mintPendingDivert`
+  // uses, never an in-memory-only lookup: an on-disk occupant never scanned, or now living at a
+  // `-collision-` file, must never be silently overwritten.
+  const diskReconciled = reconcilePendingDivertTarget(toPersist);
+  const { filename } = diskReconciled;
   const atFilenameIdx = pendingUnresolvedQuarantines.findIndex((p) => p.sourceFile === filename);
   const atFinalBasenameIdx = finalBasename === filename ? -1 : pendingUnresolvedQuarantines.findIndex((p) => p.sourceFile === finalBasename);
-  // @decision c9114934 (round 3, MAJOR #2) — union ONLY from `atFilenameIdx`'s own entry (a ref THIS
-  // function itself wrote, never stale) — NEVER from `atFinalBasenameIdx`'s, which can be a live
-  // boot-time union `armQuarantineKey` already bled a colliding sibling's tokens into.
-  const priorEntry = atFilenameIdx >= 0 ? pendingUnresolvedQuarantines[atFilenameIdx]!.entry : undefined;
-  const toWrite = priorEntry ? unionQuarantineEntries(priorEntry, toPersist) : toPersist;
+  // @decision 8db913e2 (Follow-up 6451a749, Round 2) — ALSO union the in-memory record at
+  // `atFilenameIdx` (never `atFinalBasenameIdx`) ON TOP of the disk read above — memory can legitimately
+  // outrun disk (an earlier durable write for this identity already failed); see the decision record.
+  const toWrite = atFilenameIdx >= 0
+    ? unionQuarantineEntries(diskReconciled.toWrite, pendingUnresolvedQuarantines[atFilenameIdx]!.entry)
+    : diskReconciled.toWrite;
   if (!writePendingDivertFile(filename, toWrite)) {
     // @decision 4900c365 (round 2) — re-establish an in-memory record that OWNS `final` at its OWN
     // current name (self-referenced in `orphanLatchFiles`): enforces in THIS process too, not only on a
     // later boot, and every reference-aware sweep in this module already honours this ownership shape.
     //
-    // @decision c9114934 (round 3, MAJOR #2) — union source is `toPersist` ALONE here too, same rule as
-    // `toWrite` above: `atFinalBasenameIdx`'s own live entry can be a boot-time union `armQuarantineKey`
-    // already bled a colliding sibling's tokens into, never a safe union source.
+    // @decision 8db913e2 (Follow-up 6451a749, Round 2) — `orphanLatchFiles` comes from `toPersist`
+    // ALONE, never `toWrite`: `toWrite` can carry a FOREIGN orphan reference (from `filename`'s own
+    // record); `kept` lives at `finalBasename` and must never inherit one to wrongly sweep later.
     const kept: MergeQuarantineEntry = {
-      ...toPersist,
+      ...toWrite,
       orphanLatchFiles: [...new Set([...(toPersist.orphanLatchFiles ?? []), finalBasename])],
     };
     if (atFinalBasenameIdx >= 0) {
@@ -2017,47 +2022,139 @@ function attemptDivertSafetyTmpFallback(entry: MergeQuarantineEntry): string | f
 }
 
 /**
- * Reconciles a fresh mint's own write target against whatever CURRENTLY occupies
- * {@link pendingDivertFilenameFor}'s own deterministic path, right before {@link mintPendingDivert} writes
- * to it — a blind overwrite here could destroy another live record's own latch with zero in-memory signal
- * (the exact shape this card reproduced). ENOENT -> nothing real there, write `entry` unchanged at the
- * primary filename. The SAME identity already occupies it -> union its on-disk tokens into `entry`, never
- * dropping one (mirrors {@link reconcileMarkedBasenameBeforeWrite}'s own identity+token-union pattern),
- * still at the primary filename. A DIFFERENT identity, or an unreadable/corrupt/EISDIR file -> never
- * overwrite it AND never move it (relocating it could break whatever else still references its own path)
- * -- `entry` is written UNCHANGED to a distinct {@link pendingDivertCollisionFilenameFor} filename instead,
- * leaving the occupant byte-untouched.
+ * Reads a pending-divert FILENAME's own CURRENT on-disk content, right now, and reconstructs a
+ * {@link MergeQuarantineEntry} from it using the SAME explicit field whitelist this module already trusts
+ * at every copy-aside/union site (`82032b5c`/`db0a9db0`) — never more of the parsed JSON than that.
+ * Shared by both the primary-filename check and the existing-collision-file scan in
+ * {@link reconcilePendingDivertTarget} below, so the two never drift on what counts as "readable,
+ * trustworthy content" at this deterministic path shape.
  *
- * @decision 8db913e2 (Follow-up 8a79dd31)
+ * Returns `"enoent"` (nothing real there) or `"unsafe"` (a directory, a genuinely unreadable file right
+ * now, corrupt JSON, a non-object/`null` parse, or no `repoPath` string — none of these can be proven
+ * safe to trust) — the caller decides what either means for ITS OWN write; this function never does.
+ *
+ * @decision 8db913e2 (Follow-up 6451a749)
  */
-function reconcilePendingDivertTargetBeforeMint(entry: MergeQuarantineEntry): { filename: string; toWrite: MergeQuarantineEntry } {
-  const primary = pendingDivertFilenameFor(entry.repoPath);
-  const finalPath = path.join(MERGE_QUARANTINE_DIR, primary);
+function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { state: "unsafe" } | { state: "entry"; entry: MergeQuarantineEntry } {
   let raw: string;
   try {
-    raw = fs.readFileSync(finalPath, "utf8");
+    raw = fs.readFileSync(filePath, "utf8");
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { filename: primary, toWrite: entry };
-    // EISDIR, or any other unreadable-file code -- cannot prove safety, never overwrite blind.
-    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry };
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "enoent" };
+    return { state: "unsafe" }; // EISDIR, or any other unreadable-file code
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry }; // corrupt -- cannot prove safety
+    return { state: "unsafe" }; // corrupt
   }
-  if (!isReadableLatchRecord(parsed) || typeof parsed.repoPath !== "string") {
-    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry };
-  }
-  if (directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) {
-    // A genuinely different identity physically occupies the primary filename -- never overwrite, never move.
-    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry };
-  }
+  if (!isReadableLatchRecord(parsed) || typeof parsed.repoPath !== "string") return { state: "unsafe" };
   const { surviving } = readSurvivingOnDiskTokens(parsed);
-  const toWrite = surviving.length > 0 ? { ...entry, tokens: [...new Set([...surviving, ...entry.tokens])] } : entry;
-  return { filename: primary, toWrite };
+  const entry: MergeQuarantineEntry = {
+    repoPath: parsed.repoPath,
+    branch: typeof parsed.branch === "string" ? parsed.branch : "",
+    reason: typeof parsed.reason === "string" ? parsed.reason : "",
+    opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
+    enteredAt: typeof parsed.enteredAt === "number" ? parsed.enteredAt : Date.now(),
+    tokens: surviving,
+    // @decision 82032b5c / db0a9db0 — same explicit field carry-forward every other reader of a parsed
+    // latch record in this module already does; never trust more of `parsed` than this whitelist.
+    orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
+      ? parsed.orphanLatchFiles : undefined,
+    contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
+      ? parsed.contributorRepoPaths : undefined,
+    provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
+    provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
+  };
+  return { state: "entry", entry };
+}
+
+/**
+ * Unions an on-disk pending-divert occupant's own parsed record into a fresh `entry` targeting the SAME
+ * identity — via {@link unionQuarantineEntries} itself (never a hand-rolled re-implementation), so tokens
+ * AND `orphanLatchFiles`/`contributorRepoPaths`/`provenanceUnknown`/`provenanceTracked` all carry forward
+ * together, exactly as {@link protectOccupantContentBeforeDelete}'s own PRE-EXISTING in-memory-match union
+ * already did before this card — never silently narrowed to a token-only union.
+ *
+ * `unionQuarantineEntries` always stamps `armedKeys` as an array (never `undefined`) — normalized back to
+ * `undefined` when empty here, mirroring {@link divertRaiseEntry}'s own "never a cosmetic `armedKeys: []`
+ * on a record with nothing to carry there" rule; a pending-only record is never armed anywhere.
+ *
+ * @decision 8db913e2 (Follow-up 6451a749)
+ */
+function unionIntoOnDiskPendingEntry(onDisk: MergeQuarantineEntry, entry: MergeQuarantineEntry): MergeQuarantineEntry {
+  const merged = unionQuarantineEntries(onDisk, entry);
+  return merged.armedKeys && merged.armedKeys.length > 0 ? merged : { ...merged, armedKeys: undefined };
+}
+
+/**
+ * Scans {@link MERGE_QUARANTINE_DIR} for an EXISTING `-collision-` file already minted for `repoPath`'s
+ * own identity — the deterministic `pending-<24hex>` prefix {@link pendingDivertFilenameFor} derives,
+ * shared by every collision file {@link pendingDivertCollisionFilenameFor} ever mints for that SAME
+ * identity — and returns the first one that is both readable and genuinely the same identity. Without
+ * this, a repeated collision against the same foreign primary occupant would mint an unbounded number of
+ * fresh collision files for one identity instead of converging on one growing record. Never matches a
+ * crash-left tmp residue ({@link PENDING_DIVERT_COLLISION_TMP_RE}'s own shape — a torn write, never a
+ * live record) and never touches one that is unreadable or genuinely foreign — those are left
+ * byte-untouched, exactly like the primary-slot rule.
+ *
+ * @decision 8db913e2 (Follow-up 6451a749)
+ */
+function findExistingSameIdentityCollisionFile(repoPath: string): { filename: string; entry: MergeQuarantineEntry } | undefined {
+  const prefix = pendingDivertFilenameFor(repoPath).slice(0, -".json".length); // "pending-<24hex>"
+  const collisionRe = new RegExp(`^${prefix}-collision-[0-9a-f]{8}\\.json$`);
+  let names: string[];
+  try {
+    names = fs.readdirSync(MERGE_QUARANTINE_DIR);
+  } catch {
+    return undefined;
+  }
+  for (const name of names.filter((n) => collisionRe.test(n)).sort()) {
+    const read = readPendingDivertFileAt(path.join(MERGE_QUARANTINE_DIR, name));
+    if (read.state === "entry" && directPathIdentity(read.entry.repoPath) === directPathIdentity(repoPath)) {
+      return { filename: name, entry: read.entry };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Reconciles ANY writer's own write target against whatever CURRENTLY occupies
+ * {@link pendingDivertFilenameFor}'s own deterministic path for `entry`'s own identity, right before that
+ * write happens — a blind overwrite here could destroy another live record's own latch with zero
+ * in-memory signal. Shared by {@link mintPendingDivert} (a fresh mint) AND
+ * {@link protectOccupantContentBeforeDelete} (copying a degraded/foreign occupant's content aside before
+ * an unconditional unlink) — ONE occupant-aware chokepoint, never a second, independently-maintained copy.
+ *
+ * ENOENT -> nothing real there, write `entry` unchanged at the primary filename. The SAME identity already
+ * occupies the PRIMARY filename -> union `entry` into it via {@link unionIntoOnDiskPendingEntry} (tokens
+ * AND orphanLatchFiles/contributorRepoPaths/provenanceUnknown/provenanceTracked — never tokens alone),
+ * still at the primary filename. A DIFFERENT identity, or an unreadable/corrupt/EISDIR/no-repoPath file at
+ * the primary -> never overwrite it AND never move it (relocating it could break whatever else still
+ * references its own path) -- look for an EXISTING `-collision-` file already minted for THIS SAME
+ * identity ({@link findExistingSameIdentityCollisionFile}) and union into it if one qualifies, so repeated
+ * collisions against the same primary occupant converge on one record instead of proliferating; mint a
+ * brand-new {@link pendingDivertCollisionFilenameFor} filename only when none does.
+ *
+ * @decision 8db913e2 (Follow-up 8a79dd31) — the primary-vs-collision divert rule itself.
+ * @decision 8db913e2 (Follow-up 6451a749) — generalized to a second caller that used to trust only an
+ * in-memory lookup, and widened to union into an existing collision file rather than minting fresh ones.
+ */
+function reconcilePendingDivertTarget(entry: MergeQuarantineEntry): { filename: string; toWrite: MergeQuarantineEntry } {
+  const primary = pendingDivertFilenameFor(entry.repoPath);
+  const primaryRead = readPendingDivertFileAt(path.join(MERGE_QUARANTINE_DIR, primary));
+  if (primaryRead.state === "enoent") return { filename: primary, toWrite: entry };
+  if (primaryRead.state === "entry" && directPathIdentity(primaryRead.entry.repoPath) === directPathIdentity(entry.repoPath)) {
+    return { filename: primary, toWrite: unionIntoOnDiskPendingEntry(primaryRead.entry, entry) };
+  }
+  // Primary is occupied by something we must never touch (a different identity, or unreadable/corrupt/
+  // EISDIR/no-repoPath content) -- find-or-mint a collision record instead.
+  const existing = findExistingSameIdentityCollisionFile(entry.repoPath);
+  if (existing) {
+    return { filename: existing.filename, toWrite: unionIntoOnDiskPendingEntry(existing.entry, entry) };
+  }
+  return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry };
 }
 
 /**
@@ -2069,14 +2166,14 @@ function reconcilePendingDivertTargetBeforeMint(entry: MergeQuarantineEntry): { 
  * double-fault safety-tmp fallback below, which its own prior inline copy never had.
  *
  * @decision 8db913e2 (Follow-up 8a79dd31) — reconciles against the primary filename's current occupant, via
- * {@link reconcilePendingDivertTargetBeforeMint}, before ever writing — see that function's own doc.
+ * {@link reconcilePendingDivertTarget}, before ever writing — see that function's own doc.
  *
  * @decision 8db913e2 (Follow-up dd34da46, Item 3) — on a double fault (the chosen write ALSO fails), falls
  * back to a safety-tmp residue via {@link attemptDivertSafetyTmpFallback} rather than losing the entry
  * outright across a reboot.
  */
 function mintPendingDivert(entry: MergeQuarantineEntry): void {
-  const { filename, toWrite } = reconcilePendingDivertTargetBeforeMint(entry);
+  const { filename, toWrite } = reconcilePendingDivertTarget(entry);
   // Keep the caller's own in-memory placement (if any — e.g. enterMergeQuarantine's `existing` branch
   // already placed `entry` into `activeQuarantines` before calling this) in sync with the reconciled
   // object that is about to become the durable bytes.

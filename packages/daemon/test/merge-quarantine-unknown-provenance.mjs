@@ -526,9 +526,13 @@ try {
       const protective = await runProtectAndReadCopy(await rebootSim(), x3, y3);
       check("(3a baseline, unmutated) the protective copy carries provenanceUnknown forward", protective?.provenanceUnknown === true);
     }
-    const PROTECT_WHITELIST_LINE = "provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,\n    };\n    const filename = pendingDivertFilenameFor(occupantRepoPath);";
+    // Card 6451a749 renamed/moved the line that used to follow this block (`const filename =
+    // pendingDivertFilenameFor(occupantRepoPath);`, now `const finalBasename = path.basename(final);`,
+    // with the filename/toWrite derivation itself moved into the shared `reconcilePendingDivertTarget`
+    // chokepoint) — the anchor below is updated to match, same disambiguating-suffix technique as before.
+    const PROTECT_WHITELIST_LINE = "provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,\n    };\n    const finalBasename = path.basename(final);";
     await withDistMutation(PROTECT_WHITELIST_LINE,
-      "provenanceUnknown: undefined, provenanceTracked: undefined };\n    const filename = pendingDivertFilenameFor(occupantRepoPath);", async (m) => {
+      "provenanceUnknown: undefined, provenanceTracked: undefined };\n    const finalBasename = path.basename(final);", async (m) => {
         const { x3, y3 } = buildProtectFixture("mutated");
         const protective = await runProtectAndReadCopy(m, x3, y3);
         check("*** PINNED (3) *** dropping the whitelist's own carry-forward loses it in the protective copy — caught", protective?.provenanceUnknown !== true);

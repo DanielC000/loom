@@ -2899,7 +2899,7 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // Card 8a79dd31 ("8a79dd31-fresh-divert") -- SAME-IDENTITY UNION case, fixed by mintPendingDivert's own
-  // reconcilePendingDivertTargetBeforeMint check.
+  // reconcilePendingDivertTarget check (renamed by card 6451a749, which generalized it to a second caller).
   //
   // `enterMergeQuarantine`'s own direct unresolvable brand-new-divert branch (the `!verified` block) used
   // to call `writePendingDivertFile(pendingDivertFilenameFor(repoPath), fresh)` with ZERO read of whatever
@@ -3114,8 +3114,8 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // Card 8a79dd31 (CR ddb58ffa) ("8a79dd31-corrupt-json-diverts") -- the primary pending-divert filename
-  // holds genuinely UNPARSEABLE bytes (not valid JSON at all). `reconcilePendingDivertTargetBeforeMint`'s
-  // own `JSON.parse` catch must treat this exactly like a different-identity occupant: cannot prove
+  // holds genuinely UNPARSEABLE bytes (not valid JSON at all). `reconcilePendingDivertTarget`'s (renamed
+  // by card 6451a749) own `JSON.parse` catch must treat this exactly like a different-identity occupant: cannot prove
   // safety, never overwrite, never move -- divert to a collision filename instead.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
@@ -3146,7 +3146,7 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // Card 8a79dd31 (CR ddb58ffa) ("8a79dd31-null-and-no-repopath-divert") -- two isolated shapes that both
-  // pass JSON.parse but fail `reconcilePendingDivertTargetBeforeMint`'s own `isReadableLatchRecord`/
+  // pass JSON.parse but fail `reconcilePendingDivertTarget`'s (renamed by 6451a749) own `isReadableLatchRecord`/
   // `typeof parsed.repoPath === "string"` guard: the bare literal `null` (495fd320's own null-latch class),
   // and a syntactically valid object with no `repoPath` field at all. Both must divert, never overwrite.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -3263,6 +3263,571 @@ try {
   check("(8a79dd31-collision-tmp-residue-clearable-by-id) the crash-left tmp residue itself is swept off disk",
     !fs.existsSync(crashTmpPath));
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 ("6451a749-never-scanned") -- CR ddb58ffa of 8a79dd31 found a THIRD writer of the
+  // deterministic `pendingDivertFilenameFor(...)` path. `protectOccupantContentBeforeDelete` is reached
+  // from `protectDegradedOccupantBeforeDelete`/`protectUnincorporatedOccupantBeforeDelete` when a RAISE's
+  // own guard-skipped write (e1cb7d33) is about to clobber a foreign/degraded occupant's physical `final`
+  // -- its job is to copy that occupant's content aside, durably, to `pendingDivertFilenameFor
+  // (occupantRepoPath)` before letting the write through. It used to trust ONLY the in-memory
+  // `atFilenameIdx` lookup against `pendingUnresolvedQuarantines`, never reading whatever currently
+  // occupies that deterministic filename ON DISK -- the exact 8a79dd31 bug shape, at the one call site
+  // that card's own "Do not" section explicitly left unaudited (@decision 8db913e2, Follow-up 29fe2372's
+  // own "Do not" section). THE FIX: it now routes through the SAME {@link reconcilePendingDivertTarget}
+  // chokepoint {@link mintPendingDivert} uses (@decision 8db913e2, Follow-up 6451a749).
+  //
+  // Setup: D (a never-created subdir of R, unresolvable) sits at R's own key's physical `final` -- the
+  // same "degraded occupant" shape SHAPE 1 (control, above) already exercises via this SAME call site. A
+  // SEPARATE, independent same-identity record for D is hand-crafted directly at `pendingDivertFilenameFor
+  // (d)` -- standing in for an earlier raise of D's own, diverted there, that this process's own
+  // `pendingUnresolvedQuarantines` never scanned (no boot call for it ever ran) -- mirrors
+  // 8a79dd31-fresh-divert/8a79dd31-divert-raise-entry's own "never scanned" setup, now for this THIRD
+  // writer. R then raises (resolvable), reaching `enterMergeQuarantine`'s own "no existing" region's
+  // `protectDegradedOccupantBeforeDelete` call, which finds D foreign at `final` and calls
+  // `protectOccupantContentBeforeDelete`.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("6451a749-ns-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(r, "gone-subdir-6451a749-ns");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["6451a749-ns-current-token"],
+  }, null, 2) + "\n");
+
+  const occupantFile = pendingDivertFilenameForTest(d);
+  const occupantPath = path.join(MERGE_QUARANTINE_DIR, occupantFile);
+  const occupantContentBeforeNS = JSON.stringify({
+    repoPath: d, branch: "d-earlier-branch", reason: "6451a749-never-scanned: D's own EARLIER, independent same-identity pending record, never scanned by this process",
+    enteredAt: Date.now() - 100000, tokens: ["6451a749-ns-never-scanned-token"],
+  }, null, 2) + "\n";
+  fs.writeFileSync(occupantPath, occupantContentBeforeNS);
+  check("(6451a749-never-scanned precondition) nothing in THIS process tracks the never-scanned token yet",
+    !new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? [])).has("6451a749-ns-never-scanned-token"));
+
+  const rToken = enterMergeQuarantine(r, "r-branch", "6451a749-never-scanned: r raises, triggering protectDegradedOccupantBeforeDelete for D");
+
+  check("(6451a749-never-scanned) R's own write lands directly at `final` (the existing, legitimate-overwrite path, unaffected by this card)",
+    (contentIfExists(finalPath) ?? "").includes(rToken));
+  check("*** THE FIX (6451a749-never-scanned) *** the never-scanned occupant's own token SURVIVES byte-for-byte (same identity -> unioned by reconcilePendingDivertTarget, never overwritten)",
+    (contentIfExists(occupantPath) ?? "").includes("6451a749-ns-never-scanned-token"));
+  check("(6451a749-never-scanned) the never-scanned occupant's own PRE-EXISTING branch/reason survive the union too (not just tokens)",
+    (contentIfExists(occupantPath) ?? "").includes("d-earlier-branch"));
+
+  const freshNS = await freshBootModule();
+  freshNS.reenterMergeQuarantinesAtBoot([]);
+  const tokensAfterRebootNS = new Set(freshNS.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("*** THE FIX (6451a749-never-scanned, reboot) *** BOTH the never-scanned occupant's own token AND R's own token survive a fresh-process reboot",
+    tokensAfterRebootNS.has("6451a749-ns-never-scanned-token") && tokensAfterRebootNS.has(rToken));
+
+  freshNS.clearMergeQuarantineByToken(r, rToken);
+  freshNS.clearMergeQuarantineByToken(d, "6451a749-ns-current-token");
+  freshNS.clearMergeQuarantineByToken(d, "6451a749-ns-never-scanned-token");
+  freshNS.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 ("6451a749-collision-file") -- once an identity's own pending-divert record lives at a
+  // `-collision-` file (8a79dd31's own fix: a genuinely different identity occupies the primary
+  // `pendingDivertFilenameFor` slot, so a LATER raise diverts elsewhere rather than overwriting it),
+  // `protectOccupantContentBeforeDelete`'s OLD primary-name-only lookup could never find that collision
+  // record. When this SAME identity was LATER discovered as a foreign degraded occupant at some OTHER
+  // key's `final`, protect's blind write to the PRIMARY filename destroyed the very occupant 8a79dd31's
+  // own reconcile had specifically refused to touch there. THE FIX: the SAME shared
+  // {@link reconcilePendingDivertTarget} chokepoint never overwrites a primary occupied by a different
+  // identity (@decision 8db913e2, Follow-up 6451a749).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r2 = makeToplevelRepo("6451a749-cf-r2");
+  const foreign = makeToplevelRepo("6451a749-cf-foreign");
+  const d = path.join(r2, "gone-subdir-6451a749-cf");
+
+  // Hand-craft a GENUINELY FOREIGN occupant at D's own primary pending-divert filename -- a true
+  // hash-of-identity collision stand-in, same pattern as 8a79dd31-different-identity-diverts.
+  const primaryFile = pendingDivertFilenameForTest(d);
+  const primaryPath = path.join(MERGE_QUARANTINE_DIR, primaryFile);
+  const foreignContentBefore = JSON.stringify({
+    repoPath: foreign, branch: "foreign-branch", reason: "6451a749-collision-file hand-crafted FOREIGN occupant at D's own primary pending-divert filename",
+    enteredAt: Date.now(), tokens: ["6451a749-cf-foreign-token"],
+  }, null, 2) + "\n";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(primaryPath, foreignContentBefore);
+
+  // D raises directly -- unresolvable (never created), reaches the brand-new divert branch. 8a79dd31's
+  // own fix diverts D's own fresh record to a DISTINCT collision filename, leaving the foreign occupant's
+  // own primary file byte-untouched.
+  const dToken1 = enterMergeQuarantine(d, "d-branch-1", "6451a749-collision-file: d raises over a GENUINELY FOREIGN occupant, diverts to a collision file");
+  check("(6451a749-collision-file precondition) the foreign occupant's own primary file is byte-identical after D's own divert",
+    contentIfExists(primaryPath) === foreignContentBefore);
+  const collisionFile = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f !== primaryFile && contentIfExists(path.join(MERGE_QUARANTINE_DIR, f))?.includes(dToken1));
+  check("(6451a749-collision-file precondition) D's own record now lives at a DISTINCT collision-suffixed file, never the primary",
+    collisionFile !== undefined && /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json$/.test(collisionFile));
+
+  // An EARLIER, INDEPENDENT same-identity record for D, hand-crafted directly at R2's own canonical key's
+  // physical `final` -- standing in for an earlier raise of D's that happened to walk up to R2's own key
+  // (the same "degraded occupant" shape every other scenario in this file uses; `d4b25feb`'s own
+  // established "one identity, two independent records" shape covers D legitimately holding both this
+  // AND the collision record above at once).
+  const Kr2 = canonicalRepoLockKey(r2);
+  const Kr2hash = createHash("sha256").update(Kr2).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Kr2hash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-earlier-branch", reason: "D's own EARLIER degraded entry, walked up to R2's own real key",
+    enteredAt: Date.now() - 200000, tokens: ["6451a749-cf-earlier-token"],
+  }, null, 2) + "\n");
+
+  const r2Token = enterMergeQuarantine(r2, "r2-branch", "6451a749-collision-file: r2 raises, triggering protectDegradedOccupantBeforeDelete for D whose own record now lives at a collision file");
+
+  check("(6451a749-collision-file) R2's own write lands directly at its own `final` (the existing, legitimate-overwrite path, unaffected by this card)",
+    (contentIfExists(finalPath) ?? "").includes(r2Token));
+  check("*** THE FIX (6451a749-collision-file) *** the foreign occupant's own file, which 8a79dd31's own reconcile specifically refused to touch, stays BYTE-IDENTICAL -- never overwritten by protectOccupantContentBeforeDelete",
+    contentIfExists(primaryPath) === foreignContentBefore);
+  // Note: the foreign occupant's own token was NEVER scanned into THIS process's own
+  // `pendingUnresolvedQuarantines` (by design, matching the never-scanned-occupant shape) -- so it was
+  // never going to appear in `listActiveMergeQuarantines()` (a purely in-memory read) either before or
+  // after this card's own fix. The byte-identical check above, plus the reboot check below (which DOES
+  // scan disk fresh), are what actually discriminate the fix -- not an in-process-only read here.
+
+  const freshCF = await freshBootModule();
+  freshCF.reenterMergeQuarantinesAtBoot([]);
+  const tokensAfterRebootCF = new Set(freshCF.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("*** THE FIX (6451a749-collision-file, reboot) *** the foreign occupant's own token SURVIVES a fresh-process reboot",
+    tokensAfterRebootCF.has("6451a749-cf-foreign-token"));
+  check("(6451a749-collision-file, reboot) D's own collision-file record and R2's own token both survive regardless",
+    tokensAfterRebootCF.has(dToken1) && tokensAfterRebootCF.has(r2Token));
+
+  freshCF.clearMergeQuarantineByToken(r2, r2Token);
+  freshCF.clearMergeQuarantineByToken(d, dToken1);
+  freshCF.clearMergeQuarantineByToken(d, "6451a749-cf-earlier-token");
+  freshCF.clearMergeQuarantineByToken(foreign, "6451a749-cf-foreign-token");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 ("6451a749-collision-reuse") -- manager ruling: a REPEATED collision against the SAME
+  // primary occupant, for the SAME identity, must UNION into the EXISTING collision file rather than
+  // minting an unbounded number of fresh ones. Two independent degraded-occupant records for ONE identity
+  // X (the SAME "one identity, two independent records" shape 6451a749-collision-file above already
+  // uses), discovered via TWO separate resolvable repos' own clears, each reach
+  // `protectOccupantContentBeforeDelete` -> `reconcilePendingDivertTarget`'s own disk-based
+  // `findExistingSameIdentityCollisionFile` scan -- which never depends on in-memory bookkeeping, so this
+  // is exercised identically whether or not the SAME process happened to track the first collision file.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const x = path.join(os.tmpdir(), `loom-mqrpf-6451a749-cr-x-nonexistent-${freshSfx()}`);
+  const foreign = makeToplevelRepo("6451a749-cr-foreign");
+  const primaryFile = pendingDivertFilenameForTest(x);
+  const primaryPath = path.join(MERGE_QUARANTINE_DIR, primaryFile);
+  const foreignContentBefore = JSON.stringify({
+    repoPath: foreign, branch: "foreign-branch", reason: "6451a749-collision-reuse hand-crafted FOREIGN occupant at X's own primary pending-divert filename",
+    enteredAt: Date.now(), tokens: ["6451a749-cr-foreign-token"],
+  }, null, 2) + "\n";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(primaryPath, foreignContentBefore);
+
+  // FIRST independent degraded record for X, discovered via R1's own clear -- mints a fresh collision file.
+  const r1 = makeToplevelRepo("6451a749-cr-r1");
+  const Kr1 = canonicalRepoLockKey(r1);
+  const Kr1hash = createHash("sha256").update(Kr1).digest("hex").slice(0, 24);
+  const final1Path = path.join(MERGE_QUARANTINE_DIR, `${Kr1hash}.json`);
+  fs.writeFileSync(final1Path, JSON.stringify({
+    repoPath: x, branch: "x-branch-a", reason: "X's own FIRST degraded entry, walked up to R1's own real key",
+    enteredAt: Date.now() - 300000, tokens: ["6451a749-cr-token-a"],
+  }, null, 2) + "\n");
+  const r1Token = enterMergeQuarantine(r1, "r1-branch", "6451a749-collision-reuse: r1 raises, X's first record diverts to a fresh collision file");
+  const collisionFile1 = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f !== primaryFile && contentIfExists(path.join(MERGE_QUARANTINE_DIR, f))?.includes("6451a749-cr-token-a"));
+  check("(6451a749-collision-reuse precondition) X's first record minted a DISTINCT collision-suffixed file",
+    collisionFile1 !== undefined && /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json$/.test(collisionFile1));
+
+  // SECOND, INDEPENDENT degraded record for the SAME identity X, discovered via R2's own clear -- must
+  // UNION into collisionFile1, never mint a second collision file.
+  const r2 = makeToplevelRepo("6451a749-cr-r2");
+  const Kr2 = canonicalRepoLockKey(r2);
+  const Kr2hash = createHash("sha256").update(Kr2).digest("hex").slice(0, 24);
+  const final2Path = path.join(MERGE_QUARANTINE_DIR, `${Kr2hash}.json`);
+  fs.writeFileSync(final2Path, JSON.stringify({
+    repoPath: x, branch: "x-branch-b", reason: "X's own SECOND, independent degraded entry, walked up to R2's own real key",
+    enteredAt: Date.now() - 100000, tokens: ["6451a749-cr-token-b"],
+  }, null, 2) + "\n");
+  const r2Token = enterMergeQuarantine(r2, "r2-branch", "6451a749-collision-reuse: r2 raises, X's second record must union into the EXISTING collision file");
+
+  const collisionFilesForX = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith(`${primaryFile.slice(0, -".json".length)}-collision-`) && f.endsWith(".json"));
+  check("*** THE FIX (6451a749-collision-reuse) *** exactly ONE collision file exists for X's own identity -- never two",
+    collisionFilesForX.length === 1 && collisionFilesForX[0] === collisionFile1);
+  check("*** THE FIX (6451a749-collision-reuse) *** that ONE collision file carries BOTH independent tokens",
+    (() => {
+      const c = contentIfExists(path.join(MERGE_QUARANTINE_DIR, collisionFile1)) ?? "";
+      return c.includes("6451a749-cr-token-a") && c.includes("6451a749-cr-token-b");
+    })());
+  check("(6451a749-collision-reuse) the foreign occupant's own primary file stays byte-identical throughout",
+    contentIfExists(primaryPath) === foreignContentBefore);
+  check("(6451a749-collision-reuse) both R1's and R2's own raises land directly at their OWN `final` (unaffected by this card)",
+    (contentIfExists(final1Path) ?? "").includes(r1Token) && (contentIfExists(final2Path) ?? "").includes(r2Token));
+
+  const freshCR = await freshBootModule();
+  freshCR.reenterMergeQuarantinesAtBoot([foreign]);
+  const tokensAfterRebootCR = new Set(freshCR.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("*** THE FIX (6451a749-collision-reuse, reboot) *** BOTH of X's own tokens survive a fresh-process reboot, as ONE record",
+    tokensAfterRebootCR.has("6451a749-cr-token-a") && tokensAfterRebootCR.has("6451a749-cr-token-b"));
+  check("(6451a749-collision-reuse, reboot) the foreign occupant's own token also survives, unaffected",
+    tokensAfterRebootCR.has("6451a749-cr-foreign-token"));
+
+  freshCR.clearMergeQuarantineByToken(r1, r1Token);
+  freshCR.clearMergeQuarantineByToken(r2, r2Token);
+  freshCR.clearMergeQuarantineByToken(x, "6451a749-cr-token-a");
+  freshCR.clearMergeQuarantineByToken(x, "6451a749-cr-token-b");
+  freshCR.clearMergeQuarantineByToken(foreign, "6451a749-cr-foreign-token");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 (Code Review 45c8250c, CRITICAL, Round 2) -- a fail-OPEN regression in this card's own
+  // Round 1 fix. protectOccupantContentBeforeDelete's new chokepoint union read ONLY the fresh disk
+  // content at `filename`, then OVERWROTE the in-memory record at `atFilenameIdx` with that disk-only
+  // result. An in-memory record can legitimately hold MORE tokens than its own physical backing file
+  // RIGHT NOW -- an EARLIER durable write for the SAME identity already failed ("quarantined IN THIS
+  // PROCESS ONLY": D's own SECOND raise, via `mergeTokenIntoPendingEntries`, has no safety-tmp fallback
+  // at all -- a failed rewrite leaves `merged` enforced purely in memory, at its own pre-existing
+  // `sourceFile`, with the physical file never touched). THE FIX (Round 2): also union the in-memory
+  // record at `atFilenameIdx` (never `atFinalBasenameIdx` -- `c9114934` forbids only that one) ON TOP of
+  // the disk-reconciled result, rather than letting the chokepoint's own disk read REPLACE it.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const d = path.join(os.tmpdir(), `loom-mqrpf-6451a749-im-d-nonexistent-${freshSfx()}`);
+  const pendingFile = pendingDivertFilenameForTest(d);
+  const pendingPath = path.join(MERGE_QUARANTINE_DIR, pendingFile);
+
+  const tD1 = enterMergeQuarantine(d, "d-branch-1", "6451a749-inmemory: D's first raise, mints a fresh pending-divert file");
+  check("(6451a749-inmemory precondition) D's first token is durably on disk",
+    (contentIfExists(pendingPath) ?? "").includes(tD1));
+
+  // D raises AGAIN while every open of `pendingPath` (and its own write-tmp) fails. This reaches
+  // `mergeTokenIntoPendingEntries` (D is still unresolvable, and its own first pending entry already
+  // matches by identity) -- that function's own failed-write branch has NO safety-tmp fallback at all,
+  // so `merged` (tD1+tD2) is pushed into `pendingUnresolvedQuarantines` regardless of the write's own
+  // outcome, leaving it enforced IN MEMORY ONLY while the physical file still holds just tD1.
+  const injectD = injectOpenSyncFailureForPrefix(pendingPath);
+  let tD2;
+  try {
+    tD2 = enterMergeQuarantine(d, "d-branch-2", "6451a749-inmemory: D's second raise, the rewrite fails with no safety-tmp fallback");
+  } finally {
+    injectD.restore();
+  }
+  check("(6451a749-inmemory precondition) D's second token is tracked IN-PROCESS", (() => {
+    const e = activeMergeQuarantineFor(d);
+    return !!e && e.tokens.includes(tD1) && e.tokens.includes(tD2);
+  })());
+  check("(6451a749-inmemory precondition) D's second token did NOT reach disk (the failed rewrite is real, not vacuous)",
+    !(contentIfExists(pendingPath) ?? "").includes(tD2));
+
+  // D's own EARLIER, INDEPENDENT degraded record is discovered at R's own key (the same shape every
+  // other scenario in this file uses) -- R raises, triggering protectOccupantContentBeforeDelete for D,
+  // whose in-memory record (tD1+tD2) now outruns its own on-disk backing (tD1 only).
+  const r = makeToplevelRepo("6451a749-im-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-earlier-branch", reason: "D's own EARLIER degraded entry, walked up to R's own real key",
+    enteredAt: Date.now() - 300000, tokens: ["6451a749-im-current-token"],
+  }, null, 2) + "\n");
+  const rToken = enterMergeQuarantine(r, "r-branch", "6451a749-inmemory: r raises, triggering protectDegradedOccupantBeforeDelete for D");
+
+  check("*** THE FIX (6451a749-inmemory) *** D's own second token (held in memory only before this raise) is now durably written to disk, never silently dropped",
+    (contentIfExists(pendingPath) ?? "").includes(tD2));
+  check("(6451a749-inmemory) D's first token AND the newly-discovered current token also survive the union",
+    (() => {
+      const c = contentIfExists(pendingPath) ?? "";
+      return c.includes(tD1) && c.includes("6451a749-im-current-token");
+    })());
+  check("*** THE FIX (6451a749-inmemory) *** D's own second token is STILL tracked IN-PROCESS after the raise (never dropped by the re-point)",
+    (activeMergeQuarantineFor(d)?.tokens ?? []).includes(tD2));
+
+  const freshIM = await freshBootModule();
+  freshIM.reenterMergeQuarantinesAtBoot([]);
+  const tokensAfterRebootIM = new Set(freshIM.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("*** THE FIX (6451a749-inmemory, reboot) *** D's own second token (previously held in memory only) survives a fresh-process reboot",
+    tokensAfterRebootIM.has(tD2));
+  check("(6451a749-inmemory, reboot) D's first token, D's own current token, and R's own token all survive too",
+    tokensAfterRebootIM.has(tD1) && tokensAfterRebootIM.has("6451a749-im-current-token") && tokensAfterRebootIM.has(rToken));
+
+  freshIM.clearMergeQuarantineByToken(d, tD1);
+  freshIM.clearMergeQuarantineByToken(d, tD2);
+  freshIM.clearMergeQuarantineByToken(d, "6451a749-im-current-token");
+  freshIM.clearMergeQuarantineByToken(r, rToken);
+  freshIM.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 (Code Review 45c8250c, Round 2, test gap) -- a COLLISION-TARGET variant of
+  // `6451a749-inmemory` above: the SAME in-memory-outruns-disk shape, but D's own pending record lives at
+  // a `-collision-` file (because a foreign identity occupies D's own PRIMARY slot) rather than the
+  // primary filename itself. `atFilenameIdx`'s own fold must key off whatever `reconcilePendingDivertTarget`
+  // ACTUALLY resolves to -- proving the fold is not accidentally scoped to the primary-filename case alone.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const d = path.join(os.tmpdir(), `loom-mqrpf-6451a749-imc-d-nonexistent-${freshSfx()}`);
+  const foreign = makeToplevelRepo("6451a749-imc-foreign");
+  const primaryFile = pendingDivertFilenameForTest(d);
+  const primaryPath = path.join(MERGE_QUARANTINE_DIR, primaryFile);
+  const foreignContentBefore = JSON.stringify({
+    repoPath: foreign, branch: "foreign-branch", reason: "6451a749-inmemory-collision hand-crafted FOREIGN occupant at D's own primary pending-divert filename",
+    enteredAt: Date.now(), tokens: ["6451a749-imc-foreign-token"],
+  }, null, 2) + "\n";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(primaryPath, foreignContentBefore);
+
+  // D raises -- its own primary slot is occupied by a GENUINELY different identity, so this diverts to a
+  // fresh collision file (8a79dd31's own rule), never the primary.
+  const tD1 = enterMergeQuarantine(d, "d-branch-1", "6451a749-inmemory-collision: D's first raise, diverts to a fresh collision file");
+  const collisionFile = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f !== primaryFile && contentIfExists(path.join(MERGE_QUARANTINE_DIR, f))?.includes(tD1));
+  check("(6451a749-inmemory-collision precondition) D's first record lives at a DISTINCT collision-suffixed file, never the primary",
+    collisionFile !== undefined && /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json$/.test(collisionFile));
+  const collisionPath = path.join(MERGE_QUARANTINE_DIR, collisionFile);
+
+  // D raises AGAIN while every open of its own COLLISION file (not the primary) fails -- the SAME
+  // `mergeTokenIntoPendingEntries` shape as `6451a749-inmemory` above, just at a different physical name.
+  const injectD = injectOpenSyncFailureForPrefix(collisionPath);
+  let tD2;
+  try {
+    tD2 = enterMergeQuarantine(d, "d-branch-2", "6451a749-inmemory-collision: D's second raise, the collision-file rewrite fails with no safety-tmp fallback");
+  } finally {
+    injectD.restore();
+  }
+  check("(6451a749-inmemory-collision precondition) D's second token is tracked IN-PROCESS", (() => {
+    const e = activeMergeQuarantineFor(d);
+    return !!e && e.tokens.includes(tD1) && e.tokens.includes(tD2);
+  })());
+  check("(6451a749-inmemory-collision precondition) D's second token did NOT reach the collision file on disk (the failed rewrite is real, not vacuous)",
+    !(contentIfExists(collisionPath) ?? "").includes(tD2));
+
+  // D's own EARLIER, INDEPENDENT degraded record is discovered at R's own key -- R raises, triggering
+  // protectOccupantContentBeforeDelete for D, whose in-memory record (tD1+tD2, at the COLLISION file) now
+  // outruns that collision file's own on-disk backing (tD1 only). The primary is STILL occupied by
+  // `foreign`, unchanged, so `reconcilePendingDivertTarget` must resolve back to the SAME collision file
+  // (via `findExistingSameIdentityCollisionFile`) for the fold to even have something to key off.
+  const r = makeToplevelRepo("6451a749-imc-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-earlier-branch", reason: "D's own EARLIER degraded entry, walked up to R's own real key",
+    enteredAt: Date.now() - 300000, tokens: ["6451a749-imc-current-token"],
+  }, null, 2) + "\n");
+  const rToken = enterMergeQuarantine(r, "r-branch", "6451a749-inmemory-collision: r raises, triggering protectDegradedOccupantBeforeDelete for D");
+
+  check("(6451a749-inmemory-collision) the foreign occupant's own primary file is byte-identical throughout",
+    contentIfExists(primaryPath) === foreignContentBefore);
+  check("*** THE FIX (6451a749-inmemory-collision) *** D's own second token (held in memory only, at the COLLISION file) is now durably written to disk, never silently dropped",
+    (contentIfExists(collisionPath) ?? "").includes(tD2));
+  check("(6451a749-inmemory-collision) D's first token AND the newly-discovered current token also survive the union",
+    (() => {
+      const c = contentIfExists(collisionPath) ?? "";
+      return c.includes(tD1) && c.includes("6451a749-imc-current-token");
+    })());
+  check("*** THE FIX (6451a749-inmemory-collision) *** D's own second token is STILL tracked IN-PROCESS after the raise",
+    (activeMergeQuarantineFor(d)?.tokens ?? []).includes(tD2));
+
+  const freshIMC = await freshBootModule();
+  freshIMC.reenterMergeQuarantinesAtBoot([foreign]);
+  const tokensAfterRebootIMC = new Set(freshIMC.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("*** THE FIX (6451a749-inmemory-collision, reboot) *** D's own second token (previously held in memory only at the collision file) survives a fresh-process reboot",
+    tokensAfterRebootIMC.has(tD2));
+  check("(6451a749-inmemory-collision, reboot) D's first token, D's own current token, R's own token, and the foreign occupant's own token all survive too",
+    tokensAfterRebootIMC.has(tD1) && tokensAfterRebootIMC.has("6451a749-imc-current-token") && tokensAfterRebootIMC.has(rToken) && tokensAfterRebootIMC.has("6451a749-imc-foreign-token"));
+
+  freshIMC.clearMergeQuarantineByToken(d, tD1);
+  freshIMC.clearMergeQuarantineByToken(d, tD2);
+  freshIMC.clearMergeQuarantineByToken(d, "6451a749-imc-current-token");
+  freshIMC.clearMergeQuarantineByToken(r, rToken);
+  freshIMC.clearMergeQuarantineByToken(foreign, "6451a749-imc-foreign-token");
+  freshIMC.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 (Code Review 45c8250c, Minor #2) -- the double-fault `kept` fallback (the chosen write
+  // ALSO fails) must carry TOKENS forward from the unioned `toWrite` (fail-closed), but must NEVER borrow
+  // `orphanLatchFiles` from it: `toWrite` can list files belonging to WHATEVER OTHER record lives at
+  // `filename` (the on-disk occupant, or a folded in-memory entry) -- `kept` is self-owned at
+  // `finalBasename`, a DIFFERENT physical file, and a later clear of `kept` must never sweep a file that
+  // other record still legitimately references. `orphanLatchFiles` is scoped to `toPersist` instead --
+  // `final`'s own content, which genuinely belongs to `kept`'s own lineage.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const d = path.join(os.tmpdir(), `loom-mqrpf-6451a749-of-d-nonexistent-${freshSfx()}`);
+  const pendingFile = pendingDivertFilenameForTest(d);
+  const pendingPath = path.join(MERGE_QUARANTINE_DIR, pendingFile);
+  const foreignOrphanRef = "6451a749-of-foreign-orphan-ref.json";
+  const foreignOrphanPath = path.join(MERGE_QUARANTINE_DIR, foreignOrphanRef);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // A dummy file standing in for content some OTHER, still-live record genuinely owns -- never created
+  // or owned by this scenario's own D/R identities.
+  fs.writeFileSync(foreignOrphanPath, "not D's own content\n");
+
+  // D's own PRE-EXISTING pending-divert record already carries an orphan reference of its OWN (standing
+  // in for an earlier, legitimate sibling-absorb) -- this is what `toWrite`'s own disk-union would pull
+  // forward, and what `kept` must NOT inherit.
+  fs.writeFileSync(pendingPath, JSON.stringify({
+    repoPath: d, branch: "d-prior-branch", reason: "6451a749-double-fault-orphan-scope: D's own prior pending record, carrying an orphan reference",
+    enteredAt: Date.now() - 100000, tokens: ["6451a749-of-prior-token"], orphanLatchFiles: [foreignOrphanRef],
+  }, null, 2) + "\n");
+
+  const r = makeToplevelRepo("6451a749-of-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-current-branch", reason: "D's own CURRENT degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["6451a749-of-current-token"],
+  }, null, 2) + "\n");
+
+  // Force the chosen write (to `pendingPath`, the SAME primary filename) to fail -- the double fault.
+  const injectOF = injectOpenSyncFailureForPrefix(pendingPath);
+  let rToken;
+  try {
+    rToken = enterMergeQuarantine(r, "r-branch", "6451a749-double-fault-orphan-scope: r raises, protect's own chosen write fails");
+  } finally {
+    injectOF.restore();
+  }
+  check("(6451a749-double-fault-orphan-scope precondition) the write was actually attempted (and injected to fail)", injectOF.count() >= 1);
+
+  const kept = activeMergeQuarantineFor(d);
+  check("*** THE FIX (6451a749-double-fault-orphan-scope) *** `kept` carries BOTH tokens forward (fail-closed)",
+    !!kept && kept.tokens.includes("6451a749-of-prior-token") && kept.tokens.includes("6451a749-of-current-token"));
+  check("*** THE FIX (6451a749-double-fault-orphan-scope) *** `kept` does NOT borrow the foreign orphan reference it never owned",
+    !!kept && !(kept.orphanLatchFiles ?? []).includes(foreignOrphanRef));
+  check("(6451a749-double-fault-orphan-scope) `kept` DOES self-reference `final`'s own basename",
+    !!kept && (kept.orphanLatchFiles ?? []).includes(path.basename(finalPath)));
+  check("(6451a749-double-fault-orphan-scope) the foreign orphan file itself is untouched on disk (never swept, never owned)",
+    contentIfExists(foreignOrphanPath) === "not D's own content\n");
+  check("(6451a749-double-fault-orphan-scope) r's own raise still persists in-process despite the double fault",
+    new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? [])).has(rToken));
+
+  // Drive the actual HARM this pin exists to prevent, not just the field shape above: clearing `kept`'s
+  // own LAST token reaches `clearTokenFromPendingIndices`'s own last-token branch, which sweeps every
+  // file listed in THAT entry's own `orphanLatchFiles` that nothing else references
+  // (`sweepOrphanLatchFileIfUnreferenced`). If `kept` wrongly inherited the foreign reference (the
+  // reverted shape this pin guards against), this sweep is what would actually delete the foreign file
+  // -- the field-shape checks above cannot see that on their own; this is Control B's own discriminator.
+  clearMergeQuarantineByToken(d, "6451a749-of-prior-token"); // partial clear -- one token remains, no sweep yet
+  clearMergeQuarantineByToken(d, "6451a749-of-current-token"); // the LAST token -- triggers the orphan sweep
+  check("*** THE FIX (6451a749-double-fault-orphan-scope) *** clearing `kept`'s own LAST token does NOT sweep the foreign orphan file it never owned",
+    fs.existsSync(foreignOrphanPath));
+
+  clearMergeQuarantineByToken(r, rToken);
+  fs.rmSync(foreignOrphanPath, { force: true });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 (Code Review 45c8250c, Minor #3a) -- pin the MINT path's own collision reuse
+  // (`mintPendingDivert` -> `reconcilePendingDivertTarget` -> `findExistingSameIdentityCollisionFile`).
+  // The earlier `6451a749-collision-reuse` scenario above exercises this ONLY via
+  // `protectOccupantContentBeforeDelete`; this scenario drives it via a fresh RAISE instead, mirroring
+  // 8a79dd31-fresh-divert's own "never scanned" setup for the COLLISION file specifically.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const x = path.join(os.tmpdir(), `loom-mqrpf-6451a749-mr-x-nonexistent-${freshSfx()}`);
+  const foreign = makeToplevelRepo("6451a749-mr-foreign");
+  const primaryFile = pendingDivertFilenameForTest(x);
+  const primaryPath = path.join(MERGE_QUARANTINE_DIR, primaryFile);
+  const foreignContentBefore = JSON.stringify({
+    repoPath: foreign, branch: "foreign-branch", reason: "6451a749-mint-reuse hand-crafted FOREIGN occupant at X's own primary pending-divert filename",
+    enteredAt: Date.now(), tokens: ["6451a749-mr-foreign-token"],
+  }, null, 2) + "\n";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(primaryPath, foreignContentBefore);
+
+  // A collision file for X's OWN identity, hand-crafted directly -- standing in for an earlier mint by a
+  // DIFFERENT process, never scanned into THIS process's own pendingUnresolvedQuarantines.
+  const existingCollisionFile = pendingDivertCollisionFilenameForTest(x);
+  const existingCollisionPath = path.join(MERGE_QUARANTINE_DIR, existingCollisionFile);
+  fs.writeFileSync(existingCollisionPath, JSON.stringify({
+    repoPath: x, branch: "x-earlier-branch", reason: "6451a749-mint-reuse: X's own earlier collision record, never scanned by this process",
+    enteredAt: Date.now() - 100000, tokens: ["6451a749-mr-existing-token"],
+  }, null, 2) + "\n");
+
+  // X raises directly -- unresolvable, never scanned anywhere -> reaches `mintPendingDivert` via
+  // `enterMergeQuarantine`'s own brand-new-unresolvable branch (NOT `protectOccupantContentBeforeDelete`).
+  const xToken = enterMergeQuarantine(x, "x-branch", "6451a749-mint-reuse: x raises, must UNION into the EXISTING collision file via the mint path");
+
+  check("*** THE FIX (6451a749-mint-reuse) *** the foreign occupant's own primary file is byte-identical, never touched",
+    contentIfExists(primaryPath) === foreignContentBefore);
+  const collisionFilesForX = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith(`${primaryFile.slice(0, -".json".length)}-collision-`) && f.endsWith(".json"));
+  check("*** THE FIX (6451a749-mint-reuse) *** exactly ONE collision file exists for X's own identity -- the EXISTING one, never a second",
+    collisionFilesForX.length === 1 && collisionFilesForX[0] === existingCollisionFile);
+  check("*** THE FIX (6451a749-mint-reuse) *** that file carries BOTH the earlier and the fresh token",
+    (() => {
+      const c = contentIfExists(existingCollisionPath) ?? "";
+      return c.includes("6451a749-mr-existing-token") && c.includes(xToken);
+    })());
+
+  const freshMR = await freshBootModule();
+  freshMR.reenterMergeQuarantinesAtBoot([foreign]);
+  const tokensAfterRebootMR = new Set(freshMR.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("*** THE FIX (6451a749-mint-reuse, reboot) *** BOTH of X's own tokens survive a fresh-process reboot, as ONE record",
+    tokensAfterRebootMR.has("6451a749-mr-existing-token") && tokensAfterRebootMR.has(xToken));
+
+  freshMR.clearMergeQuarantineByToken(x, "6451a749-mr-existing-token");
+  freshMR.clearMergeQuarantineByToken(x, xToken);
+  freshMR.clearMergeQuarantineByToken(foreign, "6451a749-mr-foreign-token");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6451a749 (Code Review 45c8250c, Minor #3b) -- a NEGATIVE CONTROL for the mint-reuse scan above:
+  // 8a79dd31's own "different identity -> fresh collision file, never overwrite/reuse" rule must still
+  // hold when `findExistingSameIdentityCollisionFile`'s OWN scan finds a collision-suffixed file sitting
+  // at X's own deterministic prefix, but whose CONTENT names a GENUINELY DIFFERENT identity (a true
+  // hash-of-identity collision stand-in, same pattern 8a79dd31-different-identity-diverts already uses at
+  // the primary slot -- here it's the COLLISION slot instead). The scan must SKIP it (content mismatch)
+  // and mint a brand-new collision file for X, never reuse or touch the mismatched one.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const x = path.join(os.tmpdir(), `loom-mqrpf-6451a749-mrn-x-nonexistent-${freshSfx()}`);
+  const foreign1 = makeToplevelRepo("6451a749-mrn-foreign1");
+  const foreign2 = makeToplevelRepo("6451a749-mrn-foreign2");
+  const primaryFile = pendingDivertFilenameForTest(x);
+  const primaryPath = path.join(MERGE_QUARANTINE_DIR, primaryFile);
+  const foreign1ContentBefore = JSON.stringify({
+    repoPath: foreign1, branch: "foreign1-branch", reason: "6451a749-mint-reuse-negative hand-crafted FOREIGN occupant at X's own primary filename",
+    enteredAt: Date.now(), tokens: ["6451a749-mrn-foreign1-token"],
+  }, null, 2) + "\n";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(primaryPath, foreign1ContentBefore);
+
+  // A collision-suffixed file sitting at X's OWN deterministic prefix, but its content names a WHOLLY
+  // DIFFERENT identity (foreign2) -- the true-hash-of-identity-collision stand-in, now at the collision
+  // slot rather than the primary one.
+  const mismatchedCollisionFile = pendingDivertCollisionFilenameForTest(x);
+  const mismatchedCollisionPath = path.join(MERGE_QUARANTINE_DIR, mismatchedCollisionFile);
+  const foreign2ContentBefore = JSON.stringify({
+    repoPath: foreign2, branch: "foreign2-branch", reason: "6451a749-mint-reuse-negative hand-crafted FOREIGN occupant AT X's own collision-prefixed filename",
+    enteredAt: Date.now(), tokens: ["6451a749-mrn-foreign2-token"],
+  }, null, 2) + "\n";
+  fs.writeFileSync(mismatchedCollisionPath, foreign2ContentBefore);
+
+  const xToken = enterMergeQuarantine(x, "x-branch", "6451a749-mint-reuse-negative: x raises, the collision-slot occupant is a content mismatch -> must mint fresh");
+
+  check("(6451a749-mint-reuse-negative) foreign1's own primary file is byte-identical, never touched",
+    contentIfExists(primaryPath) === foreign1ContentBefore);
+  check("*** THE FIX (6451a749-mint-reuse-negative) *** the content-mismatched collision-slot occupant (foreign2) is byte-identical, NEVER reused or touched",
+    contentIfExists(mismatchedCollisionPath) === foreign2ContentBefore);
+  const freshCollisionFile = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f !== primaryFile && f !== mismatchedCollisionFile && contentIfExists(path.join(MERGE_QUARANTINE_DIR, f))?.includes(xToken));
+  check("*** THE FIX (6451a749-mint-reuse-negative) *** x's own entry landed at a DISTINCT, BRAND-NEW collision file -- never the mismatched one",
+    freshCollisionFile !== undefined && /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json$/.test(freshCollisionFile));
+
+  const freshMRN = await freshBootModule();
+  freshMRN.reenterMergeQuarantinesAtBoot([foreign1, foreign2]);
+  const tokensAfterRebootMRN = new Set(freshMRN.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("(6451a749-mint-reuse-negative, reboot) ALL THREE tokens survive, as three separate records",
+    tokensAfterRebootMRN.has(xToken) && tokensAfterRebootMRN.has("6451a749-mrn-foreign1-token") && tokensAfterRebootMRN.has("6451a749-mrn-foreign2-token"));
+
+  freshMRN.clearMergeQuarantineByToken(x, xToken);
+  freshMRN.clearMergeQuarantineByToken(foreign1, "6451a749-mrn-foreign1-token");
+  freshMRN.clearMergeQuarantineByToken(foreign2, "6451a749-mrn-foreign2-token");
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -3310,6 +3875,17 @@ console.log(failures === 0
     "`reconcileMarkedBasenameBeforeWrite` already used, so the two can never drift apart again — a " +
     "degraded occupant whose every on-disk token is already tombstoned is copied aside NOT AT ALL (p3), " +
     "and one whose on-disk tokens are a genuine mix of tombstoned and still-owed carries forward only the " +
-    "survivor (mixed)."
+    "survivor (mixed). " +
+    "FOLLOW-UP (CR ddb58ffa of 8a79dd31, card 6451a749): `protectOccupantContentBeforeDelete` was a THIRD " +
+    "writer of the deterministic pending-divert path with no occupant-aware disk read at all — its own " +
+    "union source was ONLY the in-memory `pendingUnresolvedQuarantines` lookup, so an on-disk same-identity " +
+    "occupant this process never scanned was silently destroyed (never-scanned), and once an identity's " +
+    "record lived at a `-collision-` file, its primary-name-only write overwrote the very foreign occupant " +
+    "8a79dd31's own reconcile had refused to touch (collision-file). THE FIX: both `mintPendingDivert` and " +
+    "`protectOccupantContentBeforeDelete` now route through ONE generalized chokepoint " +
+    "(`reconcilePendingDivertTarget`), whose same-identity union carries tokens AND orphanLatchFiles/" +
+    "contributorRepoPaths/provenanceUnknown/provenanceTracked forward (via `unionQuarantineEntries` " +
+    "itself, never a token-only re-implementation), and which unions a repeated collision into an EXISTING " +
+    "same-identity collision file rather than minting an unbounded number of fresh ones (collision-reuse)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
