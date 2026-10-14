@@ -3736,6 +3736,12 @@ export class OrchestrationMcpRouter {
           "NO-OP ON A CLEAN COMPOSER: if the worker's composer looks genuinely empty (nothing outstanding, " +
           "no possibly-stranded residue), this is a documented no-op — `{ok:false, reason:\"composer-empty\"}` " +
           "— never a stray bare Enter that could start an empty turn. " +
+          "NOT APPLICABLE TO A CODEX-HARNESS WORKER (card 760f2874): this affordance is a bracketed-paste " +
+          "reassert + Enter mechanism claude uses; codex never uses bracketed paste and has no equivalent " +
+          "stranded-composer state, so a LIVE codex worker reports `{ok:false, reason:\"not-applicable-codex\"}` " +
+          "— never the dead-session `\"session-dead\"` a genuinely gone worker gets, which this used to " +
+          "falsely report for every codex worker regardless of liveness (fixed; see that card's decision " +
+          "record). Check `worker_list`/`worker_status` for a codex worker's own liveness/busy state instead. " +
           "⚠️ A REMEDY TO TRY, NOT A GUARANTEED RECOVERY: the Enter can succeed, OR it can fail to confirm " +
           "exactly as it did the first time — `confirmed` reports which, honestly, after a bounded wait; a " +
           "`confirmed:false` result means this attempt didn't land, not that nothing can be done (you still " +

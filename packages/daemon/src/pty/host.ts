@@ -11887,10 +11887,16 @@ export class PtyHost {
    * populated ONLY when this call's own bounded wait happens to observe the resolution for THIS SAME
    * `gen` before returning; the common late case is read later via `getLastFlushAttribution`/a
    * subsequent `worker_flush` call, never blocked on here.
+   *
+   * @decision 760f2874 — an alive codex session reports `"not-applicable-codex"` here, never the
+   * claude-dead-session `"session-dead"` — this whole flush mechanism has no codex equivalent.
    */
   flushComposer(sessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; attributable?: boolean }> {
     const live = this.live.get(sessionId);
-    if (!live?.alive) return Promise.resolve({ ok: false, reason: "session-dead" });
+    if (!live?.alive) {
+      if (this.liveCodex.get(sessionId)?.alive) return Promise.resolve({ ok: false, reason: "not-applicable-codex" });
+      return Promise.resolve({ ok: false, reason: "session-dead" });
+    }
     const stranded = !live.enterConfirmed && (live.busy || live.composerDirtyLen > 0);
     if (!stranded) return Promise.resolve({ ok: false, reason: "composer-empty" });
     // Card 29b3c396 (CR follow-up): captured BEFORE this call writes anything, so `recovered` below can
