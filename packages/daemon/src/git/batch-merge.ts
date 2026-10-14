@@ -4,7 +4,7 @@ import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByT
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
-import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
+import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
 import { mergeCommitBlocksLinearization, MAX_MERGE_COMMITS_CHECKED } from "./merge-linearization.js";
 import { isMergeGateRed } from "../orchestration/gate-semaphore.js";
@@ -69,13 +69,16 @@ function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit
   return { git, timeoutMs };
 }
 
-/** Same seam as {@link boundedGit}, PLUS `nonInteractiveEnv()` on the default factory — matching
+/** Same seam as {@link boundedGit}, PLUS `localNonInteractiveEnv()` on the default factory — matching
  *  `git/worktrees.ts`'s own `boundedMergeGit` convention for a git WRITE (a cherry-pick's own commit step
  *  is exactly that class of call). `gitFactory`, when supplied (the test seam), is used as-is — mirrors
- *  `worktrees.ts`'s identical reasoning: a test injecting a fake doesn't need env scrubbing applied to it. */
+ *  `worktrees.ts`'s identical reasoning: a test injecting a fake doesn't need env scrubbing applied to it.
+ *  @decision a746a3eb — `localNonInteractiveEnv()`, not `nonInteractiveEnv()`: this instance's `.raw()` is
+ *  called directly (never through `killableCanonicalRaw`'s own raw-spawn path) against the ephemeral batch
+ *  worktree, which never touches a remote — the transport family must be stripped, not left blocked. */
 function boundedMergeGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs, nonInteractiveEnv());
+  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs, localNonInteractiveEnv());
   return { git, timeoutMs };
 }
 

@@ -102,7 +102,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, attemptCodexAutoCommit, boundConventionalSubject, precheckWorkerDone } = await import("../dist/git/worktrees.js");
 const { boundedSimpleGit } = await import("../dist/git/bounded.js");
-const { nonInteractiveEnv } = await import("../dist/git/writer.js");
+const { localNonInteractiveEnv } = await import("../dist/git/writer.js");
 
 let failures = 0;
 let skipped = 0;
@@ -306,7 +306,9 @@ try {
     let plantAttempted = false;
     let plantLandedImmediately; // checked INSIDE the wrapper, before commit/cleanup — never after return
     const planterFactory = (repoPath, ms) => {
-      const real = boundedSimpleGit(repoPath, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
+      // @decision a746a3eb — localNonInteractiveEnv(), not nonInteractiveEnv(): mirrors attemptCodexAutoCommit's
+      // own default factory (worktree-scoped, never network), so this test double survives ambient GIT_ASKPASS too.
+      const real = boundedSimpleGit(repoPath, ms, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
       return {
         raw: (args) => {
           const p = real.raw(args);
@@ -346,7 +348,9 @@ try {
     fs.writeFileSync(path.join(worktreePath, "fsmonitor-test.txt"), "real work\n");
     const calls = [];
     const spyFactory = (repoPath, ms) => {
-      const real = boundedSimpleGit(repoPath, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
+      // @decision a746a3eb — localNonInteractiveEnv(), not nonInteractiveEnv(): mirrors attemptCodexAutoCommit's
+      // own default factory (worktree-scoped, never network), so this test double survives ambient GIT_ASKPASS too.
+      const real = boundedSimpleGit(repoPath, ms, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
       return { raw: (args) => { calls.push(args); return real.raw(args); } };
     };
     const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "fsmonitor test" }, { gitFactory: spyFactory });
@@ -421,7 +425,9 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, `cac-k11-proj-${sfx}`, `cac-k11-task-${sfx}`);
     fs.writeFileSync(path.join(worktreePath, "seen-file.txt"), "the file our OWN status read will see\n");
     const raceFactory = (repoPath, ms) => {
-      const real = boundedSimpleGit(repoPath, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
+      // @decision a746a3eb — localNonInteractiveEnv(), not nonInteractiveEnv(): mirrors attemptCodexAutoCommit's
+      // own default factory (worktree-scoped, never network), so this test double survives ambient GIT_ASKPASS too.
+      const real = boundedSimpleGit(repoPath, ms, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
       return {
         raw: (args) => {
           const p = real.raw(args);
@@ -469,7 +475,9 @@ try {
     let commitAttempted = false;
     let postCommitRevParseCount = 0;
     const factory = (repoPath, ms) => {
-      const real = boundedSimpleGit(repoPath, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
+      // @decision a746a3eb — localNonInteractiveEnv(), not nonInteractiveEnv(): mirrors attemptCodexAutoCommit's
+      // own default factory (worktree-scoped, never network), so this test double survives ambient GIT_ASKPASS too.
+      const real = boundedSimpleGit(repoPath, ms, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
       return {
         raw: (args) => {
           if (Array.isArray(args) && args.includes("commit") && args.includes("--no-verify")) commitAttempted = true;
@@ -510,7 +518,9 @@ try {
     // call, and rejecting it is exactly what reproduces the bug this test guards against.
     let commitAttempted = false;
     const factory = (repoPath, ms) => {
-      const real = boundedSimpleGit(repoPath, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
+      // @decision a746a3eb — localNonInteractiveEnv(), not nonInteractiveEnv(): mirrors attemptCodexAutoCommit's
+      // own default factory (worktree-scoped, never network), so this test double survives ambient GIT_ASKPASS too.
+      const real = boundedSimpleGit(repoPath, ms, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true });
       return {
         raw: (args) => {
           if (Array.isArray(args) && args.includes("commit") && args.includes("--no-verify")) {
@@ -653,7 +663,10 @@ try {
   {
     const repo = path.join(os.tmpdir(), `loom-cac-s4-${sfx}`);
     initRepo(repo);
-    const plain = boundedSimpleGit(repo, 5000, nonInteractiveEnv());
+    // @decision a746a3eb — localNonInteractiveEnv(): a plain `git status` on this throwaway repo never
+    // touches a remote, so this must survive ambient GIT_ASKPASS the same way attemptCodexAutoCommit's own
+    // default factory does; only the hooksPath refusal under test should ever throw here.
+    const plain = boundedSimpleGit(repo, 5000, localNonInteractiveEnv());
     let plainThrew = false;
     try {
       await plain.raw(["-c", "core.hooksPath=/dev/null", "status"]);
@@ -662,7 +675,7 @@ try {
     }
     check("(S4) a PLAIN boundedSimpleGit call (no extraUnsafe) still gets refused for -c core.hooksPath",
       plainThrew === true);
-    const optedIn = boundedSimpleGit(repo, 5000, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true });
+    const optedIn = boundedSimpleGit(repo, 5000, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true });
     let optedInThrew = false;
     try {
       await optedIn.raw(["-c", "core.hooksPath=/dev/null", "status"]);

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { SimpleGit } from "simple-git";
 import { RUNS_DIR } from "../paths.js";
-import { withTimeout, boundedSimpleGit, scrubGitEnv } from "../git/bounded.js";
+import { withTimeout, boundedSimpleGit, scrubGitEnv, deleteEnvKeys, GIT_ENV_TRANSPORT_KEYS } from "../git/bounded.js";
 import { killableRemoveDir, type RemoveDirResult } from "../git/worktrees.js";
 
 /**
@@ -68,6 +68,9 @@ export async function createRunSnapshot(repoPath: string, sessionId: string, dep
     if (v === undefined) continue;
     env[k] = v;
   }
+  // @decision a746a3eb — strip the transport family (GIT_ASKPASS/...) too, same as every other LOCAL-only
+  // canonical git instance — this read-tree/checkout-index plumbing never touches a remote.
+  deleteEnvKeys(env, GIT_ENV_TRANSPORT_KEYS);
   env.GIT_INDEX_FILE = indexFile;
   const timeoutMs = deps.timeoutMs ?? RUN_SNAPSHOT_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms, e) => boundedSimpleGit(p, ms, e));

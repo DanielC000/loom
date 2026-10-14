@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
-import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
+import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
@@ -188,19 +188,24 @@ function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleG
 
 /**
  * Same seam as {@link boundedGit} (block-timeout + the `withTimeout` race, both defaulting to
- * {@link GIT_OP_TIMEOUT_MS}), PLUS `nonInteractiveEnv()` (`GIT_TERMINAL_PROMPT=0` etc.) on the default
- * factory — matching `git/reader.ts` and `git/writer.ts`'s own convention for a git WRITE. Used only by
- * {@link mergeBranchLocked} and {@link scanCanonicalReposForMergeResidue}: the squash-merge onto the
- * canonical repo is this codebase's highest-consequence git write (board card 44c28799), so it gets the
- * same non-interactive posture as every other writer. Deliberately NOT folded into {@link boundedGit}
- * itself — that helper backs ~20 other call sites in this file (worktree creation, branch listing,
- * diffing) that are read-mostly or worktree-scoped; changing their environment behavior is out of scope
- * here and would need its own verification. `gitFactory`, when supplied (the test seam), is used as-is —
- * a test injecting a hanging fake doesn't need env scrubbing applied to it.
+ * {@link GIT_OP_TIMEOUT_MS}), PLUS `localNonInteractiveEnv()` (`GIT_TERMINAL_PROMPT=0` etc., transport
+ * family stripped) on the default factory — matching `git/reader.ts` and `git/writer.ts`'s own convention
+ * for a LOCAL git write. Used only by {@link mergeBranchLocked} and
+ * {@link scanCanonicalReposForMergeResidue}: the squash-merge onto the canonical repo is this codebase's
+ * highest-consequence git write (board card 44c28799), so it gets the same non-interactive posture as
+ * every other writer. Deliberately NOT folded into {@link boundedGit} itself — that helper backs ~20 other
+ * call sites in this file (worktree creation, branch listing, diffing) that are read-mostly or
+ * worktree-scoped; changing their environment behavior is out of scope here and would need its own
+ * verification. `gitFactory`, when supplied (the test seam), is used as-is — a test injecting a hanging
+ * fake doesn't need env scrubbing applied to it.
+ *
+ * @decision a746a3eb — `localNonInteractiveEnv()`, not `nonInteractiveEnv()`: this instance's own
+ * `.raw()` is called DIRECTLY (never through `killableCanonicalRaw`'s immune raw-spawn path) for ops on
+ * the canonical repo that never touch a remote — the transport family must be stripped, not left blocked.
  */
 function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, nonInteractiveEnv()));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localNonInteractiveEnv()));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(repoPath, timeoutMs);
@@ -2627,8 +2632,10 @@ export async function attemptCodexAutoCommit(
   // `allowUnsafeFsMonitor`, for the `-c` args below) are passed ONLY through THIS dedicated default
   // factory, via boundedSimpleGit's own opt-in `extraUnsafe` param — never added to that shared
   // chokepoint's unconditional allowlist, so no OTHER caller's `unsafe` set is widened by this feature.
+  // @decision a746a3eb — `localNonInteractiveEnv()`: every read/write below calls this instance's own
+  // `.raw()` directly against the worktree, which never touches a remote.
   const makeGit = deps.gitFactory
-    ?? ((p, ms) => canonicalGit(p, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
+    ?? ((p, ms) => canonicalGit(p, ms, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(worktreePath, timeoutMs);

@@ -15,6 +15,7 @@ import {
   withTimeout,
   boundedSimpleGit,
   scrubGitEnv,
+  localReadGitEnv,
   killableCanonicalRaw,
   treeDeathUnconfirmed,
   isNotAGitRepositoryError,
@@ -79,18 +80,22 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
  * of a fixed list of env vars is present in the supplied env, unless the matching `unsafe.allow*` flag is
  * explicitly set — each entry below is one of those categories, decided on the SAME two-part test the
  * original `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` strip used: (1) could a real host/session ambiently carry
- * it, and (2) would any op in this file (log/branches/show/checkout/commit/push — all captured stdio,
- * never a real TTY) ever legitimately need it.
+ * it, and (2) would {@link GitWriter.push}'s own instance (this function's ONE remaining caller — see
+ * {@link localNonInteractiveEnv} for every LOCAL-only caller, which strips the transport family instead)
+ * ever legitimately need it.
  *
  * @decision f7a80d76 — STRIPPED (delegated to {@link scrubGitEnv}: includes GIT_PAGER/PAGER, proved to
  * 500 every git op, card 42544916) vs PASSED-THROUGH-EXPLICITLY-ALLOWED (the config-path family, via
  * `unsafe.allowUnsafeConfigPaths`) — never re-add GIT_PAGER/PAGER, never blanket-strip config-paths.
  *
- * DELIBERATELY LEFT BLOCKED (simple-git's guard staying active is the intended behavior, not a gap):
+ * @decision a746a3eb — the transport family below is DELIBERATELY LEFT BLOCKED for `push()` specifically,
+ * never a gap. Every OTHER, LOCAL-only caller instead strips it via {@link localNonInteractiveEnv}.
+ *
+ * DELIBERATELY LEFT BLOCKED (simple-git's guard staying active for `push()` is the intended behavior):
  *  - GIT_ASKPASS / SSH_ASKPASS — pre-existing decision (see {@link NONINTERACTIVE_ENV}'s comment):
  *    genuinely reachable ambiently (e.g. VS Code's integrated terminal sets `GIT_ASKPASS` for its own
  *    Git extension), but bypassing the guard is an arbitrary-command vector during a real auth prompt —
- *    the wrong trade for this trust-boundary surface. Left as-is; this comment doesn't reopen it.
+ *    the wrong trade for the one instance that actually authenticates against a remote.
  *  - GIT_SSH / GIT_SSH_COMMAND — same trust class as ASKPASS: plausibly ambient (devs pin a custom
  *    identity file via `GIT_SSH_COMMAND`), but it names an arbitrary program git will exec in place of
  *    `ssh` for the real network transport `push()` uses — bypassing it is the same class of risk as
@@ -110,6 +115,15 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
  */
 export function nonInteractiveEnv(): Record<string, string | undefined> {
   return { ...scrubGitEnv(process.env), ...NONINTERACTIVE_ENV };
+}
+
+/**
+ * @decision a746a3eb — the LOCAL-ONLY sibling of {@link nonInteractiveEnv}: also strips the transport
+ * family (GIT_ASKPASS, SSH_ASKPASS, GIT_SSH, GIT_SSH_COMMAND, GIT_PROXY_COMMAND, ...), left BLOCKED by
+ * `nonInteractiveEnv()` itself. Never use this for an instance that can reach a remote (e.g. push).
+ */
+export function localNonInteractiveEnv(): Record<string, string | undefined> {
+  return localReadGitEnv(nonInteractiveEnv(), {});
 }
 
 /** A structured outcome the UI can render — never a thrown 500 for an EXPECTED git failure. */
@@ -197,7 +211,9 @@ export async function resolveOperationalHomeToplevelRefusal(
   gitFactory: NonNullable<GitWriterDeps["gitFactory"]> = (p, ms, env) => boundedSimpleGit(p, ms, env),
 ): Promise<{ ok: false; error: string } | null> {
   try {
-    const git = gitFactory(repoPath, timeoutMs, nonInteractiveEnv());
+    // @decision a746a3eb — LOCAL-only discovery (never touches a remote), so this always uses
+    // localNonInteractiveEnv() regardless of what the calling write eventually does.
+    const git = gitFactory(repoPath, timeoutMs, localNonInteractiveEnv());
     const toplevel = (await withTimeout(
       git.revparse(["--show-toplevel"]),
       timeoutMs,
@@ -298,9 +314,18 @@ export class GitWriter {
     this.gitFactory = opts?.gitFactory ?? ((p, ms, env) => boundedSimpleGit(p, ms, env));
   }
 
-  /** A simpleGit bound to this repo with a kill-the-hung-child block timeout + the non-interactive env. */
+  /** A simpleGit bound to this repo with a kill-the-hung-child block timeout + the non-interactive env.
+   *  NETWORK-CAPABLE (push() is the one caller that needs GIT_ASKPASS left blocked) — see {@link gitLocal}
+   *  for the sibling used by every LOCAL-only write (checkout/createBranch/commit). */
   private git(blockMs: number): WriterGit {
     return this.gitFactory(this.repoPath, blockMs, nonInteractiveEnv());
+  }
+
+  /** @decision a746a3eb — the LOCAL-only sibling of {@link git}: same bound instance, but with the
+   *  transport env family (GIT_ASKPASS/...) stripped rather than left blocked, since none of its callers
+   *  ever reach a remote. Never call this from push() or identityWarning() — see {@link git}'s own doc. */
+  private gitLocal(blockMs: number): WriterGit {
+    return this.gitFactory(this.repoPath, blockMs, localNonInteractiveEnv());
   }
 
   /**
@@ -334,14 +359,19 @@ export class GitWriter {
     return resolveOperationalHomeToplevelRefusal(this.repoPath, this.localMs, this.gitFactory);
   }
 
-  /** Adapts {@link testGitFactory} (if a test injected one) to the narrower shape
-   *  `killableCanonicalRaw` itself expects. Returns `undefined` on the real production path, so
-   *  `killableCanonicalRaw` spawns a REAL, tree-killable child instead of reusing a test fake that has
-   *  nothing real to kill. */
+  /**
+   * Adapts {@link testGitFactory} (if a test injected one) to the narrower shape
+   * `killableCanonicalRaw` itself expects. Returns `undefined` on the real production path, so
+   * `killableCanonicalRaw` spawns a REAL, tree-killable child instead of reusing a test fake that has
+   * nothing real to kill.
+   *
+   * @decision a746a3eb — every caller of this is a LOCAL-only mutation (checkout/checkout-b/add-A/commit),
+   * so it uses `localNonInteractiveEnv()`, never `nonInteractiveEnv()`.
+   */
   private killableGitFactory(): ((repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">) | undefined {
     const tf = this.testGitFactory;
     if (!tf) return undefined;
-    return (repoPath, blockMs) => tf(repoPath, blockMs, nonInteractiveEnv());
+    return (repoPath, blockMs) => tf(repoPath, blockMs, localNonInteractiveEnv());
   }
 
   /**
@@ -385,7 +415,7 @@ export class GitWriter {
     try {
       return await withCanonicalIndexLock(this.repoPath, () =>
         this.withVaultPauseLease(async () => {
-          const git = this.git(this.localMs);
+          const git = this.gitLocal(this.localMs);
           // @decision d8bb2074 — kill-confirmed (killableCanonicalRaw), not a bare withTimeout race: an
           // orphaned checkout child must never survive past the lock releasing, and the repo is re-checked
           // for quarantine immediately before spawning.
@@ -394,7 +424,7 @@ export class GitWriter {
             if (confirmed && raisedToken) clearMergeQuarantineByToken(this.repoPath, raisedToken);
           };
           try {
-            await killableCanonicalRaw(this.repoPath, ["checkout", target], this.localMs, "git checkout", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+            await killableCanonicalRaw(this.repoPath, ["checkout", target], this.localMs, "git checkout", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             if (treeDeathUnconfirmed(e)) {
               raisedToken = enterMergeQuarantine(this.repoPath, target, unconfirmedKillReason(`git checkout could not be confirmed dead after a kill: ${(e as Error).message}`));
@@ -442,7 +472,7 @@ export class GitWriter {
             if (confirmed && raisedToken) clearMergeQuarantineByToken(this.repoPath, raisedToken);
           };
           try {
-            await killableCanonicalRaw(this.repoPath, ["checkout", "-b", target], this.localMs, "git checkout -b", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+            await killableCanonicalRaw(this.repoPath, ["checkout", "-b", target], this.localMs, "git checkout -b", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             if (treeDeathUnconfirmed(e)) {
               raisedToken = enterMergeQuarantine(this.repoPath, target, unconfirmedKillReason(`git checkout -b could not be confirmed dead after a kill: ${(e as Error).message}`));
@@ -505,7 +535,7 @@ export class GitWriter {
     try {
       return await withCanonicalIndexLock(this.repoPath, () =>
         this.withVaultPauseLease(async () => {
-          const git = this.git(this.localMs);
+          const git = this.gitLocal(this.localMs);
           // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
           const status = await withTimeout(git.status(), this.localMs, "git status");
           if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
@@ -526,7 +556,7 @@ export class GitWriter {
             }
           };
           try {
-            await killableCanonicalRaw(this.repoPath, paths ? ["add", "-A", "--", ...paths] : ["add", "-A"], this.localMs, "git add -A", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+            await killableCanonicalRaw(this.repoPath, paths ? ["add", "-A", "--", ...paths] : ["add", "-A"], this.localMs, "git add -A", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             quarantineOnUnconfirmedKill(e, "git add -A");
             throw e;
@@ -539,7 +569,7 @@ export class GitWriter {
           // own pathspec separator above (code review of a8dbb159: paths are already validated against a
           // leading `-`, so this is defense-in-depth, not a correctness fix).
           try {
-            await killableCanonicalRaw(this.repoPath, ["commit", "-m", cleanedMessage.trim(), ...(paths ? ["--", ...paths] : [])], this.localMs, "git commit", this.killableGitFactory(), nonInteractiveEnv(), onTreeDeathSettled);
+            await killableCanonicalRaw(this.repoPath, ["commit", "-m", cleanedMessage.trim(), ...(paths ? ["--", ...paths] : [])], this.localMs, "git commit", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             quarantineOnUnconfirmedKill(e, "git commit");
             throw e;
@@ -684,7 +714,8 @@ export class GitWriter {
    */
   async pendingPushSummary(): Promise<{ branch: string; ahead: number | null; latestSubject: string | null } | null> {
     try {
-      const git = this.git(this.localMs);
+      // @decision a746a3eb — gitLocal(), not git(): this is a read-only preview, never a push.
+      const git = this.gitLocal(this.localMs);
       const branch = (await withTimeout(git.branchLocal(), this.localMs, "git branch")).current;
       if (!branch) return null;
       let ahead: number | null = null;

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import type { SimpleGit } from "simple-git";
-import { originHost, commitIdentityHostWarning, nonInteractiveEnv } from "./writer.js";
+import { originHost, commitIdentityHostWarning, localNonInteractiveEnv } from "./writer.js";
 import { withTimeout, boundedSimpleGit } from "./bounded.js";
 
 /**
@@ -129,9 +129,12 @@ export class GitReader {
     // `unsafe.allowUnsafeConfigPaths` allowance boundedSimpleGit applies for a non-empty env only takes
     // effect if the env is present when the instance is BUILT, so a post-construction `.env()` chain
     // would silently miss it and leave GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM throwing (M2).
+    // @decision a746a3eb — this class is read-only project-repo introspection, never a push/fetch (see its
+    // own class doc, "§ no commit/checkout/push"), so it uses localNonInteractiveEnv() rather than the
+    // transport-blocked nonInteractiveEnv() — an ambient GIT_ASKPASS must not break the Log/Branches view.
     this.git = deps.gitFactory
       ? deps.gitFactory(repoPath, this.timeoutMs)
-      : boundedSimpleGit(repoPath, this.timeoutMs, nonInteractiveEnv());
+      : boundedSimpleGit(repoPath, this.timeoutMs, localNonInteractiveEnv());
   }
 
   async log(limit = 50) {
