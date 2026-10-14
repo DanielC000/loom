@@ -4834,6 +4834,39 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // this list's other entries. A comment-only edit inserting either token's text inside that region (or
   // relocating the region's own anchor comments) could in principle flip the verdict.
   "packages/daemon/test/spawn-args.mjs",
+  // Card 4319d6b1: withDistMutation anchors on literal, unstripped lines of compiled dist/git/
+  // merge-quarantine.js (via a throwaway copy of its minimal import closure, never the real shared dist —
+  // see the file's own db0a9db0-round-3 doc comment) to pin six carry-forward sites, plus two further
+  // scenarios ((7)+ in the same family) pinning provenanceTracked's own carry. A comment-only edit to
+  // merge-quarantine.ts near any pinned anchor (e.g. relocating one of the db0a9db0 decision-comments
+  // this file's own find-text embeds) could shift what withDistMutation's exact-occurrence find matches,
+  // same hazard class as this list's other dist-text readers — no live re-derivation elsewhere covers it.
+  "packages/daemon/test/merge-quarantine-unknown-provenance.mjs",
+  // Card 4319d6b1 sweep: structural pin (s) raw-scans real src/sessions/service.ts and
+  // src/orchestration/pending-ops.ts SOURCE, unstripped, for exact literal call-site counts
+  // (`rejectNotify("canonical_...")`/`squashRefusedResult({ merged: false`) and a `classifyOutcome`/
+  // `NEVER_CACHED_OUTCOMES` presence match — a genuinely new read with no live production re-derivation to
+  // inherit immunity from, same posture as merge-staged-dirt-lock-race.mjs's entry above. A comment-only
+  // edit near any of these call sites could shift the counted occurrences or the presence match.
+  "packages/daemon/test/merge-confirm-squash-refusal-recall.mjs",
+  // Card 4319d6b1 sweep: mirrors merge-confirm-squash-refusal-recall.mjs's own structural-pin scenario (s)
+  // one entry above — same two real src files, same unstripped presence-match shape, for the
+  // reducedGateOnlyFileFailed outcome instead of squashRefused.
+  "packages/daemon/test/merge-confirm-reduced-gate-only-file-recall.mjs",
+  // Card 4319d6b1 sweep: mirrors merge-confirm-squash-refusal-recall.mjs's own structural-pin scenario (s)
+  // again, raw-reading real src/sessions/service.ts for the batch runGate closure's own ReducedGateOnlyFileError
+  // handling — one of its own regexes embeds a literal comment ("// Card 92be634e: best-effort cleanup")
+  // as part of what it matches, so moving or rewording that comment alone could flip the verdict.
+  "packages/daemon/test/batch-merge-reduced-gate-only-file-failure.mjs",
+  // Card 4319d6b1 sweep (manager ruling): raw-reads real src/git/mainline-watch.ts, src/gateway/server.ts
+  // and src/pty/host.ts, but its own local `strip`/`stripL` helpers remove only whole-line `//` comments
+  // by deliberate choice (the file's own inline note: a block-comment stripper would mis-pair the `/*`
+  // inside the gateway's route glob strings) — so an inline `/* */` comment landing inside one of its
+  // matched expressions is NOT stripped and could in principle flip a verdict. Included anyway: the
+  // author accepted that residual as a risk to the TEST's own verdict, not as a reason to skip running
+  // it on a reduced gate — a seat here only means it also runs when a compiled .ts path changes, which
+  // is strictly safer and costs nothing extra on a gate that would otherwise skip it.
+  "packages/daemon/test/mainline-watch-boot-reader.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its
