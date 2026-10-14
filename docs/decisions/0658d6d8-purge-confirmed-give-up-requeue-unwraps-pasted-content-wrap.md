@@ -120,9 +120,21 @@ purged even though this confirmation was never actually about N. This is a genui
 residual: it requires (1) a message literally authoring the escaped tag form as prose (rare on its own —
 `691d02e1`'s own "one accepted failure direction" is this same rarity), (2) a second, concurrently
 ambiguous message differing from the first by exactly that one backslash at that exact position, and (3)
-the specific resolve-ordering above. No real specimen has ever shown either precondition, let alone both
-together with the ordering — left recorded, not fixed, same posture as `691d02e1`'s own accepted
-false-alarm residual.
+the specific resolve-ordering above. No real specimen has ever shown precondition (2)+(3) together — left
+recorded, not fixed, same posture as `691d02e1`'s own accepted false-alarm residual.
+
+**Precondition (1) has now been observed in production, on the sibling mismatch-classification path (a
+different consumer, not this purge path):** a Loom lead's `worker_message` to this worker session (gen=3,
+written 1664 chars, `writtenHash d7f5d31e`, mint-time `2026-10-14T16:44:23.358Z`) mixed both the bare and
+already-escaped forms of the tag in its own prose and, reaching this session, reported back as 1723
+chars (`reportedHash fc802e3b`) — a +59 delta the narrow reversal could not round-trip, surfacing as
+`[loom:prompt-mismatch-unmatched]` (the UNRECOGNIZED third state), never a confirmed loss. This lands on
+`isRecognizedPastedContentWrap`'s own acceptance check, not on `purgeConfirmedGiveUpRequeueCore` — it is
+the `691d02e1` false-ALARM direction, observed, not an instance of THIS record's purge-path loss residual
+— but it confirms precondition (1) (a real message genuinely mixing both tag forms) is not merely
+theoretical. Preconditions (2)+(3) — a second, concurrently-ambiguous message in THIS purge path,
+differing by exactly that one backslash, resolved in the specific order the loss residual needs — remain
+unobserved.
 
 ## Do not (2)
 
