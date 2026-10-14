@@ -1195,7 +1195,7 @@ try {
     // the leftover's own tokens are an EXACT SUPERSET match (identical to the live entry's), so the OLD
     // code took the fold branch rather than minting an independent pending record. A clearMergeQuarantine-
     // ByToken call IN-PROCESS (no reboot yet) durably rewrote the live entry at K2 with the reduced token
-    // set, but the fold's own divert FILE on disk was never told — `clearPendingEntryByToken` never found
+    // set, but the fold's own divert FILE on disk was never told — the pending-side sweep never found
     // it (nothing in `pendingUnresolvedQuarantines` referenced it; it was reachable only via the live
     // entry's in-memory `orphanLatchFiles`). A later reboot re-reads that still-stale divert file as its
     // own independent record, still carrying the ALREADY-CLEARED token — resurrecting it.
@@ -1275,7 +1275,7 @@ try {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // B1 (Code Review d2558a4b of card 8567df22's round-4 fix) — the KEY/ID clear route (clearMergeQuarantine-
     // ByKey, reached here via clearMergeQuarantineLatchFile) is a wholly SEPARATE sweep mechanism from the
-    // TOKEN route's clearPendingEntryByToken: it never swept the round-4-minted duplicate pending record
+    // TOKEN route's own pending-side sweep: it never swept the round-4-minted duplicate pending record
     // at all — the duplicate has no armedKeys, is never `===` the active entry, and is never named in the
     // active entry's own orphanLatchFiles, so `tiedToThisEntity` treated it as a d4b25feb-style INDEPENDENT
     // later raise and left it behind, reporting {liftedRepoPaths:[], stillQuarantined:true}.

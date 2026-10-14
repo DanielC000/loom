@@ -430,7 +430,8 @@ try {
     // card's own fix). clearMergeQuarantineByToken(X, tokX) computes `key = canonicalRepoLockKey(X)` = Kr
     // (degraded) — `current = activeQuarantines.get(Kr)` = T's entry, which genuinely does NOT include
     // tokX. Pre-fix, the function returned here without ever trying the pending store, so X's own
-    // in-process auto-clear silently never fires. Post-fix, it falls back to clearPendingEntryByToken.
+    // in-process auto-clear silently never fires. Post-fix, it falls back to the pending-side sweep
+    // (clearTokenFromPendingIndices, matched today by TOKEN alone across every identity — `6c04633d`).
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const { repo, nested, subdir } = makeRepoWithNestedRepoAndSubdir("tok");
 

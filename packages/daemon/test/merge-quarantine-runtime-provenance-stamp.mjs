@@ -65,7 +65,7 @@ const SCENARIOS = [
   // supports.
   "lazy-graduation-query-stamps-provenance-tracked",
   // (c) writePendingDivertFile — the one non-stamping writer genuinely reachable from a runtime CLEAR
-  // call (clearMergeQuarantineByToken -> clearPendingEntryByToken's partial-clear branch) with a
+  // call (clearMergeQuarantineByToken -> clearTokenFromPendingIndices' partial-clear branch) with a
   // resolvedKey-bearing entry whose own armedKeys members are NOT present in activeQuarantines (so the
   // write loop's own writeMergeQuarantineLatch calls are skipped entirely — this write is the ONLY one
   // that touches disk). Proves BOTH directions: an entry that already carries provenanceTracked survives
@@ -210,7 +210,7 @@ try {
     // enterMergeQuarantine's own unresolvable-raise branch — carries neither). This fixture exists purely
     // to PIN writePendingDivertFile's own write behaviour in isolation, by handing it an entry shaped
     // exactly how it would need to be shaped for the write to be resolvedKey-bearing, with NO active
-    // counterpart in activeQuarantines at all — so clearPendingEntryByToken's own per-key
+    // counterpart in activeQuarantines at all — so clearTokenFromPendingIndices' own per-key
     // writeMergeQuarantineLatch loop is a no-op for every member of armedKeys
     // (activeQuarantines.get(k) !== updated for all of them), and writePendingDivertFile is the ONLY
     // write that touches disk for this entry.
@@ -242,8 +242,8 @@ try {
     check("(precondition) w1 reads quarantined via the pending path (genuinely pending-only, no active match)", assertRepoNotQuarantined(w1).ok === false);
     check("(precondition) w2 likewise reads quarantined via the pending path", assertRepoNotQuarantined(w2).ok === false);
 
-    // Partial clear (tok*a) on each — leaves tok*b outstanding, exercising clearPendingEntryByToken's own
-    // remaining-tokens rewrite branch, which calls writePendingDivertFile.
+    // Partial clear (tok*a) on each — leaves tok*b outstanding, exercising clearTokenFromPendingIndices'
+    // own remaining-tokens rewrite branch, which calls writePendingDivertFile.
     clearMergeQuarantineByToken(w1, tok1a);
     clearMergeQuarantineByToken(w2, tok2a);
 

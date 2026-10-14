@@ -664,10 +664,16 @@ try {
   // `pendingUnresolvedQuarantines`. A SIBLING pending entry consumed alongside the raiser (a DIFFERENT
   // identity sharing the raiser's own canonical key, via `collectCrossTierSiblingIndices`) had nothing
   // left tracking its own `sourceFile` once diverted — orphaned on disk, re-arming after a reboot. THE
-  // FIX: fold every matched entry's own `sourceFile` into `armed.orphanLatchFiles` before diverting,
-  // excluding only the divert's own likely target. The sibling's own `sourceFile` here (`sibFile` below)
-  // is a FIXED, arbitrary literal — never derived from either identity's own hash — so this is also the
-  // dedicated "distinct sourceFile" case (never relying on the same-identity-coincidence the fix must not).
+  // FIX (this round): fold every matched entry's own `sourceFile` into `armed.orphanLatchFiles` before
+  // diverting, excluding only the divert's own likely target. The sibling's own `sourceFile` here
+  // (`sibFile` below) is a FIXED, arbitrary literal — never derived from either identity's own hash — so
+  // this is also the dedicated "distinct sourceFile" case (never relying on the same-identity-coincidence
+  // the fix must not).
+  //
+  // @decision 6c04633d — SUPERSEDES this round's own merge-everything shape for a DIFFERENT identity: S
+  // (identity ≠ D's own) is no longer folded into D's divert record at all — it is pushed straight back,
+  // untouched, under its own identity (decision record, Follow-up 6c04633d). `sibFile` is a THIRD valid
+  // state the check below now accounts for: live and correct, never an orphan, never gone.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r = makeToplevelRepo("round4-x-r");
@@ -709,10 +715,17 @@ try {
   const filesAfterRaise = fs.readdirSync(MERGE_QUARANTINE_DIR);
   const allEntriesX = listActiveMergeQuarantines();
   const referencedOrphansX = new Set(allEntriesX.flatMap((e) => e.orphanLatchFiles ?? []));
+  // @decision 6c04633d (M3, Code Review `e8c78d98`) — tie the check to THIS exact file, captured at the
+  // SAME pre-query snapshot as `filesAfterRaise`/`referencedOrphansX` above — `activeMergeQuarantineFor`
+  // below is a QUERY whose own lazy-graduation tail can ITSELF trigger a (pre-existing, unchanged, out of
+  // this card's scope) successful consolidation of D+S once reads succeed again, which would delete
+  // `sibFile` out from under a check read any later than this.
+  const sibFileContentAfterRaise = contentIfExists(path.join(MERGE_QUARANTINE_DIR, sibFile)) ?? "";
   check("(round4-x) t2 enforced in-process", new Set(allEntriesX.flatMap((q) => q.tokens ?? [])).has(t2x));
   check("(round4-x) d reported quarantined", !!activeMergeQuarantineFor(d));
-  check("*** THE FIX (round4-x) *** the sibling's own sourceFile is NEVER an untracked orphan — gone, or named in SOME entry's own orphanLatchFiles",
-    !filesAfterRaise.includes(sibFile) || referencedOrphansX.has(sibFile));
+  check("*** THE FIX (round4-x) *** the sibling's own sourceFile is NEVER an untracked orphan — gone, named in SOME entry's own orphanLatchFiles, or (6c04633d) still THIS exact file's own untouched bytes naming S and sibToken",
+    !filesAfterRaise.includes(sibFile) || referencedOrphansX.has(sibFile) ||
+    (sibFileContentAfterRaise.includes(sibToken) && sibFileContentAfterRaise.includes(path.basename(s))));
 
   // Clear every token in-process (orig is stranded, unreconciled, in `final`'s own untouched bytes
   // throughout this scenario — this call is a defensive no-op, exactly mirroring the card's own repro).
@@ -738,7 +751,7 @@ try {
   // WITHOUT tombstoning the token the owner just released. A later same-identity re-raise's own fold-in
   // then reads that still-marked, un-tombstoned basename back and resurrects the released token. THE FIX:
   // after `clearMergeQuarantineByKey` returns, tombstone `token` unconditionally (no touched list),
-  // matching `clearPendingEntryByToken`'s own last-token branch.
+  // matching `clearTokenFromPendingIndices`' own last-token branch.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r = makeToplevelRepo("d6efbc9b-z3");
@@ -1673,13 +1686,16 @@ try {
   // ROUND 3 (Code Review 765f5453, Minor 1, "dd34da46-p3g-v1") — pins the `base.sourceFile` sweep
   // (`sweepOwnLatchFileUnlessOwnedElsewhere`) in `divertRaiseEntry`'s merge-into-existing-pending
   // fallback branch. The COMMITTED p3g scenario above releases BOTH tokens, which passes even WITHOUT
-  // that sweep call — a full (last-token) clear's own `orphanFilesToSweep` loop in
-  // `clearPendingEntryByToken` already sweeps every `orphanLatchFiles` entry (which includes
+  // that sweep call — a full (last-token) clear's own `orphanFilesToSweep` loop (in what is now
+  // `clearTokenFromPendingIndices`) already sweeps every `orphanLatchFiles` entry (which includes
   // `base.sourceFile`, folded in alongside the safety-tmp basename) once nothing remains outstanding.
-  // A PARTIAL release — exactly this scenario — never reaches that loop at all (the partial-clear branch
-  // only rewrites `pending.sourceFile`, i.e. the safety-tmp, and never looks at `orphanLatchFiles`), so
-  // `base.sourceFile`'s own STALE bytes (still holding only t1, never rewritten since that rewrite is
-  // what failed) survive on disk, untracked, until the explicit sweep at write time removes them.
+  // A PARTIAL release — exactly this scenario — never reaches that loop at all. At the time this test was
+  // written the partial-clear branch only rewrote `pending.sourceFile` (the safety-tmp) and never looked
+  // at `orphanLatchFiles` at all; card `6c04633d` later added an OWNERSHIP-GATED orphan rewrite to that
+  // same branch, but it only ever REWRITES a file it can positively confirm is this same entity's own —
+  // it still never SWEEPS (deletes) one, so `base.sourceFile`'s own STALE bytes (still holding only t1,
+  // never rewritten since that rewrite is what failed) still survive on disk, untracked, until the
+  // explicit sweep at write time removes them.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r = makeToplevelRepo("p3g-v1-r");
@@ -2428,6 +2444,273 @@ try {
   check("*** THE FIX (probeA, reboot) *** A-d does NOT come back after a reboot", !freshTokensA.has("A-d"));
   check("*** THE FIX (probeA, reboot) *** rA's own token does NOT come back after a reboot", !freshTokensA.has(rTokenA));
   check("*** THE FIX (probeA, reboot) *** the already-tombstoned token does NOT resurrect either", !freshTokensA.has(tombTokA));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6c04633d ("6c04633d-z1", CR4 of 8db913e2, finding Z1, reviewer 4c732a8c, scratch probe
+  // zz-cr4-probe.mjs commit cb461f56) — `consumeMatchedPendingsIntoArmedEntry`'s own raise-divert branch
+  // unioned EVERY matched entry — the raiser's own AND every sibling sharing the canonical key — into ONE
+  // divert record keyed to whichever matched entry `unionQuarantineEntries` judged OLDEST, an ARBITRARY
+  // winner never guaranteed to be the raiser's own identity. `clearMergeQuarantineByToken` matches
+  // PENDING entries by identity alone, so it could never reach the raiser's own tokens once folded under
+  // a sibling's identity: the raiser stayed quarantined after every one of its own tokens was released,
+  // including across a reboot. Setup: R raises twice (t1, t2 — t2's own raise diverts on a transient read
+  // failure). A SIBLING S = R/sib-subdir has an OLDER pending entry (so it would win the old arbitrary
+  // "oldest identity wins" union) and S exists on disk by the time R raises a third time (t3), whose own
+  // fold-in read also fails — absorbing S via `collectCrossTierSiblingIndices`.
+  //
+  // MANAGER'S RULING: a divert union keeps the RAISER's own identity for the raiser's own tokens — never
+  // fold one identity's tokens into a record keyed to a DIFFERENT identity; group matched entries by
+  // identity and divert each identity separately. `clearMergeQuarantineByToken` ALSO now sweeps every
+  // record — active and pending, any identity — still holding a given token, since a token is a
+  // process-unique `randomUUID` and a match IS an exact identity of its own holder.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("6c04633d-z1-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  const s = path.join(r, "sib-subdir");
+  const sibToken = "sib-z-6c04633d-z1";
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const sibFile = "pending-0123456789abcdef01234567.json";
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sibFile), JSON.stringify({
+    repoPath: s, branch: "sib-branch", reason: "S", enteredAt: Date.now() - 100000, tokens: [sibToken],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  const t1z = enterMergeQuarantine(r, "r-branch", "r raises itself (t1)");
+  const injectT2z = injectReadFailureAtCalls(finalPath, [1, 2]);
+  const t2z = enterMergeQuarantine(r, "r-branch", "r raises again (t2), final unreadable, diverts");
+  injectT2z.restore();
+
+  // S now exists on disk — its own canonical key degrades (walks up) to Kr, a genuine sibling.
+  fs.mkdirSync(s, { recursive: true });
+
+  // Only the fold-in read inside consumeMatchedPendingsIntoArmedEntry's own sibling-absorb fails — the
+  // exact shape that used to fold R's own tokens AND the sibling's into ONE record keyed to whichever
+  // identity unionQuarantineEntries judged oldest (S, by construction above).
+  const injectT3z = injectReadFailureAtCalls(finalPath, [4]);
+  const t3z = enterMergeQuarantine(r, "r-branch", "r raises a third time (t3), absorbs the sibling");
+  injectT3z.restore();
+
+  const allEntriesZ1 = listActiveMergeQuarantines();
+  const tokensAfterT3z = new Set(allEntriesZ1.flatMap((q) => q.tokens ?? []));
+  check("(6c04633d-z1) t1/t2/t3 all enforced after the sibling-absorbing raise", [t1z, t2z, t3z].every((t) => tokensAfterT3z.has(t)));
+  check("(6c04633d-z1) the sibling's own token is also still enforced", tokensAfterT3z.has(sibToken));
+  check("*** THE FIX (6c04633d-z1) *** no record keyed to the sibling's own identity holds any of R's own tokens",
+    !allEntriesZ1.some((e) => path.basename(e.repoPath) === "sib-subdir" && [t1z, t2z, t3z].some((t) => (e.tokens ?? []).includes(t))));
+
+  // clearMergeQuarantineByToken must lift EVERY one of R's own tokens, whatever record currently holds
+  // it — this is the card's own exact repro assertion (Z1's own token-by-token release, in order).
+  clearMergeQuarantineByToken(r, t1z);
+  const tokensAfterClearT1z = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (6c04633d-z1) *** t1 is gone IN-PROCESS after clearMergeQuarantineByToken(r, t1)", !tokensAfterClearT1z.has(t1z));
+  const diskAfterClearT1z = fs.readdirSync(MERGE_QUARANTINE_DIR)
+    .map((f) => contentIfExists(path.join(MERGE_QUARANTINE_DIR, f)) ?? "").join("\n");
+  check("*** THE FIX (6c04633d-z1) *** t1 is gone ON DISK too — no latch file still carries it", !diskAfterClearT1z.includes(t1z));
+
+  clearMergeQuarantineByToken(r, t2z);
+  clearMergeQuarantineByToken(r, t3z);
+  clearMergeQuarantineByToken(s, sibToken);
+  const tokensAfterAllClearsZ1 = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (6c04633d-z1) *** r is FULLY lifted in-process after releasing every one of its own tokens", !activeMergeQuarantineFor(r));
+  check("(6c04633d-z1) none of r's tokens or the sibling's survive in-process", ![t1z, t2z, t3z, sibToken].some((t) => tokensAfterAllClearsZ1.has(t)));
+
+  const freshZ1 = await freshBootModule();
+  freshZ1.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensZ1 = new Set(freshZ1.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (6c04633d-z1, reboot) *** none of r's own tokens resurrect after a reboot", ![t1z, t2z, t3z].some((t) => freshTokensZ1.has(t)));
+  check("*** THE FIX (6c04633d-z1, reboot) *** the sibling's own (already-cleared) token does not resurrect either", !freshTokensZ1.has(sibToken));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 6c04633d ("6c04633d-a", CR4 of 8db913e2 finding (a)) — a PARTIAL by-token clear of a record
+  // whose own `orphanLatchFiles` was folded from an absorbed SAME-IDENTITY pending entry never kept that
+  // folded file's own physical bytes in sync with the reduced token set — generalizing the `ae79d492`
+  // dual-tracked-twin rewrite (which only ever covered ONE reference-tracked pending twin) to every
+  // folded orphan a record carries. D has a pre-existing, LEGACY-named pending entry (`ownFile`, never
+  // `pendingDivertFilenameFor(d)`) holding its own token; a later raise (via the `existing`-branch's own
+  // sibling-absorb, `collectCrossTierSiblingIndices`) folds it into the raiser's OWN record (SAME
+  // identity, per the 6c04633d identity rule) and `ownFile` becomes a genuine, non-self-referencing
+  // orphan. Releasing the exact token `ownFile` itself originally carried, via a PARTIAL clear (other
+  // tokens remain outstanding), must rewrite `ownFile`'s own bytes too — or a reboot re-arms it from the
+  // stale, never-updated copy still sitting there.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const d = path.join(makeToplevelRepo("6c04633d-a-r"), "gone-subdir");
+  const r = path.dirname(d);
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  const origToken = "orig-token-6c04633d-a";
+  const ownExtraToken = "own-extra-token-6c04633d-a";
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: [origToken], resolvedKey: Kr,
+  }, null, 2) + "\n");
+  // D's OWN pre-existing pending entry, under a DISTINCT, legacy filename (never
+  // `pendingDivertFilenameFor(d)`) — sharing D's own identity, so a later raise's own consume-divert
+  // folds it into ITS OWN record (never a different identity's, per the 6c04633d identity rule), and its
+  // own file becomes a genuine, non-self-referencing orphan once folded.
+  const ownFile = "pending-fedcbafedcbafedcbafedcba.json";
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, ownFile), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own pre-existing pending copy", enteredAt: Date.now() - 100000, tokens: [ownExtraToken],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  const injectMarkA = injectReadFailureOnlyNth(finalPath, 1);
+  clearMergeQuarantineReporting(r);
+  injectMarkA.restore();
+
+  fs.mkdirSync(d, { recursive: true });
+
+  const injectFoldA = injectReadFailureAtCalls(finalPath, [3]);
+  const t2a = enterMergeQuarantine(d, "d2", "D raise, foldIn read fails, merges its OWN pending copy");
+  injectFoldA.restore();
+
+  const entryA = listActiveMergeQuarantines().find((e) => (e.tokens ?? []).includes(ownExtraToken));
+  check("(6c04633d-a precondition) D's own legacy pending token is merged into the raise's own record", !!entryA && (entryA.tokens ?? []).includes(t2a));
+  check("(6c04633d-a precondition) the legacy file is folded into orphanLatchFiles, DISTINCT from its own divert target", (entryA?.orphanLatchFiles ?? []).includes(ownFile));
+  check("(6c04633d-a precondition) the legacy file still exists on disk, UNCHANGED at fold time", (contentIfExists(path.join(MERGE_QUARANTINE_DIR, ownFile)) ?? "").includes(ownExtraToken));
+
+  // Partial clear: release ownExtraToken — the EXACT token the orphan file `ownFile` itself originally
+  // carried — while origToken/t2a remain outstanding (not the last token on the authoritative record).
+  clearMergeQuarantineByToken(d, ownExtraToken);
+  const ownFileContentAfter = contentIfExists(path.join(MERGE_QUARANTINE_DIR, ownFile)) ?? "";
+  check("*** THE FIX (6c04633d-a) *** the folded orphan latch file's own bytes are rewritten to EXCLUDE the just-released token", !ownFileContentAfter.includes(ownExtraToken));
+
+  const tokensAfterPartialA = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(6c04633d-a) ownExtraToken gone in-process, t2 still enforced", !tokensAfterPartialA.has(ownExtraToken) && tokensAfterPartialA.has(t2a));
+
+  const freshA = await freshBootModule();
+  freshA.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensA = new Set(freshA.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (6c04633d-a, reboot) *** the released ownExtraToken does NOT resurrect from the stale orphan file after a reboot", !freshTokensA.has(ownExtraToken));
+  check("(6c04633d-a, reboot) the still-outstanding token(s) survive the reboot", freshTokensA.has(t2a) || freshTokensA.has(origToken));
+
+  clearMergeQuarantineByToken(d, t2a);
+  clearMergeQuarantineByToken(d, origToken);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Code Review `e8c78d98` of commit `b49ab498`, B1 CRITICAL ("6c04633d-b1") — `rewriteOrphanLatchFilesAfterPartialClear`
+  // blind-wrote the clearing entry's whole record into every EXISTING file its own `orphanLatchFiles`
+  // named, checking only `existsSync`, never OWNERSHIP. `9cabd143` records that an orphan reference can
+  // name a file that is now ANOTHER live entry's own latch — mirroring the `95ea8d3f-r3-orphanref` setup
+  // (PASS 2's own "unmatched orphan broadcast onto every registered repo" mechanism), but reached via a
+  // WRITE this time, not a wrongful unlink.
+  //
+  // Repro (the reviewer's own): a corrupt `<hashB>.json` exists; boot with [A] (A is fail-closed
+  // quarantined, PASS 2 folds the unmatched orphan into A's own `orphanLatchFiles`); B raises for real,
+  // so `<hashB>.json` becomes B's own live latch; A raises AGAIN (its own identity, a second token); a
+  // PARTIAL clear of A's own just-added token reaches `rewriteOrphanLatchFilesAfterPartialClear`, which
+  // (pre-fix) blind-writes A's own record into `<hashB>.json`, destroying B's real content.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const A = makeToplevelRepo("6c04633d-b1-A");
+  const B = makeToplevelRepo("6c04633d-b1-B");
+  const KB = canonicalRepoLockKey(B);
+  const KBhash = createHash("sha256").update(KB).digest("hex").slice(0, 24);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const bFinalPath = path.join(MERGE_QUARANTINE_DIR, `${KBhash}.json`);
+  // Step 1: corrupt content at B's own real hash — matches NO registered repo's hash.
+  fs.writeFileSync(bFinalPath, "{not valid json");
+  // Step 2: boot with ONLY A registered — A is fail-closed quarantined (a corrupt, unmatched latch
+  // forces every registered repo fail-closed) and PASS 2 folds the unmatched orphan into A's own
+  // orphanLatchFiles (card 9a55fb90/882d6cff-era PASS 2, round 7 M2) — mirrors `95ea8d3f-r3-orphanref`.
+  reenterMergeQuarantinesAtBoot([A]);
+  const entryAAtBoot = listActiveMergeQuarantines().find((e) => e.repoPath === A);
+  check("(6c04633d-b1 precondition) A is fail-closed quarantined at boot", !!entryAAtBoot && (entryAAtBoot.tokens ?? []).length > 0);
+  check("(6c04633d-b1 precondition) A's own entry now names B's file in its orphanLatchFiles",
+    (entryAAtBoot?.orphanLatchFiles ?? []).includes(`${KBhash}.json`));
+  const failClosedTokenA = (entryAAtBoot?.tokens ?? [])[0];
+
+  // Step 3: B raises for real — the corrupt content is "nothing usable," so the write proceeds and
+  // durably overwrites `<hashB>.json` with B's own real latch.
+  const bToken = enterMergeQuarantine(B, "b-branch", "b raises for real");
+  check("(6c04633d-b1 precondition) B's own real latch is now durably at hashB.json",
+    (contentIfExists(bFinalPath) ?? "").includes(bToken));
+
+  // Step 4: A raises AGAIN (its own identity — reachable in production via a GitWriter op, which lacks
+  // assertRepoNotQuarantined) — a SECOND token, so a later clear of just this one is a PARTIAL clear.
+  const tA = enterMergeQuarantine(A, "a-branch", "a raises again, already quarantined");
+  const tokensAAfterRaise = new Set(listActiveMergeQuarantines().find((e) => e.repoPath === A)?.tokens ?? []);
+  check("(6c04633d-b1 precondition) A now holds BOTH its fail-closed token and the new tA", tokensAAfterRaise.has(failClosedTokenA) && tokensAAfterRaise.has(tA));
+
+  // Step 5: partial clear of A's own tA (failClosedTokenA remains outstanding) — reaches
+  // rewriteOrphanLatchFilesAfterPartialClear with hashB.json still folded into A's own orphanLatchFiles.
+  clearMergeQuarantineByToken(A, tA);
+  const bFinalContentAfterClear = contentIfExists(bFinalPath) ?? "";
+  check("*** THE FIX (6c04633d-b1) *** hashB.json is NEVER overwritten with A's own record — B's real content survives byte-for-byte",
+    bFinalContentAfterClear.includes(bToken) && !bFinalContentAfterClear.includes(path.basename(A)));
+  check("(6c04633d-b1) A's own tA is lifted in-process; its fail-closed token remains outstanding",
+    !new Set(listActiveMergeQuarantines().find((e) => e.repoPath === A)?.tokens ?? []).has(tA));
+
+  // Step 6: fresh-process reboot, registering both A and B — B must stay quarantined (per the ruling: a
+  // skipped, left-stale orphan rewrite is an accepted fail-CLOSED residual, never a silent un-quarantine).
+  const freshB1 = await freshBootModule();
+  freshB1.reenterMergeQuarantinesAtBoot([A, B]);
+  const freshListB1 = freshB1.listActiveMergeQuarantines();
+  check("*** THE FIX (6c04633d-b1, reboot) *** B stays quarantined after a fresh-process reboot (never silently lifted as a side effect of A's own clear)",
+    freshListB1.some((e) => e.repoPath === B && (e.tokens ?? []).includes(bToken)));
+
+  clearMergeQuarantineByToken(B, bToken);
+  clearMergeQuarantineByToken(A, failClosedTokenA);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Code Review `e8c78d98`, B1 (keptUnreadable variant, "6c04633d-b1-kept") — the SAME shape as
+  // 6c04633d-b1, but `<hashB>.json`'s own basename is ALSO `keptUnreadableLatchFiles`-marked (via a
+  // THROWAWAY raise on an unresolvable subdir of B, which degrades to B's own key and hits a transient
+  // read failure) at the moment A's partial clear tries the orphan rewrite. NOTE (named, not glossed
+  // over): this does NOT isolate the `keptUnreadableLatchFiles` check from the cross-identity content
+  // check — B's own real content ALSO differs from A's identity here, so either check alone would skip
+  // this write; both pass together, as a combined regression guard for the overall fail-closed outcome,
+  // not a unit proof that the mark-check specifically is what fired.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const A = makeToplevelRepo("6c04633d-b1k-A");
+  const B = makeToplevelRepo("6c04633d-b1k-B");
+  const KB = canonicalRepoLockKey(B);
+  const KBhash = createHash("sha256").update(KB).digest("hex").slice(0, 24);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const bFinalPath = path.join(MERGE_QUARANTINE_DIR, `${KBhash}.json`);
+  fs.writeFileSync(bFinalPath, "{not valid json");
+  reenterMergeQuarantinesAtBoot([A]);
+  const entryAAtBootK = listActiveMergeQuarantines().find((e) => e.repoPath === A);
+  check("(6c04633d-b1-kept precondition) A's own entry names B's file in its orphanLatchFiles",
+    (entryAAtBootK?.orphanLatchFiles ?? []).includes(`${KBhash}.json`));
+  const failClosedTokenAK = (entryAAtBootK?.tokens ?? [])[0];
+
+  const bToken = enterMergeQuarantine(B, "b-branch", "b raises for real");
+  check("(6c04633d-b1-kept precondition) B's own real latch is now durably at hashB.json",
+    (contentIfExists(bFinalPath) ?? "").includes(bToken));
+
+  // A throwaway raise on an unresolvable subdir of B — degrades (walks up) to B's OWN canonical key — with
+  // a transient read failure on hashB.json marks its basename `keptUnreadableLatchFiles` and diverts,
+  // never touching B's own real content (the pre-existing, unchanged "existing"-branch divert path).
+  const bSub = path.join(B, "throwaway-subdir");
+  const injectKeptMark = injectReadFailureOnlyNth(bFinalPath, 1);
+  const bSubToken = enterMergeQuarantine(bSub, "b-sub-branch", "throwaway raise to mark hashB.json kept-unreadable");
+  injectKeptMark.restore();
+  check("(6c04633d-b1-kept precondition) B's own real content at hashB.json is UNCHANGED by the throwaway raise",
+    (contentIfExists(bFinalPath) ?? "").includes(bToken));
+
+  const tAK = enterMergeQuarantine(A, "a-branch", "a raises again, already quarantined");
+  clearMergeQuarantineByToken(A, tAK);
+  const bFinalContentAfterClearK = contentIfExists(bFinalPath) ?? "";
+  check("*** THE FIX (6c04633d-b1-kept) *** hashB.json is NEVER overwritten while its basename is keptUnreadableLatchFiles-marked",
+    bFinalContentAfterClearK.includes(bToken) && !bFinalContentAfterClearK.includes(path.basename(A)));
+
+  clearMergeQuarantineByToken(B, bToken);
+  clearMergeQuarantineByToken(bSub, bSubToken);
+  clearMergeQuarantineByToken(A, failClosedTokenAK);
   }
 } finally {
   for (const d of tmpDirs) {
