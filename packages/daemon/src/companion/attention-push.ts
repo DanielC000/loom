@@ -174,9 +174,11 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
       return "worker-crashed";
     // Card 68f27faf: a `type:"notice"` ask is a distinct, owner-signal class of its own — "notice" — never
     // "decision-pending" (nothing is pending for a self-terminal notice; see its own `state:"notice"`,
-    // b13df292). Discriminated on `detail.type`, stamped into the event's own detail at the one filing
-    // site (mcp/orchestration.ts) — never re-derived from the question row itself, which this event's
-    // detail is the only trace of by the time a tail-poll tick classifies it.
+    // b13df292). Discriminated on `detail.type`, stamped into the event's own detail by the shared
+    // `appendQuestionAskedEvent` helper (mcp/questionTool.ts) — card c0c9ca4a: called from BOTH the
+    // manager's question_ask (mcp/orchestration.ts) and the Platform Lead's (mcp/platform.ts), never
+    // re-derived from the question row itself, which this event's detail is the only trace of by the
+    // time a tail-poll tick classifies it.
     case "question_asked":
       return detail?.type === "notice" ? "notice" : "decision-pending";
     // Card 5ea0153c: a still-pending ask's content just changed IN PLACE (question_amend) — same class as

@@ -229,6 +229,27 @@ export function buildQuestionAsk(
 }
 
 /**
+ * Append the `question_asked` orchestration event for a freshly-filed question — the attention-push
+ * signal source (companion/attention-push.ts's `classify()`/`alertLine()`) for both a manager's and the
+ * Platform Lead's `question_ask`. Card c0c9ca4a: before this helper, the Lead's own registration
+ * (mcp/platform.ts) never appended this event (only the manager's, mcp/orchestration.ts, did), so the
+ * Lead's decisions/notices never reached attention-push. Shared here — not hand-copied per caller — so
+ * the two can never drift apart again. `sessionId` (the manager's own id, or the Lead's platform session
+ * id) is also what `Db.appendEvent`'s `DURABLE_AUDIT_EVENT_KINDS` stamping derives `detail.projectId`
+ * from, so the event's project always matches the project the question was filed against. `detail.type`
+ * (card 68f27faf) lets classify() tell a self-terminal "notice" apart from an ordinary pending decision.
+ * Side effect (intended, LOOM_DEV only): an UNSCOPED event trigger (no `projectId`,
+ * `orchestration/event-triggers.ts`) subscribed to `"question_asked"` now also matches a Lead question —
+ * before this helper, the Lead filed no such event at all, so one could never have fired for it.
+ */
+export function appendQuestionAskedEvent(db: Db, sessionId: string, question: Question): void {
+  db.appendEvent({
+    id: randomUUID(), ts: question.createdAt, managerSessionId: sessionId,
+    kind: "question_asked", detail: { questionId: question.id, title: question.title, type: question.type },
+  });
+}
+
+/**
  * The `type:"credential"` ack text — factored out of `questionPullItem` (card 988bb585) so
  * `taskRequestGetItem`'s full-detail read can share the EXACT same never-echo phrasing without
  * duplicating it and risking drift. Never touches `secret_blob` — only `credentialEnvVar`/

@@ -420,9 +420,11 @@ try {
 
   // ============ card 68f27faf round 2 (CR a7a2464e, B2): drive a REAL notice end-to-end through the
   //     ACTUAL question_ask MCP tool (never a hand-fired event) — proving the filing-site stamp
-  //     (`type: question.type` on the question_asked event, mcp/orchestration.ts) is what actually keeps
-  //     a lead-mode watcher from pushing it, not just that classify()/resolveConfig agree with each other
-  //     in isolation. A control "decision" ask on the SAME manager still pushes, so a false-negative
+  //     (`type: question.type` on the question_asked event, now stamped by the shared
+  //     `appendQuestionAskedEvent` helper in mcp/questionTool.ts — card c0c9ca4a, called from both the
+  //     manager's question_ask here and the Platform Lead's own in mcp/platform.ts) is what actually
+  //     keeps a lead-mode watcher from pushing it, not just that classify()/resolveConfig agree with each
+  //     other in isolation. A control "decision" ask on the SAME manager still pushes, so a false-negative
   //     "nothing pushes at all" can never masquerade as this test passing. ============
   {
     const db = tmpDb();

@@ -12,7 +12,7 @@ import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
@@ -3664,6 +3664,11 @@ export class PlatformMcpRouter {
         const supersede = input.supersedes
           ? applySupersede(db, callerSessionId, input.supersedes, question)
           : undefined;
+        // Card c0c9ca4a: event-emit twin (attention-push signal source) — the Lead's question_ask never
+        // appended this event before, so its decisions/notices never reached companion attention-push.
+        // Shared with the manager's own question_ask (mcp/orchestration.ts) via appendQuestionAskedEvent
+        // so the two can never again drift apart.
+        appendQuestionAskedEvent(db, callerSessionId, question);
         // Card 788ed7f4: filing a Request is a disposition — clear any open "owner message left without a
         // disposition" episode for THIS session, by occurrence alone (no content matching).
         db.clearPendingOwnerMessage(callerSessionId);
