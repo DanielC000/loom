@@ -1592,6 +1592,28 @@ const PENDING_DIVERT_RE = /^pending-[0-9a-f]{24}\.json$/;
  *  own branch below. */
 const PENDING_DIVERT_TMP_RE = /^pending-[0-9a-f]{24}\.json\.tmp-\d+(-[0-9a-f]+)?$/;
 
+/** Matches {@link pendingDivertCollisionFilenameFor}'s own output — a fresh mint diverted to a distinct
+ *  filename because {@link pendingDivertFilenameFor}'s own deterministic path was already occupied by a
+ *  different, still-live (or unreadable) record at mint time. Exists ONLY so {@link pendingLatchIdFor} can
+ *  hash the whole basename for it, same posture as {@link PENDING_DIVERT_RE}'s own branch below — never
+ *  written to directly by anything other than {@link mintPendingDivert}.
+ *
+ *  @decision 8db913e2 (Follow-up 8a79dd31) */
+const PENDING_DIVERT_COLLISION_RE = /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json$/;
+
+/** Matches a crash-left TORN-WRITE residue of {@link writePendingDivertFile}'s own write to a
+ *  {@link pendingDivertCollisionFilenameFor} target — the SAME `.json.tmp-<pid>(-<hex>)?` shape
+ *  {@link PENDING_DIVERT_TMP_RE} matches for an ORDINARY pending-divert file, just with the
+ *  `-collision-<8hex>` infix inserted before `.json`. Already correctly RECOVERED by PASS 1b's own
+ *  pre-existing, content-based "no resolvedKey, unresolvable" branch with zero code changes (same reason
+ *  {@link PENDING_DIVERT_TMP_RE} needs no boot-side change either) — this regex exists ONLY so
+ *  {@link pendingLatchIdFor} can also derive a valid id for it, rather than falling through to the generic
+ *  `.json`-index cut (which recovers a non-24-hex basename `clearMergeQuarantineLatchFile` then rejects as
+ *  an "invalid latch id").
+ *
+ *  @decision 8db913e2 (Follow-up 8a79dd31) */
+const PENDING_DIVERT_COLLISION_TMP_RE = /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json\.tmp-\d+(-[0-9a-f]+)?$/;
+
 /** Deterministic, collision-proof filename for a repoPath's own pending-divert entry — hashes
  *  {@link directPathIdentity}, NEVER `canonicalRepoLockKey` (which is exactly the degraded, walked-up
  *  value this format exists to avoid writing under). Determinism is a convenience (the SAME identity
@@ -1600,6 +1622,18 @@ const PENDING_DIVERT_TMP_RE = /^pending-[0-9a-f]{24}\.json\.tmp-\d+(-[0-9a-f]+)?
  *  filename. */
 function pendingDivertFilenameFor(repoPath: string): string {
   return `pending-${createHash("sha256").update(directPathIdentity(repoPath)).digest("hex").slice(0, 24)}.json`;
+}
+
+/** A collision-suffixed fallback filename for `repoPath`'s own pending-divert entry — used ONLY by
+ *  {@link mintPendingDivert} when {@link pendingDivertFilenameFor}'s own deterministic path is occupied by
+ *  a different, still-live record (or an unreadable/corrupt one) at mint time. The random suffix makes a
+ *  SECOND collision vanishingly unlikely — the same residual-risk posture this module already accepts for
+ *  every other PID/random-suffixed tmp name.
+ *
+ *  @decision 8db913e2 (Follow-up 8a79dd31) */
+function pendingDivertCollisionFilenameFor(repoPath: string): string {
+  const base = pendingDivertFilenameFor(repoPath).slice(0, -".json".length); // "pending-<24hex>"
+  return `${base}-collision-${randomUUID().replace(/-/g, "").slice(0, 8)}.json`;
 }
 
 /**
@@ -1983,6 +2017,92 @@ function attemptDivertSafetyTmpFallback(entry: MergeQuarantineEntry): string | f
 }
 
 /**
+ * Reconciles a fresh mint's own write target against whatever CURRENTLY occupies
+ * {@link pendingDivertFilenameFor}'s own deterministic path, right before {@link mintPendingDivert} writes
+ * to it — a blind overwrite here could destroy another live record's own latch with zero in-memory signal
+ * (the exact shape this card reproduced). ENOENT -> nothing real there, write `entry` unchanged at the
+ * primary filename. The SAME identity already occupies it -> union its on-disk tokens into `entry`, never
+ * dropping one (mirrors {@link reconcileMarkedBasenameBeforeWrite}'s own identity+token-union pattern),
+ * still at the primary filename. A DIFFERENT identity, or an unreadable/corrupt/EISDIR file -> never
+ * overwrite it AND never move it (relocating it could break whatever else still references its own path)
+ * -- `entry` is written UNCHANGED to a distinct {@link pendingDivertCollisionFilenameFor} filename instead,
+ * leaving the occupant byte-untouched.
+ *
+ * @decision 8db913e2 (Follow-up 8a79dd31)
+ */
+function reconcilePendingDivertTargetBeforeMint(entry: MergeQuarantineEntry): { filename: string; toWrite: MergeQuarantineEntry } {
+  const primary = pendingDivertFilenameFor(entry.repoPath);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, primary);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(finalPath, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { filename: primary, toWrite: entry };
+    // EISDIR, or any other unreadable-file code -- cannot prove safety, never overwrite blind.
+    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry }; // corrupt -- cannot prove safety
+  }
+  if (!isReadableLatchRecord(parsed) || typeof parsed.repoPath !== "string") {
+    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry };
+  }
+  if (directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) {
+    // A genuinely different identity physically occupies the primary filename -- never overwrite, never move.
+    return { filename: pendingDivertCollisionFilenameFor(entry.repoPath), toWrite: entry };
+  }
+  const { surviving } = readSurvivingOnDiskTokens(parsed);
+  const toWrite = surviving.length > 0 ? { ...entry, tokens: [...new Set([...surviving, ...entry.tokens])] } : entry;
+  return { filename: primary, toWrite };
+}
+
+/**
+ * Mint a fresh pending-divert record for `entry` at its own deterministic filename — shared by
+ * {@link divertRaiseEntry}'s own `indices.length === 0` branch and `enterMergeQuarantine`'s own direct
+ * unresolvable brand-new-divert branch. ONE chokepoint, never two independently-maintained copies.
+ *
+ * @decision 8db913e2 (Follow-up 8a79dd31) — this consolidation also gives `enterMergeQuarantine`'s own call site the
+ * double-fault safety-tmp fallback below, which its own prior inline copy never had.
+ *
+ * @decision 8db913e2 (Follow-up 8a79dd31) — reconciles against the primary filename's current occupant, via
+ * {@link reconcilePendingDivertTargetBeforeMint}, before ever writing — see that function's own doc.
+ *
+ * @decision 8db913e2 (Follow-up dd34da46, Item 3) — on a double fault (the chosen write ALSO fails), falls
+ * back to a safety-tmp residue via {@link attemptDivertSafetyTmpFallback} rather than losing the entry
+ * outright across a reboot.
+ */
+function mintPendingDivert(entry: MergeQuarantineEntry): void {
+  const { filename, toWrite } = reconcilePendingDivertTargetBeforeMint(entry);
+  // Keep the caller's own in-memory placement (if any — e.g. enterMergeQuarantine's `existing` branch
+  // already placed `entry` into `activeQuarantines` before calling this) in sync with the reconciled
+  // object that is about to become the durable bytes.
+  if (toWrite !== entry) replaceEntryEverywhere(activeQuarantines, entry, toWrite);
+  const persisted = writePendingDivertFile(filename, toWrite);
+  if (persisted) {
+    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error(`[merge-quarantine] canonical repo ${toWrite.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted to a fresh pending-divert record) — the durable pending-divert latch failed to write; investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
+  // @decision 8db913e2 (Follow-up dd34da46, Item 3) — the double fault: a safety-tmp residue is a
+  // recoverable fallback, but ONLY once this process's own pending record is re-pointed at it — never
+  // left pointing at `filename`, the file that was never actually written.
+  const safetyTmpBasename = attemptDivertSafetyTmpFallback(toWrite);
+  if (safetyTmpBasename) {
+    const secured: MergeQuarantineEntry = { ...toWrite, orphanLatchFiles: [...new Set([...(toWrite.orphanLatchFiles ?? []), safetyTmpBasename])] };
+    replaceEntryEverywhere(activeQuarantines, toWrite, secured);
+    pendingUnresolvedQuarantines.push({ entry: secured, sourceFile: safetyTmpBasename });
+  } else {
+    // Triple fault — nothing durable to re-point to; keep the pre-existing (accepted-residual) shape.
+    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
+  }
+}
+
+/**
  * Divert a VERIFIED raise's own write away from `final` — the raise still durably persists (`e1cb7d33`),
  * just not at its own canonical key's physical file right now. Unions `entry` into EVERY pending record
  * already sharing its own identity by {@link directPathIdentity} (never just the first match), durably
@@ -2002,26 +2122,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   const identity = directPathIdentity(entry.repoPath);
   const indices = collectPendingIndices((p) => directPathIdentity(p.entry.repoPath) === identity);
   if (indices.length === 0) {
-    const filename = pendingDivertFilenameFor(entry.repoPath);
-    const persisted = writePendingDivertFile(filename, entry);
-    if (persisted) {
-      pendingUnresolvedQuarantines.push({ entry, sourceFile: filename });
-      return;
-    }
-    // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, its own key's physical final could not be safely overwritten) — the durable pending-divert latch ALSO failed to write; investigate immediately.`);
-    // @decision 8db913e2 (Follow-up dd34da46, Item 3) — the double fault: a safety-tmp residue is a
-    // recoverable fallback, but ONLY once this process's own pending record is re-pointed at it — never
-    // left pointing at `filename`, the file that was never actually written.
-    const safetyTmpBasename = attemptDivertSafetyTmpFallback(entry);
-    if (safetyTmpBasename) {
-      const secured: MergeQuarantineEntry = { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), safetyTmpBasename])] };
-      replaceEntryEverywhere(activeQuarantines, entry, secured);
-      pendingUnresolvedQuarantines.push({ entry: secured, sourceFile: safetyTmpBasename });
-    } else {
-      // Triple fault — nothing durable to re-point to; keep the pre-existing (accepted-residual) shape.
-      pendingUnresolvedQuarantines.push({ entry, sourceFile: filename });
-    }
+    mintPendingDivert(entry);
     return;
   }
   const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine);
@@ -2248,14 +2349,11 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // @decision d4b25feb — a genuinely BRAND NEW raise while repoPath is unresolvable: divert to
     // pendingUnresolvedQuarantines under its own, disjoint filename — never arm `activeQuarantines` at the
     // degraded, walked-up `key` (883e29bc's own fix, generalized here from boot to runtime).
+    //
+    // @decision 8db913e2 (Follow-up 8a79dd31) — routes through the SAME chokepoint divertRaiseEntry's own `indices.length === 0`
+    // branch uses, never a parallel inline copy — see mintPendingDivert's own doc comment.
     const fresh: MergeQuarantineEntry = { repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token] };
-    const filename = pendingDivertFilenameFor(repoPath);
-    const persisted = writePendingDivertFile(filename, fresh);
-    pendingUnresolvedQuarantines.push({ entry: fresh, sourceFile: filename });
-    if (!persisted) {
-      // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now (unresolvable raise, diverted to pending) — the durable pending-divert latch failed to write (see the error just above), so a daemon restart BEFORE that is fixed would silently LIFT this quarantine instead of re-arming it. Investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
-    }
+    mintPendingDivert(fresh);
     return token;
   }
   // @decision 500e307a — stamp provenanceTracked on the in-memory entry at the instant it is CREATED,
@@ -3426,7 +3524,13 @@ function pendingLatchIdFor(sourceFile: string): string {
   }
   // @decision d4b25feb — a pending-divert basename (clean final OR a crash-left tmp residue) is NOT
   // itself a valid 24-hex id — hash the FULL basename, mirroring the SAFETY_TMP_RE branch above.
-  if (PENDING_DIVERT_RE.test(sourceFile) || PENDING_DIVERT_TMP_RE.test(sourceFile)) {
+  //
+  // @decision 8db913e2 (Follow-up 8a79dd31) — a collision-suffixed fresh mint (clean, OR its own
+  // crash-left tmp residue) is the SAME shape: its own basename is not a valid 24-hex id either.
+  if (
+    PENDING_DIVERT_RE.test(sourceFile) || PENDING_DIVERT_TMP_RE.test(sourceFile)
+    || PENDING_DIVERT_COLLISION_RE.test(sourceFile) || PENDING_DIVERT_COLLISION_TMP_RE.test(sourceFile)
+  ) {
     return createHash("sha256").update(sourceFile).digest("hex").slice(0, 24);
   }
   // @decision 6237bef6 — sourceFile is `<hash>.json` for a PASS-1-sourced pending entry but
