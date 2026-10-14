@@ -114,6 +114,24 @@ function staleLockMessageCorroborates(err: unknown): boolean {
   return err instanceof Error && STALE_LOCK_MESSAGE_RE.test(err.message);
 }
 
+/**
+ * Rate-limit `commitVault`'s own "skipping — canonical_index_lock_present" console.warn (card `e7a88047`,
+ * follow-up to `62c4953a`). A merge-eligible vault held behind a genuinely-held lock gets this warn once
+ * per debounced auto-commit retry (as often as every few seconds under active editing) for as long as the
+ * lock persists — unlike {@link maybeAlertStaleVaultLock}'s own durable alert, which already dedupes by
+ * the lock's mtime, this is a plain per-process console line with no dedupe at all. Keyed on `vaultPath`
+ * (not the lock's mtime) — this only throttles LOG VOLUME, it is not a correctness signal.
+ */
+const INDEX_LOCK_WARN_RATE_LIMIT_MS = 60_000;
+const lastIndexLockPresentWarnAt = new Map<string, number>();
+
+function shouldWarnIndexLockPresent(vaultPath: string, nowMs = Date.now()): boolean {
+  const last = lastIndexLockPresentWarnAt.get(vaultPath);
+  if (last !== undefined && nowMs - last < INDEX_LOCK_WARN_RATE_LIMIT_MS) return false;
+  lastIndexLockPresentWarnAt.set(vaultPath, nowMs);
+  return true;
+}
+
 /** Marker filename for {@link maybeAlertStaleVaultLock}'s on-disk dedupe — same `.git/`-scoped-file
  *  convention as the pause lease / push-outcome record below (chokidar-ignored, never git-tracked). */
 const VAULT_LOCK_ALERT_MARKER_FILENAME = "loom-vault-lock-alert.json";
@@ -969,7 +987,7 @@ export interface CommitVaultResult {
 export async function commitVault(
   vaultPath: string,
   message: string,
-  opts?: { maxFileBytes?: number; deps?: VaultGitDeps },
+  opts?: { maxFileBytes?: number; deps?: VaultGitDeps; lockAlert?: { db?: Pick<Db, "appendEvent">; projectId?: string } },
 ): Promise<CommitVaultResult> {
   // @decision 68cc29db — refuse unconditionally rather than init/stage/commit an operational dir.
   if (isOperationalVaultDir(vaultPath)) {
@@ -1219,7 +1237,13 @@ export async function commitVault(
         return { committed: false };
       }
       if (err instanceof CanonicalIndexLockPresentError) {
-        console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${err.message}`);
+        // Call the alert HERE: this refusal returns {committed:false} rather than throwing, so the outer
+        // catch in commit()/flushSync() never sees it. maybeAlertStaleVaultLock has its own staleness
+        // threshold + per-lock-instance dedupe, so this is safe on every debounced retry.
+        maybeAlertStaleVaultLock(vaultPath, opts?.lockAlert ?? {}, err);
+        if (shouldWarnIndexLockPresent(vaultPath)) {
+          console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${err.message}`);
+        }
         return { committed: false };
       }
       throw err;
@@ -1779,7 +1803,9 @@ export class VaultVersioner {
     }
     // Route through the shared commit path (at the resolved repo root) so UI writes and auto-commits
     // stay consistent. commitVault re-confirms root === commitPath, so it commits (not backs off) here.
-    try { await commitVault(this.commitPath, `loom: auto-commit ${new Date().toISOString()}`); }
+    // `lockAlert` is threaded through so a merge-eligible vault's canonical-index-lock refusal can file
+    // its owner-visible alert immediately, from inside commitVault itself (see that catch's own comment).
+    try { await commitVault(this.commitPath, `loom: auto-commit ${new Date().toISOString()}`, { lockAlert: this.lockAlert }); }
     catch (err) {
       // Card 227d9f0b — a stale .git/index.lock surfaces as an ordinary commitVault throw here; detect
       // + (at most once per lock instance) file the owner-visible alert before swallowing it as before.

@@ -34,6 +34,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const { mergeBranch, createWorktree } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
 const { fastForwardCanonicalMain } = await import(pathToFileURL(path.join(distGitDir, "batch-merge.js")).href);
+const { GitWriter } = await import(pathToFileURL(path.join(distGitDir, "writer.js")).href);
 const { checkCanonicalIndexLockNotPresent, withCanonicalIndexLock, CanonicalIndexLockPresentError } =
   await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -187,6 +188,58 @@ try {
     check("(B3 createWorktree) the lock is untouched (no auto-removal, same as everywhere else)", fs.existsSync(lockPath));
     tmpDirs.push(info.worktreePath);
     fs.rmSync(lockPath);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // GitWriter.checkout/createBranch/commit (round 3, card e7a88047 item 4) — each must refuse while a
+  // real lock is present, naming the specific reason code, and the SAME call must succeed once removed.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = makeRepo("gitwriter");
+    const mainlineBranch = git(repo, "rev-parse --abbrev-ref HEAD");
+    const writer = new GitWriter(repo);
+
+    // checkout — switch to the pre-existing "other-branch" makeRepo() already created.
+    {
+      const lockPath = plantIndexLock(repo);
+      const res = await writer.checkout("other-branch");
+      check("(GitWriter.checkout) refuses while the lock is present", res.ok === false);
+      check("(GitWriter.checkout) error names the specific reason code", /canonical_index_lock_present/.test(res.error ?? ""));
+      check("(GitWriter.checkout) canonical HEAD did not move", git(repo, "rev-parse --abbrev-ref HEAD") === mainlineBranch);
+      fs.rmSync(lockPath);
+      const res2 = await writer.checkout("other-branch");
+      check("(GitWriter.checkout) control: once the lock is removed, checkout succeeds", res2.ok === true);
+      check("(GitWriter.checkout) control: HEAD actually moved", git(repo, "rev-parse --abbrev-ref HEAD") === "other-branch");
+      await writer.checkout(mainlineBranch); // back to mainline for the next sub-scenario
+    }
+
+    // createBranch
+    {
+      const lockPath = plantIndexLock(repo);
+      const res = await writer.createBranch("gitwriter-new-branch-blocked");
+      check("(GitWriter.createBranch) refuses while the lock is present", res.ok === false);
+      check("(GitWriter.createBranch) error names the specific reason code", /canonical_index_lock_present/.test(res.error ?? ""));
+      check("(GitWriter.createBranch) the branch was never created", !git(repo, "branch --list gitwriter-new-branch-blocked").trim());
+      fs.rmSync(lockPath);
+      const res2 = await writer.createBranch("gitwriter-new-branch-blocked");
+      check("(GitWriter.createBranch) control: once the lock is removed, createBranch succeeds", res2.ok === true);
+      check("(GitWriter.createBranch) control: the branch now exists", !!git(repo, "branch --list gitwriter-new-branch-blocked").trim());
+    }
+
+    // commit — HEAD is now on the just-created branch, which is fine; this only needs a lock refusal.
+    {
+      fs.writeFileSync(path.join(repo, "gitwriter-commit-test.txt"), "content\n");
+      const countBefore = git(repo, "rev-list --count HEAD");
+      const lockPath = plantIndexLock(repo);
+      const res = await writer.commit("gitwriter commit blocked by lock");
+      check("(GitWriter.commit) refuses while the lock is present", res.ok === false);
+      check("(GitWriter.commit) error names the specific reason code", /canonical_index_lock_present/.test(res.error ?? ""));
+      check("(GitWriter.commit) nothing committed", git(repo, "rev-list --count HEAD") === countBefore);
+      fs.rmSync(lockPath);
+      const res2 = await writer.commit("gitwriter commit after lock removed");
+      check("(GitWriter.commit) control: once the lock is removed, commit succeeds", res2.ok === true);
+      check("(GitWriter.commit) control: a new commit landed", git(repo, "rev-list --count HEAD") === String(Number(countBefore) + 1));
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════

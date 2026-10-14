@@ -12,9 +12,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `quarantined` gap predates this card but is fixed on the SAME lines.
 //
 // Modelled directly on batch-merge-diverted-not-cached.mjs's own setup/mechanism, simplified: this
-// scenario plants the lock up front (never a mid-gate injection) since the fast-forward — the only
-// canonical-index write on the batch path — runs strictly AFTER a green gate, so a pre-planted lock still
-// lets the gate run for real on call #1 before refusing at the ff-only step.
+// scenario plants the lock up front (never a mid-gate injection).
+//
+// Card e7a88047 (round 3 follow-up): `mergeBatchTracked` now also checks the lock PRE-gate, strictly
+// before the batch worktree is even cut — mirroring the corrupt-watermark early bail-out. A pre-planted
+// lock is now caught there and the gate never runs at all on call #1 (gateCalls stays 0), where it used
+// to let the gate run for real and only refuse afterward at the ff-only step (gateCalls === 1). Still
+// never cached: `classifyOutcome`'s `indexLockPresent` arm applies identically whether the refusal came
+// from the new pre-gate check or the old post-gate ff-only one.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/batch-merge-index-lock-not-cached.mjs
 import fs from "node:fs";
@@ -77,17 +82,36 @@ try {
   const baseSha = git(P.repo, "rev-parse", "HEAD");
   const tipBefore1 = { a: git(P.repo, "rev-parse", w1.branch), b: git(P.repo, "rev-parse", w2.branch) };
 
-  // ── call #1: a real lock is already present BEFORE the whole batch call — the gate still runs for real
-  //    (the lock only blocks the FF-ONLY, which happens strictly after a green gate), then refuses ───────
+  // ── call #1: a real lock is already present BEFORE the whole batch call — the NEW pre-gate check
+  //    (card e7a88047) catches it before the worktree is even cut, so the gate never runs at all ────────
   plantLock();
   const r1 = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
   check("call #1 settled synchronously", r1.settled === true);
   const v1 = r1.settled && r1.ok ? r1.value : { __unsettled: r1 };
   check("call #1 refused, typed indexLockPresent", v1.ok === false && v1.indexLockPresent === true);
   check("call #1's reason names the specific reason code", /canonical_index_lock_present/.test(v1.reason ?? ""));
-  check("call #1 invoked the gate exactly once (the lock only blocks the LATER ff-only)", gateCalls === 1);
+  check("call #1 never invoked the gate (the NEW pre-gate check caught the lock before any worktree cut)", gateCalls === 0);
   check("precondition: neither candidate branch moved (no fallback ran)", git(P.repo, "rev-parse", w1.branch) === tipBefore1.a && git(P.repo, "rev-parse", w2.branch) === tipBefore1.b);
   check("precondition: canonical mainline did NOT advance", git(P.repo, "rev-parse", "HEAD") === baseSha);
+
+  // Review round 2, item 5 (nitpick): the fallback report carries an outcome-specific tail, matching the
+  // watermark-unreadable sibling's own shape — never the generic "batch cancelled — not started".
+  check(
+    "call #1's fallback reports carry the outcome-specific remedy tail (not the generic 'batch cancelled' wording)",
+    Array.isArray(v1.fallback) && v1.fallback.length > 0 &&
+      v1.fallback.every((f) => /\(clear \.git\/index\.lock \(see reason\) before any worker_merge_confirm\)$/.test(f.reason ?? "")),
+  );
+
+  // Review round 2, item 2: the settled tombstone this op minted must read the SAME typed outcome
+  // gate_status(opId) would — "skipped" with skipReason "canonical-index-lock-present" (decision ba663984's
+  // own "Do not let ANY early refusal settle with a bare tombstone row" — this is the never-bare-row proof).
+  const settled1 = db.findPendingGateOpByOpId(v1.opId);
+  check("call #1's tombstone is resolvable by its own opId", settled1.kind === "found");
+  if (settled1.kind === "found") {
+    check("call #1's tombstone settled (never left pending)", settled1.record.state === "settled");
+    check("call #1's tombstone verdict is 'skipped' (never a bare/unclassified row)", settled1.record.verdict === "skipped");
+    check("call #1's tombstone skipReason is 'canonical-index-lock-present'", settled1.record.verdictPayload?.skipReason === "canonical-index-lock-present");
+  }
 
   // ── the human's remedy: remove the lock, exactly as the refusal instructs ───────────────────────────────
   check("precondition: the lock really is still on disk before the remedy", fs.existsSync(lockPath));
@@ -101,7 +125,7 @@ try {
   check("call #2 settled synchronously", r2.settled === true);
   const v2 = r2.settled && r2.ok ? r2.value : { __unsettled: r2 };
 
-  check("(B2 FIX) the gate counter INCREMENTED — call #2 ran a REAL gate, not a cache replay", gateCalls === 2);
+  check("(B2 FIX) the gate counter INCREMENTED — call #2 ran a REAL gate, not a cache replay", gateCalls === 1);
   check("(B2 FIX) cacheHit is ABSENT on call #2's AttachResult — a genuinely fresh op, never served from the stale lock-present verdict", !("cacheHit" in r2));
   check("(B2 FIX) call #2 actually landed this time (lock was removed, no second refusal)", v2.ok === true);
   check("(B2 FIX) both candidates landed", Array.isArray(v2.landed) && v2.landed.length === 2 && v2.landed.some((l) => l.branch === w1.branch) && v2.landed.some((l) => l.branch === w2.branch));

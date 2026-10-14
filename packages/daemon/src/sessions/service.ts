@@ -75,7 +75,7 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatically } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
-import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "../git/repo-lock.js";
+import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, checkCanonicalIndexLockNotPresent } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
 import { isSupersededByRecycle, currentHaltedSuccessor, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
@@ -20123,6 +20123,18 @@ export class SessionService {
           // eslint-disable-next-line no-console
           console.warn(`[merge-batch] no mainline branch available to pin for ${finalRepoPath} (repoKey ${batchRepoKey}) — canonical HEAD is detached/unreadable; this batch's fast-forward runs WITHOUT a branch-divert check (the sha-only forfeit check still applies)`);
         }
+        // @decision 62c4953a — PRE-GATE index-lock check: the batch path used to check only at the
+        // POST-gate ff-only stage, burning a whole worktree cut + gate run on an already-present lock.
+        // Cheap (one stat) — belongs with the other early bail-outs above, before the worktree is cut.
+        const preGateLockCheck = await checkCanonicalIndexLockNotPresent(finalRepoPath);
+        if (!preGateLockCheck.ok) {
+          const notStarted = await runFallback([
+            ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: preGateLockCheck.reason })),
+            ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+            ...strandedFallback,
+          ], opId, undefined, "clear .git/index.lock (see reason) before any worker_merge_confirm");
+          return { ok: false, opId, landed: [], fallback: notStarted, indexLockPresent: true, reason: preGateLockCheck.reason };
+        }
         let batchWorktreePath: string | undefined;
         // @decision a5d9c458 — the release handle reclaimWedgedWorktreePathForSpawn hands back below,
         // called in the SAME outer `finally` that removes the batch worktree, since a bare worktree cut
@@ -21018,6 +21030,11 @@ export class SessionService {
             else if (batchAllDropped) verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: every candidate was dropped at assembly and handed to its own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "all-candidates-dropped", batchBranchCount: 0, batchLanded: false, ...timing } };
             // Card ba663984's own early refusal (before any worktree cut) — same no-gate-ran shape as batchAllDropped above.
             else if (outcome.value.watermarkUnreadable) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "the stored mainline watermark record is unreadable", skipReason: "watermark-unreadable", batchBranchCount: 0, batchLanded: false, ...timing } };
+            // Card e7a88047's own PRE-gate index-lock refusal (before any worktree cut) — same no-gate-ran
+            // shape as watermarkUnreadable above. Never reached for the POST-gate indexLockPresent shape
+            // (fastForwardCanonicalMain's refusal) — that one always has `batchGateVerdict` already set
+            // from the real gate run, so `verdict` is non-null and this whole block is skipped.
+            else if (outcome.value.indexLockPresent) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "a .git/index.lock was already present in the canonical repo", skipReason: "canonical-index-lock-present", batchBranchCount: 0, batchLanded: false, ...timing } };
             // Card 92be634e: the `runGate` closure's own early return (above) for a failed --only-file=
             // overflow write never reaches `deriveBatchGateVerdict`/the `evtBatch("build_gate", ...)` event
             // either — same no-gate-ran shape as its siblings above, told apart by this skipReason.

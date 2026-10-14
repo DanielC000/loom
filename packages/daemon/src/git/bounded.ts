@@ -354,21 +354,80 @@ function logWinJobLauncherCallFallback(): void {
   console.log("[git] win-job-launcher.exe refused this call (git was never spawned) — falling back to the direct taskkill-based path for THIS call only; the launcher stays available for later calls.");
 }
 
+// @decision 62c4953a (round 6) — an ALLOWLIST: never add a subcommand without verifying (git's own docs)
+// it has NO value-bearing message/identity/trailer/reason/config-value flag. `worktree` was REMOVED here
+// (round 6) — `worktree lock --reason <string>`/`add --lock --reason <string>` both take free text.
+const SAFE_FULL_ARGS_SUBCOMMANDS = new Set([
+  "status", "diff", "ls-files", "rev-parse", "rev-list", "merge-base", "show-ref", "for-each-ref",
+  "cat-file", "read-tree", "write-tree", "reset", "checkout", "branch", "prune", "log", "grep",
+]);
+
 /**
- * @decision 62c4953a — scrubs a `-m`/`--message=`/`-F`/`--file=` value (free-text commit message/body);
- * every other arg (subcommands, flags, shas, branch/ref names) is safe to log as-is. Bounded length —
- * diagnostic only, never parsed back.
+ * Walks a `raw` git arg list's GLOBAL-OPTION prefix — the ONE shared walker `gitSubcommand`/
+ * `gitGlobalArgs` (below) and {@link summarizeGitArgsForLog} all call, so they can never independently
+ * drift on where the prefix ends.
+ *
+ * @decision 62c4953a (round 6, Code Review `b0e10423`) — `summarizeGitArgsForLog` used to re-scan an
+ * ALREADY-SLICED prefix ARRAY by CONTENT (`a === "-c"`) for its own redaction, instead of re-walking the
+ * ORIGINAL args by POSITION — so a `-C`/`--git-dir` VALUE that happened to equal the literal string `"-c"`
+ * was mistaken for a real `-c` flag, mis-pairing the REAL following `-c`'s own value as that fake flag's
+ * value and leaking it unredacted (e.g. `["-C","-c","-c","user.password=LEAK",...]`). Walking the
+ * ORIGINAL args once, by position, with the SAME `GLOBAL_OPTS_WITH_VALUE` set every value-taking global
+ * option is paired by, closes this for every such option, not just `-c`.
  */
-function summarizeGitArgsForLog(args: readonly string[]): string {
-  const MESSAGE_FLAGS = new Set(["-m", "--message", "-F", "--file"]);
-  const out: string[] = [];
-  for (let i = 0; i < args.length; i++) {
+function walkGitGlobalPrefix(args: readonly string[]): { subcommandIndex: number; renderedForLog: string[] } {
+  const renderedForLog: string[] = [];
+  let i = 0;
+  for (; i < args.length; i++) {
     const a = args[i]!;
-    if (MESSAGE_FLAGS.has(a)) { out.push(a, "<redacted>"); i++; continue; }
-    if (/^--(message|file)=/.test(a)) { out.push(`${a.split("=")[0]}=<redacted>`); continue; }
-    out.push(a);
+    if (a === "-c") {
+      // `-c key=value` redacts only the VALUE half — the key is a config path name, not a secret, and is
+      // useful to a human diagnosing the call.
+      renderedForLog.push(a);
+      const kv = args[i + 1];
+      if (kv !== undefined) {
+        const eq = kv.indexOf("=");
+        renderedForLog.push(eq === -1 ? "<redacted>" : `${kv.slice(0, eq)}=<redacted>`);
+        i++;
+      }
+      continue;
+    }
+    if (GLOBAL_OPTS_WITH_VALUE.has(a)) {
+      // `-C <path>`/`--git-dir <path>`/etc. — logged unchanged; none of these carry a message/identity/
+      // trailer value, only a path/namespace.
+      renderedForLog.push(a);
+      const v = args[i + 1];
+      if (v !== undefined) { renderedForLog.push(v); i++; }
+      continue;
+    }
+    if (a.startsWith("-")) { renderedForLog.push(a); continue; } // another global flag with no value
+    break; // reached the subcommand
   }
-  const joined = out.join(" ");
+  return { subcommandIndex: i, renderedForLog };
+}
+
+// @decision 62c4953a (round 5) — NEVER reintroduce flag-level parsing to decide what to redact: three
+// straight rounds each closed one leaked flag shape and missed another. Fails closed at the SUBCOMMAND
+// level instead — a subcommand not on the allowlist above gets its whole tail collapsed to a bare count.
+export function summarizeGitArgsForLog(args: readonly string[]): string {
+  const { subcommandIndex, renderedForLog } = walkGitGlobalPrefix(args);
+  const subcommand = args[subcommandIndex];
+  const rest = args.slice(subcommandIndex);
+
+  let tailOut: string[];
+  if (subcommand !== undefined && SAFE_FULL_ARGS_SUBCOMMANDS.has(subcommand)) {
+    tailOut = [...rest]; // verified safe — every arg after the subcommand logged in full
+  } else if (subcommand !== undefined) {
+    // Deny by default: an unrecognized subcommand is collapsed exactly like a known-unsafe one. Nothing
+    // past the subcommand token itself is ever individually inspected — duration + subcommand is all the
+    // index-lock diagnosis this log line exists for needs; the args are a secret-shaped unknown.
+    const redactedCount = rest.length - 1;
+    tailOut = [subcommand, `<${redactedCount} arg${redactedCount === 1 ? "" : "s"} redacted>`];
+  } else {
+    tailOut = []; // no subcommand at all (a bare global-option-only call) — nothing left to redact
+  }
+
+  const joined = [...renderedForLog, ...tailOut].join(" ");
   return joined.length > 300 ? `${joined.slice(0, 300)}…` : joined;
 }
 
@@ -1081,15 +1140,11 @@ const PURE_READ_SUBCOMMANDS = new Set([
 /** Global options that take their value as a SEPARATE arg when written without `=` (`--exec-path`/`--super-prefix` are deliberately absent: bare, they take no value, and mis-skipping a real subcommand would be the UNSAFE direction) — the value must never be read as the subcommand. */
 const GLOBAL_OPTS_WITH_VALUE = new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source"]);
 
+// @decision 62c4953a (round 6) — routes through the SAME walkGitGlobalPrefix() summarizeGitArgsForLog
+// uses, so the two can never drift on where the global-option prefix ends.
 /** Parse a `raw` arg list's global options: the subcommand (or undefined). */
 function parseGitArgs(args: readonly string[]): { sub: string | undefined } {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (GLOBAL_OPTS_WITH_VALUE.has(a)) { i++; continue; }
-    if (a.startsWith("-")) continue;
-    return { sub: a };
-  }
-  return { sub: undefined };
+  return { sub: args[walkGitGlobalPrefix(args).subcommandIndex] };
 }
 
 /** The git subcommand of a `raw` arg list, skipping global options and their separate-arg values (`-c k=v`, `-C p`, `--git-dir p`, `--x[=y]`). */
@@ -1116,15 +1171,11 @@ export function describeGitFailure(e: unknown): { text: string; refusal: boolean
   return { text, refusal: e instanceof CanonicalGitRefusal };
 }
 
+// @decision 62c4953a (round 6) — routes through the SAME walkGitGlobalPrefix() summarizeGitArgsForLog
+// uses, so the two can never drift on where the global-option prefix ends.
 /** The global options in front of the subcommand (`--git-dir p`, `-C p`, `-c k=v`, `--work-tree=…`, …): the config-affecting context the REAL call runs in. */
 export function gitGlobalArgs(args: readonly string[]): string[] {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (GLOBAL_OPTS_WITH_VALUE.has(a)) { i++; continue; }
-    if (a.startsWith("-")) continue;
-    return args.slice(0, i);
-  }
-  return [...args];
+  return args.slice(0, walkGitGlobalPrefix(args).subcommandIndex);
 }
 
 const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);

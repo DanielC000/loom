@@ -308,13 +308,18 @@ export async function checkCanonicalIndexLockNotPresent(repoPath: string): Promi
  * that writes it: `mergeBranch`/`mergeBranchLocked`'s squash (`git/worktrees.ts`), the preflight probes
  * `confirmWorkerMerge` runs immediately before it (`sessions/service.ts` — same canonical-index risk, one
  * call earlier), `fastForwardCanonicalMain`'s ff-only (`git/batch-merge.ts`), and `GitWriter`'s
- * checkout/createBranch/commit (`git/writer.ts`). Never from `createWorktree`'s fresh-cut path
- * (`git/worktrees.ts`) — `worktree add`/`prune`/`branch --list` all work fine against a canonical repo
- * holding `index.lock` (verified against real git 2.47) — nor from `vault/versioner.ts`'s `commitVault`
- * (deliberately excluded; see the decision record's "Vault" section for why). Run immediately after the
- * quarantine check, same timing reasoning: a real `.git/index.lock` can appear while this caller sat
- * queued behind `prior` too. Throws {@link CanonicalIndexLockPresentError} — see {@link
- * checkCanonicalIndexLockNotPresent}'s own doc.
+ * checkout/createBranch/commit (`git/writer.ts`), and `vault/versioner.ts`'s `commitVault` (merge-eligible
+ * branch only — that path writes the SAME canonical index a real merge/`GitWriter` write would hit).
+ * Never from `createWorktree`'s fresh-cut path (`git/worktrees.ts`) — `worktree add`/`prune`/
+ * `branch --list` all work fine against a canonical repo holding `index.lock` (verified against real git
+ * 2.47). Run immediately after the quarantine check, same timing reasoning: a real `.git/index.lock` can
+ * appear while this caller sat queued behind `prior` too. Throws {@link CanonicalIndexLockPresentError} —
+ * see {@link checkCanonicalIndexLockNotPresent}'s own doc. `checkout -b` does NOT itself race a
+ * staged-but-uncommitted diff (git carries it forward onto the new branch unchanged) — `createBranch`
+ * opts in anyway because moving canonical HEAD while an external `git commit` is mid-flight would divert
+ * that commit onto the freshly-created branch instead of the mainline, the SAME divert family `checkout`/
+ * `commit` above are in (see `GitWriter.createBranch`'s own doc, `git/writer.ts`, for the full corruption
+ * story). See the decision record's Scope table for the full per-caller breakdown.
  */
 export async function withCanonicalIndexLock<T>(
   repoPath: string,

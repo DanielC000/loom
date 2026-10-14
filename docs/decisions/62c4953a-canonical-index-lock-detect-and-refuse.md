@@ -55,7 +55,7 @@ Every `withCanonicalIndexLock` caller, and its status:
 | `confirmWorkerMerge`'s preflight (staged/dirty/untracked overlap probes) | `sessions/service.ts` | **true** | runs INSIDE the same canonical-index acquisition the squash itself re-acquires one call later (B1 below) |
 | `fastForwardCanonicalMain` (the batch ff-only) | `git/batch-merge.ts` | **true** | writes the canonical index |
 | `GitWriter.checkout` | `git/writer.ts` | **true** | writes the canonical index |
-| `GitWriter.createBranch` | `git/writer.ts` | **true** | writes the canonical index (`checkout -b`) |
+| `GitWriter.createBranch` | `git/writer.ts` | **true** | `checkout -b` itself does NOT race a staged-but-uncommitted diff (verified against real git 2.47: it carries staged content forward onto the new branch unchanged) — but moving canonical HEAD while an external `git commit` is mid-flight would divert that commit onto the freshly-created branch instead of the mainline, the same divert family `checkout`/`commit` below are in |
 | `GitWriter.commit` | `git/writer.ts` | **true** | writes the canonical index (`add -A` + `commit`) |
 | `commitVault` (vault auto-commit), merge-eligible branch only | `vault/versioner.ts` | **true** | this IS the same canonical index a real merge/GitWriter write would hit (that is the entire reason this lock is taken at all — see this file's own `a09b81a0` doc); translated into the SAME graceful `{committed:false}` backoff a quarantine refusal already gets here, never a throw — an auto-commit tick already treats any failure as "retry next tick" |
 | `createWorktree`'s fresh-cut path | `git/worktrees.ts` | **false (deliberate)** | `worktree prune`/`branch --list`/`worktree add` all work fine with a lock present; must never block a worker/review spawn |
@@ -117,3 +117,128 @@ operation. The owner's ruling is to surface this to a human instead.
   so elapsed time alone cannot distinguish a real timeout from an ordinary slow failure of the same
   duration. Label it as the weaker, honest claim the signal actually supports ("slow failure (elapsed X ms
   >= idle bound Y ms)").
+
+## Round 3 (Code Review of round 2, reviewer `e243a80b`, card `e7a88047`) — additional "Do not"s
+
+- Do not read `GitWriter.createBranch`'s `checkIndexLock:true` as meaning `checkout -b` itself conflicts
+  with a staged diff — verified against real git 2.47 it does NOT (staged content carries forward onto
+  the new branch unchanged). The true reason is the Scope table row above: moving canonical HEAD while an
+  external `git commit` is mid-flight would divert that commit onto the freshly-created branch instead of
+  the mainline.
+- Do not let a merge-eligible vault's `CanonicalIndexLockPresentError` refusal (`commitVault`,
+  `vault/versioner.ts`) skip `maybeAlertStaleVaultLock` just because it's translated to a graceful
+  `{committed:false}` rather than thrown — call the alert from INSIDE `commitVault`'s own catch, not only
+  from the outer catch in `VaultVersioner.commit()`/`flushSync()` (which never sees this error, since it
+  never escapes `commitVault`). `maybeAlertStaleVaultLock` already has its own staleness threshold and
+  per-lock-instance dedupe, so calling it on every debounced retry is safe; only the plain
+  `console.warn` alongside it needs its own rate limit.
+- Do not check the batch path's index lock ONLY at the post-gate ff-only stage
+  (`fastForwardCanonicalMain`) — add the SAME cheap pre-gate check `mergeBatchTracked` (`sessions/
+  service.ts`) already does for the corrupt-watermark case, strictly before the batch worktree is cut, so
+  an already-present lock never burns a whole worktree cut + gate run. This changes `gateCalls` on call #1
+  of `batch-merge-index-lock-not-cached.mjs` from 1 to 0 — the gate no longer runs at all when the lock is
+  already present before assembly starts; updated deliberately, not a regression.
+- Do not let an early (pre-worktree-cut) `indexLockPresent` refusal settle through `onSettle` with a bare
+  tombstone row — add its own `verdict` synthesis arm (mirrors `watermarkUnreadable`'s), gated so it never
+  fires for the POST-gate `indexLockPresent` shape (that one always has `batchGateVerdict` already set
+  from the real gate run that preceded it).
+
+## Round 4 (Code Review of round 3, `1260fb58`) — NOT SHIP, one blocker
+
+**BLOCKER — `summarizeGitArgsForLog` (`git/bounded.ts`) failed open on an unrecognized global option.**
+Round 3's own subcommand detection was a hand-rolled loop that only knew `-c`. A real call shaped
+`["-C", "/repo", "commit", "-m", "<secret>"]` (or with `--git-dir`/`--config-env` in place of `-C` — all
+three are real git global options that take their value as a SEPARATE arg, the exact same shape as `-c
+<cfg>`) made that loop read the VALUE (`"/repo"`) as the subcommand, missing `commit` entirely — `isCommit`
+read `false`, and the message landed in the log UNREDACTED. Nothing was leaking in production at the time
+(no canonical call in this codebase actually uses those prefixes before `commit`), but a redaction that
+fails open on input it doesn't recognise is not an acceptable shape for a function whose whole job is
+redaction.
+
+Fixed two ways, together:
+1. **Reuse, never re-derive, subcommand detection.** `git/bounded.ts` already has `gitSubcommand()` (and
+   its `GLOBAL_OPTS_WITH_VALUE` set — `-c`, `-C`, `--git-dir`, `--work-tree`, `--namespace`,
+   `--config-env`, `--attr-source`), used elsewhere in the same file for exactly this question. Do not add
+   a second, narrower parse of the same question — two independent parses of "what is the subcommand" can
+   only ever drift apart, which is exactly how round 3 regressed.
+2. **Deny by default, not allow by default.** Round 3 scrubbed ONLY the `commit` subcommand — any OTHER
+   subcommand this function didn't yet special-case passed straight through unredacted, the same fail-open
+   shape one level up. `NO_MESSAGE_FLAG_SUBCOMMANDS` (`git/bounded.ts`) now names the few subcommands VERIFIED
+   to have no message/file/author-bearing flag at all (`log`, `grep` — both real call sites in this
+   codebase, e.g. `git log -F --grep=Loom-Worker-Branch: ...` in `git/worktrees.ts`, where `-F` is
+   `--grep`'s "fixed strings" mode, never a value of its own) — every subcommand NOT in that set, including
+   one this function has never seen before, gets every flag below redacted.
+
+Also closed, same round: `--author`'s value is now redacted too (`batch-merge.ts`'s squash-amend commit
+logs a worker's own author identity via `["commit", "--author", "<name> <email>", ...]` — a daemon-global
+log shared across every tenant on the host); and an abbreviated long option git itself accepts (`--mess=`,
+`--fil=`, …) is redacted via a cheap letter-prefix check against `"message"`/`"file"`.
+
+## Round 5 (Code Review of round 4, `bc965645`) — NOT SHIP, again on the same function
+
+**Three straight rounds of flag-parser gaps.** Round 3 scrubbed only exact `-m`/`-F`/`--message`/`--file`
+tokens on `commit`. Round 4 widened that to attached/clustered short forms, `--author`, and abbreviated
+long options — and STILL leaked: the greedy attached/clustered regex turned `commit -mConfirm` into
+`-mConfirm <redacted>` (logging the message in clear AND swallowing the next arg; `-amPassForm` leaked the
+same way), a separate-value abbreviation like `--mess X`/`--fil secretfile` was never covered at all (only
+the `=`-joined form was), and an `--author` abbreviation like `--auth=X`/`--autho X` leaked outright — made
+worse by round 4's own "Do not extend abbreviation matching to `--author`" ruling, which forbade the fix
+for that exact leak. Hand-rolling git's option grammar one flag shape at a time is not a tractable way to
+keep a redaction function closed — there is always another attached/clustered/abbreviated/separate-value
+shape no one has thought of yet.
+
+**THE FIX stops parsing flags entirely and fails closed at the SUBCOMMAND level.** `summarizeGitArgsForLog`
+(`git/bounded.ts`) now: (1) resolves the subcommand via the shared `gitSubcommand()`/`gitGlobalArgs()` (as
+round 4 already established); (2) if that subcommand is in `SAFE_FULL_ARGS_SUBCOMMANDS` — an ALLOWLIST of
+subcommands VERIFIED (against git's own documentation) to have no value-bearing message/identity/trailer/
+reason/config-value flag at all (round 6 below removed `worktree` from this list — see why) — logs every
+arg after it IN FULL; (3) otherwise collapses the ENTIRE
+tail to `<subcommand> <N args redacted>`, with zero per-flag inspection; an unrecognized subcommand gets
+the same collapse. A global `-c key=value` prefix redacts only the value half (`-c user.name=<redacted>`)
+— the key is a config path name, not a secret; `-C <path>`/`--git-dir <path>`/etc. are logged unchanged,
+as before. `NO_MESSAGE_FLAG_SUBCOMMANDS`, `EXACT_VALUE_FLAGS`, the attached/clustered short-form regex, and
+the abbreviated-long-option check are all DELETED — there is no flag-level logic left to have a gap in.
+
+## Do not (round 5)
+
+- Do not add a subcommand to `SAFE_FULL_ARGS_SUBCOMMANDS` without first verifying (git's own documentation,
+  not assumption) that it has no value-bearing message, identity, trailer, reason, or config-value flag —
+  this set is an ALLOWLIST; an unverified addition is exactly how a real secret ends up logged in full on a
+  subcommand this set wrongly trusts.
+- Do not reintroduce flag-level parsing to decide what to redact, for ANY reason — three straight rounds
+  each closed one leaked shape and missed another; the fix is failing closed at the subcommand level, not
+  a better flag parser.
+- Do not extend abbreviation matching to `--author` — this round deleted abbreviation matching entirely,
+  so there is nothing left to extend; round 4's identical-sounding "Do not" is superseded, not satisfied,
+  by this deletion.
+
+## Round 6 (Code Review of round 5, `b0e10423`) — SHIP, with two small fixes requested before landing
+
+1. **`worktree`'s "no value-bearing flag" claim was false.** `git worktree lock --reason <string>` and
+   `git worktree add --lock --reason <string>` both take free text. Removed from
+   `SAFE_FULL_ARGS_SUBCOMMANDS` — a `worktree` call now collapses to `worktree <N args redacted>` like
+   every other non-allowlisted subcommand.
+2. **The `-c` prefix-redaction loop re-scanned an already-sliced prefix ARRAY by CONTENT.** It matched
+   `a === "-c"` against each element of the `prefix` slice `gitGlobalArgs()` had already produced — but a
+   `-C`/`--git-dir`/etc. VALUE that happened to equal the literal string `"-c"` is indistinguishable, by
+   content alone, from a real `-c` flag. `["-C", "-c", "-c", "user.password=LEAK", "status"]` mis-paired
+   the REAL second `-c`'s value with the FAKE one, leaking it unredacted. Fixed by introducing ONE shared
+   walker, `walkGitGlobalPrefix()`, that walks the ORIGINAL `args` ONCE, by POSITION, using the same
+   `GLOBAL_OPTS_WITH_VALUE` set every value-taking global option is paired by — `gitSubcommand()`/
+   `gitGlobalArgs()` now both route through it too, so there is only ever one answer to "where does the
+   global-option prefix end."
+3. `log`/`rev-list`'s `--author=`/`--grep=` and `grep`'s own pattern argument are deliberately allowed in
+   full on those two allowlisted subcommands — they are SEARCH FILTERS (read-only query parameters that
+   select existing history), never SETTERS (a value that gets written somewhere), so there is nothing for
+   them to leak that the repository's own history doesn't already contain in plain sight.
+
+## Do not (round 6)
+
+- Do not re-scan an already-sliced prefix array by CONTENT to decide what to redact — walk the ORIGINAL
+  args by POSITION, through `walkGitGlobalPrefix()`, the one shared walker. A content-based re-scan cannot
+  tell a real flag token from another option's VALUE that happens to look like one.
+- Do not let `gitSubcommand()`/`gitGlobalArgs()` diverge from `summarizeGitArgsForLog()`'s own notion of
+  where the global prefix ends — all three must share `walkGitGlobalPrefix()`, never three independent
+  copies of the same walk.
+- Do not add `worktree` back to `SAFE_FULL_ARGS_SUBCOMMANDS` without accounting for `lock --reason`/`add
+  --lock --reason` specifically — those are the flags that made the original claim false.

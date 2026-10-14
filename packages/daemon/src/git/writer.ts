@@ -451,7 +451,9 @@ export class GitWriter {
           }
           return { ok: true, branch: target };
         }),
-        // @decision 62c4953a (round 2 scope) — opts in: checkout -b writes the canonical index.
+        // @decision 62c4953a (round 2 scope) — opts in: moving canonical HEAD mid-flight would divert an
+        // external git commit onto this new branch (checkout -b itself does NOT race a staged diff — see
+        // this method's own doc above for the full rationale).
         { checkIndexLock: true },
       );
     } catch (e) {
