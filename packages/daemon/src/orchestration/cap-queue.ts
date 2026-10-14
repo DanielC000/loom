@@ -168,11 +168,26 @@ export class CapQueueRegistry {
     this.entries.delete(taskId);
   }
 
-  /** Clear every taskless marker for one agentId on this manager once a taskless spawn for that agentId
-   *  actually succeeds — a taskless entry has no single stable key to delete directly (see class doc). */
-  clearTasklessForAgent(managerSessionId: string, agentId: string): void {
+  /**
+   * Clear the taskless marker(s) for one agentId on this manager that correspond to the SAME review
+   * target as the spawn that just succeeded — a taskless entry has no single stable key to delete
+   * directly (see class doc), so this matches on `agentId` PLUS the review identity instead of `agentId`
+   * alone.
+   *
+   * @decision beb6f2b5 — matching on `agentId` alone used to bulk-clear every sibling taskless entry for
+   * that agent, silently dropping one queued for a different review target with no notice at all.
+   */
+  clearTasklessForAgent(
+    managerSessionId: string, agentId: string,
+    reviewOf?: { reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
+  ): void {
+    const reviewOfWorkerSessionId = reviewOf?.reviewOfWorkerSessionId;
+    const reviewOfTaskId = reviewOf?.reviewOfTaskId;
     for (const [key, e] of this.entries) {
-      if (e.taskId === null && e.managerSessionId === managerSessionId && e.agentId === agentId) this.entries.delete(key);
+      if (
+        e.taskId === null && e.managerSessionId === managerSessionId && e.agentId === agentId
+        && e.reviewOfWorkerSessionId === reviewOfWorkerSessionId && e.reviewOfTaskId === reviewOfTaskId
+      ) this.entries.delete(key);
     }
   }
 

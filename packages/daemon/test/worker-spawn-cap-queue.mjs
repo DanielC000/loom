@@ -741,6 +741,97 @@ try {
   }
 }
 
+// ===================== Section F (card beb6f2b5): a successful taskless spawn must clear ONLY its own
+// cap-queue marker, never a SIBLING taskless entry for the SAME agent queued behind a DIFFERENT review
+// target. =====================
+// THE REAL INCIDENT THIS REPRODUCES: two taskless Code Reviewer spawns (reviewing two DIFFERENT workers)
+// were both cap-queued behind a full cap. The first auto-fired correctly; the second silently vanished —
+// never popped, never TTL-reaped, never notified — because `clearTasklessForAgent` matched on `agentId`
+// alone and bulk-cleared every taskless entry for that agent the instant ANY one of them (here, the
+// first's own auto-fire) succeeded. This section queues two such entries behind a cap of 2 and frees
+// BOTH slots (one via an auto-retire — the DoD's explicit repro shape — the other via a plain exit), then
+// asserts BOTH entries eventually fire as real live workers (correct per-target routing of a fired
+// review is already covered by Section E's (31); this section's own focus is that neither is dropped).
+{
+  const repoF = path.join(os.tmpdir(), `loom-wscq-repoF-${Date.now()}-${process.pid}-${randomUUID()}`);
+  initRepo(repoF);
+  const worktreesF = [];
+  try {
+    db.insertProject({ id: "pF", name: "F", repoPath: repoF, vaultPath: repoF, config: { orchestration: { maxConcurrentWorkers: 2 } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "agentMgrF", projectId: "pF", name: "MgrF", startupPrompt: "MGR", position: 0, profileId: null });
+    db.insertAgent({ id: "agentDevF", projectId: "pF", name: "DevF", startupPrompt: "DEV", position: 1, profileId: null });
+    db.insertAgent({ id: "agentCRF", projectId: "pF", name: "CRF", startupPrompt: "CR", position: 2, profileId: null });
+    db.insertSession({ id: "mgr5", projectId: "pF", agentId: "agentMgrF", engineSessionId: null, title: null,
+      cwd: repoF, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    const routerF = new OrchestrationMcpRouter(db, svc);
+    const serverF = routerF.buildServer("mgr5", "manager");
+    const [clientTF, serverTF] = InMemoryTransport.createLinkedPair();
+    await serverF.connect(serverTF);
+    const clientF = new Client({ name: "worker-spawn-cap-queue-test-F", version: "0" });
+    await clientF.connect(clientTF);
+    const callF = async (nameArgs, args) => parse(await clientF.callTool({ name: nameArgs, arguments: args ?? {} }));
+
+    // Fill the cap (2) with two plain taskless workers. Deliberately NO marker commit on either — F1's
+    // own done report below claims noChanges:true, which the precheck only accepts when F1 is genuinely
+    // 0-ahead of base; a worker that actually committed something could never honestly auto-retire this way.
+    const spawnF1 = await callF("worker_spawn", { agentId: "agentDevF", kickoffPrompt: "GO F1" });
+    check("(33 setup) F1 fills slot 1 of 2", !!spawnF1.workerSessionId);
+    worktreesF.push(spawnF1.worktreePath);
+    const spawnF2 = await callF("worker_spawn", { agentId: "agentDevF", kickoffPrompt: "GO F2" });
+    check("(33 setup) F2 fills slot 2 of 2", !!spawnF2.workerSessionId);
+    worktreesF.push(spawnF2.worktreePath);
+
+    // Queue TWO taskless Code Reviewer spawns for the SAME agent, reviewing DIFFERENT workers.
+    const rejCR1 = await callF("worker_spawn", { agentId: "agentCRF", kickoffPrompt: "Review F1", reviewOfWorkerSessionId: spawnF1.workerSessionId });
+    check("(33) first review spawn (of F1) is cap-queued", !!rejCR1.capQueued);
+    const rejCR2 = await callF("worker_spawn", { agentId: "agentCRF", kickoffPrompt: "Review F2", reviewOfWorkerSessionId: spawnF2.workerSessionId });
+    check("(33) second review spawn (of F2 — SAME agentId as the first, DIFFERENT review target) is also cap-queued", !!rejCR2.capQueued);
+    check("(33) both review spawns got DISTINCT opIds", rejCR1.capQueued.opId !== rejCR2.capQueued.opId);
+    check("(33 setup) both entries are listed before anything fires", svc.capQueue.listByManager("mgr5").length === 2);
+
+    // Free slot 1 via an AUTO-RETIRE (declared no-op done, zero commits ahead) — the DoD's own repro shape,
+    // and the real incident's own slot-free trigger. workerReport's own auto-retire branch fires
+    // maybeDrainCapQueue itself (fire-and-forget) — do NOT ALSO call it again here: a second, overlapping
+    // call races the first (each runs its own `for(;;)` pop loop, and the two interleave at the first
+    // await inside spawnWorker), which can pop BOTH entries concurrently instead of draining one at a
+    // time. Poll for the effect instead, mirroring this file's other real-worktree-spawn waits.
+    const liveCRCount = () => db.listWorkers("mgr5").filter((w) => w.processState === "live" && w.agentId === "agentCRF").length;
+    const cr2StillQueued = () => svc.capQueue.listByManager("mgr5").some((e) => e.opId === rejCR2.capQueued.opId);
+    const doneF1 = await svc.workerReport(spawnF1.workerSessionId, { status: "done", summary: "no findings", noChanges: true });
+    check("(34 setup) F1's done report auto-retires (declared no-op)", doneF1.autoRetired === true);
+    // Wait for the WHOLE drain to settle, not just CR1 going live — its own `for(;;)` loop continues
+    // straight on to pop CR2 too (to check for leftover headroom), and CR2's own spawnWorker call needs a
+    // moment to reach its cap-reject and requeueFront before the registry reflects its final, settled state.
+    check("(34 setup) the drain settles: F1's review is live AND the sibling is back in a stable queued state",
+      await waitUntil(() => liveCRCount() === 1 && cr2StillQueued()));
+
+    // ===== THE ASSERTION THAT MUST GO RED ON UNFIXED CODE: the SECOND entry must still be queued — not
+    // ===== silently wiped as a side effect of the FIRST entry's own successful auto-fire. =====
+    check("(34) the review of F1 auto-fired into a real live worker", liveCRCount() === 1);
+    check("(34) the SIBLING entry (review of F2) is still cap-queued — NOT silently dropped by the first entry's own success",
+      cr2StillQueued());
+    check("(34) exactly one entry remains queued (not zero, not still two)", svc.capQueue.listByManager("mgr5").length === 1);
+
+    // Free slot 2 via a PLAIN exit (mirrors the generic onExit-driven default slot-free trigger). This is
+    // the ONLY maybeDrainCapQueue call in flight at this point (nothing else triggers one concurrently),
+    // so awaiting it directly — rather than polling — is safe here.
+    db.setProcessState(spawnF2.workerSessionId, "exited");
+    db.setBusy(spawnF2.workerSessionId, false);
+    await svc.maybeDrainCapQueue("mgr5");
+
+    check("(35) the review of F2 ALSO eventually auto-fires into a real live worker (now TWO live reviewers)", liveCRCount() === 2);
+    check("(35) the cap-queue for this manager is now fully drained", svc.capQueue.listByManager("mgr5").length === 0);
+    for (const w of db.listWorkers("mgr5")) { if (w.worktreePath) worktreesF.push(w.worktreePath); }
+  } finally {
+    try {
+      const { removeWorktree } = await import("../dist/git/worktrees.js");
+      for (const wt of [...new Set(worktreesF.filter(Boolean))]) { try { await removeWorktree(repoF, wt); } catch { /* best-effort */ } }
+    } catch { /* best-effort */ }
+    try { fs.rmSync(repoF, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+}
+
 // ===================== Section B: CapQueueRegistry unit tests (injectable clock, no real wait) =====================
 {
   let fakeNow = 1_000_000;

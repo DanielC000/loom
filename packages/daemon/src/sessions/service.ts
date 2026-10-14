@@ -8651,7 +8651,10 @@ export class SessionService {
       // an already-live spawn over.
       this.bestEffortPostSpawn("clearing the cap-queue entry for this spawn", worker.id, () => {
         if (taskId) this.capQueue.clearForTask(taskId);
-        else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
+        // @decision beb6f2b5 — matched on agentId alone, this used to ALSO delete a sibling taskless
+        // entry queued for a DIFFERENT review target; scope the clear to THIS spawn's own review
+        // identity so a sibling review spawn survives.
+        else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id, { reviewOfWorkerSessionId: opts.reviewOfWorkerSessionId, reviewOfTaskId: opts.reviewOfTaskId });
       });
       const reviewOf = reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined;
       // Card 548a0c7e: live capacity on the SUCCESS response — this is the exact moment a manager
