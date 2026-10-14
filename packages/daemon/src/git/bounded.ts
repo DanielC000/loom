@@ -62,6 +62,73 @@ export function isNotAGitRepositoryError(e: unknown): boolean {
   return /not a git repository/i.test((e as Error)?.message ?? String(e));
 }
 
+/** @decision 2267e8fa — generic, non-personal identity used ONLY when git itself cannot determine an
+ *  identity for a commit role at all. Do not duplicate this constant per call site again — every
+ *  commit-creating path shares this ONE copy; a duplicate is how the per-site probes drifted before. */
+export const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
+
+/** @decision 2267e8fa — `git var` fatal for a genuinely unresolvable identity. Never match this against
+ *  an unpinned-locale probe (see `resolveGitIdentityFallbackArgs`'s `LC_ALL=C`/`LANGUAGE=C` pin), and
+ *  never re-duplicate this regex — the sync mirror (`vault/versioner.ts`) reuses this SAME export. */
+export function isGitIdentityUnresolvedError(e: unknown): boolean {
+  return /(unable to auto-detect (?:name|email address)|empty ident (?:name|email))/i.test((e as Error)?.message ?? "");
+}
+
+/** @decision 2267e8fa — never drop this `withTimeout` wrap: a never-settling `git var` must not silently
+ *  widen the caller's own total-elapsed bound. True iff `<varName>` resolves on `probeGit`; any OTHER
+ *  probe failure is treated as resolvable — see {@link resolveGitIdentityFallbackArgs}. */
+async function probeGitIdentResolvable(
+  probeGit: Pick<SimpleGit, "raw">,
+  varName: "GIT_AUTHOR_IDENT" | "GIT_COMMITTER_IDENT",
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    await withTimeout(probeGit.raw(["var", varName]), timeoutMs, `git var ${varName}`);
+    return true;
+  } catch (e) {
+    return !isGitIdentityUnresolvedError(e);
+  }
+}
+
+/** @decision 2267e8fa — THE ONE shared helper every commit-creating path uses for a fallback identity
+ *  decision. Do not probe with a bare `user.name`/`user.email` config read, or re-duplicate this per
+ *  site, again — both are how a resolvable (e.g. env-only) identity used to be wrongly read as missing.
+ *
+ *  Builds its OWN, DEDICATED probe-only git instance via `makeProbeGit` (default {@link canonicalGit}),
+ *  rather than reusing the caller's real commit instance — a `SimpleGit` instance's `.env()` MUTATES it
+ *  in place (simple-git's own `Git2.prototype.env`, single-object form, replaces `_executor.env`
+ *  wholesale), so calling it on the caller's real instance would permanently clobber whatever env that
+ *  instance needs for the REAL commit that follows. `baseEnv` (the caller's OWN env for its real
+ *  instance — `undefined` meaning "whatever `canonicalGit`/the real instance already defaults to", i.e.
+ *  `process.env`) is merged with a `LC_ALL=C`/`LANGUAGE=C` pin via {@link localReadGitEnv} and handed to
+ *  `makeProbeGit` — so the PROBE always reads git's fatal in English (git's own locale negotiation
+ *  consults `LANGUAGE`, a GNU gettext extension, AHEAD of `LC_ALL`; pinning only one is not enough) no
+ *  matter what locale the host or the caller's real instance runs under, while the real commit's own
+ *  env is untouched — never built from this merged probe env. */
+export async function resolveGitIdentityFallbackArgs(
+  cwd: string,
+  timeoutMs: number,
+  makeProbeGit: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw"> = canonicalGit,
+  baseEnv?: Record<string, string | undefined>,
+): Promise<string[]> {
+  const probeEnv = localReadGitEnv(baseEnv ?? process.env, { LC_ALL: "C", LANGUAGE: "C" });
+  const probeGit = makeProbeGit(cwd, timeoutMs, probeEnv);
+  const authorResolvable = await probeGitIdentResolvable(probeGit, "GIT_AUTHOR_IDENT", timeoutMs);
+  const committerResolvable = await probeGitIdentResolvable(probeGit, "GIT_COMMITTER_IDENT", timeoutMs);
+  return (authorResolvable && committerResolvable)
+    ? []
+    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+}
+
+/** @decision 2267e8fa — adapts a legacy 2-arg `gitFactory` test seam to the 3-arg probe shape. Do not
+ *  treat this as pinning anything — a 2-arg factory has nowhere to put `env`, so the probe stays UNPINNED
+ *  (test-only). A test needing the pin should pass its own `identityProbeGitFactory` instead. */
+export function unpinnedProbeFactoryFromLegacy(
+  legacy: (cwd: string, timeoutMs: number) => Pick<SimpleGit, "raw">,
+): (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw"> {
+  return (cwd, timeoutMs) => legacy(cwd, timeoutMs);
+}
+
 /**
  * A TYPED marker (a non-enumerable property, never a message-text change) carried on an Error to mean "we
  * killed something, or gave up trying, without a positive confirmation the whole process TREE actually

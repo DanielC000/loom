@@ -210,10 +210,53 @@ function makeHangingCommitExecImpl(markerPath) {
     }
   }
 
+  // --- Case E (card 2267e8fa): DISCRIMINATING case — name in GLOBAL config, email ONLY via the EMAIL
+  // env var. flushSync's OLD identity probe (a bare `git config user.name`/`user.email` read) saw no
+  // email IN CONFIG and wrongly applied the fallback, silently overriding the configured NAME too, same
+  // bug as Case D's own sibling for commitVault. Cases A-D above cannot catch this: on the pre-fix probe,
+  // "none configured" (D) and "fully configured" (vault-write-tool.mjs's f2) both resolve identically
+  // either way — only a PARTIALLY-configured identity exposes the bug (RED-proven via negative-control
+  // separately). Asserts author AND committer.
+  {
+    const savedEnv = { ...process.env };
+    const IDENTITY_ENV_KEYS = [
+      "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+      "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "EMAIL",
+    ];
+    try {
+      for (const k of IDENTITY_ENV_KEYS) delete process.env[k];
+      const repoE = mkdtempManaged("loom-flush-hang-e-");
+      git(repoE, "init"); // deliberately NOT calling initRepo() — no local identity
+      const nameOnlyGlobalConfig = `${repoE}-name-only-global-gitconfig`;
+      fs.writeFileSync(nameOnlyGlobalConfig, "[user]\n\tname = Name Only User\n");
+      process.env.GIT_CONFIG_GLOBAL = nameOnlyGlobalConfig;
+      process.env.GIT_CONFIG_SYSTEM = `${repoE}-nonexistent-system-gitconfig`;
+      process.env.GIT_CONFIG_NOSYSTEM = "1";
+      process.env.EMAIL = "email-env@example.com";
+      fs.writeFileSync(path.join(repoE, "urgent.md"), "edited with a name-in-config + EMAIL-env identity\n");
+      const vcE = new VaultVersioner(repoE, 60_000, undefined, { timeoutMs: TINY_TIMEOUT_MS });
+      await vcE.start();
+      const beforeE = commitCount(repoE);
+      const resultE = vcE.flushSync();
+      await vcE.stop();
+      check(
+        "Case E: flushSync commits with a name-in-config + EMAIL-env identity",
+        resultE === true && commitCount(repoE) === beforeE + 1,
+      );
+      const authorE = git(repoE, "log -1 --format=%an%x09%ae").trim();
+      const committerE = git(repoE, "log -1 --format=%cn%x09%ce").trim();
+      check("Case E: the commit's AUTHOR keeps the configured name + EMAIL-env address, NOT the fallback", authorE === "Name Only User\temail-env@example.com");
+      check("Case E: the commit's COMMITTER keeps the configured name + EMAIL-env address, NOT the fallback", committerE === "Name Only User\temail-env@example.com");
+    } finally {
+      process.env = savedEnv;
+    }
+  }
+
   console.log(failures === 0
     ? "\nALL PASS — flushSync's git calls are bounded (independently, per call), a wedged commit step is " +
-      "dropped without wedging shutdown, an ordinary flush still commits, and a host with no git identity " +
-      "still gets a fallback-identity commit instead of a silent, permanent failure."
+      "dropped without wedging shutdown, an ordinary flush still commits, a host with no git identity " +
+      "still gets a fallback-identity commit instead of a silent, permanent failure, and a PARTIALLY " +
+      "configured identity (name in config, email via EMAIL env) is kept, never shadowed by the fallback."
     : `\n${failures} FAILURE(S).`);
   // repoA/repoB/repoC/repoD were all created via mkdtempManaged, which already registers them for
   // guaranteed cleanup at process exit (card 995be21f) — nothing else to release here (each

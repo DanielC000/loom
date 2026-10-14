@@ -1,5 +1,5 @@
 import type { SimpleGit } from "simple-git";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
@@ -57,6 +57,10 @@ export interface BatchGitDeps {
    *  passes none keeps today's behavior (sha-only verification), mirroring `mergeBranchLocked`'s own
    *  optional `expectedBranchTip`. */
   expectedBaseBranch?: string;
+  /** @decision 2267e8fa — TEST SEAM ONLY, a DIFFERENT seam than `gitFactory` above (that one's 2-arg
+   *  shape has no `env` to assert on) — overrides the identity probe's own git construction. Production
+   *  never sets this. */
+  identityProbeGitFactory?: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw">;
 }
 
 function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
@@ -73,25 +77,6 @@ function boundedMergeGit(repoPath: string, deps: BatchGitDeps): { git: Pick<Simp
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs, nonInteractiveEnv());
   return { git, timeoutMs };
-}
-
-/** Generic, non-personal identity used ONLY when the batch worktree has no git identity configured at
- *  all — DUPLICATED from (not shared with) `git/worktrees.ts`'s own `FALLBACK_GIT_IDENTITY`, matching this
- *  codebase's established convention that each commit-creating path decides its own identity policy (see
- *  that constant's own doc comment). A cherry-pick's commit step needs a resolvable identity exactly like
- *  `git merge --no-edit` does — a CI runner or a fresh end-user host may have none configured. */
-const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
-
-/** Whether `git`'s cwd has BOTH `user.name` and `user.email` resolvable (any scope) — verbatim copy of
- *  `git/worktrees.ts`'s own `hasConfiguredGitIdentity`, narrowed to `raw` for the same reason. */
-async function hasConfiguredGitIdentity(git: Pick<SimpleGit, "raw">): Promise<boolean> {
-  try {
-    const name = (await git.raw(["config", "user.name"])).trim();
-    const email = (await git.raw(["config", "user.email"])).trim();
-    return !!name && !!email;
-  } catch {
-    return false;
-  }
 }
 
 /** One ready branch offered to a batch — the caller (SessionService) resolves this from a worker session. */
@@ -391,9 +376,14 @@ async function landBranchCommitsIndividually(
     }
   }
 
-  const identityArgs = (await hasConfiguredGitIdentity(git))
-    ? []
-    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+  // Card 2267e8fa: a cherry-pick's own commit step needs a resolvable identity exactly like
+  // mergeMainIntoWorktree's `git merge --no-edit` does — falls back via the ONE shared helper
+  // (resolveGitIdentityFallbackArgs, git/bounded.ts) ONLY when git itself can't determine one.
+  const identityArgs = await resolveGitIdentityFallbackArgs(
+    batchWorktreePath, timeoutMs,
+    deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+    nonInteractiveEnv(),
+  );
 
   // A rollback that itself FAILS (e.g. a canonicalGit refusal that also blocks `reset`) must not vanish: it is recorded here and appended to the failing
   // result's reason by `fail`, so a batch worktree left holding residue reads as such instead of as a clean refusal. (`cherry-pick --abort` erroring is

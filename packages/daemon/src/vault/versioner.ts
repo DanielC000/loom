@@ -8,12 +8,9 @@ import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
-import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn } from "../git/bounded.js";
+import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, isGitIdentityUnresolvedError } from "../git/bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
-
-/** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
-const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
 
 /**
  * Default oversized-file threshold for auto-commit (card 614dfbef, origin finding 4ae8a3c9): a vault was
@@ -300,6 +297,9 @@ export interface VaultGitDeps {
    *  decision comment at `flushSync`'s own call sites (card ffe98495) for why this exists and how a test
    *  uses it. Real callers never pass this. */
   flushExecFileSyncImpl?: typeof execFileSync;
+  /** @decision 2267e8fa — TEST SEAM ONLY, a DIFFERENT seam than `gitFactory` above — overrides the async
+   *  identity probe's own git construction (see `identityProbeVaultGit` below). Production never sets this. */
+  identityProbeGitFactory?: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw">;
 }
 
 /** @decision 54b839c5 — never re-add a `.env({ GIT_TERMINAL_PROMPT: "0" })` override here: tried and
@@ -377,6 +377,15 @@ function pinnedVaultGitEnv(confirmedRoot: string): Record<string, string | undef
     GIT_DIR: path.join(confirmedRoot, ".git"),
     GIT_WORK_TREE: confirmedRoot,
   });
+}
+
+/** @decision 2267e8fa — `resolveGitIdentityFallbackArgs`'s `makeProbeGit` for `commitVault`. Never reuse
+ *  `commitVault`'s own `pinnedGit` instance for this — mutating its env via `.env()` would replace it
+ *  wholesale (see `resolveGitIdentityFallbackArgs`'s own doc) and corrupt the pin the real commit needs. */
+function identityProbeVaultGit(
+  cwd: string, timeoutMs: number, env: Record<string, string | undefined>,
+): Pick<SimpleGit, "raw"> {
+  return boundedSimpleGit(cwd, timeoutMs, env, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG);
 }
 
 /**
@@ -602,52 +611,39 @@ async function unstageOversizedFiles(
   return skipped;
 }
 
-/**
- * Whether the repo at `git`'s cwd has BOTH `user.name` and `user.email` resolvable (global/system/local
- * config, in git's own precedence order). `git config user.<key>` exits non-zero when unset, which
- * simple-git surfaces as a rejection — caught here and treated as "unresolved", never thrown.
- *
- * Narrowed to `Pick<SimpleGit, "raw">` (card 54b839c5) — the only method this calls — mirroring
- * `git/worktrees.ts`'s own copy of this same check, so callers passing a `BoundedVaultGit` (which does
- * not carry every `SimpleGit` method) can use it directly. `timeoutMs` bounds each `raw` call the same
- * way every other plumbing-tier call in this module is bounded; defaults to {@link VAULT_GIT_OP_TIMEOUT_MS}
- * since a `git config` read is cheap plumbing, not working-tree-scale.
- */
-async function hasConfiguredGitIdentity(
-  git: Pick<SimpleGit, "raw">,
-  timeoutMs: number = VAULT_GIT_OP_TIMEOUT_MS,
-): Promise<boolean> {
-  try {
-    const name = (await withTimeout(git.raw(["config", "user.name"]), timeoutMs, "git config user.name (vault identity check)")).trim();
-    const email = (await withTimeout(git.raw(["config", "user.email"]), timeoutMs, "git config user.email (vault identity check)")).trim();
-    return !!name && !!email;
-  } catch {
-    return false;
-  }
+/** @decision 2267e8fa — require BOTH `.status === 128` AND the matched English fatal — `status` alone
+ *  also matches an unrelated git fatal that happens to exit 128 for a different reason. */
+function isGitIdentityUnresolvedErrorSync(e: unknown): boolean {
+  const status = (e as { status?: number | null })?.status;
+  if (status !== 128) return false;
+  const stderr = (e as { stderr?: Buffer | string })?.stderr;
+  const text = Buffer.isBuffer(stderr) ? stderr.toString("utf8") : String(stderr ?? (e as Error)?.message ?? "");
+  return isGitIdentityUnresolvedError({ message: text });
 }
 
-/**
- * SYNCHRONOUS mirror of {@link hasConfiguredGitIdentity}, for `flushSync`'s `execSync` path (card
- * 816f0056 review round 2, finding 2): `flushSync` never had an identity fallback at all, so on a host
- * with no global/system/local git identity configured, EVERY shutdown flush failed silently, forever —
- * measured: `fatal: empty ident name (for <>) not allowed` — while the async `commit()`/`commitVault`
- * path succeeded via its own fallback. This file's own doc on `commitVault` (below) already anticipates
- * exactly this kind of host ("may have no global/system git identity at all"), so the gap was not
- * hypothetical. Same "unset → false" semantics as the async version: `git config user.<key>` exits
- * non-zero when unset, which `execSync` throws for — caught here and treated as unresolved.
- */
-function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeout: number; env: NodeJS.ProcessEnv; maxBuffer: number }): boolean {
-  try {
-    // @decision 5b50eede (round 4 follow-up, CR 201f0c7e) — was a shell-string execSync("git ...") call,
-    // the SAME bare-PATH-lookup hazard every other site here was fixed for; switched to execFileSync +
-    // the shared resolver ("config user.name" has no shell operators, so this is a drop-in).
-    const gitBin = resolveGitBinaryForSpawn();
-    const name = execFileSync(gitBin, ["config", "user.name"], opts).toString().trim();
-    const email = execFileSync(gitBin, ["config", "user.email"], opts).toString().trim();
-    return !!name && !!email;
-  } catch {
-    return false;
-  }
+/** @decision 2267e8fa — SYNCHRONOUS `resolveGitIdentityFallbackArgs`. Builds a FRESH probe-only opts
+ *  object (locale pin added on top of `opts.env`) rather than mutating `opts` — the real commit that
+ *  follows must see its own env unchanged. `runGit` mirrors `flushSync`'s `flushExecFileSyncImpl` seam. */
+function resolveGitIdentityFallbackArgsSync(
+  opts: { cwd: string; stdio: "pipe"; timeout: number; env: NodeJS.ProcessEnv; maxBuffer: number },
+  runGit: typeof execFileSync = execFileSync,
+): string[] {
+  // @decision 5b50eede (round 4 follow-up, CR 201f0c7e) — was a shell-string execSync("git ...") call,
+  // the SAME bare-PATH-lookup hazard every other site here was fixed for; switched to execFileSync +
+  // the shared resolver.
+  const gitBin = resolveGitBinaryForSpawn();
+  const probeOpts = { ...opts, env: localReadGitEnv(opts.env, { LC_ALL: "C", LANGUAGE: "C" }) };
+  const identResolvable = (varName: "GIT_AUTHOR_IDENT" | "GIT_COMMITTER_IDENT"): boolean => {
+    try {
+      runGit(gitBin, ["var", varName], probeOpts);
+      return true;
+    } catch (e) {
+      return !isGitIdentityUnresolvedErrorSync(e);
+    }
+  };
+  return (identResolvable("GIT_AUTHOR_IDENT") && identResolvable("GIT_COMMITTER_IDENT"))
+    ? []
+    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
 }
 
 /**
@@ -953,9 +949,11 @@ export interface CommitVaultResult {
  *
  * **Identity fallback:** unlike `git/writer.ts` (which commits with NO identity override, by
  * deliberate convention — the Loom repo itself always has one configured), this path runs
- * unattended on an arbitrary end-user's machine, which may have no global/system git identity at
- * all. When the repo has one configured, we commit exactly as before — their identity, un-overridden.
- * Only when EITHER `user.name` or `user.email` is unresolved do we fall back to a generic, non-personal
+ * unattended on an arbitrary end-user's machine, which may have no resolvable git identity at
+ * all. When git can resolve the repo's identity (by its OWN full precedence — role-scoped env,
+ * `user.name`/`user.email` config, `EMAIL`, or auto-detect; probed via `resolveGitIdentityFallbackArgs`,
+ * card `2267e8fa`), we commit exactly as before — their identity, un-overridden. Only when git itself
+ * cannot determine an identity for the author OR the committer do we fall back to a generic, non-personal
  * `Loom <loom@localhost>` identity for that single commit, via `-c user.name=`/`-c user.email=` passed
  * as ARGS on the commit invocation, never as an env-var override — see the `GIT_TERMINAL_PROMPT` doc
  * above `boundedVaultGit` for why an `.env()` override is unsafe here.
@@ -1175,21 +1173,17 @@ export async function commitVault(
       currentOp = { label: "git commit", timeoutMs: workTreeTimeoutMs };
       // @decision ffe98495 — `--no-verify` on EVERY commit here, identity-fallback branch or not; belt-
       // and-suspenders on top of boundedVaultGit's hooksPath override (see that constant's own doc).
-      const identityConfigured = await hasConfiguredGitIdentity(pinnedGit, cheapTimeoutMs);
-      // @decision 8d49c36c — re-check right before the real commit call, AFTER hasConfiguredGitIdentity (its
-      // own `git config` subprocesses can take ~15s and would otherwise widen the window this check closes).
+      const identityArgs = await resolveGitIdentityFallbackArgs(
+        vaultPath, cheapTimeoutMs, deps.identityProbeGitFactory ?? deps.gitFactory ?? identityProbeVaultGit, pinnedVaultGitEnv(vaultPath),
+      );
+      // @decision 8d49c36c — re-check right before the real commit call, AFTER resolveGitIdentityFallbackArgs
+      // (its own `git var` subprocesses can take ~15s and would otherwise widen the window this check closes).
       const recheck = assertRepoNotQuarantined(vaultPath);
       if (!recheck.ok) {
         console.warn(`[vault-versioner] ${vaultPath} skipping commitVault (quarantined mid-call, after add) — ${recheck.reason}`);
         return { committed: false };
       }
-      const commitArgs = identityConfigured
-        ? ["commit", "--no-verify", "-m", message]
-        : [
-            "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
-            "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
-            "commit", "--no-verify", "-m", message,
-          ];
+      const commitArgs = [...identityArgs, "commit", "--no-verify", "-m", message];
       // @decision bf11ac3f — same kill-confirmed branching as the "git add ." call above.
       if (mergeEligible) {
         try {
@@ -1915,15 +1909,8 @@ export class VaultVersioner {
       // this is genuinely argument-safe rather than safe-by-coincidence — real ARGS, matching what this
       // doc's "Identity fallback" paragraph below claims.
       // @decision ffe98495 — `--no-verify` PLUS the hooksPath/fsmonitor overrides on every branch here.
-      if (hasConfiguredGitIdentitySync(cheapOpts)) {
-        runGit(gitBin, [...VAULT_GIT_SAFETY_ARGS, "commit", "--no-verify", "-m", message], commitOpts);
-      } else {
-        runGit(
-          gitBin,
-          [...VAULT_GIT_SAFETY_ARGS, "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`, "commit", "--no-verify", "-m", message],
-          commitOpts,
-        );
-      }
+      const identityArgs = resolveGitIdentityFallbackArgsSync(cheapOpts, runGit);
+      runGit(gitBin, [...VAULT_GIT_SAFETY_ARGS, ...identityArgs, "commit", "--no-verify", "-m", message], commitOpts);
       return true;
     } catch (err) {
       // best-effort — a missing identity / no-repo / plain git error, OR a bound timeout (execSync

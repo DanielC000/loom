@@ -226,6 +226,7 @@ try {
     ];
     const clearIdentityEnv = () => { for (const k of IDENTITY_ENV_KEYS) delete process.env[k]; };
     const authorOf = (cwd) => execSync("git log -1 --format=%an%x09%ae", { cwd, env: process.env }).toString().trim();
+    const committerOf = (cwd) => execSync("git log -1 --format=%cn%x09%ce", { cwd, env: process.env }).toString().trim();
     // commitVault is documented to never throw for an expected git failure; guard the call anyway so a
     // regression (e.g. a reintroduced unhandled "Author identity unknown") surfaces as a clean FAIL
     // check instead of an uncaught exception that kills the whole test process mid-run.
@@ -262,6 +263,33 @@ try {
       const committedWithId = await commitVaultSafe(withIdVault, "test: configured identity");
       check("(f2) commitVault commits when the host DOES have a git identity configured", committedWithId?.committed === true);
       check("(f2) the commit uses the CONFIGURED identity, not the Loom fallback (no shadowing)", committedWithId?.committed === true && authorOf(withIdVault) === "Test Vault User\ttest-vault@example.com");
+
+      // (f3) DISCRIMINATING case (card 2267e8fa): name in global config, email ONLY via the EMAIL env
+      // var — commitVault's OLD probe (a bare `git config user.email` read) saw no email IN CONFIG and
+      // wrongly fell back, silently overriding the configured NAME too. The new `git var`-based probe
+      // resolves the email through EMAIL exactly like `git commit` itself would, so this must keep BOTH
+      // the configured name and the EMAIL-env address — this is the ONE case (f1)/(f2) above cannot
+      // catch: both pass identically on the pre-fix probe (RED-proven via negative-control separately).
+      clearIdentityEnv();
+      const emailEnvVault = path.join(tmpHome, "vault-email-env-identity");
+      fs.mkdirSync(emailEnvVault, { recursive: true });
+      const nameOnlyGlobalConfig = path.join(tmpHome, "name-only-global-gitconfig");
+      fs.writeFileSync(nameOnlyGlobalConfig, "[user]\n\tname = Name Only User\n");
+      process.env.GIT_CONFIG_GLOBAL = nameOnlyGlobalConfig;
+      process.env.GIT_CONFIG_SYSTEM = path.join(tmpHome, "nonexistent-system-gitconfig");
+      process.env.GIT_CONFIG_NOSYSTEM = "1";
+      process.env.EMAIL = "email-env@example.com";
+      fs.writeFileSync(path.join(emailEnvVault, "note.md"), "name in config, email via EMAIL env");
+      const committedEmailEnv = await commitVaultSafe(emailEnvVault, "test: name in config, email via EMAIL env");
+      check("(f3) commitVault commits with a name-in-config + EMAIL-env identity", committedEmailEnv?.committed === true);
+      check(
+        "(f3) the commit's AUTHOR keeps the configured name + EMAIL-env address, NOT the fallback",
+        committedEmailEnv?.committed === true && authorOf(emailEnvVault) === "Name Only User\temail-env@example.com",
+      );
+      check(
+        "(f3) the commit's COMMITTER keeps the configured name + EMAIL-env address, NOT the fallback",
+        committedEmailEnv?.committed === true && committerOf(emailEnvVault) === "Name Only User\temail-env@example.com",
+      );
     } finally {
       process.env = savedEnv;
     }

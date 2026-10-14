@@ -8,7 +8,7 @@ import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -120,6 +120,10 @@ export const GIT_OP_TIMEOUT_MS = 15_000; // exported so a test can assert the fl
 export interface BoundedGitDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">;
   timeoutMs?: number;
+  /** @decision 2267e8fa — TEST SEAM ONLY, a DIFFERENT seam than `gitFactory` above (that one's 2-arg
+   *  shape has no `env` to assert on) — overrides the identity probe's own git construction. Production
+   *  never sets this. */
+  identityProbeGitFactory?: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw">;
   /**
    * Injectable KILLABLE directory removal for removeWorktree's backstop (defaults to
    * {@link killableRemoveDir}). Lets a test simulate either a CLEAN reject (settles fast, `removed:false,
@@ -7307,27 +7311,9 @@ export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
 /** @decision c0aeb5b2 — merges main's tip INTO the worktree BEFORE the gate — a REAL merge, never a rebase
  *  or squash, so `mainSha` becomes the merge-base the later squash diffs against. FAIL-CLOSED: any conflict or
  *  inconclusive failure returns `ok:false` — this function is itself a gate, never a best-effort probe. */
-/** Generic, non-personal identity used ONLY when the host has no git identity configured at all —
- *  same rationale + mechanism as vault/versioner.ts's own fallback (duplicated, not shared: each
- *  commit-creating path in this codebase decides its own identity policy — git/writer.ts deliberately
- *  commits with NO override, versioner.ts falls back for its unattended vault auto-committer). This
- *  merge ALSO runs unattended (the card-5150fdc2 stale-base auto-forward), so it needs the same
- *  fallback: a CI runner or a fresh end-user host may have no configured git identity, which would
- *  otherwise make `git merge --no-edit` (a real merge commit) fail on the commit step. */
-const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
-
-/** Whether `git`'s cwd has BOTH `user.name` and `user.email` resolvable (any scope). Mirrors
- *  versioner.ts's `hasConfiguredGitIdentity` verbatim (narrowed to `raw` — the only method the
- *  `gitFactory` seam of {@link BoundedGitDeps} guarantees). */
-async function hasConfiguredGitIdentity(git: Pick<SimpleGit, "raw">): Promise<boolean> {
-  try {
-    const name = (await git.raw(["config", "user.name"])).trim();
-    const email = (await git.raw(["config", "user.email"])).trim();
-    return !!name && !!email;
-  } catch {
-    return false;
-  }
-}
+// Identity fallback (this merge runs unattended — the card-5150fdc2 stale-base auto-forward — so a host
+// with no resolvable identity would otherwise fail the commit step) goes through the one shared helper,
+// resolveGitIdentityFallbackArgs (card 2267e8fa, git/bounded.ts) — see that helper's own doc.
 
 // Card eda70da6 (CR follow-up): `mainSha` is REQUIRED on every `ok:true` variant, by type, not just by
 // convention — a future early-success return that forgot it would otherwise typecheck clean while silently
@@ -7406,14 +7392,16 @@ export async function mergeMainIntoWorktree(
     if (mergeBase === mainSha) return { ok: true, merged: false, mainSha };
   } catch { /* fall through to attempt the merge */ }
 
-  // `git merge --no-edit` creates a real commit — on a host with no configured git identity (e.g. a CI
-  // runner) that commit step fails even though the merge itself is clean. Scoped `-c` args (never
-  // `.env()` — simple-git's `blockUnsafeOperationsPlugin` rejects an explicit `GIT_CONFIG_GLOBAL`/
-  // `SYSTEM` override) fall back to a generic identity ONLY when none is resolvable; a host with its own
-  // identity configured is unaffected.
-  const identityArgs = (await hasConfiguredGitIdentity(wtGit))
-    ? []
-    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+  // `git merge --no-edit` creates a real commit — on a host where git can't resolve an identity for this
+  // commit (e.g. a CI runner) that commit step fails even though the merge itself is clean. Scoped `-c`
+  // args (never `.env()` — simple-git's `blockUnsafeOperationsPlugin` rejects an explicit
+  // `GIT_CONFIG_GLOBAL`/`SYSTEM` override) fall back to a generic identity ONLY when git itself can't
+  // determine one (card 2267e8fa) — a host whose own identity git can resolve (by ANY of its normal
+  // rules, not just `user.name`/`user.email` config) is unaffected.
+  const identityArgs = await resolveGitIdentityFallbackArgs(
+    worktreePath, timeoutMs,
+    deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+  );
 
   // @decision 7e5b23e7 — every mutating call below pins `quarantineRepoPath` to the CANONICAL `repoPath`,
   // never this worktree: a linked worktree shares the canonical repo's hooks dir + object database, so an
@@ -8470,19 +8458,19 @@ async function mergeBranchLocked(
     }
     const bodyBlock = workerCommitLogBody ? `\n\n${workerCommitLogBody}` : "";
     let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n${resolvedBranchHead ? `Loom-Landed-Tip: ${resolvedBranchHead}\n` : ""}`;
-    // Card fdc991be: on a host with no configured git identity at all (a fresh end-user machine, or a CI
-    // runner), the squash commit below otherwise fails with "Author identity unknown" AFTER the gate has
-    // already run — `mergeMainIntoWorktree` and batch-merge.ts's cherry-pick commit already fall back this
-    // way; the solo squash commit here had been the one path that didn't. Scoped `-c` args (never `.env()`
-    // — simple-git's `blockUnsafeOperationsPlugin` rejects an explicit `GIT_CONFIG_GLOBAL`/`SYSTEM`
-    // override), and ONLY when no identity is resolvable — a host with its own identity configured commits
-    // byte-identically to before this change. Computed HERE, before the pathset capture below — a plain
-    // read-only `git config` probe, but the load-bearing adjacency rule on that capture (card c862f14c,
-    // just below) still forbids any git call between it and the commit, so this must not sit between
-    // them either.
-    const identityArgs = (await hasConfiguredGitIdentity(git))
-      ? []
-      : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+    // Card fdc991be/2267e8fa: on a host where git can't resolve an identity for this commit (a fresh
+    // end-user machine, or a CI runner), the squash commit below otherwise fails with "Author identity
+    // unknown" AFTER the gate has already run. Falls back via the ONE shared helper
+    // (resolveGitIdentityFallbackArgs, git/bounded.ts) ONLY when git itself can't determine an identity —
+    // a host whose own identity git CAN resolve commits byte-identically to before this change. Computed
+    // HERE, before the pathset capture below — two read-only `git var` probes, but the load-bearing
+    // adjacency rule on that capture (card c862f14c, just below) still forbids any git call between it and
+    // the commit, so this must not sit between them either.
+    const identityArgs = await resolveGitIdentityFallbackArgs(
+      repoPath, timeoutMs,
+      deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+      nonInteractiveEnv(),
+    );
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
     // capture and the commit below, or it breaks the tree-identity the byte-identical-digest proof rests on.

@@ -98,20 +98,22 @@ export const FLUSH_VAULTS_STEP_BUDGET_MARGIN_MS = 30_000;
  * real body, `versioner.ts`'s `flushSync()`) is TWO working-tree-scale calls PLUS THREE plumbing-tier
  * calls, run serially:
  *   - `git add -A` and `git commit`, each capped at {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS}.
- *   - `git status --porcelain`, PLUS `hasConfiguredGitIdentitySync`'s own two sequential `git config`
- *     reads (`user.name`, `user.email`) — called unconditionally before the commit to pick its identity
- *     branch — each capped at {@link VAULT_GIT_OP_TIMEOUT_MS}. Round 2 counted only the `status` call and
- *     missed these two, under-stating the real worst case by a full {@link VAULT_GIT_OP_TIMEOUT_MS} per
- *     vault (card 347b3584 round 3 finding 3).
+ *   - `git status --porcelain`, PLUS `resolveGitIdentityFallbackArgsSync`'s own two sequential `git var`
+ *     probes (`GIT_AUTHOR_IDENT`, `GIT_COMMITTER_IDENT`) — called unconditionally before the commit to pick
+ *     its identity branch — each capped at {@link VAULT_GIT_OP_TIMEOUT_MS}. Round 2 counted only the
+ *     `status` call and missed these two, under-stating the real worst case by a full
+ *     {@link VAULT_GIT_OP_TIMEOUT_MS} per vault (card 347b3584 round 3 finding 3; renamed/re-probed by card
+ *     2267e8fa — still two sequential calls at the same bound, so this count is unaffected).
  * (see docs/decisions/816f0056-vault-flush-working-tree-timeout-sizing.md for why the working-tree and
  * plumbing-tier ceilings differ) — once per unique governing vault root this process flushes.
  * `versionerCount` is the number of `VaultVersioner`s actually started this boot (0 for a vault-less /
  * all-externally-managed install, in which case this reduces to just the margin — still ample for the
  * cheap supervisor-stop half of the same step).
  *
- * Never drop the two `hasConfiguredGitIdentitySync` git-config reads from this count as "cheap" — each is
- * independently bounded at the SAME {@link VAULT_GIT_OP_TIMEOUT_MS} ceiling as `status`, and a worst-case
- * bound must count every call that can independently run to its own ceiling, not just the fast ones.
+ * Never drop the two `resolveGitIdentityFallbackArgsSync` `git var` probes from this count as "cheap" —
+ * each is independently bounded at the SAME {@link VAULT_GIT_OP_TIMEOUT_MS} ceiling as `status`, and a
+ * worst-case bound must count every call that can independently run to its own ceiling, not just the
+ * fast ones.
  *
  * @decision 347b3584 — never hardcode this figure (or a "looks big enough" literal) at either call site;
  * always call this, so a future change to either versioner.ts constant is automatically reflected here.

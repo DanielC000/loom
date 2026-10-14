@@ -8,14 +8,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // that didn't. See docs/decisions/2e73af30-prelanded-content-fixtures-never-persisted-canonical-identity.md
 // for the root-cause investigation this card grew out of.
 //
-// TWO real-git scenarios, each calling `mergeBranch` directly (no createWorktree/LOOM_HOME needed — a
-// plain `git worktree add -b` is enough to give the branch somewhere to be committed from, same shape as
-// merge-staged-residue-refuses.mjs, this file's template):
+// FOUR real-git scenarios (card 2267e8fa added (C)/(D) — the probe redesign's own matrix, see
+// docs/decisions/2267e8fa-identity-fallback-probes-git-var-not-config.md), each calling `mergeBranch`
+// directly (no createWorktree/LOOM_HOME needed — a plain `git worktree add -b` is enough to give the
+// branch somewhere to be committed from, same shape as merge-staged-residue-refuses.mjs, this file's
+// template):
 //   (A) RED-equivalent documentation: a canonical repo with NO git identity configured anywhere (repo
 //       config, global config, system config, or GIT_AUTHOR_*/GIT_COMMITTER_* env) — the squash commit
 //       must still land, under the generic Loom fallback identity.
 //   (B) CONTROL: a canonical repo WITH a persisted repo-local identity — the squash commit must land under
 //       THAT identity, unchanged (never silently overridden by the fallback).
+//   (C) name in config, email ONLY via the EMAIL env var — the squash commit must keep the user's own
+//       identity (config name + EMAIL-env address), never the fallback. This is the exact bug the CR for
+//       this card found: a bare `git config user.email` read sees nothing and wrongly triggers a fallback
+//       that silently also overrides the configured NAME.
+//   (D) identity resolvable ONLY via GIT_AUTHOR_*/GIT_COMMITTER_* env (no config, no EMAIL) — kept too.
+//
+// (C) is the ONLY scenario that actually DISCRIMINATES the fix (RED-proven on pre-fix sha 43a65f27, via
+// negative-control): (A)/(B)/(D) all pass identically on the OLD config-read probe too, so a pass on any
+// of them is a regression pin, never fix evidence — see CR 4eb77ad0 round 2 (card 2267e8fa).
 //
 // (A) isolates HOME/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM so the REAL host's own global git
 // identity (this self-hosting Windows machine has one configured) can never leak in and mask the bug —
@@ -160,8 +171,130 @@ function lastCommitCommitter(repo) {
   }
 }
 
+// ── (C) name in config, email ONLY via the EMAIL env var — must be kept, not overridden. ─────────────────
+// Card 2267e8fa's own root cause: `hasConfiguredGitIdentity`'s bare `git config user.email` read sees
+// nothing (email isn't IN config) and wrongly falls back, even though `git` itself resolves the email
+// fine via the EMAIL env var — overriding the real configured NAME too, as a side effect. The fix probes
+// `git var GIT_AUTHOR_IDENT`/`GIT_COMMITTER_IDENT` instead, which already accounts for EMAIL.
+{
+  console.log("\n— (C) name in config, email ONLY via EMAIL env — must be kept, not overridden —");
+  const isolatedHome = path.join(os.tmpdir(), `loom-mssif-home-c-${sfx}`);
+  fs.mkdirSync(isolatedHome, { recursive: true });
+  tmpDirs.push(isolatedHome);
+  const emptyGlobalConfig = path.join(isolatedHome, "empty-gitconfig");
+  fs.writeFileSync(emptyGlobalConfig, "");
+  const savedEnv = {};
+  for (const k of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) {
+    savedEnv[k] = process.env[k];
+  }
+  process.env.HOME = isolatedHome;
+  process.env.USERPROFILE = isolatedHome;
+  process.env.XDG_CONFIG_HOME = isolatedHome;
+  process.env.GIT_CONFIG_GLOBAL = emptyGlobalConfig;
+  process.env.GIT_CONFIG_SYSTEM = emptyGlobalConfig;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  delete process.env.GIT_AUTHOR_NAME;
+  delete process.env.GIT_AUTHOR_EMAIL;
+  delete process.env.GIT_COMMITTER_NAME;
+  delete process.env.GIT_COMMITTER_EMAIL;
+  process.env.EMAIL = "env-c@loom";
+
+  try {
+    const repo = makeRepo("c");
+    // Persist ONLY user.name in the canonical repo's own config — real repo-scoped config, not a scoped
+    // `-c` override — so the squash commit itself resolves name from config and email from EMAIL env.
+    execFileSync("git", ["config", "user.name", "configured-c"], { cwd: repo });
+    const ID_ARGS = ["-c", "user.email=setup-c@loom", "-c", "user.name=setup-c"]; // scoped: persists nothing
+    fs.writeFileSync(path.join(repo, "README.md"), "# c\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", [...ID_ARGS, "commit", "-q", "-m", "init", "--allow-empty"], { cwd: repo });
+
+    check("precondition: canonical repo has user.name configured but no user.email", (() => {
+      try { git(repo, ["config", "user.name"]); } catch { return false; }
+      try { git(repo, ["config", "user.email"]); return false; } catch { return true; }
+    })());
+
+    const branch = "loom/mssif-c";
+    makeWorktree(repo, branch, "feature-c.txt", `c-content-${sfx}\n`, ID_ARGS);
+
+    const res = await mergeBranch(repo, branch, "test(git): verify squash identity kept (C)");
+
+    check(`(C) mergeBranch succeeds (reason: ${res.ok ? "n/a" : res.reason})`, res.ok === true);
+    if (res.ok) {
+      const author = lastCommitAuthor(repo);
+      check(`(C) the landed commit's author keeps the configured name + EMAIL-env address, NOT the fallback (got "${author}")`, author === "configured-c <env-c@loom>");
+      const committer = lastCommitCommitter(repo);
+      check(`(C) the landed commit's committer keeps the configured name + EMAIL-env address, NOT the fallback (got "${committer}")`, committer === "configured-c <env-c@loom>");
+    }
+  } finally {
+    for (const k of Object.keys(savedEnv)) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  }
+}
+
+// ── (D) identity resolvable ONLY via GIT_AUTHOR_*/GIT_COMMITTER_* env — REGRESSION PIN, not fix evidence
+// (CR 4eb77ad0 round 2): this case passes on BOTH the pre-fix and post-fix probe — a role-scoped env var
+// outranks `-c user.name=`/`-c user.email=` in git's own precedence regardless of how "configured" is
+// decided, so it was never capable of discriminating the bug. Kept here only to pin that this case
+// doesn't regress; (C) above is the ONE case that actually proves the fix (RED-proven on 43a65f27). ────
+{
+  console.log("\n— (D) identity resolvable ONLY via GIT_AUTHOR_*/GIT_COMMITTER_* env — must be kept —");
+  const isolatedHome = path.join(os.tmpdir(), `loom-mssif-home-d-${sfx}`);
+  fs.mkdirSync(isolatedHome, { recursive: true });
+  tmpDirs.push(isolatedHome);
+  const emptyGlobalConfig = path.join(isolatedHome, "empty-gitconfig");
+  fs.writeFileSync(emptyGlobalConfig, "");
+  const savedEnv = {};
+  for (const k of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) {
+    savedEnv[k] = process.env[k];
+  }
+  process.env.HOME = isolatedHome;
+  process.env.USERPROFILE = isolatedHome;
+  process.env.XDG_CONFIG_HOME = isolatedHome;
+  process.env.GIT_CONFIG_GLOBAL = emptyGlobalConfig;
+  process.env.GIT_CONFIG_SYSTEM = emptyGlobalConfig;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  delete process.env.EMAIL;
+  process.env.GIT_AUTHOR_NAME = "env-author-d";
+  process.env.GIT_AUTHOR_EMAIL = "env-author-d@loom";
+  process.env.GIT_COMMITTER_NAME = "env-committer-d";
+  process.env.GIT_COMMITTER_EMAIL = "env-committer-d@loom";
+
+  try {
+    const repo = makeRepo("d");
+    const ID_ARGS = ["-c", "user.email=setup-d@loom", "-c", "user.name=setup-d"]; // scoped: persists nothing
+    fs.writeFileSync(path.join(repo, "README.md"), "# d\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", [...ID_ARGS, "commit", "-q", "-m", "init", "--allow-empty"], { cwd: repo });
+
+    check("precondition: canonical repo has NO configured identity anywhere (env-only case)", (() => {
+      try { git(repo, ["config", "user.name"]); return false; } catch { return true; }
+    })());
+
+    const branch = "loom/mssif-d";
+    makeWorktree(repo, branch, "feature-d.txt", `d-content-${sfx}\n`, ID_ARGS);
+
+    const res = await mergeBranch(repo, branch, "test(git): verify squash identity kept (D)");
+
+    check(`(D) mergeBranch succeeds (reason: ${res.ok ? "n/a" : res.reason})`, res.ok === true);
+    if (res.ok) {
+      const author = lastCommitAuthor(repo);
+      check(`(D) the landed commit's author is the GIT_AUTHOR_* env identity, NOT the fallback (got "${author}")`, author === "env-author-d <env-author-d@loom>");
+      const committer = lastCommitCommitter(repo);
+      check(`(D) the landed commit's committer is the GIT_COMMITTER_* env identity, NOT the fallback (got "${committer}")`, committer === "env-committer-d <env-committer-d@loom>");
+    }
+  } finally {
+    for (const k of Object.keys(savedEnv)) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the solo squash commit lands under a generic fallback identity when the host has none configured, and under the host's own configured identity, unchanged, when it does."
+  ? "\n✅ ALL PASS — the solo squash commit lands under a generic fallback identity when the host has none configured, and under the host's own resolvable identity (config, config+EMAIL env, or env-only), unchanged, when it does."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const d of tmpDirs) {

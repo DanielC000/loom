@@ -12,14 +12,14 @@ FAIL-CLOSED, mirroring `mergeBranch`'s own conflict handling: a real merge sets 
 
 A worktree that already contains `mainSha` (the common case for a freshly-cut, not-yet-drifted branch) short-circuits to a no-op success (`merged:false`) without spawning a merge child at all.
 
-`FALLBACK_GIT_IDENTITY` (`{name: "Loom", email: "loom@localhost"}`) is used ONLY when the host has no git identity configured at all — same rationale as `vault/versioner.ts`'s own fallback, duplicated rather than shared: each commit-creating path in this codebase decides its own identity policy (`git/writer.ts` commits with NO override; `versioner.ts` falls back for its unattended vault auto-committer). This merge ALSO runs unattended (the card `5150fdc2` stale-base auto-forward), so it needs the same fallback: a CI runner or a fresh end-user host may have no configured git identity, which would otherwise make `git merge --no-edit` (a real merge commit) fail on the commit step.
+`FALLBACK_GIT_IDENTITY` (`{name: "Loom", email: "loom@localhost"}`) is used ONLY when git itself cannot resolve an identity for a commit role at all — same rationale as `vault/versioner.ts`'s own fallback. **Superseded by card `2267e8fa`:** the constant and the probe that decides whether to apply it are now ONE shared copy (`git/bounded.ts`'s `FALLBACK_GIT_IDENTITY`/`resolveGitIdentityFallbackArgs`), not duplicated per path — see that card's own record for why duplicating the PROBE (not the decision to fall back at all) was the actual bug. This merge ALSO runs unattended (the card `5150fdc2` stale-base auto-forward), so it needs the same fallback: a CI runner or a fresh end-user host may have no resolvable git identity, which would otherwise make `git merge --no-edit` (a real merge commit) fail on the commit step.
 
 ## Do not
 
 - Do not run the gate against the worktree's pre-merge state — that validates a union that was never actually tested against main's current tip.
 - Do not use a rebase or squash for this step — a real merge is what makes `mainSha` the merge-base the squash later diffs against, so main's content is never re-applied as the branch's own net change.
 - Do not assume success on an inconclusive failure (unresolvable tip, a non-conflict merge error) — this function is itself a gate; it must block, not wave through.
-- Do not share `FALLBACK_GIT_IDENTITY` with `vault/versioner.ts`'s own fallback constant — each commit-creating path deliberately decides its own identity policy.
+- ~~Do not share `FALLBACK_GIT_IDENTITY` with `vault/versioner.ts`'s own fallback constant — each commit-creating path deliberately decides its own identity policy.~~ **Superseded by `2267e8fa`** — the constant and probe are now shared; see that card's record for the distinction between WHETHER a path falls back (still per-path) and the PROBE mechanism (now one copy).
 
 ## Consequences
 
