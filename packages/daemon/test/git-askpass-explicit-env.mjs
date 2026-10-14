@@ -28,10 +28,30 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       this suite exercised it under an ambient GIT_ASKPASS — the gate/CI never set one, so a revert here
 //       was gate-invisible. Also pins the strip's BREADTH beyond GIT_ASKPASS alone: one cheap case each for
 //       `GIT_SSH_COMMAND` and `GIT_CONFIG_COUNT` (both in `GIT_ENV_TRANSPORT_KEYS`, `git/bounded.ts`).
+//   (E) card 23c74c62's own bug, not a746a3eb's: an ENV-LESS `canonicalGit(...)` call under BOTH GIT_ASKPASS
+//       AND GIT_CONFIG ambient at once. GIT_CONFIG's presence forces `prepareCanonicalEnv` (git/bounded.ts)
+//       to MATERIALIZE an explicit env for what would otherwise stay env-less — `canonicalGit` itself now
+//       ALSO strips GIT_ASKPASS from that materialized copy, but ONLY when the caller passed no `env` of
+//       its own (Code Review round of 23c74c62: the fix narrowed from stripping inside `prepareCanonicalEnv`
+//       itself, which would ALSO have silently changed the raw-spawn path's env — see (G) below).
+//   (F) the narrow fix's OTHER edge, proving it stays narrow: canonicalGit called with an EXPLICIT env that
+//       itself carries GIT_CONFIG + GIT_ASKPASS must still REFUSE loudly — an explicit env is the caller's
+//       OWN responsibility (already `localNonInteractiveEnv()`/`localReadGitEnv()`-class in every real
+//       caller), never silently stripped on its behalf.
+//   (G) the raw-spawn path (`killableCanonicalRaw` → `spawnCanonicalGitTree` → `rawViaDirectSpawn`/
+//       `rawViaWinJobLauncher`) must stay BYTE-IDENTICAL to pre-card behaviour: under the SAME GIT_CONFIG +
+//       GIT_ASKPASS ambient combination that (E) fixes for `canonicalGit`, a raw-spawn child must still
+//       actually RECEIVE `GIT_ASKPASS` in its own env — this path never touches simple-git's
+//       `blockUnsafeOperationsPlugin` at all, and may legitimately need the transport family for an
+//       IMPLICIT fetch (an LFS smudge filter, a partial-clone promisor fetch) during a canonical mutation.
 //
-// All four set an ambient transport-family var (a fake, never-invoked value for the ASKPASS/SSH shapes —
+// All seven set an ambient transport-family var (a fake, never-invoked value for the ASKPASS/SSH shapes —
 // matching VS Code's own `GIT_ASKPASS=C:/fake/askpass.exe` shape named in the card) and expect the op to
-// succeed unchanged, since none of these ever touch a remote. RED on main: all four currently fail.
+// succeed unchanged (or, for (F), to loudly refuse), since none of these ever touch a remote. (A)-(D) were
+// RED before card a746a3eb's own fix landed, now PASS; (E) is RED before card 23c74c62's fix (`canonicalGit`,
+// `git/bounded.ts`); (F) and (G) pin the narrow fix's own boundary and would have been RED against the
+// FIRST (too-broad) shape of 23c74c62's fix, which stripped transport keys inside `prepareCanonicalEnv`
+// itself — see docs/decisions/a746a3eb-*.md's "Follow-up 23c74c62" section.
 // `GitWriter.push()` is the deliberate exception (CAN reach a remote, must STAY blocked) — pinned in
 // `test/git-env-vulnerability-strip.mjs`'s own section 2b, not duplicated here.
 //
@@ -49,6 +69,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { mergeBranch, createWorktree, attemptCodexAutoCommit } = await import("../dist/git/worktrees.js");
 const { GitWriter } = await import("../dist/git/writer.js");
 const { assembleBatchBranches } = await import("../dist/git/batch-merge.js");
+const { canonicalGit, killableCanonicalRaw, localReadGitEnv } = await import("../dist/git/bounded.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -233,6 +254,125 @@ async function runBatchAskpassScenario(envVarName, envVarValue) {
 await runBatchAskpassScenario("GIT_ASKPASS", FAKE_ASKPASS);
 await runBatchAskpassScenario("GIT_SSH_COMMAND", process.platform === "win32" ? "C:\\fake\\ssh.exe" : "/fake/ssh");
 await runBatchAskpassScenario("GIT_CONFIG_COUNT", "0"); // breadth pin (CR 01e61841): not ASKPASS-shaped at all
+
+// ── (E) card 23c74c62: env-less canonicalGit(...).raw(status), under BOTH GIT_ASKPASS AND GIT_CONFIG
+//      ambient at once. GIT_CONFIG's own presence forces prepareCanonicalEnv (git/bounded.ts) to
+//      MATERIALIZE an explicit env for what would otherwise stay an env-less (no `.env()` call) instance
+//      — that materialized copy must still exclude GIT_ASKPASS, or the materialize branch itself
+//      re-introduces this card's exact bug on every ambient-GIT_CONFIG host. GIT_CONFIG alone (no
+//      GIT_ASKPASS) is already covered by canonical-git-isolation.mjs's own GIT_CONFIG block; this is the
+//      combination that card 23c74c62 found broken. ──────────────────────────────────────────────────────
+{
+  console.log("\n— (E) env-less canonicalGit(...).raw(status) with GIT_ASKPASS + GIT_CONFIG both ambient —");
+  const repo = makeRepo("e");
+  execFileSync("git", ["config", "user.email", "configured-e@loom"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "configured-e"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "# e\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "init", "--allow-empty"], { cwd: repo });
+
+  const emptyGitConfig = path.join(os.tmpdir(), `loom-gaee-empty-gitconfig-${sfx}`);
+  fs.writeFileSync(emptyGitConfig, "");
+  tmpDirs.push(emptyGitConfig);
+
+  const savedGitConfig = process.env.GIT_CONFIG;
+  process.env.GIT_ASKPASS = FAKE_ASKPASS;
+  process.env.GIT_CONFIG = emptyGitConfig;
+  let out, err = null;
+  try {
+    out = await canonicalGit(repo, 15_000).raw(["status"]);
+  } catch (e) {
+    err = e;
+  } finally {
+    if (savedAskpass === undefined) delete process.env.GIT_ASKPASS; else process.env.GIT_ASKPASS = savedAskpass;
+    if (savedGitConfig === undefined) delete process.env.GIT_CONFIG; else process.env.GIT_CONFIG = savedGitConfig;
+  }
+
+  check(
+    `(E) an env-less canonicalGit(...).raw(status) succeeds with GIT_ASKPASS + GIT_CONFIG both ambient (error: ${err?.message ?? "n/a"})`,
+    err === null,
+  );
+  check("(E) ...and it genuinely ran (returned real status output)", typeof out === "string" && out.length > 0);
+}
+
+// ── (F) card 23c74c62 (round 2): canonicalGit with an EXPLICIT env carrying GIT_CONFIG + GIT_ASKPASS must
+//      still REFUSE — an explicit env is the CALLER's own responsibility (every real caller already uses
+//      localNonInteractiveEnv()/localReadGitEnv() when it needs transport keys stripped); the narrow fix
+//      proven by (E) strips transport keys ONLY when the caller itself passed no env at all. ──────────────
+{
+  console.log("\n— (F) canonicalGit with an EXPLICIT env (GIT_CONFIG + GIT_ASKPASS) still refuses —");
+  const repo = makeRepo("f");
+  execFileSync("git", ["config", "user.email", "configured-f@loom"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "configured-f"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "# f\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "init", "--allow-empty"], { cwd: repo });
+
+  const emptyGitConfigF = path.join(os.tmpdir(), `loom-gaee-empty-gitconfig-f-${sfx}`);
+  fs.writeFileSync(emptyGitConfigF, "");
+  tmpDirs.push(emptyGitConfigF);
+
+  const explicitEnv = { ...process.env, GIT_CONFIG: emptyGitConfigF, GIT_ASKPASS: FAKE_ASKPASS, GIT_TERMINAL_PROMPT: "0" };
+  let err = null;
+  try {
+    await canonicalGit(repo, 15_000, explicitEnv).raw(["status"]);
+  } catch (e) {
+    err = e;
+  }
+
+  check(
+    `(F) canonicalGit with an explicit env carrying GIT_CONFIG + GIT_ASKPASS still refuses (error: ${err?.message ?? "n/a"})`,
+    err !== null && /GIT_ASKPASS/.test(String(err.message)) && /not permitted|allowUnsafe/i.test(String(err.message)),
+  );
+}
+
+// ── (G) card 23c74c62 (round 2): the RAW-SPAWN path (killableCanonicalRaw -> spawnCanonicalGitTree ->
+//      rawViaDirectSpawn/rawViaWinJobLauncher) must stay BYTE-IDENTICAL to pre-card behaviour: under the
+//      SAME GIT_CONFIG + GIT_ASKPASS ambient combination (E) fixes for canonicalGit, a raw-spawn child must
+//      still actually RECEIVE GIT_ASKPASS in its own env — this path never touches simple-git's
+//      blockUnsafeOperationsPlugin at all, and may legitimately need the transport family for an implicit
+//      fetch (an LFS smudge filter, a partial-clone promisor fetch) during a canonical mutation. Proven by
+//      a `-c alias` that shells out to a tiny probe script and writes what it actually saw to a marker file
+//      — the most direct way to observe the CHILD's own env without relying on git itself ever invoking
+//      GIT_ASKPASS for real (these local-only ops never do). ──────────────────────────────────────────────
+{
+  console.log("\n— (G) raw-spawn path (killableCanonicalRaw) still receives GIT_ASKPASS with GIT_CONFIG + GIT_ASKPASS ambient —");
+  const repo = makeRepo("g");
+  execFileSync("git", ["config", "user.email", "configured-g@loom"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "configured-g"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "# g\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "init", "--allow-empty"], { cwd: repo });
+
+  const emptyGitConfigG = path.join(os.tmpdir(), `loom-gaee-empty-gitconfig-g-${sfx}`);
+  fs.writeFileSync(emptyGitConfigG, "");
+  tmpDirs.push(emptyGitConfigG);
+
+  const probeMarker = path.join(os.tmpdir(), `loom-gaee-askpass-probe-marker-${sfx}.txt`);
+  const probeScript = path.join(os.tmpdir(), `loom-gaee-askpass-probe-${sfx}.mjs`);
+  // forward-slashed for the alias string below — avoids any POSIX-shell backslash-escaping hazard inside
+  // the sh -c command git-for-windows' own "!"-prefixed alias execution runs; node accepts "/" on win32 too.
+  const probeScriptForShell = probeScript.replace(/\\/g, "/");
+  fs.writeFileSync(probeScript, `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(probeMarker)}, process.env.GIT_ASKPASS ?? "<unset>");\n`);
+  tmpDirs.push(probeScript, probeMarker);
+
+  const savedGitConfigG = process.env.GIT_CONFIG;
+  process.env.GIT_ASKPASS = FAKE_ASKPASS;
+  process.env.GIT_CONFIG = emptyGitConfigG;
+  let err = null;
+  try {
+    await killableCanonicalRaw(repo, ["-c", `alias.gaee-askpass-probe=!node "${probeScriptForShell}"`, "gaee-askpass-probe"], 15_000, "test(git): verify GIT_ASKPASS reaches the raw-spawn child (G)");
+  } catch (e) {
+    err = e;
+  } finally {
+    if (savedAskpass === undefined) delete process.env.GIT_ASKPASS; else process.env.GIT_ASKPASS = savedAskpass;
+    if (savedGitConfigG === undefined) delete process.env.GIT_CONFIG; else process.env.GIT_CONFIG = savedGitConfigG;
+  }
+
+  check(`(G) killableCanonicalRaw's alias probe ran without error (error: ${err?.message ?? "n/a"})`, err === null);
+  const seen = fs.existsSync(probeMarker) ? fs.readFileSync(probeMarker, "utf8") : "<marker missing>";
+  check(`(G) the raw-spawn CHILD's own env still carried GIT_ASKPASS (saw "${seen}")`, seen === FAKE_ASKPASS);
+}
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — local-only canonical git ops succeed under an ambient GIT_ASKPASS."

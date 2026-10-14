@@ -1358,6 +1358,14 @@ export async function canonicalRaw(git: Pick<SimpleGit, "raw">, args: string[], 
  * spawnCanonicalGitTree} (@decision 24c0bdba) so its raw spawn sees the IDENTICAL env `canonicalGit`
  * itself would build — keep env-less callers env-less either way (`undefined` stays `undefined`), since
  * simple-git's `blockUnsafeOperationsPlugin` only inspects an EXPLICIT env.
+ *
+ * Deliberately does NOT strip {@link GIT_ENV_TRANSPORT_KEYS} here (card `23c74c62`'s Code Review round):
+ * the raw-spawn path ({@link spawnCanonicalGitTree}'s own `rawViaDirectSpawn`/`rawViaWinJobLauncher`) is
+ * the OTHER consumer of this function, never arms `blockUnsafeOperationsPlugin` (it never touches
+ * simple-git at all), and may legitimately need those vars for an IMPLICIT fetch during a canonical
+ * mutation (an LFS smudge filter, a partial-clone promisor fetch during `worktree add`/checkout —
+ * `CANONICAL_GIT_CONFIG` does not disable filters). {@link canonicalGit} applies its own narrower strip,
+ * for the ONE consumer that actually needs it — see its own doc below.
  */
 function prepareCanonicalEnv(env?: Record<string, string | undefined>): Record<string, string | undefined> | undefined {
   const base = env ?? process.env;
@@ -1381,7 +1389,12 @@ export function canonicalGit(
   //
   // `allowUnsafeMergeDriver` is required for simple-git to pass OUR `-c merge.<x>.driver=` (a blanking, never a set).
   // `boundedSimpleGit` re-applies `scrubGitEnv` to whatever `prepareCanonicalEnv` already scrubbed — idempotent, kept for its own unconditional-at-construction guarantee (f7a80d76).
-  const git = boundedSimpleGit(repoPath, blockTimeoutMs, prepareCanonicalEnv(env), abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
+  let simpleGitEnv = prepareCanonicalEnv(env);
+  // @decision a746a3eb (Follow-up 23c74c62) — strip GIT_ENV_TRANSPORT_KEYS here, ONLY for this real
+  // SimpleGit consumer and ONLY when the caller itself passed no `env` (prepareCanonicalEnv then
+  // materialized one because GIT_CONFIG was ambient) — see the decision record for the full rationale.
+  if (env === undefined && simpleGitEnv) { simpleGitEnv = { ...simpleGitEnv }; deleteEnvKeys(simpleGitEnv, GIT_ENV_TRANSPORT_KEYS); }
+  const git = boundedSimpleGit(repoPath, blockTimeoutMs, simpleGitEnv, abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
   const raw = async (...callArgs: unknown[]): Promise<string> => {
     const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     const startedAt = performance.now();

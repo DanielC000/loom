@@ -29,7 +29,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, mergeMainIntoWorktree, verifyReviewedTipChain } = await import("../dist/git/worktrees.js");
 const { assembleBatchBranches } = await import("../dist/git/batch-merge.js");
-const { boundedSimpleGit, CANONICAL_GIT_CONFIG, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, gitSubcommand, canRunMergeDriver, assertNoLiveMergeDrivers, describeGitFailure, CanonicalGitRefusal, canonicalRaw, scrubGitEnv, envKeysNamed } = await import("../dist/git/bounded.js");
+const { boundedSimpleGit, CANONICAL_GIT_CONFIG, canonicalGit, CANONICAL_GIT_CONFIG_ARGS, gitSubcommand, canRunMergeDriver, assertNoLiveMergeDrivers, describeGitFailure, CanonicalGitRefusal, canonicalRaw, scrubGitEnv, envKeysNamed, localReadGitEnv } = await import("../dist/git/bounded.js");
 
 const GIT_ID = "-c user.email=cgi@loom -c user.name=cgi";
 const now = new Date().toISOString();
@@ -431,7 +431,13 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
       const g = canonicalGit(repo, 15_000);
       await g.raw(mergeTree).catch(() => {});
       check("(GIT_CONFIG) canonicalGit strips GIT_CONFIG from the child env: the driver does NOT run", !exists(mark));
-      const g2 = canonicalGit(repo, 15_000, { ...process.env, GIT_TERMINAL_PROMPT: "0" });
+      // Hermetic (card 23c74c62, round 2): this is testing GIT_CONFIG blindness with an EXPLICIT caller
+      // env, not GIT_ASKPASS behavior — canonicalGit's own narrow fix deliberately does NOT strip
+      // transport keys from an explicit env (that stays the caller's responsibility; see
+      // git-askpass-explicit-env.mjs's own scenario for that assertion), so strip them from THIS test's
+      // own env here rather than let an ambient GIT_ASKPASS on the host turn this into a vacuous pass
+      // (the call refusing outright for an unrelated reason, rather than GIT_CONFIG really being stripped).
+      const g2 = canonicalGit(repo, 15_000, localReadGitEnv(process.env, { GIT_TERMINAL_PROMPT: "0" }));
       await g2.raw(mergeTree).catch(() => {});
       check("(GIT_CONFIG) …also when the caller supplies its own env (nonInteractiveEnv-style spreads process.env)", !exists(mark));
     } finally { if (saved === undefined) delete process.env.GIT_CONFIG; else process.env.GIT_CONFIG = saved; }
@@ -463,14 +469,22 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
         try { execSync(`git ${mergeTree.join(" ")}`, { cwd: repo, stdio: "ignore", env: process.env }); } catch { /* only the marker matters */ }
         check(`(GIT_CONFIG casing ${spelling}) CONTROL: …while a bare \`git merge-tree\` under the same env DOES exec the driver`, exists(mark));
         fs.rmSync(mark, { force: true });
-        for (const [label, g] of [["env-less", canonicalGit(repo, 15_000)], ["caller env", canonicalGit(repo, 15_000, { ...process.env, GIT_TERMINAL_PROMPT: "0" })]]) {
+        // Hermetic: this block is about GIT_CONFIG-casing blindness, not about transport vars, so the
+        // "caller env" instance strips GIT_ENV_TRANSPORT_KEYS itself rather than riding on whatever's
+        // ambient (an ambient GIT_ASKPASS on the host must never make THIS block throw — that's covered,
+        // on purpose, by git-askpass-explicit-env.mjs / git-env-vulnerability-strip.mjs instead).
+        for (const [label, g] of [["env-less", canonicalGit(repo, 15_000)], ["caller env", canonicalGit(repo, 15_000, localReadGitEnv(process.env, { GIT_TERMINAL_PROMPT: "0" }))]]) {
           await g.raw(mergeTree).catch(() => {}); // a conflict/refusal is fine — only the marker matters
           check(`(GIT_CONFIG casing ${spelling}, ${label}) …and the driver did NOT run`, !exists(mark));
           fs.rmSync(mark, { force: true });
         }
         // The read itself: enumeration through the instance must list the driver (blindness would list none).
-        const listed = await canonicalGit(repo, 15_000).raw(["config", "-z", "--list"]);
-        check(`(GIT_CONFIG casing ${spelling}) canonicalGit's own \`config -z --list\` read sees the repo's merge.evil.driver (not the empty GIT_CONFIG file)`, listed.includes("merge.evil.driver"));
+        // Caught explicitly (not a bare await) so a regression here is reported as a FAIL, never an
+        // unhandled rejection that crashes the whole suite.
+        let listed = null, listErr = null;
+        try { listed = await canonicalGit(repo, 15_000).raw(["config", "-z", "--list"]); } catch (e) { listErr = e; }
+        check(`(GIT_CONFIG casing ${spelling}) canonicalGit's own \`config -z --list\` read did not throw (${listErr?.message ?? "ok"})`, listErr === null);
+        check(`(GIT_CONFIG casing ${spelling}) canonicalGit's own \`config -z --list\` read sees the repo's merge.evil.driver (not the empty GIT_CONFIG file)`, !!listed?.includes("merge.evil.driver"));
       } finally {
         delete process.env[spelling];
         if (saved !== undefined) process.env.GIT_CONFIG = saved;
@@ -506,12 +520,14 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
 
   // ── LOCALE: on glibc in a UTF-8 locale a regex `.` does NOT match an invalid byte, so a `--get-regexp '^merge\..*\.driver$'` read returned NOTHING for the
   // raw-0xE9 name and the driver ran. Both reads now list every entry and filter IN JS. A Windows git matches in every locale (this cannot go red there), so
-  // FORCE a UTF-8 locale on the canonicalGit env: ubuntu CI exercises it for real.
+  // FORCE a UTF-8 locale on the canonicalGit env: ubuntu CI exercises it for real. Hermetic (card 23c74c62): this is testing LOCALE, not transport vars, so
+  // strip GIT_ENV_TRANSPORT_KEYS from the forced env too — a bare `{...process.env}` here would otherwise arm blockUnsafeOperationsPlugin against whatever
+  // transport var happens to be ambient on the host (e.g. GIT_ASKPASS) and make this block fail for a reason unrelated to locale.
   {
     const repo = mkRepo("locale");
     const { mark, cmd } = driverFor("r5-locale");
     plantDriver(repo, null, "rawbyte", cmd, "r5-locale");
-    const utf8 = { ...process.env, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
+    const utf8 = localReadGitEnv(process.env, { LANG: "C.UTF-8", LC_ALL: "C.UTF-8" });
     const g = canonicalGit(repo, 15_000, utf8);
     let err = null; try { await g.raw(mergeTree); } catch (e) { err = e; }
     check("(locale) under a forced UTF-8 locale the raw-0xE9 driver name is still SEEN and refused (no locale-dependent regex hides it)", err instanceof CanonicalGitRefusal);

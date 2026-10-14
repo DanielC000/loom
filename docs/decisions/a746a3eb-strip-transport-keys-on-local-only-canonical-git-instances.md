@@ -111,6 +111,88 @@ deliberate exception the card's own investigation found.
   ever reach a remote — if it can't, use `localNonInteractiveEnv()`; if it can, keep `nonInteractiveEnv()`
   and document why, the same way `GitWriter.push()` does.
 
+## Follow-up 23c74c62
+
+Code Review `01e61841` of this card found a SECOND, independent bug surface: `prepareCanonicalEnv`
+(`git/bounded.ts`) MATERIALIZES an explicit env — a `{...base}` copy of whatever base env it was given
+(the caller's own `env` argument, or `process.env` for an otherwise env-less call) — whenever `GIT_CONFIG`
+is present in that base (any casing). Before this follow-up, that materialize branch stripped only
+`GIT_CONFIG` itself, then ran `scrubGitEnv` (editor/pager family only). So an AMBIENT `GIT_CONFIG` turned
+an env-less `canonicalGit(repoPath, timeoutMs)` call into one with a real explicit env, arming simple-git's
+`blockUnsafeOperationsPlugin` — and if `GIT_ASKPASS` (or any other `GIT_ENV_TRANSPORT_KEYS` member) was
+ALSO ambient, every such call threw. `canonical-git-isolation.mjs`'s own `GIT_CONFIG`-casing block hit
+exactly this at its env-less `config -z --list` read, which crashed as an unhandled rejection (no
+surrounding `try`/`catch`) rather than failing a `check()`.
+
+**`prepareCanonicalEnv` has TWO consumers, not one, and they need DIFFERENT treatment.** It is called by
+`canonicalGit` (builds a real `SimpleGit` instance — the ONLY consumer `blockUnsafeOperationsPlugin` can
+ever arm against), AND, separately, by the raw-spawn path (`rawViaDirectSpawn`/`rawViaWinJobLauncher`,
+`git/bounded.ts:664`/`:752`, both reached via `spawnCanonicalGitTree` → `killableCanonicalRaw`) — a bare
+`child_process.spawn()` that never touches simple-git at all, so the plugin never arms against it
+regardless of what env it's given. A first version of this fix stripped `GIT_ENV_TRANSPORT_KEYS` inside
+`prepareCanonicalEnv` itself, unconditionally on materialize — which fixed `canonicalGit` but ALSO silently
+changed the raw-spawn path's env under the exact same ambient-`GIT_CONFIG` condition. That is a real
+regression risk: `CANONICAL_GIT_CONFIG` disables merge drivers, not filters, so a canonical mutation
+(`worktree add`, checkout) can still trigger an IMPLICIT fetch — an LFS smudge filter, a partial-clone
+promisor fetch — that genuinely needs `GIT_ASKPASS`/`GIT_SSH_COMMAND` to succeed. (Neither the canonical
+nor the raw-spawn path ever issues an EXPLICIT network verb — `push`/`fetch`/`clone` — itself; this implicit
+case is why the raw-spawn path keeps its env regardless.)
+
+**The fix, narrowed (Code Review round 2 of this follow-up):** `prepareCanonicalEnv` itself is UNCHANGED
+from before this follow-up (strips only `GIT_CONFIG`, then `scrubGitEnv`) — byte-identical for the
+raw-spawn path, in every case. `canonicalGit` ALONE now additionally strips `GIT_ENV_TRANSPORT_KEYS` from
+whatever `prepareCanonicalEnv` returns, and ONLY when the caller itself passed no `env` (`env ===
+undefined`) — i.e. only in the exact case where `prepareCanonicalEnv` just materialized a copy of ambient
+`process.env` for what the caller intended to be an env-less call. An EXPLICIT caller env (even one that
+happens to carry `GIT_CONFIG`) is left untouched and still refuses loudly under an ambient `GIT_ASKPASS` —
+that stays the caller's own responsibility, exactly like every other explicit-env caller in this codebase
+(`localNonInteractiveEnv()`/`localReadGitEnv()`).
+
+`canonical-git-isolation.mjs`'s `GIT_CONFIG`-casing block, its "caller env" case in the earlier `MAJOR 2`
+block, and its separate locale block (`(round 5)`, which forces a UTF-8 locale via its own `{...process.env}`
+spread, unrelated to `GIT_CONFIG`) were all made hermetic: each now builds its explicit env via
+`localReadGitEnv` instead of a raw `{...process.env}` spread, so none of them depends on whatever transport
+var happens to be ambient on the host running the test (a vacuous pass otherwise: the call would refuse for
+an unrelated reason and the assertion would pass regardless of whether the real fix works). The casing
+block's env-less read is also wrapped in `try`/`catch` so a regression there is reported as a `FAIL`, never
+an unhandled rejection that crashes the whole suite.
+
+`test/git-askpass-explicit-env.mjs` gained three regression scenarios: (E) an env-less `canonicalGit(...)`
+call succeeds under ambient `GIT_CONFIG` + `GIT_ASKPASS` (the bug this follow-up fixes); (F) an EXPLICIT env
+carrying both still refuses (pins the narrow fix's boundary — this is what the first, too-broad fix shape
+got wrong); (G) the raw-spawn path (`killableCanonicalRaw`) under the SAME ambient combination still
+genuinely delivers `GIT_ASKPASS` to its child's own env, proven via a `-c alias` that shells out to a probe
+script and writes what it actually saw to a marker file. (F) and (G) are RED against the first, too-broad
+fix shape and GREEN against the narrowed one; (E) is RED against no fix at all and GREEN against either
+shape — see that test file's own header comment for the full RED/GREEN matrix.
+
+### Do not (follow-up)
+
+- Do not strip `GIT_ENV_TRANSPORT_KEYS` inside `prepareCanonicalEnv` itself, even "just on materialize" —
+  that function is shared by the raw-spawn path, which never arms `blockUnsafeOperationsPlugin` and may
+  legitimately need the transport family for an implicit fetch during a canonical mutation. The strip
+  belongs ONLY in `canonicalGit`'s own construction, gated on `env === undefined`.
+- Do not gate the strip in `canonicalGit` on "is `GIT_CONFIG` present" instead of "did the caller pass no
+  `env`" — that reintroduces the asymmetry Code Review round 2 rejected: an explicit env WITH `GIT_CONFIG`
+  would silently lose its transport keys while one WITHOUT it keeps simple-git's loud refusal. Gate on
+  `env === undefined`, full stop; an explicit env is always the caller's own responsibility.
+- Do not strip `GIT_ENV_TRANSPORT_KEYS` only in the TEST, and leave `canonicalGit` itself unfixed — the
+  test hermeticity fixes above are a SEPARATE belt-and-suspenders hardening, not a substitute for the
+  production fix; the host ambient env is not something a worker/user can control.
+- Do not add this strip inside `nonInteractiveEnv()`/`GIT_ENV_STRIP_KEYS`/`scrubGitEnv` — those are
+  shared by `GitWriter.push()` (the main record's own exception) and must stay unaffected.
+- Do not reintroduce a bare `{...process.env}` spread in a NEW `canonical-git-isolation.mjs` scenario
+  that forces some OTHER ambient setting (a second locale pin, a config override, etc.) without routing it
+  through `localReadGitEnv` first — any such scenario inherits this exact fragility to whatever transport
+  var happens to be ambient on the host it runs on.
+- Do not assume `killableCanonicalRaw`/`spawnCanonicalGitTree` are safe from THIS bug class just because
+  they're immune to `blockUnsafeOperationsPlugin` (see the main record's own "structurally immune" section
+  above, which is about THAT plugin specifically) — they still go through `prepareCanonicalEnv`, so any
+  FUTURE change to that function's own `GIT_CONFIG`-materialize branch affects both consumers at once;
+  re-verify scenario (G) (or add an equivalent) against any such change.
+
 ## Source
 
-Card `a746a3eb`, discovered from Code Review `ff3eec9f` of card `7b59e981`.
+Card `a746a3eb`, discovered from Code Review `ff3eec9f` of card `7b59e981`. Follow-up from Code Review
+`01e61841`, card `23c74c62` (round 1: too-broad strip inside `prepareCanonicalEnv`; round 2, same Code
+Review: narrowed to `canonicalGit`'s own construction, gated on `env === undefined`).
