@@ -53,6 +53,22 @@ const { runBatchedMerge, fastForwardCanonicalMain } = await import("../dist/git/
 const {
   enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
 } = await import("../dist/git/merge-quarantine.js");
+// Card 4966d70c — SCENARIO B/E's own "an unconfirmed-kill descendant escapes ⇒ quarantine" premise only
+// holds on the taskkill-based fallback path (card 24c0bdba); on win32, when win-job-launcher.exe (card
+// 1718416d) is built, the escaping descendant is a member of the SAME Job Object as the git child it
+// tried to escape, so the tree-kill reaches it too, confirmation succeeds, and NO quarantine is ever
+// raised — a real, host-dependent (not a regression) divergence this file had no case for. `setWinJobLauncherOverrideForTest`
+// (git/bounded.ts, test-only — never a production env var/config knob; already used the same way by
+// git-writer-kill-confirm.mjs/merge-commit-kill-confirm.mjs) is the SANCTIONED seam for forcing the
+// fallback path WITHOUT touching the real `win-job-launcher.exe` the live self-hosting daemon uses.
+// SCENARIO B/E below now force fallback explicitly via that seam (so they test what they claim on every
+// checkout, launcher built or not), and SCENARIO B-LAUNCHER/E-LAUNCHER assert the launcher-mode outcome
+// explicitly as its own case, SKIPping (like the win-job-launcher-*.mjs tests' own top-of-file guard)
+// when the exe isn't built — so plain worktrees and ubuntu CI (which never build it) stay green and the
+// launcher-mode behavior still gets a real assertion on a host that HAS it built.
+const { setWinJobLauncherOverrideForTest } = await import("../dist/git/bounded.js");
+const { WIN_JOB_LAUNCHER_PATH } = await import("../dist/paths.js");
+const launcherBuilt = process.platform === "win32" && fs.existsSync(WIN_JOB_LAUNCHER_PATH);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -157,6 +173,11 @@ try {
   const S_MAIN_MS = SMALL_MS + 10000;
   const AUTO_CLEAR_POLL_MS = S_HOLD_MS + 10000;
   const markerName = "escaped-descendant-b.marker";
+  // Hoisted to top level (was originally scoped inside SCENARIO E's own block) and parameterized on the
+  // marker filename, so both SCENARIO E and its SCENARIO E-LAUNCHER counterpart can call it — mirrors
+  // installDoubleForkedPreCommitHook just above, which was already top-level for the same reason (B's
+  // own launcher counterpart needed it too).
+  const markerNameE = "escaped-descendant-e.marker";
   function installDoubleForkedPreCommitHook(repo, holdMs, mainMs) {
     const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
     fs.writeFileSync(hookPath,
@@ -169,7 +190,28 @@ try {
       `sleep ${mainMs / 1000}\n`);
     fs.chmodSync(hookPath, 0o755);
   }
+  // @decision f59ca98a — same POSIX setsid requirement as the pre-commit hook above: without it, the
+  // escaped descendant shares git's own process GROUP (bounded.ts spawns the canonical git child
+  // `detached` on POSIX) and dies along with it under the tree-kill's process-group kill. Moved to top
+  // level (was originally scoped inside SCENARIO E's own block) and given a `markerFileName` parameter so
+  // SCENARIO E-LAUNCHER can reuse it too.
+  function installDoubleForkedPostMergeHook(repo, holdMs, mainMs, markerFileName) {
+    const hookPath = path.join(repo, ".git", "hooks", "post-merge");
+    fs.writeFileSync(hookPath,
+      `#!/bin/sh\n` +
+      `if command -v setsid >/dev/null 2>&1; then\n` +
+      `  ( setsid sh -c 'sleep ${holdMs / 1000}; echo escaped > ${markerFileName}' & )\n` +
+      `else\n` +
+      `  ( (sleep ${holdMs / 1000}; echo escaped > ${markerFileName}) & )\n` +
+      `fi\n` +
+      `sleep ${mainMs / 1000}\n`);
+    fs.chmodSync(hookPath, 0o755);
+  }
   {
+    // Force the taskkill fallback path (card 4966d70c) — this scenario's premise ("an unconfirmed-kill
+    // descendant escapes ⇒ quarantine") only holds there; see SCENARIO B-LAUNCHER below for the launcher
+    // mode's own, different, explicitly-asserted outcome.
+    setWinJobLauncherOverrideForTest(null);
     const repo = makeRepo("b");
     const taskId = `mqb-task-b-${sfx}`;
     const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
@@ -216,6 +258,54 @@ try {
     // before this file's OWN cleanup tries to touch the worktree/repo.
     fs.rmSync(path.join(repo, ".git", "hooks", "pre-commit"), { force: true });
     try { execSync("git reset --hard HEAD", { cwd: repo }); } catch { /* best-effort */ }
+    setWinJobLauncherOverrideForTest(undefined); // restore real detection before SCENARIO B-LAUNCHER
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO B-LAUNCHER (card 4966d70c) — the SAME escaped-descendant shape as SCENARIO B, but with the
+  // real win-job-launcher.exe (Job Object containment, card 1718416d) in play: the escaping descendant is
+  // a member of the SAME Job as the git child it tried to escape, so the tree-kill reaches it too, the
+  // kill-confirm succeeds, and NO quarantine is ever raised — the candidate's own commit is simply
+  // dropped as an ordinary (non-quarantining) failure. Asserts that outcome explicitly rather than
+  // leaving it uncovered. SKIPs (prints SKIP, does not count as a failure) when win-job-launcher.exe
+  // isn't built — plain worktrees and ubuntu CI never build it, so this case never runs there.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  if (!launcherBuilt) {
+    console.log("SKIP  (B-launcher) win-job-launcher.exe not built — run `pnpm --filter @loom/daemon build:native` first.");
+  } else {
+    setWinJobLauncherOverrideForTest(undefined); // real detection — picks up the built launcher
+    const repo = makeRepo("bl");
+    const taskId = `mqb-task-bl-${sfx}`;
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    fs.writeFileSync(path.join(worktreePath, "bl1.txt"), "bl1\n");
+    commitAll(worktreePath, "feat(test): bl1", GIT_ID);
+    fs.writeFileSync(path.join(worktreePath, "bl2.txt"), "bl2\n");
+    commitAll(worktreePath, "feat(test): bl2", GIT_ID);
+    const cand = { workerSessionId: `mqb-wkr-bl-${sfx}`, taskId, branch, taskTitle: "feat(test): bl" };
+    installDoubleForkedPreCommitHook(repo, S_HOLD_MS, S_MAIN_MS);
+
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const batchWt = await cutBatchWorktree(repo, "bl");
+    const markerPath = path.join(batchWt, markerName);
+    let gateInvoked = false;
+    const trackedGate = async () => { gateInvoked = true; return passGate(); };
+
+    const r = await runBatchedMerge(repo, batchWt, baseMainSha, [cand], trackedGate, { timeoutMs: SMALL_MS });
+    console.log(`(B-launcher) info: runBatchedMerge -> ${JSON.stringify({ ok: r.ok, quarantined: r.quarantined, reason: r.reason })}`);
+    check("(B-launcher) runBatchedMerge still refuses (the candidate's own commit failed and was dropped)", r.ok === false);
+    check("(B-launcher) the TYPED quarantined flag is NOT set — the Job Object's confirmed kill means this is an ordinary drop, never a quarantine", r.quarantined !== true);
+    check("(B-launcher) the gate NEVER ran", gateInvoked === false);
+    check("(B-launcher) canonical HEAD is UNCHANGED (no fast-forward, not even bl1's own commit)", git(repo, "rev-parse HEAD") === baseMainSha);
+    check("(B-launcher) the repo does NOT read as quarantined via the internal state", !activeMergeQuarantineFor(repo));
+    // The escaped descendant never gets the chance to run: by the time runBatchedMerge resolves, the
+    // launcher's Job Object kill-confirm has ALREADY settled synchronously (unlike SCENARIO B's fallback
+    // path, where the descendant genuinely escapes and keeps running in the background) — so this is an
+    // immediate check on already-settled state, not a race requiring its own bounded wait.
+    check("(B-launcher) the escaped descendant's marker write is NEVER observed — the Job Object kills it before it can run", !fs.existsSync(markerPath));
+
+    fs.rmSync(path.join(repo, ".git", "hooks", "pre-commit"), { force: true });
+    try { execSync("git reset --hard HEAD", { cwd: repo }); } catch { /* best-effort */ }
+    setWinJobLauncherOverrideForTest(undefined);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -318,24 +408,9 @@ try {
   // on this one call, unlike every other mutating call on this path).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
-    const markerNameE = "escaped-descendant-e.marker";
-    // @decision f59ca98a — same POSIX setsid requirement as SCENARIO B's pre-commit hook above: without
-    // it, the escaped descendant shares git's own process GROUP (bounded.ts spawns the canonical git child
-    // `detached` on POSIX, making it its own group leader) and dies along with it under the tree-kill's
-    // process-group kill, so it never escapes on POSIX the way it does on win32's PPID-walking kill.
-    function installDoubleForkedPostMergeHook(repo, holdMs, mainMs) {
-      const hookPath = path.join(repo, ".git", "hooks", "post-merge");
-      fs.writeFileSync(hookPath,
-        `#!/bin/sh\n` +
-        `if command -v setsid >/dev/null 2>&1; then\n` +
-        `  ( setsid sh -c 'sleep ${holdMs / 1000}; echo escaped > ${markerNameE}' & )\n` +
-        `else\n` +
-        `  ( (sleep ${holdMs / 1000}; echo escaped > ${markerNameE}) & )\n` +
-        `fi\n` +
-        `sleep ${mainMs / 1000}\n`);
-      fs.chmodSync(hookPath, 0o755);
-    }
-
+    // Force the taskkill fallback path (card 4966d70c) — see the top-of-file note; SCENARIO E-LAUNCHER
+    // below is this scenario's launcher-mode counterpart.
+    setWinJobLauncherOverrideForTest(null);
     const repo = makeRepo("e");
     const baseMainSha = git(repo, "rev-parse HEAD");
     // A real, linear-descendant commit sha to fast-forward onto — cut from a SEPARATE worktree of the SAME
@@ -347,7 +422,7 @@ try {
 
     // post-merge's own cwd is the repo the merge ran IN — the canonical repo itself here, never a worktree.
     const markerPath = path.join(repo, markerNameE);
-    installDoubleForkedPostMergeHook(repo, S_HOLD_MS, S_MAIN_MS);
+    installDoubleForkedPostMergeHook(repo, S_HOLD_MS, S_MAIN_MS, markerNameE);
 
     const r = await fastForwardCanonicalMain(repo, baseMainSha, targetSha, { timeoutMs: SMALL_MS });
     console.log(`(E) info: fastForwardCanonicalMain -> ${JSON.stringify({ ok: r.ok, quarantined: r.quarantined, reason: r.reason })}`);
@@ -365,6 +440,43 @@ try {
     check("(E) the quarantine auto-clears once the real tree-death confirmation eventually arrives", autoCleared);
 
     fs.rmSync(path.join(repo, ".git", "hooks", "post-merge"), { force: true });
+    setWinJobLauncherOverrideForTest(undefined); // restore real detection before SCENARIO E-LAUNCHER
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO E-LAUNCHER (card 4966d70c) — launcher-mode counterpart to SCENARIO E: the ff-only merge's
+  // own commits already landed (git completed the fast-forward itself) before the post-merge hook ever
+  // ran, so when the hook's escaped descendant dies confirmed (same Job Object as SCENARIO B-LAUNCHER)
+  // fastForwardCanonicalMain reports success from the merge that had already completed, rather than
+  // refusing+quarantining. SKIPs when win-job-launcher.exe isn't built, same as SCENARIO B-LAUNCHER.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  if (!launcherBuilt) {
+    console.log("SKIP  (E-launcher) win-job-launcher.exe not built — run `pnpm --filter @loom/daemon build:native` first.");
+  } else {
+    setWinJobLauncherOverrideForTest(undefined); // real detection — picks up the built launcher
+    const repo = makeRepo("el");
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath } = await createWorktree(repo, projId, `mqb-task-el-${sfx}`);
+    fs.writeFileSync(path.join(worktreePath, "el1.txt"), "el1\n");
+    commitAll(worktreePath, "feat(test): el1", GIT_ID);
+    const targetSha = git(worktreePath, "rev-parse HEAD");
+
+    const markerPath = path.join(repo, markerNameE);
+    installDoubleForkedPostMergeHook(repo, S_HOLD_MS, S_MAIN_MS, markerNameE);
+
+    const r = await fastForwardCanonicalMain(repo, baseMainSha, targetSha, { timeoutMs: SMALL_MS });
+    console.log(`(E-launcher) info: fastForwardCanonicalMain -> ${JSON.stringify({ ok: r.ok, quarantined: r.quarantined, reason: r.reason })}`);
+    check("(E-launcher) fastForwardCanonicalMain SUCCEEDS — the ff-only merge itself had already landed before the hook ran", r.ok === true);
+    check("(E-launcher) the TYPED quarantined flag is NOT set", r.quarantined !== true);
+    check("(E-launcher) canonical HEAD now matches the fast-forward target", git(repo, "rev-parse HEAD") === targetSha);
+    check("(E-launcher) the repo does NOT read as quarantined via the internal state", !activeMergeQuarantineFor(repo));
+    // Same reasoning as SCENARIO B-LAUNCHER: the Job Object's kill-confirm has already settled
+    // synchronously by the time fastForwardCanonicalMain resolves, so this is an immediate check on
+    // already-settled state, not a race requiring its own bounded wait.
+    check("(E-launcher) the escaped descendant's marker write is NEVER observed — the Job Object kills it before it can run", !fs.existsSync(markerPath));
+
+    fs.rmSync(path.join(repo, ".git", "hooks", "post-merge"), { force: true });
+    setWinJobLauncherOverrideForTest(undefined);
   }
 } finally {
   for (const d of tmpDirs) {
