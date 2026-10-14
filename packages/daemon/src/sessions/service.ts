@@ -2829,6 +2829,76 @@ export class SessionService {
   // against it; reclaimWedgedWorktreePathForSpawn MUST refuse a respawn against a path marked here,
   // never race it — see the decision record for why a single point-in-time check isn't enough.
   private readonly removingWorktreePaths = new Set<string>();
+  /**
+   * @decision 641cc62c — per-task "a merge/confirm op is in flight" marker (keyed on taskId → opIds),
+   * released on the real RUN's own `.finally()`, NEVER from `onSettle` — that hook never fires for an
+   * entry `evictDeadOwner()` force-removed, which would otherwise leak this claim forever.
+   */
+  private readonly inFlightMergeTaskIds = new Map<string, Set<string>>();
+  /** @decision 641cc62c — the ONLY writers of {@link inFlightMergeTaskIds}: confirmWorkerMergeTracked's own
+   *  onOpMinted (solo) and mergeBatchTracked's own callback-start (batch, one call per LIVE candidate). */
+  private markMergeInFlightForTask(taskId: string, opId: string): void {
+    let set = this.inFlightMergeTaskIds.get(taskId);
+    if (!set) { set = new Set(); this.inFlightMergeTaskIds.set(taskId, set); }
+    set.add(opId);
+  }
+  /** @decision 641cc62c — the ONLY clearers of {@link inFlightMergeTaskIds}: chained off the real RUN's
+   *  own `.finally()` (solo and batch alike) — paired 1:1 with the mark above, fires even for an orphaned
+   *  (evicted) run, unlike `onSettle`. */
+  private clearMergeInFlightForTask(taskId: string, opId: string): void {
+    const set = this.inFlightMergeTaskIds.get(taskId);
+    if (!set) return;
+    set.delete(opId);
+    if (set.size === 0) this.inFlightMergeTaskIds.delete(taskId);
+  }
+  /** @decision 641cc62c — read-only: the opId of an in-flight merge/batch op for this task, if any (first
+   *  found — ordinarily at most one). */
+  private mergeInFlightOpIdForTask(taskId: string): string | undefined {
+    const set = this.inFlightMergeTaskIds.get(taskId);
+    if (!set || set.size === 0) return undefined;
+    return set.values().next().value;
+  }
+  /**
+   * @decision 641cc62c — THE shared spawn-side "may I claim this task's worktree?" predicate — spawnWorker
+   * and recycleWorker both call this before any side effect, so the two paths can never diverge.
+   */
+  private claimTaskWorktreeRefusal(taskId: string | null, excludeSessionId?: string): string | undefined {
+    if (!taskId) return undefined;
+    const liveHolder = this.db.liveSessionIdForTask(taskId);
+    if (liveHolder && liveHolder !== excludeSessionId) {
+      return `already has a live worker (${liveHolder}); stop or recycle it before re-spawning`;
+    }
+    const mergeInFlightOpId = this.mergeInFlightOpIdForTask(taskId);
+    if (mergeInFlightOpId) {
+      return `has a merge for this task in flight [op ${mergeInFlightOpId}]; re-spawn after it settles`;
+    }
+    return undefined;
+  }
+  /**
+   * @decision 641cc62c — THE shared REVERSE-direction predicate: confirmWorkerMergeTracked's `onOpMinted`
+   * (solo, refuses the whole mint) and mergeBatchTracked's own pre-assembly filter (batch, routes just
+   * that ONE candidate to fallback — never fails the whole batch) both call this before claiming a task.
+   */
+  private spawnMintConflict(taskId: string | null, worktreePath: string | null, excludeSessionId?: string): string | undefined {
+    if (!taskId) return undefined;
+    if (this.inFlightSpawnTaskIds.has(taskId)) {
+      return `a worker_spawn for this task is already in flight; retry once it settles`;
+    }
+    if (worktreePath && this.claimedWorktreePaths.has(normForCompare(worktreePath))) {
+      return `a worker_spawn has just claimed this task's worktree; retry once it settles`;
+    }
+    const liveHolder = this.db.liveSessionIdForTask(taskId);
+    if (liveHolder && liveHolder !== excludeSessionId) {
+      return `a DIFFERENT live worker (${liveHolder}) now holds this task; re-check before merging`;
+    }
+    return undefined;
+  }
+  /** @decision 641cc62c — the ONE formatter for a {@link spawnMintConflict} hit's reader-facing text,
+   *  shared by every caller (solo's thrown refusal, batch's pre-amble and late-recheck fallback entries)
+   *  so the wording can never drift apart between them. */
+  private spawnMintConflictReason(taskId: string, conflict: string): string {
+    return `confirmWorkerMerge refused: taskId '${taskId}' ${conflict}`;
+  }
   /** Card dc13bcf1: pending-op keys whose in-flight op was minted by reviveWorkerTracked (vs a plain spawn). */
   private readonly reviveInFlightKeys = new Set<string>();
   /**
@@ -8271,9 +8341,11 @@ export class SessionService {
       // branch spawns TASKLESS instead (its kickoff names the author's branch; it gets its OWN fresh worktree
       // below, so it can never share/clobber the author's checkout) rather than attaching to the author's
       // taskId, which is what used to force minting a throwaway vehicle card.
-      const liveHolder = this.db.liveSessionIdForTask(taskId);
-      if (liveHolder) {
-        throw new Error(`worker_spawn taskId '${taskId}' already has a live worker (${liveHolder}); stop or recycle it before re-spawning`);
+      // @decision 641cc62c — routed through the ONE shared claim predicate so this guard can never
+      // diverge from recycleWorker's own equivalent check on the identical hazard.
+      const claimRefusal = this.claimTaskWorktreeRefusal(taskId);
+      if (claimRefusal) {
+        throw new Error(`worker_spawn taskId '${taskId}' ${claimRefusal}`);
       }
     }
     // REVIEW-SPAWN resolution (card 47bbdc3f) — validated BEFORE any side effect, same posture as the
@@ -13299,6 +13371,10 @@ export class SessionService {
     const worktreePath = old.worktreePath ?? old.cwd; // worker cwd === its worktree
     const branch = old.branch ?? null;
     const taskId = old.taskId ?? null;
+    // @decision 641cc62c — routed through the ONE shared predicate spawnWorker itself uses: recycleWorker
+    // reuses `old`'s worktree IN PLACE, so a merge still in flight for this task would race the fresh pty.
+    const claimRefusal = this.claimTaskWorktreeRefusal(taskId, old.id);
+    if (claimRefusal) throw new Error(`worker_recycle: taskId '${taskId}' ${claimRefusal}`);
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
@@ -19899,10 +19975,16 @@ export class SessionService {
     // fallback path up front rather than silently wasting a batch slot on an empty diff.
     const candidates: Candidate[] = [];
     const strandedFallback: { workerSessionId: string; reason: string }[] = [];
+    // @decision 641cc62c — REVERSE-direction check: a worker_spawn already in flight for this candidate's
+    // task, one that just claimed its worktree, or a DIFFERENT live session now holding it, pulls ONLY
+    // this ONE candidate out to its own fallback/drop — never fails the whole batch.
+    const spawnConflictFallback: { workerSessionId: string; reason: string }[] = [];
     for (const r of resolved) {
       if (retainedOutstanding.has(r.workerSessionId) || reviewMoved.has(r.workerSessionId)) { candidates.push(r); continue; } // held / review-moved: no stranded check, no fallback
       const worker = this.db.getSession(r.workerSessionId)!;
       const worktreePath = worker.worktreePath ?? worker.cwd;
+      const spawnConflict = this.spawnMintConflict(r.taskId, worktreePath, r.workerSessionId);
+      if (spawnConflict) { spawnConflictFallback.push({ workerSessionId: r.workerSessionId, reason: this.spawnMintConflictReason(r.taskId!, spawnConflict) }); continue; }
       const stranded = await detectStrandedWork(finalRepoPath, worktreePath, r.branch, { timeoutMs: this.gitOpMs });
       if (stranded.stranded) { strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `stranded work on '${stranded.branch}' — refusing the empty batch slot; re-point the branch then re-confirm` }); continue; }
       candidates.push(r);
@@ -20013,6 +20095,7 @@ export class SessionService {
         ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "fewer than 2 eligible candidates — batching buys nothing over a solo confirm" })),
         ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
         ...strandedFallback,
+        ...spawnConflictFallback,
       ]);
       return { settled: true, ok: true, value: { ok: false, landed: [], fallback, reason: "nothing eligible to batch" } };
     }
@@ -20046,6 +20129,7 @@ export class SessionService {
         ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, decision: batchDecision, reason: mergeGateOff ? (batchDecision.skipReason === "gate-interval" ? "merge gate interval: not this landing's turn" : "merge gate disabled") : "no gateCommand configured for this repo — nothing to share a gate over" })),
         ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
         ...strandedFallback,
+        ...spawnConflictFallback,
       ], undefined, batchReservations);
       return { settled: true, ok: true, value: { ok: false, landed: [], fallback, reason: mergeGateOff ? (batchDecision.skipReason === "gate-interval" ? "merge gate interval: not this landing's turn" : "merge gate disabled") : "no gateCommand configured" } };
     }
@@ -20090,11 +20174,28 @@ export class SessionService {
     // must never be misreported under `batchAllDropped`'s own "all-candidates-dropped" skipReason.
     let batchAssemblyAborted: "rollback-unverified" | undefined;
     let batchMintedAtMs: number | undefined; // set by the closure's own mint; `onSettle` derives a no-gate verdict's timing from it
-    return this.pendingOps.attach<MergeBatchResult>(
-      batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
-      async (opId) => {
+    // @decision 641cc62c — extracted to a named const (byte-identical body) so the real attach() `run`
+    // argument can be a tiny wrapper chaining `.finally()` onto ITS returned promise — the release must
+    // fire on the RUN's own completion, not from `onSettle` (which never fires for an evicted entry).
+    const runBatchBody = async (opId: string): Promise<MergeBatchResult> => {
+        // @decision 641cc62c — re-runs spawnMintConflict synchronously here (the pre-assembly check above
+        // leaves a real await-window where a spawn can slip in before this mint); a newly-conflicting
+        // candidate is pulled out, never marked, and routed to its own fallback — never fails the batch.
+        const lateSpawnConflictFallback: { workerSessionId: string; reason: string }[] = [];
+        const liveChosenAtMint = liveChosen.filter((c) => {
+          const w = this.db.getSession(c.workerSessionId);
+          const conflict = this.spawnMintConflict(c.taskId, w?.worktreePath ?? w?.cwd ?? null, c.workerSessionId);
+          if (!conflict) return true;
+          lateSpawnConflictFallback.push({ workerSessionId: c.workerSessionId, reason: this.spawnMintConflictReason(c.taskId!, conflict) });
+          return false;
+        });
         // The LIVE set only — a held candidate is not a member of this batch (Minor 4: it used to be named here).
-        const branchIdentities = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch }));
+        const branchIdentities = liveChosenAtMint.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch }));
+        // @decision 641cc62c — marks this batch's own real-mint instant for every LIVE candidate's task
+        // (a held/review-moved/overflow/late-spawn-conflict candidate is never acted on by this run, so
+        // never marked); cleared via the real attach() call's own `.finally()` wrapper around
+        // `runBatchBody`, below.
+        for (const b of branchIdentities) if (b.taskId) this.markMergeInFlightForTask(b.taskId, opId);
         const evtBatch = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind,
           detail: { ...detail, opId, branches: branchIdentities },
@@ -20150,6 +20251,8 @@ export class SessionService {
             ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "this project's mainline watermark record is corrupt/unreadable — nothing was batched, gated or landed" })),
             ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
             ...strandedFallback,
+            ...spawnConflictFallback,
+            ...lateSpawnConflictFallback,
           ], opId, undefined, "restore or reset the mainline watermark (see reason) BEFORE any worker_merge_confirm");
           return { ok: false, opId, landed: [], fallback: notStarted, branchDiverted: true, watermarkUnreadable: true, reason };
         }
@@ -20175,6 +20278,8 @@ export class SessionService {
             ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: preGateLockCheck.reason })),
             ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
             ...strandedFallback,
+            ...spawnConflictFallback,
+            ...lateSpawnConflictFallback,
           ], opId, undefined, "clear .git/index.lock (see reason) before any worker_merge_confirm");
           return { ok: false, opId, landed: [], fallback: notStarted, indexLockPresent: true, reason: preGateLockCheck.reason };
         }
@@ -20388,7 +20493,7 @@ export class SessionService {
                 // @decision 593cedc8 — same ordering point and ONE rule as the solo path (see `recordSoloRedOnce`): last-settled `settled`, any end.
                 if (!batchRedRecorded && (isMergeGateRed(settled) || (thrown !== undefined && settled === batchPartialPassResult))) {
                   batchRedRecorded = true;
-                  await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
+                  await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosenAtMint.length });
                 }
               });
             } catch (err) {
@@ -20520,7 +20625,9 @@ export class SessionService {
             };
           };
 
-          const batchCandidates: BatchCandidate[] = liveChosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle, ...(verifiedTip.has(c.workerSessionId) ? { tip: verifiedTip.get(c.workerSessionId)! } : {}) }));
+          // @decision 641cc62c — liveChosenAtMint (not the outer liveChosen): a late-detected spawn
+          // conflict must actually exclude that candidate from the real assembly, not just skip marking it.
+          const batchCandidates: BatchCandidate[] = liveChosenAtMint.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle, ...(verifiedTip.has(c.workerSessionId) ? { tip: verifiedTip.get(c.workerSessionId)! } : {}) }));
           // @decision c24dd48a — release the held repo guard in THIS `finally` (every exit after a passing gate), never inline after it;
           //  scoped to end at the squash, not the outer `finally` (finalize never moves main's HEAD).
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
@@ -20605,7 +20712,7 @@ export class SessionService {
           }
           const ownDropReason = new Map(result.dropped.map((d) => [d.workerSessionId, d.reason]));
           // Card 6f13746c: a genuine batch gate FAILURE feeds the interval state ONCE (no branch tip — `candidates: K`).
-          if (result.gateFailed && !batchRedRecorded) await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosen.length });
+          if (result.gateFailed && !batchRedRecorded) await this.recordMergeGateFailure(finalProjectId, { repoPath: finalRepoPath, repoKey: batchRepoKey, opId, periodic: batchDecision.cadence !== "every", candidates: liveChosenAtMint.length });
 
           // @decision b4080777 — fires ONCE, centrally, ahead of every per-outcome branch below, so a
           // refused ff never leaves a landed candidate stranded at `merge_landing_started`; never move
@@ -20641,6 +20748,8 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? "the batch was cancelled before its gate ran" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, cancelled: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
@@ -20655,6 +20764,8 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the canonical repo is quarantined" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, quarantined: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
@@ -20665,6 +20776,8 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "a .git/index.lock was already present in the canonical repo" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, indexLockPresent: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
@@ -20697,6 +20810,8 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the canonical mainline checkout diverted to an unexpected branch" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
             ], opId, undefined, divertTail);
             return { ok: false, opId, landed: [], fallback: notStarted, branchDiverted: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
@@ -20723,6 +20838,8 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the batch fast-forward's landed result could not be verified" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
             ], opId, undefined, unverifiedTail);
             return { ok: false, opId, landed: [], fallback: notStarted, unverified: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
@@ -20731,6 +20848,8 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "batch failed" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
             ], opId);
             return {
               ok: false, opId, landed: [], fallback, reason: result.reason,
@@ -20843,6 +20962,8 @@ export class SessionService {
             ...droppedFallback,
             ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
             ...strandedFallback,
+            ...spawnConflictFallback,
+            ...lateSpawnConflictFallback,
           ], opId);
           return {
             ok: true, opId, landed, landedCount: result.landed.length, fallback,
@@ -20890,6 +21011,8 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: why })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback, postGateThrow: true, reason: why };
           } catch (secondary) { console.warn(`[merge-batch] op ${opId} post-gate-throw handler failed (${secondary instanceof Error ? secondary.message : String(secondary)}); rethrowing the original error`); throw err; }
@@ -20908,7 +21031,14 @@ export class SessionService {
           // session row to hand the release off to, so this finally is its only release point.
           releaseBatchWorktreePathClaim?.();
         }
-      },
+    };
+    return this.pendingOps.attach<MergeBatchResult>(
+      batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
+      (opId) => runBatchBody(opId).finally(() => {
+        // @decision 641cc62c — released on the RUN's own completion (chained here), NEVER from the
+        // `onSettle` opt below — that hook never fires for an entry `evictDeadOwner()` force-removed.
+        for (const c of liveChosen) if (c.taskId) this.clearMergeInFlightForTask(c.taskId, opId);
+      }),
       // @decision f944d4e4 — this async settle nudge fires ONLY for a caller that observed
       //  {settled:false}; a sync-settled caller gets zero notices, and this is the one place a batch's
       //  landed branches are ever announced (task + branch + commit), never just a bare count.
@@ -22349,6 +22479,9 @@ export class SessionService {
     // `identityOptional`'s own doc) rather than forcing a match against `undefined`, which would
     // (correctly, but wastefully) still treat it as a miss.
     const worker = this.db.getSession(workerSessionId);
+    // @decision 641cc62c — read once here (not re-derived inside onOpMinted below) since `worker` is
+    // already in scope at this exact point; `spawnMintConflict`'s own worktree-path check reads this.
+    const worktreePath = worker?.worktreePath ?? worker?.cwd ?? null;
     const taskAlreadyTerminal = taskId != null && (() => {
       const task = this.db.getTask(taskId);
       const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
@@ -22456,6 +22589,10 @@ export class SessionService {
           }
           throw err;
         }
+      }).finally(() => {
+        // @decision 641cc62c — released on the RUN's own completion (chained here), NEVER from the
+        // `onSettle` opt below — that hook never fires for an entry `evictDeadOwner()` force-removed.
+        if (taskId) this.clearMergeInFlightForTask(taskId, opId);
       }),
       (outcome, opId) => {
         // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
@@ -22667,11 +22804,21 @@ export class SessionService {
         // @decision e3e40167 — originated by card edc1ec12, generalized here: mints the durable tombstone
         // row the MOMENT this op is created, covering the fast path too, not just surfaced-pending.
         onOpMinted: (opId) => {
+          // @decision 641cc62c — REVERSE-direction check, at the real mint instant, before anything is
+          // written: refuses the whole mint when a worker_spawn is in flight for this task, has just
+          // claimed its worktree, or a DIFFERENT live session now holds it.
+          if (taskId) {
+            const conflict = this.spawnMintConflict(taskId, worktreePath, workerSessionId);
+            if (conflict) throw new Error(this.spawnMintConflictReason(taskId, conflict));
+          }
           this.db.insertPendingGateOp({
             opId, kind: "merge", key, ownerSessionId: managerSessionId, projectId, taskId,
             branch: this.db.getSession(workerSessionId)?.branch ?? null, startedAt: opStartedAt,
             state: "pending", surfacedPending: false,
           });
+          // @decision 641cc62c — marks the SAME real-mint instant `onOpMinted` already exists for;
+          // cleared on the real RUN's own `.finally()` above, never in `onSettle` below.
+          if (taskId) this.markMergeInFlightForTask(taskId, opId);
         },
         // @decision e3e40167 — flips the row's surfaced_pending flag before any possible settle, so a real
         // process death before this op settles can still be reconciled at the next boot.
