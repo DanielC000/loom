@@ -1808,6 +1808,13 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   const toWrite = atFilenameIdx >= 0
     ? unionQuarantineEntries(diskReconciled.toWrite, pendingUnresolvedQuarantines[atFilenameIdx]!.entry)
     : diskReconciled.toWrite;
+  // Capture BOTH indices' own current entries before anything below mutates the array — `oldAtFinalBasename`
+  // in particular must be read NOW, since branch 1 below splices that slot away.
+  const oldAtFilename = atFilenameIdx >= 0 ? pendingUnresolvedQuarantines[atFilenameIdx]!.entry : undefined;
+  const oldAtFinalBasename = atFinalBasenameIdx >= 0 ? pendingUnresolvedQuarantines[atFinalBasenameIdx]!.entry : undefined;
+  // @decision 8db913e2 (Follow-up 37452ddd) — do NOT carry `resolvedKey`/`armedKeys` forward onto
+  // `toWrite` here: investigated and REJECTED — see the decision record for the regression this
+  // reopens (card 82032b5c/c9114934's own "a protective copy never re-occupies a resolved collision").
   if (!writePendingDivertFile(filename, toWrite)) {
     // @decision 4900c365 (round 2) — re-establish an in-memory record that OWNS `final` at its OWN
     // current name (self-referenced in `orphanLatchFiles`): enforces in THIS process too, not only on a
@@ -1820,7 +1827,11 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
       ...toWrite,
       orphanLatchFiles: [...new Set([...(toPersist.orphanLatchFiles ?? []), finalBasename])],
     };
+    // @decision 8db913e2 (Follow-up 37452ddd) — `oldAtFinalBasename` can ALSO be an 883e29bc twin armed
+    // in `activeQuarantines`; re-point via `replaceEntryEverywhere` before overwriting this slot, or the
+    // active side is left pointing at an object this double-fault branch is about to discard.
     if (atFinalBasenameIdx >= 0) {
+      replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, kept);
       pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: kept, sourceFile: finalBasename };
     } else {
       pendingUnresolvedQuarantines.push({ entry: kept, sourceFile: finalBasename });
@@ -1838,10 +1849,19 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // object again. Re-point any EXISTING pending reference to `final`'s own basename (e.g. its boot-time
   // degraded-divert push) onto the new, durable filename — never leave it dangling at the name about to
   // be deleted.
+  //
+  // @decision 8db913e2 (Follow-up 37452ddd) — EITHER index's own entry can be an 883e29bc twin, and the
+  // two indices' entries can be TWO DIFFERENT objects (one armed, one pending-only) — re-point BOTH via
+  // `replaceEntryEverywhere` before either slot is overwritten/discarded, or the active side goes stale.
   if (atFilenameIdx >= 0) {
+    replaceEntryEverywhere(activeQuarantines, oldAtFilename!, toWrite);
+    if (atFinalBasenameIdx >= 0) replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, toWrite);
     pendingUnresolvedQuarantines[atFilenameIdx] = { entry: toWrite, sourceFile: filename };
     if (atFinalBasenameIdx >= 0) pendingUnresolvedQuarantines.splice(atFinalBasenameIdx, 1);
   } else if (atFinalBasenameIdx >= 0) {
+    // @decision 8db913e2 (Follow-up 37452ddd) — re-point for the REPLACEMENT only, never as a union
+    // source — `c9114934` still forbids unioning `atFinalBasenameIdx`'s own tokens into `toWrite`.
+    replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, toWrite);
     pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: toWrite, sourceFile: filename };
   } else {
     // @decision 1922be3a (round 4) — ALWAYS mint an independent, durably-tracked pending record here;
