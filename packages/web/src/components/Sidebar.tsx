@@ -15,6 +15,7 @@ import { api, orchStatusQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
 import { isCompanionSession } from "../lib/sessions";
+import { isUnread } from "../lib/questions";
 import { useDismissable } from "../lib/useDismissable";
 import { color, font, radius } from "../theme";
 
@@ -150,6 +151,10 @@ export function Sidebar() {
   const alertCount = attentionItems.filter((it) => !it.questionId).length;
   const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 4000 });
   const pendingRequests = (questions.data ?? []).filter((q) => q.state === "pending").length;
+  // Phase 2 of card 59fa6403 (read/unread) — a SEPARATE, muted count from the red pending badge above:
+  // unread is orthogonal to state (a notice can be unread with nothing pending at all), so this is never
+  // folded into pendingRequests — see isUnread's own doc on Question.readAt.
+  const unreadRequests = (questions.data ?? []).filter(isUnread).length;
   // No refetchInterval (C6 of the WS delta-push umbrella, 1efde4ba): FleetSocketProvider seeds this cache
   // on every /ws/fleet (re)connect and patches it from C5's `status` deltas, with a disconnected-ONLY
   // fallback poll. This used to poll GET /api/orchestration/status every 4s from the rail, i.e. on every
@@ -191,6 +196,7 @@ export function Sidebar() {
                     <span className="loom-rail-lbl">{p.label}</span>
                     {p.scoped && <ScopeDot />}
                     {p.to === "/inbox" && pendingRequests > 0 && <span className="loom-rail-badge">{pendingRequests}</span>}
+                    {p.to === "/inbox" && unreadRequests > 0 && <span className="loom-rail-badge-muted" title={`${unreadRequests} unread`}>{unreadRequests}</span>}
                   </NavLink>
                 ))}
               </div>

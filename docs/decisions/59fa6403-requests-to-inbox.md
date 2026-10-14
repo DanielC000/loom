@@ -534,3 +534,65 @@ key-set guards, every `question`/`decision`/`request`/`answered`-matching daemon
 grepped, not a fixed count — re-derive it from the filename pattern, not from a number quoted here),
 `wake-impact.mjs`/`restart-wake-classification.mjs`, the 7 Inbox e2e specs, and `pnpm --filter
 @loom/daemon guards`.
+
+## Implementation notes (Phase 2, built — card 54007ab7)
+
+What actually landed for the read/unread layer, and the one open question Phase 1's own "Implementation
+notes" section deferred to this card: whether the notice-visibility window (`NOTICE_INBOX_WINDOW_MS`,
+round 2's deliberate stopgap) should be replaced by `readAt`-driven visibility now that read/unread
+actually exists.
+
+- **Schema**: one new nullable `read_at TEXT` column on `questions`, added via the established
+  `QUESTION_ADDED_COLUMNS` + `migrateQuestions()` ALTER-TABLE pattern (`db.ts`) — same posture as
+  `escalated_at`/`acknowledged_until` (ALTER-only, never in the base `CREATE TABLE`, no index references
+  it). Surfaced as `Question.readAt: string | null` (`@loom/shared`). Boot-tested against a synthesized
+  pre-card legacy DB (`test/question-read-at-migration.mjs`, mirroring
+  `question-acknowledged-until-migration.mjs`'s precedent) — a legacy row reads `readAt:null` with every
+  other field (including an unrelated migrate-added column, `acknowledgedUntil`) untouched.
+- **The write**: `Db.markQuestionsRead(ids, readAt)` — batched (an id list, not one row at a time),
+  idempotent (an already-read row's `read_at` is PINNED to its first stamp, never overwritten by a later
+  call — it is reported as NOT updated), deliberately UNGUARDED by `state`/`acknowledgedUntil` (read/unread
+  applies uniformly to every kind and state). Human-only loopback REST: `POST /api/questions/mark-read`
+  (`gateway/server.ts`), Tier-0 like `acknowledge`/`dismiss` — no agent MCP tool of any kind exposes it, on
+  any surface (manager, Platform Lead, worker). `mark-on-open`: the SINGLE `useOpenRequest()` opener
+  (`requests.tsx`) that every in-app "open this request" affordance already funnels through (Inbox rows,
+  History rows, the task drawer rail, the attention toast, the command palette) now also fires-and-forgets
+  a mark-read call for the opened id — so every existing open affordance gained this behavior for free,
+  with no new per-call-site wiring.
+- **UI**: an "unread" toggle `FilterChip` in `RequestsInbox` (never exclusive with the existing type/project
+  facets) and a "read + unread" / "unread only" `<Select>` in `RequestHistory`, both keyed on
+  `isUnread(q)` (`lib/questions.ts`, `readAt == null`). The Sidebar's existing red pending-count badge is
+  UNCHANGED; a second, deliberately less-alarming MUTED badge (`.loom-rail-badge-muted`, `global.css`)
+  shows the unread count alongside it — never folded into one number, same "two different questions on one
+  row" discipline `acknowledgedUntil`/`state` already keep separate (see §(a) above).
+- **The window-vs-readAt decision (this card's one genuine judgment call): REPLACE the fixed 7-day
+  `NOTICE_INBOX_WINDOW_MS` stopgap with `read_at IS NULL`-driven visibility, in BOTH places it gated —
+  `listOpenQuestions`' default "waiting on me" view AND `listQuestionsForAudit`'s default
+  `excludeConsumed:true` view (`requests_list`'s backing query) — kept consistent with each other, per this
+  card's own scope note.** Reasoning: `NOTICE_INBOX_WINDOW_MS`'s own doc comment already named itself as a
+  "deliberate, temporary stopgap" destined to be replaced by exactly this card, so keeping it alongside a
+  newly-shipped read/unread mechanism would leave two competing, overlapping "is this notice still live"
+  signals — age AND read state — for no reason once the better one exists. A notice now behaves exactly
+  like every other Request kind already does: it stays in the live/default view until a human resolves it
+  (here, "resolves" = reads it, since a notice has nothing to answer), then drops to History-only — nothing
+  in the live Inbox auto-expires on TIME anywhere else, so a notice is no longer the one exception. The
+  `NOTICE_INBOX_WINDOW_MS` constant itself is DELETED (not deprecated) — it has no remaining caller, and
+  leaving an unused "stopgap, destined to be replaced" constant in the tree past the point of its own
+  replacement is exactly the kind of stale code CLAUDE.md's conventions ask to avoid.
+  `notice-request-kind.mjs`'s (H)/(I) sections were rewritten in place (not appended) to seed an unread and
+  a read notice via the REAL `buildQuestionAsk` + `markQuestionsRead` (never a hand-built row with the
+  field already set — the same vacuous-test trap this record's own CR2 methodology note warns about) and
+  assert on read state instead of age; proven RED (reverted `db.ts` to HEAD) → GREEN restored via
+  `pnpm --filter @loom/daemon negative-control`.
+- **Tests (Phase 2)**: `question-read-at-migration.mjs` (new, the migration boot-test above),
+  `question-read-tracking.mjs` (new — `markQuestionsRead`'s batching/idempotency/orthogonality-to-state,
+  plus the REST route's 200/400s), `notice-request-kind.mjs` (H)/(I) sections rewritten per the window
+  decision above, and `packages/web/e2e/requests-inbox.spec.ts` gained two new cases (the Inbox unread
+  filter + mark-on-open, and History's "unread only" filter). Confirmed (not assumed) that no MCP response
+  shape gained `readAt` — `questionPullItem`/`taskRequestGetItem`/`auditRequestItem`/`pageRequests` all
+  build an explicit field list rather than spreading the full `Question`, so none of the four CLAUDE.md
+  response-key-set guards (`entity-row-fields-guard.mjs`, `worker-status-projection-guard.mjs`,
+  `agent-session-full-field-guard.mjs`, `platform-config-redaction-drift.mjs`) needed updating — all four
+  re-run clean as a confirming check regardless. `pnpm --filter @loom/daemon guards` (all 30, fresh-read,
+  not a trusted cached count) and the full named question/decision/request/answered-matching daemon test
+  battery from §(g) all pass.

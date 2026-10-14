@@ -18,8 +18,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (G) the elevated Platform Lead's `project_configure` ALSO rejects it (HUMAN_ONLY_NESTED_PROJECT_CONFIG_
 //       KEYS) — even the Lead cannot raise its own fleet's limit — and the human (full) validator still
 //       accepts it (control: this is a trust-tier restriction, not a validation bug).
-//   (H) `listOpenQuestions`' default "waiting on me" view includes a RECENT notice but excludes an OLD one
-//       (past NOTICE_INBOX_WINDOW_MS); `includeConsumed:true` (History) includes BOTH regardless of age.
+//   (H) `listOpenQuestions`' default "waiting on me" view includes an UNREAD notice but excludes an
+//       already-READ one (card 54007ab7, Phase 2 of 59fa6403 — replaces the old fixed-age-window stopgap);
+//       `includeConsumed:true` (History) includes BOTH regardless of read state.
 //
 // Run: 1) build (turbo builds shared first), 2) node packages/daemon/test/notice-request-kind.mjs
 import fs from "node:fs";
@@ -37,7 +38,7 @@ process.env.LOOM_HOME = tmpHome;
 const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();
 
-const { Db, NOTICE_INBOX_WINDOW_MS } = await import("../dist/db.js");
+const { Db } = await import("../dist/db.js");
 const { buildQuestionAsk } = await import("../dist/mcp/questionTool.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const {
@@ -212,42 +213,41 @@ try {
     }
   }
 
-  // ===== (H) listOpenQuestions' default view shows a RECENT notice, excludes an OLD one; History shows both =====
+  // ===== (H) listOpenQuestions' default view shows an UNREAD notice, excludes a READ one; History shows
+  // both (card 54007ab7, Phase 2 of 59fa6403 — replaces the old fixed-age-window stopgap) =====
   {
-    const recentBuilt = buildQuestionAsk(
-      { type: "notice", title: "Recent notice", body: "within the window" },
+    const unreadBuilt = buildQuestionAsk(
+      { type: "notice", title: "Unread notice", body: "never opened" },
       { sessionId: mgrId, projectId: projId, db, role: "manager" },
     );
-    db.insertQuestion(recentBuilt.question);
-    // An "old" notice: insert directly with a created_at/answered_at well past NOTICE_INBOX_WINDOW_MS —
-    // buildQuestionAsk always stamps "now", so a past-dated row needs a direct db.insertQuestion (mirrors
-    // the fixture pattern other watchdog tests in this repo already use, e.g. answered-stuck-watcher.mjs).
-    const oldIso = new Date(Date.now() - NOTICE_INBOX_WINDOW_MS - 60_000).toISOString(); // 1 min past the window
-    const oldId = "nk-old-notice";
-    db.insertQuestion({
-      id: oldId, sessionId: mgrId, projectId: projId, type: "notice", title: "Old notice", body: "past the window",
-      options: null, recommendation: null, taskId: null, state: "notice", chosenOption: null, note: null,
-      createdAt: oldIso, answeredAt: oldIso, consumedAt: null, cancelledReason: null, cancelledBy: null, cancelledAt: null,
-    });
+    db.insertQuestion(unreadBuilt.question);
+    const readBuilt = buildQuestionAsk(
+      { type: "notice", title: "Read notice", body: "already seen" },
+      { sessionId: mgrId, projectId: projId, db, role: "manager" },
+    );
+    db.insertQuestion(readBuilt.question);
+    const readId = readBuilt.question.id;
+    const marked = db.markQuestionsRead([readId], new Date().toISOString());
+    check("(H setup) markQuestionsRead actually stamped the 'read' notice", marked.length === 1 && marked[0] === readId);
 
     const defaultView = db.listOpenQuestions(false);
-    check("(H1) the default 'waiting on me' view INCLUDES the recent notice", defaultView.some((q) => q.id === recentBuilt.question.id));
-    check("(H2) the default view EXCLUDES the old notice (past NOTICE_INBOX_WINDOW_MS)", !defaultView.some((q) => q.id === oldId));
+    check("(H1) the default 'waiting on me' view INCLUDES the unread notice", defaultView.some((q) => q.id === unreadBuilt.question.id));
+    check("(H2) the default view EXCLUDES the read notice", !defaultView.some((q) => q.id === readId));
 
     const historyView = db.listOpenQuestions(true);
-    check("(H3) History (includeConsumed:true) includes the RECENT notice too", historyView.some((q) => q.id === recentBuilt.question.id));
-    check("(H4) History (includeConsumed:true) ALSO includes the OLD notice — age never matters there", historyView.some((q) => q.id === oldId));
+    check("(H3) History (includeConsumed:true) includes the UNREAD notice too", historyView.some((q) => q.id === unreadBuilt.question.id));
+    check("(H4) History (includeConsumed:true) ALSO includes the READ notice — read state never matters there", historyView.some((q) => q.id === readId));
 
-    // ===== (I) CR2 844bd6b8: requests_list's backing listQuestionsForAudit gets the SAME window under
-    // its default excludeConsumed:true (the manager's requests_list), for consistency with the web Inbox
-    // — without this, requests_list's default view would keep every notice forever. =====
+    // ===== (I) card 54007ab7: requests_list's backing listQuestionsForAudit gets the SAME read-driven
+    // visibility under its default excludeConsumed:true (the manager's requests_list), for consistency
+    // with the web Inbox — without this, requests_list's default view would keep every notice forever. =====
     const auditExcludeConsumed = db.listQuestionsForAudit({ projectId: projId, excludeConsumed: true });
-    check("(I1) listQuestionsForAudit(excludeConsumed:true) INCLUDES the recent notice", auditExcludeConsumed.some((q) => q.id === recentBuilt.question.id));
-    check("(I2) listQuestionsForAudit(excludeConsumed:true) EXCLUDES the old notice", !auditExcludeConsumed.some((q) => q.id === oldId));
+    check("(I1) listQuestionsForAudit(excludeConsumed:true) INCLUDES the unread notice", auditExcludeConsumed.some((q) => q.id === unreadBuilt.question.id));
+    check("(I2) listQuestionsForAudit(excludeConsumed:true) EXCLUDES the read notice", !auditExcludeConsumed.some((q) => q.id === readId));
     const auditIncludeConsumed = db.listQuestionsForAudit({ projectId: projId, excludeConsumed: false });
-    check("(I3) listQuestionsForAudit(excludeConsumed:false) includes BOTH regardless of age", auditIncludeConsumed.some((q) => q.id === recentBuilt.question.id) && auditIncludeConsumed.some((q) => q.id === oldId));
+    check("(I3) listQuestionsForAudit(excludeConsumed:false) includes BOTH regardless of read state", auditIncludeConsumed.some((q) => q.id === unreadBuilt.question.id) && auditIncludeConsumed.some((q) => q.id === readId));
     const auditExplicitState = db.listQuestionsForAudit({ projectId: projId, state: "notice", excludeConsumed: true });
-    check("(I4) an EXPLICIT state:\"notice\" filter always shows it regardless of age, even with excludeConsumed:true", auditExplicitState.some((q) => q.id === oldId));
+    check("(I4) an EXPLICIT state:\"notice\" filter always shows it regardless of read state, even with excludeConsumed:true", auditExplicitState.some((q) => q.id === readId));
   }
 } finally {
   try { db?.close(); } catch { /* ignore */ }
@@ -261,7 +261,7 @@ console.log(failures === 0
     "agent lineage with a loud refusal (never a silent drop) once a configured per-project limit is " +
     "exceeded, and a worker's MCP surface still has no question_ask tool at all; the notice rate limit " +
     "is human-only even from the elevated Platform Lead (both the agent validator and the Lead's own " +
-    "project_configure reject it); and listOpenQuestions' default view includes a recent notice while " +
-    "excluding an old one, with History including both regardless of age."
+    "project_configure reject it); and listOpenQuestions' default view includes an unread notice while " +
+    "excluding a read one, with History including both regardless of read state."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

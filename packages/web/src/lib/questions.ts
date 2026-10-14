@@ -38,6 +38,13 @@ export function isDecisionWatchdog(q: Pick<Question, "state" | "answeredAt">, no
   return Number.isFinite(t) && nowMs - t >= thresholdMs;
 }
 
+// Read/unread (Phase 2 of card 59fa6403) — ORTHOGONAL to `state`/`acknowledgedUntil`: a still-`pending`
+// decision can be read-but-unanswered, a self-terminal `notice` can be answered-but-unread. Never conflate
+// this with `isDecisionWatchdog` or a lifecycle chip — see `readAt`'s own doc on `Question`.
+export function isUnread(q: Pick<Question, "readAt">): boolean {
+  return q.readAt == null;
+}
+
 export interface StateChipSpec { tone: Tone; label: string; }
 
 // The lifecycle chip (surface 4): pending (cyan, waiting on you) → answered (muted, waiting on the

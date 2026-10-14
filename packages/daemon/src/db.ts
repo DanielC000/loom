@@ -1668,13 +1668,6 @@ export const DEFAULT_GATE_HISTORY_PAGE = 25;
  *  the `events_search` MCP tool's description can cite the same number without redeclaring it. */
 export const MAX_EVENTS_SEARCH_PAGE = 200;
 
-/** Card 59fa6403 (owner ruling, round 2): how long a `type:"notice"` row stays in `listOpenQuestions`'
- *  default "waiting on me" view (a notice never has anything PENDING to show, but a brand-new one is
- *  still worth surfacing there) before it drops out to History-only. A deliberate, temporary stopgap —
- *  Phase 2 (card 54007ab7, the read/unread layer) replaces this fixed window with `readAt`-driven
- *  visibility; don't widen this constant as a substitute for landing that card. */
-export const NOTICE_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-
 /** The gate-run orchestration_event kinds that constitute Gates-page HISTORY — one row per daemon-executed
  *  lane run: a worker self-check (`worker_gate`), a merge gate + its transient-kill retry (`build_gate` /
  *  `build_gate_retry`, both gateType "merge"), and a scoped deploy (`deploy`). The marker-only
@@ -2279,6 +2272,13 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // pre-migration `~/.loom/loom.db`, mirroring migrateQuestions()'s own `type` precedent — see
   // test/question-filed-by-session-id-migration.mjs.
   filed_by_session_id: "TEXT",
+  // Phase 2 of card 59fa6403 (read/unread) — an ISO instant the FIRST time a human opened/marked this row
+  // read, stamped ONLY by the human-only loopback POST /api/questions/mark-read. Nullable, like
+  // escalated_at/acknowledged_until above (the same two deliberately ALTER-only precedents): a legacy row
+  // simply reads null ("never marked read"), there is nothing to backfill, and no index references this
+  // column in the base SCHEMA — same reasoning as those two fields' own docs. Orthogonal to state/
+  // acknowledged_until; never touched by any agent path.
+  read_at: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
@@ -9062,6 +9062,23 @@ export class Db {
     return this.getQuestion(id);
   }
   /**
+   * Phase 2 of card 59fa6403 (read/unread) — the human-only read-tracking write. Stamps `read_at` on
+   * every id in `ids` that doesn't already have one; an id that's missing or already read is silently
+   * skipped (idempotent — `read_at` records the FIRST time a human saw the row, never re-stamped).
+   * Deliberately UNGUARDED by `state` (same posture as `acknowledgeQuestion`): read/unread applies to
+   * every kind/state alike, never touches `state`/`acknowledgedUntil`/`question_pull`/`question_cancel`.
+   * Returns the ids actually updated (a subset of `ids`, in no particular order).
+   */
+  markQuestionsRead(ids: string[], readAt: string): string[] {
+    if (ids.length === 0) return [];
+    const stmt = this.db.prepare("UPDATE questions SET read_at = ? WHERE id = ? AND read_at IS NULL");
+    const updated: string[] = [];
+    for (const id of ids) {
+      if (stmt.run(readAt, id).changes > 0) updated.push(id);
+    }
+    return updated;
+  }
+  /**
    * The manager-only pull/consume: atomically reads every 'answered' question for `sessionId` and flips
    * them to 'consumed' in the SAME transaction, so a concurrent pull can never double-consume the same
    * row. Returns the questions AS THEY WERE when answered (pre-flip) — the manager's payload.
@@ -9272,12 +9289,13 @@ export class Db {
     if (filters.state) { clauses.push("q.state = ?"); params.push(filters.state); }
     // 'cancelled' is EXCLUDED alongside 'consumed' by default (question_cancel/dismiss's terminal state is
     // retained history exactly like 'consumed'), unless an explicit `state` filter asks for it. A 'notice'
-    // (card 59fa6403 round 2, CR2 844bd6b8) gets the SAME visibility window as listOpenQuestions: an old
-    // one is excluded too under this default, for consistency — without this, requests_list's default
-    // (excludeConsumed) view would keep every notice forever, unlike the web Inbox's own default view.
+    // (card 54007ab7, Phase 2 of 59fa6403) gets the SAME read-driven visibility as listOpenQuestions: an
+    // already-read one is excluded too under this default, for consistency — without this, requests_list's
+    // default (excludeConsumed) view would keep every notice forever, unlike the web Inbox's own default
+    // view. Round 2 (CR2 844bd6b8) originally gated this on a fixed 7-day age window
+    // (`NOTICE_INBOX_WINDOW_MS`) as a deliberate stopgap; Phase 2 replaces it with the real signal.
     else if (filters.excludeConsumed) {
-      clauses.push("(q.state NOT IN ('consumed','cancelled','notice') OR (q.state = 'notice' AND q.created_at >= ?))");
-      params.push(new Date(Date.now() - NOTICE_INBOX_WINDOW_MS).toISOString());
+      clauses.push("(q.state NOT IN ('consumed','cancelled','notice') OR (q.state = 'notice' AND q.read_at IS NULL))");
     }
     if (filters.type) { clauses.push("q.type = ?"); params.push(filters.type); }
     if (filters.since) { clauses.push("q.created_at >= ?"); params.push(filters.since); }
@@ -9299,10 +9317,13 @@ export class Db {
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
    * ALL projects/sessions, enriched with the asking agent/project display names + whether the CURRENTLY
    * ROUTED session is still live (for the jump/nudge affordances). By default only the human-actionable
-   * states ('pending' + 'answered') PLUS a `type:"notice"` row created within {@link
-   * NOTICE_INBOX_WINDOW_MS} (card 59fa6403 round 2, owner ruling) — a notice has nothing pending to show,
-   * but a brand-new one is still worth surfacing in the default view; an OLDER notice drops out to
-   * History-only (`includeConsumed`). `includeConsumed` folds in the FULL terminal history — 'consumed',
+   * states ('pending' + 'answered') PLUS an UNREAD `type:"notice"` row (`read_at IS NULL`) — a notice has
+   * nothing pending to show, but an unread one is still worth surfacing in the default view; once a human
+   * reads it (`markQuestionsRead`), it drops out to History-only (`includeConsumed`), the same way an
+   * answered decision drops out once consumed. Round 2 (owner ruling) originally gated this on a fixed
+   * 7-day age window (`NOTICE_INBOX_WINDOW_MS`) as a deliberate stopgap, explicitly destined to be replaced
+   * once read/unread shipped — card 54007ab7 (Phase 2 of 59fa6403) is that replacement; age no longer
+   * matters here at all. `includeConsumed` folds in the FULL terminal history — 'consumed',
    * 'cancelled' (question_cancel/dismiss's terminal state is retained history exactly like 'consumed',
    * never a separate bucket), AND EVERY 'notice' regardless of age. Newest-first. LEFT JOINs so a question
    * whose filing/routed session or agent was hard-deleted still lists (name falls back to "?") rather than
@@ -9321,11 +9342,10 @@ export class Db {
    * joined off `session_id` on purpose: those describe the CURRENT routed seat, not who filed it.
    */
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
-    const noticeWindowStart = new Date(Date.now() - NOTICE_INBOX_WINDOW_MS).toISOString();
     const whereClause = includeConsumed
       ? `q.state IN ('pending','answered','consumed','cancelled','notice')`
-      : `q.state IN ('pending','answered') OR (q.state = 'notice' AND q.created_at >= ?)`;
-    const params = includeConsumed ? [] : [noticeWindowStart];
+      : `q.state IN ('pending','answered') OR (q.state = 'notice' AND q.read_at IS NULL)`;
+    const params: unknown[] = [];
     const rows = this.db.prepare(
       `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
               s.resumability AS session_resumability, t.column_key AS linked_task_column_key,
@@ -10835,6 +10855,7 @@ function toQuestion(r0: unknown): Question {
     // fall back to session_id here (that would silently re-introduce the exact bug this column exists to
     // fix, since session_id is the mutable routing target, not the filer).
     filedBySessionId: (r.filed_by_session_id as string | null) ?? null,
+    readAt: (r.read_at as string | null) ?? null,
   };
 }
 // A question row already carrying the joined display columns (agent_name / project_name /

@@ -656,11 +656,36 @@ body {
   justify-content: center;
   flex: none;
 }
+/* Phase 2 of card 59fa6403 — a second, deliberately LESS alarming "N unread" indicator alongside the
+   pending-request badge above: unread FYI items (e.g. notices) aren't urgent the way a pending decision
+   is, so this never reuses the amber treatment. Sits after the pending badge, never replacing it — the
+   two counts are kept visually AND numerically distinct (see Sidebar.tsx's own doc on why). */
+.loom-rail-badge-muted {
+  margin-left: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--loom-border-strong);
+  color: var(--loom-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
 /* Collapsed: float the count badge onto the icon's top-right corner so it still signals. */
 .loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-item .loom-rail-badge {
   position: absolute;
   top: 5px;
   right: 8px;
+  margin: 0;
+}
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-item .loom-rail-badge-muted {
+  position: absolute;
+  top: 5px;
+  right: 20px;
   margin: 0;
 }
 

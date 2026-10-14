@@ -9,7 +9,7 @@ import { Panel, Button, Dot, SectionLabel, Badge, Select } from "./ui";
 import { DecisionStateChip } from "./decisions";
 import { color, font, radius, tone, type Tone } from "../theme";
 import {
-  isDecisionWatchdog, relativeAge,
+  isDecisionWatchdog, isUnread, relativeAge,
   REQUEST_TYPE_TONE, REQUEST_TYPE_ORDER,
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
   requestProvenanceText,
@@ -223,10 +223,12 @@ export function RequestsInbox() {
   const qc = useQueryClient();
   const [typeFacet, setTypeFacet] = useState<QuestionType | "all">("all");
   const [projFacet, setProjFacet] = useState<string>("all"); // projectId | "all"
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const openRequest = useOpenRequest();
   const now = Date.now();
 
   const items = questions.data ?? [];
+  const unreadCount = items.filter(isUnread).length;
   // Type counts (over the whole queue) — one chip per type, "all" leads.
   const typeCounts = useMemo(() => {
     const m = new Map<QuestionType, number>();
@@ -249,7 +251,8 @@ export function RequestsInbox() {
   const activeProj = projFacet !== "all" && projects.some((p) => p.id === projFacet) ? projFacet : "all";
   const filtered = items.filter((q) =>
     (activeType === "all" || q.type === activeType) &&
-    (activeProj === "all" || q.projectId === activeProj));
+    (activeProj === "all" || q.projectId === activeProj) &&
+    (!unreadOnly || isUnread(q)));
   const pending = filtered.filter((q) => q.state === "pending");
   // A notice (card 59fa6403) is its own group, NOT "waiting on me" — nobody is waiting on anything for
   // it, so it must never inflate the header count or sit under the "waiting on manager pickup" label,
@@ -282,6 +285,14 @@ export function RequestsInbox() {
           {projects.map((p) => (
             <FilterChip key={p.id} label={p.name} count={p.count} active={activeProj === p.id} onClick={() => setProjFacet(p.id)} />
           ))}
+        </div>
+      )}
+
+      {/* unread filter (Phase 2 of card 59fa6403) — a toggle, not a facet: only on/off, never exclusive
+          with the type/project facets above. */}
+      {unreadCount > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <FilterChip label="unread" count={unreadCount} dotTone="muted" active={unreadOnly} onClick={() => setUnreadOnly((v) => !v)} />
         </div>
       )}
 
@@ -370,7 +381,16 @@ const RequestModalContext = createContext<((questionId: string) => void) | null>
 
 export function RequestModalProvider({ children }: { children: ReactNode }) {
   const [openId, setOpenId] = useState<string | null>(null);
-  const open = useCallback((questionId: string) => setOpenId(questionId), []);
+  const qc = useQueryClient();
+  // Phase 2 of card 59fa6403 (read/unread) — every in-app "open this request" affordance funnels through
+  // this ONE opener (see the doc block above), so marking the row read ON OPEN here covers all of them
+  // with no per-call-site wiring. Best-effort: a failed mark-read write never blocks opening the row.
+  const open = useCallback((questionId: string) => {
+    setOpenId(questionId);
+    api.markQuestionsRead([questionId])
+      .then((r) => { if (r.updated.length > 0) qc.invalidateQueries({ queryKey: ["openQuestions"] }); })
+      .catch(() => { /* best-effort — the modal already has the row's data either way */ });
+  }, [qc]);
   return (
     <RequestModalContext.Provider value={open}>
       {children}
@@ -792,6 +812,7 @@ export function RequestHistory() {
   const [projF, setProjF] = useState<string>("all");
   const [outcomeF, setOutcomeF] = useState<"all" | "authorized" | "denied" | "answered" | "provided" | "cancelled" | "notice">("all");
   const [dateF, setDateF] = useState<"all" | "24h" | "7d" | "30d">("all");
+  const [readF, setReadF] = useState<"all" | "unread">("all"); // Phase 2 of card 59fa6403
   const openRequest = useOpenRequest();
   const now = Date.now();
 
@@ -836,6 +857,7 @@ export function RequestHistory() {
     (typeF === "all" || q.type === typeF) &&
     (projF === "all" || q.projectId === projF) &&
     (outcomeF === "all" || outcomeOf(q) === outcomeF) &&
+    (readF === "all" || isUnread(q)) &&
     withinDate(resolvedAt(q)) &&
     (s === "" || `${q.title} ${q.note ?? ""} ${q.chosenOption ?? ""} ${q.cancelledReason ?? ""} ${q.agentName} ${q.projectName}`.toLowerCase().includes(s)));
 
@@ -868,6 +890,10 @@ export function RequestHistory() {
           <option value="24h">last 24h</option>
           <option value="7d">last 7 days</option>
           <option value="30d">last 30 days</option>
+        </Select>
+        <Select value={readF} onChange={(e) => setReadF(e.target.value as typeof readF)}>
+          <option value="all">read + unread</option>
+          <option value="unread">unread only</option>
         </Select>
       </div>
 

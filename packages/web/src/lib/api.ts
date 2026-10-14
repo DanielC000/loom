@@ -867,6 +867,12 @@ export const api = {
   // `expiresAt` above); pass `null` to un-snooze immediately. Returns the updated Question.
   acknowledgeQuestion: (id: string, until: string | null) =>
     postErr<Question>(`/api/questions/${encodeURIComponent(id)}/acknowledge`, { until }),
+  // Human read-tracking write (POST /api/questions/mark-read, Phase 2 of card 59fa6403) — batched (an id
+  // list, not one row at a time) so a single "open this row" call and a future "mark all visible read"
+  // affordance share one route. Orthogonal to state/acknowledgedUntil; idempotent (an already-read id is
+  // silently skipped server-side). Returns the ids actually updated (a subset of the request).
+  markQuestionsRead: (ids: string[]) =>
+    post<{ updated: string[] }>("/api/questions/mark-read", { ids }),
 
   // --- Session/run AUDIT LOG (replayable timeline + run-vs-run diff). READ-ONLY, HUMAN-only loopback
   // readers over the existing `orchestration_events` record — NEVER an agent MCP tool (mirrors

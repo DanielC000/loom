@@ -3805,6 +3805,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // is applied as a SEPARATE write below, through the SAME markQuestionEscalated/acknowledgeQuestion
           // the real IdleWatcher tick / acknowledge route use, not by widening the INSERT.
           escalatedAt: null, acknowledgedUntil: null,
+          // Card 54007ab7 — same posture: insertQuestion's INSERT never binds read_at either, always
+          // unread at insert time. A spec needing an already-read row marks it via markQuestionsRead.
+          readAt: null,
         });
         // Card 99d41588 / 889ae619 — apply a seeded escalatedAt/acknowledgedUntil as a follow-up write
         // through the REAL setters (markQuestionEscalated / acknowledgeQuestion), the ONLY way an e2e spec
@@ -6400,6 +6403,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const updated = deps.db.acknowledgeQuestion(id, body.until);
     if (!updated) return reply.code(404).send({ error: "question not found" });
     return reply.send(updated);
+  });
+  // Phase 2 of card 59fa6403 (read/unread) — the human-only read-tracking write. Batched (an id list, not
+  // one row at a time) so the web client can mark a whole visible page read in one call as well as a
+  // single row on open. Orthogonal to state/acknowledged_until — never touches either, never an agent MCP
+  // tool. Same human-only loopback trust posture as acknowledge just above (Tier-0 by default). No push
+  // nudge: this never changes anything the asking session can observe.
+  app.post("/api/questions/mark-read", async (req, reply) => {
+    const body = (req.body ?? {}) as { ids?: unknown };
+    if (!Array.isArray(body.ids) || body.ids.some((v) => typeof v !== "string"))
+      return reply.code(400).send({ error: "ids is required — an array of question id strings" });
+    const updated = deps.db.markQuestionsRead(body.ids as string[], new Date().toISOString());
+    return reply.send({ updated });
   });
 
   // --- Delivered credentials (card af08f7e8) — HUMAN-ONLY loopback REST, NO MCP path of ANY router (same

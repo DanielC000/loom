@@ -399,6 +399,74 @@ test.describe("requests inbox (card 695ebab0)", () => {
     expect(patchRes.status()).toBe(200);
     await expect(main.getByText(new RegExp(`task #${task.id.slice(0, 8)} · done`))).toBeVisible({ timeout: 10_000 });
   });
+
+  test("Phase 2 (card 54007ab7): the unread filter narrows to unread rows, and opening a request marks it read", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "UnreadMgr" });
+    const title1 = uniq("unread-ask-1");
+    const title2 = uniq("unread-ask-2");
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: title1, type: "decision", options: ["A", "B"] });
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: title2, type: "decision", options: ["A", "B"] });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await expect(main.getByText(title1, { exact: true })).toBeVisible();
+    await expect(main.getByText(title2, { exact: true })).toBeVisible();
+
+    // Both rows are freshly seeded — neither has ever been marked read — so BOTH still show once the
+    // unread filter is toggled on (never exclusive with the type/project facets above it).
+    const unreadChip = main.getByRole("button", { name: /^unread/ });
+    await expect(unreadChip).toBeVisible();
+    await unreadChip.click();
+    await expect(main.getByText(title1, { exact: true })).toBeVisible();
+    await expect(main.getByText(title2, { exact: true })).toBeVisible();
+
+    // Turn the filter back off, then open title1's modal — the single useOpenRequest chokepoint marks it
+    // read on open (POST /api/questions/mark-read), with no explicit "mark read" affordance to click.
+    // hasNotText title2 excludes the shared list-wrapper div (which contains BOTH rows, and so BOTH
+    // "Answer →" buttons) so this scopes to title1's own row.
+    await unreadChip.click();
+    const row1 = main.locator("div").filter({ hasText: title1 }).filter({ hasNotText: title2 }).first();
+    await row1.getByRole("button", { name: "Answer →" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "✕" }).click();
+    await expect(dialog).toHaveCount(0);
+
+    // Re-apply the unread filter: title1 (now read) drops out, title2 (still unread) stays.
+    await unreadChip.click();
+    await expect(main.getByText(title1, { exact: true })).toHaveCount(0);
+    await expect(main.getByText(title2, { exact: true })).toBeVisible();
+  });
+
+  test("Phase 2 (card 54007ab7): History's 'unread only' filter narrows to never-opened rows", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "UnreadHistMgr" });
+    const title1 = uniq("unread-hist-1");
+    const title2 = uniq("unread-hist-2");
+    // Seeded directly as 'consumed' (the precedent's own History-population pattern — a bare REST answer
+    // only reaches 'answered', which History never shows; only a pull flips it to 'consumed').
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: title1, type: "decision", options: ["A"], state: "consumed", chosenOption: "A" });
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: title2, type: "decision", options: ["A"], state: "consumed", chosenOption: "A" });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await main.getByRole("button", { name: "History" }).click();
+    await expect(main.getByText(title1, { exact: true })).toBeVisible();
+    await expect(main.getByText(title2, { exact: true })).toBeVisible();
+
+    // Open title1's row — History rows route through the SAME useOpenRequest chokepoint as the live
+    // inbox, so this marks it read with no separate affordance.
+    const historyRow1 = main.locator("button").filter({ hasText: title1 }).first();
+    await historyRow1.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "✕" }).click();
+    await expect(dialog).toHaveCount(0);
+
+    // "unread only" excludes title1 (now read) and keeps title2 (never opened).
+    await main.getByRole("combobox").filter({ hasText: "read + unread" }).selectOption("unread");
+    await expect(main.getByText(title1, { exact: true })).toHaveCount(0);
+    await expect(main.getByText(title2, { exact: true })).toBeVisible();
+  });
 });
 
 // ── Provenance vs routing (card 5b22b262) ──────────────────────────────────────────────────────────

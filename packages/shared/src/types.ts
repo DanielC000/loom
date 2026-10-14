@@ -3815,6 +3815,13 @@ export interface Question {
    *  unset — there is no backfill for a legacy row, and `null` here must be read as "unknown," never
    *  guessed at from `createdAt`/session lifetimes. */
   filedBySessionId: string | null;
+  /** Phase 2 of card 59fa6403 (read/unread) — an ISO instant the FIRST time a human opened/marked this
+   *  row read, via the human-only loopback `POST /api/questions/mark-read`. Null means never read. This
+   *  is ORTHOGONAL to `state`/`acknowledgedUntil`: a still-`pending` decision can be read-but-unanswered,
+   *  a self-terminal `notice` can be answered-but-unread — never conflate "read" with "answered"/
+   *  "consumed"/snoozed (same "two different questions on the same row" trap `cb7d6998` already named for
+   *  `sessionId` vs. `filedBySessionId`). Never written by any agent MCP tool. */
+  readAt: string | null;
 }
 
 /**

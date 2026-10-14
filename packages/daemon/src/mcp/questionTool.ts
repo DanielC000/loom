@@ -222,6 +222,8 @@ export function buildQuestionAsk(
       escalatedAt: null,
       // Card 889ae619 — never snoozed at ask time; only a human can set this, via the acknowledge route.
       acknowledgedUntil: null,
+      // Card 54007ab7 — never read at ask time; only a human can set this, via POST /api/questions/mark-read.
+      readAt: null,
     },
   };
 }
