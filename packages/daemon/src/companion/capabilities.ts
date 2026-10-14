@@ -684,7 +684,10 @@ const DECISIONS_RELAY: CompanionCapability = {
           "alreadySurfaced:true, slimmed:true}` (no `body`/`options`/`recommendation`) instead of its full, " +
           "multi-KB payload — cutting the cost of a repeat poll that finds nothing new. A genuinely new or " +
           "changed entry ALWAYS returns in full regardless of `since`. Omit `since` to always get every " +
-          "field for every entry (today's default behavior). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "field for every entry (today's default behavior). NEVER includes a `type:\"notice\"` row — a " +
+          "notice needs no answer, so it is not a decision; it reaches a companion ONLY through the " +
+          "attention-push 'notice' alert class, which needs its own explicit opt-in (card 68f27faf). " +
+          "Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
           "the `decisions` rows spill to a scratch file instead of inlining, and the response becomes a " +
           "{decisionsFile, decisionsChars, rowCount, note, asOf} pointer at that same NDJSON text (one " +
           "decision per line) — page it with Read or grep it; re-call with `since`/`project` to narrow instead.",
@@ -697,7 +700,14 @@ const DECISIONS_RELAY: CompanionCapability = {
           return ok({ error: scopeDenialMessage(db, ctx.sessionId, "decisions-relay", project) });
         }
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
-        const rows = db.listOpenQuestions().filter((q) => targetProjects.has(q.projectId));
+        // Card 68f27faf round 2 (CR a7a2464e, B1): `listOpenQuestions()` includes an unread `type:"notice"`
+        // row (it's meant to for the HUMAN inbox read) — but this is a DECISION relay, and a notice is not
+        // a decision (nothing to resolve, no options). Excluded here explicitly rather than relying on
+        // `decision_resolve`'s own options-required refusal downstream: that only stops an ACT, it does
+        // nothing to stop this READ from narrating the notice to the owner's chat with no opt-in, which is
+        // exactly what synthesizeLeadModeScope's "*" wildcard would otherwise do for every lead-mode
+        // companion. A notice reaches a companion ONLY via the attention-push "notice" class opt-in.
+        const rows = db.listOpenQuestions().filter((q) => targetProjects.has(q.projectId) && q.type !== "notice");
         // Decisions-relay dedup (card 0c1365d0): batch-read each row's last-surfaced signature, diff it
         // against the CURRENT signature to derive `alreadySurfaced`, then stamp the current signature back
         // so the NEXT read of an unchanged decision comes back alreadySurfaced:true. Both steps are

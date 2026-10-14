@@ -344,10 +344,15 @@ try {
     const watcher = new AttentionPushWatcher({ db, pty, sessionId: sess });
     watcher.start(); watcher.stop(); // seed watermark past any backlog
 
-    const ownerSignalClasses = ATTENTION_ALERT_CLASSES.filter((c) => !FLEET_OPS_ALERT_CLASSES.has(c));
+    // Card 68f27faf, owner ruling: "notice" is ALSO excluded from the wildcard, same as the 4 fleet-ops
+    // classes, but it is deliberately NOT a member of FLEET_OPS_ALERT_CLASSES (the semantics differ — see
+    // resolveConfig's own doc) — so this test must subtract it separately rather than via that set, the
+    // same way production code does, or a future ATTENTION_ALERT_CLASSES addition could silently pass
+    // this test by accident.
+    const ownerSignalClasses = ATTENTION_ALERT_CLASSES.filter((c) => !FLEET_OPS_ALERT_CLASSES.has(c) && c !== "notice");
     check("sanity: FLEET_OPS_ALERT_CLASSES is the expected 4-class denylist",
       [...FLEET_OPS_ALERT_CLASSES].sort().join(",") === ["manager-idle", "merge-gate", "worker-blocked", "worker-crashed"].sort().join(","));
-    check("sanity: the remaining owner-signal classes are the other 4",
+    check("sanity: the remaining owner-signal classes are the other 4 (excluding 'notice', wildcard-excluded on its own)",
       ownerSignalClasses.sort().join(",") === ["context-overflow", "decision-pending", "escalation", "usage-limit"].sort().join(","));
 
     // One event per alert class, across BOTH projects (proving cross-project reach too), each mapped via
@@ -360,17 +365,103 @@ try {
     db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "context_escalated", detail: {} }); // context-overflow (owner-signal)
     db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "platform_escalate", detail: { title: "t" } }); // escalation (owner-signal)
     db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "session_rate_limited", detail: {} }); // usage-limit (owner-signal)
+    // Card 68f27faf DoD: a notice fired under the SAME lead-mode wildcard must NOT push — this is the one
+    // event this test seeds that is deliberately NOT counted in ownerSignalClasses above.
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "question_asked", detail: { title: "a notice", type: "notice" } }); // notice (wildcard-excluded)
 
     watcher.tick(new Date());
-    check(`attention-push wildcard: only the ${ownerSignalClasses.length} owner-signal classes pushed (fleet-ops excluded by default)`,
+    check(`attention-push wildcard: only the ${ownerSignalClasses.length} owner-signal classes pushed (fleet-ops + notice excluded by default)`,
       enqueued.length === ownerSignalClasses.length);
     const pushedText = enqueued.map((e) => e.text).join("\n");
     check("attention-push wildcard: none of the 3 rendered fleet-ops lines leaked through",
       !/merge rejected|worker stuck|worker exited without report/.test(pushedText));
     check("attention-push wildcard: manager-idle (idle_escalated) also excluded — 'manager asleep' never rendered",
       !/manager asleep/.test(pushedText));
+    check("attention-push wildcard: a lead-mode companion that has NOT explicitly opted in never gets the notice (no FYI line rendered)",
+      !/FYI/.test(pushedText));
     check("attention-push wildcard: the owner-signal lines DID render (decision needed / context overflow / escalated to platform / usage limit)",
       /decision needed/.test(pushedText) && /context overflow/.test(pushedText) && /escalated to platform/.test(pushedText) && /usage limit/.test(pushedText));
+
+    db.close();
+  }
+
+  // ============ card 68f27faf DoD: an explicit per-grant alertClasses:["notice"] on a NON-lead-mode
+  //     companion still pushes a notice — lead mode's own wildcard exclusion above never reaches a
+  //     companion the owner explicitly opted in on its own (non-synthesized) grant. ============
+  {
+    const db = tmpDb();
+    const proj = `pn-${randomUUID()}`;
+    seedProject(db, proj, "Notice");
+    const sess = `cs-notice-${randomUUID()}`;
+    seedSession(db, sess, proj, "assistant");
+    const mgr = `mgr-notice-${randomUUID()}`; seedSession(db, mgr, proj, "manager");
+    // NO lead mode here — an ordinary, human-written grant explicitly naming "notice".
+    db.upsertCompanionCapabilityGrant({ sessionId: sess, capability: "attention-push", projectId: proj, mode: "read", config: { alertClasses: ["notice"] } });
+
+    const enqueued = [];
+    const pty = { isAlive: () => true, enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; }, getPending: () => [] };
+    const watcher = new AttentionPushWatcher({ db, pty, sessionId: sess });
+    watcher.start(); watcher.stop();
+
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgr, kind: "question_asked", detail: { title: "deploy finished", type: "notice" } }); // notice
+    watcher.tick(new Date());
+    check("explicit per-grant alertClasses:['notice'] DOES push a notice — the opt-in works outside lead mode",
+      enqueued.length === 1 && /FYI/.test(enqueued[0].text) && /deploy finished/.test(enqueued[0].text));
+
+    // Each push is deduped — a second tick with nothing new must not re-fire (same discipline every other
+    // alert class already proves in companion-attention-push.mjs; asserted here too since it's this card's
+    // own named DoD test, not just inherited coverage).
+    const pushedCount = enqueued.length;
+    watcher.tick(new Date());
+    check("notice push is deduped — a 2nd tick with nothing new does not re-fire", enqueued.length === pushedCount);
+
+    db.close();
+  }
+
+  // ============ card 68f27faf round 2 (CR a7a2464e, B2): drive a REAL notice end-to-end through the
+  //     ACTUAL question_ask MCP tool (never a hand-fired event) — proving the filing-site stamp
+  //     (`type: question.type` on the question_asked event, mcp/orchestration.ts) is what actually keeps
+  //     a lead-mode watcher from pushing it, not just that classify()/resolveConfig agree with each other
+  //     in isolation. A control "decision" ask on the SAME manager still pushes, so a false-negative
+  //     "nothing pushes at all" can never masquerade as this test passing. ============
+  {
+    const db = tmpDb();
+    const proj = `pe2e-${randomUUID()}`;
+    seedProject(db, proj, "E2E");
+    const sess = `cs-e2e-${randomUUID()}`;
+    seedSession(db, sess, proj, "assistant");
+    const mgr = `mgr-e2e-${randomUUID()}`; seedSession(db, mgr, proj, "manager");
+    db.setCompanionLeadMode(sess, true);
+
+    const enqueued = [];
+    const pty = { isAlive: () => true, enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; }, getPending: () => [] };
+    const watcher = new AttentionPushWatcher({ db, pty, sessionId: sess });
+    watcher.start(); watcher.stop();
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(mgr, "manager"));
+    const noticeRes = await call(client, "question_ask", { type: "notice", title: "deploy finished", body: "all good" });
+    check("(e2e) question_ask(type:'notice') succeeds", typeof noticeRes.questionId === "string");
+    const decisionRes = await call(client, "question_ask", { type: "decision", title: "pick a plan", body: "A or B", options: ["A", "B"] });
+    check("(e2e) question_ask(type:'decision') succeeds (control)", typeof decisionRes.questionId === "string");
+    await client.close();
+
+    // THE filing-site stamp itself, on the REAL event (not hand-built) — this is what B2 asks for directly.
+    const filedEvents = db.listEvents(mgr).filter((e) => e.kind === "question_asked");
+    check("(e2e) the notice's REAL question_asked event carries detail.type === 'notice'",
+      filedEvents.some((e) => e.detail?.questionId === noticeRes.questionId && e.detail?.type === "notice"));
+    check("(e2e) the decision's REAL question_asked event carries detail.type === 'decision' (control)",
+      filedEvents.some((e) => e.detail?.questionId === decisionRes.questionId && e.detail?.type === "decision"));
+
+    watcher.tick(new Date());
+    const pushedText2 = enqueued.map((e) => e.text).join("\n");
+    const decisionNeededCount = (pushedText2.match(/decision needed/g) ?? []).length;
+    check("(e2e) the lead-mode wildcard did NOT push the real notice — no FYI line", !/FYI/.test(pushedText2));
+    // The discriminating assertion: if the filing-site stamp were ever dropped, the notice would fall back
+    // to "decision-pending" and ALSO render "decision needed" — so this reads 2, not 1, exactly on that
+    // regression (reverting the one `type: question.type` line reproduces this RED).
+    check("(e2e) EXACTLY ONE 'decision needed' line pushed — the control decision, never the notice too",
+      decisionNeededCount === 1);
 
     db.close();
   }

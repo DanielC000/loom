@@ -196,11 +196,19 @@ export interface AttentionItem {
   // affordance deep-links to that session's view (/session/:sessionId), NOT the merge panel.
   sessionId?: string | null;
   rateLimitSessionId?: string | null; // when set, the row offers a "clear / retry now" action (POST .../rate-limit/clear)
-  // Set ONLY on a pending/orphaned request item (a manager→human Request of ANY type — decision, input,
-  // permission, credential). Its "Answer →" affordance opens the answer page (/question/:id); the row
-  // also renders a PENDING state chip off this presence. This is the structural "is a request" check —
-  // prefer it over comparing `kind` to a literal label, since the label itself is now type-varying.
+  // Set on a pending/orphaned request item (a manager→human Request of ANY type — decision, input,
+  // permission, credential) AND on an unread notice (card 68f27faf) — both are Request rows. Its
+  // "Answer →" affordance opens the answer page (/question/:id) for the former; the row also renders a
+  // PENDING state chip off this presence. This is the structural "is a request" check — prefer it over
+  // comparing `kind` to a literal label, since the label itself is now type-varying. NOTE: a notice is
+  // deliberately EXCLUDED from the collapsed "N requests need you" pill despite carrying this field — see
+  // `isNotice` below; don't derive the pill count from this field alone.
   questionId?: string | null;
+  // Card 68f27faf round 2 (CR a7a2464e, item 3): true ONLY on the unread-notice item below. A notice
+  // needs no answer from the owner, so it must NOT inflate ToastContainer's "N requests need you" pill
+  // (which is otherwise `items.filter(it => it.questionId).length`) — but it still carries `questionId`
+  // (for the desktop Notification/open-target machinery) and still fires that Notification normally.
+  isNotice?: boolean;
   // Card 889ae619 (iii-a) — set ONLY on the DECISION STALE branch (a pending Request whose `escalatedAt`
   // is set and isn't currently snoozed): the Snooze affordance's presence check. Deliberately a SEPARATE
   // field from `questionId` (which is also set on the cyan/amber branches, where there's nothing stale to
@@ -220,6 +228,20 @@ export interface AttentionItem {
   // visible after its short-lived run session has archived out of every bounded session page. Purely a
   // resolution hint — nothing renders off it.
   agentId?: string | null;
+}
+
+// Card 68f27faf round 3 (CR 7cbb6994, item 1): whether this item is an ANSWERABLE request — a real
+// pending/orphaned decision/input/permission/credential ask that genuinely needs the owner to act, as
+// opposed to a self-terminal notice (which also carries `questionId`, for routing + the desktop
+// Notification, but needs no answer at all). This is the ONE place "does this need an answer" is derived
+// — every caller that means THAT (a PENDING-style chip, an "Answer →" verb/button, a count of asks
+// waiting on the owner) must route through this rather than re-deriving `questionId != null && !isNotice`
+// itself, so none of them can independently drift from `isNotice`'s own definition. A caller that means
+// the broader "is this a Request row at all" (e.g. deciding whether to open the Request modal, or to
+// suppress a standalone toast in favor of the collapsed pill/notice-only signal) still uses the plain
+// `questionId != null` check below — a notice IS such a row, it's just never an ANSWERABLE one.
+export function isAnswerableRequest(item: Pick<AttentionItem, "questionId" | "isNotice">): boolean {
+  return item.questionId != null && !item.isNotice;
 }
 
 // The deep-link an attention item's "Open" affordance targets, or null if it has none. A MERGE REQUEST
@@ -460,6 +482,27 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
           dismissHint: "Hide this alert — it returns if this request goes stale or its asking session dies. The request stays pending and answerable in the inbox.",
           text: decisionAttentionText(q),
         });
+  }
+  // Card 68f27faf: a `notice` lands `state:"notice"` immediately (never "pending"), so the loop above —
+  // keyed on `state === "pending"` — never sees it; this is the parallel signal the design calls for so a
+  // fresh notice still produces a bell/toast event. Visible for exactly as long as it's UNREAD (mirrors
+  // `listOpenQuestions`'s own server-side read-driven visibility, card 54007ab7) — opening it in the inbox
+  // (`useOpenRequest`'s mark-on-open) clears `readAt`, and the item then drops out of this filter on its
+  // own, with no separate dismiss step needed. Tone "muted" (same as `REQUEST_TYPE_TONE.notice` elsewhere)
+  // — a notice is deliberately not one of the alarming tones; it needs no answer. `isNotice:true` (round
+  // 2, item 3) keeps it OUT of the collapsed "N requests need you" pill — the desktop Notification still
+  // fires normally (it needs nothing from `isNotice`), and Phase 2's muted sidebar unread badge already
+  // carries the FYI count, so the pill would be double-counting it for no reason.
+  for (const q of (questions.data ?? []).filter((x) => x.state === "notice" && x.readAt == null)) {
+    items.push({
+      key: `qn-${q.id}`, tone: "muted", notify: "request", kind: requestAttentionLabel(q.type), questionId: q.id, sessionId: q.sessionId,
+      projectId: q.projectId, isNotice: true,
+      // Identity + the (unchanging) state that fired this — a notice's state never moves, so this key is
+      // stable for as long as the item is rendered at all (card 611e76ba's dismiss-key discipline).
+      dismissKey: `q:${q.id}:notice`,
+      dismissHint: "Hide this alert — it stays until you open it in the Inbox (which marks it read and clears it on its own).",
+      text: decisionAttentionText(q),
+    });
   }
   // A genuinely-pending review keeps its WORKER session alive on the worktree (the worker is only
   // hard-stopped at merge-confirm time). So a merge_request whose worker is gone (exited/dead/not in

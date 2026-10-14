@@ -78,6 +78,69 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(main.getByText("FYI", { exact: true })).toBeVisible();
   });
 
+  test("a fresh notice fires a browser Notification titled 'FYI' but never inflates the collapsed request pill (card 68f27faf round 2)", async ({ page, loomDaemon }) => {
+    // A notice lands state:"notice" immediately (never "pending"), so it's invisible to the pre-existing
+    // pending-based toast/bell logic — lib/attention.ts adds a parallel item for it. CR a7a2464e (round 2,
+    // item 3) found the FIRST cut of this wrongly folded that item into "N requests need you" too — a
+    // notice needs nothing from the owner, so it must fire ONLY the desktop Notification (+ Phase 2's own
+    // muted sidebar unread badge, covered elsewhere), never the pill that means "go answer something".
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NoticeBellMgr" });
+
+    // Record `new Notification(...)` instead of raising a real OS one — same technique as
+    // attention-no-replay-on-load.spec.ts. Installed before any page script runs.
+    await page.addInitScript(() => {
+      const recorded: { title: string; body: string | null }[] = [];
+      (window as unknown as { __loomNotifications: typeof recorded }).__loomNotifications = recorded;
+      class RecordingNotification {
+        static permission = "granted";
+        static requestPermission() { return Promise.resolve("granted"); }
+        constructor(title: string, opts?: { body?: string }) {
+          recorded.push({ title, body: opts?.body ?? null });
+        }
+        close() { /* no-op */ }
+      }
+      (window as unknown as { Notification: unknown }).Notification = RecordingNotification;
+    });
+
+    // /platform is outside the collapsed request-pill's suppression set (/, /overview and /inbox render
+    // the queue themselves instead), so the pill is available here as the level-triggered witness.
+    await page.goto(`${loomDaemon.baseURL}/platform`);
+    const pillCount = async () => {
+      const loc = page.getByTestId("request-count-pill");
+      if ((await loc.count()) === 0) return 0; // not rendered yet ⇒ zero, never a wait-for-attach hang
+      return Number(/(\d+)/.exec((await loc.textContent()) ?? "")?.[1] ?? 0);
+    };
+    const before = await pillCount();
+
+    const noticeTitle = uniq("bell-notice");
+    // state: "notice" must be passed EXPLICITLY — the seed route's own default (q.state ?? "pending") is
+    // NOT type-aware (unlike the real buildQuestionAsk, which always derives it from type); omitting it
+    // would seed a type:"notice"/state:"pending" row that renders (and leaks) as an ordinary pending
+    // decision-shaped row forever, since this test's own cleanup (resolveSeededQuestions) now routes a
+    // type:"notice" row through mark-read, never /answer.
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: noticeTitle, type: "notice", state: "notice" });
+
+    // WITNESS, ordered BEFORE the zero assertion below (same discipline as attention-no-replay-on-load.
+    // spec.ts): await the Notification firing FIRST — it only fires once the notice is a genuinely new,
+    // resolved attention item, so reaching this proves the item arrived and the render committed. Asserting
+    // the pill's non-change only AFTER this rules out "the notice never arrived" as the reason it didn't move.
+    const matching = async () => page.evaluate(
+      (needle) => (window as unknown as { __loomNotifications: { title: string; body: string | null }[] }).__loomNotifications
+        .filter((rec) => (rec.body ?? "").includes(needle)),
+      noticeTitle,
+    );
+    await expect.poll(async () => (await matching()).length).toBe(1);
+    const fired = await matching();
+    // "FYI" (requestAttentionLabel's label for type:"notice"), never "decision needed" — a notice needs no
+    // answer, and the daemon-side attention-push line carries the same discipline (companion-attention-
+    // push.mjs/companion-lead-mode.mjs cover that half; this is the web twin).
+    expect(fired[0]!.title).toContain("FYI");
+    expect(fired[0]!.body).toContain(noticeTitle);
+
+    // THE ASSERTION (round 2 fix): the pill never moved, even though the notice demonstrably arrived.
+    expect(await pillCount()).toBe(before);
+  });
+
   test("a permission request opens as a modal; the scope toggle enables the expiry select; Authorize resolves it", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "PermMgr" });
     const title = uniq("permission-ask");

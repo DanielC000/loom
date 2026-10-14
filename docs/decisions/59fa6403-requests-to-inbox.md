@@ -282,12 +282,18 @@ route restructuring, so there is nothing to keep "working" that wasn't already g
   class exists).
 - **`decisions-relay` (companion read/act lever)**: `decisions_list`'s underlying read is
   `db.listOpenQuestions()` unfiltered by type — a `notice` row will already appear there once it exists,
-  UNLESS it's filtered out deliberately. Recommend it **is** included (a companion asked "what's pending
-  for the owner" should be able to mention a recent FYI) but `decision_resolve` (the ACT half) must
-  continue to require `options` to be non-empty — which a `notice` never has — so `decision_resolve`
-  already structurally refuses to try to "resolve" a notice; no new guard code is needed there, only
-  confirming (at build time) that the existing options-required check isn't accidentally bypassable for
-  the new type.
+  UNLESS it's filtered out deliberately. **SUPERSEDED (Phase 3 round 2, Code Review `a7a2464e`, B1) —
+  this design originally recommended INCLUDING it ("a companion asked 'what's pending for the owner'
+  should be able to mention a recent FYI"); that recommendation was wrong and was NOT shipped.**
+  `decisions_list` must **EXCLUDE** `type:"notice"` instead: `decisions_list` is a decision-inbox view (a
+  companion's `DEFAULT_HEARTBEAT_PROMPT` narrates it to the owner's chat), and a notice is not a decision
+  — nothing to resolve, no options. Worse, under companion "lead mode" the `"*"` wildcard synthesizes
+  every project's `decisions-relay` scope regardless of any real grant row (`synthesizeLeadModeScope`, see
+  `@decision b5c606aa`), so an un-filtered `decisions_list` would relay every notice to EVERY lead-mode
+  companion's chat with **no opt-in whatsoever** — the exact hole the attention-push "notice" class (just
+  above) exists to require one for. `decision_resolve` (the ACT half) separately still requires `options`
+  to be non-empty — which a `notice` never has — so it structurally refuses to "resolve" one regardless;
+  that part of the original reasoning was correct and needed no change.
 - **Platform Auditor's cross-project `requests_list`**: `auditRequestItem`/`listQuestionsForAudit` are
   already generic over every `Question` row — a `notice` shows up there automatically. Its `stale` flag
   (card `5ea0153c`, "routing session isn't live right now") is defined only in terms of a still-`pending`
@@ -596,3 +602,99 @@ actually exists.
   re-run clean as a confirming check regardless. `pnpm --filter @loom/daemon guards` (all 30, fresh-read,
   not a trusted cached count) and the full named question/decision/request/answered-matching daemon test
   battery from §(g) all pass.
+
+## Implementation notes (Phase 3, built — card 68f27faf)
+
+What actually landed for notifications/companion, and the round-2 Code Review (`a7a2464e`, NOT SHIP) that
+corrected it before it shipped.
+
+- **A new `AttentionAlertClass: "notice"`** (`attention-push.ts`'s `ATTENTION_ALERT_CLASSES`). A
+  `question_asked` orchestration event now carries `type: question.type` in its `detail` (stamped at the
+  one manager-facing filing site, `mcp/orchestration.ts`) so `classify()` can tell a notice apart from an
+  ordinary pending decision — without that stamp, every notice would classify as `"decision-pending"` and
+  render as "decision needed" to every lead-mode companion. `alertLine()` renders it as `"FYI"` instead.
+- **Excluded from a companion's lead-mode `"*"` wildcard by default** (the owner ruling recorded above) —
+  via its own explicit check in `resolveConfig`'s wildcard branch, deliberately NOT folded into
+  `FLEET_OPS_ALERT_CLASSES` (the exclusion reasons differ: fleet-ops = "the manager handles this
+  autonomously"; notice = "nobody asked to hear about this by default"). A human opts a companion in by
+  naming `"notice"` explicitly in that companion's own (non-lead-mode) `attention-push` grant's
+  `alertClasses`.
+- **Under lead mode, a notice push cannot be opted into at all — this is deliberately fail-closed.**
+  `synthesizeLeadModeScope` (`@decision b5c606aa`) SUPERSEDES any real grant row with a synthesized
+  `{alertClasses:["*"]}` while lead mode is on, so there is no per-grant way to add `"notice"` back in for
+  a lead-mode companion — the ONLY route to get a lead-mode companion to see a notice push is turning lead
+  mode off and granting `attention-push` with `alertClasses` naming `"notice"` explicitly instead.
+- **Web bell/toast**: `useAttention()` adds a parallel item for an unread notice (it skips `pending`
+  entirely, so the existing pending-keyed toast/bell loop never saw it) — the item carries `questionId`
+  (so the desktop Notification/open-target machinery works) but is marked `isNotice:true`.
+- **Round 2 fix (CR `a7a2464e`, B1 and item 3), both found before ship:**
+  1. **`decisions_list` now EXCLUDES `type:"notice"`** — see §(e)'s corrected text above. Without this, a
+     lead-mode companion's own heartbeat (`DEFAULT_HEARTBEAT_PROMPT`, which narrates `decisions_list`'s
+     output to the owner) would relay every notice to chat with **zero** opt-in, defeating the wildcard
+     exclusion above entirely — `decisions_list` reads `listOpenQuestions()` directly, which deliberately
+     INCLUDES an unread notice (that's correct for the human-facing Inbox read `listOpenQuestions` backs;
+     it's wrong for a companion-facing decision relay, hence the separate filter at the `decisions_list`
+     call site, not a change to `listOpenQuestions()` itself).
+  2. **The unread-notice web item must not inflate the collapsed "N requests need you" pill**
+     (`ToastContainer`'s `requestCount`, `App.tsx`) — a notice needs nothing from the owner, so counting it
+     there was actively misleading. Fixed via `AttentionItem.isNotice` excluding it from that one count
+     while leaving the desktop Notification (still fires, titled "FYI") and Phase 2's own muted sidebar
+     unread badge untouched.
+- **Round 3 fix (CR `7cbb6994`, SHIP, 3 fold-in items):**
+  1. **`AttentionRow` (`components/fleet.tsx`) had the SAME bug as the round-2 pill fix, one layer deeper:
+     it decided "answerable" from a bare `item.questionId != null`, so an unread notice on the owner's
+     primary board (Overview/Mission Control) rendered as a full PENDING ask — cyan edge, a hardcoded
+     `DecisionStateChip q={{state:"pending"}}`, and an "Answer →" button, none of which are true of a
+     notice.** Fixed by lifting the distinction into ONE shared, exported helper,
+     `isAnswerableRequest(item)` (`lib/attention.ts`): `questionId != null && !isNotice`. Both
+     `AttentionRow` and `App.tsx`'s pill now read this SAME helper (replacing the pill's own inline
+     `it.questionId && !it.isNotice` from round 2), so the two can never again drift on what counts as
+     answerable. `CommandPalette.tsx` needed a finer split: its ROUTING ("does this open the Request
+     modal via `openRequest`") stays on the plain `questionId != null` check — a notice still opens there,
+     since that's how a human marks it read — while its LABEL verb ("Answer" vs "Open") now reads
+     `isAnswerableRequest`. Every other `questionId` consumer in `packages/web/src` (the toast-suppression
+     check in `App.tsx`, `attentionOpenTarget`, the Sidebar `Alerts` count, `MissionControl.tsx`/
+     `Overview.tsx`'s `onOpen` routing) was audited and left unchanged — each means "is this a Request-
+     shaped row at all" (routing/categorisation), never "does this need an answer", so swapping those to
+     the new helper would have been a behavior change, not a fix. `fleet.tsx`'s own "Answer →" buttons at
+     two OTHER call sites (the per-session jump-to-decision affordance) are driven by `PendingDecision`
+     (`usePendingDecisionsBySession`), which filters `state === "pending"` and so can never contain a
+     notice (`state:"notice"`) in the first place — structurally unaffected, confirmed by reading that
+     filter rather than assumed.
+  2. **A stale comment** (`App.tsx`'s `requestCount` block) claimed the desktop Notification "fires below,
+     unconditionally" — it fires ABOVE, inside `useNewAttention`'s callback, gated on the mute setting and
+     `Notification.permission === "granted"`. Corrected in place.
+  3. **The round-2 `negative-control` command recorded in chat was VACUOUS**, not a repo artifact (this
+     design record never quoted the literal `--ref`, only narrated "reverting the filing-site stamp
+     reproduces this test RED" — true, but under-specified): `--ref HEAD~2`, evaluated AFTER the round-2
+     commits landed, resolves to `c01a0a98` — a commit that ALREADY carries the `type: question.type`
+     stamp (added in `4d456783`), so that invocation's "RED" phase was never actually testing the
+     pre-stamp state at all. **A relative ref embedded in a report is a ticking trap: it silently points
+     at a different commit every time another commit lands on top.** The REPRODUCIBLE form uses the
+     stamp's own actual parent commit as an ABSOLUTE sha:
+     ```
+     node scripts/negative-control.mjs \
+       --file packages/daemon/src/mcp/orchestration.ts \
+       --test packages/daemon/test/companion-lead-mode.mjs \
+       --ref 1dbb558a
+     ```
+     Re-run with this corrected command: RED (reverted to `1dbb558a`) failed as expected, GREEN (restored)
+     passed, tree restored byte-identical.
+- **Tests (Phase 3)**: `companion-attention-push.mjs` (classify()/alertLine() notice-vs-decision sanity,
+  both directions); `companion-lead-mode.mjs` (the wildcard excludes a hand-fired notice while an explicit
+  `alertClasses:["notice"]` grant still pushes one and dedupes on a repeat tick; a REAL end-to-end case
+  drives an actual `question_ask(type:"notice")` MCP call through `OrchestrationMcpRouter` and asserts
+  BOTH that the real `question_asked` event carries `detail.type === "notice"` AND that a lead-mode watcher
+  renders exactly one "decision needed" line — the control decision's, never the notice's too; see the
+  corrected, reproducible `negative-control` command above for the RED proof); `companion-decisions-relay.
+  mjs` (two new cases: an explicit decisions-relay grant, and companion lead mode, BOTH exclude an unread
+  notice from `decisions_list` while still returning an ordinary pending decision). `packages/web/e2e/
+  requests-inbox.spec.ts` gained a case proving a fresh notice fires exactly one browser Notification
+  titled "FYI" while the collapsed request pill count is unchanged (awaiting the Notification BEFORE
+  asserting the pill's non-change, so the zero can't be mistaken for "the notice never arrived"; proven RED
+  against the pre-fix `App.tsx` by hand-reverting it, since web has no `negative-control` tool).
+  `packages/web/e2e/overview-layout.spec.ts` gained a case (round 3) pinning that a notice's `AttentionRow`
+  shows no PENDING chip and no "Answer →" button, just "Open" — proven RED against the pre-fix `fleet.tsx`
+  the same way. Full named battery (surface-drift, doctrine-naming, the 4 response key-set guards, `pnpm
+  --filter @loom/daemon guards`, the question/decision/request/answered-matching daemon test corpus, and
+  every e2e spec rendering `AttentionRow` or the request pill) re-run clean on every round.

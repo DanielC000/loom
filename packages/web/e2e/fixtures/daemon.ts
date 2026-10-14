@@ -846,6 +846,19 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
         try {
           const r = await fetch(`${baseURL}/api/questions/${id}`);
           const type = r.ok ? ((await r.json()) as { type?: string }).type : undefined;
+          // Card 68f27faf: a "notice" is self-terminal (never pending) — POSTing /answer against one 400s
+          // and, more importantly, leaves `read_at` untouched, so an UNREAD seeded notice would otherwise
+          // leak forever into the shared e2e daemon's attention set (now that an unread notice is its own
+          // attention item — see lib/attention.ts). Mark it READ instead, via the real human-only
+          // mark-read route, which is this kind's actual "resolved" equivalent.
+          if (type === "notice") {
+            await fetch(`${baseURL}/api/questions/mark-read`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ ids: [id] }),
+            });
+            continue;
+          }
           const body =
             type === "credential" ? { secret: "e2e-cleanup-secret" }
               : type === "permission" ? { decision: "deny", note: "e2e cleanup — auto-resolved" }

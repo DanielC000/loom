@@ -481,8 +481,18 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   check("classify: claude_boot_dialog_resolved → null (a resolve clears an alert, never a fresh one)",
     classify("claude_boot_dialog_resolved", {}) === null);
   check("classify: an unrelated kind → null", classify("spawn_worker", {}) === null);
+  // Card 68f27faf: a type:"notice" question_asked is its OWN class ("notice"), never "decision-pending" —
+  // discriminated purely on the event's own detail.type (stamped at the one filing site), never re-derived.
+  check("classify: question_asked(type:'notice') → notice", classify("question_asked", { title: "t", type: "notice" }) === "notice");
+  check("classify: question_asked(type:'decision') → decision-pending (unchanged)", classify("question_asked", { title: "t", type: "decision" }) === "decision-pending");
+  check("classify: question_asked(no type field) → decision-pending (every pre-card event, defensive default)", classify("question_asked", { title: "t" }) === "decision-pending");
   const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "context_escalated", detail: {} }, "context-overflow", "Proj Z");
   check("alertLine: terse, names the project + an m: id slice", line.includes("Proj Z") && line.includes("m:mgr-1234"));
+  const noticeLine = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "question_asked", detail: { title: "deploy done", questionId: "q1" } }, "notice", "Proj Z");
+  check("alertLine: a notice renders 'FYI', never 'decision needed' (nothing is pending for it)",
+    noticeLine.includes("FYI") && !/decision needed/.test(noticeLine) && noticeLine.includes("deploy done") && noticeLine.includes("question:q1"));
+  const decisionLine = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "question_asked", detail: { title: "pick a plan", questionId: "q2" } }, "decision-pending", "Proj Z");
+  check("alertLine: an ordinary decision still renders 'decision needed' (unchanged)", /decision needed/.test(decisionLine) && !decisionLine.includes("FYI"));
   cleanupEnv({ db: { close() {} }, dbFile: "" }); // no-op cleanup (nothing to remove) — keeps the block shape uniform
 }
 

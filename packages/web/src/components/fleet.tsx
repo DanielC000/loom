@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
-import { isRateLimited, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
+import { isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived } from "../lib/fleet";
 import { harnessOf } from "../lib/harnessFields";
 import { DecisionStateChip } from "./decisions";
@@ -157,9 +157,12 @@ export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionRowIt
   // PENDING state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE
   // REQUEST and the red/amber alerts. Orphaned still routes to the same answer page (its own amber
   // tone/text already flags the asker is gone), just via item.tone rather than a hardcoded second border
-  // color. `questionId` (not a literal kind string) is the structural marker — the kind LABEL now varies
-  // by request type (DECISION/SECRET/PERMISSION/INPUT NEEDED), so it can no longer be compared literally.
-  const decision = item.questionId != null;
+  // color. Card 68f27faf round 3 (CR 7cbb6994, item 1): a self-terminal `notice` also carries `questionId`
+  // (it's a Request row too — opening it marks it read) but is NOT answerable, so a bare `questionId !=
+  // null` check wrongly rendered it as a PENDING ask with an "Answer →" button. `isAnswerableRequest`
+  // (lib/attention.ts) is the one place that distinction lives — App.tsx's collapsed request pill reads
+  // the SAME helper, so the two can never drift apart on what counts as answerable.
+  const decision = isAnswerableRequest(item);
   return (
     // `data-*` hooks (card ed0858dc): an e2e assertion on an attention row has to be scoped to the row it
     // MEANS — the e2e daemon is shared, so a sibling spec's session renders a byte-identical row and a

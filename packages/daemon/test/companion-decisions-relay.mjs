@@ -79,10 +79,10 @@ function seedSession(db, id, projectId, role, opts = {}) {
 }
 function seedQuestion(db, id, sessionId, projectId, opts = {}) {
   db.insertQuestion({
-    id, sessionId, projectId, title: opts.title ?? `Question ${id}`, body: opts.body ?? "body text",
+    id, sessionId, projectId, type: opts.type, title: opts.title ?? `Question ${id}`, body: opts.body ?? "body text",
     options: opts.options ?? null, recommendation: opts.recommendation ?? null,
     state: opts.state ?? "pending", chosenOption: null, note: null,
-    createdAt: opts.createdAt ?? now, answeredAt: null, consumedAt: null,
+    createdAt: opts.createdAt ?? now, answeredAt: opts.answeredAt ?? null, consumedAt: null,
   });
 }
 const tmpDb = () => new Db(path.join(tmpHome, `${randomUUID()}.db`));
@@ -147,6 +147,61 @@ try {
     const all = await call(client, "decisions_list", {});
     check("decisions_list includes a pending question", all.decisions.some((d) => d.questionId === "q-pending"));
     check("decisions_list excludes an already-consumed question", !all.decisions.some((d) => d.questionId === "q-consumed"));
+    await client.close();
+    db.close();
+  }
+
+  // ============ card 68f27faf round 2 (CR a7a2464e, B1): a `type:"notice"` row is NEVER a decision —
+  //     decisions_list must EXCLUDE it even though `listOpenQuestions()` (the human-facing "waiting on
+  //     me" read this tool is built on) deliberately includes an UNREAD notice. Without this exclusion a
+  //     lead-mode companion's own heartbeat would relay a notice into the owner's chat with no opt-in at
+  //     all — the exact gap the CR found. ============
+  {
+    const db = tmpDb();
+    const proj = "proj-notice-relay";
+    seedProject(db, proj, "NoticeRelay");
+    const companionSess = "companion-notice-relay";
+    seedSession(db, companionSess, proj, "assistant");
+    const asker = "asker-notice-relay";
+    seedSession(db, asker, proj, "manager");
+    seedQuestion(db, "q-notice-decision", asker, proj, { title: "Still a real decision" });
+    seedQuestion(db, "q-notice-fyi", asker, proj, { title: "Deploy finished", type: "notice", state: "notice", answeredAt: now });
+
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const all = await call(client, "decisions_list", {});
+    check("an explicit decisions-relay grant: decisions_list still includes an ordinary pending decision",
+      all.decisions.some((d) => d.questionId === "q-notice-decision"));
+    check("an explicit decisions-relay grant: decisions_list EXCLUDES the unread notice — never a decision",
+      !all.decisions.some((d) => d.questionId === "q-notice-fyi"));
+    await client.close();
+    db.close();
+  }
+
+  // ============ same exclusion under companion "lead mode" (the synthesized "*"-scope decisions-relay a
+  //     heartbeat actually uses) — the more dangerous path, since lead mode supersedes any real grant and
+  //     there is no per-grant way to opt a lead-mode companion OUT of a notice reaching decisions_list. ============
+  {
+    const db = tmpDb();
+    const proj = "proj-notice-relay-lead";
+    seedProject(db, proj, "NoticeRelayLead");
+    const companionSess = "companion-notice-relay-lead";
+    seedSession(db, companionSess, proj, "assistant");
+    const asker = "asker-notice-relay-lead";
+    seedSession(db, asker, proj, "manager");
+    seedQuestion(db, "q-notice-decision-lead", asker, proj, { title: "Still a real decision (lead mode)" });
+    seedQuestion(db, "q-notice-fyi-lead", asker, proj, { title: "Deploy finished (lead mode)", type: "notice", state: "notice", answeredAt: now });
+    db.setCompanionLeadMode(companionSess, true);
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const all = await call(client, "decisions_list", {});
+    check("lead mode: decisions_list still includes an ordinary pending decision",
+      all.decisions.some((d) => d.questionId === "q-notice-decision-lead"));
+    check("lead mode: decisions_list EXCLUDES the unread notice — a lead-mode heartbeat must never relay it with no opt-in",
+      !all.decisions.some((d) => d.questionId === "q-notice-fyi-lead"));
     await client.close();
     db.close();
   }

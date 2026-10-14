@@ -3999,7 +3999,10 @@ export class OrchestrationMcpRouter {
         // (alert-webhook's events[] allowlist, web attention) lists this new kind, so this is inert for them.
         db.appendEvent({
           id: randomUUID(), ts: question.createdAt, managerSessionId,
-          kind: "question_asked", detail: { questionId: question.id, title: question.title },
+          // Card 68f27faf: `type` rides along so attention-push's classify() can discriminate a
+          // self-terminal "notice" from an ordinary pending decision — this event's own detail is the
+          // only trace of the question's type a tail-poll tick ever sees.
+          kind: "question_asked", detail: { questionId: question.id, title: question.title, type: question.type },
         });
         // Card 788ed7f4: filing a Request is a disposition — clear any open "owner message left without a
         // disposition" episode for THIS session, by occurrence alone (no content matching).

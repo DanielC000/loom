@@ -45,7 +45,7 @@ export const ALERT_TAG = "[loom:alert]";
  *  time, and so this module's own classify() stays the single source of truth for what's valid. */
 export const ATTENTION_ALERT_CLASSES = [
   "merge-gate", "worker-blocked", "worker-crashed", "decision-pending",
-  "manager-idle", "context-overflow", "escalation", "usage-limit",
+  "manager-idle", "context-overflow", "escalation", "usage-limit", "notice",
 ] as const;
 export type AttentionAlertClass = (typeof ATTENTION_ALERT_CLASSES)[number];
 
@@ -172,8 +172,13 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // in `tick()`/`stampConsolidatedLineage` below — never assume the source event fires at most once.
     case "recycle_split_lineage_consolidated":
       return "worker-crashed";
+    // Card 68f27faf: a `type:"notice"` ask is a distinct, owner-signal class of its own — "notice" — never
+    // "decision-pending" (nothing is pending for a self-terminal notice; see its own `state:"notice"`,
+    // b13df292). Discriminated on `detail.type`, stamped into the event's own detail at the one filing
+    // site (mcp/orchestration.ts) — never re-derived from the question row itself, which this event's
+    // detail is the only trace of by the time a tail-poll tick classifies it.
     case "question_asked":
-      return "decision-pending";
+      return detail?.type === "notice" ? "notice" : "decision-pending";
     // Card 5ea0153c: a still-pending ask's content just changed IN PLACE (question_amend) — same class as
     // the original ask, since the human still owes the SAME decision, just with fresher wording.
     case "question_amended":
@@ -316,7 +321,10 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // half a sentence, then retracting) is exactly this ambiguity turning into a wrong decision.
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
       const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
-      line = `${projectName}: decision needed${qRef}${cutFlag} — "${title}" (${m8})`;
+      // Card 68f27faf: a notice needs no answer — "decision needed" would be actively wrong wording for it.
+      line = alertClass === "notice"
+        ? `${projectName}: FYI${qRef}${cutFlag} — "${title}" (${m8})`
+        : `${projectName}: decision needed${qRef}${cutFlag} — "${title}" (${m8})`;
       break;
     }
     case "question_amended": {
@@ -704,7 +712,14 @@ export class AttentionPushWatcher {
         // class in the `else` branch below is NEVER filtered, wildcard or not.
         if (cfg.alertClasses.includes("*")) {
           for (const c of ATTENTION_ALERT_CLASSES) {
-            if (!FLEET_OPS_ALERT_CLASSES.has(c)) alertClasses.add(c);
+            // Card 68f27faf, owner ruling: "notice" is excluded from the wildcard too, but deliberately
+            // NOT via FLEET_OPS_ALERT_CLASSES — the semantics differ (fleet-ops = "the manager handles
+            // this autonomously"; notice = "nobody asked to hear about this by default"). A human opts a
+            // companion into notices by adding "notice" to that companion's OWN (non-lead-mode)
+            // attention-push grant's alertClasses — lead mode synthesizes a full `["*"]` scope that
+            // supersedes any real grant row while it's on (see `synthesizeLeadModeScope`'s own doc, card
+            // b5c606aa), so the explicit opt-in can only ever take effect for a companion NOT in lead mode.
+            if (!FLEET_OPS_ALERT_CLASSES.has(c) && c !== "notice") alertClasses.add(c);
           }
         } else {
           for (const c of cfg.alertClasses) {

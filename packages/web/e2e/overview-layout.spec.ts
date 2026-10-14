@@ -151,6 +151,32 @@ test.describe("project Overview — Attention list caps + collapses (unbounded-g
   });
 });
 
+// Card 68f27faf round 3 (CR 7cbb6994, item 1): AttentionRow (components/fleet.tsx) used to decide
+// "answerable" from a bare `item.questionId != null` — true for a self-terminal notice too, since a
+// notice is still a Request row (opening it marks it read), so a notice rendered as a PENDING ask with a
+// cyan edge and an "Answer →" button, exactly like a real decision. `isAnswerableRequest` (lib/
+// attention.ts) now excludes it; this pins the OBSERVABLE row chrome on /overview.
+test.describe("project Overview — a notice renders as FYI, never an answerable PENDING request", () => {
+  test("a notice's AttentionRow shows no PENDING chip and no 'Answer →' button — just 'Open'", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "OvNoticeMgr" });
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, type: "notice", state: "notice",
+      title: `ov-notice-${Date.now()}`, body: "deploy finished",
+    });
+
+    await pinActiveProject(page, mgr.projectId);
+    await page.goto(`${loomDaemon.baseURL}/overview`);
+
+    // requestAttentionLabel's label for type:"notice" is "FYI" — scope to THIS row (data-kind), since the
+    // e2e daemon is shared and a sibling spec's row could otherwise satisfy a bare text match.
+    const row = page.locator('[data-testid="attention-row"][data-kind="FYI"]');
+    await expect(row).toBeVisible();
+    await expect(row.getByText("PENDING", { exact: true })).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Answer →" })).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Open" })).toBeVisible();
+  });
+});
+
 // Worker-role agents are EXCLUDED from the Overview "Agents" spawn grid (owner intake 2026-07-08): workers
 // are Loom-DRIVEN — a manager dispatches them via worker_spawn onto isolated worktree branches, never a
 // human manual spawn — so a worker spawn card is clutter + a footgun. A non-worker (manager / null-role)

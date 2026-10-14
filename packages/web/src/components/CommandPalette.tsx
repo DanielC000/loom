@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAttention, attentionOpenTarget } from "../lib/attention";
+import { useAttention, attentionOpenTarget, isAnswerableRequest } from "../lib/attention";
 import { useOpenRequest } from "./requests";
 import { useVisibleNavPages } from "../nav";
 import { color, font } from "../theme";
@@ -33,14 +33,20 @@ export function CommandPalette() {
       const target = attentionOpenTarget(a);
       if (!target) return [];
       const merge = a.kind === "MERGE REQUEST";
-      // Structural check (any pending/orphaned Request type carries a questionId) — the kind LABEL now
-      // varies by type (DECISION/SECRET/PERMISSION/INPUT NEEDED), so it can't be compared literally.
-      const decision = a.questionId != null;
-      const verb = merge ? "Review" : decision ? "Answer" : "Open";
-      const hint = merge ? "review" : decision ? "question" : "session";
+      // Structural check (any pending/orphaned Request type, OR a self-terminal notice, carries a
+      // questionId) — the kind LABEL now varies by type (DECISION/SECRET/PERMISSION/INPUT NEEDED/FYI), so
+      // it can't be compared literally. This is ROUTING only (does it open the Request modal) — a notice
+      // routes here too, since opening it is how a human marks it read.
+      const isRequest = a.questionId != null;
+      // Card 68f27faf round 3 (CR 7cbb6994, item 1): the LABEL, by contrast, must distinguish an
+      // answerable ask from a notice (which needs no answer) — `isAnswerableRequest` is the one place that
+      // distinction lives (AttentionRow/App.tsx read the same helper).
+      const answerable = isAnswerableRequest(a);
+      const verb = merge ? "Review" : answerable ? "Answer" : "Open";
+      const hint = merge ? "review" : isRequest ? "question" : "session";
       // A REQUEST opens the shared in-place modal (the provider renders it, so the closing palette can't
       // race the mount); everything else navigates to its route. `go()` closes the palette after `run`.
-      const run = decision ? () => openRequest(a.questionId!) : () => navigate(target);
+      const run = isRequest ? () => openRequest(a.questionId!) : () => navigate(target);
       return [{ label: `${verb} · ${a.kind} ${a.text}`, hint, run }];
     }),
   ].filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));

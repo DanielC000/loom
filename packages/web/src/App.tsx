@@ -13,7 +13,7 @@ import { CredentialBanner } from "./components/CredentialBanner";
 import { GatewayTokenBanner } from "./components/GatewayTokenBanner";
 import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
-import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionOpenTarget, type AttentionItem } from "./lib/attention";
+import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionOpenTarget, isAnswerableRequest, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider } from "./lib/activeProject";
 import { color, font, radius, tone } from "./theme";
@@ -132,7 +132,13 @@ function ToastContainer() {
 
   // The collapsed pending-Request count, level-triggered off the current attention set (NOT the edge-
   // triggered new-item signal), so it always shows the true number waiting — not a burst of arrivals.
-  const requestCount = items.filter((it) => it.questionId).length;
+  // Card 68f27faf round 2/3: an unread notice carries `questionId` too (it's a Request row) but needs
+  // nothing from the owner, so it must never inflate "N requests need you" — its own signal is the
+  // desktop Notification (fired in `useNewAttention` above, gated on mute + permission) plus Phase 2's
+  // muted sidebar unread badge, never this pill. `isAnswerableRequest` (lib/attention.ts) is the single
+  // source of that exclusion — AttentionRow (components/fleet.tsx) reads the SAME helper for its own
+  // PENDING-chip/"Answer →" decision, so the two can never drift apart on what counts as answerable.
+  const requestCount = items.filter(isAnswerableRequest).length;
   // Dismiss survives client navigation: this container mounts ONCE at the app root (outside <Routes>), so
   // in-memory state persists across route changes. We remember the count that was dismissed so a LATER,
   // larger batch re-surfaces the pill (keep the signal) while dismissing the current batch stays dismissed
