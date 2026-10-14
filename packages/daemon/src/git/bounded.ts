@@ -631,7 +631,7 @@ export function spawnCanonicalGitTree(
  * `reject(...)` a few lines below it NEVER runs, so the bounded git promise this callback is nested
  * inside never settles at all. Swallow (never rethrow) so the caller can always still settle.
  *
- * @decision 495fd320 — see the decision record.
+ * @decision 24c0bdba (Follow-up 495fd320) — see the decision record.
  */
 function invokeTreeDeathSettledSafely(onTreeDeathSettled: ((confirmed: boolean) => void) | undefined, confirmed: boolean): void {
   try {
