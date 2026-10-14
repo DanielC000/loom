@@ -132,15 +132,12 @@ refused: taskId '<id>' <conflict>"` reason text was constructed independently at
 throw, batch's pre-amble push, batch's late-recheck push) — factored into one shared
 `spawnMintConflictReason(taskId, conflict)` formatter.
 
-## Known residual (out of scope — carded separately by the reviewer)
+## Residual CLOSED by card `c30293ae`
 
-The REVERSE of the recycle direction is NOT covered: a `worker_merge_confirm`/`merge_batch` mint targeting
-a worker whose `recycleWorker` call is itself still in flight (the fresh successor row exists and may
-already be live/`"starting"`, but the predecessor's own teardown/handoff hasn't fully settled) can still
-race recycle's own worktree-reuse-in-place. `claimTaskWorktreeRefusal`/`spawnMintConflict` have no
-awareness of an in-flight `recycleWorker` call at all — there is no equivalent of `inFlightSpawnTaskIds`/
-`claimedWorktreePaths` for a recycle in progress. Deliberately NOT fixed here — do not extend this card's
-scope to cover it; it is a distinct hazard shape the reviewer is tracking as its own card.
+The REVERSE of the recycle direction — a `worker_merge_confirm`/`merge_batch` mint targeting a worker whose
+own `recycleWorker` call is itself still in flight — was left open here as a known residual and is now
+closed. See `docs/decisions/c30293ae-recycleworker-holds-the-in-flight-claim-too.md`: `recycleWorker` now
+holds the same `inFlightSpawnTaskIds` claim `spawnWorker` does, for the duration of its own swap.
 
 ## Verification
 

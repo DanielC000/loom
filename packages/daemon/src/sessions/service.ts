@@ -2882,7 +2882,7 @@ export class SessionService {
   private spawnMintConflict(taskId: string | null, worktreePath: string | null, excludeSessionId?: string): string | undefined {
     if (!taskId) return undefined;
     if (this.inFlightSpawnTaskIds.has(taskId)) {
-      return `a worker_spawn for this task is already in flight; retry once it settles`;
+      return `a spawn or recycle for this task is already in flight; retry once it settles`;
     }
     if (worktreePath && this.claimedWorktreePaths.has(normForCompare(worktreePath))) {
       return `a worker_spawn has just claimed this task's worktree; retry once it settles`;
@@ -8460,7 +8460,7 @@ export class SessionService {
     // taskless spawns run concurrently instead of serializing against each other.
     const claimKey = taskId ?? randomUUID();
     if (this.inFlightSpawnTaskIds.has(claimKey)) {
-      throw new Error(`worker_spawn taskId '${claimKey}' already has a spawn in flight; wait for it to finish before re-spawning`);
+      throw new Error(`worker_spawn taskId '${claimKey}' already has a spawn or recycle in flight; wait for it to finish before re-spawning`);
     }
     // @decision sha:173fdf61 — the concurrency-cap admit counts in-flight claims too, checked BEFORE
     // .add(), so N concurrent spawns for different taskIds can't all observe a stale liveWorkers and
@@ -13410,7 +13410,14 @@ export class SessionService {
     // own cap-admit), so a drain sneaking into this window could hand the "freed" slot to a queued entry
     // and then this method's own insert would push the manager one OVER cap. See recycleDrainSuppressed's
     // class doc. Lifted in a finally so a throw anywhere in this window can never leave it stuck suppressed.
+    // @decision c30293ae — never move the add below, between here and `try {` nothing may throw. The
+    // mutex refusal fires before suppressCapQueueDrain, on purpose: a refused duplicate must never engage
+    // (and so never need to lift) suppression it was refused before reaching.
+    if (taskId && this.inFlightSpawnTaskIds.has(taskId)) {
+      throw new Error(`worker_recycle: taskId '${taskId}' already has a spawn or recycle in flight; retry once it settles`);
+    }
     this.suppressCapQueueDrain(managerSessionId);
+    if (taskId) this.inFlightSpawnTaskIds.add(taskId);
     try {
       // STALE IDLE-NUDGE PURGE (task 69a128b0 — evaluation-vs-delivery gap): the predecessor may have a
       // `[loom:worker-idle]`/`[loom:worker-spawn-broken]` nudge already QUEUED (not yet delivered) in this
@@ -13767,6 +13774,10 @@ export class SessionService {
       return { ...fresh, processState: "live" };
     } finally {
       this.recycleTeardownInFlight.delete(workerSessionId);
+      // @decision c30293ae — release BEFORE maybeDrainCapQueue below, not after: that call is
+      // fire-and-forget but still synchronously invoked from this same finally, and an auto-fired re-spawn
+      // for this SAME taskId must see the claim already cleared, never find it still held.
+      if (taskId) this.inFlightSpawnTaskIds.delete(taskId);
       this.unsuppressCapQueueDrain(managerSessionId);
       // A drain suppressed during the window above may have left real headroom on the table (e.g. the
       // manager's cap was raised mid-recycle, or another slot freed independently while suppressed) — catch

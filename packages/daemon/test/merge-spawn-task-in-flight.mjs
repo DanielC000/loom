@@ -546,8 +546,10 @@ try {
     // AttachResult the way a throw from inside the real run() callback is, e.g. scenario (4)'s "worker has
     // no branch" case) — confirmWorkerMergeTracked's own call REJECTS directly, a real exception the
     // caller (the MCP layer in production) sees and can retry against a clear, named reason.
+    // Card c30293ae: wording widened from "a worker_spawn for this task..." to "a spawn or recycle for this
+    // task..." once recycleWorker started sharing this same claim/predicate.
     check("(9) confirmWorkerMerge REJECTS because a worker_spawn for this task was already in flight at mint time",
-      confirmSettled.status === "rejected" && /worker_spawn for this task is already in flight/.test(confirmSettled.reason?.message ?? ""));
+      confirmSettled.status === "rejected" && /a spawn or recycle for this task is already in flight/.test(confirmSettled.reason?.message ?? ""));
     if (spawnSettled.status === "fulfilled" && spawnSettled.value) stopSeamPty(spawnSettled.value.id);
   }
 
@@ -607,7 +609,7 @@ try {
     check("(10) the batch itself settles successfully (candidate 2 unaffected)", batchResult.settled === true && batchResult.ok === true);
     const fallbackEntry = batchResult.value?.fallback?.find((f) => f.workerSessionId === w1);
     check("(10) THE FIX: candidate 1 — conflicting ONLY in the gap between the pre-amble check and the real mint — is pulled to fallback by the LATE re-check, never merged",
-      !!fallbackEntry && /worker_spawn for this task is already in flight/.test(fallbackEntry.reason ?? "") && fallbackEntry.started === false);
+      !!fallbackEntry && /a spawn or recycle for this task is already in flight/.test(fallbackEntry.reason ?? "") && fallbackEntry.started === false);
     // NOTE: deliberately NOT asserting mergeInFlightOpIdForTask(taskId1) post-settle as proof candidate 1
     // was "never marked" — the batch's own release clears EVERY liveChosen taskId (including an excluded
     // one, harmlessly, via Set.delete's no-op-if-absent) once the WHOLE batch settles, so an absent claim
