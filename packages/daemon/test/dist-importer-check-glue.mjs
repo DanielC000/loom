@@ -92,8 +92,30 @@ const noReap = async () => ({ killedPids: [] });
 // call. `DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS` (the REAL production ceiling for this same call,
 // sessions/service.ts) is 300_000ms, and this file's own `test-daemon.mjs` TEST_TIMEOUT_OVERRIDES entry
 // is 300_000ms total for all ~25 scenarios — so 10_000ms was never remotely close to what production
-// itself tolerates. 120_000ms gives >2x headroom over the one genuine failure observed while staying well
-// inside this file's own total budget even if hit more than once in the same run.
+// itself tolerates.
+//
+// ⛔ RETRACTED (card 69dc8fcd): this comment used to claim 120_000ms "gives >2x headroom over the one
+// genuine failure observed" — that claim is FALSE. In one of the same worker's own post-widening trials
+// (3 concurrent copies of this file), scenario (14)'s own version of this wait (`ctx.gate.lastDistCall`)
+// did NOT resolve within the full 120_000ms budget AND its 40_000ms grace window (240_009ms total) — i.e.
+// a >240s non-resolution, which the 120_000ms constant does not cover at all, let alone with 2x headroom.
+// An immediate rerun resolved in <1s for all 3 copies — consistent with an intermittent stall, not
+// ordinary load-driven slowness (a call that is sub-second nearly always and sometimes doesn't finish in
+// 4 minutes looks like a hang — a lock, a blocked child, an uncancelled promise — not a scaled-up version
+// of the same wait).
+//
+// Card 69dc8fcd's own repro attempt: 8 bounded batches of 3 concurrent copies of this file (24
+// copy-runs total; real ambient host contention confirmed present via a live git/node process census
+// each run — other sessions' own git activity was visible throughout), external process monitoring for
+// real `git.exe` children (by command line, never by image name) and for a stray `.git/index.lock` under
+// this file's own `loom-dic-*` temp repos. Zero non-resolutions reproduced (0/24); no `index.lock` was
+// ever observed; batch wall time ranged 141-193s. So this file's own repro effort could NOT reproduce the
+// >240s stall, and found no evidence of a bug in production `createWorktree` (git/worktrees.ts) to fix —
+// but 0/24 is not proof the stall is host-only or gone; it was ALSO not reproduced in the handful of
+// trials between the original >60s observation and this card, right up until the one trial that hit it.
+// Treat 120_000ms as a load-tolerant bound for ordinary slowness, chosen with no verified headroom over
+// the worst case actually observed (that worst case already exceeded this constant) — not as a number
+// proven to cover every future stall.
 const DIST_IMPORTER_REAL_GIT_OP_WAIT_MS = 120_000;
 
 // ── fixture: a tiny repo shaped like packages/daemon, so the real path-prefix filter matches ──────────
