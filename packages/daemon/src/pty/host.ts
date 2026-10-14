@@ -5567,11 +5567,14 @@ export interface RootReapResult {
  * design (win32 CIM exposes no per-process cwd); a win32 kill takes the matched pid's whole subtree.
  * @decision 864e79fe — `deps.excludePids`: a caller-named survivor (e.g. a still-live worker's own pty
  * during confirmWorkerMerge's pre-gate sweep) beyond the always-on daemon-pid self-exclusion above.
+ * @decision a5d9c458 — `deps.abortIfClaimed` (optional, mirrors `removeWorktree`'s dep of the same name):
+ * check it once right after enumeration resolves, before the synchronous kill loop, never inside/after
+ * a kill — a reclaiming spawn's claim landing during enumeration must skip the kill loop entirely.
  */
 export async function reapProcessesRootedInWorktree(
   worktreePath: string,
-  deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number; excludePids?: number[] } = {},
-): Promise<{ killedPids: number[]; enumerationFailed?: boolean; enumerationAttempts?: number; skippedUnverifiedPids?: number[] }> {
+  deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number; excludePids?: number[]; abortIfClaimed?: () => boolean } = {},
+): Promise<{ killedPids: number[]; enumerationFailed?: boolean; enumerationAttempts?: number; skippedUnverifiedPids?: number[]; aborted?: boolean }> {
   const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
   const kill = deps.kill ?? killProcessById;
   const timeoutMs = deps.timeoutMs ?? 10_000;
@@ -5588,6 +5591,20 @@ export async function reapProcessesRootedInWorktree(
   const totalBudgetMs = REAP_ENUMERATE_MAX_ATTEMPTS * timeoutMs + (REAP_ENUMERATE_MAX_ATTEMPTS - 1) * REAP_ENUMERATE_RETRY_DELAY_MS;
   try {
     const { procs, attempts } = await withReapTimeout(enumerateWithRetry(enumerate, timeoutMs), totalBudgetMs);
+    // @decision a5d9c458 — a THROWING abortIfClaimed is treated as CLAIMED (fail-safe: never kill when
+    // the claim check itself is broken), logged distinctly from both the "genuinely claimed" and the
+    // enumeration-failure cases below — never let it fall through to the outer catch as a bare failure.
+    let claimed = false;
+    try {
+      claimed = !!deps.abortIfClaimed?.();
+    } catch (err) {
+      console.warn(`[reap] ${worktreePath}: abortIfClaimed THREW (${(err as Error).message}) — treating as CLAIMED, fail-safe.`);
+      claimed = true;
+    }
+    if (claimed) {
+      console.warn(`[reap] ${worktreePath}: aborting — a reclaiming spawn claimed this path during enumeration. Nothing was touched.`);
+      return { killedPids: [], enumerationAttempts: attempts, aborted: true };
+    }
     const killedPids: number[] = [];
     const skippedUnverifiedPids: number[] = [];
     for (const proc of procs) {

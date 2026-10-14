@@ -433,10 +433,10 @@ agreed as the call-site check above only.
 - Do not remove or weaken the EXISTING post-reap `claimedWorktreePaths` check on the theory that the new
   pre-reap one makes it redundant — it still catches a claim landing between the new check and
   `removingWorktreePaths.add(normPath)`.
-- Do not claim the reap-during-enumeration residual is closed, or attempt to close it by making
-  `reapProcessesRootedInWorktree` re-check the claim, without a new card scoping that change — this round
-  deliberately left it as a stated, analysed residual rather than silently assuming it away OR
-  unilaterally expanding scope to fix it.
+- The reap-during-enumeration residual stated below is CLOSED as of round 6 (card `b33a8101`):
+  `reapProcessesRootedInWorktree` gained `deps.abortIfClaimed`, wired into `gcWorktreeDir`'s own reap call
+  via the shared `reapWorktreeUnlessClaimed` helper — see ROUND 6's own "Do not" section for the current
+  rule (do not re-derive a fix for this residual a second time; it is already closed, at this exact site).
 - Do not assume this fix is scoped to `finalizeMerge` alone — the `staleKnowledge:true` callers (the
   wedge sweep, both boot-reconcile Pass B GC sites) had the identical scan→reap exposure and are now
   covered too; see the scope paragraph above for why their changed `"claimed"` (was
@@ -502,3 +502,146 @@ other claim/identity structure in this codebase already relies on (session ids, 
 `packages/daemon/src/sessions/service.ts` (`reclaimWedgedWorktreePathForSpawn`'s `release()`, the
 `spawnWorker` and batch-merge call sites) and `packages/daemon/src/orchestration/pending-ops.ts`
 (`PendingOpRegistry.attach`'s `opId` mint) — reviewed on card `f487a493`.
+
+## ROUND 6 (card `b33a8101`, discovered from Code Review `74762998` on card `beeae646`) — the same
+## claim-after-kill race, on the THREE sweep call sites round 5 never reached
+
+### Narrative
+
+Round 5 (above) closed `gcWorktreeDir`'s own scan-to-reap window, but its fix was scoped to that one
+chokepoint. Three OTHER call sites in `sessions/service.ts` invoke `reapWorktreeProcesses` directly,
+bypassing `gcWorktreeDir` entirely, and had NO reference to `claimedWorktreePaths` anywhere — confirmed by
+reading each method body in full before writing any fix, not assumed from the call shape alone:
+
+1. **`sweepWorktreeStrays`** (the `stopWorker`/`killAllWorkers` path, via `cancelWorkerGateThenSweep`) —
+   fire-and-forget, with an enumeration window of up to ~20.5s (`reapProcessesRootedInWorktree`'s own
+   worst-case retry budget). Scenario: `worker_stop` on a task, then an immediate `worker_spawn` on the
+   SAME task (same deterministic worktree path, per `resolveWorktreePath`'s determinism — see this
+   record's own earlier section). The sweep's enumeration can overlap the respawn's `createWorktree`
+   provisioning and kill it, because `excludePids` only ever names the STOPPED worker's own pid, never a
+   respawn's.
+2. **`confirmWorkerMerge`'s pre-gate sweep** (`@decision c21487e8`) — runs BEFORE the confirming worker's
+   OWN worktree removal, while that worker is typically still live.
+3. **`runWorkerGate`'s post-timeout sweep** (`@decision 3564fd1e`'s own POST-TIMEOUT SWEEP) — runs after a
+   worker's own self-check gate times out, while that worker's task is still in progress.
+
+Hermetically reproduced (card `b33a8101`'s own blocked checkpoint, reviewed and approved before the fix
+below): seeding `sessions.claimedWorktreePaths` for a worktree path, then driving `stopWorker` for a
+worker at that exact path, showed the injected `reapWorktreeProcesses` seam invoked anyway — with a
+control proving the SAME harness correctly observes `gcWorktreeDir`'s own (round-5) check blocking reap
+for the identical claimed path, ruling out a harness blind to "reap not called" as the explanation.
+
+A SECOND, independent residual (named but not reproduced in round 5 — see that round's own "Stated
+residual" paragraph): `reapProcessesRootedInWorktree` itself (`pty/host.ts`) takes exactly ONE enumeration
+snapshot, then runs a fully synchronous kill loop with no claim awareness at all — so even a caller WITH a
+pre-call claim check (like `gcWorktreeDir`'s own round-5 fix) remains exposed to a claim landing DURING
+that enumeration's own await, between the pre-check passing and the kill loop actually running.
+
+### Fix
+
+Two parts, both load-bearing (one without the other leaves a real gap):
+
+1. **`reapProcessesRootedInWorktree` gained `deps.abortIfClaimed?: () => boolean`** (mirrors
+   `removeWorktree`'s existing dep of the same name, `git/worktrees.ts`) — checked ONCE, immediately after
+   enumeration resolves and before the kill loop starts; the kill loop itself has no further awaits, so one
+   check there closes the "claim lands during enumeration" window completely, for ANY caller that passes
+   it. Optional: a caller that omits it is byte-identical to before this round. A THROWING `abortIfClaimed`
+   is treated as CLAIMED (fail-safe — never kill when the claim check itself is broken), logged distinctly
+   from both the generic abort message and an enumeration failure, never falling through to the outer
+   catch as a bare, misclassified failure.
+2. **A single shared helper, `SessionService.reapWorktreeUnlessClaimed(worktreePath, opts)`** — a
+   synchronous `claimedWorktreePaths.has(normForCompare(worktreePath))` pre-check (skip + a non-alarming
+   log naming the call site on a hit, via `opts.logPrefix`/`opts.verb`) that ALWAYS forwards
+   `abortIfClaimed` to whichever reap impl is active — the production `reapProcessesRootedInWorktree`
+   fallback AND an injected `reapWorktreeProcesses` test seam alike. Every call site that needs this
+   protection calls the helper directly; none builds its own reap closure anymore.
+
+**Code Review `044d26f1` (on the first cut of this round, commit `ea3f9544`) found a real gap in that first
+cut**, before the shared helper existed: `sweepWorktreeStrays`, `confirmWorkerMerge`'s pre-gate sweep, and
+`runWorkerGate`'s post-timeout sweep each built their OWN `const reap = this.reapWorktreeProcesses ?? (...
+closure wiring abortIfClaimed into the real reapProcessesRootedInWorktree fallback only ...)`. Every
+SessionService-level test scenario injects `reapWorktreeProcesses`, which REPLACES that whole closure —
+the ONLY place `abortIfClaimed` was ever constructed — so a test seam-based scenario could never observe
+whether the forwarding was actually wired. The CR proved this concretely: stripping the
+`, abortIfClaimed: () => ...` clause from all three copy-pasted closures in `dist/` left every one of
+`sweep-strays-claim-before-reap.mjs`, `worktree-process-reap.mjs`, `worker-stop-reap.mjs`,
+`stop-worker-cancels-gate-before-sweep.mjs`, and `gate-timeout-circuit-breaker.mjs` green — nothing would
+have caught a future refactor silently dropping the forwarding. The fix is the shared helper above: one
+convergence point that threads `abortIfClaimed` into the opts handed to the active impl regardless of
+which impl that is, so a test CAN inject a seam that captures and asserts on the callback it received
+(`sweep-strays-claim-before-reap.mjs`'s wiring-pin scenarios (J)-(M)).
+
+**`gcWorktreeDir`'s own reap call (the round-5 site) is now ALSO routed through the shared helper** —
+closing round 5's own stated reap-during-enumeration residual at that site too. Manager ruling (card
+`b33a8101`): in scope for this card now that the helper exists, since it is the same bug class through the
+same underlying function and the helper makes it nearly free to wire in everywhere. `gcWorktreeDir` KEEPS
+its own existing, distinct pre-check (the one that returns `{outcome:"claimed"}` and skips the ENTIRE
+removal, not just the reap sub-step) completely unchanged — that early return controls whether removal
+proceeds at all and is orthogonal to the helper's own (now redundant-but-harmless, since there is no await
+between the two) internal pre-check. Only the subsequent `reap(...)` call itself was replaced with a call
+to `reapWorktreeUnlessClaimed`, adding `abortIfClaimed` coverage for the enumeration window specifically.
+
+**`confirmWorkerMerge` has FIVE reap call sites, not one** — all now routed through the shared helper
+directly (no more shared local closure), each with its own `opts.verb` naming which sub-step it guards:
+1. The **pre-gate sweep** (this card's originally-named site) — `verb: "swept pre-gate"`.
+2. The **inert-reclassify reunion** reap (~L17839 pre-round-2-edit; re-derive the live line, don't trust
+   this number — guards the re-union triggered by a main/branch-tip move detected during the inert-diff
+   reclassification) — `verb: "swept before the inert-reclassify re-union"`.
+3. **`reunionAtAdmission`**'s reap (~L18244 pre-round-2-edit) — guards the admission-time re-union when
+   `gateBaseMainHead` moved during the queue wait — `verb: "swept before the admission-time re-union"`.
+4. The **attempt-1 post-timeout sweep** (~L18470 pre-round-2-edit) — `verb: "swept post-timeout (attempt 1)"`.
+5. The **transient-retry post-timeout sweep** (~L18517 pre-round-2-edit, inside the auto-retry `next`
+   callback) — `verb: "swept post-timeout (transient retry)"`.
+
+Every one of these five now gets BOTH the synchronous pre-check (round 1 of this card gave only #1 that)
+AND `abortIfClaimed` (round 1 gave all five that, via the shared closure that no longer exists in this
+form) — the shared helper makes this uniform instead of a special case for the pre-gate call alone.
+
+**Safety basis for why a claim can legitimately exist on a CONFIRMING worker's own worktree path at all**
+(the scenario every one of these five sites, plus `runWorkerGate`'s, must tolerate): `spawnWorker` refuses
+a second live worker on an already-live task (`db.liveSessionIdForTask(taskId)`, `~L8274`) — so a
+confirming/gating worker that is genuinely LIVE can never be raced by a same-task respawn; the claim this
+card protects against can only form when that worker's task is NOT currently live (a crash, a stop/recycle
+race, a transitional processState window) WHILE a confirm/gate call is still mid-flight against its
+worktree. Every reap call this card touches is already wrapped in a best-effort `try`/`catch` (or,
+`sweepWorktreeStrays`, a fire-and-forget `.catch()`) — so skipping a reap on a hit never throws; it yields,
+at worst, a reported, retryable merge/gate failure (an escaped build child the reap would have cleared
+stays alive, which the EXISTING EPERM-class failure handling already surfaces), never a silent wedge.
+
+A claimed worktree's merge is NOT blocked by any of this: `confirmWorkerMerge` still returns `merged:true`
+even when its pre-gate reap (and, independently, `gcWorktreeDir`'s own post-merge reap) are both skipped —
+the squash already landed on main before worktree cleanup runs, and a `"claimed"` GC outcome is deliberately
+excluded from `worktreeGcOutcome`/`worktreeGcWarning` (round 4/5's own rule), never surfaced as a merge
+failure.
+
+### Do not
+
+- Do not assume `gcWorktreeDir`'s round-5 fix covers the other sweep sites — none of them route through
+  `gcWorktreeDir` at all; each calls `reapWorktreeUnlessClaimed` directly.
+- Do not rely on the synchronous pre-call check alone as a complete fix for any site — it only closes
+  "claimed before the sweep fires"; `abortIfClaimed` is what closes "claimed DURING the sweep's own
+  enumeration", and both are needed together, which is exactly why they're bundled into ONE helper rather
+  than left as two things a caller could adopt only one of.
+- Do not build a per-call-site `reap` closure again (the shape this round's own Code Review found broken)
+  — route every new or changed reap call through `reapWorktreeUnlessClaimed`. A hand-rolled closure is
+  invisible to a test that injects `reapWorktreeProcesses`, since the injected seam REPLACES whatever
+  closure would have wired `abortIfClaimed` in — only a shared, caller-independent convergence point lets
+  a test assert the forwarding actually happened.
+- Do not treat `gcWorktreeDir`'s own pre-check (the one returning `{outcome:"claimed"}`) as redundant with
+  the helper's internal one and remove it — they control different things (whether removal proceeds at
+  all, vs. whether this ONE reap call fires) and the helper's check firing there is a no-op by
+  construction (no await separates the two), not a signal that one of them is unnecessary.
+- Do not treat a `"claimed"`-outcome-adjacent merge (pre-gate reap skipped, post-merge reap also skipped)
+  as a merge failure or a reason to retry — `merged:true` still holds; see round 4/5's own identical rule.
+- Do not re-derive the `confirmWorkerMerge` reuse-site line numbers above as still-current — they are
+  stamped to the pre-round-2-edit state and will drift with the next unrelated edit to that (very large)
+  method; re-find them by the quoted `verb` strings or the surrounding decision anchors instead.
+
+### Source
+
+`packages/daemon/src/pty/host.ts` (`reapProcessesRootedInWorktree`'s `deps.abortIfClaimed`, including its
+throw-safety) and `packages/daemon/src/sessions/service.ts` (`reapWorktreeUnlessClaimed`,
+`sweepWorktreeStrays`, `confirmWorkerMerge`'s five reap call sites, `runWorkerGate`'s post-timeout sweep,
+`gcWorktreeDir`'s own reap call) — fixed on card `b33a8101` (round 6 of `a5d9c458`, discovered from Code
+Review `74762998` on card `beeae646`; folded in after a second Code Review, `044d26f1`, on the first cut),
+caught by `packages/daemon/test/sweep-strays-claim-before-reap.mjs`.

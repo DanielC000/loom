@@ -2534,8 +2534,10 @@ export class SessionService {
    * without touching real OS processes. The optional second-arg `excludePids` lets confirmWorkerMerge's
    * pre-gate sweep (run BEFORE the confirming worker is stopped) exclude that worker's own still-live pty
    * pid from the kill set — see the pre-gate call site's doc comment.
+   * @decision a5d9c458 — `opts.abortIfClaimed` is ALWAYS forwarded (by `reapWorktreeUnlessClaimed`) to
+   * whichever impl is active, this injected seam included, never just the production fallback.
    */
-  private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>) | undefined;
+  private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[]; abortIfClaimed?: () => boolean }) => Promise<{ killedPids: number[]; aborted?: boolean }>) | undefined;
   // @decision 3564fd1e — per-branch consecutive gate-TIMEOUT circuit breaker; in-memory/daemon-uptime-
   // scoped on purpose (never persist), keyed by branch not workerSessionId, cleared only when the
   // worktree HEAD advances
@@ -2986,7 +2988,7 @@ export class SessionService {
     opts?: {
       gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number;
       removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
-      reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>;
+      reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[]; abortIfClaimed?: () => boolean }) => Promise<{ killedPids: number[]; aborted?: boolean }>;
       findNestedGitRepos?: (worktreePath: string) => Promise<{ repos: string[]; truncated: boolean }>;
       runGate?: (gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv) => Promise<GateSequentialResult>;
       /** Test seam for the merge gate's reflog snapshots (card 01777ceb): lets a hermetic test return an unreadable (null) snapshot. */
@@ -16517,6 +16519,24 @@ export class SessionService {
   }
 
   /**
+   * @decision a5d9c458 — the SHARED claim-aware reap for EVERY worktree-stray-sweep call site: a
+   * synchronous pre-check (skip + log on a hit) that ALWAYS also forwards `abortIfClaimed` to whichever
+   * impl is active, the injected test seam included — one convergence point, not several closures.
+   */
+  private async reapWorktreeUnlessClaimed(
+    worktreePath: string,
+    opts: { logPrefix: string; verb: string; excludePids?: number[] },
+  ): Promise<{ killedPids: number[]; aborted?: boolean; enumerationFailed?: boolean; enumerationAttempts?: number; skippedUnverifiedPids?: number[] }> {
+    const abortIfClaimed = () => this.claimedWorktreePaths.has(normForCompare(worktreePath));
+    if (abortIfClaimed()) {
+      console.warn(`[${opts.logPrefix}] ${worktreePath} not ${opts.verb} — a new spawn already claimed this path for reuse (expected, safe). Nothing was touched, reap skipped.`);
+      return { killedPids: [], aborted: true };
+    }
+    const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[]; abortIfClaimed?: () => boolean }) => reapProcessesRootedInWorktree(p, o));
+    return reap(worktreePath, { excludePids: opts.excludePids, abortIfClaimed });
+  }
+
+  /**
    * Best-effort worktree-path-scoped process sweep for a worker being stopped (card 3564fd1e — the reap
    * gap: `stopWorker`/`killAllWorkers` used to do nothing beyond `pty.stop()`, which only kills the
    * worker's own pty tree — node-pty's conpty kill path walking _getConsoleProcessList() on Windows (not
@@ -16534,8 +16554,7 @@ export class SessionService {
     const worktreePath = worker.worktreePath ?? worker.cwd;
     if (!worktreePath) return;
     const workerPid = this.pty.getPid?.(worker.id);
-    const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
-    void reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }).catch(() => { /* best-effort */ });
+    void this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "stop-worker", verb: "swept", excludePids: workerPid == null ? [] : [workerPid] }).catch(() => { /* best-effort */ });
   }
 
   /**
@@ -17336,9 +17355,8 @@ export class SessionService {
       //  gate: an escaped watcher still holding a handle on a tracked file main touched would otherwise
       //  make the union-merge's own file-write fail with a spurious EPERM, misreported as a merge failure.
       const workerPid = this.pty.getPid?.(workerSessionId);
-      const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
       try {
-        await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
+        await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "merge-confirm", verb: "swept pre-gate", excludePids: workerPid == null ? [] : [workerPid] });
       } catch {
         // Best-effort by construction, mirroring gcWorktreeDir's identical guard: an injected/broken seam
         // must never abort the gate/merge it's only meant to help along.
@@ -17818,7 +17836,7 @@ export class SessionService {
               // deliberately fires on main-moved (the original `ac7aad04` trigger), branch-moved, or a
               // failed branch-tip re-read alike, reaping a live worker's own dev server under any of them.
               try {
-                await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
+                await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "merge-confirm", verb: "swept before the inert-reclassify re-union", excludePids: workerPid == null ? [] : [workerPid] });
               } catch {
                 // Best-effort, same guard as every other reap call in this method.
               }
@@ -18216,14 +18234,14 @@ export class SessionService {
             // worktree exactly like the FIRST union-merge does, so it is equally lock-sensitive — an
             // escaped watcher/build child that (re-)attached during the queue wait would otherwise make
             // THIS write fail with a spurious EPERM, misreported below as a real git failure rather than
-            // the lock issue it actually is. `reap`/`workerPid` are the SAME closures the pre-gate sweep
-            // above already captured — reused here, not re-derived.
+            // the lock issue it actually is. `workerPid` is the SAME value the pre-gate sweep above
+            // already captured — reused here, not re-derived.
             //
             // @decision b798e706 — this admission-time re-union writes tracked files exactly like the
             //  first union-merge, so it needs the same pre-write reap (card c0aeb5b2) or an escaped
             //  watcher/build child can fail it with a spurious EPERM, misreported as a git failure.
             try {
-              await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
+              await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "merge-confirm", verb: "swept before the admission-time re-union", excludePids: workerPid == null ? [] : [workerPid] });
             } catch {
               // Best-effort, same guard as the pre-gate sweep above.
             }
@@ -18449,7 +18467,7 @@ export class SessionService {
             // sweep above uses, for whatever already detached/re-parented before that kill landed. Excludes the
             // worker's own live pty pid for the identical reason the pre-gate sweep does (see its doc above) —
             // this must never race gate-runner.ts's own precise tree-kill by ALSO killing the confirming worker.
-            try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+            try { await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "merge-confirm", verb: "swept post-timeout (attempt 1)", excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
           }
           // `recordGateTimeoutOutcome`'s own doc: call after EVERY REAL (non-short-circuited) gate
           // invocation — a REUSED result never actually ran, so it must not feed the circuit breaker.
@@ -18496,7 +18514,7 @@ export class SessionService {
             concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
             evt("build_gate_retry", { passed: rr.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
             if (rr.failedTimedOut) {
-              try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+              try { await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "merge-confirm", verb: "swept post-timeout (transient retry)", excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
             }
             await this.recordGateTimeoutOutcome(branch, worktreePath, !!rr.failedTimedOut);
             return null;
@@ -23134,8 +23152,7 @@ export class SessionService {
               // Excludes the calling worker's own live pty pid — this sweep must never kill the very worker
               // whose gate just timed out.
               const workerPid = this.pty.getPid?.(workerSessionId);
-              const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
-              try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+              try { await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "run-gate", verb: "swept post-timeout", excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
             }
             await this.recordGateTimeoutOutcome(worker.branch, worktreePath, !!gateResult.failedTimedOut);
           }
@@ -23833,9 +23850,11 @@ export class SessionService {
       console.warn(`[worktree] ${worktreePath} not removed — a new spawn already claimed this path for reuse before removal began (expected, safe). Nothing was touched, reap skipped.`);
       return { outcome: "claimed" };
     }
-    const reap = this.reapWorktreeProcesses ?? ((p: string) => reapProcessesRootedInWorktree(p));
+    // @decision a5d9c458 — round 6 (card b33a8101): routed through the SAME shared helper as every other
+    // sweep site, closing the one residual round 5 left open (a claim landing DURING this reap's own
+    // enumeration, after the check immediately above already passed) — see that round's own record.
     try {
-      await reap(worktreePath);
+      await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "worktree", verb: "swept" });
     } catch {
       // Best-effort by construction (reapProcessesRootedInWorktree never throws), but stay defensive:
       // an injected/broken seam must never abort the removal it's only meant to help along.
