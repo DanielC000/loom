@@ -47,14 +47,19 @@ const keyFor = (dir) => path.resolve(dir).replace(/\\/g, "/");
 
 try {
   // === 1. Classification + dry run: exact count, capped sample, NEVER writes. Covers all four required
-  //        negatives plus the positive (dead loom temp dir). ===
+  //        negatives plus the positives (dead direct-child loom temp dir, AND — card a900fbf4 — dead
+  //        NESTED loom temp key any depth under a loom-prefixed top segment). ===
   const liveLoomTemp = path.join(tmpRoot, "loom-live-abc123");
   fs.mkdirSync(liveLoomTemp, { recursive: true }); // live — a direct child, loom-prefixed, but NOT dead
   const deadLoomTemp1 = path.join(tmpRoot, "loom-prest-970"); // never created — dead, direct child, loom-prefixed
   const deadLoomTemp2 = path.join(tmpRoot, "loom-abcd1234"); // never created — dead, direct child, loom-prefixed
   const nonLoomTempKey = path.join(tmpRoot, "notloom-xyz"); // never created — dead, direct child, but NOT loom-prefixed
   const outsideTmpdirKey = path.join(root, "loom-outside"); // never created — loom-prefixed, dead, but NOT under tmpRoot at all
-  const nestedUnderTmpdirKey = path.join(tmpRoot, "nested", "loom-deep"); // never created — loom-prefixed, dead, but NESTED (not a direct child)
+  const nestedUnderTmpdirKey = path.join(tmpRoot, "nested", "loom-deep"); // never created — dead, but its TOP segment ("nested") is NOT loom-prefixed, however deep the loom- name sits below it
+  const nestedDeadLoomKey = path.join(tmpRoot, "loom-rss-nested-dead", "proj1", "abcdef12"); // never created — dead, NESTED (not a direct child) under a loom-prefixed top segment
+  const nestedLiveLoomParent = path.join(tmpRoot, "loom-live-nested");
+  const nestedLiveLoomKey = path.join(nestedLiveLoomParent, "sub", "deep"); // created — live, nested under a loom-prefixed top segment
+  fs.mkdirSync(nestedLiveLoomKey, { recursive: true });
 
   writeCfg({
     [keyFor(liveLoomTemp)]: { hasTrustDialogAccepted: true },
@@ -63,37 +68,45 @@ try {
     [keyFor(nonLoomTempKey)]: { hasTrustDialogAccepted: true },
     [keyFor(outsideTmpdirKey)]: { hasTrustDialogAccepted: true },
     [keyFor(nestedUnderTmpdirKey)]: { hasTrustDialogAccepted: true },
+    [keyFor(nestedDeadLoomKey)]: { hasTrustDialogAccepted: true },
+    [keyFor(nestedLiveLoomKey)]: { hasTrustDialogAccepted: true },
   });
 
   const dry = pruneDeadTempTestClaudeConfigEntries({ dryRun: true, tmpdir: tmpRoot });
-  check("dry run: exact dead count is 2 (only the two direct-child loom- dead keys)", dry.deadCount === 2);
+  check("dry run: exact dead count is 3 (the two direct-child loom- dead keys, plus the one nested dead loom- key)", dry.deadCount === 3);
   check("dry run: dryRun flag echoed true", dry.dryRun === true);
-  check("dry run: sample contains both dead keys",
-    dry.deadKeysSample.includes(keyFor(deadLoomTemp1)) && dry.deadKeysSample.includes(keyFor(deadLoomTemp2)));
+  check("dry run: sample contains all three dead keys",
+    dry.deadKeysSample.includes(keyFor(deadLoomTemp1)) && dry.deadKeysSample.includes(keyFor(deadLoomTemp2))
+    && dry.deadKeysSample.includes(keyFor(nestedDeadLoomKey)));
   check("dry run: removedKeys always empty", dry.removedKeys.length === 0);
-  check("dry run: no write happened (file still has all 6 entries)", Object.keys(readCfgRaw().projects).length === 6);
+  check("dry run: no write happened (file still has all 8 entries)", Object.keys(readCfgRaw().projects).length === 8);
   check("dry run: no abort, no parse error", dry.aborted === null && dry.parseError === null);
   check("dry run: unknownKeys empty (no stat errors here)", dry.unknownKeys.length === 0);
   check("negative: live loom temp dir never in the dead sample", !dry.deadKeysSample.includes(keyFor(liveLoomTemp)));
   check("negative: non-loom temp key never in the dead sample", !dry.deadKeysSample.includes(keyFor(nonLoomTempKey)));
   check("negative: a key outside tmpdir never in the dead sample", !dry.deadKeysSample.includes(keyFor(outsideTmpdirKey)));
-  check("negative: a key nested (not a direct child) under tmpdir never in the dead sample",
+  check("negative: a key nested under a NON-loom-prefixed top segment never in the dead sample",
     !dry.deadKeysSample.includes(keyFor(nestedUnderTmpdirKey)));
+  check("negative: a LIVE key nested under a loom-prefixed top segment never in the dead sample",
+    !dry.deadKeysSample.includes(keyFor(nestedLiveLoomKey)));
 
-  // === 2. Real apply: prunes ONLY the two dead direct-child loom- keys; every negative survives. ===
+  // === 2. Real apply: prunes the two dead direct-child loom- keys PLUS the dead nested loom- key; every
+  //        negative survives, including the live nested key. ===
   const applied = pruneDeadTempTestClaudeConfigEntries({ dryRun: false, tmpdir: tmpRoot });
-  check("apply: removed exactly the 2 dead keys", applied.removedKeys.length === 2
-    && applied.removedKeys.includes(keyFor(deadLoomTemp1)) && applied.removedKeys.includes(keyFor(deadLoomTemp2)));
+  check("apply: removed exactly the 3 dead keys", applied.removedKeys.length === 3
+    && applied.removedKeys.includes(keyFor(deadLoomTemp1)) && applied.removedKeys.includes(keyFor(deadLoomTemp2))
+    && applied.removedKeys.includes(keyFor(nestedDeadLoomKey)));
   check("apply: recreatedKeys empty (nothing recreated)", applied.recreatedKeys.length === 0);
   check("apply: no abort, no parse error", applied.aborted === null && applied.parseError === null);
   const afterApply = readCfgRaw().projects;
   check("apply: live loom temp dir kept", keyFor(liveLoomTemp) in afterApply);
   check("apply: dead keys actually gone from the file",
-    !(keyFor(deadLoomTemp1) in afterApply) && !(keyFor(deadLoomTemp2) in afterApply));
+    !(keyFor(deadLoomTemp1) in afterApply) && !(keyFor(deadLoomTemp2) in afterApply) && !(keyFor(nestedDeadLoomKey) in afterApply));
   check("apply: non-loom temp key kept untouched", keyFor(nonLoomTempKey) in afterApply);
   check("apply: key outside tmpdir kept untouched", keyFor(outsideTmpdirKey) in afterApply);
-  check("apply: nested (non-direct-child) key kept untouched", keyFor(nestedUnderTmpdirKey) in afterApply);
-  check("apply: exactly 4 entries remain (6 - 2 dead)", Object.keys(afterApply).length === 4);
+  check("apply: key nested under a non-loom top segment kept untouched", keyFor(nestedUnderTmpdirKey) in afterApply);
+  check("apply: live key nested under a loom top segment kept untouched", keyFor(nestedLiveLoomKey) in afterApply);
+  check("apply: exactly 5 entries remain (8 - 3 dead)", Object.keys(afterApply).length === 5);
 
   // === 3. A path that only LOOKS like tmpdir: a different drive (win32) does NOT match, and a
   //        differently-cased spelling of the SAME real tmpdir (win32) DOES match (case-fold, not a

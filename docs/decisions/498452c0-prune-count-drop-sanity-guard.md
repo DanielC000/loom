@@ -9,9 +9,11 @@ rather than under a worktrees root. Rather than fork a second read-lock-reread-w
 classify-and-write mechanics below (the lock, the re-verify-absent-before-write step, and this guard)
 were factored out into a shared `pruneClaudeConfigEntriesCore`, parameterized only by WHICH stored keys
 are candidates at all (`classifyWorktreeScopedKeys`'s `isStrictlyUnderRootForms` predicate for the
-worktree mode; `isDirectLoomTempKey` — a direct child of `tmpdir` whose basename starts with `loom-` —
-for the temp-test mode). Everything below this guard's own narrative (round 1/2) is unchanged in
-substance for either mode; only the classification predicate differs.
+worktree mode; `isUnderLoomTempDir` — strictly under, or equal to, a direct child of `tmpdir` whose
+basename starts with `loom-` — for the temp-test mode; see `docs/decisions/a900fbf4-widen-temp-key-predicate-to-nested.md`
+for why this predicate was later widened from direct-children-only to any nesting depth). Everything
+below this guard's own narrative (round 1/2) is unchanged in substance for either mode; only the
+classification predicate differs.
 
 ## Narrative (round 2 — event-loop-stall fix on `removeClaudeConfigEntryForWorktree`)
 

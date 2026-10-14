@@ -23,14 +23,18 @@
 //     directory holding a copy of your real .claude.json AND pass --worktrees-root pointing at a
 //     throwaway directory tree, before running this script with --apply. Meaningless with
 //     --temp-test-entries — passing both is refused.
-//   * --temp-test-entries (card d4580e19) switches to a SECOND, independent candidate predicate: a key
-//     that resolves DIRECTLY under os.tmpdir(), whose first path segment starts with `loom-`, and whose
-//     directory no longer exists — the leaked entries Loom TESTS wrote by reaching `ensureTrusted`
-//     without redirecting CLAUDE_CONFIG_DIR (cards 849acf9b, 042a4312, c75006c2), never a worktree entry.
-//     It goes through the SAME lock, the SAME re-verify-absent-before-write step, and the SAME count-drop
-//     sanity guard as the default worktree mode (pruneDeadTempTestClaudeConfigEntries reuses the same
-//     write path in pty/claude-config.ts — there is only one). --apply here is just as owner-facing as
-//     the default mode: read the dry-run output first.
+//   * --temp-test-entries (card d4580e19; widened to any nesting depth by card a900fbf4) switches to a
+//     SECOND, independent candidate predicate: a key that resolves under os.tmpdir(), whose TOP path
+//     segment (the direct child of os.tmpdir() the key is nested under, or the key itself) starts with
+//     `loom-`, and whose directory no longer exists — the leaked entries Loom TESTS wrote by reaching
+//     `ensureTrusted` without redirecting CLAUDE_CONFIG_DIR (cards 849acf9b, 042a4312, c75006c2, dc22f3d2),
+//     never a worktree entry. A key nested arbitrarily deeper under that `loom-`-prefixed top segment is
+//     a candidate too (e.g. a worktree or seeded-repo subdirectory a leaking test created inside its own
+//     `loom-*` fixture root); a key under a sibling directory that doesn't itself start with `loom-` is
+//     not, however deep. It goes through the SAME lock, the SAME re-verify-absent-before-write step, and
+//     the SAME count-drop sanity guard as the default worktree mode (pruneDeadTempTestClaudeConfigEntries
+//     reuses the same write path in pty/claude-config.ts — there is only one). --apply here is just as
+//     owner-facing as the default mode: read the dry-run output first.
 //   * Unlike a sqlite-backed backfill, this does NOT require the daemon to be stopped: every write this
 //     script makes goes through the SAME cross-process advisory lock every live `ensureTrusted` spawn
 //     call already takes on this exact file (in REQUIRED mode for the real write — see

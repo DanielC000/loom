@@ -929,7 +929,7 @@ function isStrictlyUnderRootForms(rootForms: readonly string[], child: string): 
 /** Bucket `cfg`'s project keys into dead/alive/unknown by {@link classifyPathLiveness}, restricted to
  *  keys `isCandidate` accepts — the one classification shape every bulk-prune mode shares (card
  *  d4580e19); only `isCandidate` differs between the worktree mode ({@link isStrictlyUnderRootForms})
- *  and the temp-test mode ({@link isDirectLoomTempKey}). */
+ *  and the temp-test mode ({@link isUnderLoomTempDir}). */
 function classifyKeysByPredicate(cfg: ClaudeCfg, isCandidate: (key: string) => boolean): { dead: string[]; alive: string[]; unknown: string[] } {
   const dead: string[] = [];
   const alive: string[] = [];
@@ -944,24 +944,33 @@ function classifyKeysByPredicate(cfg: ClaudeCfg, isCandidate: (key: string) => b
   return { dead, alive, unknown };
 }
 
-/** Candidate predicate for the temp-test-entries mode (card d4580e19): `key` is a direct child of
- *  `tmpRoot` (already {@link normForCompare}-normalized by the caller) — never nested deeper, never
- *  `tmpRoot` itself — AND its own basename starts with `loom-`. Comparing via `path.dirname` of the
- *  SAME normalized form `tmpRoot` already uses means a decoy that merely shares a textual prefix with
- *  `tmpRoot` (a different drive, or a sibling directory whose name happens to start with the same
- *  characters) is rejected: its normalized dirname is a different string, not an exact match. A
- *  genuinely differently-cased spelling of the SAME real tmpdir (win32 only) DOES match, by the same
- *  case-fold `normForCompare` already applies everywhere else in this file. A non-absolute (including
- *  empty-string) `key` never matches. On win32, `normForCompare` ALSO lower-cases the whole path, so the
- *  final `startsWith("loom-")` check below runs against an already-lower-cased basename there — i.e. a
- *  stored key spelled `Loom-abc123` or `LOOM-abc123` still matches on win32 (consistent with every other
- *  case-fold comparison in this file), while on a case-sensitive platform only a literal `loom-` prefix
- *  (the exact casing Loom itself writes) ever matches. */
-function isDirectLoomTempKey(tmpRoot: string, key: string): boolean {
+/** Candidate predicate for the temp-test-entries mode (card d4580e19). `key` qualifies when it is
+ *  strictly under (or equal to) a directory that is itself a DIRECT child of `tmpRoot` (already
+ *  {@link normForCompare}-normalized by the caller) AND whose basename starts with `loom-` — `key` may be
+ *  that direct-child directory itself, or nested arbitrarily deeper under it. A key nested under a
+ *  NON-`loom-`-prefixed direct child of `tmpRoot` never matches, however deep — only the TOP segment
+ *  immediately under `tmpRoot` is tested for the `loom-` prefix. Comparing via a `tmpRoot + path.sep`
+ *  prefix of the SAME normalized form `tmpRoot` already uses means a decoy that merely shares a textual
+ *  prefix with `tmpRoot` (a different drive, or a sibling directory whose name happens to start with the
+ *  same characters) is rejected: its normalized form doesn't share that exact prefix. A genuinely
+ *  differently-cased spelling of the SAME real tmpdir (win32 only) DOES match, by the same case-fold
+ *  `normForCompare` already applies everywhere else in this file. A non-absolute (including empty-string)
+ *  `key` never matches, and `tmpRoot` itself never matches (there is no top segment to test). On win32,
+ *  `normForCompare` ALSO lower-cases the whole path, so the final `startsWith("loom-")` check below runs
+ *  against an already-lower-cased top segment there — i.e. a stored key spelled `Loom-abc123` or
+ *  `LOOM-abc123` still matches on win32 (consistent with every other case-fold comparison in this file),
+ *  while on a case-sensitive platform only a literal `loom-` prefix (the exact casing Loom itself writes)
+ *  ever matches.
+ *
+ *  @decision a900fbf4 — never restrict this back to direct children only (real leaked keys nest under a
+ *  loom- fixture root), and never drop the loom- prefix check on the top segment when matching nested. */
+function isUnderLoomTempDir(tmpRoot: string, key: string): boolean {
   if (key === "" || !path.isAbsolute(key)) return false;
   const normKey = normForCompare(key);
-  if (path.dirname(normKey) !== tmpRoot) return false;
-  return path.basename(normKey).startsWith("loom-");
+  const prefix = tmpRoot + path.sep;
+  if (!normKey.startsWith(prefix)) return false; // strictly under tmpRoot — never tmpRoot itself
+  const topSegment = normKey.slice(prefix.length).split(path.sep)[0] ?? "";
+  return topSegment.startsWith("loom-");
 }
 
 /**
@@ -1032,10 +1041,11 @@ export function pruneDeadWorktreeClaudeConfigEntries(
  * 849acf9b, 042a4312, c75006c2). `tmpdir` defaults to the real `os.tmpdir()` but is overridable, the same
  * testability convention `worktreesRoot` above uses.
  *
- * Classification ({@link isDirectLoomTempKey}): a stored key is a candidate iff it is absolute, its
- * {@link normForCompare}-normalized parent is EXACTLY `tmpdir` (a DIRECT child — never nested deeper,
- * never `tmpdir` itself), and its own basename starts with `loom-`. Bucketed dead/alive/unknown by the
- * SAME {@link classifyPathLiveness} the worktree mode uses.
+ * Classification ({@link isUnderLoomTempDir}): a stored key is a candidate iff it is absolute and
+ * strictly under (or equal to) a direct child of `tmpdir` (already {@link normForCompare}-normalized)
+ * whose own basename starts with `loom-` — never `tmpdir` itself, but nested arbitrarily deeper under
+ * that `loom-`-prefixed child is fine (card a900fbf4 — widened from direct-children-only). Bucketed
+ * dead/alive/unknown by the SAME {@link classifyPathLiveness} the worktree mode uses.
  *
  * Reuses {@link pruneClaudeConfigEntriesCore} — the SAME lock, the SAME re-verify-absent-before-write
  * step, and the SAME count-drop sanity guard (card 498452c0) the worktree mode already uses. There is
@@ -1049,7 +1059,7 @@ export function pruneDeadTempTestClaudeConfigEntries(
   return pruneClaudeConfigEntriesCore(
     opts,
     claudeJson,
-    (cfg) => classifyKeysByPredicate(cfg, (key) => isDirectLoomTempKey(tmpRoot, key)),
+    (cfg) => classifyKeysByPredicate(cfg, (key) => isUnderLoomTempDir(tmpRoot, key)),
   );
 }
 
