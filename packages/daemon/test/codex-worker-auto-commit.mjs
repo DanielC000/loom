@@ -353,13 +353,19 @@ try {
     check("(K8) auto-commit succeeded", ac.committed === true);
     // Two bare `rev-parse HEAD` calls exist by design (Code Review "B1 residual"): the pre-commit
     // baseline capture, and the post-commit recovery read — NEITHER scans the working tree, so neither
-    // needs (or carries) the fsmonitor override.
+    // needs (or carries) the fsmonitor override. Card 27ac3c2d added two more non-scanning calls, the
+    // `resolveGitIdentityFallbackArgs` identity probe's `git var GIT_AUTHOR_IDENT`/`GIT_COMMITTER_IDENT`
+    // reads (routed through this SAME spyFactory, via `unpinnedProbeFactoryFromLegacy`, so they land in
+    // `calls` too) — same shape as the bare HEAD reads: nothing to scan, so no fsmonitor override either.
     const bareShaReads = calls.filter((a) => a[0] === "rev-parse" && a[1] === "HEAD");
-    const workingTreeCalls = calls.filter((a) => !(a[0] === "rev-parse" && a[1] === "HEAD"));
+    const identityProbes = calls.filter((a) => a[0] === "var");
+    const workingTreeCalls = calls.filter((a) => !(a[0] === "rev-parse" && a[1] === "HEAD") && a[0] !== "var");
     check("(K8) every WORKING-TREE-SCANNING call carries -c core.fsmonitor=false",
       workingTreeCalls.length > 0 && workingTreeCalls.every((a) => a.includes("core.fsmonitor=false")));
     check("(K8) both bare `rev-parse HEAD` calls (pre- and post-commit) correctly lack it (nothing to scan)",
       bareShaReads.length === 2 && bareShaReads.every((a) => !a.includes("core.fsmonitor=false")));
+    check("(K8) both `git var` identity-probe calls correctly lack it too (nothing to scan)",
+      identityProbes.length === 2 && identityProbes.every((a) => !a.includes("core.fsmonitor=false")));
 
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(worktreePath, { recursive: true, force: true });

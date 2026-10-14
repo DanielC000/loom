@@ -2697,6 +2697,20 @@ export async function attemptCodexAutoCommit(
     return { attempted: false, committed: false }; // FAIL SAFE — same posture as every earlier read
   }
 
+  // Card 27ac3c2d: on a host where git can't resolve an identity for this commit (e.g. a fresh
+  // end-user machine with no git identity configured), the commit call below otherwise fails with
+  // "Author identity unknown" and this codex worker's `done` report would then be refused outright.
+  // Falls back via the ONE shared helper (resolveGitIdentityFallbackArgs, git/bounded.ts) ONLY when git
+  // itself can't determine an identity — a host whose own identity git CAN resolve commits
+  // byte-identically to before this change. `baseEnv` is this commit's own env (`nonInteractiveEnv()`,
+  // the same env `killableCanonicalRaw` below is called with) so the probe reads identity under the
+  // SAME env the real commit will run under.
+  const identityArgs = await resolveGitIdentityFallbackArgs(
+    worktreePath, timeoutMs,
+    deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+    nonInteractiveEnv(),
+  );
+
   try {
     // Code Review "S2": `--literal-pathspecs` is a GLOBAL flag (before the subcommand, alongside the
     // `-c` args) — `--` alone does NOT stop pathspec magic/globbing, so a candidate literally named `*`
@@ -2721,7 +2735,7 @@ export async function attemptCodexAutoCommit(
   // `quarantineRepoPath`": `24c0bdba` already disables hooks here (core.hooksPath=devNull, unrelated
   // reason — see this function's own factory), so there's no hook-escape vector to close; left at default.
   const messageArgs = body ? ["-m", subject, "-m", body] : ["-m", subject];
-  const commitArgs = [...cfg, "commit", "--no-verify", ...messageArgs];
+  const commitArgs = [...identityArgs, ...cfg, "commit", "--no-verify", ...messageArgs];
   const commitLabel = "codex-auto-commit commit";
   let commitThrew: unknown;
   try {
