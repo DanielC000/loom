@@ -2245,27 +2245,88 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
 }
 
 /**
+ * `true` iff some entry OBJECT other than `updated` itself — active OR pending, of ANY identity,
+ * including `updated`'s own — still physically depends on `filename` as its own current backing. A
+ * stronger, OBJECT-reference-aware restatement of {@link physicalOwnerRepoPaths}'s own two loops (which
+ * this subsumes: both of its match conditions are strict subsets of the ones here, each additionally
+ * gated on `!== updated`). `physicalOwnerRepoPaths` answers "whose IDENTITY owns this filename," which
+ * cannot distinguish "this is `updated`'s OWN file" from "this is a DIFFERENT, independent record that
+ * merely SHARES `updated`'s identity" — `d4b25feb` round 2 established that one identity can legitimately
+ * hold TWO disjoint-token records at once (one active-only, one pending-only). Layer (a) of
+ * {@link orphanRewriteOwnershipConfirmed}'s fix.
+ *
+ * @decision 29fe2372 — see the decision record, Follow-up 29fe2372, for the repro this closes.
+ */
+function anotherLiveEntryOwnsFile(filename: string, updated: MergeQuarantineEntry): boolean {
+  for (const [k, e] of activeQuarantines) {
+    if (e === updated) continue;
+    const isFreshWriteTarget = isRepoPathCurrentlyResolvable(e.repoPath) && path.basename(quarantinePathFor(e.repoPath)) === filename;
+    if (`${quarantineHashForKey(k)}.json` === filename || isFreshWriteTarget) return true;
+  }
+  for (const p of pendingUnresolvedQuarantines) {
+    if (p.entry === updated) continue;
+    if (p.sourceFile === filename) return true;
+  }
+  return false;
+}
+
+/**
+ * `true` iff every REAL token physically present in `orphanFile`'s own on-disk content right now is
+ * already accounted for by `updated`'s own write — either still outstanding on `updated.tokens`, or
+ * exactly the token THIS SAME partial clear just dropped (`clearedToken`) — so overwriting `orphanFile`
+ * with `updated` can never durably destroy a token that belonged to anyone else. Layer (b) of
+ * {@link orphanRewriteOwnershipConfirmed}'s fix, mirroring {@link markedFinalFullyCoveredByClear}'s own
+ * content-containment pattern (`dd34da46`/`95ea8d3f`) rather than inventing a parallel one. A read
+ * failure or corrupt/unparseable JSON can never be proven safe (the caller already skips a genuinely
+ * MISSING file via its own `existsSync` check before this is ever reached, so ENOENT/EISDIR need no
+ * special-casing here, unlike `markedFinalFullyCoveredByClear`'s own).
+ *
+ * @decision 29fe2372 — see the decision record, Follow-up 29fe2372.
+ */
+function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: MergeQuarantineEntry, clearedToken: string): boolean {
+  let raw: string;
+  try { raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, orphanFile), "utf8"); } catch { return false; }
+  let parsed: { tokens?: unknown; token?: unknown };
+  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return false; }
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
+  const accountedFor = new Set([...updated.tokens, clearedToken]);
+  return onDiskTokens.every((t) => accountedFor.has(t) || clearedTokens.has(t));
+}
+
+/**
  * `true` iff `orphanFile` is CONFIRMED to be `updated`'s own physical content right now — never a guess
- * from a reference list alone. A basename still `keptUnreadableLatchFiles`-marked is refused outright
- * (writing it here would bypass `writeMergeQuarantineLatch`'s own marked-basename reconcile chokepoint,
- * contradicting `8db913e2` Round 2 and `63e49ee2`). Otherwise confirmed by BOTH a structural check
- * ({@link physicalOwnerRepoPaths}/{@link survivingSharedClaimRepoPaths} must never credit this file to a
- * DIFFERENT identity) AND a content check ({@link quarantineFileRepoPathIdentity} must read back
- * `updated`'s own identity, never `undefined` — a read/parse failure proves nothing). Fail-closed on
- * every branch: a file whose ownership cannot be positively confirmed as `updated`'s own is left
- * untouched rather than risk destroying another entity's only durable copy.
+ * from a reference list, a bare identity match, or a content-identity match alone. A basename still
+ * `keptUnreadableLatchFiles`-marked is refused outright (writing it here would bypass
+ * `writeMergeQuarantineLatch`'s own marked-basename reconcile chokepoint, contradicting `8db913e2` Round 2
+ * and `63e49ee2`). Otherwise confirmed by THREE layers, ALL required:
+ * 1. the pre-existing structural check ({@link physicalOwnerRepoPaths}/{@link survivingSharedClaimRepoPaths})
+ *    must never credit this file to a DIFFERENT identity;
+ * 2. {@link anotherLiveEntryOwnsFile} must find no OTHER live entry object, active or pending, of ANY
+ *    identity (including `updated`'s own), that still depends on this file as its own current backing —
+ *    SAME IDENTITY IS NOT SAME ENTITY (`d4b25feb`), and layer 1 alone cannot tell them apart;
+ * 3. {@link orphanFileTokensAccountedForByUpdate} — the file's own on-disk CONTENT must hold no token
+ *    this write doesn't already account for ({@link quarantineFileRepoPathIdentity} resolving to the same
+ *    identity is necessary but not sufficient — same identity is not same content, `63e49ee2` round 5).
+ * Fail-closed on every branch: a file whose ownership cannot be positively confirmed as `updated`'s own,
+ * by ALL three layers, is left untouched rather than risk destroying another entity's only durable copy.
  *
  * @decision 6c04633d (B1, Code Review `e8c78d98`) — this closes a BLIND-WRITE reachability of the
  * `9cabd143` bug class (an orphan reference can name a file that is now ANOTHER live entry's own latch).
  * See the decision record, Follow-up 6c04633d.
+ *
+ * @decision 29fe2372 — layers 2/3 close a FURTHER fail-open: a DIFFERENT, independent, same-identity
+ * record's own file, silently destroyed by a partial clear of an unrelated record sharing only its
+ * identity. See the decision record, Follow-up 29fe2372.
  */
-function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuarantineEntry): boolean {
+function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuarantineEntry, clearedToken: string): boolean {
   if (keptUnreadableLatchFiles.has(orphanFile)) return false;
   const updatedIdentity = directPathIdentity(updated.repoPath);
   const structuralOwners = [...physicalOwnerRepoPaths(orphanFile), ...survivingSharedClaimRepoPaths(orphanFile)];
   if (structuralOwners.some((o) => directPathIdentity(o) !== updatedIdentity)) return false;
+  if (anotherLiveEntryOwnsFile(orphanFile, updated)) return false;
   const contentIdentity = quarantineFileRepoPathIdentity(path.join(MERGE_QUARANTINE_DIR, orphanFile));
-  return contentIdentity === updatedIdentity;
+  if (contentIdentity !== updatedIdentity) return false;
+  return orphanFileTokensAccountedForByUpdate(orphanFile, updated, clearedToken);
 }
 
 /**
@@ -2281,14 +2342,18 @@ function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuara
  * @decision 6c04633d (a) — a partial by-token clear of a record with folded `orphanLatchFiles` used to
  * leave those files' own stale (un-reduced) bytes untouched; they re-armed the released token on reboot.
  * See the decision record, Follow-up 6c04633d.
+ *
+ * @decision 29fe2372 — `clearedToken` (the token THIS SAME partial clear just dropped from `updated`) is
+ * threaded through to {@link orphanRewriteOwnershipConfirmed}'s own layer (b) — see the decision record,
+ * Follow-up 29fe2372.
  */
-function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry, skip: Set<string>): void {
+function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry, skip: Set<string>, clearedToken: string): void {
   for (const orphanFile of updated.orphanLatchFiles ?? []) {
     if (skip.has(orphanFile)) continue;
     if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, orphanFile))) continue;
-    if (!orphanRewriteOwnershipConfirmed(orphanFile, updated)) {
+    if (!orphanRewriteOwnershipConfirmed(orphanFile, updated, clearedToken)) {
       // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] keeping ${orphanFile} UNTOUCHED (left stale) after a partial clear of ${updated.repoPath} — its own ownership could not be positively confirmed as this same entity's (a different entity's live latch, an unreadable/unparsable read, or a marked-kept basename); fail-closed rather than risk destroying a different entity's only durable copy.`);
+      console.error(`[merge-quarantine] keeping ${orphanFile} UNTOUCHED (left stale) after a partial clear of ${updated.repoPath} — its own ownership could not be positively confirmed as this same entity's (a different entity's live latch, an unreadable/unparsable read, a marked-kept basename, or a real on-disk token this write doesn't already account for); fail-closed rather than risk destroying a different entity's only durable copy.`);
       continue;
     }
     if (!writePendingDivertFile(orphanFile, updated)) {
@@ -2358,7 +2423,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${pending.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
     }
-    rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames);
+    rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, token);
   }
 }
 
@@ -2453,7 +2518,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
     }
   }
-  rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames);
+  rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames, token);
 }
 
 /**

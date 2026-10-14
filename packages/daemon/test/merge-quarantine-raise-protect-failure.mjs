@@ -2712,6 +2712,183 @@ try {
   clearMergeQuarantineByToken(bSub, bSubToken);
   clearMergeQuarantineByToken(A, failClosedTokenAK);
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 29fe2372 ("29fe2372") — `orphanRewriteOwnershipConfirmed` (6c04633d's own ownership gate) checked
+  // same IDENTITY, never same ENTITY. `d4b25feb` round 2 established one identity can legitimately hold
+  // TWO independent records at once (one active-only, one pending-only, disjoint tokens). When a
+  // DIFFERENT, independent same-identity record's own `sourceFile` is named in the entry being partially
+  // cleared's own `orphanLatchFiles`, the old identity-only gate wrongly confirmed ownership and blindly
+  // overwrote that OTHER record's physical file — destroying its token with ZERO in-memory signal (its
+  // own `pendingUnresolvedQuarantines` entry stays untouched, still reporting its token enforced, until a
+  // reboot silently drops it with no clear ever issued for it). THE FIX adds two further layers:
+  // `anotherLiveEntryOwnsFile` (no OTHER live entry object, active or pending, any identity, may still
+  // depend on the file) and `orphanFileTokensAccountedForByUpdate` (every real on-disk token must already
+  // be accounted for by `updated.tokens` plus the token this exact clear just dropped).
+  //
+  // Step 3 below (giving A's own file an `orphanLatchFiles` reference to P's own `sourceFile`) is a
+  // HAND-EDIT that STANDS IN FOR the real production path — an "existing"-branch sibling-absorb whose own
+  // durable write fails (`consumeMatchedPendingsIntoArmedEntry`'s own `else` branch, ~1321-1330).
+  // EMPIRICALLY CHECKED (a standalone probe, reusing the SAME `injectOpenSyncFailureForPrefix` seam this
+  // file already uses for shape 3/dd34da46/p3b/p3g): that real path instead CONSUMES the independent
+  // pending record into ONE merged entity (safe — its own token is already accounted for by the merge),
+  // never leaving two genuinely independent records sharing one orphan reference. Reaching that exact
+  // shape through 100% production code additionally requires the separately-carded, still-unguarded
+  // fresh-divert write (`divertRaiseEntry` ~1964-1966 / `enterMergeQuarantine` ~2206-2218,
+  // `writePendingDivertFile` with no occupant read) — out of THIS card's own scope by Lead ruling.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const x = makeToplevelRepo("29fe2372-x");
+  const Kx = canonicalRepoLockKey(x);
+  const Kxhash = createHash("sha256").update(Kx).digest("hex").slice(0, 24);
+  const xFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Kxhash}.json`);
+  const pendingFile = pendingDivertFilenameForTest(x);
+  const pendingPath = path.join(MERGE_QUARANTINE_DIR, pendingFile);
+
+  // Step 1-2: two raises of x WHILE resolvable -> active A, two tokens (so a later clear can be partial).
+  const tA1 = enterMergeQuarantine(x, "a-branch", "29fe2372 raise 1, resolvable");
+  const tA2 = enterMergeQuarantine(x, "a-branch", "29fe2372 raise 2, still resolvable (gives A a 2nd token)");
+  // Step 3: x becomes unresolvable, then raises again -- per d4b25feb's own "existing lookup only runs
+  // when verified" fix, this never looks at A at all; it creates a wholly INDEPENDENT pending entry P.
+  fs.rmSync(x, { recursive: true, force: true });
+  const tP = enterMergeQuarantine(x, "p-branch", "29fe2372 raise 3, unresolvable -> independent pending P");
+  check("(29fe2372 precondition) two DISTINCT entry objects for x's identity (one active-only, one pending-only, per d4b25feb)",
+    listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 2);
+  check("(29fe2372 precondition) tA1/tA2/tP all enforced before the stand-in hand-edit", (() => {
+    const t = new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+    return t.has(tA1) && t.has(tA2) && t.has(tP);
+  })());
+
+  // Stand-in hand-edit (see header comment) -- A's own durable file gains an orphanLatchFiles reference
+  // to P's own, genuinely independent sourceFile.
+  const aRaw = JSON.parse(contentIfExists(xFinalPath));
+  aRaw.orphanLatchFiles = [pendingFile];
+  fs.writeFileSync(xFinalPath, JSON.stringify(aRaw, null, 2) + "\n");
+
+  const freshA = await freshBootModule();
+  freshA.reenterMergeQuarantinesAtBoot([x]);
+  check("(29fe2372 precondition, post-reboot) still two distinct entries for x, same tokens",
+    freshA.listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 2);
+
+  // Step 4: PARTIAL clear of A (tA2) -- tA1 remains outstanding. Reaches rewriteOrphanLatchFilesAfterPartialClear.
+  freshA.clearMergeQuarantineByToken(x, tA2);
+  const pendingContentAfterClear = contentIfExists(pendingPath) ?? "";
+  check("*** THE FIX (29fe2372) *** P's own real token is NOT destroyed by A's wholly unrelated partial clear",
+    pendingContentAfterClear.includes(tP));
+  check("(29fe2372) A's own tA1 remains outstanding, tA2 is gone (the clear itself still worked)", (() => {
+    const t = new Set(freshA.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+    return t.has(tA1) && !t.has(tA2);
+  })());
+
+  // Step 5: a SECOND fresh-process reboot, with NO clear of tP ever issued by anyone.
+  const freshB = await freshBootModule();
+  freshB.reenterMergeQuarantinesAtBoot([x]);
+  const tokensAfterReboot2 = new Set(freshB.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("*** THE FIX (29fe2372, reboot) *** P's own token SURVIVES a fresh-process reboot, despite NEVER being cleared",
+    tokensAfterReboot2.has(tP));
+  check("(29fe2372, reboot) A's own remaining token also survives", tokensAfterReboot2.has(tA1));
+
+  freshB.clearMergeQuarantineByToken(x, tP);
+  freshB.clearMergeQuarantineByToken(x, tA1);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 29fe2372 ("29fe2372-isolate-b") -- an isolating case for LAYER (b) alone (content token-subset):
+  // NOTHING in memory (active or pending) references the orphan file at all, so layer (a)
+  // (`anotherLiveEntryOwnsFile`) finds nobody and would have PASSED on its own -- only layer (b)
+  // (`orphanFileTokensAccountedForByUpdate`), reading a genuinely FOREIGN token physically sitting on
+  // disk, can correctly refuse this rewrite. Ablation-verified: with layer (b) alone removed, this
+  // scenario's own discriminating check goes RED (see the worker report for this card).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const x = makeToplevelRepo("29fe2372-isob-x");
+  const Kx = canonicalRepoLockKey(x);
+  const Kxhash = createHash("sha256").update(Kx).digest("hex").slice(0, 24);
+  const xFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Kxhash}.json`);
+  const someFile = pendingDivertFilenameForTest(x);
+  const somePath = path.join(MERGE_QUARANTINE_DIR, someFile);
+
+  fs.rmSync(x, { recursive: true, force: true });
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(xFinalPath, JSON.stringify({
+    repoPath: x, branch: "a-branch", reason: "29fe2372-isolate-b hand-built active entry",
+    enteredAt: Date.now(), tokens: ["isob-tA1", "isob-tA2"], resolvedKey: canonicalRepoLockKey(x),
+    orphanLatchFiles: [someFile],
+  }, null, 2) + "\n");
+
+  const freshIsoB = await freshBootModule();
+  freshIsoB.reenterMergeQuarantinesAtBoot([x]);
+  check("(29fe2372-isolate-b precondition) A is armed with both hand-built tokens and the orphan reference",
+    freshIsoB.listActiveMergeQuarantines().some((e) => e.repoPath === x && (e.orphanLatchFiles ?? []).includes(someFile)));
+
+  // Write someFile's content AFTER boot -- it was never classified by PASS1 at all, so NOTHING in
+  // pendingUnresolvedQuarantines or activeQuarantines references it as its own backing (A's own
+  // orphanLatchFiles reference above is a hand-built POINTER, not a second live OBJECT). Layer (a) finds
+  // no SECOND entry object to disqualify this write.
+  fs.writeFileSync(somePath, JSON.stringify({ repoPath: x, tokens: ["isob-foreign-token"] }, null, 2) + "\n");
+  check("(29fe2372-isolate-b precondition) only ONE live entry object exists for x (no second, independent record)",
+    freshIsoB.listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 1);
+
+  freshIsoB.clearMergeQuarantineByToken(x, "isob-tA2");
+  check("*** THE FIX (29fe2372-isolate-b), layer (b) alone discriminates *** the foreign token physically on disk is NOT destroyed",
+    (contentIfExists(somePath) ?? "").includes("isob-foreign-token"));
+
+  freshIsoB.clearMergeQuarantineByToken(x, "isob-tA1");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 29fe2372 ("29fe2372-isolate-a") -- an isolating case for LAYER (a) alone (object-reference
+  // ownership): a GENUINE, LIVE, independent pending entry P2 (reconstructed at boot from its own valid,
+  // if token-LESS, on-disk content) shares the orphan file as its own `sourceFile` -- layer (b)
+  // (`orphanFileTokensAccountedForByUpdate`) finds ZERO real tokens there and would VACUOUSLY pass on its
+  // own (nothing to object to); only layer (a) (`anotherLiveEntryOwnsFile`), which sees P2 is a genuinely
+  // SEPARATE, surviving object, correctly refuses. Ablation-verified: with layer (a) alone removed, this
+  // scenario's own discriminating check goes RED (see the worker report for this card).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const x = makeToplevelRepo("29fe2372-isoa-x");
+  const Kx = canonicalRepoLockKey(x);
+  const Kxhash = createHash("sha256").update(Kx).digest("hex").slice(0, 24);
+  const xFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Kxhash}.json`);
+  const pendingFile = pendingDivertFilenameForTest(x);
+  const pendingPath = path.join(MERGE_QUARANTINE_DIR, pendingFile);
+
+  fs.rmSync(x, { recursive: true, force: true });
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(xFinalPath, JSON.stringify({
+    repoPath: x, branch: "a-branch", reason: "29fe2372-isolate-a hand-built active entry",
+    enteredAt: Date.now(), tokens: ["isoa-tA1", "isoa-tA2"], resolvedKey: canonicalRepoLockKey(x),
+    orphanLatchFiles: [pendingFile],
+  }, null, 2) + "\n");
+  // A genuinely valid, if TOKEN-LESS, pending latch -- PASS1 reconstructs a real, live, independent P2
+  // object from this at boot (not a drifted in-memory copy); its own on-disk content has nothing for a
+  // pure content check to object to.
+  fs.writeFileSync(pendingPath, JSON.stringify({
+    repoPath: x, branch: "p2-branch", reason: "29fe2372-isolate-a token-less independent pending P2",
+    enteredAt: Date.now(), tokens: [],
+  }, null, 2) + "\n");
+
+  const freshIsoA = await freshBootModule();
+  freshIsoA.reenterMergeQuarantinesAtBoot([x]);
+  const bootListIsoA = freshIsoA.listActiveMergeQuarantines();
+  check("(29fe2372-isolate-a precondition) two distinct entries for x -- A (active) and P2 (pending, token-less)",
+    bootListIsoA.filter((e) => e.repoPath === x).length === 2);
+  // PASS1 mints an in-memory-only randomUUID() for a token-less pending latch (its own legacy fallback,
+  // never durably written back) -- so the DISCRIMINATING check here is the file's own RAW on-disk bytes,
+  // never the in-memory listing (which would now show a synthesized, non-empty token for P2 too).
+  check("(29fe2372-isolate-a precondition) layer (b) alone would vacuously pass -- pendingFile's own ON-DISK bytes hold zero real tokens",
+    (JSON.parse(contentIfExists(pendingPath)).tokens ?? []).length === 0);
+
+  freshIsoA.clearMergeQuarantineByToken(x, "isoa-tA2");
+  const pendingContentIsoA = contentIfExists(pendingPath) ?? "";
+  check("*** THE FIX (29fe2372-isolate-a), layer (a) alone discriminates *** P2's own file is NOT overwritten with A's content",
+    !pendingContentIsoA.includes("isoa-tA1"));
+  check("(29fe2372-isolate-a) P2's own token-less record still independently survives (never swept as a side effect)",
+    freshIsoA.listActiveMergeQuarantines().some((e) => e.repoPath === x && e.branch === "p2-branch"));
+
+  freshIsoA.clearMergeQuarantineByToken(x, "isoa-tA1");
+  freshIsoA.clearMergeQuarantineByRecordedPath(x); // P2 is token-less -- clearMergeQuarantineByToken can never match it.
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
