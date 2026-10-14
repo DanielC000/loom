@@ -193,6 +193,47 @@ try {
     check("3: NEGATIVE CONTROL — gen 1's requeued duplicate STILL sits in pending (not purged by a superset)",
       host.getPendingEntries(sid).length === before && host.getPendingEntries(sid).some((m) => m.text === TEXT1));
   }
+  // ===== 4. THE ESCAPED-TAG BUG (card fc82dd76, discovered from 691d02e1): gen 1's give-up body itself
+  // QUOTES the pasted_content tag syntax — e.g. discussing this very wrap, exactly as card 691d02e1's
+  // 3 real-world specimens did. The engine's own composer-wrap echo escapes that literal occurrence
+  // (inserts `\` right after `<`, whether or not followed by `/`) when it echoes the body back — the
+  // SAME CLI behavior `unescapeNestedPastedContentTag` (host.ts, card 691d02e1) reverses for the
+  // UNRELATED prompt-mismatch-classification path (`isRecognizedPastedContentWrap`). This purge path's
+  // own unwrap (right after `const sig = textSignature(reportedPrompt)`, @decision 0658d6d8) computes
+  // `textSignature(wrapMatch[2])` over the RAW (still-escaped) captured inner — it never calls
+  // `unescapeNestedPastedContentTag` at all — so that signature can never equal the archived entry's
+  // signature over the genuinely-dispatched (unescaped) TEXT1. Mirrors scenario 1's shape exactly (give
+  // up, re-mint via an unrelated healthy gen 2, then the late wrapped confirmation arrives) with only the
+  // body content and the escaping step on confirm changed. =====
+  {
+    const sid = "sess-wrap-confirm-escaped-tag"; SIDS.push(sid);
+    const TEXT1 = "GEN1_BODY_QUOTES_THE_TAG_SYNTAX_ITSELF: see `<pasted_content id=\"aa11\">...</pasted_content id=\"aa11\">` for reference.";
+    spawnReady(sid);
+
+    const r1 = host.enqueueStdin(sid, TEXT1);
+    check("(setup 4) gen 1 delivered immediately, busy armed", r1.delivered === true && busyLog[sid]?.at(-1) === true);
+    await sharedWaitUntil(() => busyLog[sid]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: "pty-giveup-pasted-content-wrap-confirm: gen1 give-up (escaped-tag)" });
+    check("(setup 4) gen 1 genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
+    check("(setup 4) gen 1's TEXT1 is requeued, sitting ambiguous in pending", host.getPendingEntries(sid).some((m) => m.text === TEXT1));
+
+    // A fresh, unrelated, healthy generation (2) becomes current — same as scenario 1, this strips away
+    // the content-blind FIFO-position fallback's own ability to cover gen 1's entry.
+    const before = host.getPendingEntries(sid).length;
+    confirmNormally(sid, "HEALTHY_UNRELATED_GEN_2_ESCAPED_TAG");
+
+    submitLog.length = 0;
+    // Exactly the CLI's own observed escape (card 691d02e1, and pty-prompt-mismatch.mjs's own fixtures for
+    // it): insert `\` right after `<` whenever followed by (optional `/`) "pasted_content".
+    const escapedInner = TEXT1.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("(fixture sanity 4) the escape actually added characters (otherwise this scenario proves nothing)", escapedInner.length > TEXT1.length);
+    const wrapped = pastedContentWrap("gw04", escapedInner);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: wrapped });
+
+    check("4: a CONTENT-MATCHED CONFIRMED log was emitted for gen 1's own logicalId despite the CLI's escape",
+      submitLog.some((l) => l.includes("CONFIRMED logicalId=") && l.includes("content-matched")));
+    check("4: gen 1's requeued duplicate is purged despite the CLI's escape (no duplicate redelivery)",
+      !host.getPendingEntries(sid).some((m) => m.text === TEXT1));
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
