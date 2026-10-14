@@ -466,10 +466,28 @@ const PASTED_CONTENT_WRAP_RE = /^\n\n<pasted_content id="([0-9a-zA-Z]+)">\n([\s\
  *
  *  The engine also trims TRAILING whitespace off the pasted body, so an `intended` ending in whitespace
  *  comes back as `intended.trimEnd()` inside the wrap (the +57).
- *  @decision 7c1487c8 — accept ONLY `intended` or `intended.trimEnd()` as inner; never widen further. */
+ *  @decision 7c1487c8 — accept ONLY `intended`, `intended.trimEnd()`, or (since `691d02e1`) either of those
+ *  after reversing the CLI's own literal-tag escape (see `unescapeNestedPastedContentTag` below) as inner;
+ *  never widen further than those two mechanisms. */
 function isRecognizedPastedContentWrap(reported: string, intended: string): boolean {
   const m = PASTED_CONTENT_WRAP_RE.exec(reported);
-  return m !== null && (m[2] === intended || m[2] === intended.trimEnd());
+  if (m === null) return false;
+  const inner = m[2]!;
+  if (inner === intended || inner === intended.trimEnd()) return true;
+  const unescaped = unescapeNestedPastedContentTag(inner);
+  return unescaped === intended || unescaped === intended.trimEnd();
+}
+
+/** The current CLI escapes a literal `<pasted_content` / `</pasted_content` occurrence found WITHIN the
+ *  pasted body itself (inserting a single `\` right after the `<`) — e.g. a message that quotes this very
+ *  wrap's own syntax as prose, which is exactly what card 691d02e1's 3 specimens all did. This reverses
+ *  ONLY that one substitution, applied to the already-captured inner (`m[2]`), never to `reported` as a
+ *  whole.
+ *  @decision 691d02e1 — reverses ONLY the CLI's literal `<pasted_content`/`</pasted_content` escape in
+ *  `inner`; never widen to another escape shape without a new specimen. Removal-only, so it can produce a
+ *  false ALARM (if `intended` itself already contains the escaped form) but never mask a real loss. */
+function unescapeNestedPastedContentTag(inner: string): string {
+  return inner.replace(/<\\(\/?)pasted_content/g, "<$1pasted_content");
 }
 
 /** Card b1cc4f01 — sibling diagnostic to `isRecognizedPastedContentWrap`: the wrap FRAMING matches the

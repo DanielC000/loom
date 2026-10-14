@@ -891,6 +891,157 @@ try {
     check("6u: disclosure-safe — no raw content leaks into the decline line", !(decline6u[0] ?? "").includes(intended));
   }
 
+  // ===== 6v. Card 691d02e1 — POSITIVE: the current CLI escapes a literal `<pasted_content`/`</pasted_content`
+  // occurrence found WITHIN the pasted body itself (inserting `\` right after `<`) — e.g. a message that
+  // quotes this very wrap's own syntax as prose, exactly what the real production specimen did (reconstructed
+  // byte-exact: 9211 -> 9274 chars via 5 such insertions, nothing else differing). The escaped form must now
+  // be recognized as benign — content fully present, only the CLI's own disambiguating escape added. =====
+  {
+    const sid = newSession("PastedContentWrapEscapedNestedTag"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "discussing the wrap: it looks like `<pasted_content id=\"aa11\">...</pasted_content id=\"aa11\">` " +
+      "in practice, and sometimes just `<pasted_content>` for short, closed with `</pasted_content>`.";
+    // Exactly the CLI's own observed escape: insert `\` right after `<` whenever followed by (optional `/`) "pasted_content".
+    const escapedInner = intended.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("6v: fixture sanity — the escape actually added characters (otherwise this test proves nothing)", escapedInner.length > intended.length);
+    const reported = `\n\n<pasted_content id="f5c5">\n${escapedInner}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6v: the raw byte-wise scan still diverges — the diagnostic log still fires (corpus preserved)", warnings.length === 1);
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — see scenario 8's own comment for why exactly one tick is
+    // provably sufficient; the negative check below runs synchronously immediately after, no further await.
+    await new Promise((r) => setTimeout(r, 0));
+    check("6v: NEGATIVE CONTROL — despite the raw byte divergence, the session-facing notice does NOT enqueue (recognized escaped-nested-tag wrap, content fully present)", !hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const afterTurn = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6v: and nothing resembling the notice ever reached the pty", !afterTurn.includes("[loom:prompt-mismatch]"));
+    check("6v: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
+  }
+
+  // ===== 6w. Card 691d02e1 — THE SAFETY CASE: the SAME escaped-nested-tag shape as 6v, but with one
+  // additional, UNRELATED character dropped elsewhere in the body (far from any escape site) — a genuine
+  // loss alongside the benign escape must still fire in full. The reversal only removes what it recognizes
+  // by exact substring match; it never repairs or masks any other divergence. =====
+  {
+    const sid = newSession("PastedContentWrapEscapedNestedTagPlusRealLoss"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "discussing the wrap: it looks like `<pasted_content id=\"aa11\">...</pasted_content id=\"aa11\">` " +
+      "in practice, and the rest of this sentence must still arrive here in full, every single word of it.";
+    const escapedInner = intended.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("6w: fixture sanity — the escape actually added characters", escapedInner.length > intended.length);
+    const dropIndex = escapedInner.length - 10; // far from either escape site, well inside the trailing sentence
+    const innerWithRealLossToo = escapedInner.slice(0, dropIndex) + escapedInner.slice(dropIndex + 1);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithRealLossToo}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6w: the diagnostic log fires (a real divergence, escape aside)", warnings.length === 1);
+    const noticeLanded6w = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6w: THE SAFETY CASE — a genuine loss alongside the benign escape still enqueues the session-facing notice (reversal fails closed)", noticeLanded6w);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6w = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6w: the notice actually reached the pty", noticeWrite6w.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6x. Card 691d02e1 — PINS THE ACCEPTED FAILURE DIRECTION: if `intended` itself already contains the
+  // literal substring `<\pasted_content` (a real backslash, as genuine authored content — e.g. quoting this
+  // very fix), the reversal's global replace strips that pre-existing backslash too once it's reached (only
+  // after a direct match already failed, here because of a SEPARATE bare occurrence the CLI genuinely did
+  // escape), turning an otherwise complete, correct transmission into a reported mismatch. Pinned as a false
+  // ALARM, never a missed loss — see docs/decisions/691d02e1-*.md's "one accepted failure direction". =====
+  {
+    const sid = newSession("PastedContentWrapPreExistingBackslashFalseAlarm"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "first, a bare mention `<pasted_content id=\"bare1\">` that the CLI really does escape, " +
+      "and separately, already-escaped-looking prose quoting this exact fix: `<\\pasted_content id=\"pre22\">`.";
+    // Simulate the real CLI: only the BARE occurrence (no backslash already present) gets one inserted;
+    // the already-backslashed occurrence is left untouched (it doesn't match the CLI's own bare-tag pattern).
+    const reportedInner = intended.replace(/(?<!\\)<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("6x: fixture sanity — exactly one occurrence was escaped (the bare one, not the pre-existing one)",
+      reportedInner.length === intended.length + 1);
+    check("6x: fixture sanity — the pre-existing backslashed occurrence is untouched in reportedInner",
+      reportedInner.includes('<\\pasted_content id="pre22">'));
+    const reported = `\n\n<pasted_content id="f5c5">\n${reportedInner}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6x: the diagnostic log fires (inner differs from intended under raw comparison)", warnings.length === 1);
+    const noticeLanded6x = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6x: PINNED — a pre-existing literal `<\\pasted_content` in `intended` makes the global reversal over-strip, so this benign transmission is (deliberately, acceptably) reported as a possible LOSS, not silently recognized", noticeLanded6x);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6x = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6x: the notice actually reached the pty (false alarm, not a silent drop of the notice)", noticeWrite6x.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6y. Card 691d02e1 (Code Reviewer follow-up ee0ec098) — NOTHING in this suite previously pinned the
+  // reversal's own NARROWNESS: the reviewer patched compiled dist/pty/host.js two ways — (i) strip EVERY
+  // backslash unconditionally, (ii) drop the leading `<` anchor (match bare `\pasted_content`/`\/pasted_content`
+  // anywhere) — and every scenario in this file stayed green under BOTH, because every existing defect here
+  // is a DROPPED non-backslash char, which neither widening touches. THE SAFETY CASE: a backslash INSERTED
+  // right after a literal `<` but before an ORDINARY word (not "pasted_content") is a genuine divergence —
+  // not a real escape site at all — and must still fire. This alone defeats widening (i) (which strips it
+  // unconditionally); it does NOT by itself defeat widening (ii) (which still requires "pasted_content" to
+  // follow the backslash, so it never touches this fixture either way) — see 6z for the complementary case
+  // that does. =====
+  {
+    const sid = newSession("PastedContentWrapInsertedBackslashOrdinaryWord"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "see `<plain>` text here — nothing about the wrap syntax at all in this message.";
+    const innerWithExtraBackslash = intended.replace("<plain>", "<\\plain>"); // `<\plain>`, NOT `<\pasted_content...>`
+    check("6y: fixture sanity — exactly one backslash was inserted, right after `<` but before an unrelated word", innerWithExtraBackslash.length === intended.length + 1);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithExtraBackslash}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6y: the diagnostic log fires (inner differs from intended under raw comparison)", warnings.length === 1);
+    const noticeLanded6y = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6y: THE SAFETY CASE — a backslash inserted after `<` but before an ORDINARY word is a genuine divergence and must still fire (defeats a 'strip every backslash' widening)", noticeLanded6y);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6y = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6y: the notice actually reached the pty", noticeWrite6y.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6z. Card 691d02e1 (Code Reviewer follow-up ee0ec098) — the COMPLEMENTARY case to 6y, defeating
+  // widening (ii) (drop the leading `<` anchor): a backslash inserted right before a BARE "pasted_content"
+  // word with NO preceding `<` at all (a casual prose mention, not any kind of tag) is still a genuine
+  // divergence and must still fire. A "<"-anchor-dropped widened regex (`\(\/?)pasted_content` with no `<`
+  // requirement) would wrongly match and strip this bare occurrence regardless of position — exactly the
+  // defect this case exists to catch. (It also defeats widening (i) — stripping every backslash strips this
+  // one too — so this single fixture alone is sufficient to redden BOTH widenings; 6y stays as the direct,
+  // narrowly-scoped check the reviewer's first example named.) =====
+  {
+    const sid = newSession("PastedContentWrapInsertedBackslashBareNoAngleAnchor"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "a casual mention of pasted_content in ordinary prose, nothing wrapped or tagged here at all.";
+    const innerWithExtraBackslash = intended.replace("pasted_content", "\\pasted_content"); // bare, no preceding `<`
+    check("6z: fixture sanity — exactly one backslash was inserted, right before a BARE \"pasted_content\" with no preceding `<`", innerWithExtraBackslash.length === intended.length + 1);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithExtraBackslash}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6z: the diagnostic log fires (inner differs from intended under raw comparison)", warnings.length === 1);
+    const noticeLanded6z = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6z: THE SAFETY CASE — a backslash inserted before a BARE \"pasted_content\" with no `<` anchor is a genuine divergence and must still fire (defeats BOTH a 'strip every backslash' widening and a 'drop the `<` anchor' widening)", noticeLanded6z);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6z = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6z: the notice actually reached the pty", noticeWrite6z.includes("[loom:prompt-mismatch]"));
+  }
+
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not
   // just to daemon-output.log. Reproduces the real incident's shape (session 363002b9, 2026-08-04): an
   // EARLIER generation's own already-confirmed text reappears, byte-for-byte, as what the engine reports

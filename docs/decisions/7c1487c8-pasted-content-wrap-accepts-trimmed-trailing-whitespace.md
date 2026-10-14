@@ -12,7 +12,12 @@ The earlier near-miss diagnostic (`detectPastedContentWrapSingleCharDeficit`, `b
 
 ## Do not
 
-- Do not accept any inner other than `intended` or `intended.trimEnd()`: the recognizer's safety property is that a genuine content loss wrapped in the same framing still notifies. An `intended` with no trailing whitespace whose inner is missing its last non-whitespace char must still decline (test 6r; 6q is the content-mismatch control, 6p the positive cases).
+- Do not accept any inner other than `intended`, `intended.trimEnd()`, or (since `691d02e1`) either of
+  those after reversing the CLI's own literal `<pasted_content`/`</pasted_content` escape — see
+  `docs/decisions/691d02e1-pasted-content-wrap-accepts-escaped-nested-tag.md` for that exact, narrow
+  exception. Still: the recognizer's safety property is that a genuine content loss wrapped in the same
+  framing still notifies. An `intended` with no trailing whitespace whose inner is missing its last
+  non-whitespace char must still decline (test 6r; 6q is the content-mismatch control, 6p the positive cases).
 - Do not widen to leading-whitespace or interior normalization: no specimen shows the engine doing either. If the engine trims a narrower set than JS `trimEnd` (e.g. not NBSP) a mismatch just falls through to arming, which fails closed.
 - Do not treat the unclassified residue above as explained by this record.
 
