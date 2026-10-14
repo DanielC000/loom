@@ -42,6 +42,69 @@ const tmpDirs = [];
 function lastCommitAuthor(cwd) { return git(cwd, ["log", "-1", "--format=%an <%ae>"]); }
 function lastCommitCommitter(cwd) { return git(cwd, ["log", "-1", "--format=%cn <%ce>"]); }
 
+// ── (A) NO identity anywhere — mutation-detecting test gap (CR ff3eec9f): scenario (C) below never
+// exercises a NON-EMPTY identityEnv being merged into the plain union-merge call, so stripping
+// `...identityEnv` from that call (worktrees.ts) would go completely undetected — (C)'s identity is fully
+// resolvable (identityEnv is `{}` there), so splicing it in or out changes nothing observable. This
+// scenario forces BOTH roles to need the fallback, so a dropped merge is the only way this can pass. ─────
+console.log("\n— (A) host has NO git identity configured anywhere —");
+{
+  const isolatedHomeA = path.join(os.tmpdir(), `loom-mmiw-home-a-${sfx}`);
+  fs.mkdirSync(isolatedHomeA, { recursive: true });
+  tmpDirs.push(isolatedHomeA);
+  const emptyGlobalConfigA = path.join(isolatedHomeA, "empty-gitconfig");
+  fs.writeFileSync(emptyGlobalConfigA, "");
+  const savedEnvA = {};
+  for (const k of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) {
+    savedEnvA[k] = process.env[k];
+  }
+  process.env.HOME = isolatedHomeA;
+  process.env.USERPROFILE = isolatedHomeA;
+  process.env.XDG_CONFIG_HOME = isolatedHomeA;
+  process.env.GIT_CONFIG_GLOBAL = emptyGlobalConfigA;
+  process.env.GIT_CONFIG_SYSTEM = emptyGlobalConfigA;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) delete process.env[k];
+
+  try {
+    const repo = path.join(os.tmpdir(), `loom-mmiw-repo-a-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true });
+    tmpDirs.push(repo);
+    const ID_ARGS = ["-c", "user.email=setup-mmiw-a@loom", "-c", "user.name=setup-mmiw-a"]; // scoped: persists nothing
+    execSync("git init -q", { cwd: repo });
+    fs.writeFileSync(path.join(repo, "README.md"), "# mmiw-a\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", [...ID_ARGS, "commit", "-q", "-m", "init"], { cwd: repo });
+
+    const wt = path.join(os.tmpdir(), `loom-mmiw-wt-a-${sfx}`);
+    tmpDirs.push(wt);
+    execFileSync("git", ["worktree", "add", "-q", "-b", "loom/mmiw-a-branch", wt, "HEAD"], { cwd: repo });
+    fs.writeFileSync(path.join(wt, "branch-file.txt"), "branch work\n");
+    execFileSync("git", ["add", "."], { cwd: wt });
+    execFileSync("git", [...ID_ARGS, "commit", "-q", "-m", "branch work"], { cwd: wt });
+
+    fs.writeFileSync(path.join(repo, "main-file.txt"), "main advance\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", [...ID_ARGS, "commit", "-q", "-m", "main advance"], { cwd: repo });
+
+    const res = await mergeMainIntoWorktree(repo, wt);
+
+    check(`(A) mergeMainIntoWorktree succeeds despite no configured identity anywhere (reason: ${res.ok ? "n/a" : res.reason})`, res.ok === true);
+    check("(A) a real merge actually happened (merged:true)", res.ok === true && res.merged === true);
+    if (res.ok) {
+      const author = lastCommitAuthor(wt);
+      check(`[FIX TARGET] (A) the landed merge commit's AUTHOR is the Loom fallback identity (got "${author}")`, author === "Loom <loom@localhost>");
+      const committer = lastCommitCommitter(wt);
+      check(`[FIX TARGET] (A) the landed merge commit's COMMITTER is the Loom fallback identity (got "${committer}")`, committer === "Loom <loom@localhost>");
+    }
+  } finally {
+    for (const k of Object.keys(savedEnvA)) {
+      if (savedEnvA[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnvA[k];
+    }
+  }
+}
+
 console.log("\n— (C) name in config, email ONLY via EMAIL env — must be kept, not overridden —");
 
 const isolatedHome = path.join(os.tmpdir(), `loom-mmiw-home-${sfx}`);
@@ -113,7 +176,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — mergeMainIntoWorktree's union-merge commit keeps a partially-configured (name in config, email via EMAIL env) identity, never silently overridden by the generic Loom fallback."
+  ? "\n✅ ALL PASS — mergeMainIntoWorktree's union-merge commit lands under the generic fallback identity when the host has none configured, and keeps a partially-configured (name in config, email via EMAIL env) identity, never silently overridden by the generic Loom fallback, when it does."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const d of tmpDirs) {

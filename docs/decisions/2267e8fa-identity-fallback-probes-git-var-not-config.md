@@ -64,6 +64,68 @@ and let the real commit itself surface any genuine error, rather than silently r
 commit as Loom on a transient probe hiccup. The one thing this *can't* do is distinguish "transient" from
 "a git version whose fatal wording has changed" — both fall through to "treated as resolved," which is
 the intentionally safer failure direction (a real commit failure is loud; a silently wrong author is not).
+**Card `7b59e981` extended this to a synchronous `makeProbeGit` CONSTRUCT failure too** (e.g. a worktree
+vanishing mid-flight) — previously unguarded and able to throw past a caller with no try/catch
+(`attemptCodexAutoCommit`); now wrapped and degrading to "resolvable" the same way.
+
+**Card `7b59e981` also extended the matched fatal set**: `user.useConfigOnly=true` makes `git var` emit a
+DIFFERENT fatal ("no email/name was given and auto-detection is disabled") than the ordinary auto-detect
+failure this card originally matched — verified against real git 2.47.0. A host with that config set used
+to read as "resolvable" and the fallback never engaged at all; `isGitIdentityUnresolvedError` now matches
+both shapes.
+
+## Superseded by `7b59e981` — the fallback is now PER-ROLE env, never a shared `-c user.*` pair
+
+The "Checked separately per role, applied as ONE override" section above, and the "CORRECTED" paragraph
+right after it, describe the ORIGINAL mechanism: probe each role independently, but apply a single,
+SHARED `-c user.name=`/`-c user.email=` override when either role fails. That round-2 correction already
+identified the residual contamination (a `-c user.email=` override reaching an already-resolvable role
+whose email came from `EMAIL`/auto-detect rather than its own role-scoped env) and deferred the real fix
+to a follow-up card — this is that card.
+
+**The fix:** `resolveGitIdentityFallbackArgs`/`resolveGitIdentityFallbackArgsSync` now return a PER-ROLE
+env override (`buildGitIdentityFallbackEnv`, `git/bounded.ts`) — `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` only
+when the AUTHOR probe failed, `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` only when the COMMITTER probe
+failed, never both pairs for one role resolving and the other not. A role-scoped env var ALWAYS outranks
+`-c`/config on git's own precedence (see the "CORRECTED" paragraph above), so the injected override for
+the failing role always wins, and — the structural property the old mechanism lacked — a role-scoped env
+var for one role has ZERO effect on the OTHER role's resolution. This isn't a narrower patch of one repro;
+it removes the shared mutable surface (global `-c user.*` config) the whole contamination class lived in.
+
+Every call site merges the returned record into the REAL commit's own already-explicit `env` object (a
+fresh plain-object spread built at the call site, e.g. `{ ...nonInteractiveEnv(), ...identityEnv }`) —
+never `.env()` on an existing instance, which stays exactly as unsafe as this card's own "Do not" below
+already says. The one call site with no existing per-call env hook (`mergeMainIntoWorktree`'s `owedBase`
+branch, `commit-tree`) builds a dedicated one-off `canonicalGit(worktreePath, timeoutMs, mergedEnv)`
+instance — same factory, same hardening, same `timeoutMs` bound — used for that ONE call only, never
+shared or reused, and never constructed at all when no fallback is needed or a test `gitFactory` is
+active (byte-identical to before in both cases).
+
+**CORRECTED (CR `ff3eec9f`) — that one-off instance's `mergedEnv` must be `localReadGitEnv(nonInteractiveEnv(),
+identityEnv)`, never a bare `{ ...nonInteractiveEnv(), ...identityEnv }` spread.** `wtGit` (the instance
+this one-off replaces for that ONE call) never carried an explicit env at all, so simple-git's
+`blockUnsafeOperationsPlugin` never ran against it; passing ANY explicit env arms that plugin, and
+`nonInteractiveEnv()` alone doesn't satisfy it (it scrubs the editor/pager family only, never the
+transport family) — an ambient `GIT_ASKPASS` (e.g. VS Code's own terminal sets it) made this call throw
+"not permitted without enabling allowUnsafeAskPass" on a call that used to be silent about it entirely.
+`localReadGitEnv` strips the transport family before merging in the fallback, which is safe here because
+`commit-tree` never touches a remote. So this one call site DOES now carry an explicit env where it
+never did before — a narrow, deliberate exception to "byte-identical to before when no fallback is
+needed," confined to this one call.
+
+**Residual, accepted — corrected (CR `ff3eec9f`): the limit is the PROBE, not git's own resolution.**
+`git` itself resolves name and email as two fully independent components regardless of source — e.g.
+`EMAIL=real@user` + `GIT_COMMITTER_NAME=OnlyName` (no `GIT_COMMITTER_EMAIL`) resolves cleanly as
+`OnlyName <real@user>`; there is no git-level obstacle to overriding just one component. The actual limit
+is `git var GIT_<ROLE>_IDENT` itself: it dies with ONE combined fatal the moment either component is
+missing, so the probe's own `resolvable: boolean` signal per role cannot distinguish "name failed" from
+"email failed" — `buildGitIdentityFallbackEnv` sets BOTH of a failing role's components because that's
+all the probe tells it. A FINER fix is possible: the fatal TEXT itself already distinguishes the two
+("empty ident name" vs "empty ident email", "unable to auto-detect name" vs "...email address", "no name
+was given..." vs "no email was given...") — a probe that parsed which specific wording matched could
+inject only the genuinely-missing component and leave an already-resolvable sibling component (e.g. a
+real auto-detected name next to a failing email) untouched. Not implemented here — deferred as a real,
+nameable finer-grained improvement, not a claimed-impossible limitation.
 
 **Message-matched on the async path, `.status === 128` AND the matched message on the sync path.**
 simple-git's `.raw()` exposes no real process exit code for a plain non-zero exit (`errorDetectionPlugin`
@@ -89,12 +151,16 @@ child-process API — `execFileSync`, not simple-git's `.raw()`), so it has its 
 `resolveGitIdentityFallbackArgsSync` — but follows the identical rule (probe author/committer separately
 via `git var`, fall back only when one is genuinely unresolvable).
 
-**Out of scope, deliberately:** `computeOwedLanding` (`git/worktrees.ts`) ALSO references
-`FALLBACK_GIT_IDENTITY`, but unconditionally — it builds THROWAWAY commit-tree objects for computing a
-tree (nothing is checked out, no ref moves, as its own doc states), never a real landed, attributed
-commit. It was never one of the four buggy sites this card named, and applying a conditional probe there
-would add real cost to a purely internal computation with no identity-attribution consequence. Left
-untouched.
+**Out of scope, deliberately:** `computeOwedLanding` (`git/worktrees.ts` ~7745) ALSO references
+`FALLBACK_GIT_IDENTITY`, but unconditionally, via the ORIGINAL shared `-c user.name=`/`-c user.email=`
+pair — it builds THROWAWAY commit-tree objects for computing a tree (nothing is checked out, no ref moves,
+as its own doc states), never a real landed, attributed commit. It was never one of the four buggy sites
+this card named, and applying a conditional probe there would add real cost to a purely internal
+computation with no identity-attribution consequence. Left untouched, still unconditional, still the
+shared `-c` pair — **this is NOT a violation of the "Do not reintroduce a shared `-c user.*` pair" bullet
+below**, which scopes to the per-role fallback card `7b59e981` fixed (the four real, landed-commit sites);
+`computeOwedLanding`'s own throwaway, never-attributed use was carved out of that card's scope from the
+start and stays carved out here.
 
 ## Do not
 
@@ -109,12 +175,16 @@ untouched.
   matched message) as "unresolved" — a timeout or spawn failure must fail toward the user's own identity,
   not toward silently re-authoring as Loom.
 - ~~Do not build asymmetric, role-specific override args... the existing combined pair is already safe for
-  the mixed case.~~ **RETRACTED (CR `4eb77ad0` round 2) — this is FALSE when the resolving role's email
-  (or name) comes from `EMAIL`/auto-detect rather than its own role-scoped env; see the corrected
-  paragraph above.** Per-role env injection (`GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/
-  `GIT_COMMITTER_EMAIL`, set only for the role that actually needs it, never the combined `-c` pair) IS
-  the real fix for this residual — a KNOWN, DEFERRED gap, not implemented by this card. Filed as its own
-  follow-up card, `7b59e981`; implement it there, not by reopening this one.
+  the mixed case.~~ **RETIRED — implemented by `7b59e981`, see "Superseded by `7b59e981`" above.** This
+  bullet used to defer the per-role fix as a known gap; it is no longer deferred, so the prohibition it
+  stated (against building asymmetric per-role args) no longer applies — per-role env IS now the mechanism.
+- **(card `7b59e981`) Do not reintroduce a shared `-c user.name=`/`-c user.email=` fallback pair for any of
+  the FOUR real, landed-commit sites this card and `7b59e981` cover** — that is precisely the
+  contamination surface this card's own round-2 correction identified and `7b59e981` closed; a shared
+  override can never discriminate roles, so it will always carry the same residual risk regardless of how
+  carefully its call sites are reviewed. Use `buildGitIdentityFallbackEnv`. (`computeOwedLanding`'s own
+  unconditional, throwaway-commit use of the shared pair is a SEPARATE, pre-existing, deliberately
+  out-of-scope exception — see that bullet above; it does not violate this one.)
 - (CR `7163d56a` round 2) Do not run the identity probe on the caller's REAL commit instance, and do not
   call `.env()` on that instance to pin the probe's locale — `.env()`'s single-object form REPLACES
   `_executor.env` wholesale (simple-git's own `Git2.prototype.env`), so it would permanently clobber
@@ -134,10 +204,14 @@ A host whose identity `git` can genuinely resolve — by ANY of its own rules, n
 `user.email` config — now commits under that real identity on every one of the four sites, instead of
 having it silently discarded for the generic Loom fallback whenever the identity happens to be
 partially-configured, EMAIL-env-completed, or auto-detected. A host with genuinely no resolvable identity
-still gets the fallback, unchanged. **Residual, pre-existing, NOT closed by this card:** when the
-fallback genuinely IS needed (one role unresolvable), the OTHER role's identity can still come out as a
-silently rewritten hybrid if that role's own email (or name) resolved via `EMAIL`/auto-detect rather than
-its own role-scoped env — see the corrected paragraph above and the deferred follow-up card, `7b59e981`.
+still gets the fallback, unchanged. **The hybrid residual this card originally left open IS now closed, by
+`7b59e981`** (see "Superseded by `7b59e981`" above): when the fallback genuinely IS needed (one role
+unresolvable), the OTHER, already-resolvable role's identity is never touched, regardless of whether that
+role's email/name resolved via its own role-scoped env, `EMAIL`, or auto-detect. The narrower residual
+`7b59e981` itself accepts — a role needing the fallback gets BOTH its name and email replaced, even if
+only one component was the real problem, because the PROBE's per-role signal can't tell which component
+failed (git's own resolution has no such limit) — is named in that same section, along with the
+finer-grained fix (parsing the fatal's own distinguishing wording) that remains possible but unimplemented.
 
 ## Source
 

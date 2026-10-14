@@ -2705,7 +2705,9 @@ export async function attemptCodexAutoCommit(
   // byte-identically to before this change. `baseEnv` is this commit's own env (`nonInteractiveEnv()`,
   // the same env `killableCanonicalRaw` below is called with) so the probe reads identity under the
   // SAME env the real commit will run under.
-  const identityArgs = await resolveGitIdentityFallbackArgs(
+  // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into the commit's own explicit env below, never
+  // spliced into argv.
+  const identityEnv = await resolveGitIdentityFallbackArgs(
     worktreePath, timeoutMs,
     deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
     nonInteractiveEnv(),
@@ -2735,11 +2737,11 @@ export async function attemptCodexAutoCommit(
   // `quarantineRepoPath`": `24c0bdba` already disables hooks here (core.hooksPath=devNull, unrelated
   // reason — see this function's own factory), so there's no hook-escape vector to close; left at default.
   const messageArgs = body ? ["-m", subject, "-m", body] : ["-m", subject];
-  const commitArgs = [...identityArgs, ...cfg, "commit", "--no-verify", ...messageArgs];
+  const commitArgs = [...cfg, "commit", "--no-verify", ...messageArgs];
   const commitLabel = "codex-auto-commit commit";
   let commitThrew: unknown;
   try {
-    await killableCanonicalRaw(worktreePath, commitArgs, timeoutMs, commitLabel, deps.gitFactory, nonInteractiveEnv());
+    await killableCanonicalRaw(worktreePath, commitArgs, timeoutMs, commitLabel, deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv });
   } catch (e) {
     commitThrew = e;
   }
@@ -7406,13 +7408,14 @@ export async function mergeMainIntoWorktree(
     if (mergeBase === mainSha) return { ok: true, merged: false, mainSha };
   } catch { /* fall through to attempt the merge */ }
 
-  // `git merge --no-edit` creates a real commit — on a host where git can't resolve an identity for this
-  // commit (e.g. a CI runner) that commit step fails even though the merge itself is clean. Scoped `-c`
-  // args (never `.env()` — simple-git's `blockUnsafeOperationsPlugin` rejects an explicit
-  // `GIT_CONFIG_GLOBAL`/`SYSTEM` override) fall back to a generic identity ONLY when git itself can't
+  // `git merge --no-edit` (and the owedBase branch's `commit-tree`, below) creates a real commit — on a
+  // host where git can't resolve an identity for this commit (e.g. a CI runner) that step fails even
+  // though the merge itself is clean. Falls back to a generic identity ONLY when git itself can't
   // determine one (card 2267e8fa) — a host whose own identity git can resolve (by ANY of its normal
   // rules, not just `user.name`/`user.email` config) is unaffected.
-  const identityArgs = await resolveGitIdentityFallbackArgs(
+  // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into each commit call's own explicit env below,
+  // never a shared `-c user.*` pair spliced into argv.
+  const identityEnv = await resolveGitIdentityFallbackArgs(
     worktreePath, timeoutMs,
     deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
   );
@@ -7440,7 +7443,23 @@ export async function mergeMainIntoWorktree(
       const tipTree = (await wtRaw(["rev-parse", `${tip}^{tree}`])).trim();
       const mainIsAncestor = (await wtRaw(["merge-base", tip, mainSha])).trim() === mainSha;
       if (mainIsAncestor && landing.tree === tipTree) return { ok: true, merged: false, mainSha }; // the branch already IS main plus its owed commits
-      commit = (await wtRaw([...identityArgs, "commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`])).trim();
+      // @decision 2267e8fa (card 7b59e981) — a one-off `canonicalGit` instance carries the fallback ONLY
+      // when actually needed; `wtGit` is reused byte-identically otherwise, including under a test
+      // gitFactory (never `.env()` on `wtGit` itself).
+      //
+      // CR ff3eec9f: `localReadGitEnv`, never a bare `{...nonInteractiveEnv(), ...identityEnv}` spread —
+      // `commit-tree` had NO explicit env before this card, so simple-git's `blockUnsafeOperationsPlugin`
+      // never ran on it; ANY explicit env arms that plugin, and `nonInteractiveEnv()` alone doesn't satisfy
+      // it (scrubs editor/pager keys only, never the transport family) — an ambient `GIT_ASKPASS` (e.g.
+      // VS Code's terminal) would throw "not permitted without allowUnsafeAskPass" otherwise.
+      // `commit-tree` never touches a remote, so stripping the transport family here is safe.
+      const commitTreeGit = (Object.keys(identityEnv).length > 0 && !deps.gitFactory)
+        ? canonicalGit(worktreePath, timeoutMs, localReadGitEnv(nonInteractiveEnv(), identityEnv))
+        : wtGit;
+      commit = (await withTimeout(
+        commitTreeGit.raw(["commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`]),
+        timeoutMs, "git commit-tree (owed landing)",
+      )).trim();
     } catch (e) {
       const d = describeGitFailure(e);
       // @decision 8c3d6c04 — these are bare-`withTimeout` reads/a `commit-tree` write of a dangling object
@@ -7549,7 +7568,7 @@ export async function mergeMainIntoWorktree(
     // spawn-error-code check (`isTransientSpawnErrorCode`) can read its structured `.code`.
     let mergeErrObj: unknown;
     try {
-      await killableCanonicalRaw(worktreePath, [...identityArgs, "merge", "--no-edit", mainSha], mergeTimeoutMs, "git merge main into worktree", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+      await killableCanonicalRaw(worktreePath, ["merge", "--no-edit", mainSha], mergeTimeoutMs, "git merge main into worktree", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath);
     } catch (e) {
       if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
       if (treeDeathUnconfirmed(e)) {
@@ -8480,7 +8499,9 @@ async function mergeBranchLocked(
     // HERE, before the pathset capture below — two read-only `git var` probes, but the load-bearing
     // adjacency rule on that capture (card c862f14c, just below) still forbids any git call between it and
     // the commit, so this must not sit between them either.
-    const identityArgs = await resolveGitIdentityFallbackArgs(
+    // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into the commit's own explicit env at the call
+    // below — a pure JS object merge, never a git call, so the adjacency rule above still holds.
+    const identityEnv = await resolveGitIdentityFallbackArgs(
       repoPath, timeoutMs,
       deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
       nonInteractiveEnv(),
@@ -8503,7 +8524,7 @@ async function mergeBranchLocked(
     // @decision 24c0bdba — kill-confirmed: a "failure" here can still mean the commit landed anyway (a
     // post-commit hook outliving the timeout) — re-verify via HEAD and report truthfully, never assume.
     try {
-      await killableCanonicalRaw(repoPath, [...identityArgs, "commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
+      await killableCanonicalRaw(repoPath, ["commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled);
     } catch (e) {
       // @decision bde5d1fe — already quarantined at the re-check; refuse directly, never re-raise. Name
       // the real staged residue the squash already left behind (Code Review of b4315b52, item 4) so a

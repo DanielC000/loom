@@ -11,7 +11,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `resolveGitIdentityFallbackArgs` return (not hang) within a small, bounded multiple of `timeoutMs` —
 // and, since a timeout is NOT git's own "cannot determine identity" fatal, it is treated as RESOLVED (per
 // this card's own "any other probe error ⇒ fail toward the user's identity" ruling), so the result is the
-// empty fallback-args array, never the generic Loom override.
+// empty fallback-env object `{}` (card 7b59e981), never a generic Loom override.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/identity-probe-timeout-bound.mjs
 import { performance } from "node:perf_hooks";
@@ -50,7 +50,7 @@ const elapsedMs = performance.now() - start;
 check(`resolveGitIdentityFallbackArgs returns (does not hang) against a never-settling probe — settled in ${elapsedMs.toFixed(0)}ms (cap ${WALLCLOCK_CAP_MS}ms)`, elapsedMs < WALLCLOCK_CAP_MS);
 check("the probe factory was actually invoked (the timeout path was genuinely exercised, not short-circuited)", factoryCalls === 1);
 check("both the author AND committer `var` probes were attempted (genuinely bounded per-call, not just once)", rawCalls === 2);
-check("a timed-out probe is treated as RESOLVED, never git's own 'cannot determine identity' fatal — no fallback args returned", Array.isArray(result) && result.length === 0);
+check("a timed-out probe is treated as RESOLVED, never git's own 'cannot determine identity' fatal — no fallback env returned", typeof result === "object" && !Array.isArray(result) && Object.keys(result).length === 0);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a never-settling `git var` probe cannot widen resolveGitIdentityFallbackArgs past its own bounded timeout, and a timeout is treated as resolved (fail toward the user's own identity), never as git's own unresolvable-identity fatal."

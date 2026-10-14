@@ -23,10 +23,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       this card found: a bare `git config user.email` read sees nothing and wrongly triggers a fallback
 //       that silently also overrides the configured NAME.
 //   (D) identity resolvable ONLY via GIT_AUTHOR_*/GIT_COMMITTER_* env (no config, no EMAIL) — kept too.
+//   (E) card 7b59e981's HYBRID case: author resolvable via EMAIL env, committer genuinely unresolvable —
+//       the landed commit must come out SPLIT (author kept, committer gets the fallback), never the old
+//       shared `-c user.*` pair's cross-role contamination (which also rewrote the author's real email).
 //
-// (C) is the ONLY scenario that actually DISCRIMINATES the fix (RED-proven on pre-fix sha 43a65f27, via
+// (C) is the scenario that discriminates THIS card's probe fix (RED-proven on pre-fix sha 43a65f27, via
 // negative-control): (A)/(B)/(D) all pass identically on the OLD config-read probe too, so a pass on any
-// of them is a regression pin, never fix evidence — see CR 4eb77ad0 round 2 (card 2267e8fa).
+// of them is a regression pin, never fix evidence — see CR 4eb77ad0 round 2 (card 2267e8fa). (E)
+// discriminates the SEPARATE per-role fix (card 7b59e981) the same way: it fails on the shared `-c`
+// mechanism and passes only once the fallback is injected per-role.
 //
 // (A) isolates HOME/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM so the REAL host's own global git
 // identity (this self-hosting Windows machine has one configured) can never leak in and mask the bug —
@@ -293,8 +298,71 @@ function lastCommitCommitter(repo) {
   }
 }
 
+// ── (E) card 7b59e981 — the HYBRID case, end-to-end through the REAL solo squash: author resolvable via
+// EMAIL env (a non-role-scoped layer), committer genuinely unresolvable. Proves the PER-ROLE fix lands a
+// SPLIT identity — author kept exactly, committer gets the generic fallback — never the old shared `-c
+// user.*` pair's cross-role contamination (which would have overwritten the author's real email too).
+// GIT_COMMITTER_NAME="" (an explicit, empty role-scoped env var) forces a REAL, deterministic, host-
+// independent "empty ident name" failure for the committer probe specifically — portable where relying on
+// real auto-detect is not (this host's own NAME auto-detect succeeds unconditionally via a Windows API
+// call no env var touches, and EMAIL backstops BOTH roles' email whenever neither sets its own role-scoped
+// GIT_AUTHOR_EMAIL/GIT_COMMITTER_EMAIL, so neither can be made to fail portably on its own). ──────────────
+{
+  console.log("\n— (E) HYBRID end-to-end: author via EMAIL env (kept), committer genuinely unresolvable (gets the fallback) —");
+  const isolatedHome = path.join(os.tmpdir(), `loom-mssif-home-e-${sfx}`);
+  fs.mkdirSync(isolatedHome, { recursive: true });
+  tmpDirs.push(isolatedHome);
+  const emptyGlobalConfig = path.join(isolatedHome, "empty-gitconfig");
+  fs.writeFileSync(emptyGlobalConfig, "");
+  const savedEnv = {};
+  for (const k of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) {
+    savedEnv[k] = process.env[k];
+  }
+  process.env.HOME = isolatedHome;
+  process.env.USERPROFILE = isolatedHome;
+  process.env.XDG_CONFIG_HOME = isolatedHome;
+  process.env.GIT_CONFIG_GLOBAL = emptyGlobalConfig;
+  process.env.GIT_CONFIG_SYSTEM = emptyGlobalConfig;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  delete process.env.GIT_AUTHOR_EMAIL;
+  delete process.env.GIT_COMMITTER_EMAIL;
+  delete process.env.GIT_COMMITTER_NAME;
+  process.env.GIT_AUTHOR_NAME = "Alice";
+  process.env.EMAIL = "alice@real";
+
+  try {
+    // Setup (repo init + the worktree's own branch-work commit) runs BEFORE GIT_COMMITTER_NAME is forced
+    // empty below — those scoped `-c` setup commits would otherwise fail too, since an explicit (even
+    // empty) role-scoped env var outranks `-c` on git's own precedence.
+    const repo = makeRepo("e");
+    const ID_ARGS = ["-c", "user.email=setup-e@loom", "-c", "user.name=setup-e"]; // scoped: persists nothing
+    fs.writeFileSync(path.join(repo, "README.md"), "# e\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", [...ID_ARGS, "commit", "-q", "-m", "init", "--allow-empty"], { cwd: repo });
+
+    const branch = "loom/mssif-e";
+    makeWorktree(repo, branch, "feature-e.txt", `e-content-${sfx}\n`, ID_ARGS);
+
+    process.env.GIT_COMMITTER_NAME = ""; // explicit empty — a real, deterministic committer-ident failure
+    const res = await mergeBranch(repo, branch, "test(git): verify squash hybrid fallback split (E)");
+
+    check(`(E) mergeBranch succeeds (reason: ${res.ok ? "n/a" : res.reason})`, res.ok === true);
+    if (res.ok) {
+      const author = lastCommitAuthor(repo);
+      check(`(E) [FIX TARGET] the landed commit's AUTHOR keeps the real EMAIL-env address, NOT the fallback (got "${author}")`, author === "Alice <alice@real>");
+      const committer = lastCommitCommitter(repo);
+      check(`(E) the landed commit's COMMITTER gets the generic Loom fallback (got "${committer}")`, committer === "Loom <loom@localhost>");
+    }
+  } finally {
+    for (const k of Object.keys(savedEnv)) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the solo squash commit lands under a generic fallback identity when the host has none configured, and under the host's own resolvable identity (config, config+EMAIL env, or env-only), unchanged, when it does."
+  ? "\n✅ ALL PASS — the solo squash commit lands under a generic fallback identity when the host has none configured, under the host's own resolvable identity (config, config+EMAIL env, or env-only) unchanged when it does, and under a correctly SPLIT per-role identity when only one role is genuinely unresolvable."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const d of tmpDirs) {

@@ -379,7 +379,10 @@ async function landBranchCommitsIndividually(
   // Card 2267e8fa: a cherry-pick's own commit step needs a resolvable identity exactly like
   // mergeMainIntoWorktree's `git merge --no-edit` does — falls back via the ONE shared helper
   // (resolveGitIdentityFallbackArgs, git/bounded.ts) ONLY when git itself can't determine one.
-  const identityArgs = await resolveGitIdentityFallbackArgs(
+  // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into each call's own explicit env below; the
+  // manual "commit --author ..." call below already pins author via that flag (outranking everything),
+  // so a committer-only fallback here never touches it.
+  const identityEnv = await resolveGitIdentityFallbackArgs(
     batchWorktreePath, timeoutMs,
     deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
     nonInteractiveEnv(),
@@ -478,8 +481,8 @@ async function landBranchCommitsIndividually(
       // @decision 24c0bdba — kill-confirmed: mutates the same worktree index the commit below (and any
       // later candidate in this loop) will also touch.
       await killableCanonicalRaw(
-        batchWorktreePath, [...identityArgs, "cherry-pick", "--no-commit", sha],
-        timeoutMs, "git cherry-pick (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath,
+        batchWorktreePath, ["cherry-pick", "--no-commit", sha],
+        timeoutMs, "git cherry-pick (batch land)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
       );
     } catch (e) {
       // @decision bde5d1fe — already quarantined at the re-check (never THIS call's own kill) — refuse
@@ -545,8 +548,8 @@ async function landBranchCommitsIndividually(
       // @decision 24c0bdba — kill-confirmed: an orphaned child here must never later land onto whatever
       // this SAME worktree happens to be staging by the time it resumes (rollback, or the next candidate).
       await killableCanonicalRaw(
-        batchWorktreePath, [...identityArgs, "commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage],
-        timeoutMs, "git commit (batch land)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath,
+        batchWorktreePath, ["commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage],
+        timeoutMs, "git commit (batch land)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
       );
     } catch (e) {
       // @decision bde5d1fe — already quarantined at the re-check (never THIS call's own kill) — refuse
@@ -605,8 +608,8 @@ async function landBranchCommitsIndividually(
       const amendedMessage = `${finalMessage.replace(/\s+$/, "")}\nLoom-Worker-Base: ${batchHeadBefore}\nLoom-Worker-PathSet: ${digest}\n`;
       // @decision 24c0bdba — kill-confirmed, same reasoning as the plain commit above.
       await killableCanonicalRaw(
-        batchWorktreePath, [...identityArgs, "commit", "--amend", "-m", amendedMessage],
-        timeoutMs, "git commit --amend (batch land, pathset)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath,
+        batchWorktreePath, ["commit", "--amend", "-m", amendedMessage],
+        timeoutMs, "git commit --amend (batch land, pathset)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
       );
     } catch (e) {
       // @decision bde5d1fe — already quarantined at the re-check (nothing spawned, so no HEAD recovery to

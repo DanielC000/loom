@@ -67,11 +67,11 @@ export function isNotAGitRepositoryError(e: unknown): boolean {
  *  commit-creating path shares this ONE copy; a duplicate is how the per-site probes drifted before. */
 export const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
 
-/** @decision 2267e8fa — `git var` fatal for a genuinely unresolvable identity. Never match this against
- *  an unpinned-locale probe (see `resolveGitIdentityFallbackArgs`'s `LC_ALL=C`/`LANGUAGE=C` pin), and
- *  never re-duplicate this regex — the sync mirror (`vault/versioner.ts`) reuses this SAME export. */
+/** @decision 2267e8fa — `git var` fatal for a genuinely unresolvable identity, INCLUDING the different
+ *  fatal under `user.useConfigOnly=true` (card 7b59e981). Never match this against an unpinned-locale
+ *  probe, and never re-duplicate this regex — the sync mirror (`vault/versioner.ts`) reuses this export. */
 export function isGitIdentityUnresolvedError(e: unknown): boolean {
-  return /(unable to auto-detect (?:name|email address)|empty ident (?:name|email))/i.test((e as Error)?.message ?? "");
+  return /(unable to auto-detect (?:name|email address)|empty ident (?:name|email)|no (?:name|email) was given and auto-detection is disabled)/i.test((e as Error)?.message ?? "");
 }
 
 /** @decision 2267e8fa — never drop this `withTimeout` wrap: a never-settling `git var` must not silently
@@ -90,6 +90,16 @@ async function probeGitIdentResolvable(
   }
 }
 
+/** @decision 2267e8fa — per-role (card 7b59e981): injects only the unresolvable role's GIT_<ROLE>_NAME/EMAIL,
+ *  never a shared user.name/user.email pair that would also override an already-resolvable role.
+ *  Residual: still replaces that role's identity wholesale, even when only one of its two fields failed. */
+export function buildGitIdentityFallbackEnv(authorResolvable: boolean, committerResolvable: boolean): Record<string, string> {
+  return {
+    ...(authorResolvable ? {} : { GIT_AUTHOR_NAME: FALLBACK_GIT_IDENTITY.name, GIT_AUTHOR_EMAIL: FALLBACK_GIT_IDENTITY.email }),
+    ...(committerResolvable ? {} : { GIT_COMMITTER_NAME: FALLBACK_GIT_IDENTITY.name, GIT_COMMITTER_EMAIL: FALLBACK_GIT_IDENTITY.email }),
+  };
+}
+
 /** @decision 2267e8fa — THE ONE shared helper every commit-creating path uses for a fallback identity
  *  decision. Do not probe with a bare `user.name`/`user.email` config read, or re-duplicate this per
  *  site, again — both are how a resolvable (e.g. env-only) identity used to be wrongly read as missing.
@@ -104,20 +114,27 @@ async function probeGitIdentResolvable(
  *  `makeProbeGit` — so the PROBE always reads git's fatal in English (git's own locale negotiation
  *  consults `LANGUAGE`, a GNU gettext extension, AHEAD of `LC_ALL`; pinning only one is not enough) no
  *  matter what locale the host or the caller's real instance runs under, while the real commit's own
- *  env is untouched — never built from this merged probe env. */
+ *  env is untouched — never built from this merged probe env.
+ *
+ *  @decision 2267e8fa (card 7b59e981) — returns PER-ROLE env overrides ({@link buildGitIdentityFallbackEnv}), merged by the
+ *  caller into the real commit's own explicit env (never `.env()` on an existing instance). Never throws: a
+ *  synchronous `makeProbeGit` construct failure degrades to resolvable ({}) — some callers have no try/catch. */
 export async function resolveGitIdentityFallbackArgs(
   cwd: string,
   timeoutMs: number,
   makeProbeGit: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw"> = canonicalGit,
   baseEnv?: Record<string, string | undefined>,
-): Promise<string[]> {
+): Promise<Record<string, string>> {
   const probeEnv = localReadGitEnv(baseEnv ?? process.env, { LC_ALL: "C", LANGUAGE: "C" });
-  const probeGit = makeProbeGit(cwd, timeoutMs, probeEnv);
+  let probeGit: Pick<SimpleGit, "raw">;
+  try {
+    probeGit = makeProbeGit(cwd, timeoutMs, probeEnv);
+  } catch {
+    return {};
+  }
   const authorResolvable = await probeGitIdentResolvable(probeGit, "GIT_AUTHOR_IDENT", timeoutMs);
   const committerResolvable = await probeGitIdentResolvable(probeGit, "GIT_COMMITTER_IDENT", timeoutMs);
-  return (authorResolvable && committerResolvable)
-    ? []
-    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+  return buildGitIdentityFallbackEnv(authorResolvable, committerResolvable);
 }
 
 /** @decision 2267e8fa — adapts a legacy 2-arg `gitFactory` test seam to the 3-arg probe shape. Do not

@@ -8,7 +8,7 @@ import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
-import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, isGitIdentityUnresolvedError } from "../git/bounded.js";
+import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, buildGitIdentityFallbackEnv, isGitIdentityUnresolvedError } from "../git/bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 
@@ -623,11 +623,13 @@ function isGitIdentityUnresolvedErrorSync(e: unknown): boolean {
 
 /** @decision 2267e8fa — SYNCHRONOUS `resolveGitIdentityFallbackArgs`. Builds a FRESH probe-only opts
  *  object (locale pin added on top of `opts.env`) rather than mutating `opts` — the real commit that
- *  follows must see its own env unchanged. `runGit` mirrors `flushSync`'s `flushExecFileSyncImpl` seam. */
+ *  follows must see its own env unchanged. `runGit` mirrors `flushSync`'s `flushExecFileSyncImpl` seam.
+ *  @decision 2267e8fa (card 7b59e981) — returns PER-ROLE env overrides via the shared `buildGitIdentityFallbackEnv`
+ *  (`git/bounded.ts`), never a shared `-c user.*` pair — see that function's own doc. */
 function resolveGitIdentityFallbackArgsSync(
   opts: { cwd: string; stdio: "pipe"; timeout: number; env: NodeJS.ProcessEnv; maxBuffer: number },
   runGit: typeof execFileSync = execFileSync,
-): string[] {
+): Record<string, string> {
   // @decision 5b50eede (round 4 follow-up, CR 201f0c7e) — was a shell-string execSync("git ...") call,
   // the SAME bare-PATH-lookup hazard every other site here was fixed for; switched to execFileSync +
   // the shared resolver.
@@ -641,9 +643,7 @@ function resolveGitIdentityFallbackArgsSync(
       return !isGitIdentityUnresolvedErrorSync(e);
     }
   };
-  return (identResolvable("GIT_AUTHOR_IDENT") && identResolvable("GIT_COMMITTER_IDENT"))
-    ? []
-    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+  return buildGitIdentityFallbackEnv(identResolvable("GIT_AUTHOR_IDENT"), identResolvable("GIT_COMMITTER_IDENT"));
 }
 
 /**
@@ -954,9 +954,10 @@ export interface CommitVaultResult {
  * `user.name`/`user.email` config, `EMAIL`, or auto-detect; probed via `resolveGitIdentityFallbackArgs`,
  * card `2267e8fa`), we commit exactly as before — their identity, un-overridden. Only when git itself
  * cannot determine an identity for the author OR the committer do we fall back to a generic, non-personal
- * `Loom <loom@localhost>` identity for that single commit, via `-c user.name=`/`-c user.email=` passed
- * as ARGS on the commit invocation, never as an env-var override — see the `GIT_TERMINAL_PROMPT` doc
- * above `boundedVaultGit` for why an `.env()` override is unsafe here.
+ * `Loom <loom@localhost>` identity for that one unresolvable ROLE (card `7b59e981`) — a per-role
+ * `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env override merged into a FRESH env object for the real commit call,
+ * never `-c user.*` (which would also override an already-resolvable other role) and never `.env()` on an
+ * EXISTING instance (the `GIT_TERMINAL_PROMPT` doc above `boundedVaultGit` is about that distinct hazard).
  *
  * **Oversized-file guard** (card 614dfbef): before committing, any staged file above `opts.maxFileBytes`
  * (default `DEFAULT_MAX_VAULT_FILE_BYTES`, ~95MB) is unstaged and warned about instead of committed — see
@@ -1173,7 +1174,9 @@ export async function commitVault(
       currentOp = { label: "git commit", timeoutMs: workTreeTimeoutMs };
       // @decision ffe98495 — `--no-verify` on EVERY commit here, identity-fallback branch or not; belt-
       // and-suspenders on top of boundedVaultGit's hooksPath override (see that constant's own doc).
-      const identityArgs = await resolveGitIdentityFallbackArgs(
+      // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides now, never a shared `-c user.*` pair; merged into the
+      // real commit's own explicit env below, never spliced into argv.
+      const identityEnv = await resolveGitIdentityFallbackArgs(
         vaultPath, cheapTimeoutMs, deps.identityProbeGitFactory ?? deps.gitFactory ?? identityProbeVaultGit, pinnedVaultGitEnv(vaultPath),
       );
       // @decision 8d49c36c — re-check right before the real commit call, AFTER resolveGitIdentityFallbackArgs
@@ -1183,13 +1186,13 @@ export async function commitVault(
         console.warn(`[vault-versioner] ${vaultPath} skipping commitVault (quarantined mid-call, after add) — ${recheck.reason}`);
         return { committed: false };
       }
-      const commitArgs = [...identityArgs, "commit", "--no-verify", "-m", message];
+      const commitArgs = ["commit", "--no-verify", "-m", message];
       // @decision bf11ac3f — same kill-confirmed branching as the "git add ." call above.
       if (mergeEligible) {
         try {
           await killableCanonicalRaw(
             vaultPath, commitArgs, workTreeTimeoutMs, currentOp.label,
-            killableVaultGitFactory(vaultPath, deps), pinnedVaultGitEnv(vaultPath), onTreeDeathSettled,
+            killableVaultGitFactory(vaultPath, deps), { ...pinnedVaultGitEnv(vaultPath), ...identityEnv }, onTreeDeathSettled,
             vaultPath, VAULT_GIT_SAFETY_ARGS,
           );
         } catch (e) {
@@ -1197,7 +1200,13 @@ export async function commitVault(
           throw e;
         }
       } else {
-        await withTimeout(workGit.raw(commitArgs), workTreeTimeoutMs, currentOp.label);
+        // @decision 2267e8fa (card 7b59e981) — a fresh one-off instance ONLY when a fallback is actually needed and no
+        // test gitFactory is in play (a test fake never receives env anyway) — `workGit` stays untouched
+        // (no `.env()` mutation), so the identity-less path is byte-identical to before this card.
+        const commitGit = (Object.keys(identityEnv).length > 0 && !deps.gitFactory)
+          ? boundedSimpleGit(vaultPath, workTreeTimeoutMs, { ...pinnedVaultGitEnv(vaultPath), ...identityEnv }, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG)
+          : workGit;
+        await withTimeout(commitGit.raw(commitArgs), workTreeTimeoutMs, currentOp.label);
       }
       return { committed: true };
     } catch (err) {
@@ -1899,18 +1908,16 @@ export class VaultVersioner {
       if (!staged) return false; // nothing to commit — no-op
       const message = `loom: auto-commit ${new Date().toISOString()} (shutdown flush)`;
       currentOp = { label: "git commit", timeoutMs: commitTimeoutMs };
-      // execFileSync, not execSync (card 816f0056 review round 3): the identity-fallback branch
-      // interpolates FALLBACK_GIT_IDENTITY into the command — safe TODAY only because that constant
-      // happens to contain no spaces/shell metacharacters. A future edit to it (e.g. "Loom Daemon") would
-      // silently break the shell-string form (`-c user.name=Loom Daemon` splits at the space, git sees a
-      // stray `Daemon` argument, the commit fails) and land in the catch below as a SILENTLY DROPPED
-      // shutdown commit — the exact failure class this card exists to close, reopened one constant edit
-      // away. execFileSync passes each argument as a real array element, with no shell parsing at all, so
-      // this is genuinely argument-safe rather than safe-by-coincidence — real ARGS, matching what this
-      // doc's "Identity fallback" paragraph below claims.
+      // execFileSync, not execSync (card 816f0056 review round 3): every arg here (the commit message,
+      // VAULT_GIT_SAFETY_ARGS) is passed as a real array element, with no shell parsing at all — genuinely
+      // argument-safe rather than safe-by-coincidence. (Card 7b59e981: the identity fallback no longer
+      // rides in argv at all — it's an env override on `identityCommitOpts` below, so the shell-metachar
+      // concern this comment used to describe for `FALLBACK_GIT_IDENTITY` no longer applies to it.)
       // @decision ffe98495 — `--no-verify` PLUS the hooksPath/fsmonitor overrides on every branch here.
-      const identityArgs = resolveGitIdentityFallbackArgsSync(cheapOpts, runGit);
-      runGit(gitBin, [...VAULT_GIT_SAFETY_ARGS, ...identityArgs, "commit", "--no-verify", "-m", message], commitOpts);
+      // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into commitOpts.env (never spliced into argv).
+      const identityEnv = resolveGitIdentityFallbackArgsSync(cheapOpts, runGit);
+      const identityCommitOpts = Object.keys(identityEnv).length > 0 ? { ...commitOpts, env: { ...commitOpts.env, ...identityEnv } } : commitOpts;
+      runGit(gitBin, [...VAULT_GIT_SAFETY_ARGS, "commit", "--no-verify", "-m", message], identityCommitOpts);
       return true;
     } catch (err) {
       // best-effort — a missing identity / no-repo / plain git error, OR a bound timeout (execSync
