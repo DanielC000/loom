@@ -2125,6 +2125,310 @@ try {
   check("*** THE FIX (openq, reboot) *** D's own CLEARED token does NOT resurrect", !freshTokensOpenq.has(dTokenOpenq));
   check("(openq, reboot) e's own raise SURVIVES", freshTokensOpenq.has(eTokenOpenq));
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 25f6a7dc — from the CR of 5b55149b: THREE inline token parsers in merge-quarantine.ts still
+  // bypassed readSurvivingOnDiskTokens and so lacked its `length > 0` legacy-fallback fix. Reachability
+  // was roughly nil (no current writer emits `tokens: []`), but one of the three FAILS OPEN:
+  //
+  //   ("25f6a7dc-l1318") markedFinalFullyCoveredByClear (~L1318): `[].every(...)` is vacuously true, so a
+  //   marked final holding a legacy token X not in candidateTokens read as "fully covered" — unlinking a
+  //   file boot recovery would have re-armed with X. THE FIX routes the coverage proof through the shared
+  //   reader's RAW array, testing each on-disk token against candidateTokens OR clearedTokens (a token
+  //   already deliberately released earlier THIS process) — never `.surviving` alone.
+  //
+  // The other two FAIL CLOSED (a redundant protect copy-aside, never data loss) — but "redundant" can
+  // still mint a bogus, durably-written pending record for an unrelated identity merely because it shares
+  // a degraded key, which THEN independently resurrects a token after a reboot that was already safely,
+  // correctly released under its real owner's own identity:
+  //
+  //   ("25f6a7dc-l751") unincorporatedOccupantRepoPathAt (~L751) — the CLEAR-side twin.
+  //   ("25f6a7dc-l1856") resolveRaiseOverwrite's own "already incorporated" check (~L1856) — the RAISE-side twin.
+  //
+  // Two further scenarios pin that this fix does NOT disturb protectOccupantContentBeforeDelete's own
+  // PRE-EXISTING (7a7e041b/5b55149b) tombstone-skip and no-token-fallback behavior, reached THROUGH the
+  // now-fixed sites: ("25f6a7dc-tombstoned") and ("25f6a7dc-no-token").
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+  // ---- 25f6a7dc-l1318 — the FAIL-OPEN repro, same shape as 95ea8d3f-adversarial but with the still-owed
+  // extra token riding the LEGACY singular `token` field behind an EMPTY `tokens` array ----
+  {
+  const r = makeToplevelRepo("l1318-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(r, "gone-subdir");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["d-token-l1318"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  const inject = injectPersistentReadFailure(finalPath);
+  try {
+    enterMergeQuarantine(r, "r-branch", "r raises over D's own key, unreadable throughout");
+  } finally {
+    inject.restore();
+  }
+  activeMergeQuarantineFor(r);
+
+  // `final`'s own physical bytes now carry a DIFFERENT, still-owed token — via the LEGACY singular
+  // `token` field, with `tokens` rewritten to an EMPTY array — never covered by d's own in-memory
+  // tokens (["d-token-l1318"]), and never tombstoned.
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: [], token: "legacy-extra-token-l1318",
+  }, null, 2) + "\n");
+
+  clearMergeQuarantineByRecordedPath(d);
+  check("*** THE FIX (l1318) *** final is KEPT on disk (coverage NOT proven — the legacy token is uncovered)", fs.existsSync(finalPath));
+  check("(l1318) final's own bytes are byte-for-byte unchanged", (contentIfExists(finalPath) ?? "").includes("legacy-extra-token-l1318"));
+
+  const freshL1318 = await freshBootModule();
+  freshL1318.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensL1318 = new Set(freshL1318.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (l1318, reboot) *** the legacy token SURVIVES (never destroyed as collateral by the vacuous-empty-array fail-open)",
+    freshTokensL1318.has("legacy-extra-token-l1318"));
+  }
+
+  // ---- 25f6a7dc-l751 — unincorporatedOccupantRepoPathAt's own "already incorporated" check: a legacy
+  // singular token that's already part of the CLEARER's own in-memory tokens, under a stale `repoPath`
+  // naming an unrelated identity sharing the same degraded key ----
+  {
+  const r6 = makeToplevelRepo("l751-r6");
+  const d6 = path.join(r6, "sub-d6"); // a REAL, resolvable subdirectory — shares r6's own key
+  fs.mkdirSync(d6, { recursive: true });
+  fs.writeFileSync(path.join(d6, "placeholder.txt"), "sub\n");
+  commitAll(r6, "add sub-d6", GIT_ID);
+  const Kr6 = canonicalRepoLockKey(r6);
+  check("(l751 precondition) d6 shares r6's own key", canonicalRepoLockKey(d6) === Kr6);
+
+  reenterMergeQuarantinesAtBoot([]);
+  const tokA = enterMergeQuarantine(d6, "d6-branch", "d6 raises first — takes the existing-branch identity");
+  check("(l751 precondition) d6 is armed `existing` at its own key", activeMergeQuarantineFor(d6)?.repoPath === d6);
+
+  const Kr6hash = createHash("sha256").update(Kr6).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Kr6hash}.json`);
+  const z6 = path.join(r6, "gone-z6"); // a DIFFERENT, unresolvable identity sharing the SAME key
+
+  // A stale leftover: final's own `repoPath` now names z6 (not d6), but it STILL carries d6's own real
+  // token (tokA) — via the LEGACY singular `token` field, with `tokens` rewritten to an EMPTY array.
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: z6, branch: "z6-branch", reason: "a stale leftover naming a different identity, holding tokA in legacy form",
+    enteredAt: Date.now(), tokens: [], token: tokA,
+  }, null, 2) + "\n");
+
+  // r6 raises too — reaches the EXISTING branch (d6 already armed at this key); its own protect call
+  // re-reads final, finds the "different identity" (z6) holding tokA in legacy form.
+  const tokB = enterMergeQuarantine(r6, "r6-branch", "r6 raises into d6's existing entry");
+
+  const z6PendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(z6));
+  check("*** THE FIX (l751) *** NO bogus pending-divert record is minted for z6 (tokA is already incorporated into d6's own entry)",
+    !fs.existsSync(z6PendingPath));
+  const tokensAfterRaiseL751 = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(l751) d6's own union still carries both tokA and tokB", tokensAfterRaiseL751.has(tokA) && tokensAfterRaiseL751.has(tokB));
+
+  clearMergeQuarantineByToken(d6, tokA);
+  clearMergeQuarantineByToken(d6, tokB);
+  const freshL751 = await freshBootModule();
+  freshL751.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensL751 = new Set(freshL751.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (l751, reboot) *** tokA does NOT resurrect under z6's own bogus identity after a reboot", !freshTokensL751.has(tokA));
+  }
+
+  // ---- 25f6a7dc-l1856 — resolveRaiseOverwrite's own "already incorporated" check: the SAME shape as
+  // l751, but reached via its own direct re-read (forced past the fast path by an UNRELATED transient
+  // read failure classified "unknown" on the FIRST read of final, during the existing-branch's own
+  // protectUnincorporatedOccupantBeforeDelete call) ----
+  {
+  const r7 = makeToplevelRepo("l1856-r7");
+  const d7 = path.join(r7, "sub-d7");
+  fs.mkdirSync(d7, { recursive: true });
+  fs.writeFileSync(path.join(d7, "placeholder.txt"), "sub\n");
+  commitAll(r7, "add sub-d7", GIT_ID);
+  const Kr7 = canonicalRepoLockKey(r7);
+  check("(l1856 precondition) d7 shares r7's own key", canonicalRepoLockKey(d7) === Kr7);
+
+  reenterMergeQuarantinesAtBoot([]);
+  const tokC = enterMergeQuarantine(d7, "d7-branch", "d7 raises first — takes the existing-branch identity");
+
+  const Kr7hash = createHash("sha256").update(Kr7).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Kr7hash}.json`);
+  const z7 = path.join(r7, "gone-z7");
+
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: z7, branch: "z7-branch", reason: "a stale leftover naming a different identity, holding tokC in legacy form",
+    enteredAt: Date.now(), tokens: [], token: tokC,
+  }, null, 2) + "\n");
+
+  // Fail ONLY the FIRST read of final — protectUnincorporatedOccupantBeforeDelete's own read comes back
+  // "unknown" (marking the basename kept, protectOk=false), forcing resolveRaiseOverwrite past its own
+  // fast path into its OWN direct re-read, which succeeds (every read after the first).
+  const injectL1856 = injectReadFailureOnlyNth(finalPath, 1);
+  let tokD;
+  try {
+    tokD = enterMergeQuarantine(r7, "r7-branch", "r7 raises into d7's existing entry, first read of final fails");
+  } finally {
+    injectL1856.restore();
+  }
+
+  const z7PendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(z7));
+  check("*** THE FIX (l1856) *** NO bogus pending-divert record is minted for z7 (tokC is already incorporated into d7's own entry)",
+    !fs.existsSync(z7PendingPath));
+  const tokensAfterRaiseL1856 = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(l1856) d7's own union still carries both tokC and tokD", tokensAfterRaiseL1856.has(tokC) && tokensAfterRaiseL1856.has(tokD));
+
+  clearMergeQuarantineByToken(d7, tokC);
+  clearMergeQuarantineByToken(d7, tokD);
+  const freshL1856 = await freshBootModule();
+  freshL1856.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensL1856 = new Set(freshL1856.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (l1856, reboot) *** tokC does NOT resurrect under z7's own bogus identity after a reboot", !freshTokensL1856.has(tokC));
+  }
+
+  // ---- 25f6a7dc-tombstoned — {tokens:[], token:X} with X ALREADY CLEARED (tombstoned): the overlap
+  // check correctly does NOT exempt it (X isn't in the raiser's own tokens — it's a pin, not a
+  // discriminator: protectOccupantContentBeforeDelete's own pre-existing 7a7e041b skip already handles
+  // this downstream, with or without this card's fix) — asserts the copy-aside is skipped outright, as
+  // fully tombstoned, never resurrected ----
+  {
+  const scratch8 = makeToplevelRepo("tombstoned-scratch8");
+  const tombTok = enterMergeQuarantine(scratch8, "scratch-branch", "scratch raise — becomes the tombstoned token");
+  clearMergeQuarantineByToken(scratch8, tombTok);
+  check("(tombstoned precondition) tombTok is lifted in-process (tombstoned)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tombTok));
+
+  const r8 = makeToplevelRepo("tombstoned-r8");
+  const d8 = path.join(r8, "sub-d8");
+  fs.mkdirSync(d8, { recursive: true });
+  fs.writeFileSync(path.join(d8, "placeholder.txt"), "sub\n");
+  commitAll(r8, "add sub-d8", GIT_ID);
+  const Kr8 = canonicalRepoLockKey(r8);
+  reenterMergeQuarantinesAtBoot([]);
+  const tokE = enterMergeQuarantine(d8, "d8-branch", "d8 raises first — takes the existing-branch identity");
+
+  const Kr8hash = createHash("sha256").update(Kr8).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Kr8hash}.json`);
+  const z8 = path.join(r8, "gone-z8");
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: z8, branch: "z8-branch", reason: "a stale leftover naming a different identity, holding an ALREADY-TOMBSTONED legacy token",
+    enteredAt: Date.now(), tokens: [], token: tombTok,
+  }, null, 2) + "\n");
+
+  const tokF = enterMergeQuarantine(r8, "r8-branch", "r8 raises into d8's existing entry");
+  const z8PendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(z8));
+  check("(tombstoned) no pending record survives for z8 (every real on-disk token was already tombstoned — nothing to protect)",
+    !fs.existsSync(z8PendingPath));
+  check("(tombstoned) tombTok is never resurrected", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tombTok));
+  check("(tombstoned) d8's own union carries tokE and tokF", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tokE)
+    && new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tokF));
+
+  clearMergeQuarantineByToken(d8, tokE);
+  clearMergeQuarantineByToken(d8, tokF);
+  const freshTomb = await freshBootModule();
+  freshTomb.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensTomb = new Set(freshTomb.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(tombstoned, reboot) tombTok stays gone after a reboot", !freshTokensTomb.has(tombTok));
+  }
+
+  // ---- 25f6a7dc-no-token — {tokens:[]} with NO legacy token at all: readSurvivingOnDiskTokens' own raw
+  // array stays genuinely empty (nothing to recover either way), so protectOccupantContentBeforeDelete's
+  // pre-existing random-token fallback still fires — a pin that this card's fix does not disturb it ----
+  {
+  const r9 = makeToplevelRepo("no-token-r9");
+  const d9 = path.join(r9, "sub-d9");
+  fs.mkdirSync(d9, { recursive: true });
+  fs.writeFileSync(path.join(d9, "placeholder.txt"), "sub\n");
+  commitAll(r9, "add sub-d9", GIT_ID);
+  const Kr9 = canonicalRepoLockKey(r9);
+  reenterMergeQuarantinesAtBoot([]);
+  const tokG = enterMergeQuarantine(d9, "d9-branch", "d9 raises first — takes the existing-branch identity");
+
+  const Kr9hash = createHash("sha256").update(Kr9).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Kr9hash}.json`);
+  const z9 = path.join(r9, "gone-z9");
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: z9, branch: "z9-branch", reason: "a stale leftover naming a different identity, with an empty tokens array and NO legacy token field",
+    enteredAt: Date.now(), tokens: [],
+  }, null, 2) + "\n");
+
+  const tokH = enterMergeQuarantine(r9, "r9-branch", "r9 raises into d9's existing entry");
+  const z9PendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(z9));
+  check("(no-token) a pending record IS minted for z9 — its own repoPath/branch/reason are genuine content worth protecting, even with no real token",
+    fs.existsSync(z9PendingPath));
+  check("(no-token) that pending record carries a FRESH, freshly-minted token (never an empty tokens array)",
+    (contentIfExists(z9PendingPath) ?? "").includes(z9.replace(/\\/g, "\\\\")));
+  check("(no-token) d9's own union carries tokG and tokH, unaffected", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tokG)
+    && new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tokH));
+
+  clearMergeQuarantineByToken(d9, tokG);
+  clearMergeQuarantineByToken(d9, tokH);
+  }
+
+  // ---- 25f6a7dc-probeA (Code Review 6dac0fe9 of 25f6a7dc, probe A) — the `|| clearedTokens.has(t)`
+  // disjunct this card added to markedFinalFullyCoveredByClear doesn't only fix the empty-array legacy
+  // shape — it ALSO changes coverage for an ORDINARY, non-empty on-disk `tokens` array that mixes a
+  // STILL-OWED token (being cleared right now) with one that was ALREADY tombstoned earlier this process.
+  // Without the disjunct, the stale tombstoned token alone keeps `final` on disk, fail-closed — and BOTH
+  // tokens (the still-owed one AND the long-dead one) resurrect from `final`'s own stale bytes after a
+  // reboot, even though neither is actually still outstanding anywhere.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const rA = makeToplevelRepo("probeA-r");
+  const KrA = canonicalRepoLockKey(rA);
+  const KrAhash = createHash("sha256").update(KrA).digest("hex").slice(0, 24);
+  const dA = path.join(rA, "gone-subdir");
+
+  // T: mint via a wholly UNRELATED scratch repo and fully clear it — tombstones this exact string in
+  // `clearedTokens`, with no connection at all to rA/dA below.
+  const scratchA = makeToplevelRepo("probeA-scratch");
+  const tombTokA = enterMergeQuarantine(scratchA, "scratch-branch", "scratch raise — becomes the tombstoned token");
+  clearMergeQuarantineByToken(scratchA, tombTokA);
+  check("(probeA precondition) tombTokA is lifted in-process (tombstoned)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tombTokA));
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPathA = path.join(MERGE_QUARANTINE_DIR, `${KrAhash}.json`);
+  fs.writeFileSync(finalPathA, JSON.stringify({
+    repoPath: dA, branch: "dA-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["A-d"], resolvedKey: KrA,
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("(probeA precondition) dA is `existing` at rA's own key", activeMergeQuarantineFor(rA)?.repoPath === dA);
+
+  const injectA = injectPersistentReadFailure(finalPathA);
+  let rTokenA;
+  try {
+    rTokenA = enterMergeQuarantine(rA, "rA-branch", "rA raises into dA's already-armed existing entry, final unreadable throughout");
+  } finally {
+    injectA.restore(); // transient — restored before the clear below
+  }
+  check("(probeA precondition) final is untouched (still ONLY A-d) right after the divert",
+    (contentIfExists(finalPathA) ?? "").includes("A-d") && !(contentIfExists(finalPathA) ?? "").includes(rTokenA));
+
+  // final's own physical bytes now ALSO carry the already-tombstoned token, alongside the still-owed
+  // one — a stale copy of what this exact slot held before T was released elsewhere, never rewritten
+  // since (the normal write path never reaches this file while its basename stays marked).
+  fs.writeFileSync(finalPathA, JSON.stringify({
+    repoPath: dA, branch: "dA-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["A-d", tombTokA], resolvedKey: KrA,
+  }, null, 2) + "\n");
+
+  const clearResultA = clearMergeQuarantineByRecordedPath(dA);
+  check("(probeA) the clear reports success", clearResultA?.wasQuarantined === true);
+  check("*** THE FIX (probeA) *** final is UNLINKED (coverage proven: A-d is being cleared, T is already tombstoned)",
+    contentIfExists(finalPathA) === null);
+  const tokensAfterClearA = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(probeA) A-d is lifted IN-PROCESS", !tokensAfterClearA.has("A-d"));
+  check("(probeA) rA's own (merged) token is ALSO lifted IN-PROCESS", !tokensAfterClearA.has(rTokenA));
+
+  const freshA = await freshBootModule();
+  freshA.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensA = new Set(freshA.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (probeA, reboot) *** A-d does NOT come back after a reboot", !freshTokensA.has("A-d"));
+  check("*** THE FIX (probeA, reboot) *** rA's own token does NOT come back after a reboot", !freshTokensA.has(rTokenA));
+  check("*** THE FIX (probeA, reboot) *** the already-tombstoned token does NOT resurrect either", !freshTokensA.has(tombTokA));
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }

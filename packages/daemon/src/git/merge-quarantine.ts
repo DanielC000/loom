@@ -748,9 +748,10 @@ function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuar
   if (typeof existing.repoPath !== "string") return { state: "none" };
   if (directPathIdentity(existing.repoPath) === directPathIdentity(clearedEntry.repoPath)) return { state: "none" }; // same identity
   if (clearIdentity && directPathIdentity(existing.repoPath) === clearIdentity) return { state: "none" }; // genuinely the clearer's own data
-  const existingTokens = Array.isArray(existing.tokens) && existing.tokens.every((t): t is string => typeof t === "string")
-    ? existing.tokens
-    : typeof existing.token === "string" ? [existing.token] : [];
+  // @decision 25f6a7dc — route through the SHARED reader, never a re-derived inline parser: skipping its
+  // empty-array-falls-back-to-legacy-`token` fix here wrongly treats an already-incorporated legacy token
+  // as foreign, minting a redundant protect copy-aside. See the decision record.
+  const { raw: existingTokens } = readSurvivingOnDiskTokens(existing);
   if (existingTokens.length > 0 && existingTokens.some((t) => clearedEntry.tokens.includes(t))) return { state: "none" }; // already incorporated
   return { state: "occupant", repoPath: existing.repoPath };
 }
@@ -1315,10 +1316,11 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
   }
   let parsed: { tokens?: unknown; token?: unknown };
   try { parsed = JSON.parse(raw) as typeof parsed; } catch { return false; } // corrupt — cannot prove coverage
-  const onDiskTokens = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
-    ? parsed.tokens
-    : typeof parsed.token === "string" ? [parsed.token] : [];
-  return onDiskTokens.every((t) => candidateTokens.includes(t));
+  // @decision 25f6a7dc — tests the RAW on-disk tokens, each covered by being cleared NOW (candidateTokens)
+  // or ALREADY tombstoned (clearedTokens) — never `.surviving` alone, which folds "already cleared"
+  // silently into the array instead of deciding it here. See the decision record.
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
+  return onDiskTokens.every((t) => candidateTokens.includes(t) || clearedTokens.has(t));
 }
 
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
@@ -1853,9 +1855,10 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
     if (survivingTokenHolderRepoPaths(surviving, directPathIdentity(ownRepoPath)).length === 0) return false;
     return true; // still held elsewhere — divert, never overwrite blind
   }
-  const onDiskTokens = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
-    ? parsed.tokens
-    : typeof parsed.token === "string" ? [parsed.token] : [];
+  // @decision 25f6a7dc — route through the SHARED reader, never a re-derived inline parser: see
+  // `unincorporatedOccupantRepoPathAt`'s own matching fix for why skipping its empty-array fallback here
+  // wrongly treats an already-incorporated legacy token as foreign. See the decision record.
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
   // Already incorporated via token overlap — see this function's own doc comment above.
   if (onDiskTokens.length > 0 && onDiskTokens.some((t) => ownTokens.includes(t))) return false;
   // A different, still-unresolvable identity physically occupies `final` right now (confirmed by THIS
