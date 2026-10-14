@@ -234,12 +234,48 @@ try {
     check("4: gen 1's requeued duplicate is purged despite the CLI's escape (no duplicate redelivery)",
       !host.getPendingEntries(sid).some((m) => m.text === TEXT1));
   }
+
+  // ===== 5. NEGATIVE CONTROL (fix review follow-up, card fc82dd76) — the inner CARRIES the CLI's escape
+  // (so the new third candidate, textSignature(unescapeNestedPastedContentTag(inner)), is actually
+  // exercised rather than trivially inapplicable), but the UNESCAPED text is a genuinely DIFFERENT body
+  // from gen 1's archived write — not byte-identical once the escape is reversed. This pins that the new
+  // candidate still requires exact whole-inner equality (after reversal), the same as the raw/unwrapped
+  // candidates already do in scenarios 2/3 — it must NOT purge merely because an escape was present. =====
+  {
+    const sid = "sess-wrap-confirm-escaped-tag-mismatch"; SIDS.push(sid);
+    const TEXT1 = "GEN1_ESCAPED_TAG_NEGATIVE_CONTROL: mentions `<pasted_content id=\"zz99\">` here.";
+    spawnReady(sid);
+
+    const r1 = host.enqueueStdin(sid, TEXT1);
+    check("(setup 5) gen 1 delivered immediately, busy armed", r1.delivered === true && busyLog[sid]?.at(-1) === true);
+    await sharedWaitUntil(() => busyLog[sid]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: "pty-giveup-pasted-content-wrap-confirm: gen1 give-up (escaped-tag mismatch)" });
+    check("(setup 5) gen 1 genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
+    check("(setup 5) gen 1's TEXT1 is requeued, sitting ambiguous in pending", host.getPendingEntries(sid).some((m) => m.text === TEXT1));
+
+    const before = host.getPendingEntries(sid).length;
+    confirmNormally(sid, "HEALTHY_UNRELATED_GEN_2_ESCAPED_TAG_MISMATCH");
+
+    submitLog.length = 0;
+    // A DIFFERENT body that also quotes the tag syntax (so the CLI's escape fires and the new candidate
+    // is genuinely exercised), but whose text — even after the escape is reversed — never matches TEXT1.
+    const unrelatedBody = "UNRELATED_BODY_ALSO_QUOTES_THE_TAG: mentions `<pasted_content id=\"zz99\">` but is a completely different message.";
+    check("(fixture sanity 5) the unrelated body is genuinely not equal to TEXT1 even disregarding the escape", unrelatedBody !== TEXT1);
+    const escapedUnrelatedInner = unrelatedBody.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("(fixture sanity 5) the escape actually added characters (otherwise this control doesn't exercise the new candidate)", escapedUnrelatedInner.length > unrelatedBody.length);
+    const unrelatedWrapped = pastedContentWrap("gw05", escapedUnrelatedInner);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: unrelatedWrapped });
+
+    check("5: NEGATIVE CONTROL — no CONTENT-MATCHED CONFIRMED log for an escaped-but-mismatched body",
+      !submitLog.some((l) => l.includes("CONFIRMED logicalId=") && l.includes("content-matched")));
+    check("5: NEGATIVE CONTROL — gen 1's requeued duplicate STILL sits in pending (an escape alone must not purge a non-matching body)",
+      host.getPendingEntries(sid).length === before && host.getPendingEntries(sid).some((m) => m.text === TEXT1));
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a wrapped late confirmation of a given-up generation is recognized by unwrapping the engine's pasted-content composer framing before the content-match signature check, purging that generation's still-queued give-up re-mint; an unrelated wrapped body, and a superset (exact-whole-inner, not substring) wrapped body, both still leave an unrelated/unresolved duplicate untouched (still redrives, never falsely purged); and the CONFIRMED log line this fix's match can now produce still carries no raw message content."
+  ? "\n✅ ALL PASS — a wrapped late confirmation of a given-up generation is recognized by unwrapping the engine's pasted-content composer framing before the content-match signature check, purging that generation's still-queued give-up re-mint; an unrelated wrapped body, a superset (exact-whole-inner, not substring) wrapped body, and a body carrying the CLI's own literal-tag escape but a genuinely mismatched unescaped text, all still leave an unrelated/unresolved duplicate untouched (still redrives, never falsely purged); a wrapped body whose quoted tag syntax is escaped by the CLI on echo is still recognized and purged; and the CONFIRMED log line this fix's match can now produce still carries no raw message content."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

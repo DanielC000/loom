@@ -67,6 +67,36 @@ dc92f4b6's own posture on the `ff871b77`/d0c329c1 small-excess shape.
   different question (content identity against the CURRENT generation) than this purge path needs
   (content identity against ANY still-ambiguous archived dispatch).
 
+## Addendum (card `fc82dd76`) — a third candidate signature for the CLI's own literal-tag escape
+
+Discovered from card `691d02e1`: the current CLI escapes a literal `<pasted_content`/`</pasted_content`
+occurrence found WITHIN a pasted body (inserting a `\` right after the `<`) — e.g. a give-up write whose
+own text quotes this very wrap's syntax as prose. `isRecognizedPastedContentWrap` already reverses that
+escape via `unescapeNestedPastedContentTag` for the unrelated prompt-mismatch-classification path (card
+691d02e1), but this purge path's own unwrap computed `textSignature(wrapMatch[2])` over the RAW captured
+inner only, never reversing the escape — so an archived signature over the genuinely-dispatched
+(unescaped) text could never match a CLI-escaped echo of a give-up body that quoted the tag.
+
+Reproduced hermetically (`packages/daemon/test/pty-giveup-pasted-content-wrap-confirm.mjs`, scenario 4):
+RED on pre-fix code — same shape as scenario 1 (give-up, re-mint via an unrelated healthy generation,
+late wrapped confirmation) but with a body that quotes the tag syntax, escaped by the CLI on echo exactly
+as card 691d02e1's real-world specimens showed.
+
+**The fix:** compute a third candidate signature, `textSignature(unescapeNestedPastedContentTag(wrapMatch[2]))`,
+and fold it into `matchesSig` as a third OR-branch alongside the existing raw/unwrapped checks — purely
+additive; the exact-hash (raw `sig`) and unwrapped-but-unescaped paths stay byte-identical.
+
+## Do not (2)
+
+- Do not widen `unescapeNestedPastedContentTag` itself, or the equality check against its output, beyond
+  what card `691d02e1`'s own record already allows — this addendum only reuses that existing, narrow
+  reversal as a second unwrap pass; it introduces no new escape-reversal logic of its own.
+- Do not let the escape-reversed candidate match anything less than exact whole-inner equality (same
+  anchored-regex reasoning as the first "Do not" above) — a give-up whose unescaped text happens to be a
+  substring/superset of an archived entry's text must still decline, exactly like the raw/unwrapped
+  candidates already do (see `pty-giveup-pasted-content-wrap-confirm.mjs` scenario 5, the negative
+  control pinning this).
+
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts`, inside `purgeConfirmedGiveUpRequeueCore`, right after

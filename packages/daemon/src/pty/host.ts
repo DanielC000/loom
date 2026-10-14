@@ -12530,17 +12530,19 @@ export class PtyHost {
   private purgeConfirmedGiveUpRequeueCore(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
     if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && (live.ambiguousDispatches.size > 0 || live.retiredGiveUpSignatures.size > 0)) {
       const sig = textSignature(reportedPrompt);
-      // @decision 0658d6d8 — unwrap PASTED_CONTENT_WRAP_RE before this signature check (exact whole-inner
-      // equality only, never a substring); never add a trimEnd() compensation here — the archived entry
-      // holds only a hash, with no original text to re-derive a trim-tolerant comparison against.
+      // @decision 0658d6d8 — unwrap PASTED_CONTENT_WRAP_RE before this check (exact whole-inner equality
+      // only, never a substring, never trimEnd()-compensated); also try the inner with the CLI's own
+      // literal-tag escape reversed (card fc82dd76) — never widen either reversal beyond exact equality.
       const wrapMatch = PASTED_CONTENT_WRAP_RE.exec(reportedPrompt);
       const unwrappedSig = wrapMatch !== null ? textSignature(wrapMatch[2]!) : null;
+      const unescapedUnwrappedSig = wrapMatch !== null ? textSignature(unescapeNestedPastedContentTag(wrapMatch[2]!)) : null;
       // Card ee56a894: deliberately checks `entry.len`/`entry.hash` (the joined `submittedSig`) only, never
       // `entry.memberSig` — that field is `hasAmbiguousMatch`'s own narrower-scoped addition, not a general
       // substitute for this, the engine-echo purge path's, own signature check.
       const matchesSig = (entry: { len: number; hash: string }): boolean =>
         (entry.len === sig.len && entry.hash === sig.hash) ||
-        (unwrappedSig !== null && entry.len === unwrappedSig.len && entry.hash === unwrappedSig.hash);
+        (unwrappedSig !== null && entry.len === unwrappedSig.len && entry.hash === unwrappedSig.hash) ||
+        (unescapedUnwrappedSig !== null && entry.len === unescapedUnwrappedSig.len && entry.hash === unescapedUnwrappedSig.hash);
       // Code Reviewer follow-up (card 4a0af485, Major 4): a COALESCED drain seeds MULTIPLE member
       // logicalIds with the SAME joined signature (see `requeueGiveUpOrigin`'s own doc) — a single hook can
       // therefore legitimately confirm more than one logicalId at once. Collect every match instead of
