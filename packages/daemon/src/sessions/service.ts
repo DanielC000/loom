@@ -2853,7 +2853,7 @@ export class SessionService {
    * auto-drained by {@link maybeDrainCapQueue} whenever a concurrency slot actually frees (card 81b7e346)
    * — a manager can still re-drive an entry by hand via worker_spawn, but no longer has to.
    */
-  private readonly capQueue = new CapQueueRegistry();
+  private readonly capQueue = new CapQueueRegistry(Date.now, (entries) => this.notifyReapedCapQueueEntries(entries));
   /**
    * Per-manager REFCOUNTED suppression for {@link maybeDrainCapQueue} — guards the ONE retirement path
    * that reuses a just-freed slot for a session it inserts DIRECTLY, bypassing spawnWorker's own cap-admit
@@ -8178,8 +8178,11 @@ export class SessionService {
      *  suppresses the normal cap-reject `record()` call (see {@link CapQueueRejectedError}'s doc for why:
      *  the drain already holds the original popped entry and re-queues THAT itself, preserving its opId/
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
-     *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
-    internal?: { skipCapQueueRecord?: boolean; revive?: ReviveSpawnSpec },
+     *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them.
+     *  `clearCapQueueOpId` (card e3c6ec8a) is the drain's own popped entry's opId — on success, clears the
+     *  cap-queue EXACTLY by that key instead of `clearTasklessForAgent`'s agent+review heuristic, which
+     *  can't tell apart two sibling PLAIN taskless entries for the same agent. */
+    internal?: { skipCapQueueRecord?: boolean; revive?: ReviveSpawnSpec; clearCapQueueOpId?: string },
   ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
@@ -8651,6 +8654,10 @@ export class SessionService {
       // an already-live spawn over.
       this.bestEffortPostSpawn("clearing the cap-queue entry for this spawn", worker.id, () => {
         if (taskId) this.capQueue.clearForTask(taskId);
+        // @decision e3c6ec8a — the drain already holds its popped entry's own opId; clear by that EXACT
+        // key rather than the agentId+review heuristic below, which can't tell apart two sibling PLAIN
+        // taskless entries for the same agent.
+        else if (internal?.clearCapQueueOpId) this.capQueue.clearByOpId(managerSessionId, internal.clearCapQueueOpId);
         // @decision beb6f2b5 — matched on agentId alone, this used to ALSO delete a sibling taskless
         // entry queued for a DIFFERENT review target; scope the clear to THIS spawn's own review
         // identity so a sibling review spawn survives.
@@ -9288,6 +9295,27 @@ export class SessionService {
   }
 
   /**
+   * TTL-reap notification — the SAME `[loom:cap-queue-ttl-reaped]` text every reap path now reports
+   * through, injected as {@link CapQueueRegistry}'s own `onReap` callback (card e3c6ec8a) so a plain read
+   * (`listByManager`/`record`/`cancel`) notifies exactly like a drain's own `takeOldestOrReaped` always
+   * did — reaping is no longer silent for any caller. One-shot per entry (it's already gone from the
+   * queue by the time this fires, never re-sent); reports only OBSERVED facts (it existed, when it was
+   * queued, that it exceeded the TTL, that no worker was ever spawned for it) — never a causal claim
+   * about WHY a slot didn't free in time, which nothing at this layer can know.
+   */
+  private notifyReapedCapQueueEntries(entries: CapQueuedSpawn[]): void {
+    for (const reaped of entries) {
+      try {
+        this.enqueueDurableMessage(
+          reaped.managerSessionId,
+          `[loom:cap-queue-ttl-reaped] queued spawn (opId ${reaped.opId}, task ${reaped.taskId ?? "taskless"}, agent ${reaped.agentId}) queued at ${reaped.queuedAt} was dropped from the cap queue — it exceeded the queue's ${CAP_QUEUE_TTL_MS / 60_000}-minute TTL, and no worker was ever spawned for it. Re-call worker_spawn yourself if it's still needed.`,
+          { sender: "system", taskId: reaped.taskId ?? null, kind: "agent" },
+        );
+      } catch { /* best-effort — never let a notification failure disturb the caller that triggered the reap */ }
+    }
+  }
+
+  /**
    * @decision sha:ea61b16c — drains this manager's cap-queue by replaying each popped entry through the
    *  same spawnWorker a manual worker_spawn uses (never re-implementing its atomic guarantees),
    *  fire-and-forget, suppressed during recycleWorker's own slot-reclaim, bounded by construction.
@@ -9300,22 +9328,10 @@ export class SessionService {
       // would otherwise reach here; without this check each queued entry would be mistaken for a genuinely
       // broken spawn and dropped, which is exactly wrong for an emergency stop-everything.
       if (this.control.isPaused(managerSessionId)) return;
-      const { entry, reapedForManager } = this.capQueue.takeOldestOrReaped(managerSessionId);
-      // TTL REAP NOTIFICATION (card 5ab3c664 Part 2): an entry that aged past CAP_QUEUE_TTL_MS before
-      // this drain ever ran is discarded silently INSIDE takeOldestOrReaped's own prune — it never reaches
-      // the try/catch below (that block only runs for an entry `takeOldestOrReaped` actually returned).
-      // Report only what was OBSERVED (it existed, when it was queued, that it exceeded the TTL, that no
-      // worker was ever spawned for it) — never a claim about WHY a slot didn't free in time, which this
-      // method has no way to know. One-shot: the entry is already gone from the queue, never re-sent.
-      for (const reaped of reapedForManager) {
-        try {
-          this.enqueueDurableMessage(
-            managerSessionId,
-            `[loom:cap-queue-ttl-reaped] queued spawn (opId ${reaped.opId}, task ${reaped.taskId ?? "taskless"}, agent ${reaped.agentId}) queued at ${reaped.queuedAt} was dropped from the cap queue — it exceeded the queue's ${CAP_QUEUE_TTL_MS / 60_000}-minute TTL, and no worker was ever spawned for it. Re-call worker_spawn yourself if it's still needed.`,
-            { sender: "system", taskId: reaped.taskId ?? null, kind: "agent" },
-          );
-        } catch { /* best-effort — never let the notification disturb the drain */ }
-      }
+      // TTL-reap notification (card 5ab3c664 Part 2) now fires from INSIDE takeOldestOrReaped's own
+      // prune() via the registry's injected onReap — see notifyReapedCapQueueEntries above — so this loop
+      // no longer needs its own separate reap-notification block.
+      const { entry } = this.capQueue.takeOldestOrReaped(managerSessionId);
       if (!entry) return;
       try {
         await this.spawnWorker(managerSessionId, {
@@ -9330,7 +9346,13 @@ export class SessionService {
           // [loom:cap-queue-autofire-failed] notify branch below instead of masquerading as a success.
           reviewOfWorkerSessionId: entry.reviewOfWorkerSessionId,
           reviewOfTaskId: entry.reviewOfTaskId,
-        }, { skipCapQueueRecord: true }); // WE re-queue on a cap-race ourselves — see the catch branch below
+        }, {
+          skipCapQueueRecord: true, // WE re-queue on a cap-race ourselves — see the catch branch below
+          // @decision e3c6ec8a — clear by this entry's OWN opId on success, never the agentId+review
+          // heuristic: two sibling PLAIN taskless entries (no review target) for the same agent are
+          // indistinguishable under that heuristic, and it would wrongly delete the surviving sibling.
+          clearCapQueueOpId: entry.opId,
+        });
         // Success: loop again in case more than one slot is free (e.g. two workers retired back-to-back).
       } catch (e) {
         if (e instanceof CapQueueRejectedError) {

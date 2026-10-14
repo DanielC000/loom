@@ -832,6 +832,143 @@ try {
   }
 }
 
+// ===================== Section G (card e3c6ec8a): two residuals left over from beb6f2b5, NEITHER fixed
+// by it. See docs/decisions/e3c6ec8a-cap-queue-residuals-exact-key-clear-and-reap-notify.md. =====================
+// G1: two PLAIN taskless entries (NO review target at all — reviewOfWorkerSessionId/reviewOfTaskId both
+//     undefined) for the SAME agent are STILL indistinguishable under beb6f2b5's own agent+review match
+//     — that fix only disambiguates DIFFERENT review targets (see its own "Do not" section). This
+//     reproduces the auto-DRAIN shape (Section F's own shape, but with NO review target on either side):
+//     one entry pops and fires via maybeDrainCapQueue, the other must survive the first's own success.
+// G2: the MANUAL-SPAWN fallback — when NO popped entry's opId exists to key off (a fresh, non-drain
+//     worker_spawn call that happens to land while two plain siblings are still queued), the clear must
+//     still only ever touch the OLDEST matching entry, never bulk-clear every sibling.
+// G3: a PLAIN READ (worker_list → listByManager) must notify the manager via [loom:cap-queue-ttl-reaped]
+//     when it silently TTL-reaps a stale entry — before this fix, only the drain's own
+//     takeOldestOrReaped ever reported a reap; a plain read discarded it with no notice at all.
+{
+  const repoG = path.join(os.tmpdir(), `loom-wscq-repoG-${Date.now()}-${process.pid}-${randomUUID()}`);
+  initRepo(repoG);
+  const worktreesG = [];
+  try {
+    db.insertProject({ id: "pG", name: "G", repoPath: repoG, vaultPath: repoG, config: { orchestration: { maxConcurrentWorkers: 2 } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "agentMgrG", projectId: "pG", name: "MgrG", startupPrompt: "MGR", position: 0, profileId: null });
+    db.insertAgent({ id: "agentDevG", projectId: "pG", name: "DevG", startupPrompt: "DEV", position: 1, profileId: null });
+    db.insertAgent({ id: "agentAdHocG", projectId: "pG", name: "AdHocG", startupPrompt: "ADHOC", position: 2, profileId: null });
+    db.insertSession({ id: "mgr6", projectId: "pG", agentId: "agentMgrG", engineSessionId: null, title: null,
+      cwd: repoG, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    const routerG = new OrchestrationMcpRouter(db, svc);
+    const serverG = routerG.buildServer("mgr6", "manager");
+    const [clientTG, serverTG] = InMemoryTransport.createLinkedPair();
+    await serverG.connect(serverTG);
+    const clientG = new Client({ name: "worker-spawn-cap-queue-test-G", version: "0" });
+    await clientG.connect(clientTG);
+    const callG = async (nameArgs, args) => parse(await clientG.callTool({ name: nameArgs, arguments: args ?? {} }));
+    const liveAHCount = () => db.listWorkers("mgr6").filter((w) => w.processState === "live" && w.agentId === "agentAdHocG").length;
+
+    // Fill the cap (2) with two plain taskless DEV workers — a DIFFERENT agentId, only here to occupy slots.
+    const spawnG1 = await callG("worker_spawn", { agentId: "agentDevG", kickoffPrompt: "GO G1" });
+    check("(G setup) G1 fills slot 1 of 2", !!spawnG1.workerSessionId);
+    worktreesG.push(spawnG1.worktreePath);
+    const spawnG2 = await callG("worker_spawn", { agentId: "agentDevG", kickoffPrompt: "GO G2" });
+    check("(G setup) G2 fills slot 2 of 2", !!spawnG2.workerSessionId);
+    worktreesG.push(spawnG2.worktreePath);
+
+    // ===== G1: queue TWO PLAIN taskless entries for the SAME agent — NEITHER carries a review target =====
+    const rejAH1 = await callG("worker_spawn", { agentId: "agentAdHocG", kickoffPrompt: "AdHoc G1" });
+    check("(G1 setup) first ad-hoc taskless spawn (no review target) is cap-queued", !!rejAH1.capQueued);
+    const rejAH2 = await callG("worker_spawn", { agentId: "agentAdHocG", kickoffPrompt: "AdHoc G2" });
+    check("(G1 setup) second ad-hoc taskless spawn — SAME agentId, ALSO no review target — is also cap-queued", !!rejAH2.capQueued);
+    check("(G1 setup) both entries got DISTINCT opIds", rejAH1.capQueued.opId !== rejAH2.capQueued.opId);
+    check("(G1 setup) both entries are listed before anything fires", svc.capQueue.listByManager("mgr6").length === 2);
+
+    // Free slot 1 via an AUTO-RETIRE (mirrors Section F's own repro shape) — workerReport's auto-retire
+    // branch fires maybeDrainCapQueue itself (fire-and-forget); poll for the drain to settle rather than
+    // racing a second overlapping call.
+    const ah2StillQueued = () => svc.capQueue.listByManager("mgr6").some((e) => e.opId === rejAH2.capQueued.opId);
+    const doneG1 = await svc.workerReport(spawnG1.workerSessionId, { status: "done", summary: "no findings", noChanges: true });
+    check("(G1 setup) G1's done report auto-retires (declared no-op)", doneG1.autoRetired === true);
+    check("(G1 setup) the drain settles: the first ad-hoc entry is live AND the sibling is back in a stable queued state",
+      await waitUntil(() => liveAHCount() === 1 && ah2StillQueued()));
+
+    // ===== THE ASSERTION THAT MUST GO RED ON UNFIXED CODE: the SECOND plain entry must still be queued —
+    // ===== NOT silently wiped as a side effect of the FIRST entry's own successful auto-fire (both share
+    // ===== the SAME undefined/undefined review identity, so beb6f2b5's own fix alone can't tell them apart).
+    check("(G1) the first ad-hoc entry auto-fired into a real live worker", liveAHCount() === 1);
+    check("(G1) the SIBLING plain entry is still cap-queued — NOT silently dropped by the first entry's own success",
+      ah2StillQueued());
+    check("(G1) exactly one entry remains queued (not zero, not still two)", svc.capQueue.listByManager("mgr6").length === 1);
+
+    // Free slot 2 the same way — confirms the sibling eventually fires too (nothing was ever lost, just delayed).
+    db.setProcessState(spawnG2.workerSessionId, "exited");
+    db.setBusy(spawnG2.workerSessionId, false);
+    await svc.maybeDrainCapQueue("mgr6");
+    check("(G1) the sibling ad-hoc entry ALSO eventually auto-fires (now TWO live ad-hoc workers)", liveAHCount() === 2);
+    check("(G1) the cap-queue for this manager is now fully drained", svc.capQueue.listByManager("mgr6").length === 0);
+    for (const w of db.listWorkers("mgr6")) { if (w.worktreePath) worktreesG.push(w.worktreePath); }
+
+    // ===== G2: the MANUAL-SPAWN fallback — no popped entry to key off, so clearTasklessForAgent must
+    // ===== clear only the OLDEST matching entry, never bulk-clear every plain sibling.
+    const rejAH3 = await callG("worker_spawn", { agentId: "agentAdHocG", kickoffPrompt: "AdHoc G3" });
+    check("(G2 setup) a third ad-hoc spawn is cap-queued (cap is full again)", !!rejAH3.capQueued);
+    const rejAH4 = await callG("worker_spawn", { agentId: "agentAdHocG", kickoffPrompt: "AdHoc G4" });
+    check("(G2 setup) a fourth ad-hoc spawn — SAME agent, also no review target — is also cap-queued", !!rejAH4.capQueued);
+    check("(G2 setup) two entries queued again", svc.capQueue.listByManager("mgr6").length === 2);
+
+    // Free BOTH live ad-hoc slots WITHOUT ever calling maybeDrainCapQueue — a raw DB write never triggers
+    // the real onExit-driven drain (same technique Section C's (13)/(25) already use), so the queue is
+    // left completely untouched by this free — simulating a slot-free that a manual, direct worker_spawn
+    // later lands on top of, rather than a drain replay.
+    for (const w of db.listWorkers("mgr6").filter((w) => w.agentId === "agentAdHocG" && w.processState === "live")) {
+      db.setProcessState(w.id, "exited");
+      db.setBusy(w.id, false);
+    }
+    // A completely FRESH, direct worker_spawn call for the SAME agent (taskless, no review target) — this
+    // bypasses the queue/drain entirely (the cap now has room) and hits spawnWorker's ordinary success
+    // path, which has NO popped entry's opId to key off.
+    const freshAH = await callG("worker_spawn", { agentId: "agentAdHocG", kickoffPrompt: "AdHoc fresh, not a drain replay" });
+    check("(G2 setup) the fresh manual spawn succeeds directly (bypasses the queue)", !!freshAH.workerSessionId);
+    worktreesG.push(freshAH.worktreePath);
+
+    const remainingG2 = svc.capQueue.listByManager("mgr6");
+    check("(G2) exactly ONE of the two plain siblings was cleared — not both, not neither", remainingG2.length === 1);
+    check("(G2) the SURVIVING entry is the NEWER one (AH4) — the OLDEST (AH3) is what a manual spawn with no exact key clears",
+      remainingG2[0]?.opId === rejAH4.capQueued.opId);
+
+    // Confirm the spared sibling (AH4) wasn't just spared BY ACCIDENT — it still drains normally once a
+    // real drain actually runs, filling the cap back up for G3 below.
+    await svc.maybeDrainCapQueue("mgr6");
+    check("(G2) the spared sibling (AH4) still drains normally once the drain runs (cap now full again: freshAH + AH4)",
+      liveAHCount() === 2 && svc.capQueue.listByManager("mgr6").length === 0);
+    for (const w of db.listWorkers("mgr6")) { if (w.worktreePath) worktreesG.push(w.worktreePath); }
+
+    // ===== G3: a PLAIN READ (worker_list → listByManager) must notify on a silent TTL reap — never just
+    // ===== the drain's own takeOldestOrReaped.
+    const rejStale = await callG("worker_spawn", { agentId: "agentAdHocG", kickoffPrompt: "AdHoc will TTL-reap via a plain read" });
+    check("(G3 setup) a fifth ad-hoc spawn is cap-queued (cap is full again)", !!rejStale.capQueued);
+    const rawStale = [...svc.capQueue.entries.values()].find((e) => e.opId === rejStale.capQueued.opId);
+    check("(G3 setup) white-box access reaches the raw registry entry", !!rawStale);
+    const staleQueuedAtG3 = new Date(Date.now() - CAP_QUEUE_TTL_MS - 1000).toISOString();
+    rawStale.queuedAt = staleQueuedAtG3;
+
+    host.enqueueLog.length = 0; // clean slate — only this plain read's own (if any) notification should show up below
+    // THE ASSERTION THAT MUST GO RED ON UNFIXED CODE: worker_list is a PLAIN READ — it never calls
+    // maybeDrainCapQueue — yet the manager must still be notified that the entry aged out.
+    await callG("worker_list");
+    check("(G3) the TTL-reaped entry is gone after a plain read alone (no drain call anywhere in this sequence)",
+      !svc.capQueue.listByManager("mgr6").some((e) => e.opId === rejStale.capQueued.opId));
+    check("(G3) the manager WAS notified via [loom:cap-queue-ttl-reaped] from a PLAIN READ, never a drain call",
+      host.enqueueLog.some((e) => e.sessionId === "mgr6" && e.text.includes("[loom:cap-queue-ttl-reaped]")
+        && e.text.includes(rejStale.capQueued.opId) && e.text.includes(staleQueuedAtG3)));
+  } finally {
+    try {
+      const { removeWorktree } = await import("../dist/git/worktrees.js");
+      for (const wt of [...new Set(worktreesG.filter(Boolean))]) { try { await removeWorktree(repoG, wt); } catch { /* best-effort */ } }
+    } catch { /* best-effort */ }
+    try { fs.rmSync(repoG, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+}
+
 // ===================== Section B: CapQueueRegistry unit tests (injectable clock, no real wait) =====================
 {
   let fakeNow = 1_000_000;
@@ -980,6 +1117,77 @@ try {
     check("(29) a different manager's TTL-reaped entry never leaks into another manager's reapedForManager", reapedForManager.length === 0);
     check("(29) and no entry is returned either", entry === undefined);
   }
+
+  // ===================== card e3c6ec8a (registry-level, no SessionService needed): the two residuals =====================
+  // ===================== directly on CapQueueRegistry's own public surface. =====================
+
+  // (39) clearTasklessForAgent clears only the OLDEST matching entry — never every match — when TWO
+  // entries for the same agent carry the identical (undefined/undefined) plain review identity.
+  const regClear = new CapQueueRegistry(() => fakeNow);
+  const ePlain1 = regClear.record("mgrClear", "agentClear", null, "plain kickoff 1");
+  const ePlain2 = regClear.record("mgrClear", "agentClear", null, "plain kickoff 2");
+  check("(39 setup) both plain taskless entries are queued", regClear.listByManager("mgrClear").length === 2);
+  regClear.clearTasklessForAgent("mgrClear", "agentClear"); // no reviewOf — matches BOTH under the old bug
+  const afterClear = regClear.listByManager("mgrClear");
+  check("(39) exactly ONE entry remains — not zero (bulk-cleared), not still two (never cleared)", afterClear.length === 1);
+  check("(39) the SURVIVING entry is the NEWER one (ePlain2) — the OLDEST (ePlain1) is what gets cleared",
+    afterClear[0]?.opId === ePlain2.opId);
+  // A second call with nothing left to match (ePlain2's own review identity is still undefined/undefined,
+  // so it WOULD match again) proves this is a real single-entry clear, not a no-op that happened to leave 1.
+  regClear.clearTasklessForAgent("mgrClear", "agentClear");
+  check("(39) a second call clears the remaining entry too (confirms the match condition itself still fires)",
+    regClear.listByManager("mgrClear").length === 0);
+
+  // (40) clearByOpId — exact-key clear, scoped to the owning manager, a safe no-op otherwise.
+  const regOp = new CapQueueRegistry(() => fakeNow);
+  const eOpA = regOp.record("mgrOp", "agentOp", null, "op A");
+  const eOpB = regOp.record("mgrOp", "agentOp", null, "op B");
+  regOp.clearByOpId("mgrOp", eOpA.opId);
+  check("(40) clearByOpId removes ONLY the exact-matching entry", !regOp.listByManager("mgrOp").some((e) => e.opId === eOpA.opId));
+  check("(40) the sibling (eOpB) is untouched", regOp.listByManager("mgrOp").some((e) => e.opId === eOpB.opId));
+  check("(40) clearByOpId scoped to the WRONG manager is a safe no-op", (() => {
+    regOp.clearByOpId("someOtherMgr", eOpB.opId);
+    return regOp.listByManager("mgrOp").some((e) => e.opId === eOpB.opId);
+  })());
+  check("(40) clearByOpId against an already-gone opId never throws", (() => {
+    regOp.clearByOpId("mgrOp", eOpA.opId);
+    return true;
+  })());
+
+  // (41)-(43) onReap: EVERY public method that triggers a prune() pass reports what it reaped through the
+  // injected callback — not just takeOldestOrReaped (what the drain alone used to rely on).
+  const reapedCalls = [];
+  const regNotify = new CapQueueRegistry(() => fakeNow, (entries) => reapedCalls.push(...entries));
+  const eN1 = regNotify.record("mgrN", "agentN", "tN1", "kickoff N1");
+  fakeNow += CAP_QUEUE_TTL_MS + 1; // age it out
+  check("(41 setup) nothing reported yet — the entry hasn't been read since aging out", reapedCalls.length === 0);
+  regNotify.listByManager("mgrN"); // a PLAIN READ — never takeOldest/takeOldestOrReaped
+  check("(41) a PLAIN listByManager READ reports the reap via onReap (not just the drain's own takeOldestOrReaped)",
+    reapedCalls.length === 1 && reapedCalls[0].opId === eN1.opId && reapedCalls[0].taskId === "tN1");
+
+  reapedCalls.length = 0;
+  const eN2 = regNotify.record("mgrN", "agentN", "tN2", "kickoff N2");
+  fakeNow += CAP_QUEUE_TTL_MS + 1;
+  regNotify.record("mgrN", "agentN", "tN3", "kickoff N3"); // record() itself also prunes before inserting
+  check("(42) record() ALSO reports a reap it triggers while inserting a new entry",
+    reapedCalls.some((e) => e.opId === eN2.opId));
+
+  reapedCalls.length = 0;
+  const eN4 = regNotify.record("mgrN", "agentN", "tN4", "kickoff N4");
+  fakeNow += CAP_QUEUE_TTL_MS + 1;
+  regNotify.cancel("mgrN", "nonexistent-opId-does-not-matter"); // cancel() also prunes first
+  check("(43) cancel() ALSO reports a reap it triggers while pruning", reapedCalls.some((e) => e.opId === eN4.opId));
+
+  // (44) a bare construction with NO onReap callback never throws when a reap happens — the default stays
+  // fully backward-compatible (every pre-existing `new CapQueueRegistry(fn)` single-arg construction in
+  // this file is exactly this shape).
+  const regBare = new CapQueueRegistry(() => fakeNow);
+  regBare.record("mgrBare", "agentBare", "tBare", "kickoff");
+  fakeNow += CAP_QUEUE_TTL_MS + 1;
+  check("(44) a reap with no onReap callback configured never throws", (() => {
+    regBare.listByManager("mgrBare");
+    return true;
+  })());
 }
 
 db.close();

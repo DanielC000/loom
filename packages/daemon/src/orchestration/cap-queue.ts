@@ -97,8 +97,16 @@ export class CapQueueRegistry {
 
   /** `now` is injectable — real `Date.now` in prod, a fake clock in tests (so TTL reap is testable
    *  without a real 30-minute wait). Defaults to `Date.now`, so every existing/production construction
-   *  (`new CapQueueRegistry()`) is byte-identical. */
-  constructor(private readonly now: () => number = Date.now) {}
+   *  (`new CapQueueRegistry()`) is byte-identical.
+   *
+   *  `onReap` (optional, card e3c6ec8a) is invoked by {@link prune} with EVERY entry it just reaped,
+   *  across ALL managers, from WHICHEVER public method triggered that prune pass — `record`/
+   *  `listByManager`/`takeOldest`/`takeOldestOrReaped`/`cancel` alike, not just the drain. Before this,
+   *  only {@link SessionService.maybeDrainCapQueue}'s own `takeOldestOrReaped` call ever reported a TTL
+   *  reap anywhere; a plain read (e.g. `worker_list`'s `listByManager`) silently dropped a stale entry
+   *  with no notice at all. Omitted (the default) in a bare unit-test construction — reaping then stays
+   *  silent exactly as before, so every existing test construction is unaffected. */
+  constructor(private readonly now: () => number = Date.now, private readonly onReap?: (entries: CapQueuedSpawn[]) => void) {}
 
   private markRemoved(e: CapQueueEntry, reason: "already-fired" | "reaped"): void {
     if (this.removedReasons.size >= CAP_QUEUE_MAX) {
@@ -110,8 +118,9 @@ export class CapQueueRegistry {
 
   /** Returns whatever this call actually reaped (across every manager) — {@link takeOldestOrReaped} uses
    *  this to notice an entry that aged out for ITS OWN manager before ever being drained (card 5ab3c664
-   *  Part 2). Every other caller (`record`/`listByManager`/`takeOldest`) still just discards it — reaping
-   *  during a plain read/record stays silent, exactly as before; only the drain path reports it. */
+   *  Part 2).
+   *
+   *  @decision e3c6ec8a — every caller now reports what it reaped via {@link onReap}, not just the drain. */
   private prune(nowMs: number): CapQueueEntry[] {
     const reaped: CapQueueEntry[] = [];
     for (const [key, e] of this.entries) {
@@ -120,6 +129,9 @@ export class CapQueueRegistry {
         this.markRemoved(e, "reaped");
         reaped.push(e);
       }
+    }
+    if (reaped.length > 0 && this.onReap) {
+      try { this.onReap(reaped.map(toPublic)); } catch { /* best-effort — never let a notifier failure break the caller's own read/write */ }
     }
     return reaped;
   }
@@ -169,13 +181,17 @@ export class CapQueueRegistry {
   }
 
   /**
-   * Clear the taskless marker(s) for one agentId on this manager that correspond to the SAME review
+   * Clear the taskless marker for one agentId on this manager that corresponds to the SAME review
    * target as the spawn that just succeeded — a taskless entry has no single stable key to delete
    * directly (see class doc), so this matches on `agentId` PLUS the review identity instead of `agentId`
    * alone.
    *
    * @decision beb6f2b5 — matching on `agentId` alone used to bulk-clear every sibling taskless entry for
    * that agent, silently dropping one queued for a different review target with no notice at all.
+   *
+   * @decision e3c6ec8a — two PLAIN taskless entries for the same agent are still indistinguishable here,
+   * so clear only the OLDEST match, never every match — prefer {@link clearByOpId} when the caller
+   * already holds the popped entry's own opId.
    */
   clearTasklessForAgent(
     managerSessionId: string, agentId: string,
@@ -187,7 +203,28 @@ export class CapQueueRegistry {
       if (
         e.taskId === null && e.managerSessionId === managerSessionId && e.agentId === agentId
         && e.reviewOfWorkerSessionId === reviewOfWorkerSessionId && e.reviewOfTaskId === reviewOfTaskId
-      ) this.entries.delete(key);
+      ) {
+        this.entries.delete(key);
+        return; // OLDEST match only (Map iteration preserves insertion order) — never bulk-clear siblings
+      }
+    }
+  }
+
+  /**
+   * Clear ONE entry by its EXACT opId, scoped to `managerSessionId` — for a caller that already holds the
+   * popped entry's own opId (e.g. {@link SessionService.maybeDrainCapQueue}'s replay) and so has no need
+   * of {@link clearTasklessForAgent}'s heuristic agent+review match, which can still collide between two
+   * sibling entries that are BOTH plain (no review target) for the same agent.
+   *
+   * @decision e3c6ec8a — no-op if the opId is already gone (the common case: a drained entry is already
+   * removed by `takeOldest`/`takeOldestOrReaped` before this ever runs) — never throws.
+   */
+  clearByOpId(managerSessionId: string, opId: string): void {
+    for (const [key, e] of this.entries) {
+      if (e.opId === opId && e.managerSessionId === managerSessionId) {
+        this.entries.delete(key);
+        return;
+      }
     }
   }
 
@@ -218,13 +255,12 @@ export class CapQueueRegistry {
   }
 
   /**
-   * Same as {@link takeOldest}, plus any entries belonging to THIS manager that this call's own TTL prune
-   * just silently removed (card 5ab3c664 Part 2) — used ONLY by {@link SessionService.maybeDrainCapQueue}
-   * so it can tell its manager a queued dispatch aged out before a slot ever freed for it, instead of the
-   * entry just vanishing with no signal at all (the pre-existing `[loom:cap-queue-autofire-failed]`
-   * notice only ever fires when a POPPED entry then fails inside spawnWorker — a TTL reap never reaches
-   * that branch, since `takeOldest` already discarded it before returning). Entries reaped for OTHER
-   * managers are unaffected — still silently dropped, exactly as `takeOldest`/`listByManager` do.
+   * Same as {@link takeOldest}, plus `reapedForManager` — any entries belonging to THIS manager that this
+   * call's own TTL prune just removed (card 5ab3c664 Part 2), scoped for a caller that only cares about
+   * its own manager (e.g. a diagnostic/test read). The actual manager NOTIFICATION for a reap — for THIS
+   * manager and any other — now happens inside {@link prune} itself via {@link onReap} (card e3c6ec8a), so
+   * `reapedForManager` is no longer the only path a reap's existence reaches a caller through; it is kept
+   * here for callers that want the reaped rows directly, not just a side-effect notification.
    */
   takeOldestOrReaped(managerSessionId: string): { entry: CapQueueEntry | undefined; reapedForManager: CapQueueEntry[] } {
     const reapedForManager = this.prune(this.now()).filter((e) => e.managerSessionId === managerSessionId);
