@@ -795,9 +795,12 @@ function wouldOverwriteDifferentUnresolvableOccupant(final: string, entry: Merge
  *
  * @decision 7a7e041b — route every on-disk-token read through this ONE reader; a caller that re-parses
  * `tokens`/`token` independently skips the subtraction and can resurrect an already-cleared token.
+ *
+ * @decision 5b55149b — an EMPTY `tokens` array also falls back to legacy `token`, never treated as a
+ * valid (if empty) array. See the decision record's Follow-up section.
  */
 function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }): { raw: string[]; surviving: string[] } {
-  const raw = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
+  const raw = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
     ? parsed.tokens
     : typeof parsed.token === "string" ? [parsed.token] : [];
   // @decision 8db913e2 (round 3) — never let a stale on-disk copy resurrect a token THIS PROCESS already

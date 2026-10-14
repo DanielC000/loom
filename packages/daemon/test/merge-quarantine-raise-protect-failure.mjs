@@ -882,6 +882,17 @@ try {
   check("*** THE FIX (mixed) *** the still-owed keepTok SURVIVES the copy-aside", tokensAfterRaise.has(keepTok));
   check("(mixed) r's own raise is enforced too", tokensAfterRaise.has(rTok));
 
+  // Reviewer finding 2 (5b55149b) — the Tests section previously claimed keepTok survives "in-process and
+  // across a reboot," but every reboot check below ran AFTER keepTok was already cleared, so survival
+  // across a reboot while still held was never actually asserted. Check it here, BEFORE any clear.
+  const freshMixedPreClear = await freshBootModule();
+  freshMixedPreClear.reenterMergeQuarantinesAtBoot([]);
+  const mixedPreClearEntries = freshMixedPreClear.listActiveMergeQuarantines();
+  check("*** THE FIX (mixed, reboot BEFORE any clear) *** keepTok survives a reboot, still held by d's own pending record",
+    mixedPreClearEntries.some((q) => q.repoPath === d && (q.tokens ?? []).includes(keepTok)));
+  check("(mixed, reboot before any clear) deadTok is NOT resurrected after that same reboot",
+    !mixedPreClearEntries.some((q) => (q.tokens ?? []).includes(deadTok)));
+
   clearMergeQuarantineByToken(d, keepTok);
   clearMergeQuarantineByToken(r, rTok);
   const tokensAfterClear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
@@ -892,6 +903,60 @@ try {
   const freshTokensMixed = new Set(freshMixed.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
   check("*** THE FIX (mixed, reboot) *** deadTok is NOT resurrected after a reboot", !freshTokensMixed.has(deadTok));
   check("(mixed, reboot) keepTok/rTok also stay gone after a reboot (fully released)", !freshTokensMixed.has(keepTok) && !freshTokensMixed.has(rTok));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 5b55149b, REVIEWER PROBE B2 ("7a7e041b-b2") — `final` physically holds the LEGACY singular
+  // `token` field with an EMPTY `tokens` array: `{tokens: [], token: "legacy-live-tok"}`.
+  // `readSurvivingOnDiskTokens`'s own array-type guard treated an empty array as a VALID (if empty)
+  // string array, so pre-fix it never fell through to the `token` fallback at all — the copy-aside then
+  // minted a brand-new RANDOM token in place of the real legacy one, and the legacy token's own holder
+  // could never clear it by token again. THE FIX: fall back to `token` whenever `tokens` is EMPTY *or*
+  // missing, not just missing — keeping the clearedTokens subtraction unchanged.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r = makeToplevelRepo("7a7e041b-b2");
+  const d = path.join(r, "gone-subdir-b2"); // never created — a phantom, unresolvable occupant identity
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  const legacyTok = "legacy-live-tok-7a7e041b-b2";
+
+  // Hand-write `final` directly in the LEGACY singular-`token` shape with an EMPTY `tokens` array — never
+  // loaded into THIS process's memory at all (d is never booted).
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(finalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "D's own degraded entry, legacy singular token field",
+    enteredAt: Date.now(), tokens: [], token: legacyTok,
+  }, null, 2) + "\n");
+  check("(b2 precondition) final holds the legacy token with an empty tokens array", (contentIfExists(finalPath) ?? "").includes(legacyTok));
+
+  // r raises itself: nothing is armed at Kr in this process (d was never booted), so this hits the
+  // "no existing" / brand-new-entry region and calls protectOccupantContentBeforeDelete(final, d, r).
+  const rTok = enterMergeQuarantine(r, "r-branch", "r raises over the legacy-token foreign occupant");
+  const tokensAfterRaise = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (b2) *** the legacy token survives the copy-aside, never replaced by a fresh random token",
+    tokensAfterRaise.has(legacyTok));
+  check("(b2) r's own raise is enforced too", tokensAfterRaise.has(rTok));
+
+  const freshB2PreClear = await freshBootModule();
+  freshB2PreClear.reenterMergeQuarantinesAtBoot([]);
+  const b2PreClearEntries = freshB2PreClear.listActiveMergeQuarantines();
+  check("*** THE FIX (b2, reboot BEFORE any clear) *** the legacy token survives a reboot, still held by d's own pending record",
+    b2PreClearEntries.some((q) => q.repoPath === d && (q.tokens ?? []).includes(legacyTok)));
+
+  // The legacy token must still be clearable BY TOKEN — not just present on disk.
+  clearMergeQuarantineByToken(d, legacyTok);
+  clearMergeQuarantineByToken(r, rTok);
+  const tokensAfterClear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (b2) *** the legacy token lifts in-process once cleared BY TOKEN",
+    !tokensAfterClear.has(legacyTok) && !tokensAfterClear.has(rTok));
+
+  const freshB2 = await freshBootModule();
+  freshB2.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensB2 = new Set(freshB2.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** THE FIX (b2, reboot) *** the legacy token is NOT resurrected after a reboot", !freshTokensB2.has(legacyTok));
+  check("(b2, reboot) r's own token stays gone after a reboot too", !freshTokensB2.has(rTok));
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
