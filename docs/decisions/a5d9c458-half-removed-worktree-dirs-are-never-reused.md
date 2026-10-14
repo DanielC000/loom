@@ -328,6 +328,133 @@ treatment `"removed"` itself gets, since nothing here is actually wrong.
 `packages/daemon/src/sessions/service.ts` (`gcWorktreeDir`'s `"claimed"` outcome,
 `finalizeWorktreeAndBranch`'s exclusion) — fixed on card `f487a493`.
 
+## ROUND 5 (Code Review `f9833ee7` of `73cc6d06`, card `beeae646`) — the claim was never checked BEFORE reap at all
+
+### Narrative
+
+Round 4 (above) gave `"claimed"` a distinct, non-alarming outcome once `removeWorktree`'s own
+`abortIfClaimed` (or the post-reap `this.claimedWorktreePaths.has(normPath)` check, for `finalizeMerge`'s
+non-`staleKnowledge` call shape) catches a reclaim. But neither of those checks runs until AFTER the
+nested-repo scan AND the process reap have already executed. For `finalizeMerge`'s call specifically —
+the one real production caller that never sets `opts.staleKnowledge` — `staleKnowledgeGuard()` is a
+complete no-op (it returns `null` immediately whenever `!opts?.staleKnowledge`), so there was NO claim
+check anywhere before reap: a reclaiming spawn's claim landing during the nested-repo scan's own await, or
+even during reap's own await, was only ever discovered once the post-reap check at
+`this.claimedWorktreePaths.has(normPath)` ran — by which point `reapProcessesRootedInWorktree` had already
+enumerated and killed every OS process it found rooted in that worktree path, potentially including the
+reclaiming spawn's own in-flight `createWorktree` provisioning (`git worktree add`, then `pnpm install`,
+both genuinely spawned with `cwd: worktreePath`). The removal itself was always safely aborted (the
+directory was never deleted) — but reap's kill is a SEPARATE, irreversible side effect that the
+removal-abort does nothing to undo.
+
+Reproduced hermetically (no production code path, a direct `gcWorktreeDir` call shaped exactly like
+`finalizeMerge`'s own: no `staleKnowledge`, `retainIfUncommitted: true`): seeding
+`sessions.claimedWorktreePaths` during the injected `findNestedGitRepos` seam's own await (simulating a
+reclaim landing mid-scan) and observing the injected `reapWorktreeProcesses` seam at the instant it ran
+confirmed `reap` fired with the claim already present, and `removingWorktreePaths` not yet marked (that
+mark only happens after reap, right before the removal itself). A negative control (same shape, no claim
+seeded) confirmed reap ran with no claim present and the removal succeeded normally — the assertions
+discriminate claim-present from claim-absent rather than passing vacuously.
+
+The fix: one more, UNCONDITIONAL `this.claimedWorktreePaths.has(normPath)` check, placed immediately
+before the `reap(...)` call — after the nested-repo-scan block closes, so it also catches a claim that
+landed during THAT await, and before `reap` is invoked at all. Unlike `staleKnowledgeGuard`, this check is
+never gated on `opts.staleKnowledge` (so it actually runs for `finalizeMerge`) and never gated on
+`opts.forceRemoveWorktree` either — a `forceRemoveWorktree:true` caller skips the nested-repo scan
+entirely but still reaches reap, so it has the same exposure, just a shorter window (reap's own await
+only, not scan+reap). On a hit it short-circuits to `{ outcome: "claimed" }` with the same log wording the
+existing post-reap check uses, plus "reap skipped" — `reap` is never invoked at all in that case. The
+existing post-reap check is UNCHANGED and still needed: it is what catches a claim landing between this
+new check and `removingWorktreePaths.add(normPath)` (the window the mutual-exclusion fix, round 3, closes
+only for what happens AFTER that mark).
+
+**Scope: this is not finalizeMerge-only.** The three `staleKnowledge:true` callers — the wedge sweep
+(`sweepWedgedWorktreesOnce` ~:24063) and both boot-reconcile Pass B GC sites (~:25302, ~:25333) — had the
+SAME scan→reap window exposed: their `earlyStaleKnowledgeGuard()` runs BEFORE the scan, and (pre-round-5)
+the next claim check was the late `staleKnowledgeGuard()`, which runs AFTER reap, down past the
+`retainIfUncommitted` check. A claim landing mid-scan for one of these callers was therefore just as
+unprotected as `finalizeMerge`'s own. Because the new check is unconditional, it protects them too —
+with one visible side effect: a mid-scan claim for a `staleKnowledge` caller now resolves as `"claimed"`
+instead of what the late guard would have produced, `"reclaimed-by-live-session"`. This is harmless, not
+a regression: `reclaimWedgedWorktreePathForSpawn` already unconditionally clears the wedge-tracking entry
+for the path it's claiming (`this.db.clearWedgedWorktree(worktreePath)`, ~:24031), the same effect
+`"reclaimed-by-live-session"`'s own handler produces explicitly — so the entry ends up cleared either way.
+Neither caller inspects the outcome for either value: `sweepWedgedWorktreesOnce` discards
+`gcWorktreeDir`'s return entirely, and both Pass B sites branch only on `"needs-human-skip"`/`"removed"`/
+`"path-refused"` (plus `"left-on-disk"` for the second site) — `"claimed"` and
+`"reclaimed-by-live-session"` both fall through their `else` chains identically, uncounted either way.
+
+**Behaviour change, accepted (dirty-retained vs. claimed):** before this round, a `finalizeMerge` call
+against a DIRTY worktree with a mid-scan claim would still reach the `opts.retainIfUncommitted` check
+(after reap, since nothing caught the claim earlier) and resolve `"dirty-retained"` —
+`onWorktreeRetainedDirty` fires, so the manager sees it. After this round, the new pre-reap check now
+catches the claim FIRST and resolves `"claimed"` instead — no manager-facing signal at all; the
+dirty-worktree observation never happens for this call, and any uncommitted content surfaces only to the
+reclaiming spawn itself, via its own `reusedDirtyWorktree`/`discardedOnRecut` result from `createWorktree`.
+Accepted: the new spawn now owns the directory, so it is the right place for that signal to land, not the
+old (now-superseded) caller.
+
+**Stated residual, concretely analysed (not assumed away):** this does not close a claim landing DURING
+reap's own enumeration await, rather than before it. `reapProcessesRootedInWorktree`
+(`packages/daemon/src/pty/host.ts` ~:5572-5584) takes exactly ONE process-list snapshot
+(`enumerateWithRetry`, retried only on a timeout-shaped enumeration failure, never re-enumerated after a
+kill) and kills whatever in that one snapshot matches `worktreePath` — so the only way a reclaiming
+spawn's process could be caught is if it is already rooted in `worktreePath` by the time THAT snapshot is
+taken. Checking where the claim and the process both come from: `reclaimWedgedWorktreePathForSpawn` adds
+to `claimedWorktreePaths` SYNCHRONOUSLY (`service.ts` ~:24001) — after its own `removingWorktreePaths`
+overlap-refusal loop (~:23996-24000, a plain synchronous `for` loop, no `await` anywhere in it), so there
+is still no `await` between entry to the function and the claim landing, even though the add is not its
+very first statement — and both real call sites (`spawnWorker` ~:8451, the batch cut ~:20194) invoke it and only
+THEN `await createWorktree(...)` — so the claim is always registered strictly before `git worktree add`
+runs, and `pnpm install` (`git/worktrees.ts`'s `provisionWorktreeDeps`, spawned with `cwd: worktreePath`)
+runs later still. That ordering is exactly what makes the new pre-reap check effective in the ordinary
+case. But it does NOT make the residual impossible: `reap`'s own enumeration is itself a real async
+operation (an OS process-list call, non-blocking I/O) that yields the event loop for a genuine window —
+anywhere from sub-millisecond to multiple seconds under `enumerateWithRetry`'s own retry/timeout budget —
+and Node's single-threaded cooperative scheduling means a wholly separate, concurrent `worker_spawn`/batch
+call can run its own synchronous claim-add and kick off `createWorktree` during exactly that window. If
+that concurrent spawn's `git worktree add`/`pnpm install` manages to actually become ROOTED in
+`worktreePath` before reap's enumeration snapshot is taken — plausible for a long-lived `pnpm install`
+child, less so for a quick `git worktree add` — reap's single snapshot would still catch and kill it, since
+reap does not re-check the claim itself. This is a genuine, non-theoretical residual, not a "can't
+overlap" case — stated here rather than silently assumed closed. Closing it fully would need
+`reapProcessesRootedInWorktree` itself to consult the claim (e.g. re-check immediately before each kill,
+or filter the snapshot against a live claim read), which this card deliberately does NOT do — scope was
+agreed as the call-site check above only.
+
+### Do not
+
+- Do not read a `"claimed"` outcome (or a reclaimed respawn surviving) as proof reap never ran against
+  that worktree — it proves only that the DIRECTORY was never deleted. Reap's own kill is a separate,
+  already-irreversible side effect this outcome does not undo and does not report on.
+- Do not gate the new pre-reap `claimedWorktreePaths` check on `opts.staleKnowledge` or
+  `opts.forceRemoveWorktree` — both would silently exclude `finalizeMerge`'s own call shape, the one this
+  round exists to fix, and `forceRemoveWorktree:true` still reaches reap even with the scan skipped.
+- Do not remove or weaken the EXISTING post-reap `claimedWorktreePaths` check on the theory that the new
+  pre-reap one makes it redundant — it still catches a claim landing between the new check and
+  `removingWorktreePaths.add(normPath)`.
+- Do not claim the reap-during-enumeration residual is closed, or attempt to close it by making
+  `reapProcessesRootedInWorktree` re-check the claim, without a new card scoping that change — this round
+  deliberately left it as a stated, analysed residual rather than silently assuming it away OR
+  unilaterally expanding scope to fix it.
+- Do not assume this fix is scoped to `finalizeMerge` alone — the `staleKnowledge:true` callers (the
+  wedge sweep, both boot-reconcile Pass B GC sites) had the identical scan→reap exposure and are now
+  covered too; see the scope paragraph above for why their changed `"claimed"` (was
+  `"reclaimed-by-live-session"`) outcome is harmless.
+- Do not treat a `finalizeMerge` call against a dirty, mid-scan-claimed worktree resolving `"claimed"`
+  (with no `onWorktreeRetainedDirty` call, unlike the pre-round-5 `"dirty-retained"` outcome it would
+  previously have reached) as a regression to fix — it is an accepted behaviour change; the reclaiming
+  spawn now owns the directory and is the one that observes the dirt, via its own `createWorktree` result.
+
+### Source
+
+`packages/daemon/src/sessions/service.ts` (`gcWorktreeDir`'s new pre-reap `claimedWorktreePaths` check,
+and the `finalizeWorktreeAndBranch` comment correction) and `packages/daemon/src/pty/host.ts`
+(`reapProcessesRootedInWorktree`, read for the residual analysis, unchanged) — fixed on card `beeae646`
+(Code Review `f9833ee7` of `73cc6d06`), caught by
+`packages/daemon/test/gcworktreedir-claim-before-reap.mjs` (including its `staleKnowledge:true` case D,
+added in this round's own follow-up CR pass).
+
 ## `reclaimWedgedWorktreePathForSpawn`'s `release()` is path-keyed, not ref-counted (card `f487a493`)
 
 ### Narrative

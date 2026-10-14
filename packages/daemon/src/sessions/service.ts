@@ -23826,6 +23826,13 @@ export class SessionService {
         return { outcome: "nested-repo-blocked", nestedRepoPaths: scan.repos };
       }
     }
+    // @decision a5d9c458 — round 5 (card beeae646): do not let reap run against a path a reclaiming
+    // spawn already claimed — check unconditionally, right before reap, never only after it.
+    if (this.claimedWorktreePaths.has(normForCompare(worktreePath))) {
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] ${worktreePath} not removed — a new spawn already claimed this path for reuse before removal began (expected, safe). Nothing was touched, reap skipped.`);
+      return { outcome: "claimed" };
+    }
     const reap = this.reapWorktreeProcesses ?? ((p: string) => reapProcessesRootedInWorktree(p));
     try {
       await reap(worktreePath);
@@ -24142,8 +24149,13 @@ export class SessionService {
         // UNREACHABLE here (card a5d9c458): this call never sets `staleKnowledge`, which is the only
         // thing gcWorktreeDir ever checks to produce either outcome — see its own decision record for
         // why finalizeMerge never sets it. "claimed" (card f487a493) IS reachable here — a new spawn
-        // claiming this exact path mid-removal is correct, safe behaviour, not a failed cleanup, so it
-        // gets no manager-facing warning at all (gcWorktreeDir already logged it, non-alarmingly).
+        // claiming this exact path is correct, safe behaviour, not a failed cleanup: the directory
+        // itself is never touched. That does NOT by itself mean reap was never invoked against it —
+        // round 5 (card beeae646) checks the claim again right before reap, so the common case never
+        // reaps a claimed path at all, but a claim landing DURING reap's own enumeration await is a
+        // stated residual (a5d9c458's record, round 5) where reap can still run before this outcome is
+        // reached. Either way this gets no manager-facing warning (gcWorktreeDir already logged it,
+        // non-alarmingly).
         worktreeGcOutcome = result.outcome;
         // eslint-disable-next-line no-console
         console.warn(`${logPrefix} worktree ${args.worktreePath} not removed (${result.outcome}); ` +
