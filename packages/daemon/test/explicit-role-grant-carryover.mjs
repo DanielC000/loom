@@ -324,6 +324,12 @@ try {
   db.insertSession(seedW);
   const w2 = await svc.recycleWorker(mgrForW.id, seedW.id, "handoff w1");
   worktrees.push(w2.worktreePath);
+  // seedW was inserted directly (never through pty.spawn), so it has no backing live-pty entry — the
+  // real onExit chain that normally flips a recycled predecessor's processState to "exited" (which
+  // claimTaskWorktreeRefusal's @decision 641cc62c live-worker check depends on for the NEXT recycle on
+  // this task, below) can never fire for it. A genuinely-spawned predecessor (e.g. w2 itself, recycled
+  // next) gets this transition for free via its real live-pty entry; seedW needs it simulated here.
+  db.setProcessState(seedW.id, "exited");
   check("(recycle-D1) a pre-existing carried connections grant does NOT block a worker recycle", w2.connections?.includes("wc1"));
   // The profile now gains the FULL forbidden-key set (round 3, MINOR 2), harness included — a worker's
   // harness is ROW-PINNED (never re-resolved, unlike manager/platform-lead above), so it is old-row-carry
