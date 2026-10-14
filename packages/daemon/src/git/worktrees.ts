@@ -8470,6 +8470,19 @@ async function mergeBranchLocked(
     }
     const bodyBlock = workerCommitLogBody ? `\n\n${workerCommitLogBody}` : "";
     let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n${resolvedBranchHead ? `Loom-Landed-Tip: ${resolvedBranchHead}\n` : ""}`;
+    // Card fdc991be: on a host with no configured git identity at all (a fresh end-user machine, or a CI
+    // runner), the squash commit below otherwise fails with "Author identity unknown" AFTER the gate has
+    // already run — `mergeMainIntoWorktree` and batch-merge.ts's cherry-pick commit already fall back this
+    // way; the solo squash commit here had been the one path that didn't. Scoped `-c` args (never `.env()`
+    // — simple-git's `blockUnsafeOperationsPlugin` rejects an explicit `GIT_CONFIG_GLOBAL`/`SYSTEM`
+    // override), and ONLY when no identity is resolvable — a host with its own identity configured commits
+    // byte-identically to before this change. Computed HERE, before the pathset capture below — a plain
+    // read-only `git config` probe, but the load-bearing adjacency rule on that capture (card c862f14c,
+    // just below) still forbids any git call between it and the commit, so this must not sit between
+    // them either.
+    const identityArgs = (await hasConfiguredGitIdentity(git))
+      ? []
+      : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
     // capture and the commit below, or it breaks the tree-identity the byte-identical-digest proof rests on.
@@ -8488,7 +8501,7 @@ async function mergeBranchLocked(
     // @decision 24c0bdba — kill-confirmed: a "failure" here can still mean the commit landed anyway (a
     // post-commit hook outliving the timeout) — re-verify via HEAD and report truthfully, never assume.
     try {
-      await killableCanonicalRaw(repoPath, ["commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
+      await killableCanonicalRaw(repoPath, [...identityArgs, "commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
     } catch (e) {
       // @decision bde5d1fe — already quarantined at the re-check; refuse directly, never re-raise. Name
       // the real staged residue the squash already left behind (Code Review of b4315b52, item 4) so a
