@@ -4807,6 +4807,13 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // comment-only line that happens to combine both tokens (e.g. a stray "// CREATE INDEX ... on
   // halted_recycle_pending_for" note) would land on the SAME line the regex scans and flip the verdict.
   "packages/daemon/test/halted-recycle-pending-schema-migration.mjs",
+  // Card 282107e8: its codex-exclusion control raw-reads real pty/host.ts SOURCE directly (never
+  // dist/**) and does an unstripped indexOf-bounded region slice (createCodexPty...captureCodexEngineSessionId)
+  // then checks that region for the LOOM_PASTED_CONTENT_SYSTEM_PROMPT/--append-system-prompt tokens — a
+  // genuinely new read with no live production re-derivation to inherit immunity from, same posture as
+  // this list's other entries. A comment-only edit inserting either token's text inside that region (or
+  // relocating the region's own anchor comments) could in principle flip the verdict.
+  "packages/daemon/test/spawn-args.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its

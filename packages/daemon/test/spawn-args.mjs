@@ -3,8 +3,14 @@
 // for ANY input (dash-prefixed, huge, empty, or omitted) — closing the Windows command-line ceiling this
 // used to create (a large agent brief + kickoff could blow through CreateProcess's 32766-char limit and
 // refuse the spawn outright). The prompt now rides to the engine post-ready via submit() instead (see
-// pty/host.ts's scheduleKickoffGuarantee). Run: node test/spawn-args.mjs
-import { buildSpawnArgs } from "../dist/pty/host.js";
+// pty/host.ts's scheduleKickoffGuarantee). Also (card 282107e8) asserts `--append-system-prompt
+// <LOOM_PASTED_CONTENT_SYSTEM_PROMPT>` is emitted UNCONDITIONALLY, for every role/spawn-kind, as a FIXED
+// constant (see docs/decisions/282107e8-pasted-content-is-the-sessions-real-user-turn.md). Run: node
+// test/spawn-args.mjs
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildSpawnArgs, LOOM_PASTED_CONTENT_SYSTEM_PROMPT } from "../dist/pty/host.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -132,7 +138,73 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
   check("resume + sessionName (hypothetical): still no `--` separator (no prompt)", !args.includes("--"));
 }
 
+// --- card 282107e8: --append-system-prompt <LOOM_PASTED_CONTENT_SYSTEM_PROMPT> -------------------
+// Fixed, non-interpolated, unconditional for EVERY role (including plain) and every spawn kind.
+{
+  check("the constant is non-empty and reasonably short (fixed, not variable-length)",
+    typeof LOOM_PASTED_CONTENT_SYSTEM_PROMPT === "string" &&
+    LOOM_PASTED_CONTENT_SYSTEM_PROMPT.length > 50 && LOOM_PASTED_CONTENT_SYSTEM_PROMPT.length < 2000);
+  // Fresh/"plain" spawn — no role-conditional params at all (disallowedTools/model/sessionName all
+  // omitted) — the flag is still present. This IS the "plain role" case: plain sessions carry no
+  // disallowedTools/model/sessionName either, so this call shape already covers it.
+  const plain = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers });
+  const fIdx = plain.indexOf("--append-system-prompt");
+  check("plain spawn: --append-system-prompt is present", fIdx !== -1);
+  check("plain spawn: its value is the exact fixed constant", plain[fIdx + 1] === LOOM_PASTED_CONTENT_SYSTEM_PROMPT);
+  check("plain spawn: it precedes --strict-mcp-config/--mcp-config", fIdx >= 0 && fIdx < plain.indexOf("--strict-mcp-config"));
+
+  // Every optional dimension set at once (manager-shaped: model + disallowedTools + sessionName) —
+  // still present, still the SAME value (no interpolation from any of these inputs).
+  const loaded = buildSpawnArgs({
+    settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "lead it",
+    model: "claude-opus-4-8", disallowedTools: ["AskUserQuestion"], sessionName: "loom-loom-mgr",
+  });
+  const lIdx = loaded.indexOf("--append-system-prompt");
+  check("fully-loaded spawn (model+disallowedTools+sessionName): --append-system-prompt still present", lIdx !== -1);
+  check("fully-loaded spawn: value unchanged by any other param", loaded[lIdx + 1] === LOOM_PASTED_CONTENT_SYSTEM_PROMPT);
+
+  // Resume and fork — the two spawn kinds that never carry a startupPrompt — still get it.
+  const resumeArgs = buildSpawnArgs({ resumeId: "engine-123", settingsPath: "S", mode: "acceptEdits", mcpServers });
+  check("resume: --append-system-prompt is present with the exact fixed value",
+    resumeArgs[resumeArgs.indexOf("--append-system-prompt") + 1] === LOOM_PASTED_CONTENT_SYSTEM_PROMPT);
+  const forkArgs = buildSpawnArgs({ resumeId: "engine-123", fork: true, forkSessionId: "new-456", settingsPath: "S", mode: "acceptEdits", mcpServers });
+  check("fork: --append-system-prompt is present with the exact fixed value",
+    forkArgs[forkArgs.indexOf("--append-system-prompt") + 1] === LOOM_PASTED_CONTENT_SYSTEM_PROMPT);
+
+  // Two calls differing in literally every OTHER param still carry byte-identical --append-system-prompt
+  // framing (flag name + value) — proves it is truly unconditional/non-interpolated, not accidentally
+  // keyed off any of these inputs.
+  check("flag+value pair is identical across a plain vs. a fully-loaded call",
+    JSON.stringify([plain[fIdx], plain[fIdx + 1]]) === JSON.stringify([loaded[lIdx], loaded[lIdx + 1]]));
+}
+// Codex is structurally untouched: this constant/flag is claude-only, since createCodexPty is a
+// separate method that never calls buildSpawnArgs (profile-field-consumer-guard.mjs already pins
+// "buildSpawnArgs(" itself as absent from the codex-spawn region — re-verified here directly against
+// the new token so this file doesn't just lean on another file's control).
+{
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const hostTsPath = path.join(__dirname, "..", "src", "pty", "host.ts");
+  const hostTs = fs.readFileSync(hostTsPath, "utf8");
+  const codexStart = hostTs.indexOf("protected createCodexPty(opts: SpawnOpts");
+  const codexEnd = hostTs.indexOf("private captureCodexEngineSessionId(sessionId: string, live: CodexLive, cwd: string, attempt = 0): void {", codexStart);
+  check("codex-spawn region anchors found", codexStart !== -1 && codexEnd !== -1 && codexEnd > codexStart);
+  const codexRegion = hostTs.slice(codexStart, codexEnd);
+  check("(control) codex-spawn region does NOT contain LOOM_PASTED_CONTENT_SYSTEM_PROMPT", !codexRegion.includes("LOOM_PASTED_CONTENT_SYSTEM_PROMPT"));
+  check("(control) codex-spawn region does NOT contain --append-system-prompt", !codexRegion.includes("--append-system-prompt"));
+  // Positive control for the negative checks above: the SAME two tokens ARE present in the real
+  // buildSpawnArgs function body, so an always-green (e.g. a broken anchor) can't hide behind this.
+  // Bounded by the NEXT top-level declaration (not a fixed slice length) — WINDOWS_COMMAND_LINE_LIMIT is
+  // the real declaration buildSpawnArgs' own closing brace is followed by, re-verified every run rather
+  // than assumed, so this can't silently start under- or over-shooting the function's real end.
+  const buildSpawnArgsStart = hostTs.indexOf("export function buildSpawnArgs(o: {");
+  const buildSpawnArgsEnd = hostTs.indexOf("export const WINDOWS_COMMAND_LINE_LIMIT", buildSpawnArgsStart);
+  check("buildSpawnArgs region anchors found", buildSpawnArgsStart !== -1 && buildSpawnArgsEnd !== -1 && buildSpawnArgsEnd > buildSpawnArgsStart);
+  const buildSpawnArgsRegion = hostTs.slice(buildSpawnArgsStart, buildSpawnArgsEnd);
+  check("(control) buildSpawnArgs' own body DOES contain LOOM_PASTED_CONTENT_SYSTEM_PROMPT", buildSpawnArgsRegion.includes("LOOM_PASTED_CONTENT_SYSTEM_PROMPT"));
+  check("(control) buildSpawnArgs' own body DOES contain --append-system-prompt", buildSpawnArgsRegion.includes("--append-system-prompt"));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildSpawnArgs NEVER emits startupPrompt into argv (dash-prefixed, huge, or plain — byte-identical argv with or without it), flags lead, resume/fork thread correctly, --model is emitted iff a profile pins one (null/empty ⇒ byte-identical, no --model), and -n <name> emits/omits the same way (byte-identical when absent, always ahead of --mcp-config)."
+  ? "\n✅ ALL PASS — buildSpawnArgs NEVER emits startupPrompt into argv (dash-prefixed, huge, or plain — byte-identical argv with or without it), flags lead, resume/fork thread correctly, --model is emitted iff a profile pins one (null/empty ⇒ byte-identical, no --model), -n <name> emits/omits the same way (byte-identical when absent, always ahead of --mcp-config), and --append-system-prompt <LOOM_PASTED_CONTENT_SYSTEM_PROMPT> (card 282107e8) is emitted unconditionally, as a fixed constant, for every role/spawn-kind — and is structurally absent from the codex-spawn region."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
