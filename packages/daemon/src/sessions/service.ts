@@ -16529,7 +16529,7 @@ export class SessionService {
     }
     // @decision d099087f — `roundTrip` decides ONLY where the stamps cannot see a move (settle === admit): the null-stamp UNKNOWN and
     // the RACY shape stay first, so a plain mid-run commit that never returns keeps 39196378's RACY wording.
-    // @decision 92dcd9f1 — admit-vs-settle is tested BEFORE start-vs-settle: start === settle ≠ admit (moved in the queue wait, back mid-run)
+    // @decision d099087f (Follow-up 92dcd9f1) — admit-vs-settle is tested BEFORE start-vs-settle: start === settle ≠ admit (moved in the queue wait, back mid-run)
     // ran against the ADMIT tree, so it must be RACY, never the CLEAN shortcut (its dirty variant leaves no reflog entry for roundTrip).
     const roundTripResult = { headCurrent: false, headWarning: "the branch/worktree HEAD moved off the admitted commit while this gate was running and came back (an ABA round trip the head stamps cannot see) — what it tested may be a mix of commits. Treat this result as UNVERIFIED and NOT reusable; re-run." };
     const nowHead = settleStamp.head.slice(0, 8);
@@ -21752,7 +21752,7 @@ export class SessionService {
 
   /**
    * Boot pass (card 59d2577a): ONE {@link checkMainlineMove} read per (project, repoKey), sequential, no repo guard, each fail-open and bounded. Catches a move made while the daemon was down.
-   * @decision 59d2577a — an ALERT at boot files the durable event (source:"boot") but does NOT store W, files ONCE per move (marker) and is delivered to the project's manager(s) by deliverPendingBootAlerts; a clean/unverifiable verdict stores W.
+   * @decision 4fa36502 (Follow-up 59d2577a) — an ALERT at boot files the durable event (source:"boot") but does NOT store W, files ONCE per move (marker) and is delivered to the project's manager(s) by deliverPendingBootAlerts; a clean/unverifiable verdict stores W.
    */
   async checkMainlineMovesOnBoot(): Promise<{ checked: number }> {
     let checked = 0;
