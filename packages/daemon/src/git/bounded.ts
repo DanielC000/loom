@@ -540,6 +540,24 @@ export function spawnCanonicalGitTree(
   return { raw } as unknown as Pick<SimpleGit, "raw">;
 }
 
+/**
+ * Invokes `onTreeDeathSettled` defensively. Every call site below sits inside a `void`'d async IIFE
+ * (`child.on("close", ...)`) with no surrounding try/catch of its own — an uncaught throw from this
+ * caller-supplied callback (e.g. a merge-quarantine auto-clear) becomes an unhandled rejection, and the
+ * `reject(...)` a few lines below it NEVER runs, so the bounded git promise this callback is nested
+ * inside never settles at all. Swallow (never rethrow) so the caller can always still settle.
+ *
+ * @decision 495fd320 — see the decision record.
+ */
+function invokeTreeDeathSettledSafely(onTreeDeathSettled: ((confirmed: boolean) => void) | undefined, confirmed: boolean): void {
+  try {
+    onTreeDeathSettled?.(confirmed);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[git/bounded] onTreeDeathSettled callback threw — swallowing it so the bounded git promise can still settle: ${(e as Error)?.message ?? e}`);
+  }
+}
+
 /** The pre-1718416d direct-spawn path (now also the per-call fallback {@link rawViaWinJobLauncher}
  *  reaches for on a launcher-side refusal — see that function's own doc). This is what runs on every
  *  platform when the win32 launcher is unavailable OR its own git resolution came up empty.
@@ -606,12 +624,12 @@ function rawViaDirectSpawn(
           // (round 3, Code Review B-2) is unreachable by a PPID-walking taskkill and can hold this same
           // pipe open indefinitely instead — `close` then never fires at all, and the OUTER
           // `withTimeoutKillingChild` give-up timer (itself now tagged unconfirmed) is what catches it.
-          onTreeDeathSettled?.(true);
+          invokeTreeDeathSettledSafely(onTreeDeathSettled, true);
           reject(markConfirmedKill(new Error("Abort signal received")));
           return;
         }
         const confirmed = await confirmProcessGroupDead(pid, killGraceMs);
-        onTreeDeathSettled?.(confirmed);
+        invokeTreeDeathSettledSafely(onTreeDeathSettled, confirmed);
         const e = new Error(confirmed ? "Abort signal received" : "Abort signal received (process tree not fully confirmed dead)");
         if (confirmed) markConfirmedKill(e); else markUnconfirmedKill(e);
         reject(e);
@@ -742,7 +760,7 @@ function rawViaWinJobLauncher(
       void (async () => {
         if (killIssued) await killIssued;
         const confirmed = code === LAUNCHER_EXIT_CONFIRMED_KILLED;
-        onTreeDeathSettled?.(confirmed);
+        invokeTreeDeathSettledSafely(onTreeDeathSettled, confirmed);
         const e = new Error(confirmed ? "Abort signal received" : "Abort signal received (process tree not fully confirmed dead)");
         if (confirmed) markConfirmedKill(e); else markUnconfirmedKill(e);
         reject(e);

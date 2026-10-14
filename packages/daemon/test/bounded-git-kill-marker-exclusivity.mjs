@@ -27,8 +27,22 @@ import { EventEmitter } from "node:events";
 // signal received", no "(git child killed): " prefix, no marker) must never be classified as a confirmed
 // kill by `treeDeathConfirmed`'s message-regex fallback.
 //
+// CR a45e4011 (card 495fd320): [6]'s own fake spawnImpl only ever returns ONE generic fake child and has
+// no idea how to answer a win-job-launcher dispatch (a "run" child AND a separate "--signal" child) — on
+// a host where `win-job-launcher.exe` IS built (the main checkout always has one, since
+// `daemon_restart`'s deploy rebuild runs `build:native` — see CLAUDE.md), `spawnCanonicalGitTree` took
+// that dispatch instead of `rawViaDirectSpawn`, the fake spawnImpl's SECOND call (the "--signal" child)
+// silently overwrote `capturedChild`, and the test's own `capturedChild.emit("close", ...)` then fired on
+// the wrong child — the real main child's own `close` handler never ran, leaving `p` unsettled (observed
+// as `exit 13`, "Detected unsettled top-level await"). [6] now pins the dispatch to the fallback via
+// `setWinJobLauncherOverrideForTest(null)` (same pattern as `merge-quarantine-batch.mjs`, commit
+// `9b1f09a7`), so it tests what it claims on every checkout, launcher built or not.
+//
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/bounded-git-kill-marker-exclusivity.mjs
-const { withTimeoutKillingChild, treeDeathConfirmed, treeDeathUnconfirmed, spawnCanonicalGitTree } = await import("../dist/git/bounded.js");
+const {
+  withTimeoutKillingChild, treeDeathConfirmed, treeDeathUnconfirmed, spawnCanonicalGitTree,
+  setWinJobLauncherOverrideForTest,
+} = await import("../dist/git/bounded.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -111,6 +125,10 @@ try {
   // process involved and zero platform dependence. `capturedChild` lets the test drive the fake child's
   // `close` event by hand, in place of a real process actually exiting.
   {
+    // CR a45e4011: pin dispatch to rawViaDirectSpawn — this scenario's fake spawnImpl has no idea how to
+    // answer a win-job-launcher dispatch (see this file's own header note); without this, the test hangs
+    // (exit 13, unsettled top-level await) on any host with win-job-launcher.exe built.
+    setWinJobLauncherOverrideForTest(null);
     let capturedChild;
     const fakeSpawnImpl = () => {
       const child = new EventEmitter();
@@ -131,6 +149,7 @@ try {
     const { confirmed, unconfirmed } = assertMutuallyExclusive("confirmed marker (real seam, no real spawn)", e);
     check("[confirmed marker (real seam, no real spawn)] treeDeathConfirmed is true — deleting markConfirmedKill from this branch must turn this RED", confirmed === true);
     check("[confirmed marker (real seam, no real spawn)] treeDeathUnconfirmed is false", unconfirmed === false);
+    setWinJobLauncherOverrideForTest(undefined);
   }
 
   // [7] ROUND 3 (card 9f5ae011): simple-git's OWN bare `abortPlugin` message — "Abort signal received",

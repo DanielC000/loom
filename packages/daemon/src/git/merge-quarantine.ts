@@ -504,6 +504,35 @@ function directPathIdentity(repoPath: string): string {
 }
 
 /**
+ * `true` iff `value` is a JSON.parse() result safe to property-access AS A RECORD — array or plain
+ * object, never `null` and never a bare scalar (number/string/boolean). The CRASH this guard exists to
+ * close is narrower than what it actually excludes: `JSON.parse("null")` succeeds and returns `null`,
+ * and `parsed.repoPath`/`parsed.tokens` on `null` is the ONLY property read in this module that throws —
+ * a scalar top-level value (`JSON.parse("5")`, `JSON.parse('"x"')`, `JSON.parse("true")`) is already safe
+ * to property-access, returning `undefined` for a missing field, same as an array or plain object. This
+ * guard rejects scalars anyway (`typeof value === "object"` is false for all three), which is a REAL,
+ * deliberate behavior change at exactly two call sites that read on-disk tokens with no OTHER check ahead
+ * of it — `markedFinalFullyCoveredByClear` and `orphanFileTokensAccountedForByUpdate` (see each site's own
+ * doc comment, below): a latch whose content is a bare scalar used to make `readSurvivingOnDiskTokens`
+ * return an empty token array, which both callers' own `.every(...)` then read as VACUOUSLY covered/
+ * accounted-for (fail-OPEN) — now `isReadableLatchRecord` rejects it before `readSurvivingOnDiskTokens`
+ * is ever reached, so both callers instead return "cannot prove this" (fail-CLOSED, strictly SAFER, never
+ * a regression — just not something to leave undocumented as a side effect of the null-crash fix). An
+ * array or `{}` still passes this guard unchanged, at every site (pre- and post-fix): every OTHER site in
+ * this module already had its own `typeof parsed.repoPath === "string"` (or equivalent) check ahead of
+ * any token read, and a scalar already failed THAT check identically before this guard existed — so this
+ * guard changes nothing for a scalar anywhere except the two sites named above.
+ *
+ * Every `JSON.parse(raw)` site in this module already guards the PARSE call itself with a try/catch for
+ * corrupt/unparsable text — this guard closes the gap one line later, before the first property read.
+ *
+ * @decision 495fd320 — see the decision record.
+ */
+function isReadableLatchRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/**
  * Reads a quarantine latch file at `absolutePath` and returns the {@link directPathIdentity} of its OWN
  * recorded `repoPath` field — `undefined` when the file is missing, unparsable, or has no `repoPath`
  * field at all. Never throws.
@@ -515,8 +544,9 @@ function directPathIdentity(repoPath: string): string {
 function quarantineFileRepoPathIdentity(absolutePath: string): string | undefined {
   let raw: string;
   try { raw = fs.readFileSync(absolutePath, "utf8"); } catch { return undefined; }
-  let parsed: Partial<MergeQuarantineEntry>;
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return undefined; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return undefined; }
+  if (!isReadableLatchRecord(parsed)) return undefined; // e.g. the bare literal `null`
   return typeof parsed.repoPath === "string" ? directPathIdentity(parsed.repoPath) : undefined;
 }
 
@@ -695,12 +725,13 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "none" }; // missing — nothing to protect
     return { state: "unknown" }; // read failed for a reason other than missing
   }
-  let existing: { repoPath?: unknown; tokens?: unknown; token?: unknown };
+  let existing: unknown;
   try {
     existing = JSON.parse(existingRaw);
   } catch {
     return { state: "none" }; // corrupt — nothing to protect
   }
+  if (!isReadableLatchRecord(existing)) return { state: "none" }; // e.g. the bare literal `null`
   if (typeof existing.repoPath !== "string") return { state: "none" };
   if (directPathIdentity(existing.repoPath) === directPathIdentity(ownIdentityRepoPath)) return { state: "none" }; // same identity
   // "different but resolvable" is the write-side's own today's-behavior exclusion (e1cb7d33) — but the
@@ -739,12 +770,13 @@ function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuar
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "none" }; // missing — nothing to protect
     return { state: "unknown" }; // read failed for a reason other than missing
   }
-  let existing: { repoPath?: unknown; tokens?: unknown; token?: unknown };
+  let existing: unknown;
   try {
     existing = JSON.parse(existingRaw);
   } catch {
     return { state: "none" }; // corrupt — nothing to protect
   }
+  if (!isReadableLatchRecord(existing)) return { state: "none" }; // e.g. the bare literal `null`
   if (typeof existing.repoPath !== "string") return { state: "none" };
   if (directPathIdentity(existing.repoPath) === directPathIdentity(clearedEntry.repoPath)) return { state: "none" }; // same identity
   if (clearIdentity && directPathIdentity(existing.repoPath) === clearIdentity) return { state: "none" }; // genuinely the clearer's own data
@@ -821,8 +853,9 @@ function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }
 function readFinalOnDiskSurvivingTokens(final: string): string[] {
   let raw: string;
   try { raw = fs.readFileSync(final, "utf8"); } catch { return []; }
-  let parsed: { tokens?: unknown; token?: unknown };
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return []; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return []; }
+  if (!isReadableLatchRecord(parsed)) return []; // e.g. the bare literal `null`
   return readSurvivingOnDiskTokens(parsed).surviving;
 }
 
@@ -842,8 +875,9 @@ function confirmedDurableBackingElsewhere(entry: MergeQuarantineEntry, token: st
     if (candidateFinal === excludeFinalPath) continue;
     let raw: string;
     try { raw = fs.readFileSync(candidateFinal, "utf8"); } catch { continue; }
-    let parsed: { repoPath?: unknown; tokens?: unknown; token?: unknown };
-    try { parsed = JSON.parse(raw) as typeof parsed; } catch { continue; }
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { continue; }
+    if (!isReadableLatchRecord(parsed)) continue; // e.g. the bare literal `null`
     if (typeof parsed.repoPath !== "string" || directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) continue;
     if (readSurvivingOnDiskTokens(parsed).surviving.includes(token)) return true;
   }
@@ -922,8 +956,9 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
     if (code === "ENOENT" || code === "EISDIR") return entry;
     return "unreadable"; // a real file exists but cannot be read right now — never overwrite blind
   }
-  let parsed: { repoPath?: unknown; tokens?: unknown; token?: unknown };
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return entry; } // corrupt — nothing usable
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return entry; } // corrupt — nothing usable
+  if (!isReadableLatchRecord(parsed)) return entry; // e.g. the bare literal `null` — nothing usable
   if (typeof parsed.repoPath !== "string") return entry;
   if (directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) return entry; // a different identity — the pre-existing guard/protect rules already govern this
   const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed);
@@ -1345,6 +1380,9 @@ function consumeMatchedPendingsIntoArmedEntry(
  * @decision 95ea8d3f (Round 2) — corrupt/unparsable content is NO LONGER trivially covered — a corrupt
  * latch can be a card-882d6cff shared backing for SEVERAL distinct claimants at once, and unparseable
  * content can never prove it holds nothing but `candidateTokens`' own tokens. See the decision record.
+ *
+ * @decision 495fd320 — a bare scalar (number/string/boolean, never `null`) now ALSO counts as "cannot
+ * prove coverage" rather than vacuously `true`, a strictly safer tightening. See the decision record.
  */
 function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]): boolean {
   let raw: string;
@@ -1354,8 +1392,9 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
     const code = (e as NodeJS.ErrnoException).code;
     return code === "ENOENT" || code === "EISDIR";
   }
-  let parsed: { tokens?: unknown; token?: unknown };
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return false; } // corrupt — cannot prove coverage
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return false; } // corrupt — cannot prove coverage
+  if (!isReadableLatchRecord(parsed)) return false; // e.g. the bare literal `null` — cannot prove coverage
   // @decision 25f6a7dc — tests the RAW on-disk tokens, each covered by being cleared NOW (candidateTokens)
   // or ALREADY tombstoned (clearedTokens) — never `.surviving` alone, which folds "already cleared"
   // silently into the array instead of deciding it here. See the decision record.
@@ -1694,8 +1733,9 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     console.error(`[merge-quarantine] could not read ${path.basename(final)} (for a reason other than being missing) while protecting it for ${occupantRepoPath} before clearing ${describeClearer} — treating this as UNKNOWN rather than nothing to protect; it is marked kept in THIS PROCESS too, and ${path.basename(final)} is kept on disk, unmodified, instead of being overwritten or deleted.`);
     return false;
   }
-  let parsed: Partial<MergeQuarantineEntry> & { token?: string };
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return true; } // corrupt — nothing to protect
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return true; } // corrupt — nothing to protect
+  if (!isReadableLatchRecord(parsed)) return true; // e.g. the bare literal `null` — nothing to protect
   if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return true;
   const { raw: rawTokens, surviving: survivingTokens } = readSurvivingOnDiskTokens(parsed);
   // @decision 7a7e041b — every real on-disk token was already deliberately cleared by THIS process (a
@@ -1882,8 +1922,9 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
     if (code === "ENOENT" || code === "EISDIR") return false; // nothing real there — proceed
     return true; // a real file exists but is still unreadable — divert, never overwrite blind
   }
-  let parsed: { repoPath?: unknown; tokens?: unknown; token?: unknown };
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return false; } // corrupt — nothing usable, proceed
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return false; } // corrupt — nothing usable, proceed
+  if (!isReadableLatchRecord(parsed)) return false; // e.g. the bare literal `null` — nothing usable, proceed
   if (typeof parsed.repoPath !== "string") return false;
   if (directPathIdentity(parsed.repoPath) === directPathIdentity(ownRepoPath)) return false; // same identity — proceed; the chokepoint unions on-disk tokens forward
   if (isRepoPathCurrentlyResolvable(parsed.repoPath)) {
@@ -2282,12 +2323,16 @@ function anotherLiveEntryOwnsFile(filename: string, updated: MergeQuarantineEntr
  * special-casing here, unlike `markedFinalFullyCoveredByClear`'s own).
  *
  * @decision 29fe2372 — see the decision record, Follow-up 29fe2372.
+ *
+ * @decision 495fd320 — a bare scalar (number/string/boolean, never `null`) now ALSO counts as "cannot
+ * prove this" rather than vacuously `true`, a strictly safer tightening. See the decision record.
  */
 function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: MergeQuarantineEntry, clearedToken: string): boolean {
   let raw: string;
   try { raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, orphanFile), "utf8"); } catch { return false; }
-  let parsed: { tokens?: unknown; token?: unknown };
-  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return false; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return false; }
+  if (!isReadableLatchRecord(parsed)) return false; // e.g. the bare literal `null`
   const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
   const accountedFor = new Set([...updated.tokens, clearedToken]);
   return onDiskTokens.every((t) => accountedFor.has(t) || clearedTokens.has(t));
@@ -2733,8 +2778,9 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string)
       }
       continue; // gone (ENOENT), or unreadable but now marked kept above
     }
-    let parsed: { repoPath?: unknown };
+    let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { continue; } // corrupt — nothing to protect
+    if (!isReadableLatchRecord(parsed)) continue; // e.g. the bare literal `null`
     if (typeof parsed.repoPath !== "string") continue;
     if (directPathIdentity(parsed.repoPath) === clearIdentity) continue; // genuinely the clearer's own data
     if (isRepoPathCurrentlyResolvable(parsed.repoPath)) continue; // a resolvable leftover is safe to overwrite today

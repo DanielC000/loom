@@ -408,8 +408,83 @@ disk; a reboot re-quarantined both all over again) and GREEN after this fix.
   an agent itself triggers via `daemon_restart`, and is lifted only by the human REST route or a genuine
   in-process auto-clear.
 
+## Follow-up 495fd320 — a throwing `onTreeDeathSettled` could leave the bounded git promise unsettled forever
+
+From Code Review `9d6dc6b8` of card `29fe2372` — a SEPARATE finding from the same review, PRE-EXISTING
+since `onTreeDeathSettled` was introduced by this card's own "Round 3" quarantine work. `onTreeDeathSettled`
+is a caller-supplied callback — in production, every caller is an `enterMergeQuarantine`/
+`clearMergeQuarantineByToken` closure (`git/worktrees.ts`, `git/batch-merge.ts`) implementing this card's
+own "clear a repo's quarantine ONLY via `onTreeDeathSettled`'s own in-process auto-clear" rule (the "Do
+not" bullet below). `git/bounded.ts`'s own three real call sites (`rawViaDirectSpawn`'s two branches,
+`rawViaWinJobLauncher`'s one) each sit inside a `void`'d async IIFE (`child.on("close", ...)`) with no
+surrounding try/catch of its own. If the callback throws — the merge-quarantine half of this exact bug
+(`docs/decisions/8db913e2-raise-diverts-instead-of-overwriting-a-kept-occupant.md`, Follow-up `495fd320`,
+is one concrete way it could: a `null`-content orphan latch file) — the throw escapes as an UNHANDLED
+REJECTION, and the `reject(...)` a few lines below it NEVER runs. The bounded git promise this callback is
+nested inside never settles at all — not merely a hang, but (on this Node version's default
+`--unhandled-rejections` behavior) a daemon-crashing uncaught exception.
+
+### The fix
+
+A new helper, `invokeTreeDeathSettledSafely(onTreeDeathSettled, confirmed)`, wraps the call in a
+try/catch — a throw is logged and swallowed, never rethrown — so the surrounding IIFE always reaches its
+own `reject(...)` regardless of what the callback does. All three real call sites now route through it;
+nothing about WHAT gets rejected (the real confirmed/unconfirmed-kill error) changes — only that a
+misbehaving callback can no longer prevent it from being delivered.
+
+### Tests
+
+`test/bounded-git-tree-death-settled-throw.mjs` (new): a HERMETIC repro, mirroring
+`bounded-git-kill-marker-exclusivity.mjs`'s own scenario `[6]` — a fake `spawnImpl` returning a bare
+`EventEmitter` with `pid: null` takes `rawViaDirectSpawn`'s real unconditional-confirm branch (the same
+one a real win32 close takes) with zero real OS process involved. A throwing `onTreeDeathSettled` is
+proven to still let the promise settle (reject, with the real confirmed-kill reason intact, never
+replaced by the callback's own thrown error) within a bounded explicit timeout — so a regression fails
+this test loudly instead of hanging the whole process. A negative control repeats the same shape with a
+non-throwing callback, proving behavior is unchanged for the case that already worked. Proven RED via
+`scripts/negative-control.mjs --ref 43a65f27` (absolute, pre-fix — RED manifested as an actual uncaught
+exception crashing the test process, not merely a timeout) and GREEN after, tree restored byte-identical.
+`canonical-git-helper-guard.mjs` and `canonical-git-isolation.mjs` (120/120) re-verified green, since this
+is the canonical-git path.
+
+### Round 2 (Code Review `a45e4011`) — the original test wasn't hermetic, and a pre-existing sibling had the same hole
+
+The CR confirmed the production code (the fix above) correct and complete — but the FIRST version of
+`bounded-git-tree-death-settled-throw.mjs` only exercised `rawViaDirectSpawn`'s branch, without pinning
+the dispatch. On a host where `win-job-launcher.exe` IS built (the main checkout always has one, since
+`daemon_restart`'s own deploy rebuild runs `build:native`), `spawnCanonicalGitTree` silently took the
+`rawViaWinJobLauncher` branch instead, and the fake `spawnImpl`'s `--signal` child (the abort-signaler
+`signalWinJobLauncherAbort` spawns) never emitted `close` — the test hung until its own 2000ms timeout
+and FAILED. `bounded-git-kill-marker-exclusivity.mjs`'s own PRE-EXISTING scenario `[6]` had the identical
+hole for a different, structural reason: its single generic fake `spawnImpl` has no idea how to answer a
+launcher dispatch at all (a "run" child AND a separate "--signal" child), so the SECOND spawn call
+silently overwrote the test's own `capturedChild` reference — the real main child's own `close` handler
+never ran, and the test hung with `exit 13` ("Detected unsettled top-level await").
+
+**The fix:** both files now pin dispatch to the fallback via `setWinJobLauncherOverrideForTest(null)`
+before, and `setWinJobLauncherOverrideForTest(undefined)` after, the direct-spawn-only scenarios — the
+same seam and pattern `merge-quarantine-batch.mjs` (commit `9b1f09a7`) already established for exactly
+this divergence. `bounded-git-tree-death-settled-throw.mjs` ALSO gains a new SCENARIO 3 covering the
+THIRD real call site (`rawViaWinJobLauncher`'s own aborted-close branch, ~L763) that scenarios 1-2 never
+reached at all — win32-only, fully hermetic via `setWinJobLauncherOverrideForTest` pointed at a dummy
+EXISTING file (never the real exe, mirroring `win-job-launcher-fallback-branches.mjs`'s own pattern) with
+a fake `spawnImpl` that correctly discriminates the "run" child from the "--signal" child. Covers BOTH
+`LAUNCHER_EXIT_CONFIRMED_KILLED` and `LAUNCHER_EXIT_UNCONFIRMED_KILLED`, each with a throwing callback,
+asserting: the promise settles; the callback ran exactly once with the correct `confirmed` argument;
+`treeDeathConfirmed`/`treeDeathUnconfirmed` and the rejection message match the expected shape; and the
+swallow is actually LOGGED (captured via a `console.error` interceptor that still forwards to the real
+one). Verified in BOTH modes (no exe, and after `pnpm --filter @loom/daemon build:native`) in a worker's
+own isolated worktree — never the main checkout, which always has the real exe built live.
+
 ## Do not
 
+- Do not call `spawnCanonicalGitTree` with a fake `spawnImpl` in a test WITHOUT either pinning the
+  dispatch via `setWinJobLauncherOverrideForTest(null)` or building a spawnImpl that correctly answers
+  BOTH the win-job-launcher's own "run" child and its separate "--signal" abort-signaler child (round 2)
+  — this dispatch is HOST-DEPENDENT (it silently changes based on whether `win-job-launcher.exe` happens
+  to be built), so a test that only ever ran against `rawViaDirectSpawn` on its author's own machine can
+  hang or crash on a DIFFERENT host with no code change at all. Verify any such test in BOTH modes (no
+  exe, and after `pnpm --filter @loom/daemon build:native`) before trusting it.
 - Do not release `withCanonicalIndexLock`, or proceed to a rollback / the next candidate branch in
   `batch-merge.ts`'s per-branch loop, while a mutating git child from a PRIOR call may still be alive —
   route every mutating canonical/batch-merge git call through `killableCanonicalRaw` (`git/bounded.ts`),
@@ -432,6 +507,11 @@ disk; a reboot re-quarantined both all over again) and GREEN after this fix.
   human REST route (`POST /internal/merge-quarantine/clear`) — it must stay latched, refusing every later
   merge/batch attempt on that SAME CANONICAL repo, across any number of daemon restarts (round 4: a
   restart RE-ARMS it, via `reenterMergeQuarantinesAtBoot`, never lifts it).
+- Do not call `onTreeDeathSettled` directly (`onTreeDeathSettled?.(...)`) from a new call site in
+  `git/bounded.ts` (Follow-up `495fd320`) — always go through `invokeTreeDeathSettledSafely`. The callback
+  is caller-supplied and every call site sits inside a `void`'d async IIFE with no surrounding catch of
+  its own; an uncaught throw there leaves the bounded git promise unsettled forever (a daemon-crashing
+  unhandled rejection on this Node version), not merely a skipped side effect.
 - Do not key a quarantine (or check for one) on a BATCH WORKTREE path (round 4, BLOCKER 1) — always
   resolve and pass the CANONICAL `repoPath` first; a batch worktree shares the canonical repo's hooks
   directory and object database, so keying on the ephemeral worktree path leaves the canonical repo (and
