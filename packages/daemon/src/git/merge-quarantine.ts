@@ -695,7 +695,7 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "none" }; // missing — nothing to protect
     return { state: "unknown" }; // read failed for a reason other than missing
   }
-  let existing: { repoPath?: unknown };
+  let existing: { repoPath?: unknown; tokens?: unknown; token?: unknown };
   try {
     existing = JSON.parse(existingRaw);
   } catch {
@@ -705,7 +705,14 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
   if (directPathIdentity(existing.repoPath) === directPathIdentity(ownIdentityRepoPath)) return { state: "none" }; // same identity
   // "different but resolvable" is the write-side's own today's-behavior exclusion (e1cb7d33) — but the
   // clear-side (`protectResolvableToo: true`) must NOT share it; see this function's own doc for why.
-  if (!protectResolvableToo && isRepoPathCurrentlyResolvable(existing.repoPath)) return { state: "none" };
+  if (!protectResolvableToo && isRepoPathCurrentlyResolvable(existing.repoPath)) {
+    // @decision 0dc514dc — "resolvable ⇒ safe" assumes the occupant's own backing lives at ITS OWN key —
+    // false if an earlier graduation write there failed. Content-based, reusing THIS read (never a
+    // second one): only a real token overlap with a surviving OTHER entry means this file is load-bearing.
+    const { surviving } = readSurvivingOnDiskTokens(existing);
+    if (survivingTokenHolderRepoPaths(surviving, directPathIdentity(ownIdentityRepoPath), final).length === 0) return { state: "none" };
+    return { state: "occupant", repoPath: existing.repoPath };
+  }
   return { state: "occupant", repoPath: existing.repoPath };
 }
 
@@ -796,6 +803,82 @@ function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }
   // @decision 8db913e2 (round 3) — never let a stale on-disk copy resurrect a token THIS PROCESS already
   // deliberately cleared; see clearedTokens' own doc comment for why subtracting it here is safe.
   return { raw, surviving: raw.filter((t) => !clearedTokens.has(t)) };
+}
+
+/**
+ * `final`'s own on-disk SURVIVING tokens (via {@link readSurvivingOnDiskTokens}), or `[]` for ENOENT/
+ * EISDIR (nothing real there), any other read failure, or corrupt/unparseable JSON — every one of those
+ * is already governed by this module's OTHER, identity/reference-based protect checks; this helper feeds
+ * ONLY the purely content-based {@link survivingTokenHolderRepoPaths} check below, which never needs to
+ * (and must not) distinguish those cases itself.
+ *
+ * @decision 0dc514dc — see the decision record's Follow-up section.
+ */
+function readFinalOnDiskSurvivingTokens(final: string): string[] {
+  let raw: string;
+  try { raw = fs.readFileSync(final, "utf8"); } catch { return []; }
+  let parsed: { tokens?: unknown; token?: unknown };
+  try { parsed = JSON.parse(raw) as typeof parsed; } catch { return []; }
+  return readSurvivingOnDiskTokens(parsed).surviving;
+}
+
+/**
+ * `true` iff `entry` has an INDEPENDENT, confirmed-on-disk backing for `token` at one of its OWN
+ * `armedKeys` OTHER than `excludeFinalPath` — a real file exists there right now, names the SAME
+ * identity, and still carries `token`. Never checks `excludeFinalPath` itself — that would
+ * tautologically "confirm" a stale leftover using its own soon-to-be-destroyed/overwritten bytes.
+ *
+ * @decision 0dc514dc (Round 2, CR 582ce5a9) — see the decision record's open-question follow-up: a
+ * RESOLVABLE occupant's own content check must not flag a genuinely STALE leftover when that same
+ * occupant is ALREADY durably, independently backed elsewhere (e.g. properly migrated to its own key).
+ */
+function confirmedDurableBackingElsewhere(entry: MergeQuarantineEntry, token: string, excludeFinalPath: string): boolean {
+  for (const key of entry.armedKeys ?? []) {
+    const candidateFinal = quarantinePathForKey(key);
+    if (candidateFinal === excludeFinalPath) continue;
+    let raw: string;
+    try { raw = fs.readFileSync(candidateFinal, "utf8"); } catch { continue; }
+    let parsed: { repoPath?: unknown; tokens?: unknown; token?: unknown };
+    try { parsed = JSON.parse(raw) as typeof parsed; } catch { continue; }
+    if (typeof parsed.repoPath !== "string" || directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) continue;
+    if (readSurvivingOnDiskTokens(parsed).surviving.includes(token)) return true;
+  }
+  return false;
+}
+
+/**
+ * repoPaths of every SURVIVING active or pending entry — other than `excludeIdentity` ({@link
+ * directPathIdentity}) — that currently holds ANY of `tokens`. Purely CONTENT-based: unlike {@link
+ * survivingSharedClaimRepoPaths}, this never looks at `orphanLatchFiles`/`sourceFile` references at all
+ * (`9cabd143` bans a reference-based veto) — it answers "does some OTHER entry's own in-memory token set
+ * still include one of these exact token strings", regardless of whether that entry has ever heard of
+ * the physical file these tokens were just read from. Excluding by IDENTITY (never by object reference)
+ * so every record sharing the raiser/clearer's own identity — an active entry and a pending twin alike —
+ * is correctly treated as "the one being cleared or raised," never as a foreign survivor of itself.
+ *
+ * `excludeFinalPath`, when given, additionally excludes an ACTIVE entry whose every matched token is
+ * ALREADY confirmed durably backed at one of its OWN other `armedKeys` (see {@link
+ * confirmedDurableBackingElsewhere}) — optional, and every existing caller that omits it keeps today's
+ * behavior byte-identical.
+ *
+ * @decision 0dc514dc — see the decision record. Must NOT fire when the only on-disk token is the clearer/
+ * raiser's own (e.g. `95ea8d3f-r3-orphanref`, where `bToken` is held only by B, which is being cleared).
+ */
+function survivingTokenHolderRepoPaths(tokens: string[], excludeIdentity: string, excludeFinalPath?: string): string[] {
+  if (tokens.length === 0) return [];
+  const owners = new Set<string>();
+  for (const entry of activeQuarantines.values()) {
+    if (directPathIdentity(entry.repoPath) === excludeIdentity) continue;
+    const matched = entry.tokens.filter((t) => tokens.includes(t));
+    if (matched.length === 0) continue;
+    if (excludeFinalPath && matched.every((t) => confirmedDurableBackingElsewhere(entry, t, excludeFinalPath))) continue;
+    owners.add(entry.repoPath);
+  }
+  for (const p of pendingUnresolvedQuarantines) {
+    if (directPathIdentity(p.entry.repoPath) === excludeIdentity) continue;
+    if (p.entry.tokens.some((t) => tokens.includes(t))) owners.add(p.entry.repoPath);
+  }
+  return [...owners];
 }
 
 /**
@@ -1275,6 +1358,12 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
  */
 function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string, clearedEntry?: MergeQuarantineEntry, clearIdentity?: string): string[] {
   const final = quarantinePathForKey(key);
+  // @decision 0dc514dc — ONLY when neither protect call below would read `final` at all (both
+  // `clearingRepoPath`/`clearedEntry` absent) — a new read here otherwise steals an injected-failure
+  // slot several tests key to a specific read NUMBER. See the decision record's Follow-up.
+  const contentClaimants = clearIdentity && !clearingRepoPath && !clearedEntry
+    ? survivingTokenHolderRepoPaths(readFinalOnDiskSurvivingTokens(final), clearIdentity)
+    : [];
   let finalProtectOk = true;
   if (clearingRepoPath) finalProtectOk = protectDegradedOccupantBeforeDelete(final, clearingRepoPath) && finalProtectOk;
   if (clearIdentity) {
@@ -1300,6 +1389,11 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
   // doc. Checked last, after every other signal, so it can only ever narrow `finalProtectOk` further.
   const sharedClaimants = survivingSharedClaimRepoPaths(finalBasename);
   if (sharedClaimants.length > 0) finalProtectOk = false;
+  // @decision 0dc514dc — `contentClaimants` (computed at this function's own top, before any mutation
+  // above) is NEVER overridden by `provenCoverage` either — same "checked last, only ever narrows"
+  // posture as `sharedClaimants`, applied to a content-based rather than structural claim.
+  if (contentClaimants.length > 0) finalProtectOk = false;
+  const keptClaimants = [...new Set([...sharedClaimants, ...contentClaimants])];
   if (finalProtectOk) {
     let unlinkConfirmed = true;
     try {
@@ -1318,9 +1412,9 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
     // @decision 8db913e2 (round 4, CR3 BLOCKER 1) — NEVER tombstone here: `finalProtectOk` true also
     // covers "copied aside, still enforced". The caller's own top-level clear tombstones once, at its own
     // end, via `tombstoneIfNotSurviving` — the only place that knows the full outcome.
-  } else if (sharedClaimants.length > 0) {
+  } else if (keptClaimants.length > 0) {
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] keeping ${finalBasename} on disk — ${sharedClaimants.length} other claimant(s) sharing this exact file still structurally depend on it (${sharedClaimants.join(", ")}); never destroyed, even though this clear's own content coverage would otherwise be proven.`);
+    console.error(`[merge-quarantine] keeping ${finalBasename} on disk — ${keptClaimants.length} other claimant(s) still depend on it (${keptClaimants.join(", ")}); never destroyed, even though this clear's own content coverage would otherwise be proven.`);
   } else {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — a foreign occupant's content could not be durably protected (or could not be read) before this clear; see the error just above. It also stays marked kept in THIS PROCESS (a real self-owned record, or a basename-only read-failure mark), not only after a later boot.`);
@@ -1330,7 +1424,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string,
   // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
   // because THIS key's own entry is being legitimately cleared.
   sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key));
-  return sharedClaimants;
+  return keptClaimants;
 }
 
 /**
@@ -1685,6 +1779,13 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
     provenanceUnknown, provenanceTracked,
   };
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
+  // @decision 0dc514dc — a DIFFERENT surviving pending entry can structurally depend on this EXACT
+  // sourceFile (882d6cff's shared-corrupt-latch shape); content can't discriminate (a placeholder's
+  // tokens never appear on disk), so this reuses the clear path's own structural check instead.
+  if (survivingSharedClaimRepoPaths(base.sourceFile).length > 0) {
+    divertRaiseEntry(merged);
+    return token;
+  }
   const persisted = writePendingDivertFile(base.sourceFile, merged);
   pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
   if (!persisted) {
@@ -1740,7 +1841,15 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
   try { parsed = JSON.parse(raw) as typeof parsed; } catch { return false; } // corrupt — nothing usable, proceed
   if (typeof parsed.repoPath !== "string") return false;
   if (directPathIdentity(parsed.repoPath) === directPathIdentity(ownRepoPath)) return false; // same identity — proceed; the chokepoint unions on-disk tokens forward
-  if (isRepoPathCurrentlyResolvable(parsed.repoPath)) return false; // today's legitimate overwrite, unchanged
+  if (isRepoPathCurrentlyResolvable(parsed.repoPath)) {
+    // @decision 0dc514dc (Round 2) — "resolvable ⇒ safe" is false on a double fault (this raise's own
+    // protect-copy just failed to write); gated on `!protectOk` so a transient-duplicate copy never
+    // reaches it. Reuses `parsed` — never a second read.
+    if (protectOk) return false;
+    const { surviving } = readSurvivingOnDiskTokens(parsed);
+    if (survivingTokenHolderRepoPaths(surviving, directPathIdentity(ownRepoPath)).length === 0) return false;
+    return true; // still held elsewhere — divert, never overwrite blind
+  }
   const onDiskTokens = Array.isArray(parsed.tokens) && parsed.tokens.every((t): t is string => typeof t === "string")
     ? parsed.tokens
     : typeof parsed.token === "string" ? [parsed.token] : [];

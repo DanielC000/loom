@@ -987,6 +987,18 @@ fixture satisfying both without contradicting one or the other. The check is DEF
 position (it is never a no-op — it still matters inside `deleteMergeQuarantineLatchByKey`, which runs the
 unconditional check independent of `provenCoverage`, and `95ea8d3f-r2-ddpath` already exercises it there).
 
+**Correction (Follow-up `0dc514dc`, Code Review item 2) — FALSE, empirically.** The "direct tension"
+argument above silently assumed "provably-covered valid JSON" means a GENUINE latch (real `repoPath`/
+`tokens`). It doesn't: `markedFinalFullyCoveredByClear`'s own `onDiskTokens.every(...)` is **vacuously
+true** for an EMPTY on-disk token array — and a `final` holding merely `{}` (valid JSON, zero tokens,
+but missing `repoPath`/`branch`/`reason`) is ALSO exactly what PASS 1's own boot-time classification
+treats as "corrupt" for the purpose of minting a placeholder (`generic placeholder` creation is gated on
+"nothing usable was ever parsed," not on "JSON.parse threw"). So `final` CAN simultaneously be
+provably-covered (vacuously, via zero on-disk tokens) and still be a genuine `882d6cff` placeholder's own
+`sourceFile` — the two conditions this record called "in direct tension" are not actually in tension at
+all. See `crnit2` in `merge-quarantine-raise-protect-failure.mjs` for the fixture, and this card's own
+Follow-up section below for where it is proven reachable, naming the surviving sibling.
+
 ### Tests
 
 `merge-quarantine-raise-protect-failure.mjs`:
@@ -1234,10 +1246,367 @@ individually, each exit 0. All static guards (`pnpm --filter @loom/daemon guards
   shape, not for a self-referencing protected-copy/safety-tmp keep (`4900c365`/`ef651188`), which has
   nothing to do with key-sharing at all. State the keep cause generically and offer the clear-by-id
   remedy CONDITIONALLY ("if they share this exact degraded key...").
-- **(Follow-up 95ea8d3f, Round 3)** Do not manufacture a fixture to "prove" `sweepOwnLatchFileUnlessOwnedElsewhere`'s
-  own placeholder-`sourceFile` check fires as the discriminating reason inside its `provenCoverage`-gated
-  branch — it cannot, by construction (reaching that branch requires provably-covered VALID JSON, while a
-  placeholder's own defining trait is "nothing usable was ever parsed there"). State this as DEFENSIVE-ONLY
-  in that position rather than claiming test coverage that does not, and structurally cannot, exist there —
-  the SAME check still matters, and is genuinely exercised, inside `deleteMergeQuarantineLatchByKey`
-  (`95ea8d3f-r2-ddpath`), which runs it unconditionally, independent of `provenCoverage`.
+- **(Follow-up 95ea8d3f, Round 3; CORRECTED BY Follow-up `0dc514dc`)** The original text of this bullet
+  said never to manufacture a fixture proving `sweepOwnLatchFileUnlessOwnedElsewhere`'s own placeholder-
+  `sourceFile` check fires as the discriminating reason, since reaching that branch "cannot, by
+  construction" coincide with a genuine placeholder. FALSE — `markedFinalFullyCoveredByClear`'s own
+  vacuous "every on-disk token already covered" result for an EMPTY token array, combined with a `final`
+  holding valid-but-field-missing JSON (e.g. `{}`, which PASS 1 ALSO treats as corrupt enough to mint a
+  placeholder), makes the branch genuinely reachable. See `crnit2` in
+  `merge-quarantine-raise-protect-failure.mjs` and this card's own Follow-up section below.
+
+## Follow-up `0dc514dc` — two latches a surviving entry still needed, on clear and on raise; CONTENT-based, never reference-based (`9cabd143`)
+
+Round-3 Code Review `22bca242` of `95ea8d3f` found two further FAIL-OPEN findings, both pre-existing on
+main (not a regression of `95ea8d3f` itself): a clear, and a raise, could each destroy a latch file that
+is a SURVIVING entry's only durable backing — with NOTHING structural (`orphanLatchFiles`/`sourceFile`)
+pointing at it from either side, so neither the pre-existing structural veto (`survivingSharedClaimRepoPaths`,
+banned by `9cabd143` from considering a bare reference) nor any identity check already in place could
+ever have caught it. The CR's own direction: use a CONTENT-based check instead — before destroying a
+latch, read its own on-disk tokens via a shared reader, and if any of them is still held by a surviving
+active or pending entry OTHER than the one being cleared or raised, protect the content.
+
+### Repro A (clear path) — `deleteMergeQuarantineLatchByKey` had no token-overlap backstop when `entry` is undefined
+
+1. Write `<Krhash>.json` = `{repoPath: r/gone-subdir (D), tokens:[d-token], resolvedKey: Kr}`.
+2. `reenterMergeQuarantinesAtBoot([])` — PASS 1 arms D under its own recorded `resolvedKey` (Kr), trusting
+   it despite D itself being unverifiable.
+3. `clearMergeQuarantineReporting(r)`, with D's own pending-divert write failing — D ends up a self-owned
+   pending entry, with `sourceFile = Krhash.json` (`final` itself, untouched; this step's own protect call
+   already keeps the file correctly, by the PRE-EXISTING token-overlap-aware protect machinery).
+4. Make `r/gone-subdir` its own real git repo — D becomes resolvable, at its OWN key `Kd != Kr`.
+5. `activeMergeQuarantineFor(D)` — lazy graduation to ACTIVE at `Kd`, but the write there fails (injected).
+   D's only durable backing stays at `Krhash.json` (folded into D's own `orphanLatchFiles`), and its
+   pending twin is consumed.
+6. `clearMergeQuarantine(r)` — **r has NO quarantine of its own at `Kr` at all.** `entry =
+   activeQuarantines.get(Kr)` is `undefined`, so `clearingRepoPath`/`clearedEntry` are BOTH `undefined` —
+   neither `protectDegradedOccupantBeforeDelete` nor `protectUnincorporatedOccupantBeforeDelete` even
+   runs, and `survivingSharedClaimRepoPaths` finds nothing (D's pending twin was already consumed in step
+   5 — nothing in `pendingUnresolvedQuarantines` references `Krhash.json` any more). Pre-fix:
+   `Krhash.json` is unlinked outright. d-token is lost after a reboot.
+
+### Repro B(a) (raise path) — `mergeTokenIntoPendingEntries` unconditionally overwrote a shared `sourceFile`
+
+1. Write corrupt `<Krhash>.json` F (or, see the correction above, valid-but-field-missing `{}`).
+2. `reenterMergeQuarantinesAtBoot([d1, d2])` — TWO pure-pending placeholders (card `882d6cff`'s own
+   shared-corrupt-latch shape), both with `sourceFile = F`.
+3. `enterMergeQuarantine(d1)`, while d1 is STILL unresolvable — this reaches `mergeTokenIntoPendingEntries`
+   (never `enterMergeQuarantine`'s own `verified` raise-write branches), which durably rewrote `base.sourceFile`
+   (here, `F`) with d1's OWN merged content UNCONDITIONALLY, with no check for whether a DIFFERENT,
+   surviving pending entry (d2) also depends on that exact file. Pre-fix: F is overwritten with valid JSON
+   naming d1 alone. After a reboot d2 is gone, with no clear at all.
+
+### Repro B(b) (raise path) — `differentUnresolvableOccupantRepoPathAt`'s own "resolvable ⇒ safe" shortcut assumed the occupant's real backing lives at its OWN key
+
+In shape A above, after step 5 (D ACTIVE at its own key `Kd`, but with NO physical backing there — its
+graduation write failed, so its ONLY durable copy is still `Krhash.json`): `enterMergeQuarantine(r)`
+reaches the "no existing" raise-write branch's own `protectDegradedOccupantBeforeDelete` call, which
+read `Krhash.json`, found D's own content, and — because D is now RESOLVABLE — took
+`differentUnresolvableOccupantRepoPathAt`'s pre-existing "a different identity that is CURRENTLY
+RESOLVABLE is also safe" branch (`state: "none"`), on the theory that a resolvable occupant's own real
+backing lives at ITS OWN key and whatever sits here is stale, safely-overwritable leftover. That theory
+is false in exactly this shape: D's real backing is STILL this exact file. Pre-fix: `r`'s raise overwrites
+`Krhash.json` outright (`protectOk` stays `true`, nothing marks the basename, `resolveRaiseOverwrite`'s own
+fast path proceeds with no read at all). d-token is lost after a reboot, with no clear at all.
+
+### The fix
+
+Two new shared primitives in `merge-quarantine.ts`:
+
+- `readFinalOnDiskSurvivingTokens(final)` — `final`'s own on-disk SURVIVING tokens (via the existing
+  shared `readSurvivingOnDiskTokens`), or `[]` for ENOENT/EISDIR, any other read failure, or corrupt JSON
+  — every one of those cases is already governed by this module's other, identity/reference-based checks;
+  this helper feeds ONLY the new content-based check below.
+- `survivingTokenHolderRepoPaths(tokens, excludeIdentity)` — repoPaths of every SURVIVING active or
+  pending entry, OTHER than `excludeIdentity` ({@link directPathIdentity}), that currently holds ANY of
+  `tokens`. Purely content-based — unlike `survivingSharedClaimRepoPaths`, this never looks at
+  `orphanLatchFiles`/`sourceFile` at all (`9cabd143` bans a reference-based veto). Excludes by IDENTITY
+  (never by object reference), so every record sharing the clearer/raiser's own identity is correctly
+  treated as "the one being cleared or raised," never as a foreign survivor of itself — this is what
+  keeps the check from firing on `95ea8d3f-r3-orphanref` (bToken is held only by B, which is being
+  cleared: excluding B's own identity leaves nothing else holding it).
+
+**Repro A's fix — `deleteMergeQuarantineLatchByKey`:** `contentClaimants` is computed ONCE, at the TOP of
+the function, BEFORE any protect call runs — **not** at the end, alongside `sharedClaimants`, as a first
+draft of this fix tried. Two reasons, both found only by running the full corpus, not by this card's own
+new scenarios:
+1. **Timing (the TOCTOU-shaped regression).** A protect call that SUCCEEDS during this SAME invocation
+   (relocating a genuinely foreign occupant's content into a fresh pending-divert copy) leaves `final`'s
+   OLD bytes physically unchanged until the unlink actually runs. A content check computed AFTER that
+   protect call would read those stale bytes and find the SAME tokens ALSO present in the fresh copy it
+   just created — a transient, self-inflicted "duplicate" that wrongly blocks a legitimate unlink
+   (`in-memory-twin-clear-destroys-degraded-file`'s own precondition: "Y legitimately owns Ky now"
+   regressed to `FAIL` under the naive end-of-function placement). Computing it BEFORE any protect call
+   runs in this invocation sees the world as it was independent of this clear's own actions.
+2. **Read-count fragility.** Several existing tests (`merge-quarantine-protect-read-failure.mjs`'s
+   `round4-b1`/`round4-lifecycle`) inject a read failure keyed to a specific call NUMBER (e.g. "fail only
+   the 1st read of `final`"). An unconditional extra read anywhere ahead of the EXISTING protect call's
+   own read silently steals that slot, letting the protect call's own read see success one call later
+   than the test expects — turning a correctly-marked-kept file into a wrongly-unlinked one. **The fix is
+   gated** — `contentClaimants` is only ever computed when NEITHER `clearingRepoPath` NOR `clearedEntry`
+   is given (this card's own Repro A shape: `entry` is `undefined`, so neither protect call would ever
+   read `final` anyway) — so it never adds a read ahead of one that already exists. This is a narrower
+   scope than "every clear," by design: it closes exactly the gap Repro A demonstrates, not a general
+   content scan on every clear.
+3. **Correction (Round 2, CR `582ce5a9`).** This section previously claimed "a token already in
+   `clearedEntry.tokens` is excluded, in addition to the identity exclusion" — FALSE, no such code
+   exists. `contentClaimants` is gated OFF entirely whenever `clearedEntry` is given (point 2 above), so
+   there is never a call where BOTH a `clearedEntry` and a non-empty `contentClaimants` scan coexist —
+   nothing to exclude its tokens from in the first place. The identity exclusion (`clearIdentity`) alone
+   is what this gate's one reachable shape (Repro A: `clearedEntry` undefined) needs, and is all the
+   code does.
+
+**Repro B(a)'s fix — `mergeTokenIntoPendingEntries`:** before writing `merged` to `base.sourceFile`, check
+`survivingSharedClaimRepoPaths(base.sourceFile)` (the EXISTING structural check, reused — not a new
+content check: a placeholder's own tokens never appear in its file, so content cannot discriminate this
+shape at all, exactly the card's own ruling). `matched`'s own entries are already spliced out of
+`pendingUnresolvedQuarantines` earlier in the same function, so this sees only a genuinely OTHER surviving
+claimant. A non-empty result diverts via `divertRaiseEntry(merged)` instead of writing to the shared file
+— reusing `divertRaiseEntry` rather than inventing a second copy-aside primitive.
+
+**Repro B(b)'s fix — `differentUnresolvableOccupantRepoPathAt`'s own "resolvable" branch:** no longer
+unconditionally returns `{state:"none"}` for a different, currently-resolvable identity. It now re-reads
+that identity's own on-disk tokens (reusing the SAME read this function already performed — never a
+second read) and checks `survivingTokenHolderRepoPaths(surviving, directPathIdentity(ownIdentityRepoPath))`;
+only when NOTHING else still holds those tokens does it fall through to `"none"`. Otherwise it returns
+`{state:"occupant", repoPath: existing.repoPath}` exactly like a genuinely unresolvable occupant would —
+which routes through the SAME pre-existing `protectOccupantContentBeforeDelete` copy-aside the unresolvable
+branch already uses, **not** a divert of the raiser's own write. This mirrors shape 1's own
+protect-then-overwrite pattern: D's content is durably relocated to its own pending-divert file BEFORE
+r's write proceeds, and `final` legitimately ends up holding r's own content afterward — d-token is never
+lost, but `final`'s bytes are **not** expected to stay byte-for-byte unchanged (an earlier draft of this
+card's own test asserted exactly that, and had to be corrected once the real behavior was observed).
+
+### Tests
+
+`merge-quarantine-raise-protect-failure.mjs`:
+- **`carda`** — Repro A, ported verbatim. Asserts `final` SURVIVES the clear, the clear reports
+  `latchKept` naming D, and d-token is enforced both in-process and after a fresh-import reboot — measured
+  directly via `listActiveMergeQuarantines().flatMap(q => q.tokens ?? [])`, never `assertRepoNotQuarantined`.
+- **`cardba`** — Repro B(a), ported verbatim. Asserts F's own corrupt content is UNCHANGED by d1's raise,
+  d1's own raise persists, and d2 survives a fresh-import reboot (d2's own token is not expected
+  byte-identical across boots — a generic placeholder mints a fresh `randomUUID()` per boot, since
+  nothing usable was ever parsed; only its identity surviving is the real guarantee, same discipline as
+  `95ea8d3f-r2-shared`).
+- **`cardbb`** — Repro B(b), ported verbatim. Asserts d-token is NEVER LOST (found via
+  `listActiveMergeQuarantines`, not a `final`-content byte-compare) both immediately after r's raise and
+  after a fresh-import reboot, and that r's own raise persists too.
+- **`crnit2`** — the Code Review item 2 correction's own fixture (the `{}`-content variant of B(a)'s
+  shared-latch setup, plus a transient read failure on `r`'s own raise to mark the basename kept). Asserts
+  the clear's own `latchKept` result names d2 SPECIFICALLY (`referencingRepoPaths` non-empty) — the
+  discriminating proof that `survivingSharedClaimRepoPaths`'s own veto, not the generic unattributed-kept
+  bucket, is what kept the file — and that d2 survives a fresh-import reboot.
+
+`cardba` and `crnit2` both hard-reset `MERGE_QUARANTINE_DIR` at their own start (`fs.rmSync` +
+`fs.mkdirSync`, mirroring `merge-quarantine-migrate-source-owner-durable.mjs`'s own precedent) — this file
+runs 30+ scenarios sharing one directory, and both of these repros are sensitive to an unrelated, earlier
+scenario's own leftover orphan residue being broadcast onto their own `d1`/`d2` by PASS 2's "every
+registered repo's entry references an unmatched orphan" mechanism. Every OTHER new scenario in this card
+does not need the reset — their own precondition checks don't depend on exact file content/count.
+
+**Correction (Round 2, CR `582ce5a9`) — the original "all four new scenarios proven RED" claim was
+imprecise.** `negative-control`'s own verdict is for the WHOLE test FILE (a single exit code), not
+per-assertion — it genuinely proves "something in this file regresses on the reverted source," never
+"every new scenario's every check goes RED." Measured precisely, per scenario:
+- `carda`: genuinely RED pre-fix (`final` gets unlinked outright) and GREEN after.
+- `cardba`: the IN-PROCESS checks (F's content unchanged, d1's own raise persists) already pass
+  pre-fix too — `mergeTokenIntoPendingEntries`'s own overwrite doesn't touch d1's own in-memory state,
+  only d2's durable backing. It goes RED **only at the reboot assertion** (d2 does not survive).
+- `cardbb`: same shape as `cardba` — the in-process "d-token is NEVER LOST" check already passes
+  pre-fix (D's own in-memory active entry is untouched by what happens to `final`'s physical bytes); RED
+  is at the reboot assertion only.
+- `crnit2`: GREEN on the parent too, by design — see the correction inserted at the "sweep-path
+  structural veto" section above. This fixture pins already-correct, pre-existing (`95ea8d3f`) behavior
+  and corrects the record's own wrong claim about it; it was never expected to discriminate this card's
+  own code change, and does not.
+
+All `merge-quarantine*.mjs` files re-verified individually, each exit 0. `95ea8d3f-r3-orphanref`
+re-verified green, unaffected — bToken is excluded by the identity-exclusion rule, never because the
+content check happens not to run.
+
+## Round 2 (Code Review `582ce5a9`) — a two-path asymmetry: `resolveRaiseOverwrite`'s own independent
+slow-path re-read of the SAME "resolvable ⇒ safe" shortcut was untouched by Round 1
+
+Round 1 relaxed `differentUnresolvableOccupantRepoPathAt`'s own "resolvable ⇒ safe" shortcut (for Repro
+B(b)). `resolveRaiseOverwrite`'s own slow path has an INDEPENDENT copy of that same shortcut
+(`if (isRepoPathCurrentlyResolvable(parsed.repoPath)) return false;`), reached whenever a protect call's
+own `protectOk` return is `false` — including a DOUBLE FAULT, where the detector correctly flags D (Round
+1's own fix) but D's own protect-copy write ALSO fails, so there is nowhere durable for D's content to
+land. `protectOccupantContentBeforeDelete` falls back to keeping `final` as D's own self-owned pending
+record (its OWN write never attempted a different file) and returns `false` — `resolveRaiseOverwrite`
+then independently re-reads `final`, sees D is resolvable, and (pre-this-round) blindly proceeds anyway.
+
+### Repro P3 (the reviewer's own, verbatim)
+
+1. Run Repro A steps 1-5 (`carda`'s own setup): D kept as a self-owned pending via a failed divert write,
+   then graduates to ACTIVE at its own key Kd (graduation write there ALSO fails).
+2. Inject an `openSync` failure on `pending-<hash(D)>.json`, then call `enterMergeQuarantine(r)`.
+3. The detector flags D (Round 1's own fix). `protectOccupantContentBeforeDelete` fails to write the
+   copy-aside, so it keeps `Krhash.json` as D's own self-owned pending and returns `false`.
+4. `resolveRaiseOverwrite` re-reads, sees D is resolvable, and (pre-fix) proceeds. r's write overwrites
+   `Krhash.json`.
+5. `clearMergeQuarantine(r)` gives `latchKept:[D]`, keeping a file that now holds r's data.
+6. Fresh-import reboot (pre-fix — reproducible on `4dba1d37`, this card's own parent, AND still on
+   `f89cfbd2`, Round 1's own commit): d-token is LOST — a pre-existing fail-open this round CLOSES, not
+   an accepted residual — and r's own CLEARED token RESURRECTS (the regression Round 1's own content
+   check introduced, since it reaches this far without ever being consulted by this slow path).
+
+### The fix
+
+`resolveRaiseOverwrite`'s own `isRepoPathCurrentlyResolvable(parsed.repoPath)` branch now runs the SAME
+content check, reusing `parsed` (never a second read) — but gated on `!protectOk` ONLY, which also
+CLOSES the pre-existing d-token loss above (diverting instead of proceeding means D's content is never
+overwritten in the first place). `protectOk === true` reaching this branch at all requires `marked` to
+ALSO be true (the fast path above already returns for `protectOk && !marked`), and means ONE of two
+things: either the protect call durably copied a genuine occupant's content aside for THIS SAME
+invocation, or the detector found nothing to protect at all (`differentUnresolvableOccupantRepoPathAt`'s
+own `"none"`). A content check reached there would double-count the FIRST case's own fresh copy (the
+transient-duplicate false positive this card's own Do-not list already warns about) — and the SECOND
+case needs no such check either: a stale mark on this SAME (same-identity) basename is already correctly
+handled by the write's own chokepoint (`reconcileMarkedBasenameBeforeWrite`/`foldInOnDiskTokensIfMarked`),
+which unions any genuinely on-disk tokens forward for THIS exact write before it ever proceeds. Every
+`protectOk === false` path reaching this branch, by contrast, never durably writes a fresh copy of
+anything (a read-failure mark, or a self-owned-pending fallback that points at `final` itself, never a
+different file) — so there is nothing to double-count, and nothing else already covers it.
+
+### Open question — `wouldOverwriteDifferentUnresolvableOccupant` (non-raise writers) shares the SAME
+detector Round 1 touched, and a quick repro confirmed it IS a real, new fail-closed
+
+`differentUnresolvableOccupantRepoPathAt` is shared by `protectDegradedOccupantBeforeDelete` (raise +
+clear) AND `wouldOverwriteDifferentUnresolvableOccupant` (a NON-raise writer's own degraded-occupant
+guard — graduation, sibling-absorb). Round 1's own content check, applied uniformly via the shared
+detector, can flag a GENUINELY STALE leftover of an occupant that is ALREADY durably, independently
+backed elsewhere (its own real key, properly migrated) — purely because the stale leftover's own bytes
+still carry the SAME token the occupant's CURRENT, real record also holds. Confirmed empirically: D
+raises fresh and writes successfully to its own key Kd; a stale leftover of D (same repoPath, same
+token) is placed at a DIFFERENT key Kr; E (an unrelated, unresolvable entity walking up to Kr) raises,
+then becomes resolvable and queries — the lazy-graduation write at Kr (guard ACTIVE, unlike a raise) was
+refused, verified by reverting only this round's own exclusion and re-running: `Krhash.json` was left
+unchanged, still holding D's stale data (the write was durably refused). **Correction (CR2 `a5b84e8e`):**
+`eActive?.armedKeys` is NOT the discriminator here — an entry is armed IN-MEMORY unconditionally, whether
+or not the durable write itself succeeds (e1cb7d33: enforcement for this process must not wait on disk
+I/O), so `armedKeys` is non-empty on BOTH sides. `Krhash.json`'s own CONTENT (does it hold D's stale
+bytes, or e's own) is the real discriminator. Restoring the fix, E's write durably succeeds.
+
+**The fix:** `confirmedDurableBackingElsewhere(entry, token, excludeFinalPath)` — `true` iff `entry` has
+an INDEPENDENT, confirmed-on-disk backing for `token` at one of its OWN `armedKeys` OTHER than
+`excludeFinalPath` (a real file exists there right now, names the SAME identity, and still carries
+`token`). Never checks `excludeFinalPath` itself — that would tautologically "confirm" a stale leftover
+using its own soon-to-be-destroyed/overwritten bytes. `survivingTokenHolderRepoPaths` gained an optional
+`excludeFinalPath` parameter: when given, an ACTIVE entry whose every MATCHED token is already confirmed
+durably backed elsewhere is excluded from the result. Every existing caller that omits the parameter
+(the clear path, both `resolveRaiseOverwrite` uses) keeps today's behavior byte-identical — this is
+additive, and does not reopen Repro A/B(b)/P3, since in every one of those shapes the occupant's own
+`armedKeys` target has NO durable backing at all (confirmed by the injected write failures that define
+those repros) — `confirmedDurableBackingElsewhere` only ever EXCLUDES a genuinely safe case, never
+re-includes an unsafe one. `differentUnresolvableOccupantRepoPathAt`'s own resolvable branch passes
+`final` as `excludeFinalPath`.
+
+### Tests
+
+`merge-quarantine-raise-protect-failure.mjs`:
+- **`p3`** — the reviewer's own repro, ported verbatim. Asserts `final` is NEVER overwritten (D's own
+  content survives byte-for-byte — a double fault has nothing safe to divert TO, so proceeding would be
+  the only alternative to diverting), r's own raise persists (diverted), the clear reports `latchKept`
+  naming D, and — the discriminating check — after a fresh-import reboot, d-token SURVIVES and r's own
+  CLEARED token does NOT resurrect (unchanged from the parent commit's own behavior for that half).
+- **`openq`** (the open question's own repro) — D raises fresh to its own key Kd; a stale leftover of D
+  (same token) is placed at a DIFFERENT key Kr; E raises while unresolvable (walking up to Kr), then
+  becomes resolvable and is queried (lazy graduation, guard ACTIVE). Asserts `Krhash.json` now holds e's
+  own content (the real discriminator — `armedKeys` non-empty is asserted too, but labeled as NOT
+  discriminating: it passes on `f89cfbd2` as well, per the correction above) and D's own token is
+  unaffected throughout. **Reboot leg (CR2 `582ce5a9`/`a5b84e8e`):** the card's own real failure mode here
+  is a CLEARED-TOKEN RESURRECTION, not merely a refused write — `clearMergeQuarantineByToken(d, dToken)`,
+  then a fresh-import reboot, asserting D's own cleared token does NOT resurrect and e's own raise
+  survives. Proven RED on `f89cfbd2` and GREEN after, via `negative-control --ref f89cfbd2` — both the
+  content-match assertion and the reboot assertion discriminate against that exact ref; every other
+  `openq` check (including the relabeled `armedKeys` one) passes on both sides.
+
+Both `p3` and `openq` proven RED on `f89cfbd2` (Round 1's own commit) and GREEN after, via
+`negative-control --ref f89cfbd2` against the whole test file. All `merge-quarantine*.mjs` files
+re-verified individually, each exit 0. All static guards
+(`pnpm --filter @loom/daemon guards`) re-verified green (30/30).
+
+## Do not
+
+- **(Round 2)** Do not leave `resolveRaiseOverwrite`'s own slow-path "resolvable ⇒ safe" shortcut
+  unguarded by a content check just because `differentUnresolvableOccupantRepoPathAt` already has one —
+  the two are INDEPENDENT re-reads at two different call sites; fixing one does not fix the other (P3's
+  own regression).
+- **(Round 2)** Do not gate `resolveRaiseOverwrite`'s own new content check on anything other than
+  `!protectOk` — the slow path only reaches this branch with `protectOk === true` when `marked` is ALSO
+  true, meaning either a protect call JUST durably copied something aside for THIS SAME invocation (a
+  content check there would double-count that fresh copy — the exact transient-duplicate false positive
+  this card's own Do-not list already warns about) or there was nothing to protect at all, in which case
+  the write's own chokepoint (`reconcileMarkedBasenameBeforeWrite`) already correctly unions any
+  genuinely on-disk tokens forward — never assume the first case is the ONLY reason `protectOk` can be
+  `true` here, or the safety argument is incomplete.
+- **(Round 2)** Do not assume fixing `differentUnresolvableOccupantRepoPathAt`'s own "resolvable" branch
+  is safe for EVERY one of its callers without checking which ones share it — `wouldOverwriteDifferentUnresolvableOccupant`
+  (non-raise writers) shares the identical detector, and Round 1's own content check, applied there
+  unguarded, created a genuine new fail-closed: a stale leftover of an occupant ALREADY durably backed
+  elsewhere got wrongly flagged, refusing an unrelated entity's own legitimate write. Add
+  `confirmedDurableBackingElsewhere` rather than assuming the fix is universally safe.
+- **(Round 2)** Do not check `excludeFinalPath` itself inside `confirmedDurableBackingElsewhere` — a
+  stale leftover's own bytes trivially "confirm" themselves if the exclusion is dropped, defeating the
+  entire point of the check (it exists specifically to require an INDEPENDENT, different physical
+  backing, not a tautological self-match).
+- **(Round 2, CR2 `a5b84e8e`)** Do not assert `armedKeys` non-empty as proof a durable write succeeded —
+  an entry is armed IN-MEMORY unconditionally the instant it's constructed, whether or not the physical
+  write behind it ever lands (e1cb7d33: enforcement for this process must not wait on disk I/O). It
+  passes on BOTH sides of a refused-vs-succeeded write; the file's own CONTENT is the only thing that
+  actually discriminates. `openq`'s own `armedKeys` check is kept, but labeled as non-discriminating.
+- **(Round 2)** Do not claim "all N new scenarios proven RED" from a single `negative-control` run's
+  overall exit code — that proves the FILE regresses somewhere, never that every individual assertion in
+  every new scenario does. State which specific assertion(s) discriminate (often only the reboot check;
+  an in-process check can legitimately pass on both sides, since an in-memory active entry is untouched
+  by what happens to a physical file's own bytes) and which scenarios are deliberately GREEN on the
+  parent by design (a documentation-only correction with no code change, like `crnit2`).
+- **(Round 2)** Do not claim a content-check exclusion exists in code without grepping for it — this
+  record's own Repro A section once claimed `clearedEntry.tokens` was excluded "in addition to the
+  identity exclusion"; no such code exists, because the content check there is gated OFF entirely
+  whenever `clearedEntry` is given. See the correction inserted at that section.
+
+- **(Follow-up `0dc514dc`)** Do not compute a new content-based read of `final` unconditionally, or at
+  the END of a clear function alongside an existing structural check — a protect call that SUCCEEDS
+  earlier in the SAME invocation leaves `final`'s stale bytes physically present until the unlink runs,
+  and a content check reading them AFTER that protect call will find its own fresh copy as a false
+  "survivor." Compute it BEFORE any protect call in the same function can run, or gate it to the exact
+  shape where no protect call would run at all.
+- **(Follow-up `0dc514dc`)** Do not add a content-based read of `final` anywhere a test in this corpus
+  injects a read failure keyed to a specific call NUMBER, without re-checking every such test — an extra
+  read ahead of an existing one silently shifts which call sees the injected failure. Gate narrowly
+  (this card's own fix: only when neither `clearingRepoPath` nor `clearedEntry` is given) rather than
+  widen a content check's reach "while you're in there."
+- **(Follow-up `0dc514dc`)** Do not exclude only by `directPathIdentity` when deciding whether a token
+  found on disk is "owed elsewhere" on the CLEAR path — also exclude any token already present in
+  `clearedEntry.tokens` itself. A degraded dual-arm union can carry a different contributor's own token
+  under the entry actually being cleared, with that contributor's own bare `repoPath` never matching
+  `clearIdentity` — excluding by identity alone re-flags content the clearer's own bookkeeping already
+  safely accounts for.
+- **(Follow-up `0dc514dc`)** Do not add a content-based veto to `mergeTokenIntoPendingEntries` for the
+  B(a) shape — a placeholder's own tokens never appear in its on-disk content, so a content check would
+  be a silent no-op there. Reuse the EXISTING structural check (`survivingSharedClaimRepoPaths`), never a
+  parallel content-based mechanism that cannot discriminate this shape at all.
+- **(Follow-up `0dc514dc`)** Do not "fix" B(b) by adding a content check inside `resolveRaiseOverwrite`'s
+  own fast path (`protectOk && !marked`) — a first draft of this fix did exactly that, and it reproduces
+  the IDENTICAL transient-duplicate false positive as computing Repro A's own check too late: a
+  successful protect-then-overwrite (shape 1's own established pattern) leaves `final`'s stale bytes
+  physically present until the write runs, and the fast-path check would find its own fresh copy as a
+  false "survivor," wrongly diverting a write that should legitimately proceed
+  (`merge-quarantine-raise-protect-failure.mjs`'s own `fp:reraise` positive control regressed under this
+  draft). Fix the ROOT detector (`differentUnresolvableOccupantRepoPathAt`'s own "resolvable ⇒ none"
+  shortcut) instead, reusing the read it already performs — never add a second, independent read at a
+  DIFFERENT call site for the same decision.
+- **(Follow-up `0dc514dc`)** Do not assert that `final`'s own bytes stay byte-for-byte unchanged as the
+  discriminating proof for B(b)'s own fix — the actual fix routes D through the SAME protect-then-overwrite
+  pattern shape 1's own positive control already exercises (content durably relocated, then `final`
+  legitimately overwritten by the raiser). Assert that D's own token is never lost (present in
+  `listActiveMergeQuarantines`'s own flattened tokens), in-process and after a reboot — the same
+  discipline every other card in this module already uses, not a new, stricter claim this fix never made.
+- **(Follow-up `0dc514dc`)** Do not trust `markedFinalFullyCoveredByClear`'s own "provably covered" result
+  as proof that `final` holds a GENUINE latch — it is vacuously `true` for a `final` holding valid JSON
+  with ZERO on-disk tokens (e.g. `{}`), which is simultaneously exactly what PASS 1's own boot
+  classification treats as corrupt enough to mint a `882d6cff` placeholder. The Round-3 "direct tension"
+  argument that the sweep-path placeholder veto is structurally unreachable assumed otherwise, and was
+  wrong — see the correction inserted at that section above, and `crnit2`'s own fixture.
