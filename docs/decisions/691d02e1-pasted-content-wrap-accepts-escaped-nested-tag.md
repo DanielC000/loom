@@ -81,6 +81,15 @@ treated as a defect to fix without a real specimen showing it matters in practic
   (the mismatch stays unrecognized and still notifies), never toward a mask, same failure direction as the
   one accepted above, and with no real specimen yet showing it matters. Left unchanged deliberately, not
   overlooked.
+  **Sanctioned exception (card `fc82dd76`):** `purgeConfirmedGiveUpRequeueCore` (host.ts, decision
+  `0658d6d8`) DOES apply this same reversal, as an additional candidate signature alongside that path's
+  existing raw and unwrapped checks — a different consumer, with its own genuine specimen (a give-up body
+  quoting the tag syntax, escaped by the CLI on echo, never purged). **The safety argument above does NOT
+  carry over to that consumer unchanged:** there, a false match only produces a false ALARM; in the purge
+  path, a false match PURGES a still-queued requeue, so the failure direction flips to a possible LOSS —
+  see `0658d6d8`'s own addendum for that path's separately-reasoned, accepted residual. The underlying
+  reversal's own narrowness (pinned here by scenarios 6y/6z) is unchanged and still governs both
+  consumers; only the SET of call sites widens, by exactly this one named exception.
 - Do not treat the `ff871b77` 1-2 char excess population as PROVEN to be this same mechanism — plausible
   (1-2 occurrences of the same literal substring would produce exactly 1-2 extra chars) but not provable
   retroactively; Loom does not log kickoff body text, so there is no way to re-check those 3 historical

@@ -235,39 +235,51 @@ try {
       !host.getPendingEntries(sid).some((m) => m.text === TEXT1));
   }
 
-  // ===== 5. NEGATIVE CONTROL (fix review follow-up, card fc82dd76) — the inner CARRIES the CLI's escape
-  // (so the new third candidate, textSignature(unescapeNestedPastedContentTag(inner)), is actually
-  // exercised rather than trivially inapplicable), but the UNESCAPED text is a genuinely DIFFERENT body
-  // from gen 1's archived write — not byte-identical once the escape is reversed. This pins that the new
-  // candidate still requires exact whole-inner equality (after reversal), the same as the raw/unwrapped
-  // candidates already do in scenarios 2/3 — it must NOT purge merely because an escape was present. =====
+  // ===== 5. NEGATIVE CONTROL, DISCRIMINATING (Code Review `d9647c2b` follow-up, card fc82dd76) — a body
+  // equal to gen 1's archived TEXT1 except for ONE extra backslash at a NON-tag position (right after `<`
+  // but before an ORDINARY word, never "pasted_content") — exactly `pty-prompt-mismatch.mjs` scenario 6y's
+  // own construction, applied here to the PURGE path instead of the mismatch-classification path. This
+  // must NOT purge: `unescapeNestedPastedContentTag`'s regex only strips a backslash immediately before
+  // (optional `/`) "pasted_content", so this unrelated backslash is left untouched by the correct, narrow
+  // reversal and the unescaped-unwrapped signature still differs from TEXT1's archived one.
+  //
+  // WHY THIS ONE DISCRIMINATES AND THE PRIOR DRAFT DID NOT: an unrelated body that merely differs in
+  // overall content (the prior version of this scenario) stays unmatched under ANY reversal, correct or
+  // over-widened — a "strip every backslash" mutation does not make two otherwise-unrelated messages equal.
+  // THIS body, differing from TEXT1 by exactly one backslash, WOULD become byte-identical to TEXT1 once
+  // that one backslash is stripped — so a widened "strip every backslash" implementation of
+  // `unescapeNestedPastedContentTag` would wrongly match and purge it, while the correct, narrow
+  // (`pasted_content`-anchored) reversal does not. Verified by actually patching compiled
+  // `dist/pty/host.js` to strip every backslash unconditionally and re-running this file: this scenario's
+  // two checks go RED under that mutation (and ONLY this scenario — 1-4 and the rest of this file are
+  // unaffected), then GREEN again once the mutation is reverted and dist is rebuilt clean from untouched
+  // src — see the worker_report for the exact commands and `grep`-verified revert. =====
   {
-    const sid = "sess-wrap-confirm-escaped-tag-mismatch"; SIDS.push(sid);
-    const TEXT1 = "GEN1_ESCAPED_TAG_NEGATIVE_CONTROL: mentions `<pasted_content id=\"zz99\">` here.";
+    const sid = "sess-wrap-confirm-narrowness-control"; SIDS.push(sid);
+    const TEXT1 = "GEN1_NARROWNESS_CONTROL_BODY: see `<plain>` text here — nothing about the wrap syntax at all in this message.";
     spawnReady(sid);
 
     const r1 = host.enqueueStdin(sid, TEXT1);
     check("(setup 5) gen 1 delivered immediately, busy armed", r1.delivered === true && busyLog[sid]?.at(-1) === true);
-    await sharedWaitUntil(() => busyLog[sid]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: "pty-giveup-pasted-content-wrap-confirm: gen1 give-up (escaped-tag mismatch)" });
+    await sharedWaitUntil(() => busyLog[sid]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: "pty-giveup-pasted-content-wrap-confirm: gen1 give-up (narrowness control)" });
     check("(setup 5) gen 1 genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
     check("(setup 5) gen 1's TEXT1 is requeued, sitting ambiguous in pending", host.getPendingEntries(sid).some((m) => m.text === TEXT1));
 
     const before = host.getPendingEntries(sid).length;
-    confirmNormally(sid, "HEALTHY_UNRELATED_GEN_2_ESCAPED_TAG_MISMATCH");
+    confirmNormally(sid, "HEALTHY_UNRELATED_GEN_2_NARROWNESS_CONTROL");
 
     submitLog.length = 0;
-    // A DIFFERENT body that also quotes the tag syntax (so the CLI's escape fires and the new candidate
-    // is genuinely exercised), but whose text — even after the escape is reversed — never matches TEXT1.
-    const unrelatedBody = "UNRELATED_BODY_ALSO_QUOTES_THE_TAG: mentions `<pasted_content id=\"zz99\">` but is a completely different message.";
-    check("(fixture sanity 5) the unrelated body is genuinely not equal to TEXT1 even disregarding the escape", unrelatedBody !== TEXT1);
-    const escapedUnrelatedInner = unrelatedBody.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
-    check("(fixture sanity 5) the escape actually added characters (otherwise this control doesn't exercise the new candidate)", escapedUnrelatedInner.length > unrelatedBody.length);
-    const unrelatedWrapped = pastedContentWrap("gw05", escapedUnrelatedInner);
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: unrelatedWrapped });
+    // `<plain>` -> `<\plain>`: one extra backslash right after `<`, but before an ORDINARY word, never
+    // "pasted_content" — this is NOT the CLI's own escape shape at all, it's a genuine, unrelated
+    // divergence that happens to share the "backslash right after `<`" position.
+    const innerWithExtraBackslash = TEXT1.replace("<plain>", "<\\plain>");
+    check("(fixture sanity 5) exactly one backslash was inserted, right after `<` but before an unrelated word", innerWithExtraBackslash.length === TEXT1.length + 1);
+    const wrapped = pastedContentWrap("gw05", innerWithExtraBackslash);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: wrapped });
 
-    check("5: NEGATIVE CONTROL — no CONTENT-MATCHED CONFIRMED log for an escaped-but-mismatched body",
+    check("5: NEGATIVE CONTROL — no CONTENT-MATCHED CONFIRMED log for a non-tag backslash divergence",
       !submitLog.some((l) => l.includes("CONFIRMED logicalId=") && l.includes("content-matched")));
-    check("5: NEGATIVE CONTROL — gen 1's requeued duplicate STILL sits in pending (an escape alone must not purge a non-matching body)",
+    check("5: NEGATIVE CONTROL — gen 1's requeued duplicate STILL sits in pending (a non-tag backslash must not be reversed away)",
       host.getPendingEntries(sid).length === before && host.getPendingEntries(sid).some((m) => m.text === TEXT1));
   }
 } finally {

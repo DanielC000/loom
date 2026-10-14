@@ -86,16 +86,62 @@ as card 691d02e1's real-world specimens showed.
 and fold it into `matchesSig` as a third OR-branch alongside the existing raw/unwrapped checks — purely
 additive; the exact-hash (raw `sig`) and unwrapped-but-unescaped paths stay byte-identical.
 
+**This is a SANCTIONED EXCEPTION to `691d02e1`'s own Do-not #2** (amended by this card to name it), not an
+application already covered by that record's wording. `691d02e1`'s "one accepted failure direction" —
+reversing outside `isRecognizedPastedContentWrap` only ever risks a false ALARM, never a masked loss —
+does **not** carry over to this purge path unchanged: there, a false match is over-notification; here, a
+false match PURGES a still-queued requeue. **The failure direction for THIS consumer is the opposite one:
+a false match here is a possible LOSS, not a false alarm.** The exact-whole-inner-equality property (see
+`matchesSig`'s construction, and the first "Do not" above) is what keeps that risk bounded to the
+near-zero residual recorded below, rather than being the general case.
+
+### Accepted residual — a non-injective escape can collide two distinct give-ups
+
+The CLI's escape is non-injective in one narrow case: it only inserts a backslash before a BARE
+`pasted_content`/`/pasted_content` occurrence (a negative lookbehind skips one that already has a
+preceding backslash — established by `pty-prompt-mismatch.mjs` scenario 6x for card `691d02e1`). So two
+byte-DIFFERENT original messages can echo to the byte-SAME wrapped inner: message **M**, whose own
+authored text already contains the literal substring `<\pasted_content` (quoting the escaped form
+itself, e.g. discussing this very mechanism) — left untouched by the CLI, since it already has the
+backslash — and message **N**, otherwise byte-identical to M but with the bare `<pasted_content` (no
+backslash) at that same position — which the CLI DOES escape on echo, producing `<\pasted_content`. M's
+and N's echoes are now indistinguishable at the wrap level.
+
+If M's own confirmation arrives while M is still ambiguous: `unwrappedSig` (the raw captured inner,
+unescaped further) correctly matches M's own archived entry. But `unescapedUnwrappedSig` — stripping M's
+*already-present* backslash, since the reversal cannot tell "the CLI inserted this" apart from "the
+author typed this" — now equals N's own ORIGINAL (bare) signature. If N's entry is ALSO still ambiguous
+at that moment, `matchedLogicalIds.length > 1` across distinct `batchId`s and the existing `bc0774c4`
+ambiguous-decline (see that record) covers it: nothing is purged, failing toward a duplicate, never a
+loss — **the both-ambiguous case is safe.** The genuine residual is the asymmetric case: M's entry has
+ALREADY been resolved/removed by the time M's confirmation (or a stale replay of it) arrives, while N's
+entry is STILL ambiguous — then only N matches, `matchedLogicalIds.length === 1`, and N's requeue is
+purged even though this confirmation was never actually about N. This is a genuine, accepted LOSS
+residual: it requires (1) a message literally authoring the escaped tag form as prose (rare on its own —
+`691d02e1`'s own "one accepted failure direction" is this same rarity), (2) a second, concurrently
+ambiguous message differing from the first by exactly that one backslash at that exact position, and (3)
+the specific resolve-ordering above. No real specimen has ever shown either precondition, let alone both
+together with the ordering — left recorded, not fixed, same posture as `691d02e1`'s own accepted
+false-alarm residual.
+
 ## Do not (2)
 
 - Do not widen `unescapeNestedPastedContentTag` itself, or the equality check against its output, beyond
-  what card `691d02e1`'s own record already allows — this addendum only reuses that existing, narrow
-  reversal as a second unwrap pass; it introduces no new escape-reversal logic of its own.
+  what card `691d02e1`'s own record already allows for its OWN narrowness (pinned there by
+  `pty-prompt-mismatch.mjs` scenarios 6y/6z) — this addendum reuses that existing, narrow reversal as a
+  second unwrap pass in a NEW consumer; it introduces no new escape-reversal logic, and widening the
+  shared helper to "fix" the residual above would reopen the exact masking hazard those scenarios guard
+  against, in BOTH consumers at once.
 - Do not let the escape-reversed candidate match anything less than exact whole-inner equality (same
   anchored-regex reasoning as the first "Do not" above) — a give-up whose unescaped text happens to be a
   substring/superset of an archived entry's text must still decline, exactly like the raw/unwrapped
   candidates already do (see `pty-giveup-pasted-content-wrap-confirm.mjs` scenario 5, the negative
-  control pinning this).
+  control pinning this specifically for the purge path's own `matchesSig`, distinct from — and in
+  addition to — 6y/6z's pinning of the shared helper's narrowness above).
+- Do not treat the accepted residual above as something to "fix" by widening or narrowing the reversal
+  without a real specimen showing either precondition — the current form is deliberately the minimal,
+  additive change that explains the one real specimen class (scenario 4's shape) without reopening the
+  `691d02e1` do-not-relax posture.
 
 ## Source
 
