@@ -264,6 +264,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150], // fast — proves the restart without waiting real minutes
     healthyRunMs: 60_000, // a kill-right-after-spawn (wedge) must never count as "healthy"
     // healthProbeIntervalMs/healthProbeTimeoutMs: card cdbdf742 re-checked whether this pair could be
@@ -316,6 +325,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   const backoffMs = [40, 40]; // fast + few — exhausts the schedule quickly
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: backoffMs,
     healthyRunMs: 60_000,
     // Card b27f54b0 — DELIBERATELY tightened back BELOW real child-startup latency (~70-85ms observed,
@@ -370,6 +388,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Card cdbdf742: healthProbeIntervalMs/healthProbeTimeoutMs deliberately match the 300/180 combo this
@@ -444,6 +471,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     healthProbeIntervalMs: 300,
@@ -479,6 +515,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // intervalMs/timeoutMs/threshold stay at the file's usual values (checkBuildDrift rides the same
@@ -574,6 +619,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same file-usual 300/180/3 as scenario (5) above — deliberately NOT padded, so this genuinely
@@ -624,6 +678,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
@@ -665,6 +728,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
@@ -704,6 +776,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same margin rule as every other scenario in this file (see (1)/(2)/(5) etc.'s identical comment):
@@ -770,6 +851,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // healthProbeIntervalMs/healthProbeTimeoutMs UNCHANGED at the file's usual 300/180 (checkBuildDrift
@@ -846,6 +936,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // healthProbeIntervalMs/healthProbeTimeoutMs UNCHANGED at the file's usual 300/180 (checkBuildDrift
@@ -902,6 +1001,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // healthProbeIntervalMs/healthProbeTimeoutMs UNCHANGED at the file's usual 300/180 — checkBuildDrift
@@ -975,6 +1083,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   const backoffMs = [40, 40]; // fast + few — exhausts the schedule quickly
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: backoffMs,
     healthyRunMs: 60_000, // a kill-right-after-spawn (drift) must never count as "healthy"
     // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
@@ -1036,6 +1153,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same margin rule as scenarios (1)/(2)/(5): intervalMs/timeoutMs must stay safely above real
@@ -1103,6 +1229,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same margin rule as every other scenario in this file: intervalMs/timeoutMs must stay safely above
@@ -1171,6 +1306,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same margin rule as every other scenario in this file (see (1)/(8) etc.) — kept consistent even
@@ -1280,6 +1424,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     healthProbeIntervalMs: 300,
@@ -1353,6 +1506,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     healthProbeIntervalMs: 300,
@@ -1481,6 +1643,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [40, 40], // small — if the fix regressed and this genuinely restarted, give-up would land fast and loudly
     // Card 545ef479 follow-up: deliberately tiny — see this scenario's own header comment for why a large
     // healthyRunMs (this file's usual choice) would make `ranHealthy` false and mask the true UNBOUNDED
@@ -1560,6 +1731,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: Array(100).fill(40), // effectively "never exhausts" within this test's timeframe
     healthyRunMs: 10, // deliberately far below the real per-cycle kill time — see header
     healthProbeIntervalMs: 60,
@@ -1649,6 +1829,15 @@ for (const kind of ["PASS", "diagnostic"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     // Same margin rule as every other scenario in this file: intervalMs/timeoutMs must stay safely above
@@ -1718,6 +1907,15 @@ for (const kind of ["PASS", "diagnostic"]) {
 
   const sup = new CodescapeSupervisor({
     homeDir,
+    // Card f8d47b1c: stub a fast, deterministic memory sample for every supervisor this file constructs.
+    // checkMemoryCeiling's real OS sampler (`sampleProcessMemoryBytes`) spawns a `powershell.exe` process
+    // on win32 (measured ~900ms on this host) and is deliberately forced to sample on every supervisor's
+    // very first probe tick — left unstubbed, that silently inserts ~900ms of real subprocess latency
+    // ahead of this file's drift/health logic on that tick, which blows through the probe-interval-scaled
+    // sleeps/timeouts this file had already tuned before the memory-ceiling feature existed (it predates
+    // that feature and was never updated for it — see codescape-memory-ceiling.mjs for the same seam used
+    // the way it was designed to be used).
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
     healthProbeIntervalMs: 300,
