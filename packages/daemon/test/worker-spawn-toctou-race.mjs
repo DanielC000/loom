@@ -20,7 +20,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // race window is reproduced exactly by firing both calls without awaiting between them.
 //
 // Proves:
-//   (1) two OVERLAPPING spawns on one taskId → exactly ONE fulfils, ONE is rejected ("spawn in flight");
+//   (1) two OVERLAPPING spawns on one taskId → exactly ONE fulfils, ONE is rejected ("spawn or recycle in flight");
 //   (2) exactly ONE live worker + ONE session row exists for the task (no double-create);
 //   (3) the loser left NO orphan — only one worktree/branch was ever created (it rejected before createWorktree);
 //   (4) the claim is RELEASED afterward — the normal single-spawn path on another task still works.
@@ -95,7 +95,7 @@ try {
   check("(1) exactly ONE overlapping spawn fulfils, ONE is rejected",
     fulfilled.length === 1 && rejected.length === 1);
   check("(1) the loser's rejection names the in-flight claim",
-    rejected.length === 1 && /spawn in flight/.test(String(rejected[0].reason?.message)));
+    rejected.length === 1 && /spawn or recycle in flight/.test(String(rejected[0].reason?.message)));
 
   const winner = fulfilled[0]?.value;
   if (winner?.worktreePath) worktrees.push(winner.worktreePath);

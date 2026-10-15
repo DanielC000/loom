@@ -7,9 +7,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Two independent lines of defence, both proven here:
 //   (a) STRUCTURAL primary check — `git rev-parse --quiet --verify HEAD` is exit-code-based (--quiet
 //       suppresses stderr), so it can never be fooled by a localized message in the first place.
-//   (b) LOCALE PIN — GitReader wires `nonInteractiveEnv()` (LC_ALL=C/LANG=C, the SAME convention
-//       git/writer.ts already established — see its comment at writer.ts:45-49) onto its own git
-//       instance, as defence-in-depth for the message-match FALLBACK behind (a).
+//   (b) LOCALE PIN — GitReader wires `localNonInteractiveEnv()` (card a746a3eb: wraps `nonInteractiveEnv()`
+//       — LC_ALL=C/LANG=C, the SAME convention git/writer.ts already established, see its comment at
+//       writer.ts:45-49 — and additionally strips the transport family, e.g. GIT_ASKPASS, since GitReader
+//       is read-only and never reaches a remote) onto its own git instance, as defence-in-depth for the
+//       message-match FALLBACK behind (a).
 //
 // This box's git (Git for Windows) ships with no gettext translation catalogs, so setting LC_ALL to a
 // non-English locale does NOT actually change git's fatal-message text here (verified empirically —
@@ -19,12 +21,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (1) `nonInteractiveEnv()` overrides an INHERITED foreign LC_ALL/LANG to "C" — the exact override
 //       writer.ts's comment describes ("LC_ALL wins over any inherited LANG/LC_*"), exercised against a
 //       real foreign value set on this very process, not a hardcoded literal.
-//   (2) a WIRING guard — GitReader's compiled source actually passes `nonInteractiveEnv()` to
+//   (2) a WIRING guard — GitReader's compiled source actually passes `localNonInteractiveEnv()` to
 //       `boundedSimpleGit`'s CONSTRUCTOR (card f7a80d76: this used to be a chained `.env(nonInteractiveEnv())`
 //       call after construction — changed because `boundedSimpleGit`'s `unsafe.allowUnsafeConfigPaths`
 //       allowance is a construction-time option; a post-construction `.env()` chain would silently miss it
 //       and leave GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM throwing) — so a regression that quietly drops the
-//       env from construction (while `nonInteractiveEnv()` itself stays correct elsewhere) is still caught.
+//       env from construction (while `nonInteractiveEnv()`/`localNonInteractiveEnv()` themselves stay
+//       correct elsewhere) is still caught.
 //   (3) an end-to-end sanity pass with the process's OWN LC_ALL/LANG temporarily set to a foreign value —
 //       the commitless-repo routes still return a clean empty log. This can't by itself DISPROVE a
 //       locale regression on this host (git here doesn't localize either way — see above), but it does
@@ -78,21 +81,24 @@ try {
 // exact history (this file's own header above does, in prose) could trip if the same phrasing ever landed
 // in reader.ts's own doc comment.
 const readerSrc = stripComments(fs.readFileSync(new URL("../dist/git/reader.js", import.meta.url), "utf8"));
-check("(2) GitReader imports nonInteractiveEnv from writer.js", /nonInteractiveEnv/.test(readerSrc));
+// Card a746a3eb deliberately switched GitReader to localNonInteractiveEnv() (the LOCAL-only sibling that
+// also strips the transport family, e.g. GIT_ASKPASS) — GitReader is read-only project-repo introspection
+// and never reaches a remote, so it uses this instead of the transport-blocked nonInteractiveEnv().
+check("(2) GitReader imports localNonInteractiveEnv from writer.js", /localNonInteractiveEnv/.test(readerSrc));
 check(
-  "(2) GitReader applies it via boundedSimpleGit(..., nonInteractiveEnv()) AT CONSTRUCTION (not a later .env() chain)",
-  /boundedSimpleGit\([^;]*nonInteractiveEnv\(\)\s*\)/.test(readerSrc) && !/\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(readerSrc),
+  "(2) GitReader applies it via boundedSimpleGit(..., localNonInteractiveEnv()) AT CONSTRUCTION (not a later .env() chain)",
+  /boundedSimpleGit\([^;]*localNonInteractiveEnv\(\)\s*\)/.test(readerSrc) && !/\.env\(\s*localNonInteractiveEnv\(\)\s*\)/.test(readerSrc),
 );
 
-// (2-control, card 36afbbdd) NEGATIVE: a comment-only mention of the old `.env(nonInteractiveEnv())` chain
-// no longer flips the check. POSITIVE: the identical text as REAL code still does.
+// (2-control, card 36afbbdd) NEGATIVE: a comment-only mention of the old `.env(localNonInteractiveEnv())`
+// chain no longer flips the check. POSITIVE: the identical text as REAL code still does.
 {
-  const commentOnly = "// this used to be a chained .env(nonInteractiveEnv()) call after construction\n";
+  const commentOnly = "// this used to be a chained .env(localNonInteractiveEnv()) call after construction\n";
   check("(2-control) NEGATIVE: comment-only mention of the old chain is gone after stripping",
-    !/\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(stripComments(commentOnly)));
-  const realViolation = "reader.env(nonInteractiveEnv());\n";
+    !/\.env\(\s*localNonInteractiveEnv\(\)\s*\)/.test(stripComments(commentOnly)));
+  const realViolation = "reader.env(localNonInteractiveEnv());\n";
   check("(2-control) POSITIVE: the same text as REAL code still trips the check after stripping",
-    /\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(stripComments(realViolation)));
+    /\.env\(\s*localNonInteractiveEnv\(\)\s*\)/.test(stripComments(realViolation)));
 }
 
 // --- (3) End-to-end sanity: commitless-repo routes still return a clean empty log with a FOREIGN host
