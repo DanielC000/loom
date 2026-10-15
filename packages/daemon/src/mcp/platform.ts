@@ -2537,48 +2537,53 @@ export class PlatformMcpRouter {
     // SAME SessionService.requestDaemonRestart (whose role gate now accepts 'platform' too). The
     // supervisor-only refusal, rebuild-first fail-closed behavior, and full-fleet capture/resume are
     // ALL preserved verbatim — none of that safety is role-specific (see requestDaemonRestart's own doc).
-    server.registerTool(
-      "daemon_restart",
-      {
-        description:
-          "SELF-HOSTING ONLY (orchestrating Loom with Loom): rebuild + restart the Loom daemon so merged " +
-          "daemon-`src` code goes LIVE in the running process — a cross-project, platform-level action " +
-          "that's naturally yours to own (no need to relay execution through a project manager). This is " +
-          "a DEPLOY (per /platform-lead's safety posture) — it drops every live session across every " +
-          "project, the largest blast radius on this surface: get the human's go via `question_ask` " +
-          "FIRST, then fire this yourself. Use after " +
-          "you've merged worker/project branch(es) that change the daemon and you need the new behavior " +
-          "actually running (e.g. to end-to-end verify it). Loom REBUILDS FIRST: if the build fails it does " +
-          "NOT restart and returns the error (stays up — fix it and retry). On a green build the daemon " +
-          "restarts: EVERY live session across ALL projects is dropped, then the whole fleet — you " +
-          "included — is AUTOMATICALLY resumed with a note once it's back. Returns {restarting:true} on " +
-          "success, or {restarting:false, error} if unsupervised, a live restart supervisor process can " +
-          "no longer be confirmed (card 83718377 — re-checks the live OS process table on every call, not " +
-          "just whether this process was ONCE spawned under one; refuses rather than exit into an orphan " +
-          "nothing would relaunch — retry if the error says the CHECK itself failed, ask a human to " +
-          "restart the supervisor if it says the supervisor is actually gone), or build failed. If the " +
-          "deploy going live " +
-          "also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this daemon and is " +
-          "NOT re-execed by this restart), the success result additionally carries " +
-          "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does " +
-          "a manual `pnpm daemon:stable`; never report that part of the change as fully live. Card 2e84a250: " +
-          "if that check ITSELF fails (e.g. git unavailable) the result instead carries " +
-          "{supervisorCheckFailed:true, supervisorWarning} — a DIFFERENT, mutually-exclusive pair of fields " +
-          "from supervisorChanged — treat this as UNKNOWN whether the supervisor script changed, never as a " +
-          "confirmed-clean deploy; the SAME distinction also appears on the post-restart resume nudge (your " +
-          "reliable read of it — this immediate response returns into a session about to be killed by the " +
-          "restart itself).",
-        inputSchema: strictShape({ reason: z.string() }),
-      },
-      async ({ reason }) => {
-        if (!callerSessionId) return ok({ error: "no caller session" });
-        try {
-          return ok(await sessions.requestDaemonRestart(callerSessionId, reason));
-        } catch (e) {
-          return ok({ error: (e as Error).message });
-        }
-      },
-    );
+    // @decision f437d4e9 — dev-only: rebuild-from-source has no meaning on an npm install; `loom restart`
+    // (bin/loom.mjs, human-only) covers it there. Registered only when isLoomDev(), so it is ABSENT from
+    // a non-dev tools/list, never present-but-refusing.
+    if (isLoomDev()) {
+      server.registerTool(
+        "daemon_restart",
+        {
+          description:
+            "SELF-HOSTING ONLY (orchestrating Loom with Loom): rebuild + restart the Loom daemon so merged " +
+            "daemon-`src` code goes LIVE in the running process — a cross-project, platform-level action " +
+            "that's naturally yours to own (no need to relay execution through a project manager). This is " +
+            "a DEPLOY (per /platform-lead's safety posture) — it drops every live session across every " +
+            "project, the largest blast radius on this surface: get the human's go via `question_ask` " +
+            "FIRST, then fire this yourself. Use after " +
+            "you've merged worker/project branch(es) that change the daemon and you need the new behavior " +
+            "actually running (e.g. to end-to-end verify it). Loom REBUILDS FIRST: if the build fails it does " +
+            "NOT restart and returns the error (stays up — fix it and retry). On a green build the daemon " +
+            "restarts: EVERY live session across ALL projects is dropped, then the whole fleet — you " +
+            "included — is AUTOMATICALLY resumed with a note once it's back. Returns {restarting:true} on " +
+            "success, or {restarting:false, error} if unsupervised, a live restart supervisor process can " +
+            "no longer be confirmed (card 83718377 — re-checks the live OS process table on every call, not " +
+            "just whether this process was ONCE spawned under one; refuses rather than exit into an orphan " +
+            "nothing would relaunch — retry if the error says the CHECK itself failed, ask a human to " +
+            "restart the supervisor if it says the supervisor is actually gone), or build failed. If the " +
+            "deploy going live " +
+            "also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this daemon and is " +
+            "NOT re-execed by this restart), the success result additionally carries " +
+            "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does " +
+            "a manual `pnpm daemon:stable`; never report that part of the change as fully live. Card 2e84a250: " +
+            "if that check ITSELF fails (e.g. git unavailable) the result instead carries " +
+            "{supervisorCheckFailed:true, supervisorWarning} — a DIFFERENT, mutually-exclusive pair of fields " +
+            "from supervisorChanged — treat this as UNKNOWN whether the supervisor script changed, never as a " +
+            "confirmed-clean deploy; the SAME distinction also appears on the post-restart resume nudge (your " +
+            "reliable read of it — this immediate response returns into a session about to be killed by the " +
+            "restart itself).",
+          inputSchema: strictShape({ reason: z.string() }),
+        },
+        async ({ reason }) => {
+          if (!callerSessionId) return ok({ error: "no caller session" });
+          try {
+            return ok(await sessions.requestDaemonRestart(callerSessionId, reason));
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        },
+      );
+    }
 
     // resume_doc_check — the Lead-surface twin of the manager's orchestration.ts `resume_doc_check`
     // (card 1069c8e1). Before this the Platform Lead's resume doc had NO rotation protection at all
@@ -4039,11 +4044,20 @@ export class PlatformMcpRouter {
       return { ...result, warning: pendingMergeWarning(pendingMergeOps, "this bundled-skill write dirtied its canonical checkout, and committing it (git_commit or plain git) would land on it"), pendingMergeOps };
     };
 
+    // @decision f437d4e9 — the SINGLE source for "may this install's Lead edit a bundled skill's shipped
+    // ASSET?", read by skill_list/skill_write/skill_edit's descriptions AND both handlers below, so the
+    // tool text can never disagree with the real behavior: false REJECTS a bundled NAME outright, never a user-store fallthrough.
+    const canEditBundledAsset = isLoomDev();
+
     server.registerTool(
       "skill_list",
       {
         description:
-          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill, kept in sync with its asset) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (use skill_write to edit a bundled skill's source-of-truth asset). Read-only. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the skills spill to a scratch file instead of inlining, and the response becomes a `{skillsFile,skillsChars,rowCount,note}` pointer at that same NDJSON text.",
+          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill, kept in sync with its asset) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here" +
+          (canEditBundledAsset
+            ? " (use skill_write to edit a bundled skill's source-of-truth asset)."
+            : " — on this non-dev install skill_write/skill_edit CANNOT modify a bundled skill (edit it via the Skills UI, or write a non-bundled USER name instead).") +
+          " Read-only. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the skills spill to a scratch file instead of inlining, and the response becomes a `{skillsFile,skillsChars,rowCount,note}` pointer at that same NDJSON text.",
         inputSchema: strictShape({}),
       },
       async () => ok(skillListData(callerSessionId)),
@@ -4054,12 +4068,13 @@ export class PlatformMcpRouter {
       {
         description:
           "Create or update a skill (the Lead's ELEVATED, superset variant of the operator's skill_write). The editable unit is the skill's SKILL.md (frontmatter name/description + body); the full `content` you pass REPLACES it. name must be a kebab slug (a-z, 0-9, -, ≤64 chars). Edits apply to new sessions on next spawn.\n" +
-          "WRITE TARGET — unlike the loom-setup operator (USER store only), THIS surface can edit a BUNDLED Loom skill: for a bundled name it writes the SOURCE-OF-TRUTH shipped ASSET (assets/skills/<name>/SKILL.md) via the same validated publish path the human Skills UI uses (store then store→asset, leaving them in sync / diverged:false). A USER (non-bundled) name writes the user store, exactly like the operator surface.\n" +
+          (canEditBundledAsset
+            ? "WRITE TARGET — on this dev/self-hosting install, unlike the loom-setup operator (USER store only), THIS surface can edit a BUNDLED Loom skill: for a bundled name it writes the SOURCE-OF-TRUTH shipped ASSET (assets/skills/<name>/SKILL.md) via the same validated publish path the human Skills UI uses (store then store→asset, leaving them in sync / diverged:false). A USER (non-bundled) name always writes the user store.\n"
+            : "WRITE TARGET — on this non-dev install, a BUNDLED Loom skill name is REJECTED outright, exactly like the operator's own (non-elevated) skill_write — it does NOT fall through to the user store. Edit a bundled skill via the Skills UI, or write a non-bundled (USER) name instead, which always writes the user store.\n") +
           "CONFIRM-FIRST (load-bearing): NEVER call this without first showing the user the skill name + content and getting their explicit confirmation. Pass confirm:true to attest you have done so; a missing/false confirm is rejected and nothing is written.",
         inputSchema: strictShape(skillWriteInputSchema),
       },
-      // allowBundledAsset:TRUE — the Lead's bundled-asset edit (the operator surface passes false).
-      async ({ name, content, confirm }) => ok(withAssetPendingMergeWarning(skillWriteData({ name, content, confirm }, { allowBundledAsset: true }))),
+      async ({ name, content, confirm }) => ok(withAssetPendingMergeWarning(skillWriteData({ name, content, confirm }, { allowBundledAsset: canEditBundledAsset }))),
     );
 
     server.registerTool(
@@ -4067,13 +4082,14 @@ export class PlatformMcpRouter {
       {
         description:
           "Surgical, patch-based alternative to skill_write for a SMALL edit to an EXISTING skill's SKILL.md — exact-string replace (oldString -> newString), mirroring the Edit tool's contract, so a small doctrine tweak doesn't require reprinting the entire file through skill_write. oldString must match the skill's CURRENT content EXACTLY (including whitespace) and be UNIQUE: zero matches errors ('oldString not found'), more than one match errors naming the count ('not unique — N matches; add surrounding context') UNLESS replaceAll:true is passed, in which case every occurrence is replaced. oldString and newString must differ. The skill must already exist (skill_edit never creates one — use skill_write for that, or for a full rewrite).\n" +
-          "Reuses skill_write's EXACT SAME write path under the hood (same WRITE TARGET selection, same kebab-slug guard): for a bundled name it edits the store copy then publishes store→asset, for a USER name it edits the user store only.\n" +
+          (canEditBundledAsset
+            ? "Reuses skill_write's EXACT SAME write path under the hood (same WRITE TARGET selection, same kebab-slug guard): on this dev/self-hosting install, a bundled name edits the store copy then publishes store→asset.\n"
+            : "Reuses skill_write's EXACT SAME write path under the hood (same WRITE TARGET selection, same kebab-slug guard): on this non-dev install, a bundled name is REJECTED outright, exactly like skill_write — it does NOT fall through to the user store. Edit it via the Skills UI, or use a non-bundled (USER) name.\n") +
           "CONFIRM-FIRST (load-bearing): NEVER call this without first showing the user the oldString -> newString change and getting their explicit confirmation. Pass confirm:true to attest you have done so; a missing/false confirm is rejected and nothing is written.",
         inputSchema: strictShape(skillEditInputSchema),
       },
-      // allowBundledAsset:TRUE — same elevated write target as this surface's skill_write.
       async ({ name, oldString, newString, replaceAll, confirm }) =>
-        ok(withAssetPendingMergeWarning(skillEditData({ name, oldString, newString, replaceAll, confirm }, { allowBundledAsset: true }))),
+        ok(withAssetPendingMergeWarning(skillEditData({ name, oldString, newString, replaceAll, confirm }, { allowBundledAsset: canEditBundledAsset }))),
     );
 
     return server;

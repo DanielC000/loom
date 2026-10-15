@@ -197,12 +197,18 @@ warn that this write "dirtied its canonical checkout" and could forfeit a pendin
 has meaning on an npm install: there is no canonical checkout, and `assets/skills/` inside an installed
 package is overwritten wholesale on the next `loom update` — writing "the source of truth" there is not
 just useless, it is actively misleading (the write looks durable and isn't). **Fix:** pass
-`allowBundledAsset: isLoomDev()` instead of a hardcoded `true`. On a non-dev install this makes
-`skill_write`/`skill_edit` behave exactly like the operator's own (non-elevated) `skill_write`
-(`mcp/setup.ts:1089`, `allowBundledAsset: false` implicitly) — a bundled-NAME write falls through to the
-user store, same as any user skill. The end-user Lead keeps full `skill_list`/`skill_write`/`skill_edit`
-capability over their own skill store; it just never claims to rewrite a package-internal "source of
-truth" that doesn't durably exist for them.
+`allowBundledAsset: isLoomDev()` instead of a hardcoded `true`. **Correction (card 2179a923, verified
+against `skillWriteData`'s actual branch, `mcp/skillTools.ts:102-110`): `allowBundledAsset: false` does
+NOT fall through to the user store — it REJECTS a bundled NAME outright** ("is a bundled Loom skill —
+skill_write is bounded to USER skills and cannot modify the bundled/dev skill set"), and this is exactly
+what the operator's own `skill_write` already does for a bundled name (confirmed by
+`setup-surface.mjs`'s own (f) section, which asserts the rejection, not a store fallthrough). So on a
+non-dev install, `skill_write`/`skill_edit` behave exactly like the operator's — a bundled-NAME call is
+REJECTED with that same error, never reaching `bundledSkillAssetsDir()` — not a silent write-through to
+the user store as this paragraph previously (incorrectly) claimed. The end-user Lead keeps full
+`skill_list`/`skill_write`/`skill_edit` capability over their own (non-bundled) USER skills; it just never
+claims to rewrite a package-internal "source of truth" that doesn't durably exist for them, and a bundled
+NAME must be renamed to a user skill to be editable there, same as for the operator today.
 
 **Needs the home-resolution fix from §1d, not a tool-shape change (5 call sites inside otherwise-shipping
 tools):** `project_update`'s rename refusal (`:2761`), `project_archive`'s archive refusal (`:2830`),

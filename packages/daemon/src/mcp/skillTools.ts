@@ -13,30 +13,36 @@ import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 /**
  * SHARED skill-editing tool handlers for the in-app MCP skill surface — the SINGLE source of the
  * validated logic, reused VERBATIM by `loom-setup` (mcp/setup.ts — the ungated Setup Assistant E1-8)
- * AND `loom-platform` (mcp/platform.ts — the dev Platform Lead). Factoring it here (rather than forking
- * a second copy onto the Lead's surface) guarantees the confirm-first gate + the kebab-slug
+ * AND `loom-platform` (mcp/platform.ts — the Platform Lead, dev or end-user). Factoring it here (rather
+ * than forking a second copy onto the Lead's surface) guarantees the confirm-first gate + the kebab-slug
  * path-traversal guard can never silently diverge between the two surfaces.
  *
  * ╔═ WRITE TARGET — the one real design point, selected per-surface via `allowBundledAsset` ═══════════╗
  * ║ The store (~/.loom/skills) is per-install; the bundled ASSET (assets/skills/<name>/SKILL.md) is the ║
- * ║ SOURCE OF TRUTH shipped to every loomctl user. The two surfaces want DIFFERENT targets:            ║
+ * ║ SOURCE OF TRUTH shipped to every loomctl user. Both surfaces REJECT a bundled NAME outright when    ║
+ * ║ allowBundledAsset is false — NEITHER falls through to a silent user-store write.                    ║
  * ║                                                                                                     ║
- * ║   loom-setup  (allowBundledAsset:FALSE) — USER STORE ONLY. A bundled/shipped name is REJECTED, so   ║
- * ║     the ungated operator can never touch the bundled/dev skill set (the human Skills UI owns those).║
- * ║     This is the load-bearing bound of the lower-privilege Setup surface — UNCHANGED here.           ║
+ * ║   loom-setup  (allowBundledAsset:FALSE, always) — USER STORE ONLY. A bundled/shipped name errors,   ║
+ * ║     so the ungated operator can never touch the bundled/dev skill set (the human Skills UI owns     ║
+ * ║     those). This is the load-bearing bound of the lower-privilege Setup surface — UNCHANGED here.   ║
  * ║                                                                                                     ║
- * ║   loom-platform (allowBundledAsset:TRUE) — the Lead's ACTUAL job is editing the bundled ASSET. For  ║
- * ║     a bundled name it writes the store copy, then reuses the EXISTING validated `publishSkillToBundled`║
- * ║     (store→asset) — the SAME helper the human `POST /api/skills/:name/publish` REST route calls — so ║
- * ║     store==asset afterwards (listSkills → diverged:false), exactly the end-state the Lead's          ║
- * ║     edit-asset-then-`POST /api/skills/:name/reset` workflow targets. A USER name still writes only   ║
- * ║     the store (superset: the Lead keeps everything the operator can do, and more).                   ║
+ * ║   loom-platform (allowBundledAsset:isLoomDev(), card f437d4e9) — on a DEV/self-hosting install the  ║
+ * ║     Lead's ACTUAL job is editing the bundled ASSET: for a bundled name it writes the store copy,    ║
+ * ║     then reuses the EXISTING validated `publishSkillToBundled` (store→asset) — the SAME helper the  ║
+ * ║     human `POST /api/skills/:name/publish` REST route calls — so store==asset afterwards            ║
+ * ║     (listSkills → diverged:false), exactly the end-state the Lead's edit-asset-then-`POST /api/      ║
+ * ║     skills/:name/reset` workflow targets. On a NON-DEV (end-user) install a bundled name is instead  ║
+ * ║     REJECTED, exactly like loom-setup — editing the shipped asset has no meaning without a local      ║
+ * ║     checkout to publish into, so it is NOT adapted into a user-store write. A USER name always       ║
+ * ║     writes only the store, on either install (superset: the Lead keeps everything the operator can   ║
+ * ║     do, and more).                                                                                    ║
  * ║                                                                                                     ║
  * ║   No guard is weakened and NO human-REST-only guard is bypassed: publishSkillToBundled is a pure fs  ║
  * ║   helper restricted to names that already exist as a bundled asset (it won't mint a new asset dir);  ║
  * ║   the REST wrapper adds only the same isValidSkillName check applied here + a 404 mapping. Reaching   ║
- * ║   the asset from the Lead is consistent with the Lead already holding the git/vault writers + the     ║
- * ║   asset→reset flow — it only widens the already-most-privileged role (no trust-boundary concern).    ║
+ * ║   the asset from a dev-install Lead is consistent with the Lead already holding the git/vault         ║
+ * ║   writers + the asset→reset flow — it only widens the already-most-privileged role (no trust-         ║
+ * ║   boundary concern).                                                                                  ║
  * ╚═════════════════════════════════════════════════════════════════════════════════════════════════════╝
  */
 
@@ -78,12 +84,27 @@ export function skillListData(sessionId?: string): { skills: Array<Record<string
 }
 
 /**
+ * The bundled-name rejection shared by skill_write AND skill_edit (card 2179a923) — a single source so
+ * the two paths' wording can never drift apart. `undefined` when the write may proceed (not a bundled
+ * name, or `allowBundledAsset` is true); otherwise the error both callers return verbatim. Checked EARLY
+ * by skill_edit (before it ever reads the skill or matches `oldString`) so a rejected bundled-name edit
+ * reports the real reason, not a confusing "oldString not found" from matching against content it was
+ * never going to be allowed to write anyway.
+ */
+function bundledAssetRejectionError(name: string, allowBundledAsset: boolean): string | undefined {
+  if (allowBundledAsset || !isBundledSkill(name)) return undefined;
+  return `"${name}" is a bundled Loom skill — skill_write is bounded to USER skills and cannot modify the bundled/dev skill set. Edit a bundled skill via the Skills UI.`;
+}
+
+/**
  * skill_write handler payload — shared confirm-first gate + kebab-slug guard. `allowBundledAsset`
- * selects the write target for a BUNDLED name (see the WRITE TARGET box above):
- *   - false (loom-setup):  reject a bundled name (USER store only).
- *   - true  (loom-platform): write the store copy then publish store→asset (the Lead's asset edit).
- * A USER name always writes the user store on both surfaces. Returns the raw data object the caller
- * wraps in its MCP `ok()` envelope.
+ * selects the outcome for a BUNDLED name (see the WRITE TARGET box above) — it is a per-CALL value, not
+ * a per-surface constant: loom-setup always passes `false`, while loom-platform passes `isLoomDev()`
+ * (card f437d4e9), so a non-dev Lead call lands on the SAME `false` branch loom-setup always takes.
+ *   - false: REJECT a bundled name outright (USER skills only) — never a fallthrough to the user store.
+ *   - true:  write the store copy then publish store→asset (the dev-install Lead's asset edit).
+ * A USER name always writes the user store, regardless of `allowBundledAsset`. Returns the raw data
+ * object the caller wraps in its MCP `ok()` envelope.
  */
 export function skillWriteData(
   { name, content, confirm }: { name: string; content: string; confirm?: boolean },
@@ -98,17 +119,17 @@ export function skillWriteData(
   if (!isValidSkillName(name)) {
     return { error: "invalid skill name (kebab-case: a-z, 0-9, -, ≤64 chars)" };
   }
+  // loom-setup BOUND (load-bearing) / non-dev loom-platform (card 2179a923): USER skills ONLY — a
+  // bundled name can never create a divergent store copy of, or otherwise touch, the bundled/dev skill
+  // set, on EITHER surface when allowBundledAsset is false.
+  const bundledRejection = bundledAssetRejectionError(name, opts.allowBundledAsset);
+  if (bundledRejection) return { error: bundledRejection };
   if (isBundledSkill(name)) {
-    if (!opts.allowBundledAsset) {
-      // loom-setup BOUND (load-bearing): USER skills ONLY — a bundled name can never create a divergent
-      // store copy of, or otherwise touch, the bundled/dev skill set.
-      return { error: `"${name}" is a bundled Loom skill — skill_write is bounded to USER skills and cannot modify the bundled/dev skill set. Edit a bundled skill via the Skills UI.` };
-    }
-    // loom-platform: edit the SOURCE-OF-TRUTH bundled ASSET. Agent-driven (the Lead, not a human) — clear
-    // any stale stamp first and abort before any content lands if that fails, then write the store copy
-    // and publish it to the shipped asset via the existing validated human-REST publish path (store→
-    // asset). store==asset afterwards (diverged:false) — the asset→reset end-state the Lead's workflow
-    // targets.
+    // loom-platform (dev install only, allowBundledAsset:true): edit the SOURCE-OF-TRUTH bundled ASSET.
+    // Agent-driven (the Lead, not a human) — clear any stale stamp first and abort before any content
+    // lands if that fails, then write the store copy and publish it to the shipped asset via the
+    // existing validated human-REST publish path (store→asset). store==asset afterwards (diverged:
+    // false) — the asset→reset end-state the Lead's workflow targets.
     //
     // @decision 509176c8 — clear-first, abort-on-failure, mirroring writeSkill's own "agent" branch: never
     // let agent content land while a stale "human" stamp could still vouch for it.
@@ -173,6 +194,11 @@ export function skillEditData(
   if (!isValidSkillName(name)) {
     return { error: "invalid skill name (kebab-case: a-z, 0-9, -, ≤64 chars)" };
   }
+  // Checked BEFORE reading the skill or matching oldString (card 2179a923): a rejected bundled name
+  // must report the REAL reason, not a confusing "oldString not found" from matching against content
+  // the call was never going to be allowed to write anyway.
+  const bundledRejection = bundledAssetRejectionError(name, opts.allowBundledAsset);
+  if (bundledRejection) return { error: bundledRejection };
   const current = readSkill(name);
   if (!current) {
     return { error: `skill "${name}" not found — use skill_write to create a new skill` };

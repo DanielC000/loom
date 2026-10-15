@@ -99,9 +99,25 @@ const assistantActual = await listToolNames(orch.buildServer("s-assistant", "ass
 diff("orchestration assistant", assistantActual, ORCH_ASSISTANT_TOOLS);
 check("ORCH_ASSISTANT_TOOLS matches the real assistant (non-companion) tool set", sameSet(assistantActual, ORCH_ASSISTANT_TOOLS));
 
-const platformActual = await listToolNames(new PlatformMcpRouter(db, {}).buildServer("s-platform"));
-diff("platform", platformActual, PLATFORM_TOOLS);
-check("PLATFORM_TOOLS matches the real loom-platform tool set", sameSet(platformActual, PLATFORM_TOOLS));
+// PLATFORM_TOOLS is hand-authored against the DEV-MODE surface (it includes daemon_restart, which
+// mcp/platform.ts now registers only when isLoomDev() — card 2179a923). Pin LOOM_DEV explicitly for
+// both checks rather than relying on the ambient env (dev hosts default it on, CI runs it unset) —
+// otherwise this test's own result would silently depend on which environment ran it.
+const savedLoomDevForPlatform = process.env.LOOM_DEV;
+try {
+  process.env.LOOM_DEV = "1";
+  const platformActualDev = await listToolNames(new PlatformMcpRouter(db, {}).buildServer("s-platform"));
+  diff("platform (dev)", platformActualDev, PLATFORM_TOOLS);
+  check("PLATFORM_TOOLS matches the real loom-platform tool set (LOOM_DEV=1)", sameSet(platformActualDev, PLATFORM_TOOLS));
+
+  delete process.env.LOOM_DEV;
+  const platformActualNonDev = await listToolNames(new PlatformMcpRouter(db, {}).buildServer("s-platform"));
+  const platformExpectedNonDev = PLATFORM_TOOLS.filter((t) => t !== "daemon_restart");
+  diff("platform (non-dev)", platformActualNonDev, platformExpectedNonDev);
+  check("non-dev loom-platform tool set omits daemon_restart", !platformActualNonDev.includes("daemon_restart") && sameSet(platformActualNonDev, platformExpectedNonDev));
+} finally {
+  if (savedLoomDevForPlatform === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDevForPlatform;
+}
 
 const setupActual = await listToolNames(new SetupMcpRouter(db, {}).buildServer("s-setup"));
 diff("setup", setupActual, SETUP_TOOLS);

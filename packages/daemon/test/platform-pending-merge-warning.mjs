@@ -12,6 +12,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       left alone) and rejects an escaping/option-shaped path;
 //   (e) the Platform surface has a read-only gate_queue that sees a cross-project entry UNREDACTED, while
 //       gateQueueForManager for the same caller without the opt-in still redacts it (redaction unchanged).
+//   (f) card 2179a923: (a)-(e) above run under a pinned LOOM_DEV=1 (the dev-mode bundled-asset path);
+//       with LOOM_DEV unset a bundled-name skill_edit/skill_write instead REJECTS outright (never
+//       reaches the asset or the store) and carries no warning/pendingMergeOps even with a pending op
+//       live, since withAssetPendingMergeWarning only ever acts on a result that landed as `target:"asset"`.
 // Run: 1) build, 2) node test/platform-pending-merge-warning.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -93,6 +97,14 @@ const mintRow = (opId, { key, owner, projectId, minutesAgo = 20, taskId = null, 
   opId, kind: "merge", key, ownerSessionId: owner, projectId, taskId, branch,
   startedAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(), state: "pending", surfacedPending: false,
 });
+
+// Card 2179a923: the platform router now passes `allowBundledAsset: isLoomDev()` (was a hardcoded
+// `true`) to skill_write/skill_edit — this whole file exercises the bundled-asset path, so pin
+// LOOM_DEV=1 for its duration explicitly rather than relying on the ambient env (dev hosts default it
+// on via daemon:stable, CI runs it unset), restored in the `finally` below. (f) near the end re-checks
+// the non-dev shape on its own, toggling the env back off just for that section.
+const savedLoomDev = process.env.LOOM_DEV;
+process.env.LOOM_DEV = "1";
 
 try {
   const server = router.buildServer("PL");
@@ -201,7 +213,40 @@ try {
   const pe = await call("git_commit", { projectId: "pLoom", message: "test: empty", paths: [], acknowledgePendingMerge: true });
   check("(d) git_commit rejects an empty paths array", pe.ok === false && /non-empty/.test(pe.error ?? ""));
   db.settlePendingGateOp("op-batch-5555");
+
+  // ===== (f) NON-DEV: a bundled-name edit REJECTS outright (never reaches the asset, never warns) =====
+  // Card 2179a923: allowBundledAsset:isLoomDev() means a non-dev Lead's bundled-name skill_edit/
+  // skill_write behaves like the operator's own (rejected), not like the dev-mode (a)-(d) sections
+  // above. A pending merge op is still live here (minted below) to prove withAssetPendingMergeWarning's
+  // own `target !== "asset"` guard — see the module-level doc comment on that helper — correctly
+  // withholds the warning for a result that never became an asset write.
+  // isLoomDev() is read once PER buildServer() call (same timing as daemon_restart's own registration
+  // gate), not re-read per tool call — so this needs a FRESH server+client under LOOM_DEV unset rather
+  // than reusing the ABOVE `server`/`client`, which was built under the pinned LOOM_DEV=1 and would
+  // keep answering as dev-mode regardless of the env change (mirrors skill-edit.mjs's (e)/(e2) fix).
+  delete process.env.LOOM_DEV;
+  const nonDevServer = router.buildServer("PL");
+  const [nonDevClientT, nonDevServerT] = InMemoryTransport.createLinkedPair();
+  await nonDevServer.connect(nonDevServerT);
+  const nonDevClient = new Client({ name: "pmw-test-nondev", version: "0" });
+  await nonDevClient.connect(nonDevClientT);
+  const nonDevCall = async (name, args) => parse(await nonDevClient.callTool({ name, arguments: args }));
+
+  mintRow("op-batch-6666", { key: "merge-batch:MLIVE", owner: "MLIVE", projectId: "pLoom" });
+  const assetBefore = fs.readFileSync(path.join(assetSkillsDir, "core-doctrine", "SKILL.md"), "utf8");
+  const storeBefore = fs.readFileSync(storeSkillMd("core-doctrine"), "utf8");
+  const f1 = await nonDevCall("skill_edit", { name: "core-doctrine", oldString: doctrine.match(/Step two: \w+\./)[0], newString: "Step two: HACKED.", confirm: true });
+  check("(f) skill_edit (non-dev): REJECTS a bundled name (bound to USER store, same as the operator)",
+    typeof f1.error === "string" && /bundled/i.test(f1.error) && !f1.ok);
+  check("(f) skill_edit (non-dev): no warning/pendingMergeOps on a rejection, even with a pending op live", f1.warning === undefined && f1.pendingMergeOps === undefined);
+  check("(f) skill_edit (non-dev): the bundled ASSET was never touched", fs.readFileSync(path.join(assetSkillsDir, "core-doctrine", "SKILL.md"), "utf8") === assetBefore);
+  check("(f) skill_edit (non-dev): the store copy was also left unchanged (no fallthrough write)", fs.readFileSync(storeSkillMd("core-doctrine"), "utf8") === storeBefore);
+  const f2 = await nonDevCall("skill_write", { name: "core-doctrine", content: "HACKED", confirm: true });
+  check("(f) skill_write (non-dev): REJECTS a bundled name too", typeof f2.error === "string" && /bundled/i.test(f2.error) && !f2.ok);
+  await nonDevClient.close();
+  db.settlePendingGateOp("op-batch-6666");
 } finally {
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }

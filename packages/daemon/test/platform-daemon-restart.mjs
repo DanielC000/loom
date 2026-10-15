@@ -162,37 +162,55 @@ function rmDb(file) { for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(
 }
 
 // ==================== (P) PLATFORM ROUTER — daemon_restart reachable end-to-end ====================
+// Card 2179a923: daemon_restart is now registered on the PlatformMcpRouter ONLY when isLoomDev() — a
+// non-dev install has no local `src` to rebuild. Pin LOOM_DEV=1 explicitly rather than relying on the
+// ambient env (dev hosts default it on via daemon:stable, CI runs it unset), and assert the non-dev
+// absence right alongside it so neither direction depends on which environment ran this file.
 {
-  const file = tmpDbFile("platform");
-  const db = new Db(file);
-  const now = new Date().toISOString();
-  db.insertProject({ id: "pp", name: "PP", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
-  db.insertAgent({ id: "pt", projectId: "pp", name: "t", startupPrompt: "x", position: 0 });
-  db.insertSession({
-    id: "PL", projectId: "pp", agentId: "pt", engineSessionId: null, title: null, cwd: "/x",
-    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
-    lastError: null, role: "platform",
-  });
+  const savedLoomDevP = process.env.LOOM_DEV;
+  try {
+    const file = tmpDbFile("platform");
+    const db = new Db(file);
+    const now = new Date().toISOString();
+    db.insertProject({ id: "pp", name: "PP", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "pt", projectId: "pp", name: "t", startupPrompt: "x", position: 0 });
+    db.insertSession({
+      id: "PL", projectId: "pp", agentId: "pt", engineSessionId: null, title: null, cwd: "/x",
+      processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "platform",
+    });
 
-  const svc = new SessionService(db, /* pty */ {}, new OrchestrationControl());
-  const router = new PlatformMcpRouter(db, svc);
-  const server = router.buildServer("PL"); // callerSessionId — mirrors idle_report/end_me/recycle_me's self-scoping
+    const svc = new SessionService(db, /* pty */ {}, new OrchestrationControl());
+    const router = new PlatformMcpRouter(db, svc);
 
-  check("(P) daemon_restart IS registered on the PlatformMcpRouter surface",
-    Object.keys(server._registeredTools).includes("daemon_restart"));
+    process.env.LOOM_DEV = "1";
+    const server = router.buildServer("PL"); // callerSessionId — mirrors idle_report/end_me/recycle_me's self-scoping
 
-  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverT);
-  const client = new Client({ name: "platform-daemon-restart-test", version: "0" });
-  await client.connect(clientT);
-  const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+    check("(P) daemon_restart IS registered on the PlatformMcpRouter surface (LOOM_DEV=1)",
+      Object.keys(server._registeredTools).includes("daemon_restart"));
 
-  const r = await call("daemon_restart", { reason: "verify Lead-surface wiring" });
-  check("(P) daemon_restart via the platform router reaches the SAME unsupervised refusal (no build/exit side effects)",
-    r.restarting === false && typeof r.error === "string" && r.error.length > 0);
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "platform-daemon-restart-test", version: "0" });
+    await client.connect(clientT);
+    const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
 
-  db.close();
-  rmDb(file);
+    const r = await call("daemon_restart", { reason: "verify Lead-surface wiring" });
+    check("(P) daemon_restart via the platform router reaches the SAME unsupervised refusal (no build/exit side effects)",
+      r.restarting === false && typeof r.error === "string" && r.error.length > 0);
+
+    await client.close();
+
+    delete process.env.LOOM_DEV;
+    const serverNonDev = router.buildServer("PL");
+    check("(P) daemon_restart is ABSENT from the PlatformMcpRouter surface on a non-dev install",
+      !Object.keys(serverNonDev._registeredTools).includes("daemon_restart"));
+
+    db.close();
+    rmDb(file);
+  } finally {
+    if (savedLoomDevP === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDevP;
+  }
 }
 
 // ============================ (N) NUDGE ROUTING — resumeFleetOnBoot requester dispatch ============================

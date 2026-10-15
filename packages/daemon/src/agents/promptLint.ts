@@ -27,6 +27,10 @@ import type { SessionRole } from "@loom/shared";
 
 // --- Layer B: hand-authored per-router tool tables (verified against a live buildServer() dump) ---
 
+// PLATFORM_TOOLS includes daemon_restart, which mcp/platform.ts registers only when isLoomDev() (card
+// 2179a923) — so this table models the DEV-MODE (superset) surface. A non-dev Lead's real surface omits
+// it; per the known-gaps rationale above (card 5338a86a) this lint errs toward NOT warning, so the gap
+// only ever suppresses a correct warning on a non-dev install, never manufactures a false one.
 export const PLATFORM_TOOLS: readonly string[] = [
   "agent_clone", "agent_clone_batch", "agent_create", "agent_delete", "agent_get", "agent_prompt_search",
   "agent_update", "daemon_restart", "end_me", "events_search", "gate_queue", "git_checkout", "git_commit",

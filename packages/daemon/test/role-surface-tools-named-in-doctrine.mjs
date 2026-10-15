@@ -81,13 +81,13 @@ allow("platform", ["agent_create", "agent_delete", "agent_get", "agent_update", 
   "profile_delete", "profile_get", "project_archive", "project_create", "project_get", "project_init", "project_update",
   "schedule_create", "schedule_delete", "schedule_get", "schedule_update", "platform_config_get", "project_memory_search",
   "agent_prompt_search", "template_apply", "template_list", "skill_list"], "SELF: admin CRUD/read; tool description is the contract");
-allow("platform", ["daemon_restart"], "GAP: card f437d4e9 C4 made platform-lead a generic shipped skill and moved its " +
+allow("platform", ["daemon_restart"], "SELF: card f437d4e9 C4 made platform-lead a generic shipped skill and moved its " +
   "self-hosting daemon_restart doctrine into a spawn-time prompt addendum (sessions/platform-lead-prompt.ts, appended " +
-  "only when isLoomDev() is true), which this test does not read (it reads only SKILL.md + references/**). The tool " +
-  "itself still registers unconditionally here because C3 (gate its registerTool call on isLoomDev(), excluding it " +
-  "from a non-dev tools/list entirely) hasn't landed yet — a tracked follow-up, not an endorsement. Once C3 lands, " +
-  "this entry goes stale (the tool stops registering under LOOM_DEV-unset, the shape this test runs under) and the " +
-  "stale-entry check forces its deletion.");
+  "only when isLoomDev() is true), which this test does not read (it reads only SKILL.md + references/**) — the " +
+  "end-user Lead's doctrine must NOT teach daemon_restart (card 2179a923), so this omission from the shipped skill " +
+  "text is deliberate and permanent, not a gap. Card 2179a923 (C3) ALSO gated the tool's own registerTool call on " +
+  "isLoomDev(), so it's present only on a dev build's surface — this surface is checked under BOTH LOOM_DEV states " +
+  "(see platformToolNamesBothDevStates below) and this entry covers the dev-only appearance either way.");
 
 // Surfaces with no shipped doctrine skill — not checked (see header).
 const NO_DOCTRINE_SKILL = {
@@ -117,6 +117,24 @@ async function listToolNames(server) {
   return names;
 }
 
+// Card 2179a923: daemon_restart registers on the PlatformMcpRouter ONLY when isLoomDev() — the gate
+// inherits LOOM_DEV=1 from daemon:stable, CI runs it unset, so the platform surface's tool set is
+// otherwise environment-dependent. Build it under BOTH states and union the results (rather than
+// trusting whichever is ambient) so this test's result is identical in both environments.
+async function platformToolNamesBothDevStates(db) {
+  const saved = process.env.LOOM_DEV;
+  try {
+    const router = new PlatformMcpRouter(db, {});
+    process.env.LOOM_DEV = "1";
+    const dev = await listToolNames(router.buildServer("s-platform"));
+    delete process.env.LOOM_DEV;
+    const nonDev = await listToolNames(router.buildServer("s-platform"));
+    return [...new Set([...dev, ...nonDev])].sort();
+  } finally {
+    if (saved === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = saved;
+  }
+}
+
 const orch = new OrchestrationMcpRouter(db, {});
 const tasks = new TaskMcpRouter(db, {});
 const SURFACES = [
@@ -124,7 +142,7 @@ const SURFACES = [
   { id: "loom-tasks (manager)", skill: "orchestrate", tools: () => listToolNames(tasks.buildServer("p1", "s-manager")) },
   { id: "orchestration worker", skill: "worker", tools: () => listToolNames(orch.buildServer("s-worker", "worker")) },
   { id: "loom-tasks (worker)", skill: "worker", tools: () => listToolNames(tasks.buildServer("p1", "s-worker")) },
-  { id: "platform", skill: "platform-lead", tools: () => listToolNames(new PlatformMcpRouter(db, {}).buildServer("s-platform")) },
+  { id: "platform", skill: "platform-lead", tools: () => platformToolNamesBothDevStates(db) },
   { id: "auditor", skill: "platform-audit", tools: () => listToolNames(new AuditMcpRouter(db, {}).buildServer("s-auditor")) },
   { id: "workspace-auditor", skill: "workspace-audit", tools: () => listToolNames(new WorkspaceAuditMcpRouter(db, {}).buildServer("s-workspace-auditor")) },
   { id: "setup", skill: "setup-assistant", tools: () => listToolNames(new SetupMcpRouter(db, {}).buildServer("s-setup")) },

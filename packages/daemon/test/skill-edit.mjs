@@ -12,8 +12,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (d) oldString === newString errors; a missing/nonexistent skill errors; an invalid (path-
 //       traversal) name errors; CONFIRM-FIRST is enforced exactly like skill_write (missing/false
 //       confirm is rejected and writes nothing);
-//   (e) the BUNDLED-skill path is identical to skill_write's: it edits the store copy then publishes
-//       store->asset (store == asset afterwards, customized:false);
+//   (e) the BUNDLED-skill path is identical to skill_write's: on a DEV install (LOOM_DEV=1, pinned
+//       explicitly — card 2179a923) it edits the store copy then publishes store->asset (store == asset
+//       afterwards, customized:false);
+//   (e2) on a NON-DEV install (card 2179a923: `allowBundledAsset: isLoomDev()` instead of a hardcoded
+//       `true`) a bundled-NAME edit is instead REJECTED outright, exactly like the operator's own
+//       (non-elevated) skill_write already does — it never reaches bundledSkillAssetsDir() and never
+//       falls through to a silent user-store write either;
 //   (f) NO DIVERGENCE — skill_edit and skill_write produce byte-identical output for the same final
 //       content (cross-checked by diffing a skill_edit result against an equivalent full-content
 //       skill_write on a twin fixture), and the skill_edit source calls skillWriteData() for its
@@ -139,14 +144,57 @@ try {
   check("(d) skill_edit: the unconfirmed edits wrote NOTHING", fs.readFileSync(storeSkillMd("my-skill"), "utf8") === before2);
 
   // ============ (e) BUNDLED skill — identical WRITE TARGET behavior to skill_write ============
-  // Seed a store copy of the bundled fixture (mirrors what seedGlobalSkills() does at real boot).
-  writeStoreFile("core-doctrine", BUNDLED_MD);
-  const bundledEdit = await call("skill_edit", { name: "core-doctrine", oldString: "Step two: TODO.", newString: "Step two: DONE.", confirm: true });
-  check("(e) skill_edit: a confirmed bundled-name edit succeeds", bundledEdit.ok === true && bundledEdit.bundled === true && bundledEdit.target === "asset" && !bundledEdit.error);
-  const BUNDLED_EXPECTED = BUNDLED_MD.replace("Step two: TODO.", "Step two: DONE.");
-  check("(e) skill_edit: the store copy was updated", fs.readFileSync(storeSkillMd("core-doctrine"), "utf8") === BUNDLED_EXPECTED);
-  check("(e) skill_edit: the SOURCE-OF-TRUTH bundled asset was ALSO published (store == asset)", fs.readFileSync(assetSkillMd("core-doctrine"), "utf8") === BUNDLED_EXPECTED);
-  check("(e) skill_edit: after publish, customized:false (base advanced, same as skill_write)", bundledEdit.skill?.customized === false);
+  // Card 2179a923: the platform router now passes `allowBundledAsset: isLoomDev()` (was a hardcoded
+  // `true`). isLoomDev() is read once PER buildServer() CALL (same timing as daemon_restart's own
+  // registration gate) — NOT re-read per tool call — so toggling LOOM_DEV against the ALREADY-BUILT
+  // `server`/`client` from the top of this file would silently keep testing whichever state was
+  // ambient when THAT buildServer() ran. Build a FRESH server+client under an explicitly pinned
+  // LOOM_DEV for each state instead (mirrors platform-daemon-restart.mjs's (P) section).
+  const connectFreshClient = async () => {
+    const srv = router.buildServer();
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await srv.connect(st);
+    const cl = new Client({ name: "skill-edit-test", version: "0" });
+    await cl.connect(ct);
+    return cl;
+  };
+  const savedLoomDevE = process.env.LOOM_DEV;
+  try {
+    process.env.LOOM_DEV = "1";
+    const devClient = await connectFreshClient();
+    const devCall = async (name, args) => parse(await devClient.callTool({ name, arguments: args }));
+    // Seed a store copy of the bundled fixture (mirrors what seedGlobalSkills() does at real boot).
+    writeStoreFile("core-doctrine", BUNDLED_MD);
+    const bundledEdit = await devCall("skill_edit", { name: "core-doctrine", oldString: "Step two: TODO.", newString: "Step two: DONE.", confirm: true });
+    check("(e) skill_edit (LOOM_DEV=1): a confirmed bundled-name edit succeeds", bundledEdit.ok === true && bundledEdit.bundled === true && bundledEdit.target === "asset" && !bundledEdit.error);
+    const BUNDLED_EXPECTED = BUNDLED_MD.replace("Step two: TODO.", "Step two: DONE.");
+    check("(e) skill_edit (LOOM_DEV=1): the store copy was updated", fs.readFileSync(storeSkillMd("core-doctrine"), "utf8") === BUNDLED_EXPECTED);
+    check("(e) skill_edit (LOOM_DEV=1): the SOURCE-OF-TRUTH bundled asset was ALSO published (store == asset)", fs.readFileSync(assetSkillMd("core-doctrine"), "utf8") === BUNDLED_EXPECTED);
+    check("(e) skill_edit (LOOM_DEV=1): after publish, customized:false (base advanced, same as skill_write)", bundledEdit.skill?.customized === false);
+    await devClient.close();
+
+    // ============ (e2) BUNDLED skill, NON-DEV — card 2179a923's actual DoD: a non-dev bundled-NAME
+    // edit never reaches bundledSkillAssetsDir(). It does NOT fall through to the user store (a prior
+    // draft of this card's spec claimed that; corrected in
+    // docs/decisions/f437d4e9-end-user-platform-lead.md after verifying skillWriteData's real branch)
+    // — allowBundledAsset:false REJECTS a bundled name outright, exactly like the operator's own
+    // (non-elevated) skill_write already does (setup-surface.mjs (f)). ====
+    delete process.env.LOOM_DEV;
+    const nonDevClient = await connectFreshClient();
+    const nonDevCall = async (name, args) => parse(await nonDevClient.callTool({ name, arguments: args }));
+    const beforeAsset = fs.readFileSync(assetSkillMd("core-doctrine"), "utf8");
+    const beforeStore = fs.readFileSync(storeSkillMd("core-doctrine"), "utf8");
+    const nonDevEdit = await nonDevCall("skill_edit", { name: "core-doctrine", oldString: "Step two: DONE.", newString: "Step two: HACKED.", confirm: true });
+    check("(e2) skill_edit (non-dev): REJECTS a bundled name (bound to USER store, same as the operator)",
+      typeof nonDevEdit.error === "string" && /bundled/i.test(nonDevEdit.error) && !nonDevEdit.ok);
+    check("(e2) skill_edit (non-dev): the bundled ASSET was never touched (bundledSkillAssetsDir() never reached)",
+      fs.readFileSync(assetSkillMd("core-doctrine"), "utf8") === beforeAsset);
+    check("(e2) skill_edit (non-dev): the store copy was also left unchanged (no fallthrough write)",
+      fs.readFileSync(storeSkillMd("core-doctrine"), "utf8") === beforeStore);
+    await nonDevClient.close();
+  } finally {
+    if (savedLoomDevE === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDevE;
+  }
 
   // ============ (f) NO DIVERGENCE — skill_edit and skill_write agree byte-for-byte ============
   // Twin USER-skill fixtures seeded with the SAME initial content: one edited via skill_edit, the
