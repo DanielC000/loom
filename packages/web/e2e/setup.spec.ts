@@ -43,14 +43,14 @@ test("the Platform nav tab reaches the shipping onboarding surface", async ({ pa
   await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
 
   // The reserved "Platform" home header + its explainer copy (a substring unique to this surface).
-  await expect(page.getByText("your workspace operator · hidden from the project picker", { exact: false })).toBeVisible();
+  await expect(page.getByText("your cross-project workspace agent · hidden from the project picker", { exact: false })).toBeVisible();
 });
 
 test("the onboarding surface renders the operator + auditor entries and no live session", async ({ page, loomDaemon }) => {
   await page.goto(`${loomDaemon.baseURL}/platform`);
 
   // The surface's descriptive header resolved (proves api.setupHome loaded, not just an empty shell).
-  await expect(page.getByText("Platform is your friendly, user-facing workspace operator", { exact: false })).toBeVisible();
+  await expect(page.getByText("Platform is your friendly, cross-project workspace agent", { exact: false })).toBeVisible();
 
   // The operator go-live entry — how a new user gets their first project created (start the operator, tell
   // it what to build). Assert it's present + enabled, but NEVER click it: clicking spawns a REAL claude
@@ -105,5 +105,5 @@ test("the legacy /setup route redirects to the consolidated /platform surface", 
   // App.tsx maps /setup → <Navigate to="/platform" replace/>, so any lingering onboarding link lands on the
   // consolidated surface.
   await expect(page).toHaveURL(/\/platform$/);
-  await expect(page.getByText("your workspace operator · hidden from the project picker", { exact: false })).toBeVisible();
+  await expect(page.getByText("your cross-project workspace agent · hidden from the project picker", { exact: false })).toBeVisible();
 });

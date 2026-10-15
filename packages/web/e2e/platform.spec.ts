@@ -31,7 +31,7 @@ test.describe("platform view (end-user edition)", () => {
     await page.goto(`${loomDaemon.baseURL}/platform`);
 
     // We are on the End-User Platform surface — its distinctive lead-in copy (never in the dev edition).
-    await expect(page.getByText(/your workspace operator/i)).toBeVisible();
+    await expect(page.getByText(/your cross-project workspace agent/i)).toBeVisible();
 
     // Agent controls: the singleton operator's Start button + the create-only auditor's Review button.
     await expect(page.getByRole("button", { name: "Start Platform" })).toBeVisible();

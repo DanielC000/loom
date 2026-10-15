@@ -274,7 +274,7 @@ function FirstRunWelcome() {
         </p>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <Button variant="primary" onClick={() => setWizardOpen(true)} style={{ padding: "6px 14px", fontSize: 13 }}>Start guided setup →</Button>
-          <Button onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }} title="Hand the reins to the Platform operator instead">Open Platform</Button>
+          <Button onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }} title="Hand the reins to the Platform agent instead">Open Platform</Button>
           {/*
             @decision 6cefdf25 — do not dim this label with an inline `color`: it shadows the ghost
             variant's own hover rule and leaves the button inert. The `loom-btn-muted` class does it.

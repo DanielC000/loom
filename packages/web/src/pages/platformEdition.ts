@@ -207,11 +207,16 @@ export const endUserEdition: PlatformEdition = {
   copy: {
     errorText: "No reserved “Platform” project found — the home may not be seeded yet.",
     header: {
-      mutedSpan: "your workspace operator · hidden from the project picker",
+      mutedSpan: "your cross-project workspace agent · hidden from the project picker",
+      // Wording tracks the fact-checked README/site copy (commit 06267d94) — the capability list and the
+      // "acts on its own … built to confirm first" phrasing are deliberate: confirm-first is DOCTRINE the
+      // agent follows, NOT a gate Loom enforces, so never phrase it as "it confirms" (owner Request
+      // cfbdef3d). Keep the three in sync when any of them changes.
       paragraph:
-        "Platform is your friendly, user-facing workspace operator — creating and configuring your projects, " +
-        "agents and profiles, choosing which skills each rig enables, and acting on your behalf (confirming big " +
-        "or irreversible actions first). Start it below and tell it what you want to build. The Workspace Auditor is a " +
+        "Platform is your friendly, cross-project workspace agent — it creates and configures your projects, " +
+        "agents and profiles, spawns and oversees sessions, and triages your board. It acts on its own for " +
+        "ordinary admin and is built to confirm first for anything irreversible or outward-facing, like pushing " +
+        "to a shared repo. Start it below and tell it what you want to build. The Workspace Auditor is a " +
         "read-only reviewer — run it any time and it files improvement suggestions onto your home board.",
     },
     agentsLabel: "Assistants",
