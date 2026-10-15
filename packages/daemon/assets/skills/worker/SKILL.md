@@ -288,6 +288,9 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    case-sensitivity). A test that leans on such state can PASS on the dev or CI host that happens to have
    it and FAIL on a clean CI runner or a real end-user machine. Make it self-contained — provide or
    redirect the state it needs to test-owned files — so it proves the same thing everywhere it runs.
+   The same trap applies to a code path gated on an environment variable: your shell may have it set to
+   a value CI doesn't (or vice versa), so test such a path under each state the gate supports, not just
+   whichever one happens to be ambient.
    **A test asserting something did NOT happen, gated only by a fixed wait, is unfalsifiable in one
    trial** — a timer that expires before the bad thing occurs is indistinguishable from the bad thing
    never occurring at all, so the test can pass for the wrong reason every single run. If you add or
