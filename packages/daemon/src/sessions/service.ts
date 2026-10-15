@@ -39,7 +39,7 @@ import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, WORKTREES_DIR } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { isDurablyResumable, type RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
 import type { HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
@@ -99,7 +99,7 @@ import { mergeConfigOverride, validateAgentProjectConfigOverride, isHumanSetPerm
 import { appendTaskBodySection, checkTitleHtmlEntities } from "../mcp/tasks.js";
 import { cancelQuestionForAgent } from "../mcp/questionTool.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
-import { resolveLiveLeadHome } from "../projects/live-lead-home.js";
+import { resolveLiveLeadHome, resolveHomeLeadAgent, isSanctionedPlatformLeadAgent, liveOtherPlatformLead } from "../projects/live-lead-home.js";
 import { resolveLiveSetupHome } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
 import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
@@ -2425,6 +2425,12 @@ export class CodexForkUnsupportedError extends Error {
 export const SETUP_SESSION_FORK_BARRED_ERROR =
   "refusing to fork: a live setup session already exists for this agent (the Setup operator is a singleton — never two LIVE setup sessions)";
 
+// f437d4e9 Decision 6 — on a non-dev install, forking a role:"platform" source would carry the role
+// forward (consistent with decision 8ddcf787) and mint a SECOND Lead row, defeating Decision 5's
+// "exactly one Lead" guarantee. Dev installs keep decision 8ddcf787's multi-Lead allowance unchanged.
+export const PLATFORM_SESSION_FORK_BARRED_ERROR =
+  "refusing to fork: platform-role sessions are restricted to the one seeded end-user Platform Lead on this install";
+
 // @decision 39b58667 — hosted in clone-core.ts (circular-import reasons); re-exported here unchanged
 // for this module's existing importers (gateway/server.ts, the test suite).
 export { SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
@@ -3824,10 +3830,22 @@ export class SessionService {
   // Card 26aa4322 — this is NOT the trust boundary: platform-spawn is HUMAN-REST only (+ self-recycle);
   // session_spawn REFUSES role:"platform", so no agent/MCP path can mint one — the create-only/singleton
   // shape below is an operational guarantee, never the boundary.
-  // @decision 8ddcf787 — create-only, multiple concurrent Leads allowed: a manual Spawn always mints a
-  // FRESH platform session, never reusing an already-live one. Never reintroduce a "never two LIVE
-  // Leads" singleton short-circuit here — resuming an exited Lead stays an explicit human action.
+  // @decision 8ddcf787 — create-only, multiple concurrent Leads ON A DEV INSTALL only; a non-dev install
+  // is the deliberate exception below (card be9cb999 Decisions 5/6: one sanctioned agent, one live Lead).
+  // @decision be9cb999 — a non-dev install restricts "platform" to the one agent
+  // `isSanctionedPlatformLeadAgent` resolves (id + CURRENT profile role, not the marker alone), and
+  // refuses while a live Lead session already exists (mirrors startSetup's singleton).
   startPlatformLead(agentId: string, opts?: { spawnHumanAuthorized?: boolean }): Session {
+    if (!isLoomDev()) {
+      if (!isSanctionedPlatformLeadAgent(this.db, agentId)) {
+        throw new Error("platform-role sessions are restricted to the seeded end-user Platform Lead on this install");
+      }
+      // Round 3, J1/M1: verified pty liveness (liveOtherPlatformLead), never the raw processState flag —
+      // a phantom-live row must never block a legitimate start.
+      if (liveOtherPlatformLead(this.db, (id) => this.pty.isAlive(id))) {
+        throw new Error("a live Platform Lead session already exists — only one may run at a time on this install");
+      }
+    }
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -4338,6 +4356,20 @@ export class SessionService {
       const verifiedLiveSibling = this.liveSetupSessions(session.agentId)
         .find((s) => s.id !== session.id && this.pty.isAlive(s.id));
       if (verifiedLiveSibling) throw new Error(SETUP_SESSION_RESUME_BARRED_ERROR);
+    }
+    // Card be9cb999 round 2, item 7: a role:"platform" row must re-pass the SAME sanctioned-agent check
+    // on resume (incl. boot-resume, which routes through here) that a fresh startPlatformLead enforces —
+    // the marker/profile may have moved on since this row was minted (e.g. rebound to a different agent).
+    if (session.role === "platform") {
+      if (!isSanctionedPlatformLeadAgent(this.db, session.agentId)) {
+        throw new Error("platform-role sessions are restricted to the seeded end-user Platform Lead on this install");
+      }
+      // Round 3, J1: the start path's own "no second live Lead" singleton must ALSO hold across a
+      // resume — without this, start A -> hard-stop A -> start B -> resume(A) mints two live Leads on
+      // a non-dev install. Verified pty liveness (liveOtherPlatformLead), excluding THIS row.
+      if (liveOtherPlatformLead(this.db, (id) => this.pty.isAlive(id), session.id)) {
+        throw new Error("a live Platform Lead session already exists — only one may run at a time on this install");
+      }
     }
     const config = resolveConfig(project.config);
     // @decision e98877b1 — on agent-row-missing resume, still apply the role-keyed pin via
@@ -7635,9 +7667,15 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     // @decision ad131671 — a fork carries `role: src.role` through unchanged (below), so a "setup"
     // source would mint a 2nd live row exactly like a fresh spawn; refuse, same as startSetup's own
-    // singleton. "platform" is deliberately NOT checked — decision 8ddcf787 allows multiple Leads.
+    // singleton. (The sibling "platform" check lives in the Decision-6 guard right below.)
     if (src.role === "setup" && this.liveSetupSession(src.agentId)) {
       throw new Error(SETUP_SESSION_FORK_BARRED_ERROR);
+    }
+    // f437d4e9 Decision 6 — on a non-dev install, forking an existing "platform" source would carry the
+    // role forward (below) and mint a second Lead row, defeating Decision 5's "exactly one Lead"
+    // guarantee at the start path. Dev installs are unaffected (decision 8ddcf787 unchanged there).
+    if (src.role === "platform" && !isLoomDev()) {
+      throw new Error(PLATFORM_SESSION_FORK_BARRED_ERROR);
     }
     // @decision c30759a0 — mirrors recycleManager/resume's chokepoint (4b2e0146): a fork of a manager
     // source keeps role "manager" (see below), so it mints a NEW manager session exactly like a fresh
@@ -12209,22 +12247,23 @@ export class SessionService {
   }
 
   /**
-   * The CONFINED messaging primitive behind both workspace-auditor handoffs (board card 5eb8438a). It can
-   * reach EXACTLY ONE session: the LIVE operator of the user's OWN reserved "Platform" setup home (role
-   * "setup" — the singleton Platform operator, SETUP_AGENT_NAME — IN that home, MARKER-SCOPED via
-   * resolveSetupHome (card 5dff8d08) so it is never the dev "Loom Platform" Lead, never an arbitrary id,
-   * and keeps resolving after a human rename). The caller passes NO target; this resolves it
-   * server-side, so the auditor can never address any other session (no arbitrary cross-session messaging —
-   * the load-bearing containment). Best-effort, mirroring platformEscalate's Lead nudge: returns `boarded`
-   * if no home / no live operator (the suggestion cards are the durable inbox), else the live `enqueueStdin`
-   * outcome classified (delivered-live | queued). NEVER throws.
+   * The CONFINED messaging primitive behind both workspace-auditor handoffs (board card 5eb8438a). Reaches
+   * EXACTLY ONE session: the LIVE operator of the user's OWN reserved "Platform" setup home (resolved via
+   * resolveSetupHome, card 5dff8d08, so never the dev "Loom Platform" Lead). f437d4e9 C5 (card be9cb999
+   * round 2, item 5): resolved by AGENT IDENTITY via the shared `resolveHomeLeadAgent` helper, never by
+   * role string, since the operator may now be role "setup" OR "platform"; falls back to a
+   * role==="setup"||"platform" filter only when that helper resolves nothing. Caller passes NO target —
+   * never arbitrary cross-session messaging. Best-effort: `boarded` on no home/no live operator, else the
+   * live `enqueueStdin` outcome. NEVER throws.
    */
   private nudgeHomeOperator(note: string): DeliveryStatus {
     const home = resolveLiveSetupHome(this.db);
     if (!home) return "boarded";
-    const operator = this.db
-      .listAllSessions()
-      .find((s) => s.role === "setup" && s.projectId === home.id && s.processState === "live");
+    const liveInHome = this.db.listAllSessions().filter((s) => s.projectId === home.id && s.processState === "live");
+    const leadAgentId = resolveHomeLeadAgent(this.db)?.id;
+    const operator = leadAgentId
+      ? liveInHome.find((s) => s.agentId === leadAgentId)
+      : liveInHome.find((s) => s.role === "setup" || s.role === "platform");
     if (!operator) return "boarded"; // no live operator — the cards sit on the now-visible home board
     // kind:"agent" — a specific, actionable auditor heads-up naming a concrete suggestion, not a Loom
     // operational nudge; it must reach the operator as its own turn, never mashed with anything else.
@@ -15168,6 +15207,12 @@ export class SessionService {
   async recyclePlatformLead(oldLeadId: string, continuationPrompt: string): Promise<Session> {
     const old = this.db.getSession(oldLeadId);
     if (!old || old.role !== "platform") throw new Error("not a platform session");
+    // Card be9cb999 round 2, item 7: recycle only CARRIES role:"platform" forward — re-check the SAME
+    // sanctioned-agent gate resume()/startPlatformLead enforce, since the marker/profile may have moved
+    // on since `old` was minted (e.g. rebound away from this agent to a different one).
+    if (!isSanctionedPlatformLeadAgent(this.db, old.agentId)) {
+      throw new Error("platform-role sessions are restricted to the seeded end-user Platform Lead on this install");
+    }
     // FAIL SAFE before any teardown/spawn: a blank/whitespace continuation would seed an empty
     // successor and (via the deferred stop below) retire the predecessor — losing the handoff. Reject
     // up front so the predecessor stays live and the Lead can re-issue a real continuation (mirrors

@@ -13,11 +13,14 @@ export type PlatformSpawnRole = "platform" | "auditor" | "setup" | "workspace-au
 // effects), so the hermetic test (`test/platform-edition.mjs`, run under node --experimental-strip-types)
 // can import it directly to assert the gating both ways + the schedule variants — mirroring lib/companion.ts.
 //
-// HARD INVARIANT it upholds: each edition carries a STATIC role (`operatorRole`/`auditorRole`). The shell
-// reads the role from the edition prop, never from the edition-preview toggle in Platform.tsx — so that
-// toggle stays a PURE CLIENT-SIDE VIEW SWITCH: it selects WHICH edition mounts and nothing else, and can
-// never be read by, passed to, or wired into a spawn/role/stop call. This module holds only static config
-// + pure functions; it never touches the toggle's persisted key or browser storage (asserted by the test).
+// HARD INVARIANT it upholds: each edition carries a STATIC default role (`operatorRole`/`auditorRole`),
+// read from the edition prop, NEVER from the edition-preview toggle in Platform.tsx — so that toggle
+// stays a PURE CLIENT-SIDE VIEW SWITCH: it selects WHICH edition mounts and nothing else, and can never
+// be read by, passed to, or wired into a spawn/role/stop call. (The shell separately refines the
+// OPERATOR's actual spawn role from the live agent's bound profile — f437d4e9 C5 round 2, item 1b — but
+// that reads profile data, never the toggle, so this invariant is untouched.) This module holds only
+// static config + pure functions; it never touches the toggle's persisted key or browser storage
+// (asserted by the test).
 
 export type PlatformEditionKind = "developer" | "enduser";
 
@@ -89,6 +92,26 @@ export function operatorSpawnDisabled(edition: PlatformEdition, s: { live: boole
 }
 export function auditorSpawnDisabled(edition: PlatformEdition, s: { live: boolean; pending: boolean }): boolean {
   return s.pending || (!edition.auditorCreateOnly && s.live);
+}
+
+// ── The operator's DYNAMIC spawn role (f437d4e9 C5 round 3, M2/M4d) — card be9cb999. ──
+//
+// Mirrors first-run.ts's own resolution (profile role "platform" ⇒ "platform", else "setup"), but with
+// ONE extra state first-run.ts doesn't need: while the profiles query hasn't loaded yet, the operator's
+// REAL role is genuinely UNKNOWN — never guess "setup" (a click in that window would wrongly mint a
+// setup session on what is likely the real platform-role Lead agent). `spawnDisabled:true` is the
+// signal callers must use to hold the spawn button, not a fallback role value (the `role` returned in
+// that case is just the edition's static default, for rendering only — never meant to be spawned with).
+export function resolveOperatorSpawnRole(params: {
+  hasOperator: boolean;
+  profilesLoaded: boolean;
+  operatorProfileRole: string | null;
+  fallbackRole: PlatformSpawnRole;
+}): { role: PlatformSpawnRole; spawnDisabled: boolean } {
+  const { hasOperator, profilesLoaded, operatorProfileRole, fallbackRole } = params;
+  if (!hasOperator) return { role: fallbackRole, spawnDisabled: false }; // no agent to spawn at all — the "missing" card handles this
+  if (!profilesLoaded) return { role: fallbackRole, spawnDisabled: true }; // unknown — never guess, never spawn
+  return { role: operatorProfileRole === "platform" ? "platform" : "setup", spawnDisabled: false };
 }
 
 // ── The DEV edition — the canonical rendering (the richer surface). ──
@@ -166,7 +189,12 @@ export const developerEdition: PlatformEdition = {
 export const endUserEdition: PlatformEdition = {
   kind: "enduser",
   homeQueryKey: "setupHome",
-  operatorRole: "setup",
+  // f437d4e9 C5: the shipping end-user operator now runs as the full Platform Lead (role "platform"),
+  // not the narrower Setup Assistant — matches the daemon's seed/migration (setup/seed.ts). On a DEV
+  // install's "View as: End-user" preview, the underlying Getting-Started agent is deliberately NEVER
+  // upgraded (§1c) and stays role "setup" — Platform.tsx passes `previewOnly` so PlatformView disables
+  // the spawn button there rather than letting this static role mint a stray session on that agent.
+  operatorRole: "platform",
   auditorRole: "workspace-auditor",
   operatorName: "Platform",
   auditorName: "Workspace Auditor",

@@ -84,10 +84,13 @@ try {
   const assistant = agentsA[0];
   check("(1) the agent is the Platform operator with a NON-empty default startupPrompt",
     assistant?.name === SETUP_AGENT_NAME && assistant?.name === "Platform" && typeof assistant.startupPrompt === "string" && assistant.startupPrompt.length > 200);
-  check("(1) the agent prompt references its /setup-assistant doctrine skill", assistant.startupPrompt.includes("/setup-assistant"));
+  // f437d4e9 C5: on a non-dev install (the default — LOOM_DEV unset here) the operator seeds DIRECTLY as
+  // the full Platform Lead now, not the narrower Setup Assistant — see migrateSetupHomeToLead's own doc
+  // (setup/seed.ts) for the sibling upgrade path that covers an EXISTING pre-card install instead.
+  check("(1) the agent prompt references its /platform-lead doctrine skill", assistant.startupPrompt.includes("/platform-lead"));
   const profById = new Map(dbA.listProfiles().map((p) => [p.id, p]));
-  check("(1) the agent is bound to the bundled 'Setup Assistant' profile (role setup)",
-    profById.get(assistant.profileId)?.name === "Setup Assistant" && profById.get(assistant.profileId)?.role === "setup");
+  check("(1) the agent is bound to the bundled 'Platform-lead' profile (role platform)",
+    profById.get(assistant.profileId)?.name === "Platform-lead" && profById.get(assistant.profileId)?.role === "platform");
 
   // The getting-started checklist seeds onto the home board (the doctrine promises "a board for a setup
   // checklist" — the seed must actually fulfil it). Cards land on the home's resolved defaultLanding column.

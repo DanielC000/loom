@@ -48,6 +48,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-ownermsg-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card be9cb999 round 2, item 2: this file's (C1)/(C2) phases call recyclePlatformLead with an
+// arbitrary agent id (no sanctioned marker/profile), and its reserved-home fixture ("pHomeM", named
+// "Loom Platform") models the DEV platform home specifically — resolveLiveLeadHome/platformEscalate (M2)
+// only resolve that fixture correctly under isLoomDev()==true. Pin LOOM_DEV=1 so both the generic
+// recycle mechanics and the dev-shaped escalation fixture resolve as the file was written to model.
+process.env.LOOM_DEV = "1";
 
 const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();

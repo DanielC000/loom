@@ -52,6 +52,11 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// Card be9cb999 round 2, item 2: this is a generic Platform Lead resume-doc test (an arbitrary agent id,
+// no sanctioned marker/profile). f437d4e9 Decision 5/6 narrows startPlatformLead/recyclePlatformLead to
+// the one sanctioned end-user Lead (+ a live singleton) only on a non-dev install — pin LOOM_DEV=1 so
+// this file keeps exercising the generic multi-Lead resume-doc mechanics, unaffected.
+process.env.LOOM_DEV = "1";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { commitAll } from "./_git-commit.mjs";

@@ -40,6 +40,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const loomHome = fs.realpathSync(useOwnLoomHome("loom-startmanager-ophome-"));
 fs.mkdirSync(path.join(loomHome, "logs"), { recursive: true }); // so the fake pty's on-disk log stream has somewhere to write
+// Card be9cb999 round 2, item 2: cases (d)/(i) call startPlatformLead with an arbitrary agent id (no
+// sanctioned marker/profile) — this file is about the reserved-home manager-barring guard (card
+// 37e15c26/d25e4ea7), not f437d4e9 Decision 5/6's end-user-Lead restriction, which applies only on a
+// non-dev install. Pin LOOM_DEV=1 so startPlatformLead keeps exercising "deliberately not guarded here"
+// unaffected by the separate, non-dev-only sanctioning check.
+process.env.LOOM_DEV = "1";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv();

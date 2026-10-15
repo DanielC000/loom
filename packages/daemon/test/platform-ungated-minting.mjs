@@ -42,8 +42,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the agent's profile at all. So (a) forking a non-platform session whose agent's profile has
 //       since been rebound to role:"platform" still resolves to the source row's OWN role, never
 //       "platform"; and (b) forking an EXISTING role:"platform" session is the one sanctioned
-//       carry-forward (decision 8ddcf787: multiple concurrent Leads are allowed) and DOES succeed,
-//       producing another role:"platform" row — reachable ONLY from an already-role:"platform" source.
+//       carry-forward (decision 8ddcf787: multiple concurrent Leads are allowed) — but ONLY on a DEV
+//       install (isLoomDev()); f437d4e9 Decision 6 REFUSES it on a non-dev install (consistent with
+//       Decision 5's "exactly one Lead"), so this group toggles LOOM_DEV to prove BOTH outcomes.
+//   (9) f437d4e9 Decision 5 itself: with LOOM_DEV unset, startPlatformLead now ALSO refuses any agent
+//       that isn't the one identified by the SETUP_HOME_LEAD_AGENT_ID_KEY marker — group (7) stamps that
+//       marker onto its sanctioned agent before calling it, then this group proves a DIFFERENT agent is
+//       refused, and that the SAME call succeeds unconditionally on a DEV install.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-ungated-minting.mjs
 import fs from "node:fs";
@@ -91,6 +96,7 @@ const { validateProfile } = await import("../dist/profiles/validate.js");
 const { templateAssignableProfileError, applyWorkflowTemplate } = await import("../dist/setup/templates.js");
 const { isLoomDev } = await import("../dist/paths.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { SETUP_HOME_LEAD_AGENT_ID_KEY } = await import("../dist/setup/seed.js");
 
 check("(precondition) isLoomDev() is FALSE (LOOM_DEV unset)", isLoomDev() === false);
 
@@ -116,7 +122,12 @@ db.insertAgent({ id: "agentCoord", projectId: "pP", name: "Coord", startupPrompt
 db.insertAgent({ id: "agentCoordHome", projectId: "pHome", name: "CoordHome", startupPrompt: "COORD_HOME", position: 0, profileId: null });
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Mgr", startupPrompt: "MGR", position: 1, profileId: null });
 db.insertAgent({ id: "agentDev", projectId: "pP", name: "Dev", startupPrompt: "DEV", position: 2, profileId: "profDev" });
-db.insertAgent({ id: "agentLead", projectId: "pP", name: "Lead", startupPrompt: "LEAD", position: 3, profileId: null });
+// Lives under "pHome" (the reserved project below), not "pP" — card be9cb999 round 2 makes groups (6)/(7)
+// below resolve this agent through resolveHomeLeadAgent, which requires a real reserved "setup home".
+db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Lead", startupPrompt: "LEAD", position: 3, profileId: null });
+// A SECOND, distinct agent — never the one stamped onto SETUP_HOME_LEAD_AGENT_ID_KEY in group (7) below —
+// used in group (9) to prove Decision 5's id-equality guard refuses an unsanctioned agent.
+db.insertAgent({ id: "agentLead2", projectId: "pP", name: "Lead2", startupPrompt: "LEAD2", position: 4, profileId: null });
 
 class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.spawned = []; }
@@ -264,6 +275,16 @@ try {
     async () => applyWorkflowTemplate(db, badTemplate, "pP"), "platform");
   check("(5) the rejected template apply created NO new agent", db.listAgents("pP").length === nAgentsBeforeTemplate);
 
+  // ===================== Setup for (6)/(7): make "agentLead" the SANCTIONED end-user Lead =====================
+  // Card be9cb999 round 2, item 1(a)/7: recyclePlatformLead/startPlatformLead now ALSO require the
+  // target agent to resolve via the shared resolveHomeLeadAgent helper (marker + CURRENT platform-role
+  // profile) on a non-dev install, not just an id-equality marker check — so "pHome" must look like a
+  // real reserved setup home and "agentLead" must actually be bound to a platform-role profile before
+  // groups (6)/(7) below can mint legitimately.
+  db.setMeta("setup.homeProjectId", "pHome"); // the SAME marker key resolveSetupHome resolves by
+  db.updateAgent("agentLead", { profileId: "profPlatform" });
+  db.setMeta(SETUP_HOME_LEAD_AGENT_ID_KEY, "agentLead");
+
   // ===================== (6) recyclePlatformLead — carry-forward ONLY, never originates =====================
   await rejects("(6) recyclePlatformLead REFUSES a non-platform session (manager successor)",
     () => svc.recyclePlatformLead(mgrSuccessor.id, "continue"), "not a platform session");
@@ -271,6 +292,11 @@ try {
   // carry-forward and must succeed, producing another role:"platform" row.
   const leadSuccessor = await svc.recyclePlatformLead("PL", "continue as the new Lead");
   check("(6) recyclePlatformLead on an EXISTING role:'platform' session SUCCEEDS, carrying role:'platform' forward", leadSuccessor.role === "platform");
+  // Round 2, item 6's "ONE LIVE LEAD" singleton is a separate guard from the one under test in group (7)
+  // below — retire this successor (as a real "Stop" would) so group (7)'s fresh start doesn't collide.
+  // Round 3 (J1): the singleton checks VERIFIED pty liveness, so stopSession() (not a bare DB flag flip)
+  // is what actually clears it.
+  svc.stopSession(leadSuccessor.id, "hard");
 
   // ===================== (7) startPlatformLead — exactly ONE call site; the true positive =====================
   const serviceSrc = fs.readFileSync(path.join(__dirname, "..", "src", "sessions", "service.ts"), "utf8");
@@ -287,11 +313,17 @@ try {
   // definition + the ONE call site exercised in group (6) above are both findable the same way.
   const recycleDefHits = (serviceSrcNoComments.match(/\brecyclePlatformLead\s*\(/g) ?? []).length;
   check("(7, negative control) the SAME grep style finds recyclePlatformLead's own definition (>=1), proving the pattern isn't silently broken", recycleDefHits >= 1);
-  // Calling startPlatformLead DIRECTLY — the service method itself has NO internal runtime flag refusing
-  // this; the boundary is structural (nothing agent-facing calls it). It DOES mint role:"platform" — the
-  // one true positive this whole enumeration is built around.
+  // Calling startPlatformLead DIRECTLY — the boundary is structural (nothing agent-facing calls it).
+  // f437d4e9 Decision 5 ADDS one internal runtime check on top of that structural boundary: on a non-dev
+  // install it also requires the target agent to resolve via resolveHomeLeadAgent (marker + CURRENT
+  // platform-role profile) — already set up on "agentLead" ahead of group (6) above, so this call is the
+  // sanctioned one; group (9) below proves a DIFFERENT agent is refused.
   const freshLead = svc.startPlatformLead("agentLead", { spawnHumanAuthorized: true });
   check("(7) startPlatformLead itself DOES mint role:'platform' (the one sanctioned mint path)", freshLead.role === "platform");
+  // Retire it too — group (8b)/(9) below don't need it live, and leaving it live would trip the
+  // singleton guard the next time this file calls startPlatformLead on a non-dev path. stopSession()
+  // (round 3 J1: verified pty liveness, not a bare DB flag) is what actually clears it.
+  svc.stopSession(freshLead.id, "hard");
 
   // ===================== (8) forkSession — role is CARRIED from the source row, never re-derived from a profile =====================
   // (8a) agentCoord's profile was rebound to profPlatform (role:"platform") back in group (1) above, and
@@ -309,14 +341,45 @@ try {
   const forkedWorkerFromNonPlatform = svc.forkSession("srcWorkerOnPlatformBoundAgent");
   check("(8a) forking a role:'worker' session whose agent is bound to a role:'platform' profile resolves the fork's role to 'worker' (the SOURCE's own role), NOT 'platform'", forkedWorkerFromNonPlatform.role === "worker");
 
-  // (8b) Fork an EXISTING role:"platform" session — the one sanctioned carry-forward (decision 8ddcf787:
-  // multiple concurrent Leads are allowed; forkSession deliberately has no role==="platform" refusal,
-  // unlike its role==="setup"/role==="manager" guards above) — succeeds, producing another role:"platform" row.
+  // (8b) Fork an EXISTING role:"platform" session — decision 8ddcf787's multi-Lead carry-forward, but
+  // f437d4e9 Decision 6 now REFUSES it on a non-dev install (consistent with Decision 5's "exactly one
+  // Lead"), succeeding only on a DEV install. LOOM_DEV is unset throughout this file up to here, so the
+  // FIRST attempt proves the non-dev refusal; toggling it then proves dev is unaffected.
   seedForkableSession("srcPlatformForFork", "platform", "agentLead");
-  const forkedPlatform = svc.forkSession("srcPlatformForFork");
-  check("(8b) forking an EXISTING role:'platform' session SUCCEEDS, carrying role:'platform' forward", forkedPlatform.role === "platform");
-  check("(8b) the DB row persists role='platform' too", db.getSession(forkedPlatform.id).role === "platform");
-  check("(8b) forkSession's own role==='platform' carry-forward is reachable ONLY from an already-role:'platform' source — (8a)'s null/worker sources on the SAME bound-to-platform-profile agent both failed to produce it, so the profile confers nothing and only the source row's own role does", forkedFromNonPlatform.role !== "platform" && forkedWorkerFromNonPlatform.role !== "platform" && forkedPlatform.role === "platform");
+  const nSessBeforeNonDevForkAttempt = db.listAllSessions().length;
+  await rejects("(8b, non-dev) forking an EXISTING role:'platform' session is REFUSED with LOOM_DEV unset",
+    () => svc.forkSession("srcPlatformForFork"), "platform-role sessions are restricted");
+  check("(8b, non-dev) the refused fork attempt created NO session", db.listAllSessions().length === nSessBeforeNonDevForkAttempt);
+
+  process.env.LOOM_DEV = "1";
+  try {
+    check("(8b, precondition) isLoomDev() now reads TRUE", isLoomDev() === true);
+    const forkedPlatform = svc.forkSession("srcPlatformForFork");
+    check("(8b, dev) forking the SAME source now SUCCEEDS on a DEV install, carrying role:'platform' forward", forkedPlatform.role === "platform");
+    check("(8b, dev) the DB row persists role='platform' too", db.getSession(forkedPlatform.id).role === "platform");
+    check("(8b) forkSession's own role==='platform' carry-forward is reachable ONLY from an already-role:'platform' source — (8a)'s null/worker sources on the SAME bound-to-platform-profile agent both failed to produce it, so the profile confers nothing and only the source row's own role does", forkedFromNonPlatform.role !== "platform" && forkedWorkerFromNonPlatform.role !== "platform" && forkedPlatform.role === "platform");
+  } finally {
+    delete process.env.LOOM_DEV; // restore the non-dev shape this whole file runs under
+  }
+  check("(8b, postcondition) isLoomDev() reads FALSE again after restoring", isLoomDev() === false);
+
+  // ===================== (9) f437d4e9 Decision 5 — startPlatformLead refuses an UNSANCTIONED agent =====================
+  // Group (7) stamped SETUP_HOME_LEAD_AGENT_ID_KEY onto "agentLead" and that call succeeded. A DIFFERENT
+  // agent ("agentLead2", never stamped) must be refused with LOOM_DEV unset, and the SAME call must
+  // succeed unconditionally on a DEV install (decision 8ddcf787's own multi-Lead allowance, unchanged).
+  const nSessBeforeUnsanctioned = db.listAllSessions().length;
+  await rejects("(9) startPlatformLead REFUSES an agent other than the one stamped on SETUP_HOME_LEAD_AGENT_ID_KEY",
+    () => svc.startPlatformLead("agentLead2", { spawnHumanAuthorized: true }), "restricted to the seeded end-user Platform Lead");
+  check("(9) the refused startPlatformLead attempt created NO session", db.listAllSessions().length === nSessBeforeUnsanctioned);
+
+  process.env.LOOM_DEV = "1";
+  try {
+    const devLead2 = svc.startPlatformLead("agentLead2", { spawnHumanAuthorized: true });
+    check("(9, dev) the SAME unsanctioned agent succeeds unconditionally on a DEV install", devLead2.role === "platform");
+  } finally {
+    delete process.env.LOOM_DEV;
+  }
+  check("(9, postcondition) isLoomDev() reads FALSE again after restoring", isLoomDev() === false);
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
@@ -328,6 +391,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card f437d4e9 C1 decision 5: with LOOM_DEV unset, a profile may freely carry role:'platform' and may be bound to any agent, but nothing agent-facing (session_spawn on platform/setup, worker_spawn, manager/worker recycle, template_apply, forkSession) can ever turn that into a role:'platform' SESSION; recyclePlatformLead and forkSession only ever carry an existing one forward; startPlatformLead is the sole mint path, reachable from exactly one human-REST call site — claude-free, network-free."
+  ? "\n✅ ALL PASS — card f437d4e9 C1 decision 5: with LOOM_DEV unset, a profile may freely carry role:'platform' and may be bound to any agent, but nothing agent-facing (session_spawn on platform/setup, worker_spawn, manager/worker recycle, template_apply, forkSession) can ever turn that into a role:'platform' SESSION; recyclePlatformLead and forkSession only ever carry an existing one forward; startPlatformLead is the sole mint path, reachable from exactly one human-REST call site — claude-free, network-free. Card C5 narrows this further: on a non-dev install startPlatformLead additionally refuses any agent but the one marked SETUP_HOME_LEAD_AGENT_ID_KEY, and forkSession refuses carrying role:'platform' forward at all — both unconditionally restored on a DEV install."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

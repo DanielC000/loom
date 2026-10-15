@@ -54,7 +54,10 @@ export default function Platform() {
       <ViewAsToggle value={viewAs} onChange={setView} />
       {viewAs === "developer"
         ? <PlatformView key={developerEdition.kind} edition={developerEdition} />
-        : <PlatformView key={endUserEdition.kind} edition={endUserEdition} />}
+        // previewOnly: the underlying Getting-Started agent on a dev install is never upgraded to the
+        // Lead (§1c), so this preview must not let the operator spawn button mint a stray role:"platform"
+        // session against it — see PlatformView's own AgentControl for the disabled state.
+        : <PlatformView key={endUserEdition.kind} edition={endUserEdition} previewOnly />}
     </div>
   );
 }

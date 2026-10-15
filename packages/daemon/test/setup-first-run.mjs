@@ -8,10 +8,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // REAL seedSetupHome (E1-4), so the marker-based resolution (resolveSetupHome, card 5dff8d08) is
 // exercised end-to-end.
 //
+// f437d4e9 C5: on a non-dev install (LOOM_DEV unset — the default this whole file exercises) the home
+// operator now seeds + spawns as the full Platform Lead directly (role "platform"), not "setup" — see
+// setup/seed.ts's seedSetupHome. LOOM_DEV is explicitly unset below rather than relying on the ambient
+// shell having none exported.
+//
 // Proves the DoD (all 4 cases + the two guard reasons):
-//   (1) FRESH/EMPTY install        → maybeAutoLaunchSetup launches ONCE: a 'setup' session is spawned and
-//                                     the marker is stamped (the empty install — only reserved homes — reads
-//                                     as zero ordinary projects via listProjects).
+//   (1) FRESH/EMPTY install        → maybeAutoLaunchSetup launches ONCE: the Lead (role 'platform') is
+//                                     spawned and the marker is stamped (the empty install — only reserved
+//                                     homes — reads as zero ordinary projects via listProjects).
 //   (2) RESTART (marker set)       → a 2nd call does NOT re-spawn (reason 'marker-set'); no new pty.
 //   (3) DELETE-ALL after marker    → user creates then deletes all ordinary projects; with the marker set it
 //                                     STILL does not re-spawn even though listProjects() is empty again.
@@ -44,6 +49,11 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// f437d4e9 C5: seedSetupHome's seeded shape (and so maybeAutoLaunchSetup's resolved role) now depends on
+// isLoomDev() — unset it explicitly rather than relying on the ambient shell having no LOOM_DEV exported
+// (an interactive dev shell commonly does; a test that silently inherited "1" there would exercise the
+// WRONG shape and still pass for the wrong reason).
+delete process.env.LOOM_DEV;
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
@@ -80,9 +90,12 @@ const events = {
 };
 
 const mainDbFile = path.join(tmpHome, "loom.db");
+// f437d4e9 C5: on a non-dev install (LOOM_DEV unset, the default this whole file runs under) the home
+// operator now spawns as the full Platform Lead (role "platform"), not "setup" — match either, since this
+// helper's job is "how many sessions are bound to the operator agent", not "assert which role won".
 const setupRows = (db) => {
   const home = db.getReservedProjectByName(SETUP_PROJECT_NAME);
-  return home ? db.listSessions(db.listAgents(home.id)[0].id).filter((s) => s.role === "setup") : [];
+  return home ? db.listSessions(db.listAgents(home.id)[0].id).filter((s) => s.role === "setup" || s.role === "platform") : [];
 };
 
 try {
@@ -101,9 +114,10 @@ try {
   // ---- (1) FRESH/EMPTY → auto-launch ONCE, marker stamped ----
   const r1 = maybeAutoLaunchSetup(db, svc);
   check("(1) fresh install → launched", r1.launched === true && typeof r1.sessionId === "string");
-  check("(1) fresh install → exactly ONE 'setup' pty spawned, role 'setup', fresh (no resumeId)",
-    host.spawned.length === 1 && host.spawned.at(-1).role === "setup" && host.spawned.at(-1).resumeId === undefined);
-  check("(1) fresh install → exactly ONE setup session row, live", setupRows(db).length === 1 && db.getSession(r1.sessionId)?.processState === "live");
+  // f437d4e9 C5: a non-dev install's operator now seeds + spawns as the full Platform Lead directly.
+  check("(1) fresh install → exactly ONE pty spawned, role 'platform' (the Lead), fresh (no resumeId)",
+    host.spawned.length === 1 && host.spawned.at(-1).role === "platform" && host.spawned.at(-1).resumeId === undefined);
+  check("(1) fresh install → exactly ONE operator session row, live", setupRows(db).length === 1 && db.getSession(r1.sessionId)?.processState === "live");
   check("(1) fresh install → marker now stamped (at launch, not completion)", typeof db.getMeta(SETUP_FIRST_RUN_KEY) === "string");
 
   // ---- (2) RESTART (marker set) → no re-spawn ----
@@ -170,8 +184,8 @@ try {
   const auditorTwo = dbTwo.listAgents(homeTwo.id).find((a) => a.name === SETUP_AUDITOR_AGENT_NAME);
   check("(7) two agents present → first-run STILL launches the OPERATOR ('Platform'), not the auditor",
     r7.launched === true && launchedAgentId === operatorTwo.id && launchedAgentId !== auditorTwo.id);
-  check("(7) the auto-launched session is a 'setup' session (operator role, not the auditor)",
-    hostTwo.spawned.length === 1 && hostTwo.spawned.at(-1).role === "setup");
+  check("(7) the auto-launched session is role 'platform' (the Lead operator, not the auditor)",
+    hostTwo.spawned.length === 1 && hostTwo.spawned.at(-1).role === "platform");
   dbTwo.close();
 
   // ===== (8) LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — fresh/empty install, marker unset → the marker is STILL

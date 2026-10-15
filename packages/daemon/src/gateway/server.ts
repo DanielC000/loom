@@ -23,7 +23,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -5949,8 +5949,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } catch (e) {
       // Card 961da6c6: an honest 4xx (not a generic 500) so the UI's global mutation-error alert names the reason.
       if (e instanceof CodexForkUnsupportedError) return reply.code(409).send({ error: e.message });
-      // Card 15806f81: the same honest-4xx treatment for the two message-keyed refusals forkSession can throw.
-      if (e instanceof Error && (e.message === MANAGER_SESSION_BARRED_ERROR || e.message === SETUP_SESSION_FORK_BARRED_ERROR)) {
+      // Card 15806f81: the same honest-4xx treatment for the message-keyed refusals forkSession can throw.
+      // f437d4e9 Decision 6 added a third one (PLATFORM_SESSION_FORK_BARRED_ERROR, non-dev install).
+      if (e instanceof Error && (e.message === MANAGER_SESSION_BARRED_ERROR || e.message === SETUP_SESSION_FORK_BARRED_ERROR || e.message === PLATFORM_SESSION_FORK_BARRED_ERROR)) {
         return reply.code(409).send({ error: e.message });
       }
       throw e;

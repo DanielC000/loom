@@ -18,7 +18,7 @@ import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
 import { seedPlatformHome, migratePlatformPrompts, getPlatformHomePaths } from "./platform/seed.js";
-import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent } from "./setup/seed.js";
+import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath, shouldPrewarmCompanionVoice } from "./python/prewarm.js";
@@ -232,6 +232,17 @@ async function main(): Promise<void> {
   // or non-reserved agent. No-ops on fresh installs (the seed already created "Platform").
   const renamedSetupAgent = seedSetupAgentRename(db);
   if (renamedSetupAgent) console.log(`[boot] rebrand: renamed legacy setup agent → ${renamedSetupAgent}`);
+  // f437d4e9 C5: one-time upgrade of an EXISTING non-dev install's pristine home operator agent from
+  // Setup Assistant to the full Platform Lead (a fresh install already seeded the Lead shape directly,
+  // above). Marker-guarded one-shot; a dev install's Getting-Started agent is never touched (§1c).
+  // Best-effort: a throw here must never gate boot (the marker is stamped only at the end, on success).
+  try {
+    const leadUpgrade = migrateSetupHomeToLead(db);
+    if (leadUpgrade.migrated) console.log("[boot] upgraded the Platform home operator agent to a full Platform Lead");
+    else if (leadUpgrade.offered) console.log("[boot] filed the one-time Platform Lead upgrade-available card");
+  } catch (err) {
+    console.warn(`[boot] setup-home Lead upgrade migration failed (continuing boot): ${(err as Error).message}`);
+  }
   // End-User Platform tier B4: seed the bundled Workspace Auditor agent into the SAME reserved "Platform"
   // setup home as the operator (one home, two agents). A SEPARATE boot-time backfill — NOT folded into
   // seedSetupHome, which no-ops the whole seed once the home exists (gotcha #2) and so would never give an

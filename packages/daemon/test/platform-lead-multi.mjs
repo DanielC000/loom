@@ -40,6 +40,13 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// Card be9cb999 round 2, item 2: this file models the DEV Platform Lead specifically — decision
+// 8ddcf787's multi-Lead allowance (the owner's own "I want to spawn multiple Platform Lead sessions")
+// stays UNCHANGED only on a dev install; a non-dev install now restricts startPlatformLead to the one
+// sanctioned end-user Lead agent + a live singleton (f437d4e9 Decision 5/6), which this test is not
+// about. Pin LOOM_DEV=1 so the generic multi-Lead/create-only contract is exercised on the install type
+// it still applies to unconditionally.
+process.env.LOOM_DEV = "1";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { commitAll } from "./_git-commit.mjs";

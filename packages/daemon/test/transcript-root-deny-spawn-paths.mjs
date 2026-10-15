@@ -75,6 +75,11 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// Card be9cb999 round 2, item 2: this test calls startPlatformLead with an arbitrary agent id (no
+// sanctioned marker/profile) — it's about the transcript-root deny chokepoint, not f437d4e9 Decision
+// 5/6's end-user-Lead restriction, which applies only on a non-dev install. Pin LOOM_DEV=1 so the test
+// keeps exercising the generic deny-paths mechanics unaffected.
+process.env.LOOM_DEV = "1";
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, withTranscriptRootDenyForSpawn } = await import("../dist/pty/host.js");

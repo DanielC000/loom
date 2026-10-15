@@ -33,6 +33,11 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 process.env.LOOM_CODEX_BIN = path.join(tmpHome, "no-such-codex-binary");
+// Card be9cb999 round 2, item 2: this matrix calls startPlatformLead with an arbitrary agent id (no
+// sanctioned marker/profile) — it's about the codex-harness-force mechanics, not f437d4e9 Decision 5/6's
+// end-user-Lead restriction, which applies only on a non-dev install. Pin LOOM_DEV=1 so the matrix keeps
+// exercising the generic forced-claude behavior unaffected.
+process.env.LOOM_DEV = "1";
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");

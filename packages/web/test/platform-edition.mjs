@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   developerEdition, endUserEdition,
-  operatorSpawnDisabled, auditorSpawnDisabled,
+  operatorSpawnDisabled, auditorSpawnDisabled, resolveOperatorSpawnRole,
 } from "../src/pages/platformEdition.ts";
 
 let pass = 0;
@@ -64,10 +64,12 @@ check("auditor schedule is a LIST (dev) vs a SINGLE-FORM (enduser)", () => {
   assert.equal(endUserEdition.auditorScheduleVariant, "single-form");
 });
 
-check("the roles are forked — platform/auditor (dev) vs setup/workspace-auditor (enduser)", () => {
+// f437d4e9 C5: the end-user operator now runs as the full Platform Lead (role "platform"), matching the
+// daemon's seed/migration — the auditor fork (auditor vs workspace-auditor) is untouched by that card.
+check("the roles are forked — platform/auditor (dev) vs platform/workspace-auditor (enduser)", () => {
   assert.equal(developerEdition.operatorRole, "platform");
   assert.equal(developerEdition.auditorRole, "auditor");
-  assert.equal(endUserEdition.operatorRole, "setup");
+  assert.equal(endUserEdition.operatorRole, "platform");
   assert.equal(endUserEdition.auditorRole, "workspace-auditor");
 });
 
@@ -129,6 +131,62 @@ check("every <PlatformView> mount is KEYED by edition — a toggle REMOUNTS, not
   for (const mount of mounts) {
     assert.ok(/\bkey=\{[^}]*\.kind\}/.test(mount), `a <PlatformView> mount is missing a key={….kind}: ${mount}`);
   }
+});
+
+// f437d4e9 C5: on a DEV install, the underlying Getting-Started agent behind the "View as: End-user"
+// preview is never upgraded to the Lead (§1c), so that ONE mount must disable the spawn button
+// (previewOnly) rather than letting the static operatorRole:"platform" mint a stray session against it.
+// The shipping (!isDev) mount must NOT carry it — a real end-user install's Lead must stay spawnable.
+check("previewOnly is passed on the dev End-user PREVIEW mount only, never on the shipping mount", () => {
+  const mounts = [...platformSrc.matchAll(/<PlatformView\b[^>]*?>/g)].map((m) => m[0]);
+  const withPreview = mounts.filter((m) => /\bpreviewOnly\b/.test(m));
+  assert.equal(withPreview.length, 1, `expected exactly one previewOnly mount, found ${withPreview.length}`);
+  assert.ok(withPreview[0].includes("endUserEdition"), "the previewOnly mount must be the end-user edition");
+});
+
+check("PlatformView disables the operator spawn via previewDisabled, independent of the edition's own gate", () => {
+  assert.ok(shellSrc.includes("previewDisabled"), "PlatformView.tsx must thread a previewDisabled prop");
+  assert.ok(/spawnDisabled\s*=\s*!!previewDisabled\s*\|\|/.test(shellSrc), "spawnDisabled must OR in previewDisabled");
+});
+
+// ── 4. resolveOperatorSpawnRole (card be9cb999 round 3, M2/M4d) — the operator's DYNAMIC spawn role,
+// including the "profiles not loaded yet" state that must disable the spawn rather than guess. ────────
+
+check("platform-bound operator ⇒ role 'platform', spawn enabled", () => {
+  const r = resolveOperatorSpawnRole({ hasOperator: true, profilesLoaded: true, operatorProfileRole: "platform", fallbackRole: "platform" });
+  assert.equal(r.role, "platform");
+  assert.equal(r.spawnDisabled, false);
+});
+
+check("setup-bound operator ⇒ role 'setup', spawn enabled", () => {
+  const r = resolveOperatorSpawnRole({ hasOperator: true, profilesLoaded: true, operatorProfileRole: "setup", fallbackRole: "platform" });
+  assert.equal(r.role, "setup");
+  assert.equal(r.spawnDisabled, false);
+});
+
+check("no bound profile at all (profileId null) ⇒ role 'setup' (the same 'anything not platform' default), spawn enabled", () => {
+  const r = resolveOperatorSpawnRole({ hasOperator: true, profilesLoaded: true, operatorProfileRole: null, fallbackRole: "platform" });
+  assert.equal(r.role, "setup");
+  assert.equal(r.spawnDisabled, false);
+});
+
+check("profiles NOT yet loaded ⇒ spawn DISABLED, never a guessed 'setup' the caller could act on", () => {
+  const r = resolveOperatorSpawnRole({ hasOperator: true, profilesLoaded: false, operatorProfileRole: null, fallbackRole: "platform" });
+  assert.equal(r.spawnDisabled, true);
+});
+
+check("no operator agent resolved at all ⇒ spawn NOT disabled by this function (the 'missing agent' card handles it separately)", () => {
+  const r = resolveOperatorSpawnRole({ hasOperator: false, profilesLoaded: false, operatorProfileRole: null, fallbackRole: "platform" });
+  assert.equal(r.spawnDisabled, false);
+  assert.equal(r.role, "platform"); // the static fallback, for rendering only
+});
+
+check("PlatformView threads roleUnknown into the operator AgentControl mount and ORs it into spawnDisabled", () => {
+  assert.ok(/<AgentControl\b[^>]*\bagent=\{operator\}[^>]*\broleUnknown=\{operatorRoleUnknown\}/.test(shellSrc) ||
+    /<AgentControl\b[^>]*\broleUnknown=\{operatorRoleUnknown\}[^>]*\bagent=\{operator\}/.test(shellSrc),
+    "the operator AgentControl mount must pass roleUnknown={operatorRoleUnknown}");
+  assert.ok(/spawnDisabled\s*=\s*!!previewDisabled\s*\|\|\s*!!roleUnknown\s*\|\|/.test(shellSrc),
+    "spawnDisabled must ALSO OR in roleUnknown, alongside previewDisabled");
 });
 
 console.log(`\n${pass} passed`);

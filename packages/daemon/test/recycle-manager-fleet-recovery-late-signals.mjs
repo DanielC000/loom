@@ -59,6 +59,11 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
+// Card be9cb999 round 2, item 2: this test calls startPlatformLead/recyclePlatformLead with an
+// arbitrary agent id (no sanctioned marker/profile) — it's about generic fleet-recovery mechanics, not
+// f437d4e9 Decision 5/6's end-user-Lead restriction, which applies only on a non-dev install. Pin
+// LOOM_DEV=1 so the test keeps exercising the generic mechanics unaffected.
+process.env.LOOM_DEV = "1";
 
 // Env-shorten BEFORE importing dist/** (module-load-time reads). Deliberately: READY_FALLBACK_MS >
 // RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS, so the unresolved alert fires BEFORE the real fallback marks

@@ -1,6 +1,7 @@
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { resolveLiveSetupHome, SETUP_AGENT_NAME } from "./seed.js";
+import { resolveHomeLeadAgent } from "../projects/live-lead-home.js";
 import { isFirstRunLaunchSuppressed } from "../paths.js";
 
 /**
@@ -42,11 +43,19 @@ export function maybeAutoLaunchSetup(db: Db, sessions: SessionService): FirstRun
   if (db.getMeta(SETUP_FIRST_RUN_KEY)) return { launched: false, reason: "marker-set" };
   if (db.listProjects().length > 0) return { launched: false, reason: "has-projects" };
   const home = resolveLiveSetupHome(db);
-  const agent = home ? db.listAgents(home.id).find((a) => a.name === SETUP_AGENT_NAME) : undefined;
+  // Card be9cb999 round 2, item 5: resolve via the shared resolveHomeLeadAgent helper (marker-first,
+  // name-fallback, lockout-repair) rather than a bare name lookup, falling back to the name lookup only
+  // when it resolves nothing (e.g. a dev install, where resolveHomeLeadAgent is always undefined).
+  const agent = home ? (resolveHomeLeadAgent(db) ?? db.listAgents(home.id).find((a) => a.name === SETUP_AGENT_NAME)) : undefined;
   if (!agent) return { launched: false, reason: "agent-missing" };
   // Stamp FIRST — the exactly-once guarantee must hold even if the spawn below throws.
   db.setMeta(SETUP_FIRST_RUN_KEY, new Date().toISOString());
   if (isFirstRunLaunchSuppressed()) return { launched: false, reason: "suppressed" };
-  const session = sessions.startSetup(agent.id);
+  // f437d4e9 C5: the home operator agent may now be bound to the ungated "Platform-lead" profile
+  // (role "platform") instead of "Setup Assistant" (role "setup") — resolve which start path matches
+  // its ACTUAL current profile role rather than hardcoding startSetup. A dev install's Getting-Started
+  // agent stays role "setup" (never migrated, §1c), so this still picks startSetup there unchanged.
+  const profile = agent.profileId ? db.getProfile(agent.profileId) : undefined;
+  const session = profile?.role === "platform" ? sessions.startPlatformLead(agent.id) : sessions.startSetup(agent.id);
   return { launched: true, sessionId: session.id };
 }

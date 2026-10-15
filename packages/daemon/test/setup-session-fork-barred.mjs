@@ -1,9 +1,11 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 15806f81 — forkSession carries `role: src.role` through unchanged, so forking a "setup" source
 // used to mint a SECOND live row with that role, bypassing startSetup's own "never two LIVE setup
-// sessions" singleton (decision ad131671). "platform" is DELIBERATELY NOT subject to any such check —
-// decision 8ddcf787 removed startPlatformLead's old singleton guard; multiple concurrent Platform Leads
-// coexist by design, and that must stay true on the fork path too.
+// sessions" singleton (decision ad131671). "platform" originally carried no such check at all — decision
+// 8ddcf787 removed startPlatformLead's old singleton guard, and multiple concurrent Platform Leads coexist
+// by design on a DEV install. f437d4e9 Decision 6 adds a DIFFERENT, narrower check on top for a NON-DEV
+// install: forking a platform source is refused outright there, consistent with Decision 5's "exactly one
+// Lead" at the start path (a second Lead must not be mintable by forking the first).
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + SessionService driven against a FAKE
 // pty (createPty/stop seam, mirroring setup-singleton.mjs's own harness). A real temp git repo backs the
@@ -16,8 +18,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (B) fork an EXITED setup session while a DIFFERENT setup session (same agent) is live → refused.
 //   (C) fork an EXITED setup session when NO setup session is live for that agent → succeeds (control).
 //   (D) fork a manager source is UNAFFECTED by this check (role gate — control).
-//   (E) fork a platform source while ANOTHER platform session is live → SUCCEEDS (negative control
-//       proving no singleton check was added for "platform").
+//   (E) fork a platform source → REFUSED on a non-dev install (f437d4e9 Decision 6); SUCCEEDS on a DEV
+//       install even while another platform session is live (decision 8ddcf787's multi-Lead allowance,
+//       unaffected there) — this section toggles LOOM_DEV to prove both outcomes.
 //   (F) the REST /fork and /resume routes map MANAGER_SESSION_BARRED_ERROR / the new
 //       SETUP_SESSION_FORK_BARRED_ERROR to 409; an unrelated error is NOT remapped (control).
 //
@@ -39,6 +42,9 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// f437d4e9 Decision 6: section (E) below now depends on isLoomDev() — unset it explicitly rather than
+// relying on the ambient shell having none exported (an interactive dev shell commonly does).
+delete process.env.LOOM_DEV;
 
 const { requireHermeticEnv } = await import("./_guard.mjs");
 const { commitAll } = await import("./_git-commit.mjs");
@@ -47,7 +53,8 @@ requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this tes
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
-const { SessionService, SETUP_SESSION_FORK_BARRED_ERROR } = await import("../dist/sessions/service.js");
+const { SessionService, SETUP_SESSION_FORK_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR } = await import("../dist/sessions/service.js");
+const { isLoomDev } = await import("../dist/paths.js");
 const { MANAGER_SESSION_BARRED_ERROR } = await import("../dist/agents/clone-core.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
@@ -150,23 +157,41 @@ try {
   try { forkedD = svc.forkSession("liveD"); } catch (e) { errD = e; }
   check("(D) CONTROL: forking a manager source is not subject to this check at all", !errD && forkedD?.role === "manager");
 
-  // ========= (E) fork a platform source while ANOTHER platform session is live → SUCCEEDS =========
-  // Negative control proving no "platform" singleton was added — decision 8ddcf787 allows multiple
-  // concurrent Leads, and a fork of one must not be refused just because a sibling Lead is live.
+  // ========= (E) fork a platform source — decision 8ddcf787's multi-Lead allowance, but f437d4e9
+  // Decision 6 now REFUSES it on a NON-DEV install (consistent with Decision 5's "exactly one Lead" at
+  // the start path), succeeding only on a DEV install. This file runs with LOOM_DEV unset throughout up
+  // to here, so the FIRST attempt proves the non-dev refusal; toggling it then proves dev is unaffected.
+  check("(E, precondition) isLoomDev() is FALSE", isLoomDev() === false);
   seedSession("liveE1", "agentE", "platform", "live", "eng-liveE1");
   seedSession("exitedE2", "agentE", "platform", "exited", "eng-exitedE2");
   const beforeE = allRowCount();
   let forkedE, errE;
   try { forkedE = svc.forkSession("exitedE2"); } catch (e) { errE = e; }
-  check("(E) CONTROL: forking a platform source while a sibling platform session is live still succeeds", !errE && !!forkedE);
-  check("(E) a new live platform row was minted (now THREE platform rows total for this agent)",
-    allRowCount() === beforeE + 1 && forkedE?.role === "platform" && forkedE?.processState === "live"
-    && db.listSessions("agentE").filter((s) => s.role === "platform").length === 3);
-  // Forking the still-LIVE liveE1 itself must ALSO succeed (unlike setup's (A) above) — the sharpest proof
-  // that "platform" carries no singleton on this path at all.
+  check("(E, non-dev) forking an EXITED platform source is REFUSED", !forkedE && errE?.message === PLATFORM_SESSION_FORK_BARRED_ERROR);
+  check("(E, non-dev) no new row was minted", allRowCount() === beforeE);
   let forkedE2, errE2;
   try { forkedE2 = svc.forkSession("liveE1"); } catch (e) { errE2 = e; }
-  check("(E) CONTROL: forking the LIVE platform source itself also succeeds (no singleton, unlike setup's (A))", !errE2 && !!forkedE2 && forkedE2.role === "platform");
+  check("(E, non-dev) forking the LIVE platform source itself is ALSO refused", !forkedE2 && errE2?.message === PLATFORM_SESSION_FORK_BARRED_ERROR);
+  check("(E, non-dev) no new row was minted either", allRowCount() === beforeE);
+
+  process.env.LOOM_DEV = "1";
+  try {
+    check("(E, dev precondition) isLoomDev() now reads TRUE", isLoomDev() === true);
+    let forkedE3, errE3;
+    try { forkedE3 = svc.forkSession("exitedE2"); } catch (e) { errE3 = e; }
+    check("(E, dev) CONTROL: forking the SAME exited platform source now SUCCEEDS on a DEV install", !errE3 && !!forkedE3);
+    check("(E, dev) a new live platform row was minted (now THREE platform rows total for this agent)",
+      allRowCount() === beforeE + 1 && forkedE3?.role === "platform" && forkedE3?.processState === "live"
+      && db.listSessions("agentE").filter((s) => s.role === "platform").length === 3);
+    // Forking the still-LIVE liveE1 itself must ALSO succeed on dev (unlike setup's (A) above) — the
+    // sharpest proof that "platform" carries no singleton there at all.
+    let forkedE4, errE4;
+    try { forkedE4 = svc.forkSession("liveE1"); } catch (e) { errE4 = e; }
+    check("(E, dev) CONTROL: forking the LIVE platform source itself also succeeds (no singleton, unlike setup's (A))", !errE4 && !!forkedE4 && forkedE4.role === "platform");
+  } finally {
+    delete process.env.LOOM_DEV; // restore the non-dev shape the rest of this file (section F) runs under
+  }
+  check("(E, postcondition) isLoomDev() reads FALSE again after restoring", isLoomDev() === false);
 
   // ==================== (F) REST route error-mapping ====================
   const stub = {};
@@ -174,6 +199,7 @@ try {
     forkSession: (id) => {
       if (id === "setupBarred") throw new Error(SETUP_SESSION_FORK_BARRED_ERROR);
       if (id === "mgrBarred") throw new Error(MANAGER_SESSION_BARRED_ERROR);
+      if (id === "platformBarred") throw new Error(PLATFORM_SESSION_FORK_BARRED_ERROR);
       if (id === "boom") throw new Error("plain failure");
       return { id, role: "setup" };
     },
@@ -192,6 +218,10 @@ try {
   const rMgrFork409 = await app.inject({ method: "POST", url: "/api/sessions/mgrBarred/fork" });
   check("(F) POST /fork on MANAGER_SESSION_BARRED_ERROR ⇒ 409 (was falling through to 500)", rMgrFork409.statusCode === 409);
   check("(F) its body carries the MANAGER_SESSION_BARRED_ERROR text", JSON.parse(rMgrFork409.body).error === MANAGER_SESSION_BARRED_ERROR);
+
+  const rPlatformFork409 = await app.inject({ method: "POST", url: "/api/sessions/platformBarred/fork" });
+  check("(F) POST /fork on the new PLATFORM_SESSION_FORK_BARRED_ERROR (f437d4e9 Decision 6) ⇒ 409", rPlatformFork409.statusCode === 409);
+  check("(F) its body carries the PLATFORM_SESSION_FORK_BARRED_ERROR text", JSON.parse(rPlatformFork409.body).error === PLATFORM_SESSION_FORK_BARRED_ERROR);
 
   const rForkPlain = await app.inject({ method: "POST", url: "/api/sessions/boom/fork" });
   check("(F) CONTROL: an unrelated /fork error is NOT remapped to 409", rForkPlain.statusCode !== 409);
@@ -214,6 +244,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — forkSession refuses when a role-\"setup\" source would mint a 2nd live setup session (own-live or a live sibling), succeeds once none is live (control), never touches manager/platform forks (platform explicitly stays multi-Lead per decision 8ddcf787), and the REST /fork + /resume routes now map MANAGER_SESSION_BARRED_ERROR and SETUP_SESSION_FORK_BARRED_ERROR to an honest 409 instead of falling through to 500."
+  ? "\n✅ ALL PASS — forkSession refuses when a role-\"setup\" source would mint a 2nd live setup session (own-live or a live sibling), succeeds once none is live (control), never touches manager forks, refuses carrying role:\"platform\" forward on a non-dev install (f437d4e9 Decision 6) while leaving decision 8ddcf787's multi-Lead allowance fully intact on a DEV install, and the REST /fork + /resume routes now map MANAGER_SESSION_BARRED_ERROR and SETUP_SESSION_FORK_BARRED_ERROR to an honest 409 instead of falling through to 500."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

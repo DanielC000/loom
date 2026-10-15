@@ -113,6 +113,11 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// Card be9cb999 round 2, item 2: this test calls startPlatformLead/recyclePlatformLead with an
+// arbitrary agent id (no sanctioned marker/profile) — it's about generic settle/restart mechanics, not
+// f437d4e9 Decision 5/6's end-user-Lead restriction, which applies only on a non-dev install. Pin
+// LOOM_DEV=1 so the test keeps exercising the generic mechanics unaffected.
+process.env.LOOM_DEV = "1";
 
 // Env-shorten every settle bound BEFORE importing dist/** — only scenario (G) actually needs the real
 // in-process loop to resolve quickly. SETTLE_TIMEOUT_MS is deliberately an HOUR (see the file header's

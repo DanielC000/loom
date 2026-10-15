@@ -16,7 +16,7 @@ import { errorText } from "../lib/loopbackCredential";
 import { roleDisplay } from "../lib/roleDisplay";
 import {
   type PlatformEdition, type PlatformSpawnRole, type AgentCardCopy, type HistoryCopy,
-  operatorSpawnDisabled, auditorSpawnDisabled,
+  operatorSpawnDisabled, auditorSpawnDisabled, resolveOperatorSpawnRole,
 } from "./platformEdition";
 
 // The UNIFIED Platform surface — ONE shell driven by an `edition` config (platformEdition.ts). The DEV
@@ -40,12 +40,16 @@ import {
 // Everything reuses EXISTING REST: discovery is read-only (api.platformHome / api.setupHome); spawn =
 // startSession(edition role), stop = stopSession, cadence = createSchedule. No new write/elevated surface.
 //
-// HARD INVARIANT: the spawn role comes from the STATIC `edition` prop, never from the edition-preview
-// toggle in Platform.tsx — so that toggle stays a PURE CLIENT-SIDE VIEW SWITCH. This shell receives only
-// the edition config; it never reads the toggle's persisted key or browser storage. So a dev previewing
-// the End-user surface mounts the endUserEdition config + its setup-scoped calls and can never drive a
-// platform spawn through the wrong endpoint (asserted by test/platform-edition.mjs).
-export function PlatformView({ edition }: { edition: PlatformEdition }) {
+// HARD INVARIANT: the spawn role never comes from the edition-preview toggle in Platform.tsx — so that
+// toggle stays a PURE CLIENT-SIDE VIEW SWITCH. This shell receives only the edition config; it never
+// reads the toggle's persisted key or browser storage. So a dev previewing the End-user surface mounts
+// the endUserEdition config + its setup-scoped calls and can never drive a platform spawn through the
+// wrong endpoint (asserted by test/platform-edition.mjs). The OPERATOR's spawn role is a separate,
+// legitimate exception to "static edition role" (f437d4e9 C5 round 2, item 1b): it tracks the operator
+// agent's CURRENT bound profile (`operatorSpawnRole` below), since the end-user operator's real role can
+// differ from the edition's default (a customized, not-yet-upgraded agent is still "setup"). That
+// resolution reads profile data, never the toggle — the invariant above is untouched.
+export function PlatformView({ edition, previewOnly = false }: { edition: PlatformEdition; previewOnly?: boolean }) {
   // Map the edition's home key → the real (api-free config stays clean) read-only discovery fn. Same query
   // key as useVisibleNavPages / Platform.tsx → one shared, cached fetch.
   const load = edition.homeQueryKey === "platformHome" ? api.platformHome : api.setupHome;
@@ -69,6 +73,20 @@ export function PlatformView({ edition }: { edition: PlatformEdition }) {
   // may be the auditor), leaving the record undefined rather than mis-picking the other agent.
   const operator = agents.find((a) => roleOf(a) === edition.operatorRole) ?? agents.find((a) => a.name === edition.operatorName);
   const auditor = agents.find((a) => roleOf(a) === edition.auditorRole) ?? agents.find((a) => a.name === edition.auditorName);
+  // f437d4e9 C5 round 2, item 1(b) / round 3 M2+M4(d): the operator's SPAWN role tracks its CURRENT
+  // bound profile role, never the edition's static default — mirrors first-run.ts's own resolution
+  // (profile role "platform" ⇒ "platform", else "setup"). A customized, not-yet-upgraded end-user agent
+  // is still role "setup" even though endUserEdition.operatorRole says "platform"; spawning it as
+  // "platform" would be refused server-side (it isn't the sanctioned Lead) and should never have been
+  // attempted in the first place. While `profiles` is still loading, the real role is UNKNOWN — never
+  // guess "setup" (that would wrongly mint a setup session on what's likely the real platform Lead);
+  // `operatorRoleUnknown` disables the spawn button for that window instead (see AgentControl below).
+  const { role: operatorSpawnRole, spawnDisabled: operatorRoleUnknown } = resolveOperatorSpawnRole({
+    hasOperator: !!operator,
+    profilesLoaded: profiles.data !== undefined,
+    operatorProfileRole: operator ? roleOf(operator) : null,
+    fallbackRole: edition.operatorRole,
+  });
 
   // Sessions belonging to the reserved home, newest first.
   const homeSessions = (sessions.data ?? [])
@@ -120,9 +138,9 @@ export function PlatformView({ edition }: { edition: PlatformEdition }) {
       <section>
         <SectionLabel>{edition.copy.agentsLabel}</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
-          <AgentControl edition={edition} agent={operator} role={edition.operatorRole} card={edition.copy.operatorCard}
+          <AgentControl edition={edition} agent={operator} role={operatorSpawnRole} card={edition.copy.operatorCard}
             session={operatorLive} liveCount={liveCountFor(operator?.id)} showLiveCount={!edition.operatorSingleton}
-            gate={operatorSpawnDisabled} />
+            gate={operatorSpawnDisabled} previewDisabled={previewOnly} roleUnknown={operatorRoleUnknown} />
           <AgentControl edition={edition} agent={auditor} role={edition.auditorRole} card={edition.copy.auditorCard}
             session={auditorLive} liveCount={liveCountFor(auditor?.id)} showLiveCount={false}
             gate={auditorSpawnDisabled}
@@ -199,11 +217,19 @@ export function PlatformView({ edition }: { edition: PlatformEdition }) {
 // so it agrees with the picker + every badge; the badge LABEL + button copy come from the edition's copy
 // pack. `footer` carries the end-user auditor's inline schedule form (dev has none — it uses the list
 // section). Spawn/stop are HUMAN-only REST (startSession / stopSession) — no agent MCP path mints these.
-function AgentControl({ edition, agent, role, card, session, liveCount, showLiveCount, gate, footer }: {
+function AgentControl({ edition, agent, role, card, session, liveCount, showLiveCount, gate, footer, previewDisabled, roleUnknown }: {
   edition: PlatformEdition; agent?: Agent; role: PlatformSpawnRole; card: AgentCardCopy;
   session?: SessionListItem; liveCount: number; showLiveCount: boolean;
   gate: (edition: PlatformEdition, s: { live: boolean; pending: boolean }) => boolean;
   footer?: ReactNode;
+  // f437d4e9 C5: true only for a DEV install's "View as: End-user" preview (Platform.tsx) — the
+  // underlying agent there is never upgraded to the Lead (§1c), so the spawn button is disabled rather
+  // than minting a stray role:"platform" session against it.
+  previewDisabled?: boolean;
+  // f437d4e9 C5 round 3 (M2): true only for the OPERATOR card, while `role` is still a genuinely
+  // unresolved guess (profiles not loaded yet) — resolveOperatorSpawnRole's own `spawnDisabled`. Holds
+  // the spawn button so a click can never mint the wrong role on the real Lead agent.
+  roleUnknown?: boolean;
 }) {
   const qc = useQueryClient();
   const spawn = useMutation({
@@ -223,9 +249,11 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
     return <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>{card.missingLabel}</span></Panel>;
   }
   const live = session?.processState === "live";
-  const spawnDisabled = gate(edition, { live, pending: spawn.isPending });
+  const spawnDisabled = !!previewDisabled || !!roleUnknown || gate(edition, { live, pending: spawn.isPending });
   const spawnLabel = spawn.isPending ? card.spawn.pending : live ? card.spawn.live : card.spawn.idle;
-  const spawnTitle = live ? card.title.live : card.title.idle;
+  const spawnTitle = previewDisabled ? "Preview only on a dev install — spawning here is disabled"
+    : roleUnknown ? "Loading agent profile — please wait"
+    : live ? card.title.live : card.title.idle;
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -248,6 +276,7 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
+      {previewDisabled && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>Preview only on a dev install — spawning here is disabled.</span>}
       {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
       {/* View / edit this reserved-home agent's startup prompt (the spawn kickoff). */}
       <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={[edition.homeQueryKey]} />
