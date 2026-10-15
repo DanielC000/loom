@@ -61,6 +61,12 @@ db.insertSession({
 const host = new SeamHost(events);
 const svc = new SessionService(db, host, new OrchestrationControl());
 
+// pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves it
+// ONLY when isLoomDev()). This whole file models a dev install; pin LOOM_DEV=1 for the duration (save/
+// restore in the existing finally) so it passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's
+// Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+const savedLoomDev = process.env.LOOM_DEV;
+process.env.LOOM_DEV = "1";
 try {
   const escA = svc.platformEscalate("MGR", { title: "original finding", detail: "A: first sighting.", severity: "medium" });
   check("(setup) 1st escalation files a fresh task", !!escA.taskId && escA.created === true && escA.outcome === "created");
@@ -98,6 +104,7 @@ try {
   const escFollowup = svc.platformEscalate("MGR", { title: "irrelevant title", detail: "a normal follow-up", followUpOn: targetId });
   check("(control) the identical followUpOn call succeeds once db.getTask is no longer forced to lie", escFollowup.outcome === "appended" && escFollowup.appended === true);
 } finally {
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }

@@ -159,6 +159,12 @@ function cleanup(e) {
 
 // ============================ (F)/(G) platform_escalate enum ============================
 {
+  // pHome below is named PLATFORM_PROJECT_NAME ("Loom Platform") — the DEV home shape (card 1731ab5b's
+  // `resolveLiveLeadHome` resolves it ONLY when isLoomDev()). Pin LOOM_DEV=1 for this section (save/
+  // restore before cleanup) so this passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's
+  // Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+  const savedLoomDev = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   const e = makeEnv();
   // The reserved Platform home (the escalation target, resolved by name server-side).
   e.db.insertProject({ id: "pHome", name: PLATFORM_PROJECT_NAME, repoPath: e.projId, vaultPath: e.projId, config: {}, createdAt: NOW.toISOString(), archivedAt: null, reserved: true });
@@ -175,6 +181,7 @@ function cleanup(e) {
   const escLead = e.sessions.platformEscalate("MGR-F", { title: "issue-2", detail: "evidence", severity: "high" });
   check("(F) live Lead → 'delivered-live'", escLead.deliveryStatus === "delivered-live");
   check("(F) the Lead got a [loom:escalation] heads-up", e.enqueued.some((x) => x.id === "PL" && /\[loom:escalation\]/.test(x.text)));
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   cleanup(e);
 }
 

@@ -191,6 +191,12 @@ try {
   await platformClient.close();
 
   // ===================== (b) platform_escalate — MANAGER-gated; durable to the RESERVED board =============
+  // pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves
+  // it ONLY when isLoomDev()). Pin LOOM_DEV=1 for (b) + (b2) below (save/restore in a finally) so this
+  // passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's Windows gate (LOOM_DEV=1 inherited
+  // from daemon:stable) — card 27e38729. Restored before (c), which doesn't depend on install type.
+  const savedLoomDevB = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   const mgrClient = await connect(orch.buildServer("MGR", "manager"));
   const mCall = async (name, args) => parse(await mgrClient.callTool({ name, arguments: args }));
   const mgrTools = (await mgrClient.listTools()).tools.map((t) => t.name);
@@ -246,6 +252,7 @@ try {
     db.getTask(esc2.taskId)?.projectId === "pHome" && db.listTasks("pSetup").length === setupTasksBefore);
   // Drop the setup home again so the later "no reserved project" refusal test (archive pHome) still holds.
   db.archiveProject("pSetup");
+  if (savedLoomDevB === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDevB;
 
   // ===================== (c) a non-manager (worker) cannot call platform_escalate =====================
   const wkrClient = await connect(orch.buildServer("W", "worker"));

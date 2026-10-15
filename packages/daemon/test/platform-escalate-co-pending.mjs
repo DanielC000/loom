@@ -107,6 +107,12 @@ db.insertSession({
 const host = new SeamHost(events);
 const svc = new SessionService(db, host, new OrchestrationControl());
 
+// pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves it
+// ONLY when isLoomDev()). This whole file models a dev install; pin LOOM_DEV=1 for the duration (save/
+// restore in the existing finally) so it passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's
+// Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+const savedLoomDev = process.env.LOOM_DEV;
+process.env.LOOM_DEV = "1";
 try {
   // ===================== (e) a solo escalation gets NO suffix at all =====================
   const esc1 = svc.platformEscalate("MGR_A", { title: "104006eb-style: worker_merge gate hangs", detail: "first report", severity: "medium" });
@@ -162,6 +168,7 @@ try {
   check("(d) once EVERYTHING else is resolved, the suffix disappears entirely again",
     !notes[notes.length - 1].includes("other escalation"));
 } finally {
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }

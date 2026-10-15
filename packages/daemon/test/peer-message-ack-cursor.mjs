@@ -116,10 +116,17 @@ try {
     raceSend.targetSessionId === "MGR_B_NEW");
 
   // Same defect, same fix, applied to the OTHER named channel — platform_escalate's live-Lead nudge.
+  // pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves
+  // it ONLY when isLoomDev()). Pin LOOM_DEV=1 for this call (save/restore right after) so this passes on
+  // ubuntu CI (LOOM_DEV unset) the same as on the owner's Windows gate (LOOM_DEV=1 inherited from
+  // daemon:stable) — card 27e38729.
   check("(setup) hasSuccessor(LEAD_OLD) is true", db.hasSuccessor("LEAD_OLD") === true);
   check("(setup) LEAD_OLD is STILL processState:live", db.getSession("LEAD_OLD").processState === "live");
   host.enqueued.length = 0;
+  const savedLoomDevB2 = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   const esc = await mCall("platform_escalate", { title: "race test", detail: "does this reach the successor?" });
+  if (savedLoomDevB2 === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDevB2;
   check("(B2) platform_escalate's live nudge reaches the SUCCESSOR Lead, never the superseded predecessor",
     !esc.error && host.enqueued.length === 1 && host.enqueued[0].id === "LEAD_NEW");
 

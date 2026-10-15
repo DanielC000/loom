@@ -61,6 +61,13 @@ const now = new Date().toISOString();
   const host = new SeamHost(events);
   const svc = new SessionService(db, host, new OrchestrationControl());
 
+  // pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves
+  // it ONLY when isLoomDev()). Pin LOOM_DEV=1 for this section's platformEscalate calls (save/restore
+  // below, before db.close()) so this passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's
+  // Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+  const savedLoomDev = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
+
   // A pre-rename call mirrors what seedPlatformHome's own resolvePlatformHome call already does at boot —
   // it resolves by name (no marker yet) and backfills the stable marker.
   const first = svc.platformEscalate("MGR", { title: "First escalation", detail: "before rename" });
@@ -78,6 +85,7 @@ const now = new Date().toISOString();
   const second = svc.platformEscalate("MGR", { title: "Second, distinct escalation", detail: "after rename" });
   check("(1) POST-rename escalation STILL resolves the SAME reserved home (not a thrown error)", second.projectId === "pHome");
   check("(1) both escalations landed as separate tasks on the same board", first.taskId !== second.taskId);
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
 }
 

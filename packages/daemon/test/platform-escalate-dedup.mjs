@@ -77,6 +77,12 @@ const host = new SeamHost(events);
 const svc = new SessionService(db, host, new OrchestrationControl());
 const platformEscalateEvents = () => db.listEscalationsForProject("pOrd");
 
+// pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves it
+// ONLY when isLoomDev()). This whole file models a dev install; pin LOOM_DEV=1 for the duration (save/
+// restore in the existing finally) so it passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's
+// Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+const savedLoomDev = process.env.LOOM_DEV;
+process.env.LOOM_DEV = "1";
 try {
   const TITLE = "worker_merge gate hangs on a slow build";
 
@@ -159,6 +165,7 @@ try {
   check("(e) no new task/event for the repeat-at-new-severity",
     db.listTasks("pHome").length === tasksAfter7 && platformEscalateEvents().length === eventsAfterEscalation);
 } finally {
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }

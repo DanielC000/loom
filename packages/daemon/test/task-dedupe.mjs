@@ -461,6 +461,12 @@ try {
   check("(boarding) the duplicate peer_message card actually landed", db.listTasks("pTargetPeer").length === tasksBeforePeer + 1);
 
   // --- (c) platform-escalation landing still lands a duplicate card (distinct title, duplicate body content) ---
+  // pHomeEsc is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves
+  // it ONLY when isLoomDev()). Pin LOOM_DEV=1 for this section's platformEscalate call (save/restore below,
+  // before db.close()) so this passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's Windows gate
+  // (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+  const savedLoomDevEsc = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   db.insertProject({ id: "pHomeEsc", name: "Loom Platform", repoPath: tmpHome2, vaultPath: tmpHome2, config: {}, createdAt: now, archivedAt: null, reserved: true });
   db.insertProject({ id: "pOriginEsc", name: "Origin Esc", repoPath: tmpHome2, vaultPath: tmpHome2, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: "agentEsc", projectId: "pOriginEsc", name: "Mgr", startupPrompt: "", position: 0 });
@@ -477,6 +483,7 @@ try {
   check("(boarding) platform_escalate lands a fresh card even though its detail duplicates an existing Platform card (distinct title)",
     !!escResult.taskId && !escResult.deduped);
   check("(boarding) the duplicate escalation card actually landed", db.listTasks("pHomeEsc").length === tasksBeforeEsc + 1);
+  if (savedLoomDevEsc === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDevEsc;
 
   db.close();
   cleanupPathSync(tmpHome2);

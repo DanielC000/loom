@@ -132,6 +132,12 @@ async function callAs(sessionId, role, name, args) {
   return res;
 }
 
+// pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves it
+// ONLY when isLoomDev()). This whole file models a dev install; pin LOOM_DEV=1 for the duration (save/
+// restore in the existing finally) so it passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's
+// Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+const savedLoomDev = process.env.LOOM_DEV;
+process.env.LOOM_DEV = "1";
 try {
   // ===================== (d) surface presence =====================
   const mgrClient = await connect(orch.buildServer("MGR_A", "manager"));
@@ -337,6 +343,7 @@ try {
   try { await svc.escalationStatus("W_A", {}); } catch (e) { svcRejected = /manager-only/.test(e.message); }
   check("(d) svc.escalationStatus rejects a non-manager caller (manager-only guard)", svcRejected);
 } finally {
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }

@@ -493,6 +493,13 @@ try {
   // project_task_create card to it via resolvesEscalation — the SAME param the Platform Lead uses when
   // filing an escalation's actual fix. This is the WRITE side of card ba04d607; escalation-status.mjs
   // proves the READ side (status deriving resolved/triaged off this link).
+  // pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves
+  // it ONLY when isLoomDev()). Pin LOOM_DEV=1 for (8)/(8b)/(8c) below, which all call svc.platformEscalate
+  // directly (bypassing the tool-surface gate the project_task_create/_update calls in this same block go
+  // through unaffected) — save/restore in a finally so this passes on ubuntu CI (LOOM_DEV unset) the same
+  // as on the owner's Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+  const savedLoomDev8 = process.env.LOOM_DEV;
+  process.env.LOOM_DEV = "1";
   const esc = svc.platformEscalate("M", { title: "resolvesEscalation test escalation", detail: "evidence", severity: "medium" });
   check("(8) setup: a real escalation was filed on the Platform board", !!esc.taskId && !esc.error);
 
@@ -585,6 +592,7 @@ try {
   check("(8c) resolvesEscalation STILL resolves against the renamed Platform home (create succeeds)", !!fixCard3.id && !fixCard3.error);
   check("(8c) db.findEscalationTriage resolves to the new destination card after the rename",
     db.findEscalationTriage(esc3.taskId)?.destinationTaskId === fixCard3.id);
+  if (savedLoomDev8 === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev8;
 
   await client.close();
 

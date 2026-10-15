@@ -91,6 +91,13 @@ const db = new Db();
 const pty = new PtyStub();
 const sessions = new SessionService(db, pty, new OrchestrationControl());
 
+// `home` below is seeded as PLATFORM_PROJECT_NAME ("Loom Platform") reserved:true — the DEV home shape
+// (card 1731ab5b's `resolveLiveLeadHome` resolves it ONLY when isLoomDev()), used throughout this file's
+// platformEscalate calls. Pin LOOM_DEV=1 for the duration (save/restore in the existing finally) so this
+// passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's Windows gate (LOOM_DEV=1 inherited from
+// daemon:stable) — card 27e38729.
+const savedLoomDev = process.env.LOOM_DEV;
+process.env.LOOM_DEV = "1";
 try {
   // ============================ (0) PURE HELPERS ============================
   const base = { causal: false, liveWorkersResumed: 0, queuedIoReplayed: 0, hasUnconsumedAnswer: false, strandedBoardWork: false };
@@ -426,6 +433,7 @@ try {
   check("(4) DoD-4 control: an escalation citing the REAL structurally-captured deploy sha IS still suppressed",
     q(affLead3).length === sha2TurnsBefore && sha2Dup.deliveryStatus === "suppressed-duplicate");
 } finally {
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }

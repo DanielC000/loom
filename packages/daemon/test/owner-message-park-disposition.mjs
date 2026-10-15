@@ -277,14 +277,49 @@ try {
     }
 
     // --- (M2) platform_escalate (mcp/orchestration.ts, manager surface) ---
+    // pHomeM above is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome`
+    // resolves it ONLY when isLoomDev()). Pin LOOM_DEV=1 for the duration of this scenario (save/restore
+    // in a finally) so it passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's Windows gate
+    // (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
     {
       const sid = "mM-escalate";
       freshSession(sid, "pM", "aM", "manager");
       db.recordPendingOwnerMessage(sid, "please escalate this", new Date().toISOString());
       const server = new OrchestrationMcpRouter(db, svc, {}, ptyStub).buildServer(sid, "manager");
-      const res = JSON.parse((await server._registeredTools["platform_escalate"].handler({ title: "A Loom bug found by " + sid, detail: "repro steps" })).content[0].text);
+      const prevLoomDev = process.env.LOOM_DEV;
+      process.env.LOOM_DEV = "1";
+      let res;
+      try {
+        res = JSON.parse((await server._registeredTools["platform_escalate"].handler({ title: "A Loom bug found by " + sid, detail: "repro steps" })).content[0].text);
+      } finally {
+        if (prevLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = prevLoomDev;
+      }
       check("(M2) platform_escalate succeeds", !res.error);
       check("(M2) platform_escalate clears the open episode", db.getPendingOwnerMessage(sid) === null);
+    }
+
+    // --- (M2b) platform_escalate's NON-DEV counterpart: the end-user "Platform" home, LOOM_DEV unset ---
+    // The home-RESOLUTION mechanism itself is already covered exhaustively by
+    // test/platform-escalate-end-user-lead-home.mjs; this block only proves the episode-clearing side
+    // effect (M2's own point) holds on a non-dev install too, not just the dev one above.
+    {
+      const sid = "mM-escalate-nondev";
+      const setupHomeId = "pHomeM2";
+      db.insertProject({ id: setupHomeId, name: "Platform", repoPath: setupHomeId, vaultPath: setupHomeId, config: {}, createdAt: now, archivedAt: null, reserved: true });
+      db.insertAgent({ id: "aLeadM2", projectId: setupHomeId, name: "lead", startupPrompt: "x", position: 0 });
+      freshSession(sid, "pM", "aM", "manager");
+      db.recordPendingOwnerMessage(sid, "please escalate this (non-dev)", new Date().toISOString());
+      const server = new OrchestrationMcpRouter(db, svc, {}, ptyStub).buildServer(sid, "manager");
+      const prevLoomDev = process.env.LOOM_DEV;
+      delete process.env.LOOM_DEV;
+      let res;
+      try {
+        res = JSON.parse((await server._registeredTools["platform_escalate"].handler({ title: "A Loom bug found by " + sid, detail: "repro steps" })).content[0].text);
+      } finally {
+        if (prevLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = prevLoomDev;
+      }
+      check("(M2b) platform_escalate succeeds on a non-dev install (end-user Platform home)", !res.error);
+      check("(M2b) platform_escalate clears the open episode on a non-dev install", db.getPendingOwnerMessage(sid) === null);
     }
 
     // --- (M3) question_ask (mcp/orchestration.ts, manager surface) ---

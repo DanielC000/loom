@@ -73,6 +73,12 @@ db.insertSession({
 const host = new SeamHost(events);
 const svc = new SessionService(db, host, new OrchestrationControl());
 
+// pHome is named "Loom Platform" — the DEV home shape (card 1731ab5b's `resolveLiveLeadHome` resolves it
+// ONLY when isLoomDev()). This whole file models a dev install; pin LOOM_DEV=1 for the duration (save/
+// restore in the existing finally) so it passes on ubuntu CI (LOOM_DEV unset) the same as on the owner's
+// Windows gate (LOOM_DEV=1 inherited from daemon:stable) — card 27e38729.
+const savedLoomDev = process.env.LOOM_DEV;
+process.env.LOOM_DEV = "1";
 try {
   // ===== (1) THE REPORTED BUG: a thread with 3 escalation rows on ONE task, resolved by its own prefix =====
   const escA = svc.platformEscalate("MGR", { title: "gate lane starves under a slow build", detail: "first sighting", severity: "low" });
@@ -137,6 +143,7 @@ try {
   check("(3) …and the error names BOTH real, distinct ids (not the same id twice)",
     crossTaskMessage.includes(idX) && crossTaskMessage.includes(idY));
 } finally {
+  if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
