@@ -38,6 +38,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       human-REST session-start route) — confirmed by a structural source scan — and calling it
 //       directly DOES mint role:"platform" (the one true positive; the boundary is "nothing agent-facing
 //       calls this", never an internal runtime flag).
+//   (8) forkSession carries `role: src.role ?? undefined` straight from the SOURCE ROW — it never reads
+//       the agent's profile at all. So (a) forking a non-platform session whose agent's profile has
+//       since been rebound to role:"platform" still resolves to the source row's OWN role, never
+//       "platform"; and (b) forking an EXISTING role:"platform" session is the one sanctioned
+//       carry-forward (decision 8ddcf787: multiple concurrent Leads are allowed) and DOES succeed,
+//       producing another role:"platform" row — reachable ONLY from an already-role:"platform" source.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-ungated-minting.mjs
 import fs from "node:fs";
@@ -84,6 +90,7 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const { validateProfile } = await import("../dist/profiles/validate.js");
 const { templateAssignableProfileError, applyWorkflowTemplate } = await import("../dist/setup/templates.js");
 const { isLoomDev } = await import("../dist/paths.js");
+const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 check("(precondition) isLoomDev() is FALSE (LOOM_DEV unset)", isLoomDev() === false);
 
@@ -123,6 +130,21 @@ const events = {
 };
 const host = new SeamHost(events);
 const svc = new SessionService(db, host, new OrchestrationControl());
+
+/** Seed a forkable (idle, exited, real-on-disk-transcript) session row directly, for group (8)'s
+ *  forkSession cases — mirrors resume-fork-plain-role-not-widened.mjs's own seedSource helper. */
+function seedForkableSession(id, role, agentId) {
+  const engId = `${id}-eng-0000-0000-000000000000`;
+  db.insertSession({
+    id, projectId: "pP", agentId, engineSessionId: engId, title: null, cwd: repo,
+    processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+    role,
+  });
+  const tpath = engineTranscriptPath(repo, engId);
+  fs.mkdirSync(path.dirname(tpath), { recursive: true });
+  fs.writeFileSync(tpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+  return engId;
+}
 
 const worktrees = [];
 try {
@@ -270,6 +292,31 @@ try {
   // one true positive this whole enumeration is built around.
   const freshLead = svc.startPlatformLead("agentLead", { spawnHumanAuthorized: true });
   check("(7) startPlatformLead itself DOES mint role:'platform' (the one sanctioned mint path)", freshLead.role === "platform");
+
+  // ===================== (8) forkSession — role is CARRIED from the source row, never re-derived from a profile =====================
+  // (8a) agentCoord's profile was rebound to profPlatform (role:"platform") back in group (1) above, and
+  // is STILL bound to it here. Fork a non-platform (role:null) session on that SAME agent — forkSession
+  // must resolve the fork's role from the SOURCE ROW, never from the agent's (now platform-role) profile.
+  check("(8a, precondition) agentCoord is still bound to the role:'platform' profile", db.getAgent("agentCoord").profileId === "profPlatform");
+  seedForkableSession("srcPlainOnPlatformBoundAgent", null, "agentCoord");
+  const forkedFromNonPlatform = svc.forkSession("srcPlainOnPlatformBoundAgent");
+  check("(8a) forking a non-platform (role:null) session whose agent is bound to a role:'platform' profile resolves the fork's role to null, NOT 'platform'", forkedFromNonPlatform.role == null);
+  check("(8a) the DB row persists role=null too (not merely the in-memory return value)", db.getSession(forkedFromNonPlatform.id).role == null);
+
+  // (8a, second case) same proof against a WORKER-role source, so the enumeration covers a non-null role
+  // too, not just the role:null case above.
+  seedForkableSession("srcWorkerOnPlatformBoundAgent", "worker", "agentCoord");
+  const forkedWorkerFromNonPlatform = svc.forkSession("srcWorkerOnPlatformBoundAgent");
+  check("(8a) forking a role:'worker' session whose agent is bound to a role:'platform' profile resolves the fork's role to 'worker' (the SOURCE's own role), NOT 'platform'", forkedWorkerFromNonPlatform.role === "worker");
+
+  // (8b) Fork an EXISTING role:"platform" session — the one sanctioned carry-forward (decision 8ddcf787:
+  // multiple concurrent Leads are allowed; forkSession deliberately has no role==="platform" refusal,
+  // unlike its role==="setup"/role==="manager" guards above) — succeeds, producing another role:"platform" row.
+  seedForkableSession("srcPlatformForFork", "platform", "agentLead");
+  const forkedPlatform = svc.forkSession("srcPlatformForFork");
+  check("(8b) forking an EXISTING role:'platform' session SUCCEEDS, carrying role:'platform' forward", forkedPlatform.role === "platform");
+  check("(8b) the DB row persists role='platform' too", db.getSession(forkedPlatform.id).role === "platform");
+  check("(8b) forkSession's own role==='platform' carry-forward is reachable ONLY from an already-role:'platform' source — (8a)'s null/worker sources on the SAME bound-to-platform-profile agent both failed to produce it, so the profile confers nothing and only the source row's own role does", forkedFromNonPlatform.role !== "platform" && forkedWorkerFromNonPlatform.role !== "platform" && forkedPlatform.role === "platform");
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
@@ -281,6 +328,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card f437d4e9 C1 decision 5: with LOOM_DEV unset, a profile may freely carry role:'platform' and may be bound to any agent, but nothing agent-facing (session_spawn on platform/setup, worker_spawn, manager/worker recycle, template_apply) can ever turn that into a role:'platform' SESSION; recyclePlatformLead only ever carries an existing one forward; startPlatformLead is the sole mint path, reachable from exactly one human-REST call site — claude-free, network-free."
+  ? "\n✅ ALL PASS — card f437d4e9 C1 decision 5: with LOOM_DEV unset, a profile may freely carry role:'platform' and may be bound to any agent, but nothing agent-facing (session_spawn on platform/setup, worker_spawn, manager/worker recycle, template_apply, forkSession) can ever turn that into a role:'platform' SESSION; recyclePlatformLead and forkSession only ever carry an existing one forward; startPlatformLead is the sole mint path, reachable from exactly one human-REST call site — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

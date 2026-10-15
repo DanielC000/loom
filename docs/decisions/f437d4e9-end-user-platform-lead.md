@@ -404,6 +404,15 @@ below with extra emphasis.
      surrounding comment (`:3823-3828`, `@decision 26aa4322`) states platform-spawn is human-REST-only.
      Its only call site is `gateway/server.ts:5898`, behind `POST /api/agents/:id/sessions`, passing
      `spawnHumanAuthorized: true` — never reachable from any MCP tool or agent-facing surface.
+   - **`forkSession` (`sessions/service.ts:7616`) also only CARRIES a `role:"platform"` forward, never
+     derives it from a profile.** The fork row's `role` field (`:7677`, mirrored onto the pty spawn at
+     `:7742`) is `src.role ?? undefined` — read straight off the SOURCE session row — so forking a
+     non-platform session whose agent's profile has since been rebound to a role:"platform" rig still
+     resolves to the source row's own role, never `"platform"`; `forkSession` never consults the agent's
+     profile at all. Unlike its `role === "setup"` (`:7638`, singleton refusal) and `role === "manager"`
+     (`:7644`, barred-project refusal) guards, it carries NO `role === "platform"` check — forking an
+     EXISTING `role:"platform"` session is a deliberate, sanctioned carry-forward (decision `8ddcf787`:
+     multiple concurrent Leads are allowed) and succeeds, producing another `role:"platform"` row.
    C1's test should assert this enumeration directly (e.g. attempt every agent-facing spawn/recycle/
    profile/template surface against a non-dev install and confirm none can produce `role:"platform"`
    except via the seeded Lead's own carried-forward recycle), not merely re-read this list.
