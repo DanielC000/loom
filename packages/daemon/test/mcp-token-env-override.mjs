@@ -24,7 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, waitForJsonFile } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -125,8 +125,7 @@ if (process.platform !== "win32") {
     try {
       const liveToken = host.live.get(sid)?.mcpToken;
       check("(PART 2 setup) the live session has a real, non-empty minted mcpToken", typeof liveToken === "string" && liveToken.length > 0);
-      await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump`, timeoutMs: 15000 });
-      const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
+      const dump = await waitForJsonFile(dumpPath, { label: `${sid} fixture env dump`, timeoutMs: 15000 });
       check("(PART 2, card a50b8afd regression) claude's REAL spawned env carries the MINTED token, not the sessionEnv attacker value",
         dump[MCP_TOKEN_ENV_VAR] === liveToken);
       check("(PART 2 negative control) the attacker-controlled sessionEnv value does NOT survive into the real spawn's env",
@@ -157,8 +156,7 @@ if (process.platform !== "win32") {
     try {
       const liveToken = host.liveCodex?.get(sid)?.mcpToken;
       check("(PART 3 setup) the live codex session has a real, non-empty minted mcpToken", typeof liveToken === "string" && liveToken.length > 0);
-      await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump`, timeoutMs: 15000 });
-      const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
+      const dump = await waitForJsonFile(dumpPath, { label: `${sid} fixture env dump`, timeoutMs: 15000 });
       check("(PART 3, card a50b8afd regression) codex's REAL spawned env carries the MINTED token, not the sessionEnv attacker value",
         dump[MCP_TOKEN_ENV_VAR] === liveToken);
       check("(PART 3 negative control) the attacker-controlled sessionEnv value does NOT survive into the real codex spawn's env",
@@ -186,8 +184,7 @@ if (process.platform !== "win32") {
         id: "part4-shell", cwd: tmpHome, command: process.execPath, args: ["-e", script, dumpPath],
         geometry: { cols: 120, rows: 40 }, label: "test",
       });
-      await waitUntil(() => fs.existsSync(dumpPath), { label: "part4-shell env dump", timeoutMs: 15000 });
-      const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
+      const dump = await waitForJsonFile(dumpPath, { label: "part4-shell env dump", timeoutMs: 15000 });
       check("(PART 4, card a50b8afd Code Review round 3 FIX) createShellPty scrubs an inherited LOOM_MCP_TOKEN from the daemon's own process env — a plain shell does NOT inherit it",
         dump.LOOM_MCP_TOKEN === null || dump.LOOM_MCP_TOKEN === undefined);
     } finally {

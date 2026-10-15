@@ -54,10 +54,53 @@ if (!outputFile) {
 // 2be634f2 CONSIDERED AND REJECTED putting a capability secret here (claude's own env is inherited by
 // everything it spawns, including the agent's own shell) — this scan exists so a test can assert the
 // NEGATIVE: this set is always empty, on every platform, proving the rejected design never shipped.
+// Card 836c40b7: WRITE ATOMICALLY. `fs.writeFileSync` is open()+write()+close() as separate syscalls —
+// a reader polling `fs.existsSync` alone can observe the file the instant it's CREATED, before its
+// content is actually written and flushed, and get 0 bytes or a truncated read (crashing on
+// `JSON.parse`). Under heavy host contention that window is wide enough to hit for real — it crashed
+// two separate full merge gates on this exact file. Writing to a sibling temp path then renaming onto
+// the real path closes the gap: a same-volume rename is atomic at the filesystem level, so the real
+// path only ever appears fully formed.
 if (process.env.FIXTURE_ENV_DUMP_FILE) {
   const capSecrets = {};
   for (const [k, v] of Object.entries(process.env)) if (k.startsWith("LOOM_CAP_SECRET_")) capSecrets[k] = v;
-  fs.writeFileSync(process.env.FIXTURE_ENV_DUMP_FILE, JSON.stringify({ LOOM_MCP_TOKEN: process.env.LOOM_MCP_TOKEN ?? null, capabilitySecrets: capSecrets }));
+  const payload = JSON.stringify({ LOOM_MCP_TOKEN: process.env.LOOM_MCP_TOKEN ?? null, capabilitySecrets: capSecrets });
+  const dumpFile = process.env.FIXTURE_ENV_DUMP_FILE;
+  const slowWriteMs = Number(process.env.FIXTURE_ENV_DUMP_SLOW_WRITE_MS || 0);
+  if (slowWriteMs > 0) {
+    // TEST-ONLY: deterministically reproduces the pre-fix race for test/wait-json-file.mjs — create
+    // the file EMPTY, hold it open that way for slowWriteMs, THEN write the real content directly
+    // (never atomically, unlike the real path above). Never set outside that one regression test.
+    fs.writeFileSync(dumpFile, "");
+    sleepSync(slowWriteMs);
+    fs.writeFileSync(dumpFile, payload);
+  } else {
+    const tmpFile = `${dumpFile}.tmp-${process.pid}`;
+    fs.writeFileSync(tmpFile, payload);
+    renameAtomic(tmpFile, dumpFile);
+  }
+}
+
+// A true synchronous sleep (never a busy-loop) — this top-level script has nothing else to do before
+// the real write runs, so blocking the single thread here costs nothing a real caller would notice.
+function sleepSync(ms) {
+  const sab = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(sab), 0, 0, ms);
+}
+
+// Windows can transiently EPERM/EBUSY a rename if something still holds a handle on the destination —
+// it normally doesn't exist yet here, but retry briefly rather than assume that.
+function renameAtomic(tmpPath, destPath) {
+  const maxAttempts = 10;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      fs.renameSync(tmpPath, destPath);
+      return;
+    } catch (err) {
+      if (attempt === maxAttempts || !(err && (err.code === "EPERM" || err.code === "EBUSY"))) throw err;
+      sleepSync(20);
+    }
+  }
 }
 
 // A real spawn's argv is all FLAGS (--settings, --permission-mode, --strict-mcp-config, etc.) — that's

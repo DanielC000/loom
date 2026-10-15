@@ -47,7 +47,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, waitForJsonFile } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -487,8 +487,7 @@ if (process.platform !== "win32") {
       check("(b1 setup) the live session actually has a real, non-empty mcpToken to check against", typeof liveToken === "string" && liveToken.length > 0);
       check("(b1) the written mcp-config.json FILE contains the PLACEHOLDER, never the real token bytes",
         fileContent.includes("${LOOM_MCP_TOKEN}") && !fileContent.includes(liveToken));
-      await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump`, timeoutMs: 15000 });
-      const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
+      const dump = await waitForJsonFile(dumpPath, { label: `${sid} fixture env dump`, timeoutMs: 15000 });
       check("(b1) the REAL spawned process's OWN env carries the real mcpToken value (negative control: compared against the actual live value, not a guess)",
         dump.LOOM_MCP_TOKEN === liveToken);
     }
@@ -511,8 +510,7 @@ if (process.platform !== "win32") {
       const fileContent = fs.readFileSync(file, "utf8");
       check("(2be634f2 REJECTED) the written mcp-config.json FILE contains the LITERAL capability-secret bytes, never a placeholder",
         fileContent.includes("super-secret-value") && !fileContent.includes("LOOM_CAP_SECRET_"));
-      await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump`, timeoutMs: 15000 });
-      const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
+      const dump = await waitForJsonFile(dumpPath, { label: `${sid} fixture env dump`, timeoutMs: 15000 });
       check("(2be634f2 REJECTED — THE FINDING THIS PINS) the REAL spawned process's OWN env carries NO LOOM_CAP_SECRET_* var at all — the secret is NEVER inherited by the agent's own shell",
         Object.keys(dump.capabilitySecrets ?? {}).length === 0);
     }
@@ -550,8 +548,7 @@ if (process.platform !== "win32") {
           fileContent.includes(liveToken) && !fileContent.includes("${LOOM_MCP_TOKEN}"));
         check("(forced-POSIX, card 2be634f2 REJECTED) with ridesEnv FORCED false, the capability secret stays the LITERAL value, never a placeholder",
           fileContent.includes("super-secret-value") && !fileContent.includes("LOOM_CAP_SECRET_"));
-        await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump`, timeoutMs: 15000 });
-        const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
+        const dump = await waitForJsonFile(dumpPath, { label: `${sid} fixture env dump`, timeoutMs: 15000 });
         check("(forced-POSIX, card a50b8afd Code Review round 3 FIX — THE REGRESSION THIS CLOSES) with ridesEnv FORCED false, the REAL spawned process's env does NOT carry LOOM_MCP_TOKEN at all",
           dump.LOOM_MCP_TOKEN === null || dump.LOOM_MCP_TOKEN === undefined);
         check("(forced-POSIX, card 2be634f2 REJECTED) with ridesEnv FORCED false, the REAL spawned process's env carries NO LOOM_CAP_SECRET_* var at all",
@@ -577,8 +574,7 @@ if (process.platform !== "win32") {
           fileContent2.includes("${LOOM_MCP_TOKEN}") && !fileContent2.includes(liveToken2));
         check("(forced-win32, card 2be634f2 REJECTED) the capability secret, UNLIKE the mcpToken header just above, stays the LITERAL value even with ridesEnv FORCED true",
           fileContent2.includes("super-secret-value") && !fileContent2.includes("LOOM_CAP_SECRET_"));
-        await waitUntil(() => fs.existsSync(dumpPath2), { label: `${sid2} fixture env dump`, timeoutMs: 15000 });
-        const dump2 = JSON.parse(fs.readFileSync(dumpPath2, "utf8"));
+        const dump2 = await waitForJsonFile(dumpPath2, { label: `${sid2} fixture env dump`, timeoutMs: 15000 });
         check("(forced-win32, via the SAME injectable seam) the REAL spawned process's env DOES carry the real mcpToken",
           dump2.LOOM_MCP_TOKEN === liveToken2);
         check("(forced-win32, card 2be634f2 REJECTED — THE FINDING THIS PINS) the REAL spawned process's env carries NO LOOM_CAP_SECRET_* var, even with ridesEnv FORCED true — the secret is never inherited by the agent's own shell",

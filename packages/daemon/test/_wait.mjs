@@ -50,6 +50,8 @@
 // loop) — do not mass-convert every sleep you find; convert one only when it's genuinely racing another
 // async operation's real duration.
 
+import fs from "node:fs";
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function describe(value) {
@@ -178,4 +180,29 @@ export async function sleepPast(ms, thresholdMs, label = "sleepPast") {
     throw new Error(`sleepPast(${label}): ms (${ms}) does not exceed thresholdMs (${thresholdMs}) — this call proves a floor, not a guess, and the numbers given don't clear it`);
   }
   await sleep(ms);
+}
+
+/**
+ * Poll until `path` exists AND its content parses as JSON, then return the parsed value (card
+ * 836c40b7). Replaces the `await waitUntil(() => fs.existsSync(path)); JSON.parse(fs.readFileSync(path))`
+ * pattern several fixture-reading tests used to hand-roll: `fs.existsSync` goes true the instant a
+ * writer's file-create syscall lands, before its write()/close() complete and the content is actually
+ * visible to a second process — a reader polling raw existence can observe a momentarily-empty or
+ * truncated file and crash on `JSON.parse` (real specimen: two full merge gates crashed
+ * mcp-config-secret-lifecycle.mjs this way, both only under heavy host contention — never reproduced at
+ * low contention). Polling the PARSE itself removes the race: a read against a file mid-write throws
+ * (ENOENT before creation, SyntaxError while partial), and `waitUntil` treats a thrown predicate exactly
+ * like "not yet observed" and keeps polling within the SAME budget (see its own doc above) — this never
+ * widens any budget, it just polls the condition that actually matters.
+ * @param {string} path
+ * @param {{ timeoutMs?: number, intervalMs?: number, label?: string }} [opts]
+ * @returns {Promise<any>} the parsed JSON value.
+ */
+export async function waitForJsonFile(path, { timeoutMs = 15000, intervalMs = 10, label } = {}) {
+  const wrapped = await waitUntil(() => ({ value: JSON.parse(fs.readFileSync(path, "utf8")) }), {
+    timeoutMs,
+    intervalMs,
+    label: label ?? `JSON file ${path}`,
+  });
+  return wrapped.value;
 }
