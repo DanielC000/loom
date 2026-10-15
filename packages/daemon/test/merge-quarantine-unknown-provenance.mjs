@@ -530,9 +530,12 @@ try {
     // pendingDivertFilenameFor(occupantRepoPath);`, now `const finalBasename = path.basename(final);`,
     // with the filename/toWrite derivation itself moved into the shared `reconcilePendingDivertTarget`
     // chokepoint) — the anchor below is updated to match, same disambiguating-suffix technique as before.
-    const PROTECT_WHITELIST_LINE = "provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,\n    };\n    const finalBasename = path.basename(final);";
+    // Card 4b06875f added a `resolvedKey` field (with its own two-line comment) between
+    // `provenanceTracked` and the closing `};` — the anchor below is extended to match, same
+    // disambiguating-suffix technique as the 6451a749 update noted above.
+    const PROTECT_WHITELIST_LINE = "provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,\n        // @decision 8db913e2 (Follow-up 4b06875f) — see the guard computed just above; `undefined` here is the pre-existing,\n        // unchanged behavior for every self-consistently-filed (collision) occupant.\n        resolvedKey: resolvedKeyToCarry,\n    };\n    const finalBasename = path.basename(final);";
     await withDistMutation(PROTECT_WHITELIST_LINE,
-      "provenanceUnknown: undefined, provenanceTracked: undefined };\n    const finalBasename = path.basename(final);", async (m) => {
+      "provenanceUnknown: undefined, provenanceTracked: undefined, resolvedKey: resolvedKeyToCarry };\n    const finalBasename = path.basename(final);", async (m) => {
         const { x3, y3 } = buildProtectFixture("mutated");
         const protective = await runProtectAndReadCopy(m, x3, y3);
         check("*** PINNED (3) *** dropping the whitelist's own carry-forward loses it in the protective copy — caught", protective?.provenanceUnknown !== true);

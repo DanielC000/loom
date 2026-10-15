@@ -98,6 +98,17 @@ const SCENARIOS = [
   // so the NO-`extra` graduation path (a bare pending twin, no cross-tier absorb) left its own stale
   // secondary key pointed at the spliced-out twin object instead of the union.
   "no-extra-graduation-repoints-twin-slot",
+  // Code Review of 7282d183 (card 4b06875f), Finding 1 — the physical-hash discriminator asks the wrong
+  // question (see the scenario's own comment below for the full repro).
+  "4b06875f-dual-arm-clear-resurrection",
+  // Code Review Round 2 (card 4b06875f), Finding 2 — the post-union filter: a correctly-excluded
+  // resolvedKey can still be reintroduced by a union against an older on-disk pending record.
+  "4b06875f-post-union-filter-clear-sticks",
+  // Round-2 Code Review a61d0bec (card 4b06875f) CRITICAL — Round 2's own EXPLICIT resolvedKey union
+  // rule, applied GLOBALLY (via armQuarantineKey), drops a legacy dual-arm's own secondary key the
+  // instant a boot-time MIGRATE union collides with it — a REPRODUCED fail-open a plain `{...older}`
+  // rule never had. See the scenario's own comment below for the full repro.
+  "4b06875f-migrate-union-drops-dual-arm",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -157,6 +168,13 @@ async function rebootSim() {
 
 function hashForKey(key) {
   return createHash("sha256").update(key).digest("hex").slice(0, 24);
+}
+
+function pendingDivertFilenameFor(repoPath) {
+  let real;
+  try { real = fs.realpathSync.native(repoPath); } catch { real = path.resolve(repoPath); }
+  const identity = process.platform === "win32" ? real.toLowerCase() : real;
+  return `pending-${createHash("sha256").update(identity).digest("hex").slice(0, 24)}.json`;
 }
 
 // Manufactures the SAME X/Y fixture every scenario below builds on: X is a degraded occupant (unresolvable,
@@ -1000,6 +1018,274 @@ try {
 
     const afterList = listActiveMergeQuarantines().filter((q) => q.repoPath === e);
     check("*** THE FIX (round 2) *** e is listed exactly ONCE after graduation (no stale-twin double-report)", afterList.length === 1);
+  } else if (scenarioName === "4b06875f-dual-arm-clear-resurrection") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // PROBE B — Code Review of 7282d183 (card 4b06875f), Finding 1: the physical-hash discriminator
+    // ("does the occupant's resolvedKey equal the key `final` is physically filed under RIGHT NOW") asks
+    // the WRONG question — it only ever compares against the ONE key the CURRENT protect call happens to
+    // be touching, never against the FULL set of keys the clear/raise operation is itself lifting.
+    //
+    // Setup: Y is dual-armed via the legacy stale-resolvedKey shape (mirrors buildDualArmFixture) — Y's
+    // own REAL physical file lives at hash(Ky), its own stored `resolvedKey` field (a stale legacy
+    // dual-arm marker) is K2 (W's own REAL canonical key — never a bare nonexistent path, or X's own
+    // degenerate "no git root found" fallback could coincidentally equal it, collapsing this probe back
+    // into the ordinary single-arm shape). X is a DIFFERENT, degraded, wholly unrelated identity,
+    // physically filed AT hash(K2), with X's OWN resolvedKey recorded as Ky — the OTHER half of Y's own
+    // dual-arm, never the specific key any one protect call is touching.
+    //
+    // A RAISE (not a clear) is the clean reproduction: raising W itself (W's own canonical key IS K2)
+    // reaches `enterMergeQuarantine`'s `existing` branch (`activeQuarantines.get(K2)` already holds Y,
+    // dual-armed there) — a SINGLE `protectUnincorporatedOccupantBeforeDelete` call, with
+    // final=quarantinePathForKey(K2)=hash(K2).json=X's own physical file. (A CLEAR of Y was tried first
+    // and rejected for this probe — `deleteMergeQuarantineLatchByKey` reaches X's SAME content via TWO
+    // independent protect-call sites at once in that shape, and Finding 2's own reader/union gap then
+    // happens to erase the wrongly-carried key before it could be observed — a confound, not a fix; see
+    // the Round-2 report for the full trace. The raise side has no such second call site.)
+    //
+    // X's own resolvedKey (Ky) differs from hash(K2)'s own physical key (K2), so the Round-1 guard CARRIES
+    // Ky forward into X's own protective copy — even though Ky is EXACTLY the OTHER key Y (the entry
+    // actually being protected FROM, via `existing`) is itself armed under. Asserted directly on the
+    // WRITTEN FIELD, mid-window, right after the raise — no reboot needed to observe the wrong decision.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqrup-4b-b-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# 4b06875f-dual-arm-clear-resurrection\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+    const kyHash = hashForKey(ky);
+
+    const x = path.join(os.tmpdir(), `loom-mqrup-4b-b-x-never-exists-${freshSfx()}`);
+    const w = path.join(os.tmpdir(), `loom-mqrup-4b-b-w-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# 4b06875f-dual-arm-clear-resurrection (w)\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(w);
+    const k2Hash = hashForKey(k2);
+    if (k2Hash === kyHash) throw new Error("4b06875f-dual-arm-clear-resurrection: k2 collided with ky — re-run");
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `${kyHash}.json`);
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y dual-armed via a legacy stale resolvedKey=K2",
+      enteredAt: Date.now() - 60_000, tokens: ["y-token"], resolvedKey: k2,
+    }, null, 2) + "\n");
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${k2Hash}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded, physically at K2, resolvedKey points back at Y's own OTHER armed key",
+      enteredAt: Date.now() - 30_000, tokens: ["x-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+
+    // Deliberately NOT registering y/w — this must reach d163aef5's own collision-resolution path, never
+    // the "backed by a registered repo: legitimate same-toplevel union" shortcut.
+    reenterMergeQuarantinesAtBoot([]);
+
+    check("(precondition) Y is dual-armed — direct query at Y's own path sees Y", activeMergeQuarantineFor(y)?.repoPath === y);
+    check("(precondition) Y's own armedKeys includes BOTH Ky and K2", (() => {
+      const yEntry = listActiveMergeQuarantines().find((e) => e.repoPath === y);
+      const keys = new Set(yEntry?.armedKeys ?? []);
+      return keys.has(ky) && keys.has(k2);
+    })());
+    check("(precondition) querying W's own path (== K2) sees Y directly, confirming Y occupies K2", activeMergeQuarantineFor(w)?.repoPath === y);
+    check("(precondition) X's own physical file is untouched before the raise", fs.readFileSync(xFile, "utf8").includes("x-token"));
+
+    enterMergeQuarantine(w, "w-branch", "w's own genuine unconfirmed-kill reason");
+
+    // Find X's own protective copy by identity, never by "the one new file" (MERGE_QUARANTINE_DIR is
+    // shared for this whole scenario run) — mirrors this file's own db0a9db0-era non-vacuity discipline.
+    const xProtectiveFile = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => ({ f, parsed: (() => { try { return JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")); } catch { return undefined; } })() }))
+      .find((e) => e.parsed?.repoPath === x);
+    check("(precondition) a protective copy for X was minted", !!xProtectiveFile);
+    check("(precondition) the protective copy carries X's own token", !!xProtectiveFile?.parsed.tokens?.includes("x-token"));
+    check("*** PROBE B *** the protective copy should NOT carry resolvedKey=Ky — Ky is Y's OWN other armed key, the very entry this protect call is protecting X FROM — today it WRONGLY does",
+      xProtectiveFile?.parsed.resolvedKey !== ky);
+  } else if (scenarioName === "4b06875f-post-union-filter-clear-sticks") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // PROBE D — manager's own Round-2 design-checkpoint scenario (card 4b06875f): Finding 2's residual,
+    // closed by the post-union filter. Combines probe B's dual-arm shape with probe C's pre-existing
+    // older-pending-file shape, since BOTH are required to reach the exact union this filter protects:
+    //
+    // S is dual-armed [Ks, Kr] (legacy stale-resolvedKey shape, S's own real file at hash(Ks)). D is
+    // degraded, physically AT hash(Kr) — S's own SECOND armed key — with D's OWN resolvedKey = Ks (S's
+    // PRIMARY key). D ALSO has a PRE-EXISTING, OLDER pending-divert file that ALREADY carries
+    // resolvedKey=Ks (simulating an earlier, separate, legitimate carry — e.g. from a prior raise this
+    // scenario doesn't need to construct explicitly, since D's own on-disk record is the durable truth
+    // either way).
+    //
+    // R raises at Kr (R's own canonical key) — hits S's `existing` branch (S dual-armed there).
+    // `liftedKeys = S.armedKeys = {Ks, Kr}` correctly excludes Ks PRE-union (Ks is one of the SAME dual-
+    // armed entry's own keys) — `toPersist.resolvedKey = undefined`, exactly as Finding 1's own fix
+    // intends. But `reconcilePendingDivertTarget` then unions this `toPersist` against D's own PRE-
+    // EXISTING, OLDER pending-divert file, which already carries resolvedKey=Ks — `unionQuarantineEntries`'s
+    // own rule ("one side undefined → keep the other") then lets Ks SURVIVE the union, reintroducing
+    // exactly what the pre-union exclusion just correctly excluded. THE FIX: re-apply the SAME exclusion
+    // to whatever the union produces, before it's written.
+    //
+    // Then S clears its OWN quarantine (clearMergeQuarantine) — lifting both of its own armed keys. If
+    // the wrongly-reintroduced Ks survived onto disk, nothing currently occupies Ks after S's clear, so a
+    // reboot re-arms D there unopposed — S's OWN clear is violated: it reads unblocked in-process, right
+    // after the clear, but is blocked AGAIN after a reboot. With the post-union filter, Ks never survives
+    // the union in the first place, so S's clear genuinely sticks across a reboot, and D's own identity
+    // (its own tokens) stays independently enforced throughout via direct identity, with no resolvedKey
+    // needed for that query.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const s = path.join(os.tmpdir(), `loom-mqrup-4b-d-s-${freshSfx()}`);
+    fs.mkdirSync(s, { recursive: true });
+    tmpDirs.push(s);
+    fs.writeFileSync(path.join(s, "README.md"), "# 4b06875f-post-union-filter-clear-sticks\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: s });
+    commitAll(s, "init", GIT_ID);
+    const ks = canonicalRepoLockKey(s);
+    const ksHash = hashForKey(ks);
+
+    const r = path.join(os.tmpdir(), `loom-mqrup-4b-d-r-${freshSfx()}`);
+    fs.mkdirSync(r, { recursive: true });
+    tmpDirs.push(r);
+    fs.writeFileSync(path.join(r, "README.md"), "# 4b06875f-post-union-filter-clear-sticks (r)\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: r });
+    commitAll(r, "init", GIT_ID);
+    const kr = canonicalRepoLockKey(r);
+    const krHash = hashForKey(kr);
+    if (krHash === ksHash) throw new Error("4b06875f-post-union-filter-clear-sticks: kr collided with ks — re-run");
+
+    const d = path.join(os.tmpdir(), `loom-mqrup-4b-d-d-never-exists-${freshSfx()}`);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // S's own real file, dual-armed via legacy stale resolvedKey=Kr.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${ksHash}.json`), JSON.stringify({
+      repoPath: s, branch: "s-branch", reason: "S dual-armed via legacy stale resolvedKey=Kr",
+      enteredAt: Date.now() - 90_000, tokens: ["4b06875f-pd-tok-s"], resolvedKey: kr,
+    }, null, 2) + "\n");
+    // D physically at hash(Kr) — S's own SECOND armed key — resolvedKey points back at S's own primary key Ks.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${krHash}.json`), JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D degraded at Kr, resolvedKey points at S's own primary key Ks",
+      enteredAt: Date.now() - 60_000, tokens: ["4b06875f-pd-tok-d-orig"], resolvedKey: ks,
+    }, null, 2) + "\n");
+    // D's own PRE-EXISTING OLDER pending-divert file, already carrying resolvedKey=Ks.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameFor(d)), JSON.stringify({
+      repoPath: d, branch: "d-old-branch", reason: "D's own OLDER pending-divert record, already carrying resolvedKey=Ks",
+      enteredAt: Date.now() - 120_000, tokens: ["4b06875f-pd-tok-d-old"], resolvedKey: ks,
+    }, null, 2) + "\n");
+
+    // Deliberately NOT registering s/r — must reach d163aef5's own collision-resolution path.
+    reenterMergeQuarantinesAtBoot([]);
+    check("(precondition) S is dual-armed at [Ks, Kr]", (() => {
+      const sEntry = listActiveMergeQuarantines().find((e) => e.repoPath === s);
+      const keys = new Set(sEntry?.armedKeys ?? []);
+      return keys.has(ks) && keys.has(kr);
+    })());
+
+    enterMergeQuarantine(r, "r-branch", "r raises, hits S's existing branch at Kr");
+
+    const dProtectiveFile = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => ({ f, parsed: (() => { try { return JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")); } catch { return undefined; } })() }))
+      .find((e) => e.parsed?.repoPath === d);
+    check("(precondition) a protective copy for D was minted, unioning both of D's own tokens", (() => {
+      const tokens = new Set(dProtectiveFile?.parsed.tokens ?? []);
+      return tokens.has("4b06875f-pd-tok-d-orig") && tokens.has("4b06875f-pd-tok-d-old");
+    })());
+    check("*** THE FIX (pre-union) *** D's protective copy does NOT carry resolvedKey=Ks right after the raise",
+      dProtectiveFile?.parsed.resolvedKey !== ks);
+
+    clearMergeQuarantine(s);
+    check("(mid-window) assertRepoNotQuarantined(s) reads unblocked right after S's own clear", assertRepoNotQuarantined(s).ok === true);
+
+    const fresh = await rebootSim();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    check("*** PROBE D *** assertRepoNotQuarantined(s) stays unblocked after a reboot — S's own clear genuinely sticks",
+      fresh.assertRepoNotQuarantined(s).ok === true);
+    check("(probe D) D's own tokens are still independently enforced via direct identity", (() => {
+      const dAfter = fresh.activeMergeQuarantineFor(d);
+      const tokens = new Set(dAfter?.tokens ?? []);
+      return tokens.has("4b06875f-pd-tok-d-orig") && tokens.has("4b06875f-pd-tok-d-old");
+    })());
+  } else if (scenarioName === "4b06875f-migrate-union-drops-dual-arm") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Round-2 CR a61d0bec (card 4b06875f) CRITICAL — Round 2's own EXPLICIT resolvedKey union rule
+    // ("equal -> keep; one undefined -> keep the other; both SET and DIFFERENT -> undefined") leaked
+    // from the two protect/pending-divert call sites it was designed for into `armQuarantineKey` — the
+    // SAME chokepoint every boot-time dual-arm AND migrate-consolidation union reaches.
+    //
+    // Y is dual-armed via the legacy stale-resolvedKey shape (mirrors buildDualArmFixture): Y's own real
+    // physical file lives at hash(Ky), its own stored `resolvedKey` field is Kw (W's own real canonical
+    // key). A SEPARATE latch, physically filed under a STALE key (Kold, never Y's own), with repoPath =
+    // Y's OWN subdirectory (so its CURRENT canonical key resolves to Ky too), triggers PASS 1's own
+    // MIGRATE branch — which stamps its own in-memory resolvedKey to Ky (its own currentKey) and then
+    // falls through to the SAME primary-arm code as every ordinary file, unioning it into whatever
+    // already occupies Ky (Y's own dual-armed entry). That union's two operands now carry
+    // resolvedKey=Kw (Y's own legacy field) and resolvedKey=Ky (the migrate branch's own stamp) — SET
+    // and DIFFERENT. The explicit rule's own "both different -> undefined" branch (correct for the
+    // protect/divert case it was designed for) drops Kw outright here — W, which Kw's own dual-arm
+    // exists to block, reads UNBLOCKED after a reboot.
+    //
+    // Y's own enteredAt is deliberately OLDER than the migrating latch's — the "A-older" order the Lead
+    // decision names. Under the SCOPED (legacy) rule this fix restores for `armQuarantineKey`, the older
+    // side's resolvedKey (Kw) wins unconditionally, regardless of readdir order, so W stays blocked. The
+    // OPPOSITE order (the migrating latch older than Y) is a pre-existing, separately-carded fail-open
+    // (board card 48bda567) — deliberately NOT fixed or asserted here.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqrup-4b-crit-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# 4b06875f-migrate-union-drops-dual-arm\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+    const kyHash = hashForKey(ky);
+
+    const w = path.join(os.tmpdir(), `loom-mqrup-4b-crit-w-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# 4b06875f-migrate-union-drops-dual-arm (w)\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const kwHash = hashForKey(kw);
+    if (kwHash === kyHash) throw new Error("4b06875f-migrate-union-drops-dual-arm: kw collided with ky — re-run");
+
+    const ySub = path.join(y, "sub");
+    fs.mkdirSync(ySub, { recursive: true });
+    const kySub = canonicalRepoLockKey(ySub);
+    if (kySub !== ky) throw new Error("4b06875f-migrate-union-drops-dual-arm: y's own subdirectory did not resolve to y's own key — fixture assumption broken");
+
+    const kold = `stale-pre-migration-key-${freshSfx()}`;
+    const koldHash = hashForKey(kold);
+    if (koldHash === kyHash) throw new Error("4b06875f-migrate-union-drops-dual-arm: kold collided with ky — re-run");
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // Latch A — Y's own real, correctly-named file, dual-armed via a legacy stale resolvedKey=Kw.
+    // enteredAt is deliberately OLDER than latch B's below (the A-older order this scenario asserts).
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${kyHash}.json`), JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y dual-armed via a legacy stale resolvedKey=Kw",
+      enteredAt: Date.now() - 120_000, tokens: ["a1", "a2"], resolvedKey: kw,
+    }, null, 2) + "\n");
+    // Latch B — a STALE-key-filed latch for Y's own subdirectory, migrating to Ky this boot.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${koldHash}.json`), JSON.stringify({
+      repoPath: ySub, branch: "b-branch", reason: "a pre-rename latch for y's own subdirectory, filed under a stale key",
+      enteredAt: Date.now(), tokens: ["b1"],
+    }, null, 2) + "\n");
+
+    // Deliberately NOT registering y/w — must reach d163aef5's own collision-resolution path.
+    reenterMergeQuarantinesAtBoot([]);
+
+    check("(precondition) boot-0 dual-arms Y at BOTH Ky and Kw", (() => {
+      const yEntry = listActiveMergeQuarantines().find((e) => e.repoPath === y);
+      const keys = new Set(yEntry?.armedKeys ?? []);
+      return keys.has(ky) && keys.has(kw);
+    })());
+    check("(precondition) boot-0: W is already blocked, directly, via Y's own dual-arm", activeMergeQuarantineFor(w)?.repoPath === y);
+
+    const fresh = await rebootSim();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    check("*** CRITICAL (round-2 CR a61d0bec) *** W stays blocked after a PLAIN REBOOT (A-older order) — the migrate union must never drop Y's own legacy dual-arm",
+      fresh.activeMergeQuarantineFor(w)?.repoPath === y);
+    const refusal = fresh.assertRepoNotQuarantined(y);
+    check("(refusal text) assertRepoNotQuarantined(y) still names W in its refusal text (db0a9db0 guidance)",
+      refusal.ok === false && typeof refusal.reason === "string" && refusal.reason.toLowerCase().includes(w.toLowerCase()));
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

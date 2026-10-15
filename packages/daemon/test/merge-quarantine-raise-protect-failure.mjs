@@ -3980,11 +3980,74 @@ try {
   const tokensAfterRebootFB = new Set(freshFB.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
   check("*** THE FIX (37452ddd-twin-repoint-finalbasename, reboot) *** both of D's own tokens, plus R's own, survive a fresh-process reboot",
     tokensAfterRebootFB.has("37452ddd-fb-tok-x") && tokensAfterRebootFB.has(d2Token2) && tokensAfterRebootFB.has(rToken2));
+  // Card 4b06875f -- ACCEPTED RESIDUAL from 37452ddd's own decision record: the protective copy
+  // protectOccupantContentBeforeDelete writes (toPersist, this function's own pre-existing field
+  // whitelist) never carries the OCCUPANT's own on-disk `resolvedKey` (Ks here) forward. On THIS reboot,
+  // PASS 1 reads that copy with no resolvedKey and an unresolvable repoPath (d), so it takes the "defer
+  // to a lazy re-resolve on first query" branch (never arms anywhere) -- and findPendingIndicesFor's own
+  // 4th tier (~L3447) is gated on `!!entry.resolvedKey`, so a query keyed on S (s) can never match it
+  // either. Before R's raise, the latch at <Krhash>.json carried resolvedKey=Ks and would have re-armed S
+  // on any reboot -- the raise itself downgrades S from blocked to unblocked across a reboot, for as long
+  // as D stays unmounted. `activeMergeQuarantineFor(d)` (asserted below) stays correctly blocked via the
+  // direct-identity tier -- only the query keyed on S's own path is affected.
+  check("*** BUG (4b06875f) *** activeMergeQuarantineFor(s) should STILL be blocked after reboot -- today it is NOT (fail-open: see docs/decisions/8db913e2-*.md, Follow-up 37452ddd, ACCEPTED RESIDUAL)",
+    !!freshFB.activeMergeQuarantineFor(s));
+  check("(4b06875f) activeMergeQuarantineFor(d) is unaffected -- still correctly blocked via direct identity",
+    !!freshFB.activeMergeQuarantineFor(d));
 
   freshFB.clearMergeQuarantineByToken(r, rToken2);
   freshFB.clearMergeQuarantineByToken(d, "37452ddd-fb-tok-x");
   freshFB.clearMergeQuarantineByToken(d, d2Token2);
   freshFB.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 4b06875f (manager follow-up, timing variant) -- the SAME twin-repoint-finalbasename shape, but
+  // WITHOUT D's second raise: R raises once, THEN reboot. This isolates the bug from D's second raise --
+  // protectOccupantContentBeforeDelete's own toPersist whitelist drops resolvedKey the moment R's single
+  // raise runs; D never needs to raise again to trigger the fail-open.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("4b06875f-ns-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("4b06875f-ns-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-4b06875f-ns-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const KrFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(KrFinalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "4b06875f-no-second-raise: D degraded, filed at R's own name but resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["4b06875f-ns-tok-x"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+
+  check("(4b06875f-no-second-raise precondition) the TWIN exists: D armed at S's own key, pending ref at R's own final basename",
+    (() => {
+      const direct = activeMergeQuarantineFor(s);
+      return !!direct && direct.repoPath === d && new Set(direct.tokens).has("4b06875f-ns-tok-x");
+    })());
+
+  const rToken3 = enterMergeQuarantine(r, "r-branch", "4b06875f-no-second-raise: r raises, triggers protect via atFinalBasenameIdx only -- D never raises again");
+  check("(4b06875f-no-second-raise) R's own token lands directly at its own final",
+    (contentIfExists(KrFinalPath) ?? "").includes(rToken3));
+  // Deliberately NO second raise of D here -- this is the whole point of the variant.
+
+  const freshNS = await freshBootModule();
+  freshNS.reenterMergeQuarantinesAtBoot([]);
+  const tokensAfterRebootNS = new Set(freshNS.listActiveMergeQuarantines().flatMap((e) => e.tokens ?? []));
+  check("(4b06875f-no-second-raise, reboot) D's own original token, plus R's own, survive a fresh-process reboot",
+    tokensAfterRebootNS.has("4b06875f-ns-tok-x") && tokensAfterRebootNS.has(rToken3));
+  check("*** BUG (4b06875f-no-second-raise) *** activeMergeQuarantineFor(s) should STILL be blocked after reboot, with NO second D raise in between -- today it is NOT",
+    !!freshNS.activeMergeQuarantineFor(s));
+  check("(4b06875f-no-second-raise) activeMergeQuarantineFor(d) is unaffected -- still correctly blocked via direct identity",
+    !!freshNS.activeMergeQuarantineFor(d));
+
+  freshNS.clearMergeQuarantineByToken(r, rToken3);
+  freshNS.clearMergeQuarantineByToken(d, "4b06875f-ns-tok-x");
+  freshNS.clearMergeQuarantineByRecordedPath(d);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -4128,6 +4191,279 @@ try {
   clearMergeQuarantineByToken(d, d2Token4);
   clearMergeQuarantineByToken(r, rToken4);
   clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // PROBE C — Code Review of 7282d183 (card 4b06875f), Finding 2: readPendingDivertFileAt's own field
+  // whitelist (merge-quarantine.ts ~2086-2103) never reads `resolvedKey` back off an on-disk pending-
+  // divert file, and unionQuarantineEntries's own `{...older}` spread (~608-627) lets whichever side is
+  // OLDER win for any field not in its explicit list — including `resolvedKey`, which isn't in that list
+  // at all. So even when the raise-side guard CORRECTLY decides to carry resolvedKey forward, that value
+  // is silently dropped the instant it has to union with an EXISTING, OLDER on-disk pending-divert record
+  // for the SAME identity (the shape a runtime raise produces via mintPendingDivert when D is degraded)
+  // — age-dependent: a NEWER pre-existing pending file does not trigger this (the carried value IS
+  // "older" by comparison then, and wins the spread).
+  //
+  // Setup: D's twin at <Krhash>.json (same shape as 37452ddd-twin-repoint-finalbasename — filed as if it
+  // belongs to R's own key, but its own content records resolvedKey=Ks), PLUS D's own INDEPENDENT
+  // pending-divert file (D's deterministic pendingDivertFilenameFor(d) path) with NO resolvedKey, an
+  // OLDER enteredAt, and its own token (the exact shape a prior degraded raise already produced). R
+  // raises -- protectOccupantContentBeforeDelete correctly computes resolvedKey=Ks for D's own protective
+  // copy (final=Krhash.json's own physical key, Kr, differs from Ks) -- but reconcilePendingDivertTarget
+  // then unions it with the pre-existing OLDER pending file; the union's own `{...older}` spread takes
+  // the OLDER side's (absent) resolvedKey, discarding Ks.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("4b06875f-pc-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("4b06875f-pc-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-4b06875f-pc-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const KrFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(KrFinalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "4b06875f probe C: D degraded twin, filed at R's own name, resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["4b06875f-pc-tok-d"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+  const dPendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d));
+  fs.writeFileSync(dPendingPath, JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "4b06875f probe C: D's own OLDER pending-divert record, no resolvedKey",
+    enteredAt: Date.now() - 60_000, tokens: ["4b06875f-pc-tok-old"],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+
+  check("(probe C precondition) the TWIN exists: D armed at S's own key", (() => {
+    const direct = activeMergeQuarantineFor(s);
+    return !!direct && direct.repoPath === d && new Set(direct.tokens).has("4b06875f-pc-tok-d");
+  })());
+  check("(probe C precondition) D's own OLDER pending-divert file exists before the raise", fs.existsSync(dPendingPath));
+
+  const rTokenC = enterMergeQuarantine(r, "r-branch", "4b06875f probe C: r raises, triggers protect via atFinalBasenameIdx only");
+
+  // Mid-window (in-process, BEFORE reboot) -- per this project's own established rule (37452ddd's own
+  // "Do not trust a test's own mid-raise assertions... assert in the window BEFORE [a later step] too"),
+  // confirm this is observable immediately -- it is not something a later query/raise could self-heal.
+  check("*** PROBE C (mid-window) *** activeMergeQuarantineFor(s) should STILL be blocked right after R's raise -- today it is NOT",
+    !!activeMergeQuarantineFor(s));
+
+  const freshPC = await freshBootModule();
+  freshPC.reenterMergeQuarantinesAtBoot([]);
+  check("*** PROBE C *** activeMergeQuarantineFor(s) should STILL be blocked after reboot -- today it is NOT (readPendingDivertFileAt never reads resolvedKey back, and unionQuarantineEntries's {...older} spread lets the OLDER pending file's own undefined resolvedKey win)",
+    !!freshPC.activeMergeQuarantineFor(s));
+  check("(probe C) activeMergeQuarantineFor(d) is unaffected -- still correctly blocked via direct identity",
+    !!freshPC.activeMergeQuarantineFor(d));
+
+  freshPC.clearMergeQuarantineByToken(r, rTokenC);
+  freshPC.clearMergeQuarantineByToken(d, "4b06875f-pc-tok-d");
+  freshPC.clearMergeQuarantineByToken(d, "4b06875f-pc-tok-old");
+  freshPC.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // PROBE C, CONTROL (no R raise) -- same setup, but R never raises: D's own pre-existing twin + older
+  // pending file survive untouched, so S must still read blocked. Proves probe C's own RED is caused by
+  // R's raise specifically, never by the fixture shape alone.
+  {
+  const s = makeToplevelRepo("4b06875f-pc-ctrl-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("4b06875f-pc-ctrl-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-4b06875f-pc-ctrl-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "4b06875f probe C control: D degraded twin, filed at R's own name, resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["4b06875f-pc-ctrl-tok-d"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d)), JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "4b06875f probe C control: D's own OLDER pending-divert record, no resolvedKey",
+    enteredAt: Date.now() - 60_000, tokens: ["4b06875f-pc-ctrl-tok-old"],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  // Deliberately NO raise of r here.
+  check("(probe C control) activeMergeQuarantineFor(s) is blocked with no raise at all -- the fixture alone, no bug needed",
+    !!activeMergeQuarantineFor(s));
+
+  clearMergeQuarantineByToken(d, "4b06875f-pc-ctrl-tok-d");
+  clearMergeQuarantineByToken(d, "4b06875f-pc-ctrl-tok-old");
+  clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // PROBE C, NEWER-PENDING VARIANT -- same setup, but D's own pre-existing pending file is NEWER than the
+  // twin (not older). unionQuarantineEntries's own tie-break keeps the OLDER side; here the carried toPersist
+  // (from the twin, enteredAt=now) is OLDER than the pre-existing pending file (enteredAt=now+60s), so the
+  // carried resolvedKey SURVIVES the union (it's on the winning/older side this time) -- Ks must still
+  // block S after a reboot. Proves the age-dependence claim directly, not just the one direction.
+  {
+  const s = makeToplevelRepo("4b06875f-pc-newer-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("4b06875f-pc-newer-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-4b06875f-pc-newer-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "4b06875f probe C newer-variant: D degraded twin, filed at R's own name, resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["4b06875f-pc-newer-tok-d"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d)), JSON.stringify({
+    repoPath: d, branch: "d-new-branch", reason: "4b06875f probe C newer-variant: D's own NEWER pending-divert record, no resolvedKey",
+    enteredAt: Date.now() + 60_000, tokens: ["4b06875f-pc-newer-tok-old"],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  const rTokenCN = enterMergeQuarantine(r, "r-branch", "4b06875f probe C newer-variant: r raises");
+
+  const freshCN = await freshBootModule();
+  freshCN.reenterMergeQuarantinesAtBoot([]);
+  check("(probe C newer-variant) activeMergeQuarantineFor(s) survives after reboot when the pre-existing pending file is NEWER than the twin -- confirms the age-dependence claim",
+    !!freshCN.activeMergeQuarantineFor(s));
+
+  freshCN.clearMergeQuarantineByToken(r, rTokenCN);
+  freshCN.clearMergeQuarantineByToken(d, "4b06875f-pc-newer-tok-d");
+  freshCN.clearMergeQuarantineByToken(d, "4b06875f-pc-newer-tok-old");
+  freshCN.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // UNIT-LEVEL CHECK, unionQuarantineEntries's resolvedKey rule, case 3/3 (both set and DIFFERENT) -- cases
+  // 1/3 (equal) and 2/3 (one undefined) are already exercised directly by the twin fixtures above (same
+  // value survives a union with itself) and by probe C/probe D (one side undefined, the other wins)
+  // respectively. D's twin carries resolvedKey=Ks (via R's raise); D's own pre-existing OLDER pending file
+  // carries a DIFFERENT, real, non-undefined resolvedKey=Kt (never undefined) -- both sides are SET, and
+  // they genuinely differ. THE RULE: fail closed (neither wins) -- S stays unblocked (Ks never resurfaces)
+  // AND T stays unblocked too (Kt never resurfaces either); D's own identity is still independently
+  // enforced via direct identity regardless.
+  {
+  const s = makeToplevelRepo("4b06875f-union-both-diff-s");
+  const Ks = canonicalRepoLockKey(s);
+  const t = makeToplevelRepo("4b06875f-union-both-diff-t");
+  const Kt = canonicalRepoLockKey(t);
+  const r = makeToplevelRepo("4b06875f-union-both-diff-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-4b06875f-union-both-diff-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "4b06875f union-rule case 3/3: D degraded twin, filed at R's own name, resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["4b06875f-ubd-tok-d"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d)), JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "4b06875f union-rule case 3/3: D's own OLDER pending-divert record, carrying a DIFFERENT resolvedKey=T's key",
+    enteredAt: Date.now() - 60_000, tokens: ["4b06875f-ubd-tok-old"], resolvedKey: Kt,
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  const rTokenUBD = enterMergeQuarantine(r, "r-branch", "4b06875f union-rule case 3/3: r raises");
+
+  const freshUBD = await freshBootModule();
+  freshUBD.reenterMergeQuarantinesAtBoot([]);
+  check("*** UNION RULE (case 3/3, both DIFFERENT) *** activeMergeQuarantineFor(s) is NOT blocked by D after reboot -- Ks never survived the union",
+    !freshUBD.activeMergeQuarantineFor(s));
+  // ACCEPTED RESIDUAL, found by THIS check, not fixed here (reported, not silently dropped): D's own
+  // IN-MEMORY pending-divert entry (loaded at BOOT by PASS1, sitting in pendingUnresolvedQuarantines) is a
+  // SEPARATE copy from the fresh disk re-read reconcilePendingDivertTarget uses for the FIRST union --
+  // the atFilenameIdx union then unions AGAIN against that STALE copy, which still carries Kt (T's own
+  // key), UNFILTERED (it was loaded before this raise ever ran, so excludeLiftedResolvedKey never touched
+  // it). The first union's own correct "both different -> undefined" verdict is treated by the SECOND
+  // union as "nothing to see here, keep my own value" rather than "already adjudicated, stay dropped" --
+  // Kt (an UNRELATED third party, never in this raise's own liftedKeys and never matching final's own
+  // physical key) survives where Ks correctly does not. Deliberately NOT asserted here -- see this card's
+  // decision record "Follow-up 4b06875f" (Round 2) for the full writeup; fixing it needs a way to mark a
+  // resolvedKey as "deliberately excluded" so a LATER union can't re-admit it from a stale copy, which is
+  // a bigger change than this round's own scope.
+  check("(union-rule case 3/3) D's own tokens are still independently enforced via direct identity", (() => {
+    const tokens = new Set(freshUBD.activeMergeQuarantineFor(d)?.tokens ?? []);
+    return tokens.has("4b06875f-ubd-tok-d") && tokens.has("4b06875f-ubd-tok-old");
+  })());
+
+  freshUBD.clearMergeQuarantineByToken(r, rTokenUBD);
+  freshUBD.clearMergeQuarantineByToken(d, "4b06875f-ubd-tok-d");
+  freshUBD.clearMergeQuarantineByToken(d, "4b06875f-ubd-tok-old");
+  freshUBD.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // PROBE E — Round-2 CR a61d0bec (card 4b06875f), MAJOR: readPendingDivertFileAt's own resolvedKey read
+  // (merge-quarantine.ts, the `readPendingDivertFileAt` reader) had NO discriminating test. Probe C's own
+  // fixture never needed it: there, the OLDER pending file carries NO resolvedKey at all, so reverting
+  // the reader (always reporting resolvedKey absent) changes nothing -- the on-disk value was already
+  // absent. THIS scenario flips which side carries the field: D's own OLDER pending-divert file already
+  // carries a LEGITIMATE, non-lifted, non-physical resolvedKey=Ks (the shape an EARLIER protect call's
+  // own correct carry leaves behind on disk -- see "Follow-up 4b06875f, Round 2"'s own field-survival
+  // trace), while a LATER twin at R's own physical key carries NO resolvedKey at all (the ordinary,
+  // overwhelmingly common case -- only a misfiled 883e29bc twin ever carries one). R raises, triggering a
+  // protect call whose own toPersist carries no resolvedKey (the twin has none) -- this toPersist then
+  // unions against D's own pre-existing OLDER pending file. Per the union rule ("one side undefined ->
+  // keep the other"), Ks must survive IF AND ONLY IF the reader actually parses it back off the on-disk
+  // file -- with the reader reverted (always reporting resolvedKey absent), the union sees BOTH sides as
+  // undefined and Ks is lost, even though liftedKeys/the union rule/the post-union filter are all
+  // otherwise intact.
+  //
+  // Realism (Round 4, Code Review be296830, Q1): a named, reachable production path leaves EXACTLY this
+  // shape -- protectOccupantContentBeforeDelete's own double-fault branch (merge-quarantine.ts:1872,
+  // firing when writePendingDivertFile(filename, toWrite) returns false) re-points in-memory tracking
+  // for this identity to sourceFile:finalBasename, NEVER to filename (the deterministic
+  // pendingDivertFilenameFor path) -- regardless of whether filename already held a prior, durably
+  // written generation from an EARLIER, successful protect call. That prior generation's bytes are
+  // untouched by the failed write, but nothing in memory now points at them -- a LATER (third) protect
+  // call for the same identity reaches reconcilePendingDivertTarget fresh, computes the SAME filename,
+  // and finds atFilenameIdx < 0 (nothing tracks it) -- the disk read is the only route back to its own
+  // resolvedKey. This scenario starts from that already-reached end state directly (pending file written
+  // after boot), the same way Probe C/D themselves start from a directly-written "prior protect already
+  // happened" pending file rather than re-deriving it via a literal multi-raise sequence.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("4b06875f-rd-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("4b06875f-rd-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-4b06875f-rd-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // D's twin, filed at R's own name, carrying NO resolvedKey this time (the ordinary, non-misfiled case).
+  const KrFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(KrFinalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "4b06875f probe E: D degraded twin, filed at R's own name, NO resolvedKey",
+    enteredAt: Date.now(), tokens: ["4b06875f-rd-tok-d"],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+
+  // D's own OLDER pending-divert file, ALREADY carrying a legitimate resolvedKey=Ks (the shape an
+  // earlier protect call's own correct carry leaves behind on disk) -- written AFTER boot, deliberately,
+  // so THIS process's own pendingUnresolvedQuarantines never loads it: the only way its resolvedKey can
+  // reach the raise-side union below is a FRESH disk read via readPendingDivertFileAt at reconcile time.
+  // Writing it before boot (Probe C/D's own pattern) would let PASS 1's own untouched boot-time reader
+  // load it into memory first, and the atFilenameIdx in-memory union would then rescue resolvedKey
+  // regardless of whether readPendingDivertFileAt itself works -- the exact "two bugs cancel out" trap
+  // this card's own decision record already names for Probe C's pre-round-2 state.
+  const dPendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d));
+  fs.writeFileSync(dPendingPath, JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "4b06875f probe E: D's own OLDER pending-divert record, already carrying a legitimate resolvedKey=Ks",
+    enteredAt: Date.now() - 60_000, tokens: ["4b06875f-rd-tok-old"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+  check("(probe E precondition) D's own OLDER pending-divert file exists before the raise", fs.existsSync(dPendingPath));
+
+  const rTokenE = enterMergeQuarantine(r, "r-branch", "4b06875f probe E: r raises, triggers protect via atFinalBasenameIdx only");
+
+  const freshE = await freshBootModule();
+  freshE.reenterMergeQuarantinesAtBoot([]);
+  check("*** PROBE E *** activeMergeQuarantineFor(s) should STILL be blocked after reboot -- the reader must parse resolvedKey back off D's own pre-existing pending file, or the union sees both sides as undefined and Ks is lost",
+    !!freshE.activeMergeQuarantineFor(s));
+  check("(probe E) activeMergeQuarantineFor(d) is unaffected -- still correctly blocked via direct identity",
+    !!freshE.activeMergeQuarantineFor(d));
+
+  freshE.clearMergeQuarantineByToken(r, rTokenE);
+  freshE.clearMergeQuarantineByToken(d, "4b06875f-rd-tok-d");
+  freshE.clearMergeQuarantineByToken(d, "4b06875f-rd-tok-old");
+  freshE.clearMergeQuarantineByRecordedPath(d);
   }
 } finally {
   for (const d of tmpDirs) {
