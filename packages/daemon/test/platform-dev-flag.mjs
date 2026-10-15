@@ -13,9 +13,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       stays seeded here too), seedPlatformHome seeds the reserved project + Lead/Auditor agents, and a
 //       re-seed is idempotent (no duplicates).
 //   (3) RELEASE skill curation: curateSkillDirs (the pure helper the npm builder uses) excludes the
-//       dev-only platform skills AND the install-specific `research` skill from the staged assets/skills
-//       but keeps the core ones — checked against the REAL bundled asset listing. (platform-lead's own
-//       skill curation stays dev-only here — moving it to ship is card f437d4e9 C4, not this card.)
+//       dev-only platform-audit skill AND the install-specific `research` skill from the staged
+//       assets/skills but keeps the core ones AND platform-lead (shipped to all users since card
+//       f437d4e9 C4 — its dev-only rules moved into a spawn-time prompt addendum instead, gated on
+//       isLoomDev() — see sessions/platform-lead-prompt.ts) — checked against the REAL bundled asset
+//       listing.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-dev-flag.mjs
 import fs from "node:fs";
@@ -104,6 +106,14 @@ try {
   check("(3) staged release EXCLUDES every omitted skill (dev-only + install-specific)", DEV_ONLY_SKILLS.every((n) => !kept.includes(n)));
   check("(3) staged release KEEPS the core orchestration skills",
     ["orchestrate", "worker", "loom-pickup", "loom-doc-hygiene", "web-design"].every((n) => kept.includes(n)));
+  // Card f437d4e9 C4: platform-lead is now a generic shipped skill (dropped from DEV_ONLY_SKILLS) while
+  // platform-audit (the dev Platform Auditor) stays dev-only — this is the exact split this card ships.
+  check("(3) platform-lead skill exists in the bundled assets", allSkillDirs.includes("platform-lead"));
+  check("(3) platform-lead is NOT dev-only anymore (ships to all users)", !DEV_ONLY_SKILLS.includes("platform-lead"));
+  check("(3) staged release KEEPS the platform-lead skill", kept.includes("platform-lead"));
+  check("(3) platform-audit skill exists in the bundled assets", allSkillDirs.includes("platform-audit"));
+  check("(3) platform-audit is STILL dev-only", DEV_ONLY_SKILLS.includes("platform-audit"));
+  check("(3) staged release EXCLUDES the dev-only platform-audit skill", !kept.includes("platform-audit"));
   // The install-specific `research` skill (bespoke to the owner's geopolitics/history vault) must NOT
   // ship to regular `loomctl` users — it lives in DEV_ONLY_SKILLS and is dropped from the staged set.
   check("(3) research skill exists in the bundled assets", allSkillDirs.includes("research"));
@@ -133,6 +143,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the dev-only reserved 'Loom Platform' home + its Platform Auditor profile still gate behind LOOM_DEV, but the Platform-lead profile now seeds ungated (f437d4e9); LOOM_DEV=1 still seeds the full dev layer (home + both agents + both profiles) idempotently, and the staged release assets/skills still exclude the dev-only platform skills and the install-specific research skill while keeping the core ones."
+  ? "\n✅ ALL PASS — the dev-only reserved 'Loom Platform' home + its Platform Auditor profile still gate behind LOOM_DEV, but the Platform-lead profile now seeds ungated (f437d4e9); LOOM_DEV=1 still seeds the full dev layer (home + both agents + both profiles) idempotently, and the staged release assets/skills exclude the dev-only platform-audit skill and the install-specific research skill while keeping the core ones AND platform-lead (shipped to all users since f437d4e9 C4, its dev-only rules moved into a spawn-time prompt addendum)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -81,6 +81,13 @@ allow("platform", ["agent_create", "agent_delete", "agent_get", "agent_update", 
   "profile_delete", "profile_get", "project_archive", "project_create", "project_get", "project_init", "project_update",
   "schedule_create", "schedule_delete", "schedule_get", "schedule_update", "platform_config_get", "project_memory_search",
   "agent_prompt_search", "template_apply", "template_list", "skill_list"], "SELF: admin CRUD/read; tool description is the contract");
+allow("platform", ["daemon_restart"], "GAP: card f437d4e9 C4 made platform-lead a generic shipped skill and moved its " +
+  "self-hosting daemon_restart doctrine into a spawn-time prompt addendum (sessions/platform-lead-prompt.ts, appended " +
+  "only when isLoomDev() is true), which this test does not read (it reads only SKILL.md + references/**). The tool " +
+  "itself still registers unconditionally here because C3 (gate its registerTool call on isLoomDev(), excluding it " +
+  "from a non-dev tools/list entirely) hasn't landed yet — a tracked follow-up, not an endorsement. Once C3 lands, " +
+  "this entry goes stale (the tool stops registering under LOOM_DEV-unset, the shape this test runs under) and the " +
+  "stale-entry check forces its deletion.");
 
 // Surfaces with no shipped doctrine skill — not checked (see header).
 const NO_DOCTRINE_SKILL = {

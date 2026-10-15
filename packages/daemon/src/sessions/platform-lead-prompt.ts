@@ -4,6 +4,7 @@ import type { Db } from "../db.js";
 import { resumeDocSizeWarning } from "./resume-doc-notes.js";
 import { readCodescapeToolDriftNote, readCodescapeBuildDriftNote } from "../codescape/drift-notice.js";
 import { stripEscapeAndControlChars } from "../security/control-chars.js";
+import { isLoomDev } from "../paths.js";
 
 // Recycle-lineage helpers (`lineageRootId`/`liveLineageSuccessor`/`lineageResolvedPendingOp`) moved to
 // `./lineage.js` (card `1c51de69`) — a general session-lineage module, not specific to this file's own
@@ -76,12 +77,28 @@ export function resolvePlatformLeadResumeDocPath(db: Db, homePath: string, linea
 }
 
 /**
+ * Card f437d4e9 C4: the `/platform-lead` doctrine skill ships to every end user now (dropped from
+ * `DEV_ONLY_SKILLS`), so the dev-only rules it used to carry — the self-hosting `daemon_restart`/deploy
+ * framing and the "don't auto-drive Loom's own product development" carve-out — were stripped from the
+ * shared skill text (true for every `platform`-role install, dev and end-user alike) and live HERE
+ * instead: appended at SPAWN TIME, never stored, by `composePlatformLeadStartupPrompt` below, whenever
+ * `isLoomDev()` is true — so a hand-edited dev Lead agent prompt can never silently lose it (unlike a
+ * stored-prompt migration, which skips an edited row by design). Appended LAST (after the agent's own,
+ * possibly user-edited, startupPrompt) so it survives regardless of what that prompt says.
+ */
+export const PLATFORM_LEAD_PROMPT_DEV_ADDENDUM = `DEV ADDENDUM (this self-hosting install only — not part of the shared /platform-lead skill, which ships to every end user): you also own Loom's own self-hosting deploy. A daemon restart affects ALL projects and is itself a deploy — the largest blast radius on this surface, dropping every live session across every project. You hold \`daemon_restart\` directly: confirm with the human first, then execute it yourself rather than relaying through a project manager. And do NOT auto-drive Loom-product development — that is the owner's own flow. Loom's own roadmap, bugs and dev cards are the owner's to direct; field and triage escalations about them onto the board, but don't dispatch workers against Loom's own development on your own initiative — act on it only on an explicit owner directive. \`skill_write\`/\`skill_edit\` can also edit this repo's BUNDLED shipped doctrine skills on this install (not just your own workspace skill store) — before doing so on a bundled skill, read \`gate_queue\`; a \`merge\` entry for that repo's project means a commit to its mainline forfeits it.`;
+
+/**
  * Compose the "Where things live" pre-block for a PLATFORM LEAD spawn — mirrors
  * `composeManagerStartupPrompt` (a265e28) but carries a single already-RESOLVED resume-doc path (the
- * Lead's home has no project vault of its own to derive one from). PURE: the caller decides the actual
- * path (base vs. per-lineage, on-disk seeding) and hands it in ready to emit. `notes`, if non-empty
- * (see {@link composeResumeDocOperationalNotes}), is prepended ahead of the pointer block itself — the
- * agent sees a size/staleness warning BEFORE it's told where to read.
+ * Lead's home has no project vault of its own to derive one from). The caller decides the actual path
+ * (base vs. per-lineage, on-disk seeding) and hands it in ready to emit. `notes`, if non-empty (see
+ * {@link composeResumeDocOperationalNotes}), is prepended ahead of the pointer block itself — the agent
+ * sees a size/staleness warning BEFORE it's told where to read. Reads `isLoomDev()` at call time (like
+ * every other reader of that flag) to append {@link PLATFORM_LEAD_PROMPT_DEV_ADDENDUM} last, on every
+ * fresh/recycle/forced-restart spawn of this role — never on a plain resume, which calls this function
+ * not at all (see `sessions/service.ts`'s own `resume()` doc: "resume injects nothing"), so there is no
+ * duplication risk across a Lead's lifetime.
  */
 export function composePlatformLeadStartupPrompt(startupPrompt: string | undefined, resumeDocPath: string, notes?: string): string {
   const block =
@@ -91,7 +108,8 @@ export function composePlatformLeadStartupPrompt(startupPrompt: string | undefin
     "reconstruct it, and never Glob for it (a broad Glob from your home directory hits the search timeout).";
   const withNotes = notes?.trim() ? `${notes.trim()}\n\n${block}` : block;
   const own = startupPrompt?.trim();
-  return own ? `${withNotes}\n\n${own}` : withNotes;
+  const withOwn = own ? `${withNotes}\n\n${own}` : withNotes;
+  return isLoomDev() ? `${withOwn}\n\n${PLATFORM_LEAD_PROMPT_DEV_ADDENDUM}` : withOwn;
 }
 
 /** How far a resolved doc's mtime must lag the freshest sibling's before it's "material" enough to flag

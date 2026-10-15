@@ -41,8 +41,9 @@ const { RETIRED_BUNDLED_SKILL_NAMES } = await import("../dist/skills/store.js");
 const NEVER_PUBLISHED_EXEMPTIONS = {
   // Gated behind LOOM_DEV at the SAME commit (0cd238f0, 2026-06-15) that introduced DEV_ONLY_SKILLS
   // itself — two days BEFORE the first ever published release (v0.3.0, 2026-06-17). No published
-  // tarball ever shipped these, so no end-user store was ever seeded.
-  "platform-lead": "gated behind LOOM_DEV before the first published release (v0.3.0) ever existed",
+  // tarball ever shipped it, so no end-user store was ever seeded.
+  // ("platform-lead" was removed from DEV_ONLY_SKILLS entirely by card f437d4e9 C4 — it ships to every
+  // user now, so this exemption no longer applies to it and would itself fail the stale-entry check below.)
   "platform-audit": "gated behind LOOM_DEV before the first published release (v0.3.0) ever existed",
 };
 

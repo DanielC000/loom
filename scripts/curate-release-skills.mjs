@@ -3,10 +3,12 @@
 //
 // `DEV_ONLY_SKILLS` is the OMISSION set: bundled skill dirs that must NOT ship to regular `loomctl`
 // users. Three reasons a skill lands here:
-//   - DEV-ONLY, LOOM_DEV-gated: platform-lead / platform-audit (the "Platform layer") and codescape (a
-//     separate dev-only feature, not part of the Platform layer, but gated behind the SAME flag — see
-//     packages/daemon/src/paths.ts › isLoomDev / isCodescapeSupervisorEnabled) — so it stays loadable in
-//     dev but never ships.
+//   - DEV-ONLY, LOOM_DEV-gated: platform-audit (the dev Platform Auditor) and codescape (a separate
+//     dev-only feature, gated behind the SAME flag — see packages/daemon/src/paths.ts › isLoomDev /
+//     isCodescapeSupervisorEnabled) — so each stays loadable in dev but never ships. (platform-lead used
+//     to be in this bucket too; card f437d4e9 C4 made it a generic shipped skill — its dev-only rules
+//     moved into a spawn-time prompt addendum in packages/daemon/src/sessions/platform-lead-prompt.ts
+//     instead, appended whenever isLoomDev() is true — never stored on the agent row.)
 //   - PRIVATE PRODUCT: codescape doubles into this bucket too — it's a private product end users cannot
 //     obtain, so shipping its skill would only leak awareness of a feature they could never use (card
 //     187873f9). Its runtime IS already inert for a regular user (LOOM_DEV-gated, above); this entry is
@@ -19,7 +21,7 @@
 // build side effects on import.
 
 /** Bundled skill dirs OMITTED from the published `assets/skills/` (dev-only + private-product + install-specific). */
-export const DEV_ONLY_SKILLS = ["platform-lead", "platform-audit", "codescape", "research"];
+export const DEV_ONLY_SKILLS = ["platform-audit", "codescape", "research"];
 
 /**
  * Given the bundled skill dir names, return the subset that SHIPS in the published package — the core
