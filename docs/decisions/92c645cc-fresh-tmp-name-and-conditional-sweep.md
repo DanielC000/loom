@@ -214,6 +214,22 @@ to matter operationally (e.g. a `/clear-by-path {id}` using a PASS-1b-promoted o
 across a restart when a human expected it to keep working), re-open as its own card rather than
 re-deriving this reasoning from scratch.
 
+### Correction (card `1e739f4a`) — reason 1's "nothing is ever LESS enforced either way" is FALSE for a
+### genuine cross-repo dual-arm, never argued here
+
+This section's own reason 1 is still correct for the narrow question it actually answers (whether PASS 1b
+should re-key, cosmetically, before arming, the way PASS 1 does) — but a LATER site, PASS 1b's own
+tmp-PROMOTION write (`armedForWrite = { ...unionEntry, resolvedKey: key }`), read reason 1's claim more
+broadly than it was ever meant and unconditionally self-stamped `resolvedKey` on every promote,
+regardless of whether that key was a disposable self-migration marker (reason 1's own subject) or a
+genuinely informative, load-bearing SECOND identity (the cross-repo dual-arm shape cards `4b06875f`/
+`48bda567` later established as enforcement-bearing, not merely a `/clear-by-path` convenience). Card
+`1e739f4a` reproduced the latter as a LIVE fail-open (a dual-armed repo's secondary key, and the OTHER
+repo it was blocking, silently unblocked after a reboot) and fixed the promote site to preserve an
+already-informative `resolvedKey` instead of overwriting it. Do not cite reason 1 above for anything
+beyond the re-keying question it was written for; see `docs/decisions/8db913e2-*.md`'s own "Follow-up
+1e739f4a" section for the full fix.
+
 ## Source
 
 Card `92c645cc`. Round 1 discovered from `bde5d1fe`; round 2 from Code Review `f861ac30` of commit

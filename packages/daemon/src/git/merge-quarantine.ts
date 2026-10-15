@@ -658,6 +658,15 @@ function replaceEntryEverywhere(byRepoKey: Map<string, MergeQuarantineEntry>, ol
   }
 }
 
+/** True iff `entry.resolvedKey` is a genuinely informative secondary key for `key` — defined, and NOT
+ *  equal to `key` itself (a self-referential/no-second-arm marker). `entry` may be `undefined` (no prior
+ *  occupant at all), which is never informative. Shared by every self-vs-informative arbitration site in
+ *  this file (`armQuarantineKey`'s own 48bda567 correction, the PHASE 2 promote-site 1e739f4a fix) so
+ *  they can never drift apart on what "informative" means. */
+function isInformativeKey(entry: MergeQuarantineEntry | undefined, key: string): boolean {
+  return entry?.resolvedKey !== undefined && entry.resolvedKey !== key;
+}
+
 /** Set `key` -> `entry` in `byRepoKey`, UNIONING with whatever entry (if any) already occupies that key
  *  rather than silently overwriting it — see {@link unionQuarantineEntries}. Every boot-time PASS 1/1b
  *  write into `byRepoKey` must route through this, never a bare `.set()`, since the toplevel walk can make
@@ -682,12 +691,10 @@ function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: str
   const prior = byRepoKey.get(key);
   let merged = prior ? unionQuarantineEntries(prior, entry) : entry;
   if (merged.resolvedKey === key) {
-    const priorRK = prior?.resolvedKey;
-    const entryRK = entry.resolvedKey;
-    const priorInformative = priorRK !== undefined && priorRK !== key;
-    const entryInformative = entryRK !== undefined && entryRK !== key;
+    const priorInformative = isInformativeKey(prior, key);
+    const entryInformative = isInformativeKey(entry, key);
     if (priorInformative !== entryInformative) {
-      merged = { ...merged, resolvedKey: priorInformative ? priorRK : entryRK };
+      merged = { ...merged, resolvedKey: priorInformative ? prior!.resolvedKey : entry.resolvedKey };
     }
   }
   const armed: MergeQuarantineEntry = { ...merged, armedKeys: [...new Set([...(merged.armedKeys ?? []), key])] };
@@ -704,12 +711,13 @@ function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: str
  *  entry, so if that primary arm itself unioned with an older `prior`, the result's `resolvedKey` can
  *  differ from the raw entry's own field used as `key`; PASS 1b also primary-arms every tmp residue at
  *  its own `currentKey`, so a `.json` + `.tmp` pair (or two tmps) sharing one hash can collide there with
- *  two independently-informative keys (card `1e739f4a`, which owns fixing the outcome once a later,
- *  unconditional tmp-promotion self-stamp currently masking it is fixed). This function is still exercised
- *  directly here, with a hand-built fixture, rather than through that boot path — not because the shape
- *  is unreachable, but because this is a REGRESSION PIN on the correction's own outer guard
- *  (`merged.resolvedKey === key`), not evidence the correction discriminates anything; see the scenario's
- *  own comment for why. */
+ *  two independently-informative keys. Card `8db913e2` (Follow-up `1e739f4a`) fixed the promote-site
+ *  self-stamp that used to mask this outcome, but deliberately did NOT attempt recovery for the
+ *  collision itself — it is logged (never silent) and left as a fail-open residual card `43cf3b26` owns.
+ *  This function is still exercised directly here, with a hand-built fixture, rather than through that
+ *  boot path — not because the shape is unreachable, but because this is a REGRESSION PIN on the
+ *  correction's own outer guard (`merged.resolvedKey === key`), not evidence the correction discriminates
+ *  anything; see the scenario's own comment for why. */
 export function armQuarantineKeyTestOnly(byRepoKey: Map<string, MergeQuarantineEntry>, key: string, entry: MergeQuarantineEntry): MergeQuarantineEntry {
   return armQuarantineKey(byRepoKey, key, entry);
 }
@@ -4748,19 +4756,32 @@ function reenterMergeQuarantinesAtBootImpl(
       // See PASS 1's identical threading note above — the second call must build on the first's result.
       // @decision d163aef5 — mirrors PASS 1's own primary arm: `entry` can be degraded here too (same
       // no-mismatch, self-consistent shape) — its claim is tautological either way.
+      const priorAtCurrentKey = byRepoKey.get(currentKey);
       const armedTmpEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
+      // @decision 8db913e2 (Follow-up 1e739f4a) — a collision HERE between two informative, DIFFERENT
+      // `resolvedKey`s (same or different identity) can only keep ONE in the scalar field; log it and
+      // accept the loss (card 43cf3b26 owns a real fix) rather than attempt an undurable recovery.
+      if (isInformativeKey(priorAtCurrentKey, currentKey) && isInformativeKey(entry, currentKey) && priorAtCurrentKey!.resolvedKey !== entry.resolvedKey) {
+        const keptKey = armedTmpEntry.resolvedKey;
+        const droppedKey = keptKey === priorAtCurrentKey!.resolvedKey ? entry.resolvedKey : priorAtCurrentKey!.resolvedKey;
+        const priorSourceList = tmpsToUnlinkByKey.get(currentKey);
+        const priorSourceFile = priorSourceList?.find((p) => originalEntryBySource.get(path.basename(p))?.resolvedKey === priorAtCurrentKey!.resolvedKey);
+        const priorSourceDisplay = priorSourceFile !== undefined ? path.basename(priorSourceFile) : path.basename(quarantinePathForKey(currentKey));
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] boot found sibling latches for ${entry.repoPath} with DIFFERENT, equally informative resolvedKeys (kept: ${keptKey}, DROPPED: ${droppedKey}) — sources: ${path.basename(tmpPath)} and ${priorSourceDisplay} — ${droppedKey} fails open after reboot; see card 43cf3b26.`);
+      }
       if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
         // `entry` can ALSO be degraded here — mirrors PASS 1's own second-arm note above (a
         // self-consistently-named entry with a stale, diverging `resolvedKey`); the helper is symmetric.
         const dualArmed = armKeyUnlessDegradedCollision(entry.resolvedKey, armedTmpEntry, false);
         if (dualArmed !== undefined) byRepoKey.set(currentKey, dualArmed);
       }
+      originalEntryBySource.set(path.basename(tmpPath), entry);
       // Collect this tmp for the single per-key write/unlink pass below, grouped by the entry's OWN
       // canonical key — the same key `writeMergeQuarantineLatch` physically writes to.
       const list = tmpsToUnlinkByKey.get(currentKey) ?? [];
       list.push(tmpPath);
       tmpsToUnlinkByKey.set(currentKey, list);
-      originalEntryBySource.set(path.basename(tmpPath), entry);
     } catch (e) {
       // Genuinely unreadable/unparsable tmp content (a crash mid-write, before fsync even completed).
       // @decision 92c645cc (round 2, item 2b) — DEFER fail-closed handling: a sibling tmp for the SAME
@@ -5245,7 +5266,10 @@ function reenterMergeQuarantinesAtBootImpl(
       console.warn(`[merge-quarantine] recovered ${tmps.length} torn-write tmp(s) for ${unionEntry.repoPath} but could NOT verify its key — the path does not currently resolve on disk — leaving every tmp AS WRITTEN.`);
       continue;
     }
-    const armedForWrite: MergeQuarantineEntry = { ...unionEntry, resolvedKey: key };
+    // @decision 8db913e2 (Follow-up 1e739f4a) — never overwrite an ALREADY-INFORMATIVE
+    // `unionEntry.resolvedKey` with the self-referential promote key: that durably drops a genuine
+    // cross-repo dual-arm the instant any tmp residue for this key is promoted, even when nothing was wrong.
+    const armedForWrite: MergeQuarantineEntry = isInformativeKey(unionEntry, key) ? unionEntry : { ...unionEntry, resolvedKey: key };
     // @decision 54054c01 / fd189d91 — replace at EVERY key `unionEntry` was armed under (never just
     // `key`), AND re-point any pending reference to it — a dual-armed (stale-resolvedKey) tmp's other
     // slot double-reports via the identity-keyed de-dupe below otherwise.
