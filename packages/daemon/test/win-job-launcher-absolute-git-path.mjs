@@ -79,6 +79,33 @@ const check = (label, cond, detail) => {
   if (!cond) { failures++; if (detail) console.log(`   ${detail}`); }
 };
 
+// Card 201c8ef5 (2026-10-15 investigation): under concurrent full-gate host load, this file's own bare
+// `execFileSync("git", ...)` verification-helper calls (setup + the post-launcher `git log` checks) can
+// throw a SPAWN-LEVEL `Error: spawnSync git UNKNOWN` (errno -4094) — the child process itself never ran,
+// a transient Windows CreateProcess resource-contention artifact, distinct from git actually running and
+// exiting non-zero. Reproduced 2/2 full-suite runs at this exact line. Retry ONLY that spawn-level shape
+// (pid===0, status===null, signal===null — no exit code and no signal means the process never started);
+// a real git failure (non-zero exit, or killed by a signal) still throws at once, unretried.
+const GIT_SPAWN_RETRY_ATTEMPTS = 3;
+const GIT_SPAWN_RETRY_DELAY_MS = 150;
+function isSpawnLevelGitFailure(e) {
+  return !!e && e.pid === 0 && e.status === null && e.signal === null && typeof e.code === "string";
+}
+async function execGitResilient(args, opts) {
+  let lastErr;
+  for (let attempt = 1; attempt <= GIT_SPAWN_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return execFileSync("git", args, opts);
+    } catch (e) {
+      if (!isSpawnLevelGitFailure(e) || attempt === GIT_SPAWN_RETRY_ATTEMPTS) throw e;
+      lastErr = e;
+      console.log(`   (retry ${attempt}/${GIT_SPAWN_RETRY_ATTEMPTS}: spawn-level failure code=${e.code} errno=${e.errno} on git ${args.join(" ")} — retrying)`);
+      await new Promise((r) => setTimeout(r, GIT_SPAWN_RETRY_DELAY_MS));
+    }
+  }
+  throw lastErr;
+}
+
 function runLauncher(exe, args, cwd) {
   return new Promise((resolve) => {
     const child = spawn(exe, args, { cwd, windowsHide: true });
@@ -138,9 +165,9 @@ async function run() {
     const launcherCopy = copyLauncherTo(launcherDir);
     plantFakeGit(launcherDir);
     const repo = mkdtempManaged("loom-wjl-abspath-repo-");
-    execFileSync("git", ["init", "-q"], { cwd: repo });
-    execFileSync("git", ["config", "user.email", "wjl@loom"], { cwd: repo });
-    execFileSync("git", ["config", "user.name", "wjl"], { cwd: repo });
+    await execGitResilient(["init", "-q"], { cwd: repo });
+    await execGitResilient(["config", "user.email", "wjl@loom"], { cwd: repo });
+    await execGitResilient(["config", "user.name", "wjl"], { cwd: repo });
     plantFakeGit(repo);
 
     const nonce1 = crypto.randomBytes(16).toString("hex");
@@ -153,8 +180,15 @@ async function run() {
     const rCommit = await runLauncher(launcherCopy, ["run", nonce2, GIT_EXE, "commit", "--allow-empty", "-m", msg], repo);
     check("junk planted in BOTH locations: a real commit via the launcher still exits 0", rCommit.code === 0, JSON.stringify(rCommit));
     if (rCommit.code === 0) {
-      const logged = execFileSync("git", ["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" }).trim();
-      check("junk planted in BOTH locations: the commit landed with the EXACT intended message", logged === msg, `got=${JSON.stringify(logged)}`);
+      let logged = null;
+      try {
+        logged = (await execGitResilient(["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" })).trim();
+      } catch (e) {
+        check("junk planted in BOTH locations: the commit landed with the EXACT intended message", false, `git log threw: ${e?.message ?? e}`);
+      }
+      if (logged !== null) {
+        check("junk planted in BOTH locations: the commit landed with the EXACT intended message", logged === msg, `got=${JSON.stringify(logged)}`);
+      }
     }
   }
 
@@ -166,9 +200,9 @@ async function run() {
     setWinJobLauncherOverrideForTest(null);
     try {
       const repo = mkdtempManaged("loom-wjl-abspath-directspawn-repo-");
-      execFileSync("git", ["init", "-q"], { cwd: repo });
-      execFileSync("git", ["config", "user.email", "wjl@loom"], { cwd: repo });
-      execFileSync("git", ["config", "user.name", "wjl"], { cwd: repo });
+      await execGitResilient(["init", "-q"], { cwd: repo });
+      await execGitResilient(["config", "user.email", "wjl@loom"], { cwd: repo });
+      await execGitResilient(["config", "user.name", "wjl"], { cwd: repo });
       plantFakeGit(repo);
       const msg = "absolute-git-path direct-spawn fallback case";
       let threw = null;
@@ -177,8 +211,15 @@ async function run() {
       } catch (e) { threw = e; }
       check("direct-spawn fallback, junk planted in cwd: the call resolved (no error)", threw === null, threw?.message);
       if (threw === null) {
-        const logged = execFileSync("git", ["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" }).trim();
-        check("direct-spawn fallback, junk planted in cwd: the commit landed with the EXACT intended message", logged === msg, `got=${JSON.stringify(logged)}`);
+        let logged = null;
+        try {
+          logged = (await execGitResilient(["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" })).trim();
+        } catch (e) {
+          check("direct-spawn fallback, junk planted in cwd: the commit landed with the EXACT intended message", false, `git log threw: ${e?.message ?? e}`);
+        }
+        if (logged !== null) {
+          check("direct-spawn fallback, junk planted in cwd: the commit landed with the EXACT intended message", logged === msg, `got=${JSON.stringify(logged)}`);
+        }
       }
     } finally {
       setWinJobLauncherOverrideForTest(undefined);

@@ -100,15 +100,30 @@ async function waitForMsysPid(repo, fileName, timeoutMs = 5000) {
 }
 
 /** MSYS's own `/proc/<pid>/winpid` emulation is visible only to an MSYS-runtime-aware process (Git for
- *  Windows' `sh.exe`), never to a bare Node.exe read — shell out to resolve it. Returns `null` on any
- *  failure (process already gone, emulation unavailable) rather than throwing. */
-async function winPidFromMsysPid(msysPid) {
-  try {
-    const { stdout } = await execFileAsync("sh", ["-c", `cat /proc/${msysPid}/winpid 2>/dev/null`]);
-    const n = Number(stdout.trim());
-    return Number.isInteger(n) && n > 0 ? n : null;
-  } catch {
-    return null;
+ *  Windows' `sh.exe`), never to a bare Node.exe read — shell out to resolve it. Card 201c8ef5 (2026-10-15
+ *  investigation): under concurrent full-gate host load, a SINGLE read here can race the MSYS runtime's
+ *  own registration of the winpid mapping and return null even though the pid FILE (waitForMsysPid, above)
+ *  already confirmed the process is live — reproduced 2/2 full-suite runs. Poll it the SAME
+ *  observable-event-driven way `waitForMsysPid` polls for the pid file itself (bounded, no fixed sleep),
+ *  rather than a single shot — but keep the bound SHORT (not `waitForMsysPid`'s 5000ms default): this runs
+ *  concurrently, via `Promise.all`, with the 3000ms abort deadline case 1 fires against the hook's own 8s
+ *  sleep (see DOUBLE_FORK_HOOK's own doc above), so a long bound here would itself risk pushing the
+ *  "alive before the abort" sanity check past the abort — defeating the very race this bound closes.
+ *  Returns `null` once the bound is exhausted (process already gone, emulation never available, or a
+ *  genuine read failure) — every downstream check still treats `null` exactly as before: FAIL, not a
+ *  silent pass. */
+async function winPidFromMsysPid(msysPid, timeoutMs = 800) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const { stdout } = await execFileAsync("sh", ["-c", `cat /proc/${msysPid}/winpid 2>/dev/null`]);
+      const n = Number(stdout.trim());
+      if (Number.isInteger(n) && n > 0) return n;
+    } catch {
+      // fall through to the bound check below
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, 25));
   }
 }
 
