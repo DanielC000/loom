@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 import { normForCompare, containmentForms } from "../git/worktrees.js";
 import { WORKTREES_DIR } from "../paths.js";
@@ -426,6 +427,18 @@ function incarnationKey(lockPath: string, dev: bigint, ino: bigint): string { re
 /** TEST SEAM: reset the module-level memo above between hermetic test scenarios in the SAME process. */
 export function __clearKnownStuckIncarnationsForTest(): void { knownStuckIncarnations.clear(); }
 
+/** TEST SEAM: optional observer invoked once per {@link withTrustLock} call that actually HELD the lock
+ *  (`held === true`), with the wall-clock duration `fn()` itself took while holding it — i.e. the real
+ *  lock-HOLD time, as opposed to a caller's total wall time around this call, which can also include
+ *  lock-free work (e.g. a classification scan done before the lock is even requested) that this
+ *  observer must not be blamed for. Never invoked when the lock was not held (`fn()` still ran, but
+ *  best-effort/unlocked — there is no lock-hold duration to report). Lets a hermetic test assert on the
+ *  actual in-lock duration of a bulk write instead of inferring it from total wall time, which is
+ *  sensitive to unrelated host load during lock-free work around the call. Measured with
+ *  `performance.now()`. Defaults to undefined; production code never calls the setter. */
+let lockHoldObserverForTest: ((durationMs: number) => void) | undefined;
+export function __setLockHoldObserverForTest(fn?: (durationMs: number) => void): void { lockHoldObserverForTest = fn; }
+
 function withTrustLock(lockPath: string, fn: () => void, opts?: { requireLock?: boolean }): { held: boolean; reason?: string } {
   const timeout = trustLockMs();
   const deadline = Date.now() + timeout;
@@ -481,9 +494,12 @@ function withTrustLock(lockPath: string, fn: () => void, opts?: { requireLock?: 
     sleepSync(50);
   }
   if (!held && opts?.requireLock) return { held: false, reason: degradeReason }; // caller must perform NO write when the lock couldn't be acquired
+  const measureHold = held && lockHoldObserverForTest !== undefined;
+  const holdStartedAt = measureHold ? performance.now() : 0;
   try {
     fn();
   } finally {
+    if (measureHold) lockHoldObserverForTest!(performance.now() - holdStartedAt);
     if (held) {
       try { fs.rmSync(lockPath); } catch { /* already gone */ }
     }

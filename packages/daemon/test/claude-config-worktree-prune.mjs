@@ -19,7 +19,12 @@ import {
   removeClaudeConfigEntryForWorktree,
   __setReadFileSyncForTest,
   __setStatSyncForTest,
+  __setLockHoldObserverForTest,
 } from "../dist/pty/claude-config.js";
+
+// Synchronous sleep for injecting an artificial delay into a synchronous production code path from a
+// test seam override (the same Atomics.wait technique claude-config.ts's own internal sleepSync uses).
+const sleepSyncForTest = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -610,16 +615,79 @@ try {
     // directory on disk, so this run's dead set (and therefore its in-lock re-verify + write) is the
     // FULL 10k, not a sample — a worst-case-shaped measurement of that in-lock section's duration
     // (review item 3: "measure and report its duration... if it can exceed the stale bound
-    // [LOOM_TRUST_LOCK_MS, default 5000ms], add more protection"). Loose ceiling, not a benchmark.
+    // [LOOM_TRUST_LOCK_MS, default 5000ms], add more protection").
+    //
+    // Card f85d465f: the TOTAL wall-clock check this used to be (measured against a 3500ms ceiling)
+    // flaked under real load — measured 3010-4155ms standalone-to-loaded on main, under 15% headroom
+    // even standalone. Most of that total is the LOCK-FREE classification scan (a statSync per
+    // synthetic entry, done BEFORE the lock is even requested — see the comment above) and the
+    // lock-free initial file read, both sensitive to ambient host/filesystem load that has nothing to
+    // do with the actual safety property this test exists to guard: can a bulk prune hold the trust
+    // lock long enough for a stale-lock breaker (LOOM_TRUST_LOCK_MS) to steal it mid-write? That
+    // property is about LOCK-HOLD time, not total wall time, so this now measures lock-hold time
+    // directly via the __setLockHoldObserverForTest seam (claude-config.ts), which times exactly the
+    // span `withTrustLock` holds the lock while running its callback (fresh read + re-verify + the
+    // count-drop check + the write) — never the lock-free classification scan around it.
+    //
+    // LOCK_HOLD_CEILING_MS is half of the 5000ms default LOOM_TRUST_LOCK_MS — loose, not a benchmark,
+    // but still meaningfully tied to the actual stale-lock bound this test guards against (a 2x safety
+    // margin to the real steal threshold). Measured lock-hold time for this exact 10k-entry worst case
+    // on this host: ~540-790ms standalone — over 3x margin under this ceiling already.
+    const LOCK_HOLD_CEILING_MS = 2500;
     fs.writeFileSync(claudeJson, JSON.stringify({ projects: bigProjects }, null, 2)); // restore (13a deleted one key)
+    let holdMs = null;
+    __setLockHoldObserverForTest((ms) => { holdMs = ms; });
     const t1 = performance.now();
     const bulkResult = pruneDeadWorktreeClaudeConfigEntries({ dryRun: false, worktreesRoot });
     const bulkMs = performance.now() - t1;
-    check(`bulk prune (apply) removing all ${SYNTHETIC_ENTRY_COUNT} synthetic entries completes well under the stale-lock bound (measured ${bulkMs.toFixed(2)}ms, loose ceiling 3500ms vs the 5000ms default LOOM_TRUST_LOCK_MS)`,
-      bulkMs < 3500);
+    __setLockHoldObserverForTest(undefined);
+    check(`bulk prune (apply) removing all ${SYNTHETIC_ENTRY_COUNT} synthetic entries holds the trust lock well under the stale-lock bound (measured lock-HOLD ${holdMs === null ? "N/A" : holdMs.toFixed(2)}ms, loose ceiling ${LOCK_HOLD_CEILING_MS}ms vs the 5000ms default LOOM_TRUST_LOCK_MS; total wall time for context: ${bulkMs.toFixed(2)}ms)`,
+      holdMs !== null && holdMs < LOCK_HOLD_CEILING_MS);
     check("bulk prune on the 10k-entry file: no abort (this run never contends with anything)", bulkResult.aborted === null);
     check("bulk prune on the 10k-entry file: removed the full synthetic set", bulkResult.removedKeys.length === SYNTHETIC_ENTRY_COUNT - 1);
-    console.log(`[timing] removeClaudeConfigEntryForWorktree sync portion: ${syncMs.toFixed(2)}ms | bulk prune (apply, ${SYNTHETIC_ENTRY_COUNT} entries): ${bulkMs.toFixed(2)}ms`);
+    console.log(`[timing] removeClaudeConfigEntryForWorktree sync portion: ${syncMs.toFixed(2)}ms | bulk prune (apply, ${SYNTHETIC_ENTRY_COUNT} entries): total=${bulkMs.toFixed(2)}ms lock-hold=${holdMs === null ? "N/A" : holdMs.toFixed(2) + "ms"}`);
+
+    // 13c. REGRESSION PROOF (card f85d465f DoD): the lock-hold assertion above must be able to go RED.
+    // Artificially slow down the SECOND readFileSyncImpl call — readCfgFailClosed is called exactly
+    // twice per real bulk-prune run: once OUTSIDE the lock (the classification read) and once as the
+    // FIRST thing the locked callback itself does (the fresh in-lock read) — so delaying call #2 is a
+    // delay genuinely INSIDE the locked section, not in the lock-free scan around it. A small synthetic
+    // file keeps this fast; the injected delay dominates either way.
+    {
+      const REGRESSION_ENTRY_COUNT = 50;
+      const smallProjects = {};
+      for (let i = 0; i < REGRESSION_ENTRY_COUNT; i++) {
+        smallProjects[keyFor(path.join(worktreesRoot, "regress498452c0", `task${i}`))] = { hasTrustDialogAccepted: true };
+      }
+      const INJECTED_DELAY_MS = LOCK_HOLD_CEILING_MS + 500; // comfortably over the ceiling
+      const realReadFileSync = fs.readFileSync;
+      let readCalls = 0;
+      __setReadFileSyncForTest((...args) => {
+        readCalls++;
+        if (readCalls === 2) sleepSyncForTest(INJECTED_DELAY_MS); // the in-lock fresh read — lock is held here
+        return realReadFileSync(...args);
+      });
+
+      fs.writeFileSync(claudeJson, JSON.stringify({ projects: smallProjects }, null, 2));
+      let injectedHoldMs = null;
+      __setLockHoldObserverForTest((ms) => { injectedHoldMs = ms; });
+      pruneDeadWorktreeClaudeConfigEntries({ dryRun: false, worktreesRoot });
+      __setLockHoldObserverForTest(undefined);
+      __setReadFileSyncForTest();
+
+      check(`REGRESSION PROOF (RED case): an artificial ${INJECTED_DELAY_MS}ms delay injected INSIDE the locked section is correctly measured as exceeding the ${LOCK_HOLD_CEILING_MS}ms lock-hold ceiling (measured ${injectedHoldMs === null ? "N/A" : injectedHoldMs.toFixed(2)}ms) — proves 13b's assertion is falsifiable, not vacuously true`,
+        injectedHoldMs !== null && injectedHoldMs >= LOCK_HOLD_CEILING_MS);
+
+      // GREEN case: same file, same code path, no injected delay — confirm the detector isn't just
+      // permanently tripped and correctly reports a clean run as under the ceiling again.
+      fs.writeFileSync(claudeJson, JSON.stringify({ projects: smallProjects }, null, 2));
+      let cleanHoldMs = null;
+      __setLockHoldObserverForTest((ms) => { cleanHoldMs = ms; });
+      pruneDeadWorktreeClaudeConfigEntries({ dryRun: false, worktreesRoot });
+      __setLockHoldObserverForTest(undefined);
+      check(`REGRESSION PROOF (GREEN case): the same check, WITHOUT the injected delay, reports a lock-hold well under the ceiling again (measured ${cleanHoldMs === null ? "N/A" : cleanHoldMs.toFixed(2)}ms vs ${LOCK_HOLD_CEILING_MS}ms)`,
+        cleanHoldMs !== null && cleanHoldMs < LOCK_HOLD_CEILING_MS);
+    }
   }
 
   // === 14. Card f761fdf3 item 2 — GC-time removal: a busy trust lock now WARNS LOUDLY instead of
