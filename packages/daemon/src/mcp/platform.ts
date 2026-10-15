@@ -1267,12 +1267,13 @@ export class PlatformMcpRouter {
     private pty?: PtyHost,
   ) {}
 
-  /** Role gate: only a platform-lead gets this surface. Card 280b1e44: ALSO requires isLoomDev() — this
-   *  whole router is a LOOM_DEV-only surface (the Platform layer never ships enabled to end users), and
-   *  the per-session-token gateway hook does not know about that gate (it checks identity/liveness only),
-   *  so a leftover `role:"platform"` row from a project that later flips LOOM_DEV off must still 404 here. */
+  /** Role gate: ONLY a platform-lead session gets this surface — a bare role check, mirroring
+   *  SetupMcpRouter.resolveRole.
+   *
+   *  @decision f437d4e9 — do not reintroduce an `isLoomDev()` gate here; minting is restricted at the
+   *  source (only the seeded Lead's start/recycle path), not at this router. */
   resolveRole(sessionId: string): { id: string } | null {
-    return isLoomDev() && this.db.getSession(sessionId)?.role === "platform" ? { id: sessionId } : null;
+    return this.db.getSession(sessionId)?.role === "platform" ? { id: sessionId } : null;
   }
 
   private buildServer(callerSessionId?: string): McpServer {

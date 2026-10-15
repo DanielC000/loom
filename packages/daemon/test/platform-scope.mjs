@@ -61,15 +61,17 @@ const get = async (u) => (await fetch(BASE + u)).json();
 const now = new Date().toISOString();
 
 // --- boot the isolated daemon (dist/index.js) ---
-// Card 280b1e44: the loom-platform MCP router is now ALSO gated on isLoomDev() (mcp/platform.ts's
-// resolveRole) — this test's whole purpose is proving the platform surface's shape, so it must boot with
-// LOOM_DEV=1 regardless of the ambient gate-runner env, mirroring how a real self-hosting daemon opts in.
+// Card f437d4e9 C1: the loom-platform MCP router's resolveRole() is now a BARE role check — the
+// isLoomDev() half of the gate (card 280b1e44) was dropped on purpose, so this test deliberately boots
+// with LOOM_DEV **UNSET** (the real end-user shape) to prove the platform surface is reachable on every
+// install, not just a dev one. (platform-dev-flag-live.mjs below, if it exists, would be the place for a
+// LOOM_DEV=1 regression counterpart; this file's own job is the non-dev case.)
 // Card 2365cc22: LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1 — a fresh LOOM_HOME with zero ordinary projects (true
 // here until this test seeds one, below) is exactly the condition that fires the real Setup Assistant
 // first-run auto-launch (setup/first-run.ts) — a REAL claude spawn this test never intends. Measured
 // live firing in a sibling of this file before this fix (card 2365cc22 checkpoint).
 const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_DEV: "1", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" },
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0", LOOM_DEV: undefined, LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" },
   stdio: ["ignore", "ignore", "pipe"], // stderr captured (not "ignore") so an early EADDRINUSE-style exit is diagnosable
 });
 const getStderrTail = captureStderrTail(daemon);
@@ -122,6 +124,8 @@ commitAll(gitRepo, "init", "-c user.email=p@loom -c user.name=p");
 fs.mkdirSync(nonGit, { recursive: true });
 
 try {
+  // f437d4e9 C1 DoD-1: connecting at all (no 404/throw) with LOOM_DEV unset (this daemon's own boot env,
+  // above) IS the live-HTTP proof that a role:"platform" session reaches /mcp-platform without LOOM_DEV.
   // 1) Role gate: a platform-lead sees the platform surface (P1 create/configure + the P2 management,
   //    P4 messaging, and P3 elevated tools). Membership check (the surface grows phase by phase).
   const PL = await connect("PL");

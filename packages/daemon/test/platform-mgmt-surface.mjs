@@ -132,14 +132,14 @@ const parse = (res) => JSON.parse(res.content[0].text);
 
 try {
   // ===================== (b) ROLE GATE — resolveRole is the predicate handle() 404s on =====================
-  // resolveRole() ALSO requires isLoomDev() (card 280b1e44, mcp/platform.ts) — force LOOM_DEV=1 for this
-  // block only, rather than relying on it being set in the ambient host env (true on the owner's
-  // self-hosting Windows box, which defaults it on, but unset on a clean CI runner — the PL-session
-  // assertion was silently riding that difference). Restore immediately after so nothing later in this
-  // file (none of it LOOM_DEV-sensitive today, but don't assume for the next reader) is affected.
+  // card f437d4e9 C1: resolveRole() is now a BARE role check — the isLoomDev() gate that used to also be
+  // required here (card 280b1e44) was removed on purpose, since the whole point of f437d4e9 is that a
+  // role:"platform" session reaches this router on every install, not just a LOOM_DEV one. So this block
+  // no longer needs to force LOOM_DEV=1 to see the PL-session assertion pass — confirm it also holds with
+  // LOOM_DEV genuinely UNSET (the real end-user shape), restoring the ambient value after.
   const savedLoomDev = process.env.LOOM_DEV;
-  process.env.LOOM_DEV = "1";
-  check("(b) platform session PL HAS the surface (resolveRole truthy)", !!router.resolveRole("PL"));
+  delete process.env.LOOM_DEV;
+  check("(b) platform session PL HAS the surface with LOOM_DEV unset (resolveRole truthy)", !!router.resolveRole("PL"));
   check("(b) manager session M gets NO surface (resolveRole null)", router.resolveRole("M") === null);
   check("(b) worker session W gets NO surface (resolveRole null)", router.resolveRole("W") === null);
   check("(b) plain session P gets NO surface (resolveRole null)", router.resolveRole("P") === null);

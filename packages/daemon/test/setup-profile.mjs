@@ -69,8 +69,10 @@ try {
   check("(2b) the seeded Workspace Auditor row has role 'workspace-auditor' + a non-empty description",
     auditorRow?.role === "workspace-auditor" && typeof auditorRow?.description === "string" && auditorRow.description.length > 0);
 
-  // --- (3) NO platform-gate regression: the two platform profiles still don't seed by default ----
-  check("(3) Platform-lead is NOT seeded when LOOM_DEV is unset", !byName.has("Platform-lead"));
+  // --- (3) platform-gate check, NARROWED by card f437d4e9 C1: Platform-lead now seeds ungated (its
+  //     SESSION-minting path is what stays restricted, not the bundled profile row), but Platform-audit
+  //     is still LOOM_DEV-only ----
+  check("(3) Platform-lead IS seeded when LOOM_DEV is unset (f437d4e9: profile row seeding is ungated)", byName.has("Platform-lead"));
   check("(3) Platform-audit is NOT seeded when LOOM_DEV is unset", !byName.has("Platform-audit"));
 
   // --- (4) reset restores a tampered Setup Assistant row to the shipped values --------------------

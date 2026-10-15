@@ -2,15 +2,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Platform-layer DEV FLAG gate (LOOM_DEV, default OFF). HERMETIC + CLAUDE-FREE + NETWORK-FREE: an
 // isolated LOOM_HOME + sandboxed HOME, REAL Db handles (separate files per phase), and the REAL seeders.
 // isLoomDev() reads process.env.LOOM_DEV at CALL time, so one process exercises BOTH modes by toggling
-// the env between phases. Proves the owner decision (2026-06-15): the Platform layer ships disabled to
-// regular `loomctl` users while staying loadable in dev.
-//   (1) DEFAULT boot (LOOM_DEV unset): seedDefaultProfiles seeds the CORE profiles but NOT the two
-//       platform profiles; seedPlatformHome no-ops (no reserved project, no platform agents).
-//   (2) DEV boot (LOOM_DEV=1): the platform profiles ALSO seed, seedPlatformHome seeds the reserved
-//       project + Lead/Auditor agents, and a re-seed is idempotent (no duplicates).
+// the env between phases. Proves the owner decision (2026-06-15, NARROWED by card f437d4e9 C1,
+// 2026-10-15): the dev-only "Loom Platform" reserved home + its Platform Auditor profile still ship
+// disabled to regular `loomctl` users, but the Platform-lead profile itself now seeds for EVERY install
+// — only its SESSION-minting path stays restricted (see platform-ungated-minting.mjs for that proof).
+//   (1) DEFAULT boot (LOOM_DEV unset): seedDefaultProfiles seeds the CORE profiles AND the Platform-lead
+//       profile (f437d4e9), but NOT Platform-audit; seedPlatformHome still no-ops (no reserved project,
+//       no platform agents — unchanged, dev-only).
+//   (2) DEV boot (LOOM_DEV=1): Platform-audit ALSO seeds (Platform-lead already did in phase 1, and
+//       stays seeded here too), seedPlatformHome seeds the reserved project + Lead/Auditor agents, and a
+//       re-seed is idempotent (no duplicates).
 //   (3) RELEASE skill curation: curateSkillDirs (the pure helper the npm builder uses) excludes the
 //       dev-only platform skills AND the install-specific `research` skill from the staged assets/skills
-//       but keeps the core ones — checked against the REAL bundled asset listing.
+//       but keeps the core ones — checked against the REAL bundled asset listing. (platform-lead's own
+//       skill curation stays dev-only here — moving it to ship is card f437d4e9 C4, not this card.)
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-dev-flag.mjs
 import fs from "node:fs";
@@ -42,7 +47,9 @@ const { isLoomDev } = await import("../dist/paths.js");
 const { curateSkillDirs, DEV_ONLY_SKILLS } = await import("../../../scripts/curate-release-skills.mjs");
 
 const CORE_PROFILES = ["Orchestrator", "Planning & Triage", "Dev", "Bugfix", "QA Tester", "Web Designer", "Content Strategy", "Setup Assistant"];
-const PLATFORM_PROFILES = ["Platform-lead", "Platform-audit"];
+// f437d4e9 C1 narrowed the seed-gate to JUST the Auditor profile — "Platform-lead" now ships ungated
+// (CORE, in effect) and only "Platform-audit" stays dev-only.
+const DEV_ONLY_PLATFORM_PROFILES = ["Platform-audit"];
 
 try {
   // ===================== (1) DEFAULT boot — LOOM_DEV unset =====================
@@ -53,7 +60,10 @@ try {
   const profNamesA = new Set(dbA.listProfiles().map((p) => p.name));
   check("(1) CORE profiles ARE seeded by default", CORE_PROFILES.every((n) => profNamesA.has(n)));
   check("(1) the seed result lists every core profile", CORE_PROFILES.every((n) => seededProfA.includes(n)));
-  check("(1) the two PLATFORM profiles are NOT seeded", PLATFORM_PROFILES.every((n) => !profNamesA.has(n)));
+  check("(1) card f437d4e9: Platform-lead profile IS seeded by default (ungated)", profNamesA.has("Platform-lead"));
+  check("(1) the seed result lists Platform-lead too", seededProfA.includes("Platform-lead"));
+  check("(1) the seeded Platform-lead row has role 'platform'", dbA.listProfiles().find((p) => p.name === "Platform-lead")?.role === "platform");
+  check("(1) Platform-audit is NOT seeded (stays LOOM_DEV-only)", DEV_ONLY_PLATFORM_PROFILES.every((n) => !profNamesA.has(n)));
   check("(1) seedPlatformHome no-ops by default (returns [])", seededPlatA.length === 0);
   check("(1) NO reserved 'Loom Platform' project exists", dbA.listAllProjects().filter((p) => p.reserved).length === 0);
   dbA.close();
@@ -66,7 +76,8 @@ try {
   const seededPlatB = seedPlatformHome(dbB);
   const profNamesB = new Set(dbB.listProfiles().map((p) => p.name));
   check("(2) CORE profiles still seed in dev mode", CORE_PROFILES.every((n) => profNamesB.has(n)));
-  check("(2) the two PLATFORM profiles ALSO seed in dev mode", PLATFORM_PROFILES.every((n) => profNamesB.has(n)));
+  check("(2) Platform-lead still seeds in dev mode", profNamesB.has("Platform-lead"));
+  check("(2) Platform-audit ALSO seeds in dev mode", DEV_ONLY_PLATFORM_PROFILES.every((n) => profNamesB.has(n)));
   check("(2) seedPlatformHome seeds the reserved project + both agents",
     seededPlatB.includes(`project:${PLATFORM_PROJECT_NAME}`) &&
     seededPlatB.includes("agent:Platform Lead") && seededPlatB.includes("agent:Platform Auditor"));
@@ -122,6 +133,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Platform layer is gated behind LOOM_DEV: default boot seeds NO platform project/agents/profiles (core profiles present), LOOM_DEV=1 seeds the full layer idempotently, and the staged release assets/skills exclude the dev-only platform skills and the install-specific research skill while keeping the core ones."
+  ? "\n✅ ALL PASS — the dev-only reserved 'Loom Platform' home + its Platform Auditor profile still gate behind LOOM_DEV, but the Platform-lead profile now seeds ungated (f437d4e9); LOOM_DEV=1 still seeds the full dev layer (home + both agents + both profiles) idempotently, and the staged release assets/skills still exclude the dev-only platform skills and the install-specific research skill while keeping the core ones."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

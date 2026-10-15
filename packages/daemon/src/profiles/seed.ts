@@ -223,10 +223,13 @@ export const BUNDLED_PROFILES: Omit<Profile, "id">[] = [
 ];
 
 /**
- * A bundled profile belongs to the dev-only Platform layer (Platform-lead / Platform-audit) iff its role
- * is one of the two platform-exclusive roles. Those two profiles seed only under LOOM_DEV; every other
- * bundled profile is CORE product and always seeds. Keyed by role (not name) so a future bundled platform
- * profile is gated automatically without touching this gate.
+ * A profile's role is one of the two platform-exclusive LOCKED roles (Platform-lead "platform" or
+ * Platform-audit "auditor") — the CLONE-GUARD predicate (clone-core.ts's `clonedProfileRoleError`),
+ * never the seed gate (see `isDevOnlyPlatformLayerProfile` below for that, narrowed by card f437d4e9:
+ * "platform" itself now seeds ungated, so this broader platform-OR-auditor set must stay as the clone
+ * guard's own role axis — cloning an elevated platform rig into another project is still refused,
+ * independent of whether its bundled profile row is dev-gated). Keyed by role (not name) so a future
+ * bundled platform/auditor profile is caught automatically without touching this check.
  *
  * NB: the END-USER Auditor's "workspace-auditor" role is deliberately NOT in this set — it is CORE
  * product, so its future bundled "Workspace Auditor" rig (B4) must seed ungated for every loomctl user
@@ -238,20 +241,31 @@ export function isPlatformProfile(p: Pick<Profile, "role">): boolean {
 }
 
 /**
+ * The dev-only Platform-layer SEED gate — narrower than `isPlatformProfile` above since card f437d4e9
+ * C1: only the Platform Auditor ("auditor") bundled profile stays LOOM_DEV-only. The Platform-lead
+ * ("platform") bundled profile now seeds for every loomctl install (minting a `role:"platform"` SESSION
+ * stays restricted elsewhere — the seeded Lead's own start/recycle path; this gate only ever controlled
+ * whether the bundled PROFILE row exists at all).
+ */
+function isDevOnlyPlatformLayerProfile(p: Pick<Profile, "role">): boolean {
+  return p.role === "auditor";
+}
+
+/**
  * Seed the bundled profiles into the platform-level `profiles` table ONLY IF ABSENT (matched by
  * name), mirroring seedGlobalSkills' seed-if-absent contract: a user's future edits survive reboots,
  * and re-running is idempotent (no duplicates). Returns the names actually seeded this call.
  *
- * DEV-ONLY GATE: the two Platform-layer profiles (Platform-lead / Platform-audit) seed only when LOOM_DEV
- * is set (see paths.ts › isLoomDev); the CORE profiles (Orchestrator/Dev/Bugfix/QA/Web Designer/…) always
- * seed for every `loomctl` user.
+ * DEV-ONLY GATE: the Platform-audit profile seeds only when LOOM_DEV is set (see paths.ts › isLoomDev);
+ * Platform-lead and the CORE profiles (Orchestrator/Dev/Bugfix/QA/Web Designer/…) always seed for every
+ * `loomctl` user (card f437d4e9).
  */
 export function seedDefaultProfiles(db: Db): string[] {
   const devMode = isLoomDev();
   const existing = new Set(db.listProfiles().map((p) => p.name));
   const seeded: string[] = [];
   for (const p of BUNDLED_PROFILES) {
-    if (!devMode && isPlatformProfile(p)) continue; // dev-only Platform layer — omit for loomctl users
+    if (!devMode && isDevOnlyPlatformLayerProfile(p)) continue; // dev-only: Platform Auditor only
     if (existing.has(p.name)) continue; // preserve user edits / avoid duplicates
     db.insertProfile({ id: randomUUID(), ...p });
     seeded.push(p.name);

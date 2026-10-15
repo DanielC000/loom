@@ -248,7 +248,12 @@ try {
     check("(F) LIVENESS: an exited session's OWN still-token-matching credential → 401 (isMcpReachable, not just verifyMcpToken)", res.statusCode === 401);
   }
 
-  // ===================== (G) isLoomDev() gates /mcp-platform's OWN resolveRole =====================
+  // ===================== (G) /mcp-platform's OWN resolveRole is a BARE role check =====================
+  // Card f437d4e9 C1: the isLoomDev() half of this gate was dropped on purpose (the whole point of the
+  // card is that a role:"platform" session reaches /mcp-platform on EVERY install, not just a dev one) —
+  // see mcp/platform.ts's resolveRole and platform-ungated-minting.mjs for the full minting-path proof.
+  // This section now proves the SURVIVING half: resolveRole is role-keyed ONLY, both with LOOM_DEV unset
+  // (the real end-user shape) and set (unchanged dev shape) — and a non-platform role still 404s either way.
   {
     delete process.env.LOOM_DEV;
     db.insertSession({
@@ -256,10 +261,17 @@ try {
       processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
       lastError: null, role: "platform",
     });
+    db.insertSession({
+      id: "SMGRPLAT", projectId: "p1", agentId: "a1", engineSessionId: null, title: null, cwd: TMP,
+      processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "manager",
+    });
     const router = new PlatformMcpRouter(db, {}, {}, {});
-    check("(G) PlatformMcpRouter.resolveRole refuses a REAL role:platform session when LOOM_DEV is unset", router.resolveRole("SPLAT") === null);
+    check("(G) PlatformMcpRouter.resolveRole ACCEPTS a REAL role:platform session with LOOM_DEV unset (f437d4e9)", router.resolveRole("SPLAT")?.id === "SPLAT");
+    check("(G) PlatformMcpRouter.resolveRole still REFUSES a non-platform role with LOOM_DEV unset", router.resolveRole("SMGRPLAT") === null);
     process.env.LOOM_DEV = "1";
-    check("(G) PlatformMcpRouter.resolveRole accepts the SAME session once LOOM_DEV=1", router.resolveRole("SPLAT")?.id === "SPLAT");
+    check("(G) PlatformMcpRouter.resolveRole still accepts the SAME session with LOOM_DEV=1 (unchanged dev shape)", router.resolveRole("SPLAT")?.id === "SPLAT");
+    check("(G) PlatformMcpRouter.resolveRole still refuses a non-platform role with LOOM_DEV=1", router.resolveRole("SMGRPLAT") === null);
     delete process.env.LOOM_DEV;
   }
 
@@ -339,6 +351,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), PlatformMcpRouter's OWN resolveRole independently gates on isLoomDev(), verifyMcpToken AND the sibling /internal/hook guard verifyHookToken both compare in CONSTANT TIME via a shared fixed-length-digest + timingSafeEqual comparator never a raw `===`, and that same comparator FAILS CLOSED (401/403, never a 500) when a session's own stored secret is undefined (card 9a8bc38f)."
+  ? "\n✅ ALL PASS — the per-session-token guard on every first-party /mcp* route (card 280b1e44) fails CLOSED with a bare pty stub, 401s every one of the 8 patterns with no/wrong/cross-session credential without ever invoking the real router handler, accepts the exact right session-scoped token (positive control), refuses an exited-but-unarchived session's own still-matching token (the liveness half, distinct from the token-match half), PlatformMcpRouter's OWN resolveRole independently role-gates (a bare role check, ungated by isLoomDev() since f437d4e9 — see platform-ungated-minting.mjs for the minting-path proof), verifyMcpToken AND the sibling /internal/hook guard verifyHookToken both compare in CONSTANT TIME via a shared fixed-length-digest + timingSafeEqual comparator never a raw `===`, and that same comparator FAILS CLOSED (401/403, never a 500) when a session's own stored secret is undefined (card 9a8bc38f)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
