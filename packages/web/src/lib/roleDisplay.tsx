@@ -237,6 +237,16 @@ export function roleDisplay(role: SessionRole | null | undefined): RoleDisplay {
   return ROLE_DISPLAY[(role ?? "plain") as RoleKey] ?? ROLE_DISPLAY.plain;
 }
 
+// Whether a role is DEV-LAYER (`confer: "dev"` — today platform/auditor): shown by badges and lists
+// everywhere, but never something an ordinary human surface offers to CONFER. Derived from the map's own
+// `confer` so a future dev-layer role is covered without revisiting each call site. The Profiles role
+// picker uses it to LOCK a card; the Agents profile picker uses it to hide a dev-layer PROFILE from the
+// bind dropdown on a non-dev install. An unknown role falls back to the plain record (confer "user"), so
+// this is deliberately fail-open — it governs what a picker OFFERS, never what the daemon permits.
+export function isDevLayerRole(role: SessionRole | null | undefined): boolean {
+  return roleDisplay(role).confer === "dev";
+}
+
 // Picker card DISPLAY order — baseline → the common user rigs → operator → dev-layer. This matches the
 // owner-approved mockup; it ONLY orders the derived PICKER_ROLES (membership comes from `confer`, below).
 const TIER_DISPLAY_ORDER: Record<RoleTier, number> = {

@@ -3,7 +3,8 @@
 //   1. Projects (/projects) — the per-project Agents column LISTS REST-seeded agents, CREATING an agent
 //      through the AgentForm (revealed by "＋ New agent") reflects in the list + over REST, and ASSIGNING a
 //      Profile to an agent produces an observable change (the agent row gains the profile's role/icon; the
-//      agent row's profileId flips over REST).
+//      agent row's profileId flips over REST). The bind dropdown also HIDES platform-tier profiles on this
+//      LOOM_DEV=0 fixture (card 921e06b0), while still rendering one an agent is already bound to.
 //   2. Profiles (/profiles) — a profile's capability toggles RENDER (browserTesting / documentConversion),
 //      toggling documentConversion reveals the shared-venv provisioning panel (interactive observable), and
 //      toggling browserTesting + Save persists to the store (REST read-back).
@@ -230,5 +231,72 @@ test.describe("profiles & agents", () => {
     await expect
       .poll(async () => (await getProfile(loomDaemon.baseURL, profile.id)).connections)
       .toEqual([connection.id]);
+  });
+
+  // Card 921e06b0 (from epic f437d4e9's C5 decision 7) — the agent bind-dropdown used to offer EVERY
+  // profile, platform-tier rigs included. Binding one is safe (a profile confers only manager/worker/
+  // assistant, so the session spawns PLAIN) but reads as an offer of admin powers that does not exist.
+  // The fixture daemon runs LOOM_DEV=0 (fixtures/daemon.ts), i.e. exactly the non-dev install this hides
+  // them on.
+  test("the agent profile picker hides platform-tier profiles on a non-dev install", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`agents-tier-${Date.now()}`);
+    await seedAgent(loomDaemon.baseURL, project.id, "Binder");
+    // The platform-tier rig this test is about. `auditor` is deliberately NOT seeded here: validateProfile's
+    // roleCarryForwardOnlyError refuses to MINT one over REST, so the sweep below (which rejects an option
+    // of EITHER dev-layer role) is what covers it, rather than a seed this surface cannot create.
+    const platform = await seedProfile(loomDaemon.baseURL, { name: `Platform Rig ${Date.now()}`, role: "platform", icon: "★" });
+    // POSITIVE CONTROL: an ordinary conferrable rig seeded the same way through the same route. Without it
+    // an empty/mislocated dropdown would satisfy the absence assertions for the wrong reason.
+    const manager = await seedProfile(loomDaemon.baseURL, { name: `Manager Rig ${Date.now()}`, role: "manager", icon: "🧭" });
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
+
+    await agentRow(page, "Binder").click();
+    const select = profileSelect(page);
+    await expect(select).toBeVisible();
+
+    // POSITIVE CONTROL: the manager rig IS offered — the picker is populated and the locator is right.
+    await expect(select.locator("option").filter({ hasText: manager.name })).toHaveCount(1);
+    // The platform-tier rig is NOT offered, by name…
+    await expect(select.locator("option").filter({ hasText: platform.name })).toHaveCount(0);
+    // …and no option carries EITHER dev-layer role, so a bundled platform/auditor profile seeded outside
+    // this test can't slip through either.
+    for (const text of await select.locator("option").allTextContents()) {
+      expect(text).not.toMatch(/\((platform|auditor)\)/);
+    }
+
+    // It is hidden from the PICKER only — the store still holds it (so this is a UI filter, not a
+    // server-side change) and it is still a real profile the dev Platform surface can use.
+    expect((await getProfile(loomDaemon.baseURL, platform.id)).role).toBe("platform");
+
+    // EXERCISE the control: the dropdown still works for the rigs it does offer, with an observable
+    // before/after on both the agent row and the store.
+    await expect(select).toHaveValue("");
+    await select.selectOption(manager.id);
+    await expect(agentRow(page, "Binder")).toContainText(/manager/i);
+    await expect(select).toHaveValue(manager.id);
+  });
+
+  // An agent ALREADY bound to a platform-tier profile (seeded before this filter existed, or bound on a
+  // dev install) must still render its own assignment: dropping the selected option would leave the
+  // <select> with no matching value and silently show the agent as "— none —".
+  test("an already-bound platform-tier profile stays visible as the agent's current assignment", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`agents-keepsel-${Date.now()}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, "Prebound");
+    const platform = await seedProfile(loomDaemon.baseURL, { name: `Bound Platform Rig ${Date.now()}`, role: "platform", icon: "★" });
+    // Bind it over the same human REST route the UI drives, BEFORE the page loads.
+    await apiJson(`${loomDaemon.baseURL}/api/agents/${agent.id}`, { method: "POST", body: JSON.stringify({ profileId: platform.id }) });
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
+
+    await agentRow(page, "Prebound").click();
+    const select = profileSelect(page);
+    await expect(select).toBeVisible();
+
+    // The assignment is rendered truthfully — the option is present and selected, NOT silently "— none —".
+    await expect(select.locator("option").filter({ hasText: platform.name })).toHaveCount(1);
+    await expect(select).toHaveValue(platform.id);
+    // …and it is grouped under the label that states what binding it actually does.
+    await expect(select.locator('optgroup[label="platform-tier — binds as a plain session"]')).toHaveCount(1);
   });
 });

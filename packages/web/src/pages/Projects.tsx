@@ -6,7 +6,7 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots, StaleStartupPromptWarning } from "../components/ui";
 import { color, font, radius } from "../theme";
-import { roleDisplay, roleColor } from "../lib/roleDisplay";
+import { roleDisplay, roleColor, isDevLayerRole } from "../lib/roleDisplay";
 import { useFormSync } from "../lib/useFormSync";
 import type { SessionRole } from "@loom/shared";
 
@@ -55,6 +55,12 @@ export default function Projects() {
   const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   // Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  // Edition discovery (the SAME shared query key Platform.tsx/Skills.tsx use → one cached fetch): the
+  // dev/self-host edition has the reserved Platform home, an end-user npm install 404s it. Gates which
+  // profiles the agent bind-dropdown offers (see AgentEditor). `isSuccess &&` holds it false until the
+  // query settles, so an end user never flashes a dev-layer rig mid-load.
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const isDev = platformHome.isSuccess && !!platformHome.data?.project;
   // Cross-project live sessions — the source for the rail's live-dot AND the "stop the fleet first" guard
   // on destructive project/agent ops (archive/delete disable while a related session is live). Archived
   // projects feed the restore / permanent-delete footer. Both are cheap loopback reads, invalidated by
@@ -274,7 +280,7 @@ export default function Projects() {
               <AgentForm onCreate={(b) => createAgent.mutate(b)} pending={createAgent.isPending} onCancel={() => setCreating(null)} />
             </EditorFrame>
           ) : selectedAgent ? (
-            <AgentEditor key={selectedAgent.id} agent={selectedAgent} profiles={profiles.data ?? []}
+            <AgentEditor key={selectedAgent.id} agent={selectedAgent} profiles={profiles.data ?? []} isDev={isDev}
               liveCount={liveByAgent.get(selectedAgent.id) ?? 0}
               onAssignProfile={(profileId) => updateAgent.mutate({ id: selectedAgent.id, patch: { profileId } })}
               onSavePrompt={(startupPrompt) => updateAgent.mutate({ id: selectedAgent.id, patch: { startupPrompt } })}
@@ -739,8 +745,8 @@ function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: stri
 // the old cramped rail) over the roomy startup-prompt editor. Remounted per agent (key=agent.id) so the
 // textarea + assignment reset on switch; after Save the query refetches and `dirty` clears.
 function AgentEditor(
-  { agent, profiles, liveCount, onAssignProfile, onSavePrompt, onDelete, saving, deleting }:
-  { agent: Agent; profiles: { id: string; name: string; role: string | null; icon: string | null }[];
+  { agent, profiles, isDev, liveCount, onAssignProfile, onSavePrompt, onDelete, saving, deleting }:
+  { agent: Agent; profiles: { id: string; name: string; role: string | null; icon: string | null }[]; isDev: boolean;
     liveCount: number; onAssignProfile: (profileId: string | null) => void; onSavePrompt: (startupPrompt: string) => void;
     onDelete: () => void; saving: boolean; deleting: boolean },
 ) {
@@ -769,6 +775,24 @@ function AgentEditor(
   // hook, so Reset retires it with no extra bookkeeping here.
   const conflict = sync.conflicts.length > 0;
   const live = liveCount > 0;
+  // Which profiles this dropdown may offer. A DEV-LAYER profile (role platform / auditor — RoleConfer
+  // "dev") is not spawnable from an ordinary agent: a profile only confers manager / worker / assistant
+  // (PROFILE_SPAWNABLE_ROLES), so binding one yields a plain session with no elevated surface at all.
+  // Safe, but it reads like an offer of admin powers that does not exist — so a non-dev install, where no
+  // such rig is human-creatable in the first place, is not shown them. On dev they stay (the dev-layer
+  // rigs are real there), under their own group label stating what binding one actually does.
+  //
+  // The CURRENTLY-assigned profile is always kept, dev-layer or not: dropping the selected option would
+  // leave the <select> with no matching value and silently render this agent as "— none —".
+  const [ordinaryProfiles, devProfiles] = useMemo(() => {
+    const ordinary: typeof profiles = [], dev: typeof profiles = [];
+    for (const p of profiles) {
+      const devLayer = isDevLayerRole(p.role as SessionRole | null);
+      if (devLayer && !isDev && p.id !== agent.profileId) continue;
+      (devLayer ? dev : ordinary).push(p);
+    }
+    return [ordinary, dev];
+  }, [profiles, isDev, agent.profileId]);
   // `flex:1` (not `height:100%`) so the editor fills the Editor Panel's `minHeight:72vh`: that Panel sits in
   // an `alignItems:start` grid so its `height` is `auto`, against which a percentage height collapses to
   // content — the flex min-height is what the prompt textarea's own `flex:1` then grows into.
@@ -783,9 +807,16 @@ function AgentEditor(
           {/* Assign / clear the Profile — it supplies the spawn role/rig; the prompt comes from the agent. */}
           <Select value={agent.profileId ?? ""} onChange={(e) => onAssignProfile(e.target.value || null)} style={{ maxWidth: 220 }}>
             <option value="">— none —</option>
-            {profiles.map((p) => (
+            {ordinaryProfiles.map((p) => (
               <option key={p.id} value={p.id}>{p.icon ? `${p.icon} ` : ""}{p.name}{p.role ? ` (${p.role})` : ""}</option>
             ))}
+            {devProfiles.length > 0 && (
+              <optgroup label="platform-tier — binds as a plain session">
+                {devProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>{p.icon ? `${p.icon} ` : ""}{p.name}{p.role ? ` (${p.role})` : ""}</option>
+                ))}
+              </optgroup>
+            )}
           </Select>
         </label>
         {/* Permanently delete this agent (cascades its sessions). Disabled while it has a live session —
