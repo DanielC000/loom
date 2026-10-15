@@ -87,9 +87,26 @@ const diff = (label, actual, expected) => {
 };
 
 const orch = new OrchestrationMcpRouter(db, {});
-const managerActual = await listToolNames(orch.buildServer("s-manager", "manager"));
-diff("orchestration manager", managerActual, ORCH_MANAGER_TOOLS);
-check("ORCH_MANAGER_TOOLS matches the real manager tool set", sameSet(managerActual, ORCH_MANAGER_TOOLS));
+
+// ORCH_MANAGER_TOOLS is hand-authored against the SUPERVISED surface (it includes daemon_restart, which
+// mcp/orchestration.ts now registers only when isSupervised() — card 81331b0e). Pin LOOM_SUPERVISED
+// explicitly for both checks rather than relying on the ambient env (daemon:stable sets it, CI runs it
+// unset) — otherwise this test's own result would silently depend on which environment ran it.
+const savedLoomSupervisedForManager = process.env.LOOM_SUPERVISED;
+try {
+  process.env.LOOM_SUPERVISED = "1";
+  const managerActualSupervised = await listToolNames(orch.buildServer("s-manager", "manager"));
+  diff("orchestration manager (supervised)", managerActualSupervised, ORCH_MANAGER_TOOLS);
+  check("ORCH_MANAGER_TOOLS matches the real manager tool set (LOOM_SUPERVISED=1)", sameSet(managerActualSupervised, ORCH_MANAGER_TOOLS));
+
+  delete process.env.LOOM_SUPERVISED;
+  const managerActualUnsupervised = await listToolNames(orch.buildServer("s-manager", "manager"));
+  const managerExpectedUnsupervised = ORCH_MANAGER_TOOLS.filter((t) => t !== "daemon_restart");
+  diff("orchestration manager (unsupervised)", managerActualUnsupervised, managerExpectedUnsupervised);
+  check("unsupervised manager tool set omits daemon_restart", !managerActualUnsupervised.includes("daemon_restart") && sameSet(managerActualUnsupervised, managerExpectedUnsupervised));
+} finally {
+  if (savedLoomSupervisedForManager === undefined) delete process.env.LOOM_SUPERVISED; else process.env.LOOM_SUPERVISED = savedLoomSupervisedForManager;
+}
 
 const workerActual = await listToolNames(orch.buildServer("s-worker", "worker"));
 diff("orchestration worker", workerActual, ORCH_WORKER_TOOLS);

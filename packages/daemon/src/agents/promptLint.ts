@@ -70,6 +70,11 @@ export const OPERATOR_TOOLS: readonly string[] = [
 export const RUN_TOOLS: readonly string[] = ["submit_result"];
 
 // loom-orchestration: ONE router, THREE very different per-role surfaces (see orchestration.ts).
+// ORCH_MANAGER_TOOLS includes daemon_restart, which mcp/orchestration.ts registers only when
+// isSupervised() (card 81331b0e) — so this table models the SUPERVISED (superset) surface. An
+// unsupervised manager's real surface omits it; per the known-gaps rationale above (card 5338a86a) this
+// lint errs toward NOT warning, so the gap only ever suppresses a correct warning on an unsupervised
+// install, never manufactures a false one.
 export const ORCH_MANAGER_TOOLS: readonly string[] = [
   "agent_assign_profile", "agent_delete", "agent_get", "agent_list", "agent_update",
   "board_column_create", "board_column_delete", "board_column_rename", "daemon_restart", "end_me",

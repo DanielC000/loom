@@ -8,8 +8,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       unsupervised-refusal path is exercised — cheap, deterministic, no real build spawn); 'worker',
 //       'assistant', 'setup', and an unknown session are ALL still rejected (gate widened from one role
 //       to exactly two, not loosened further).
-//   (T) TOOL SURFACE: daemon_restart is registered on the manager's OrchestrationMcpRouter surface (pre-
-//       existing) and NOT on the worker surface — unchanged, asserted as a regression guard.
+//   (T) TOOL SURFACE: daemon_restart is registered on the manager's OrchestrationMcpRouter surface ONLY
+//       when isSupervised() (card 81331b0e) — absent, not merely refusing, on an unsupervised/npm-install
+//       manager. NOT on the worker surface either way.
 //   (P) PLATFORM ROUTER: daemon_restart is registered on the Lead's PlatformMcpRouter and reachable
 //       end-to-end over a real MCP InMemoryTransport, mirroring idle_report's (P) section exactly — the
 //       unsupervised refusal shape is IDENTICAL to the manager tool's.
@@ -147,18 +148,32 @@ function rmDb(file) { for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(
   rmDb(file);
 }
 
-// ============================ (T) TOOL SURFACE: manager registration unaffected ============================
+// ================ (T) TOOL SURFACE: manager daemon_restart is present iff supervised ================
+// Card 81331b0e: mcp/orchestration.ts registers daemon_restart on the MANAGER surface ONLY when
+// isSupervised() — the same present-but-refusing asymmetry C3 (card 2179a923) removed from the Platform
+// Lead surface. Pin LOOM_SUPERVISED explicitly rather than relying on the ambient env (daemon:stable
+// sets it, CI runs it unset), and assert BOTH directions right alongside each other.
 {
-  const file = tmpDbFile("tool-mgr");
-  const db = new Db(file);
-  const router = new OrchestrationMcpRouter(db, {});
-  const toolNames = (role) => Object.keys(router.buildServer("sid", role)._registeredTools);
+  const savedLoomSupervisedT = process.env.LOOM_SUPERVISED;
+  try {
+    const file = tmpDbFile("tool-mgr");
+    const db = new Db(file);
+    const router = new OrchestrationMcpRouter(db, {});
+    const toolNames = (role) => Object.keys(router.buildServer("sid", role)._registeredTools);
 
-  check("(T) daemon_restart IS still registered on the MANAGER surface", toolNames("manager").includes("daemon_restart"));
-  check("(T) daemon_restart is NOT on the worker surface", !toolNames("worker").includes("daemon_restart"));
+    process.env.LOOM_SUPERVISED = "1";
+    check("(T) daemon_restart IS registered on the MANAGER surface (LOOM_SUPERVISED=1)", toolNames("manager").includes("daemon_restart"));
+    check("(T) daemon_restart is NOT on the worker surface (LOOM_SUPERVISED=1)", !toolNames("worker").includes("daemon_restart"));
 
-  db.close();
-  rmDb(file);
+    delete process.env.LOOM_SUPERVISED;
+    check("(T) daemon_restart is ABSENT from the MANAGER surface when unsupervised", !toolNames("manager").includes("daemon_restart"));
+    check("(T) daemon_restart is NOT on the worker surface when unsupervised", !toolNames("worker").includes("daemon_restart"));
+
+    db.close();
+    rmDb(file);
+  } finally {
+    if (savedLoomSupervisedT === undefined) delete process.env.LOOM_SUPERVISED; else process.env.LOOM_SUPERVISED = savedLoomSupervisedT;
+  }
 }
 
 // ==================== (P) PLATFORM ROUTER — daemon_restart reachable end-to-end ====================

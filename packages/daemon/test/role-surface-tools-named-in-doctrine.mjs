@@ -135,10 +135,27 @@ async function platformToolNamesBothDevStates(db) {
   }
 }
 
+// Card 81331b0e: daemon_restart registers on the MANAGER surface ONLY when isSupervised() — the gate
+// inherits LOOM_SUPERVISED=1 from daemon:stable, CI runs it unset. daemon_restart is already named as a
+// whole token in orchestrate/SKILL.md, so this check passes either way; build both states anyway so the
+// result stays deterministic rather than coincidentally depending on which one happened to be ambient.
+async function orchManagerToolNamesBothSupervisedStates(orch) {
+  const saved = process.env.LOOM_SUPERVISED;
+  try {
+    process.env.LOOM_SUPERVISED = "1";
+    const supervised = await listToolNames(orch.buildServer("s-manager", "manager"));
+    delete process.env.LOOM_SUPERVISED;
+    const unsupervised = await listToolNames(orch.buildServer("s-manager", "manager"));
+    return [...new Set([...supervised, ...unsupervised])].sort();
+  } finally {
+    if (saved === undefined) delete process.env.LOOM_SUPERVISED; else process.env.LOOM_SUPERVISED = saved;
+  }
+}
+
 const orch = new OrchestrationMcpRouter(db, {});
 const tasks = new TaskMcpRouter(db, {});
 const SURFACES = [
-  { id: "orchestration manager", skill: "orchestrate", tools: () => listToolNames(orch.buildServer("s-manager", "manager")) },
+  { id: "orchestration manager", skill: "orchestrate", tools: () => orchManagerToolNamesBothSupervisedStates(orch) },
   { id: "loom-tasks (manager)", skill: "orchestrate", tools: () => listToolNames(tasks.buildServer("p1", "s-manager")) },
   { id: "orchestration worker", skill: "worker", tools: () => listToolNames(orch.buildServer("s-worker", "worker")) },
   { id: "loom-tasks (worker)", skill: "worker", tools: () => listToolNames(tasks.buildServer("p1", "s-worker")) },

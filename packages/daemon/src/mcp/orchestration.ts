@@ -28,6 +28,7 @@ import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { computeGateTimingBand, readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
+import { isSupervised } from "../orchestration/restart.js";
 import { MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -4972,7 +4973,10 @@ export class OrchestrationMcpRouter {
       },
     );
 
-    server.registerTool(
+    // @decision 81331b0e — register only when isSupervised(), never isLoomDev(): an npm manager must
+    // never see a tool that always refuses, and the two flags can diverge either way (isLoomDev() alone
+    // would miss that).
+    if (isSupervised()) server.registerTool(
       "daemon_restart",
       {
         description:
