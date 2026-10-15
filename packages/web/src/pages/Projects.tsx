@@ -341,16 +341,40 @@ function ProjectRow({ name, selected, live, onClick }: { name: string; selected:
   );
 }
 
+// The one wording for a profile whose role the spawn would clamp away — stated as the consequence ("what
+// do I get"), not the mechanism. One constant so all three places that disclose it can never word it
+// differently: the bind dropdown's <optgroup>, the inline note below the select (shown once the collapsed
+// <select> hides that group), and the agent list row's tooltip (card 57deed24).
+const PLAIN_BIND_GROUP_LABEL = "role not conferred — binds as a plain session";
+
 function AgentRow(
   { name, selected, icon, role, live, onClick }:
   { name: string; selected: boolean; icon: string | null; role: string | null; live: number; onClick: () => void },
 ) {
+  // The badge states the BOUND PROFILE's role — but a profile confers only manager / worker / assistant,
+  // so a row carrying any other role (setup, operator, platform, …) advertises powers the spawn silently
+  // drops. Flag it where the claim is made (card 57deed24): the editor note's amber △ leads, the role
+  // label goes MUTED, and the row tooltip carries the one shared wording.
+  // The label is muted rather than recolored amber deliberately — `operator` and `setup` ALREADY render
+  // amber as their own tone, so tinting the label would be invisible on exactly the two roles that carry
+  // this flag most often, and would overload one colour with two meanings. Dropping the label out of its
+  // saturated tone reads as "recorded, not in force" against EVERY role's colour, which is the point.
+  // `profileRoleBindsAsPlainSession` answers CONFERRAL — never `isDevLayerRole`, which answers picker
+  // VISIBILITY and is false for setup / operator / workspace-auditor (the c40489c6 trap).
+  const roleKey = role as SessionRole | null;
+  const bindsPlain = profileRoleBindsAsPlainSession(roleKey);
   return (
-    <ListRow selected={selected} onClick={onClick} title={role ? `${name} · ${role}` : name}>
+    <ListRow selected={selected} onClick={onClick}
+      title={role ? `${name} · ${role}${bindsPlain ? ` (${PLAIN_BIND_GROUP_LABEL})` : ""}` : name}>
       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
       {live > 0 && <span title={`${live} live session${live === 1 ? "" : "s"}`}><Dot tone="phosphor" glow /></span>}
       {icon && <span aria-hidden>{icon}</span>}
-      {role && <span style={{ fontSize: 10, color: roleColor(role as SessionRole | null), fontFamily: font.mono }}>{roleDisplay(role as SessionRole | null).short}</span>}
+      {role && (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10, color: bindsPlain ? color.textMuted : roleColor(roleKey), fontFamily: font.mono }}>
+          {bindsPlain && <span data-testid="agent-row-plain-bind" aria-hidden style={{ color: color.amber }}>△</span>}
+          {roleDisplay(roleKey).short}
+        </span>
+      )}
     </ListRow>
   );
 }
@@ -740,11 +764,6 @@ function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: stri
     </div>
   );
 }
-
-// The bind dropdown's group label for a profile whose role the spawn would clamp away — stated as the
-// consequence ("what do I get"), not the mechanism. One constant so the <optgroup> and the inline note
-// below the select (shown once the collapsed <select> hides the group) can never word it differently.
-const PLAIN_BIND_GROUP_LABEL = "role not conferred — binds as a plain session";
 
 // The selected agent's detail: an editor header (name + profile-assign + delete, all relocated here out of
 // the old cramped rail) over the roomy startup-prompt editor. Remounted per agent (key=agent.id) so the

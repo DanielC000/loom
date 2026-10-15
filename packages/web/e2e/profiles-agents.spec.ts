@@ -377,4 +377,55 @@ test.describe("profiles & agents", () => {
     await expect(select).toHaveValue(workerRig.id);
     await expect(page.getByTestId("agent-profile-plain-bind")).toHaveCount(0);
   });
+
+  // Card 57deed24 — c40489c6 (above) disclosed a non-conferred bind in the PICKER only; the agent LIST ROW
+  // still rendered the bound profile's role badge bare, so a `setup` rig read as plain "Operator" on the
+  // one surface you see without opening anything. Same predicate (`profileRoleBindsAsPlainSession`), same
+  // wording (PLAIN_BIND_GROUP_LABEL) — flagged where the badge makes the claim.
+  test("the agent list row flags a bound profile's role when the bind would not confer it", async ({ page, loomDaemon }) => {
+    // The project name deliberately shares NO substring with either agent name: `agentRow`'s hasText
+    // filter is substring + case-INSENSITIVE, and the project picker is an EARLIER <button> carrying the
+    // active project's name, so an overlapping stem silently hijacks `.first()`.
+    const project = await loomDaemon.createProject(`agents-rowflag-${Date.now()}`);
+    const plainAgent = await seedAgent(loomDaemon.baseURL, project.id, "Plainbound");
+    const realAgent = await seedAgent(loomDaemon.baseURL, project.id, "Realbound");
+    const setupRig = await seedProfile(loomDaemon.baseURL, { name: `Row Setup Rig ${Date.now()}`, role: "setup", icon: "⚙" });
+    const workerRig = await seedProfile(loomDaemon.baseURL, { name: `Row Worker Rig ${Date.now()}`, role: "worker", icon: "▸" });
+    // Bind both BEFORE the page loads, over the same human REST route the UI drives.
+    const bind = (agentId: string, profileId: string) =>
+      apiJson(`${loomDaemon.baseURL}/api/agents/${agentId}`, { method: "POST", body: JSON.stringify({ profileId }) });
+    await bind(plainAgent.id, setupRig.id);
+    await bind(realAgent.id, workerRig.id);
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
+
+    const plainRow = agentRow(page, "Plainbound");
+    const realRow = agentRow(page, "Realbound");
+    await expect(plainRow).toBeVisible();
+    await expect(realRow).toBeVisible();
+
+    // POSITIVE CONTROL: `worker` IS inside PROFILE_SPAWNABLE_ROLES, so that row reads exactly as it did
+    // before — the badge renders, carries no flag, and the tooltip states only "name · role".
+    // Without it, an unconditional flag (or a locator matching nothing) would satisfy the setup-row
+    // assertions below for the wrong reason.
+    await expect(realRow).toContainText(/worker/i);
+    await expect(realRow.getByTestId("agent-row-plain-bind")).toHaveCount(0);
+    await expect(realRow).toHaveAttribute("title", "Realbound · worker");
+
+    // `setup` is outside it, so the same badge is flagged and the tooltip carries the one shared wording
+    // the picker's <optgroup> and inline note already use.
+    await expect(plainRow.getByTestId("agent-row-plain-bind")).toBeVisible();
+    await expect(plainRow).toHaveAttribute("title", `Plainbound · setup (${PLAIN_BIND_GROUP_LABEL})`);
+
+    // EXERCISE the real control, with an observable before/after: the flag keys off the BIND, not off the
+    // row, so rebinding the control agent to the setup rig through the picker grows the flag on ITS row
+    // too. This is what a hard-coded or row-indexed flag would fail.
+    await realRow.click();
+    const select = profileSelect(page);
+    await expect(select).toHaveValue(workerRig.id);
+    await select.selectOption(setupRig.id);
+    await expect(select).toHaveValue(setupRig.id);
+    await expect(realRow.getByTestId("agent-row-plain-bind")).toBeVisible();
+    await expect(realRow).toHaveAttribute("title", `Realbound · setup (${PLAIN_BIND_GROUP_LABEL})`);
+  });
 });
