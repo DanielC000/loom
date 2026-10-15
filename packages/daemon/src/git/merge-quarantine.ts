@@ -673,16 +673,45 @@ function replaceEntryEverywhere(byRepoKey: Map<string, MergeQuarantineEntry>, ol
  *  `entry` can be two different identities sharing one key. See the decision record.
  *
  *  @decision a2f381dc — the exclusion is IDENTITY-CONDITIONAL (compare `prior` against `armed`, not
- *  `entry`), never absolute — see the decision record for the M-1 fix and why M-2 stays excluded. */
+ *  `entry`), never absolute — see the decision record for the M-1 fix and why M-2 stays excluded.
+ *
+ *  @decision 8db913e2 (Follow-up 48bda567) — never widen this correction beyond this one call site
+ *  (never a second `unionQuarantineEntries` option, never persist `armedKeys` to fix it instead) — see
+ *  the decision record for the age-dependent dual-arm loss this closes and why it stays scoped here. */
 function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: string, entry: MergeQuarantineEntry): MergeQuarantineEntry {
   const prior = byRepoKey.get(key);
-  const merged = prior ? unionQuarantineEntries(prior, entry) : entry;
+  let merged = prior ? unionQuarantineEntries(prior, entry) : entry;
+  if (merged.resolvedKey === key) {
+    const priorRK = prior?.resolvedKey;
+    const entryRK = entry.resolvedKey;
+    const priorInformative = priorRK !== undefined && priorRK !== key;
+    const entryInformative = entryRK !== undefined && entryRK !== key;
+    if (priorInformative !== entryInformative) {
+      merged = { ...merged, resolvedKey: priorInformative ? priorRK : entryRK };
+    }
+  }
   const armed: MergeQuarantineEntry = { ...merged, armedKeys: [...new Set([...(merged.armedKeys ?? []), key])] };
   if (prior && directPathIdentity(prior.repoPath) === directPathIdentity(armed.repoPath)) {
     replaceEntryEverywhere(byRepoKey, prior, armed);
   }
   for (const k of armed.armedKeys ?? [key]) byRepoKey.set(k, armed);
   return armed;
+}
+
+/** Test-only pass-through to {@link armQuarantineKey}. The "both sides informative and different"
+ *  shape this card's own correction must NOT engage for IS reachable through a real call site — a
+ *  secondary-arm caller (e.g. `:4562`) passes the PRIMARY arm's own RESULT as `entry`, not the raw parsed
+ *  entry, so if that primary arm itself unioned with an older `prior`, the result's `resolvedKey` can
+ *  differ from the raw entry's own field used as `key`; PASS 1b also primary-arms every tmp residue at
+ *  its own `currentKey`, so a `.json` + `.tmp` pair (or two tmps) sharing one hash can collide there with
+ *  two independently-informative keys (card `1e739f4a`, which owns fixing the outcome once a later,
+ *  unconditional tmp-promotion self-stamp currently masking it is fixed). This function is still exercised
+ *  directly here, with a hand-built fixture, rather than through that boot path — not because the shape
+ *  is unreachable, but because this is a REGRESSION PIN on the correction's own outer guard
+ *  (`merged.resolvedKey === key`), not evidence the correction discriminates anything; see the scenario's
+ *  own comment for why. */
+export function armQuarantineKeyTestOnly(byRepoKey: Map<string, MergeQuarantineEntry>, key: string, entry: MergeQuarantineEntry): MergeQuarantineEntry {
+  return armQuarantineKey(byRepoKey, key, entry);
 }
 
 /**

@@ -59,6 +59,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync, execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { commitAll } from "./_git-commit.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { useOwnLoomHome } from "./_tmp-fixture.mjs";
@@ -109,6 +110,18 @@ const SCENARIOS = [
   // instant a boot-time MIGRATE union collides with it — a REPRODUCED fail-open a plain `{...older}`
   // rule never had. See the scenario's own comment below for the full repro.
   "4b06875f-migrate-union-drops-dual-arm",
+  // Card 48bda567 — the OPPOSITE age order of the scenario above (the migrating latch OLDER than Y's
+  // own dual-arm), left deliberately unfixed/unasserted by 4b06875f's own Round 3. PRE-EXISTING fail-open
+  // under the plain `{...older}` legacy rule itself (predates 4b06875f entirely) — see the scenario's own
+  // comment below for the full repro.
+  "48bda567-migrate-union-drops-dual-arm-b-older",
+  // Card 48bda567's own required NO-FIRE discrimination: both sides carry DIFFERENT, genuinely
+  // informative resolvedKeys at the union's own `key` — the correction must not engage at all, and the
+  // result must be byte-for-byte the plain legacy union. A REGRESSION PIN (not discrimination evidence —
+  // see the scenario's own comment) against `armQuarantineKey` itself (via its test-only pass-through),
+  // rather than a real boot fixture, because card 1e739f4a's own masking tmp-promotion self-stamp makes
+  // this reachable shape unobservable through a real boot today.
+  "48bda567-no-fire-both-sides-informative-and-different",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -150,7 +163,7 @@ const {
   reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, enterMergeQuarantine, clearMergeQuarantine,
   clearMergeQuarantineLatchFile, assertRepoNotQuarantined, clearMergeQuarantineByToken,
   clearMergeQuarantineByRecordedPath, MERGE_QUARANTINE_DIR, unconfirmedKillReason,
-  UNCONFIRMED_KILL_WINDOWS_GUIDANCE, listActiveMergeQuarantines,
+  UNCONFIRMED_KILL_WINDOWS_GUIDANCE, listActiveMergeQuarantines, armQuarantineKeyTestOnly,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -1286,6 +1299,173 @@ try {
     const refusal = fresh.assertRepoNotQuarantined(y);
     check("(refusal text) assertRepoNotQuarantined(y) still names W in its refusal text (db0a9db0 guidance)",
       refusal.ok === false && typeof refusal.reason === "string" && refusal.reason.toLowerCase().includes(w.toLowerCase()));
+  } else if (scenarioName === "48bda567-migrate-union-drops-dual-arm-b-older") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Board card 48bda567 — the OPPOSITE age order of "4b06875f-migrate-union-drops-dual-arm" above.
+    // IDENTICAL fixture shape (Y dual-armed via the legacy stale-resolvedKey shape, a stale-key-filed
+    // latch for Y's own subdirectory migrating to Ky this boot), but latch B (the migrating one) is now
+    // deliberately OLDER than latch A (Y's own dual-arm) — the order 4b06875f's Round 3 explicitly left
+    // unfixed and unasserted (see this project's own decision record, "Follow-up 4b06875f, Round 3":
+    // "The OPPOSITE age order ... is a PRE-EXISTING, separately-carded fail-open under the LEGACY rule
+    // too (board card 48bda567) — deliberately not fixed or asserted by this scenario.").
+    //
+    // This is a fail-open under the plain `{...older}` LEGACY union rule itself — it predates 4b06875f
+    // entirely and is NOT caused by the explicit-rule scoping fix. `unionQuarantineEntries`'s legacy rule
+    // (merge-quarantine.ts:634, `!options?.explicitResolvedKeyRule` branch) takes `older.resolvedKey`
+    // unconditionally. When B (the migrate branch) is older, `older` is B, whose own `resolvedKey` was
+    // JUST stamped to `currentKey` (Ky) by the migrate branch (merge-quarantine.ts:4487,
+    // `entry = { ...entry, resolvedKey: currentKey }`) — a SELF-REFERENTIAL, uninformative value (it
+    // equals the very key the union is being armed at). The union's own `resolvedKey` field becomes Ky,
+    // discarding Y's own genuine secondary key Kw outright, even though `armedKeys` itself is STILL
+    // correctly `[Ky, Kw]` in memory this boot (verified below — the in-memory dual-arm is NOT what's
+    // broken). The migrate-write pass (merge-quarantine.ts:5122 PHASE 1a) then durably persists exactly
+    // this union object — Ky's own file on disk ends up with `resolvedKey: Ky` (self-referential) instead
+    // of `resolvedKey: Kw`. On the NEXT boot, PASS 1 reads Ky's file, sees `entry.resolvedKey ===
+    // currentKey` (both Ky), so the "secondArm" branch (merge-quarantine.ts:4535,
+    // `entry.resolvedKey && entry.resolvedKey !== currentKey`) never fires — Kw is never re-armed, and W
+    // reads fully UNBLOCKED.
+    //
+    // Measured directly (not just reasoned) against this project's own compiled module on commit
+    // 72ba0598 (main, post-4b06875f): at boot-0 (in-process, no reboot needed to observe this),
+    // `activeMergeQuarantineFor(w)` already returns an entry whose own `repoPath` is Y's SUBDIRECTORY
+    // (ySub), not Y itself — a side effect of the SAME legacy `{...older}` spread also carrying
+    // `repoPath`/`branch`/`reason`/`enteredAt` from the older (B) side, by this function's own documented
+    // design ("keep the EARLIER identity ... mirroring enterMergeQuarantine's own 'longest-outstanding,
+    // still-unresolved raise' rule" — merge-quarantine.ts:598-602). That part is NOT itself the bug this
+    // card targets (board card 398f476c owns the broader "a union can only represent one identity at a
+    // time" shape) — this scenario does not assert on `repoPath` at all, only on the two symptoms the
+    // card's own DoD names: W staying blocked after a REBOOT, and the refusal text naming W.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqrup-48b-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# 48bda567-migrate-union-drops-dual-arm-b-older\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+    const kyHash = hashForKey(ky);
+
+    const w = path.join(os.tmpdir(), `loom-mqrup-48b-w-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# 48bda567-migrate-union-drops-dual-arm-b-older (w)\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const kw = canonicalRepoLockKey(w);
+    const kwHash = hashForKey(kw);
+    if (kwHash === kyHash) throw new Error("48bda567-migrate-union-drops-dual-arm-b-older: kw collided with ky — re-run");
+
+    const ySub = path.join(y, "sub");
+    fs.mkdirSync(ySub, { recursive: true });
+    const kySub = canonicalRepoLockKey(ySub);
+    if (kySub !== ky) throw new Error("48bda567-migrate-union-drops-dual-arm-b-older: y's own subdirectory did not resolve to y's own key — fixture assumption broken");
+
+    const kold = `stale-pre-migration-key-${freshSfx()}`;
+    const koldHash = hashForKey(kold);
+    if (koldHash === kyHash) throw new Error("48bda567-migrate-union-drops-dual-arm-b-older: kold collided with ky — re-run");
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // Latch A — Y's own real, correctly-named file, dual-armed via a legacy stale resolvedKey=Kw.
+    // enteredAt is now NEWER than latch B's below — the "B-older" order this scenario asserts.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${kyHash}.json`), JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y dual-armed via a legacy stale resolvedKey=Kw",
+      enteredAt: Date.now(), tokens: ["a1", "a2"], resolvedKey: kw,
+    }, null, 2) + "\n");
+    // Latch B — a STALE-key-filed latch for Y's own subdirectory, migrating to Ky this boot.
+    // enteredAt is deliberately OLDER than latch A's above.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${koldHash}.json`), JSON.stringify({
+      repoPath: ySub, branch: "b-branch", reason: "a pre-rename latch for y's own subdirectory, filed under a stale key",
+      enteredAt: Date.now() - 120_000, tokens: ["b1"],
+    }, null, 2) + "\n");
+
+    // Deliberately NOT registering y/w — must reach d163aef5's own collision-resolution path.
+    reenterMergeQuarantinesAtBoot([]);
+
+    check("(precondition) boot-0 dual-arms Y at BOTH Ky and Kw (armedKeys is correct in-memory this boot — the bug is NOT here)", (() => {
+      const yEntry = listActiveMergeQuarantines().find((e) => (e.armedKeys ?? []).includes(ky));
+      const keys = new Set(yEntry?.armedKeys ?? []);
+      return keys.has(ky) && keys.has(kw);
+    })());
+
+    const fresh = await rebootSim();
+    fresh.reenterMergeQuarantinesAtBoot([]);
+    // `repoPath` is NOT the right thing to assert on here — the SAME legacy `{...older}` spread that
+    // drops `resolvedKey` also carries `repoPath` from whichever side is older (merge-quarantine.ts's own
+    // documented "keep the EARLIER identity" rule), so in THIS (B-older) order the union's own `repoPath`
+    // legitimately becomes Y's own subdirectory, not Y itself — a separate, accepted, 398f476c-owned
+    // shape (see the comment above), not this card's bug. Assert on the dual-arm's own `armedKeys`
+    // instead: W staying blocked means the SAME entry that answers for Y also answers for W.
+    const wEntryAfterReboot = fresh.activeMergeQuarantineFor(w);
+    check("*** CARD 48bda567 (B-older order) *** W stays blocked after a PLAIN REBOOT — the migrate union must never drop Y's own legacy dual-arm, regardless of which side is older",
+      !!wEntryAfterReboot && (wEntryAfterReboot.armedKeys ?? []).includes(ky) && (wEntryAfterReboot.armedKeys ?? []).includes(kw));
+    check("(and it is genuinely Y's OWN dual-arm, not a different entry) querying Y returns the SAME object as querying W",
+      fresh.activeMergeQuarantineFor(y) === wEntryAfterReboot);
+    const refusal = fresh.assertRepoNotQuarantined(y);
+    check("*** CARD 48bda567 (B-older order) *** assertRepoNotQuarantined(y) names W in its refusal text (db0a9db0 guidance)",
+      refusal.ok === false && typeof refusal.reason === "string" && refusal.reason.toLowerCase().includes(w.toLowerCase()));
+  } else if (scenarioName === "48bda567-no-fire-both-sides-informative-and-different") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 48bda567's own required NO-FIRE discrimination: a union where BOTH `prior.resolvedKey` and
+    // `entry.resolvedKey` are defined, genuinely DIFFERENT from the union's own `key`, AND different from
+    // EACH OTHER. CR 31ba43b4 found this shape IS reachable through a real call site (corrected from an
+    // earlier draft of this comment that wrongly called it unreachable): a secondary-arm caller passes
+    // the PRIMARY arm's own RESULT as `entry`, not the raw parsed entry — if that primary arm itself
+    // unioned with an older `prior`, the result's own `resolvedKey` can already differ from the raw
+    // entry's own field used as `key`. PASS 1b also primary-arms every tmp residue at its own
+    // `currentKey`, so a `.json` + `.tmp` pair (or two tmps) sharing one hash can collide there with two
+    // independently-informative keys. Card `1e739f4a` owns fixing the actual outcome once a LATER,
+    // unconditional tmp-promotion self-stamp (currently masking it) is itself fixed.
+    //
+    // This scenario is therefore a REGRESSION PIN on the correction's own outer guard
+    // (`merged.resolvedKey === key`), NOT discrimination evidence that the shape can't occur: it passes
+    // just as well with the correction removed entirely, and with the outer guard itself deleted too — a
+    // genuinely different-and-informative `entry.resolvedKey`/`prior.resolvedKey` pair makes the plain
+    // legacy `{...older}` result never equal `key` in the first place, so nothing downstream of that
+    // guard is ever reached regardless of whether the guard exists. It is still exercised directly
+    // against `armQuarantineKey` itself (via its test-only pass-through) rather than through a real boot
+    // fixture, because 1e739f4a's own masking self-stamp makes this exact shape unobservable through a
+    // real boot TODAY — not because the shape itself is unreachable.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const key = "shared-key-nofire";
+    const kA = "informative-key-a";
+    const kB = "informative-key-b";
+    if (kA === kB || kA === key || kB === key) throw new Error("48bda567-no-fire: fixture keys must be pairwise distinct");
+
+    const prior = {
+      repoPath: "C:\\nofire\\prior-repo", branch: "prior-branch", reason: "prior reason",
+      enteredAt: Date.now() - 60_000, tokens: ["prior-token"], resolvedKey: kA, armedKeys: ["prior-own-key", key],
+    };
+    const entry = {
+      repoPath: "C:\\nofire\\entry-repo", branch: "entry-branch", reason: "entry reason",
+      enteredAt: Date.now(), tokens: ["entry-token"], resolvedKey: kB,
+    };
+
+    // The expected LEGACY result, computed BY HAND — replicating `unionQuarantineEntries`'s own
+    // `{...older}` spread (prior is older here: smaller `enteredAt`, neither is a placeholder) plus
+    // `armQuarantineKey`'s own `armedKeys` fold — NEVER by calling the function under test, or this would
+    // only assert "whatever it returns, it returns" rather than discriminating a real regression.
+    const expectedLegacy = {
+      ...prior,
+      tokens: [...new Set([...prior.tokens, ...entry.tokens])],
+      // `unionQuarantineEntries` always sets these as explicit own properties (even when `undefined`) —
+      // match that exactly, or a deep-equal check would see extra keys on the real result that this
+      // hand-built comparison object never had and fail for a reason unrelated to the correction.
+      orphanLatchFiles: undefined,
+      armedKeys: [...new Set([...(prior.armedKeys ?? []), key])],
+      contributorRepoPaths: undefined,
+      provenanceUnknown: undefined,
+      provenanceTracked: undefined,
+    };
+
+    const byRepoKey = new Map([[key, prior]]);
+    const actual = armQuarantineKeyTestOnly(byRepoKey, key, entry);
+
+    check("(precondition) the fixture's own resolvedKeys are genuinely different from `key` AND from each other",
+      prior.resolvedKey !== key && entry.resolvedKey !== key && prior.resolvedKey !== entry.resolvedKey);
+    check("*** NO-FIRE *** the correction must NOT engage — the result is byte-for-byte the plain legacy union",
+      isDeepStrictEqual(actual, expectedLegacy));
+    check("*** NO-FIRE *** resolvedKey specifically stays the OLDER side's value (kA), untouched by the correction",
+      actual.resolvedKey === kA);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }
