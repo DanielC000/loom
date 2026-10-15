@@ -3927,7 +3927,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Platform; and a name-only lookup silently stops finding this home the moment a human renames it via
     // PATCH /api/projects/:id. The setup home has its own discovery route below (GET /api/setup/home).
     const found = resolveLivePlatformHome(deps.db);
-    if (!found) return reply.code(404).send({ error: "no reserved Loom Platform project" });
+    if (!found) return reply.code(404).send({ error: "no reserved platform-tier dev home found" });
     // Card 6bfc3bfb: redact sessionEnv on this reserved project like GET /api/projects — Platform.tsx
     // never reads config.sessionEnv back out of this response (it only reads project.reserved/name/id).
     const project = redactSessionEnvForRead(found);
@@ -4886,7 +4886,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // A repoPath REBIND repoints the project's git — more than metadata; REFUSE it on the reserved
       // Platform home (mirroring the DELETE/archive reserved refusals below). Benign metadata edits
       // (name / vaultPath) stay allowed on a reserved project.
-      if (p.reserved) return reply.code(400).send({ error: "cannot rebind the repoPath of the reserved Loom Platform project" });
+      if (p.reserved) return reply.code(400).send({ error: "cannot rebind the repoPath of a reserved/system project (your platform home board)" });
       // @decision d25e4ea7 — humanAuthorized:true is a no-op here today (the reserved refusal just
       // above always fires first for a reserved project) but keeps this call correct in isolation
       // should that inline guard ever be refactored away.
@@ -5038,7 +5038,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const p = deps.db.getProject(id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    if (p.reserved) return reply.code(400).send({ error: "cannot archive the reserved Loom Platform project" });
+    if (p.reserved) return reply.code(400).send({ error: "cannot archive a reserved/system project (your platform home board)" });
     const live = deps.db.countLiveSessionsInProject(id);
     if (live > 0) return reply.code(400).send({ error: `cannot archive a project with live sessions — stop the fleet first (${live} still live)` });
     deps.db.archiveProject(id);
@@ -5061,7 +5061,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const p = deps.db.getProject(id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    if (p.reserved) return reply.code(400).send({ error: "cannot delete the reserved Loom Platform project" });
+    if (p.reserved) return reply.code(400).send({ error: "cannot delete a reserved/system project (your platform home board)" });
     const live = deps.db.countLiveSessionsInProject(id);
     if (live > 0) return reply.code(400).send({ error: `cannot delete a project with live sessions — stop the fleet first (${live} still live)` });
     const { sessionIds } = deps.db.deleteProject(id);

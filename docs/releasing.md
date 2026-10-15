@@ -132,19 +132,25 @@ pnpm pack:npm        # → loomctl-X.Y.Z.tgz at the repo root
 
 Native deps (`better-sqlite3`, `node-pty`) and the runtime-resolved `@playwright/mcp` stay **real `dependencies`**, so a plain `npm install` fetches their prebuilt binaries. **pnpm is a contributor tool only** — end users need just Node 22+.
 
-### The dev-only Platform layer
+### The dev-only remainder of the Platform layer
 
-Loom's **Platform layer** — the reserved "Loom Platform" project + the Platform Lead/Auditor agents, the `Platform-lead`/`Platform-audit` profiles, and the `platform-lead`/`platform-audit` skills — is **dev-only** (owner decision, 2026-06-15). It stays in the repo (loadable in dev with `LOOM_DEV=1`) but does **not** ship to regular `loomctl` users:
+Card `f437d4e9` shipped most of Loom's **Platform layer** — the `platform` role/router, the Lead agent/
+profile/skill — to every `loomctl` install (re-homed onto the end-user "Platform" home); see
+`docs/decisions/f437d4e9-end-user-platform-lead.md`. What stays **dev-only** (owner decision) is
+narrower now: the reserved "Loom Platform" project (the owner's own dev/self-host home) + the **Platform
+Auditor** agent/profile/skill (`role:"auditor"`), plus a small set of per-tool exclusions on the
+end-user Lead's own surface (see that record's §2) and the Skills UI's "publish to repo" REST route.
 
 - **Runtime seeding** is gated behind `LOOM_DEV` (one helper, `packages/daemon/src/paths.ts` › `isLoomDev`,
-  read like `LOOM_SCHEDULER_ENABLED`): without the flag, the seeders skip the reserved project, the platform agents, and the two platform profiles. CORE orchestration always seeds.
-- **The published bundle** drops this layer's skill dirs, plus a few other dev-only / private-product /
+  read like `LOOM_SCHEDULER_ENABLED`): without the flag, the seeders skip the reserved "Loom Platform"
+  project and its Auditor agent/profile. The end-user "Platform" home's own Lead agent/profile seed
+  regardless of the flag (CORE-seed pattern, same as core orchestration).
+- **The published bundle** drops the `platform-audit` skill dir, plus a few other dev-only / private-product /
   install-specific ones — the full omitted set, and why each entry is there, is `DEV_ONLY_SKILLS` in
   `scripts/curate-release-skills.mjs` (that file's own doc comment explains the reasons; don't restate the
-  list here). `scripts/build-npm-package.mjs` curates the staged `assets/skills/` via the pure
-  `curateSkillDirs()` helper in that same file (the same helper the daemon's `platform-dev-flag` test
-  asserts against, so the build and the test never drift). The core orchestration skills
-  (`orchestrate`/`worker`/`loom-pickup`/…) always ship.
+  list here). `platform-lead` is **not** in that set — it ships to every install. `scripts/build-npm-package.mjs`
+  curates the staged `assets/skills/` via the pure `curateSkillDirs()` helper in that same file. The core
+  orchestration skills (`orchestrate`/`worker`/`loom-pickup`/…) always ship.
 
 To add or remove a dev-only skill from the published package, edit `DEV_ONLY_SKILLS` in `scripts/curate-release-skills.mjs` — that one list drives both the build curation and the test.
 

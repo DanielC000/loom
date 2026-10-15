@@ -15,7 +15,32 @@ None of these four is checked against `HUMAN_ONLY_PROJECT_CONFIG_KEYS`, `HUMAN_O
 
 ## Decision (gen 384)
 
-This is intentional, not a gap to close: the Platform Lead surface is `LOOM_DEV`-only and human-driven (see `CLAUDE.md`'s `LOOM_DEV` section) — a Lead that already has `gateCommand`/`alertWebhook` host-exec capability crosses no NEW trust boundary by also being able to set a deploy command, point the shared Python venv or the Obsidian preflight at a different executable, or write raw session env vars. Widening `HUMAN_ONLY_PROJECT_CONFIG_KEYS`/`HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` to cover these four would contradict the Lead's whole reason for existing on the full validator in the first place.
+This is intentional, not a gap to close: a Lead that already has `gateCommand`/`alertWebhook` host-exec capability crosses no NEW trust boundary by also being able to set a deploy command, point the shared Python venv or the Obsidian preflight at a different executable, or write raw session env vars. Widening `HUMAN_ONLY_PROJECT_CONFIG_KEYS`/`HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` to cover these four would contradict the Lead's whole reason for existing on the full validator in the first place.
+
+## Amendment (card `f437d4e9` — the Lead ships to end users; `74f27ab5`'s review ed789ead Minor 2)
+
+The rationale above originally rested on "the Platform Lead surface is `LOOM_DEV`-only and human-driven" —
+that premise is gone now that `f437d4e9` ships the `platform` role/router to every `loomctl` install. The
+capability stays (owner directive includes `gateCommand`); what holds the line is restated, not the grant
+itself:
+
+**Agent-settable because the Lead is human-REST-minted and human-driven, and equivalent to the human's own
+REST authority** (the same keys are already human-settable via REST project config, on a dev AND a
+non-dev install alike). What still holds: minting is loopback-secret human-REST only (see `f437d4e9` §5 C1
+for the enumeration that no agent-facing surface can mint `role:"platform"`); `NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS`
+(`mcp/platform.ts` ~388) still stops the Lead BLANKING or DROPPING `orchestration.gateCommand` (which would
+otherwise silently fall back to the "no gateCommand configured" sentinel and record an unverified PASS) —
+it does NOT stop the Lead CHANGING it to a no-op such as `exit 0`, which still records a PASS (see that
+const's own doc comment); the `HUMAN_ONLY_*` lists still cover `harness`/`mergeGate`/`mergeGateInterval`.
+
+**Accepted residual:** the Lead ingests UNTRUSTED content (`session_transcript` ~2320, `events_search`
+~1924) and can also set host-exec config (`gateCommand`, `deployCommand`, `python.interpreterPath`,
+`obsidian.path`, `sessionEnv`) — including neutering `gateCommand`/`deployCommand` to a no-op that still
+reports a PASS, per the paragraph above. On an npm install the operator is an ordinary end user, and only
+the confirm-first doctrine (see the `platform-lead` skill's "Safety posture") stands between a transcript
+prompt injection and host-exec config. The project Lead (manager) overseeing this work is to surface this
+accepted residual to the owner at ship time; whether to add a STRUCTURAL confirm on top of doctrine is an
+owner call, not resolved here.
 
 ## Non-clearable guard check (same review, item 1 follow-up)
 
@@ -27,7 +52,7 @@ Checked whether `orchestration.deployCommand` needs the same guard: it does not.
 
 - Do not treat `project_configure`'s tool description as a closed/complete list of what the elevated route accepts without also checking `HUMAN_ONLY_PROJECT_CONFIG_KEYS` / `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` / `NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS` directly in `mcp/platform.ts` — those three lists are the actual source of truth; the description is a derived summary that has already drifted once (card `b3a89191`, `a6f1b29b`).
 - Do not add `orchestration.deployCommand` to `NON_CLEARABLE_NESTED_PROJECT_CONFIG_KEYS` on the assumption it needs gateCommand's guard — checked above; the silent-unverified-pass consequence that justifies gateCommand's guard does not exist for deploy.
-- Do not widen `HUMAN_ONLY_PROJECT_CONFIG_KEYS` / `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` to cover deployCommand/python.interpreterPath/obsidian.path/sessionEnv — the Lead surface is LOOM_DEV-only and human-driven, so these are deliberately Lead-settable, not a security gap.
+- Do not widen `HUMAN_ONLY_PROJECT_CONFIG_KEYS` / `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` to cover deployCommand/python.interpreterPath/obsidian.path/sessionEnv, on a dev OR a non-dev install — the Lead is human-REST-minted and human-driven either way, so these are deliberately Lead-settable, not a security gap. See the `f437d4e9` amendment above for what still holds the line now that the Lead ships to end users.
 
 ## Source
 

@@ -124,7 +124,10 @@ without `isLoomDev()`, **`resolveLivePlatformHome` returns `undefined` on every 
 `platformEscalate` throws `"no reserved Loom Platform project exists — cannot escalate"`
 (`sessions/service.ts:11322`).** The same resolver is reused at `sessions/service.ts:10578` (a Lead-notify
 helper, itself already gated `if (!isLoomDev()) return { leadNotified: false };` at line 10577) and at
-`sessions/service.ts:12072` (escalation-status read-back). Three more literal-string leaks ride the same
+`sessions/service.ts:12110` (`auditFileFinding`'s own `resolveLivePlatformHome` call — current line as of
+this edit, re-verify before trusting it; correctly left dev-only, since the Platform Auditor stays
+dev-only per §1a; cited here only as a third caller of the same resolver, not as something this card
+changes). Three more literal-string leaks ride the same
 hardcoded name: `mcp/platform.ts:2761` ("cannot rename a reserved/system project (the Loom Platform
 home)"), `:2830` ("cannot archive a reserved/system project (the Loom Platform home)"), `:2918` ("no
 reserved Loom Platform project exists — cannot resolve resolvesEscalation"), and the **tool description
@@ -433,7 +436,10 @@ below with extra emphasis.
    profile/template surface against a non-dev install and confirm none can produce `role:"platform"`
    except via the seeded Lead's own carried-forward recycle), not merely re-read this list.
 2. **C2 — Fix every hardcoded `"Loom Platform"` reference.** `sessions/service.ts` (`platformEscalate`,
-   the Lead-notify helper at `:10577-10578`, the escalation-status read at `:12069-12072`) +
+   the Lead-notify helper at `:10577-10578`) — NOT `auditFileFinding`'s own resolver call at
+   `:12069-12072` (mislabeled "escalation-status read-back" in §1d above and in this item until
+   corrected, card `5fdec603` C2 review): that's the Platform Auditor's own finding-filer, correctly
+   staying dev-only-resolving per §1a, since `role:"auditor"` never ships to end users —
    `mcp/platform.ts` (`:2761`, `:2830`, `:2918`, `:2956`, `:3193`) — resolve against whichever platform-tier
    home is live (§1d's `resolveLiveLeadHome`), never a hardcoded constant/string. Depends on C1 (needs a
    live non-dev `platform`-role home to test against). DoD: on a non-dev install, a manager's

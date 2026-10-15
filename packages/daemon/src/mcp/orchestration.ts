@@ -5927,10 +5927,12 @@ export class OrchestrationMcpRouter {
 
     // --- Manager→Platform escalation (Platform Manager P4) ----------------------------------------
     // The ONE upward channel: a project manager reports a discovered Loom bug / friction UP to the
-    // Platform Lead. DURABLE by design — it files a structured TASK onto the reserved "Loom Platform"
-    // project's board (the Lead's inbox), which survives the common case where no Lead session is live.
+    // Platform Lead. DURABLE by design — it files a structured TASK onto whichever platform-tier home
+    // is actually live (`resolveLiveLeadHome` — the dev "Loom Platform" home on a dev install, the
+    // end-user "Platform" home otherwise; the Lead's inbox either way), which survives the common case
+    // where no Lead session is live.
     // This is ONE of the manager's two structured cross-project writes (the other is peer_message, below):
-    // the target board here is HARDCODED to the reserved home server-side (the manager never names a
+    // the target board here is HARDCODED to the live Lead home server-side (the manager never names a
     // projectId), so it can never become a general cross-project task-write. Down-tree messaging stays
     // parent-scoped (worker_message); session_message (the Lead's un-scoped delivery) is the PLATFORM
     // surface, not here.

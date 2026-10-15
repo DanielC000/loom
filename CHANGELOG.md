@@ -4,6 +4,17 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Changed
+- **Your "Platform" agent is now a full Platform Lead.** The standing "Platform" agent — who already
+  creates and configures your projects, agents and profiles — now also spawns and oversees sessions and
+  triages your board, cross-project: the same capability as the developer edition's Platform Lead, minus a
+  couple of dev-only pieces (rebuilding and restarting the daemon from source, and writing to a bundled
+  skill's canonical copy). It acts on its own for ordinary admin and is built to confirm first for
+  anything irreversible or outward-facing, like pushing to a shared repo. An existing, never-customized
+  install upgrades automatically on its next boot; if you've already customized your Platform agent's
+  prompt, it keeps running exactly as you left it and instead gets a one-time board card offering the
+  upgrade.
+
 ## [0.31.0] — 2026-10-13
 
 **A platform-hardening and cross-platform-reliability release.** Canonical git merges are now contained in a Windows job object and quarantine a repo instead of risking corruption when a kill can't be confirmed; agent-writable surfaces across profiles, platform, setup and companion routing were tightened to least privilege; the Telegram companion's chat-scope boundaries are enforced end to end; session and MCP tokens are compared and stored more defensively; and a long pass of POSIX process, path and test-harness fixes moves the daemon's own test suite — and the behavior it tests — toward parity on Linux, not just the Windows host it's usually developed on.
