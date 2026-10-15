@@ -2,7 +2,7 @@ import type { Agent, Project, SessionListItem } from "@loom/shared";
 import type { Db } from "../db.js";
 import { isLoomDev } from "../paths.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
-import { resolveLiveSetupHome, SETUP_AGENT_NAME, SETUP_HOME_LEAD_AGENT_ID_KEY } from "../setup/seed.js";
+import { resolveLiveSetupHome, SETUP_AGENT_NAME, SETUP_HOME_LEAD_AGENT_ID_KEY } from "./reserved-home-markers.js";
 
 /**
  * Card 1731ab5b (epic f437d4e9 C2) — resolve the ONE live platform-tier home for THIS install, by STRICT

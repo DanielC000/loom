@@ -65,28 +65,38 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
   if (home.isError || !home.data) {
     return <p style={{ color: color.red, fontFamily: font.mono }}>{edition.copy.errorText}</p>;
   }
-  const { project, agents } = home.data;
+  const { project, agents, resolvedLead } = home.data;
 
   const roleOf = (a: Agent): SessionRole | null => profiles.data?.find((p) => p.id === a.profileId)?.role ?? null;
-  // Classify by the bound profile's role, falling back to the seeded name if a profile is missing. The
-  // reserved home holds TWO agents (operator + auditor), so resolve by role/name — never an index (agents[0]
-  // may be the auditor), leaving the record undefined rather than mis-picking the other agent.
-  const operator = agents.find((a) => roleOf(a) === edition.operatorRole) ?? agents.find((a) => a.name === edition.operatorName);
+  // Card b2b69ec8 (M3): when the server resolved an authoritative Lead (`resolvedLead.agentId` — the
+  // SAME `resolveHomeLeadAgent` helper `startPlatformLead`/`resume()`/`migrateSetupHomeToLead` resolve
+  // through), consume it DIRECTLY by id rather than re-deriving "the Lead" by list order/name — those two
+  // can disagree the moment a second human-bound platform agent exists in the home (a stray agent sorted
+  // first would be picked here, then refused server-side on spawn). `resolvedLead` is only ever present
+  // on the setupHome response (undefined on platformHome — the dev multi-Lead edition has no single
+  // "the Lead" to resolve this way), so the dev edition is untouched and keeps the role/name fallback.
+  const operator = resolvedLead?.agentId
+    ? agents.find((a) => a.id === resolvedLead.agentId)
+    : agents.find((a) => roleOf(a) === edition.operatorRole) ?? agents.find((a) => a.name === edition.operatorName);
   const auditor = agents.find((a) => roleOf(a) === edition.auditorRole) ?? agents.find((a) => a.name === edition.auditorName);
   // f437d4e9 C5 round 2, item 1(b) / round 3 M2+M4(d): the operator's SPAWN role tracks its CURRENT
   // bound profile role, never the edition's static default — mirrors first-run.ts's own resolution
   // (profile role "platform" ⇒ "platform", else "setup"). A customized, not-yet-upgraded end-user agent
   // is still role "setup" even though endUserEdition.operatorRole says "platform"; spawning it as
   // "platform" would be refused server-side (it isn't the sanctioned Lead) and should never have been
-  // attempted in the first place. While `profiles` is still loading, the real role is UNKNOWN — never
-  // guess "setup" (that would wrongly mint a setup session on what's likely the real platform Lead);
-  // `operatorRoleUnknown` disables the spawn button for that window instead (see AgentControl below).
-  const { role: operatorSpawnRole, spawnDisabled: operatorRoleUnknown } = resolveOperatorSpawnRole({
-    hasOperator: !!operator,
-    profilesLoaded: profiles.data !== undefined,
-    operatorProfileRole: operator ? roleOf(operator) : null,
-    fallbackRole: edition.operatorRole,
-  });
+  // attempted in the first place. `resolvedLead.role` (card b2b69ec8) already carries this server-
+  // computed, independent of the `profiles` query — when present, there's no "unknown while profiles
+  // load" window to hold the spawn button for at all. Only when `resolvedLead` carries no role (the dev
+  // edition, or no operator resolved) does this fall back to the profiles-query-dependent resolution,
+  // which DOES have that window: `operatorRoleUnknown` disables the spawn button for it (AgentControl below).
+  const { role: operatorSpawnRole, spawnDisabled: operatorRoleUnknown } = resolvedLead?.role
+    ? { role: resolvedLead.role, spawnDisabled: false }
+    : resolveOperatorSpawnRole({
+        hasOperator: !!operator,
+        profilesLoaded: profiles.data !== undefined,
+        operatorProfileRole: operator ? roleOf(operator) : null,
+        fallbackRole: edition.operatorRole,
+      });
 
   // Sessions belonging to the reserved home, newest first.
   const homeSessions = (sessions.data ?? [])

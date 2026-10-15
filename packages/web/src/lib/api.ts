@@ -437,16 +437,25 @@ export const api = {
     project: Project;
     agents: Agent[];
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
+    // Optional — unlike setupHome below, this route doesn't send it (always undefined in practice); kept
+    // on this type only so PlatformView's shared union access type-checks without a cast.
+    resolvedLead?: { agentId: string | null; role: "platform" | "setup" | null };
   }>("/api/platform/home"),
   // Setup Assistant E1-7 — discover the reserved "Getting Started" home (hidden from the ordinary
   // picker, like the Platform home) + its Setup Assistant agent(s), for the dedicated Setup page.
   // MIRRORS platformHome but NAME-SCOPED server-side to the SETUP home. READ-ONLY discovery; spawn =
   // startSession(role "setup") below. liveSessions surfaces an already-live setup session so the page
   // attaches/reuses it instead of minting a second (startSetup is a server-side singleton regardless).
+  // `resolvedLead` (card b2b69ec8): the daemon's OWN authority (`resolveHomeLeadAgent`) for which agent
+  // is the home's operator + which spawn role it would actually run under — the web consumes this
+  // directly instead of re-deriving "the Lead" by list order/name, which can disagree with the server
+  // when a second human-bound platform agent exists. Both null when no operator agent resolves (e.g. a
+  // dev install's "View as: End-user" preview).
   setupHome: () => get<{
     project: Project;
     agents: Agent[];
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
+    resolvedLead: { agentId: string | null; role: "platform" | "setup" | null };
   }>("/api/setup/home"),
   // --- Guided onboarding & templates (onboarding C3/C5). HUMAN-only loopback REST mirror of the
   // agent-facing template_list/template_apply MCP tools — the setup wizard consumes these directly.

@@ -6,14 +6,16 @@ import type { Db } from "../db.js";
 import { isOperatorEnabled } from "../mcp/operator.js";
 import { resolveHomeLeadAgent } from "../projects/live-lead-home.js";
 import {
-  resolveReservedHomeByMarker,
   SETUP_HOME_PROJECT_ID_KEY,
   PLATFORM_HOME_PROJECT_ID_KEY,
   SETUP_PROJECT_NAME,
   LEGACY_SETUP_PROJECT_NAME,
-  PLATFORM_PROJECT_NAME,
+  SETUP_AGENT_NAME,
+  SETUP_HOME_LEAD_AGENT_ID_KEY,
+  resolveSetupHome,
+  resolveLiveSetupHome,
 } from "../projects/reserved-home-markers.js";
-export { SETUP_PROJECT_NAME };
+export { SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_HOME_LEAD_AGENT_ID_KEY, resolveLiveSetupHome };
 
 /**
  * Setup Assistant — the reserved, UNGATED "Platform" home + its single Setup Assistant agent.
@@ -76,13 +78,13 @@ const SETUP_HOME_PATH = LOOM_HOME;
 const SETUP_PROFILE_NAME = "Setup Assistant";
 
 /**
- * The seeded operator agent's DISPLAY name (also the name-scoped anchor the first-run auto-launch resolves
- * by). Rebranded "Setup Assistant" → "Platform" (A2): the operator's displayed identity is now "Platform".
- * first-run.ts resolves by this constant, so the lookup moves in lockstep. Internal ids/anchors (the `setup`
- * role, `setup-assistant` skill id, the profile name above) are KEPT. (SETUP_PROJECT_NAME was later renamed
- * "Getting Started" → "Platform" by a SEPARATE change — see its own doc + seedSetupProjectRename below.)
+ * The seeded operator agent's DISPLAY name (also the name-scoped anchor the first-run auto-launch
+ * resolves by), re-exported above from `projects/reserved-home-markers.ts` (card b2b69ec8 — moved there
+ * to break an import cycle with `projects/live-lead-home.ts`; every existing importer of
+ * `SETUP_AGENT_NAME` from this file is unaffected). Rebranded "Setup Assistant" → "Platform" (A2): the
+ * operator's displayed identity is now "Platform". Internal ids/anchors (the `setup` role,
+ * `setup-assistant` skill id, the profile name above) are KEPT.
  */
-export const SETUP_AGENT_NAME = "Platform";
 
 /**
  * The pre-rebrand operator display name. Existing installs seeded the agent under this literal before A2;
@@ -157,15 +159,16 @@ const PLATFORM_LEAD_PROFILE_NAME = "Platform-lead";
  * Daemon-GLOBAL app_meta markers for f437d4e9 C5 (the end-user Platform Lead upgrade), mirroring the
  * marker-guarded one-shot shape of PLATFORM_PROMPT_MIGRATION_KEY (platform/seed.ts).
  *
- * `SETUP_HOME_LEAD_AGENT_ID_KEY` holds the id of the setup home's OWN operator agent whenever one is
- * identified — stamped by seedSetupHome's direct-seed path AND by migrateSetupHomeToLead below, in BOTH
- * its pristine-match AND its customized/non-match branches (a customized agent is still "the home's
- * operator agent" even though its prompt/profile aren't touched — a later manual opt-in must resolve
- * against the SAME id, not be refused by `startPlatformLead`'s Decision-5 guard for the one it's meant to
- * allow). `sessions/service.ts`'s `startPlatformLead` reads this directly (id-equality, never a name or
- * `.find(p=>p.reserved)` lookup) to enforce "exactly one Lead" on `!isLoomDev()`.
+ * `SETUP_HOME_LEAD_AGENT_ID_KEY` (re-exported above from `projects/reserved-home-markers.ts` — moved
+ * there by card b2b69ec8 for the same import-cycle reason as `SETUP_AGENT_NAME`) holds the id of the
+ * setup home's OWN operator agent whenever one is identified — stamped by seedSetupHome's direct-seed
+ * path AND by migrateSetupHomeToLead below, in BOTH its pristine-match AND its customized/non-match
+ * branches (a customized agent is still "the home's operator agent" even though its prompt/profile
+ * aren't touched — a later manual opt-in must resolve against the SAME id, not be refused by
+ * `startPlatformLead`'s Decision-5 guard for the one it's meant to allow). `sessions/service.ts`'s
+ * `startPlatformLead` reads this directly (id-equality, never a name or `.find(p=>p.reserved)` lookup)
+ * to enforce "exactly one Lead" on `!isLoomDev()`.
  */
-export const SETUP_HOME_LEAD_AGENT_ID_KEY = "setup.platformLeadAgentId";
 /** One-shot guard: migrateSetupHomeToLead has run (regardless of outcome) — never retried after this. */
 export const SETUP_LEAD_UPGRADE_MIGRATION_KEY = "setup.platformLeadUpgradeApplied";
 /** One-shot guard: the Decision-4 upgrade-available board card has been filed — never re-seeded, even if dismissed/deleted. */
@@ -223,44 +226,6 @@ const SETUP_CHECKLIST: { title: string; body: string }[] = [
     body: "Start a manager session on your project and hand it a goal. It runs the lead-manages-workers loop — planning, delegating to workers, reviewing, and merging.",
   },
 ];
-
-/**
- * Resolve the reserved setup home by its stable app_meta id marker (card a47dd144), falling back to a
- * NAME match (current, then the pre-rebrand legacy literal) for an install that pre-dates the marker —
- * or whose marker fails validation (gone, not reserved, colliding with the platform home's own marker id,
- * or — card 5dff8d08 — this row's name looks like the platform home's AND a DIFFERENT, LIVE setup home
- * genuinely exists elsewhere) — and backfilling the marker the instant a name match is found. See
- * reserved-home-markers.ts's resolveReservedHomeByMarker for the shared validation logic.
- *
- * Module-private: used only by this file's own seeders/migrations and by `resolveLiveSetupHome` below
- * (card 5dff8d08) — never export this again for an external call site. ARCHIVE-AGNOSTIC by design
- * (round 2) — needed so a seeder's own idempotency gate treats an archived reserved home as already-
- * seeded rather than minting a live duplicate beside it. Do NOT call this directly from a runtime
- * (non-seeder) call site — an archived reserved project is not a valid target to act on even though its
- * marker still resolves it; use the exported `resolveLiveSetupHome` instead.
- */
-function resolveSetupHome(db: Db): Project | undefined {
-  return resolveReservedHomeByMarker(
-    db,
-    SETUP_HOME_PROJECT_ID_KEY,
-    PLATFORM_HOME_PROJECT_ID_KEY,
-    [SETUP_PROJECT_NAME, LEGACY_SETUP_PROJECT_NAME],
-    [PLATFORM_PROJECT_NAME],
-  );
-}
-
-/**
- * Card 5dff8d08: the LIVE-only twin of `resolveSetupHome`, for every RUNTIME (non-seeder) call site —
- * mirrors the pre-card `db.getReservedProjectByName`'s archive-EXCLUSIVE contract, now surviving a human
- * rename too. An archived reserved home (unreachable via any write surface today — both
- * `DELETE /api/projects/:id` and the Platform Lead's `project_archive` refuse a `p.reserved` project) must
- * still read as "no home" to a runtime call site, exactly as it did before this card, rather than being
- * treated as actionable just because its stable marker still resolves it.
- */
-export function resolveLiveSetupHome(db: Db): Project | undefined {
-  const home = resolveSetupHome(db);
-  return home && !home.archivedAt ? home : undefined;
-}
 
 /**
  * Seed the reserved "Platform" home and its home operator agent IF ABSENT. UNGATED — runs for

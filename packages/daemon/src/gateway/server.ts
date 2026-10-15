@@ -91,6 +91,7 @@ import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge,
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
 import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent } from "../setup/seed.js";
+import { resolveHomeLeadAgent, isSanctionedPlatformLeadAgent } from "../projects/live-lead-home.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
@@ -3973,7 +3974,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         createdAt: s.createdAt, lastActivity: s.lastActivity,
       })),
     );
-    return { project, agents, liveSessions };
+    // Card b2b69ec8 (M3): the ONE server-side authority for "which agent is the home's operator, and
+    // what spawn role would it actually run under" — `resolveHomeLeadAgent` (the SAME helper
+    // `startPlatformLead`/`resume()`/`migrateSetupHomeToLead` already resolve through), never a
+    // client-side re-derivation by list order or name. `role` is "platform" only when this exact agent
+    // is the SANCTIONED Lead (current bound profile role IS "platform" — `isSanctionedPlatformLeadAgent`,
+    // the same check `startPlatformLead` itself enforces); otherwise "setup" (a not-yet-upgraded or
+    // customized operator). Both null when no operator agent resolves at all (e.g. a dev install, where
+    // `resolveHomeLeadAgent` is always undefined — the dev Lead lives in the separate platform home).
+    const leadAgent = resolveHomeLeadAgent(deps.db);
+    const resolvedLead: { agentId: string | null; role: "platform" | "setup" | null } = leadAgent
+      ? { agentId: leadAgent.id, role: isSanctionedPlatformLeadAgent(deps.db, leadAgent.id) ? "platform" : "setup" }
+      : { agentId: null, role: null };
+    return { project, agents, liveSessions, resolvedLead };
   });
 
   // --- Workflow templates (Guided Onboarding & Templates, onboarding C3): the HUMAN-only REST mirror of

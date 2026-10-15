@@ -24,6 +24,24 @@ export const LEGACY_SETUP_PROJECT_NAME: string = "Getting Started";
 export const PLATFORM_PROJECT_NAME = "Loom Platform";
 
 /**
+ * The reserved setup home's operator agent DISPLAY name (also the name-scoped anchor several runtime
+ * call sites resolve by) — see `setup/seed.ts`'s re-export for the full rebrand history.
+ *
+ * Card b2b69ec8: moved here from `setup/seed.ts`, alongside `SETUP_HOME_LEAD_AGENT_ID_KEY` and
+ * `resolveLiveSetupHome` below, to break the `setup/seed.ts` <-> `projects/live-lead-home.ts` import
+ * cycle those two needed — `live-lead-home.ts` now imports all three from this neutral module instead
+ * of from `setup/seed.ts`, while `setup/seed.ts` keeps re-exporting them for its own existing importers.
+ */
+export const SETUP_AGENT_NAME = "Platform";
+
+/**
+ * Daemon-GLOBAL app_meta marker holding the id of the setup home's OWN operator agent whenever one is
+ * identified — see `setup/seed.ts`'s re-export for the full stamping-sites doc. Moved here for the same
+ * import-cycle reason as `SETUP_AGENT_NAME` above (card b2b69ec8).
+ */
+export const SETUP_HOME_LEAD_AGENT_ID_KEY = "setup.platformLeadAgentId";
+
+/**
  * Resolve ONE reserved home by its stable marker, falling back to a NAME match for an install that
  * pre-dates the marker (or whose marker fails validation) and BACKFILLING the marker the instant a name
  * match is found — so a name match is needed at most once per LOOM_HOME, ever.
@@ -85,4 +103,46 @@ export function resolveReservedHomeByMarker(
     }
   }
   return undefined;
+}
+
+/**
+ * Resolve the reserved setup home by its stable app_meta id marker, falling back to a NAME match
+ * (current, then the pre-rebrand legacy literal) for an install that pre-dates the marker or whose
+ * marker fails validation, backfilling the marker the instant a name match is found.
+ *
+ * Moved here from `setup/seed.ts` (card b2b69ec8) so `projects/live-lead-home.ts` can resolve the setup
+ * home WITHOUT importing `setup/seed.ts` — see `resolveLiveSetupHome` below for why that import had to
+ * go. `setup/seed.ts` re-exports this for its own seeders/migrations; ARCHIVE-AGNOSTIC by design, so a
+ * seeder's own idempotency gate treats an archived reserved home as already-seeded rather than minting a
+ * live duplicate beside it. Do NOT call this directly from a runtime (non-seeder) call site — an archived
+ * reserved project is not a valid target to act on even though its marker still resolves it; use the
+ * exported `resolveLiveSetupHome` instead.
+ */
+export function resolveSetupHome(db: Db): Project | undefined {
+  return resolveReservedHomeByMarker(
+    db,
+    SETUP_HOME_PROJECT_ID_KEY,
+    PLATFORM_HOME_PROJECT_ID_KEY,
+    [SETUP_PROJECT_NAME, LEGACY_SETUP_PROJECT_NAME],
+    [PLATFORM_PROJECT_NAME],
+  );
+}
+
+/**
+ * Card 5dff8d08: the LIVE-only twin of `resolveSetupHome` above, for every RUNTIME (non-seeder) call
+ * site — mirrors the pre-card `db.getReservedProjectByName`'s archive-EXCLUSIVE contract, now surviving
+ * a human rename too. An archived reserved home (unreachable via any write surface today — both
+ * `DELETE /api/projects/:id` and the Platform Lead's `project_archive` refuse a `p.reserved` project)
+ * must still read as "no home" to a runtime call site, rather than being treated as actionable just
+ * because its stable marker still resolves it.
+ *
+ * Moved here from `setup/seed.ts` (card b2b69ec8), alongside `resolveSetupHome`, `SETUP_AGENT_NAME` and
+ * `SETUP_HOME_LEAD_AGENT_ID_KEY` above — `projects/live-lead-home.ts` needs all four, and importing them
+ * from `setup/seed.ts` is what created that file's import cycle with `setup/seed.ts` (which itself needs
+ * `resolveHomeLeadAgent` from `live-lead-home.ts`). `setup/seed.ts` re-exports this for its own existing
+ * importers (`sessions/service.ts`, `gateway/server.ts`, `setup/first-run.ts`).
+ */
+export function resolveLiveSetupHome(db: Db): Project | undefined {
+  const home = resolveSetupHome(db);
+  return home && !home.archivedAt ? home : undefined;
 }

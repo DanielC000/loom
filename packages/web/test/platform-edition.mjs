@@ -189,4 +189,21 @@ check("PlatformView threads roleUnknown into the operator AgentControl mount and
     "spawnDisabled must ALSO OR in roleUnknown, alongside previewDisabled");
 });
 
+// ── 5. card b2b69ec8 (M3) — the operator resolves by the daemon's OWN authority (setupHome's
+// `resolvedLead`) when the server provides one, never by re-deriving "the Lead" from `agents` by list
+// order/name alone. SOURCE-TEXT structural checks (same shape as section 3/4 above) since this logic is
+// inline in the shell, not an extractable pure function. ───────────────────────────────────────────────
+
+check("the operator resolves by resolvedLead.agentId FIRST, falling back to role/name only when absent", () => {
+  assert.ok(shellSrc.includes("resolvedLead?.agentId"),
+    "PlatformView.tsx must read resolvedLead?.agentId");
+  assert.ok(/agents\.find\(\(a\)\s*=>\s*a\.id\s*===\s*resolvedLead\.agentId\)/.test(shellSrc),
+    "the operator must be resolved by exact id match against resolvedLead.agentId");
+});
+
+check("the operator's spawn role trusts resolvedLead.role directly, with no profiles-loading window, when present", () => {
+  assert.ok(shellSrc.includes("resolvedLead?.role"),
+    "PlatformView.tsx must read resolvedLead?.role for the operator's spawn role");
+});
+
 console.log(`\n${pass} passed`);
