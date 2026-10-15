@@ -5,7 +5,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
-  usesOrchestrationMcp, contextPercentFor,
+  usesOrchestrationMcp, contextPercentFor, PROFILE_SPAWNABLE_ROLES,
   type Session, type StopMode, type OrchestrationEvent, type Task, type Project, type Profile,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
@@ -1940,11 +1940,6 @@ function nearestAgentIdPrefix(agents: Agent[], ref: string): string | undefined 
 function suggestAgentRef(agents: Agent[], ref: string): string | undefined {
   return looksLikeId(ref) ? nearestAgentIdPrefix(agents, ref) : nearestAgentName(agents, ref);
 }
-
-/** ⛔ Least-privilege hardening: ONLY manager/worker/assistant are profile-spawnable on a default
- *  "+New" spawn. Elevated roles (platform/auditor/workspace-auditor/setup/operator/run) must come
- *  EXCLUSIVELY from their explicit human spawn paths — never widen this set. */
-const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker", "assistant"]);
 
 /**
  * The task-board MCP baseline a custom `permission.allow` must never be able to STRIP. Every

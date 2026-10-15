@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { errorText } from "../lib/loopbackCredential";
-import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type RepoRegistryEntry, type StalePromptWarning } from "@loom/shared";
+import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, profileRoleBindsAsPlainSession, type Agent, type Project, type RepoRegistryEntry, type StalePromptWarning } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots, StaleStartupPromptWarning } from "../components/ui";
@@ -741,6 +741,11 @@ function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: stri
   );
 }
 
+// The bind dropdown's group label for a profile whose role the spawn would clamp away — stated as the
+// consequence ("what do I get"), not the mechanism. One constant so the <optgroup> and the inline note
+// below the select (shown once the collapsed <select> hides the group) can never word it differently.
+const PLAIN_BIND_GROUP_LABEL = "role not conferred — binds as a plain session";
+
 // The selected agent's detail: an editor header (name + profile-assign + delete, all relocated here out of
 // the old cramped rail) over the roomy startup-prompt editor. Remounted per agent (key=agent.id) so the
 // textarea + assignment reset on switch; after Save the query refetches and `dirty` clears.
@@ -775,24 +780,33 @@ function AgentEditor(
   // hook, so Reset retires it with no extra bookkeeping here.
   const conflict = sync.conflicts.length > 0;
   const live = liveCount > 0;
-  // Which profiles this dropdown may offer. A DEV-LAYER profile (role platform / auditor — RoleConfer
-  // "dev") is not spawnable from an ordinary agent: a profile only confers manager / worker / assistant
-  // (PROFILE_SPAWNABLE_ROLES), so binding one yields a plain session with no elevated surface at all.
-  // Safe, but it reads like an offer of admin powers that does not exist — so a non-dev install, where no
-  // such rig is human-creatable in the first place, is not shown them. On dev they stay (the dev-layer
-  // rigs are real there), under their own group label stating what binding one actually does.
-  //
-  // The CURRENTLY-assigned profile is always kept, dev-layer or not: dropping the selected option would
-  // leave the <select> with no matching value and silently render this agent as "— none —".
-  const [ordinaryProfiles, devProfiles] = useMemo(() => {
-    const ordinary: typeof profiles = [], dev: typeof profiles = [];
+  // Which profiles this dropdown may offer, on TWO independent axes — neither hand-lists a role.
+  // VISIBILITY (`isDevLayerRole`, read off the role map's own `confer`): a dev-layer rig (platform /
+  // auditor) isn't human-creatable on a non-dev install, so offering one there is noise. On dev it stays.
+  // GROUPING (`profileRoleBindsAsPlainSession`, derived from the daemon's PROFILE_SPAWNABLE_ROLES): a
+  // profile confers only manager / worker / assistant, so binding one carrying ANY other role spawns a
+  // PLAIN session with that role silently dropped — safe, but it reads as an offer of powers that don't
+  // exist. 921e06b0 fixed the dev-layer pair; c40489c6 covers setup / operator / workspace-auditor,
+  // which are `confer: "user"`/`"hidden"` and so slip past the visibility axis. Those stay OFFERED (a
+  // user may legitimately want one bound) under a group label stating what binding one really does.
+  // Reading the set from @loom/shared instead of re-listing it here is what survives the clamp moving.
+  // The CURRENTLY-assigned profile is always kept, whichever axis would drop it: removing the selected
+  // option would leave the <select> with no matching value and silently render this agent as "— none —".
+  const [ordinaryProfiles, plainBindProfiles] = useMemo(() => {
+    const ordinary: typeof profiles = [], plainBind: typeof profiles = [];
     for (const p of profiles) {
-      const devLayer = isDevLayerRole(p.role as SessionRole | null);
-      if (devLayer && !isDev && p.id !== agent.profileId) continue;
-      (devLayer ? dev : ordinary).push(p);
+      const role = p.role as SessionRole | null;
+      if (isDevLayerRole(role) && !isDev && p.id !== agent.profileId) continue;
+      (profileRoleBindsAsPlainSession(role) ? plainBind : ordinary).push(p);
     }
-    return [ordinary, dev];
+    return [ordinary, plainBind];
   }, [profiles, isDev, agent.profileId]);
+  // The group label disappears the moment a <select> collapses to its chosen option, so a bound
+  // non-spawnable profile would read as conferring its role again. This restates it inline, only then.
+  const boundBindsPlain = useMemo(() => {
+    const bound = profiles.find((p) => p.id === agent.profileId);
+    return bound ? profileRoleBindsAsPlainSession(bound.role as SessionRole | null) : false;
+  }, [profiles, agent.profileId]);
   // `flex:1` (not `height:100%`) so the editor fills the Editor Panel's `minHeight:72vh`: that Panel sits in
   // an `alignItems:start` grid so its `height` is `auto`, against which a percentage height collapses to
   // content — the flex min-height is what the prompt textarea's own `flex:1` then grows into.
@@ -810,9 +824,9 @@ function AgentEditor(
             {ordinaryProfiles.map((p) => (
               <option key={p.id} value={p.id}>{p.icon ? `${p.icon} ` : ""}{p.name}{p.role ? ` (${p.role})` : ""}</option>
             ))}
-            {devProfiles.length > 0 && (
-              <optgroup label="platform-tier — binds as a plain session">
-                {devProfiles.map((p) => (
+            {plainBindProfiles.length > 0 && (
+              <optgroup label={PLAIN_BIND_GROUP_LABEL}>
+                {plainBindProfiles.map((p) => (
                   <option key={p.id} value={p.id}>{p.icon ? `${p.icon} ` : ""}{p.name}{p.role ? ` (${p.role})` : ""}</option>
                 ))}
               </optgroup>
@@ -827,6 +841,12 @@ function AgentEditor(
           {deleting ? "Deleting…" : "Delete agent"}
         </Button>
       </div>
+      {boundBindsPlain && (
+        <div data-testid="agent-profile-plain-bind" style={{ display: "flex", alignItems: "baseline", gap: 6, color: color.amber, fontFamily: font.mono, fontSize: 11, lineHeight: 1.5 }}>
+          <span aria-hidden>△</span>
+          <span>This profile's role isn't one a profile can confer, so sessions from this agent spawn plain.</span>
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
         <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>Startup prompt</span>
         <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>injected as the first turn of each new session</span>

@@ -545,6 +545,28 @@ export const LOOM_DRIVEN_ROLES: readonly SessionRole[] = ["worker", "setup", "au
  *  {@link LOOM_DRIVEN_ROLES} so manager/platform coverage here never leaks into disallowedToolsForRole. */
 export const BOOT_DIALOG_DETECTOR_ROLES: readonly SessionRole[] = [...LOOM_DRIVEN_ROLES, "manager", "platform"];
 
+/**
+ * ⛔ Least-privilege hardening: ONLY manager/worker/assistant are profile-spawnable on a default
+ * "+New" spawn. Elevated roles (platform/auditor/workspace-auditor/setup/operator/run) must come
+ * EXCLUSIVELY from their explicit human spawn paths — never widen this set.
+ *
+ * Card c40489c6 moved this here from `sessions/service.ts` (same reason card b1da256d moved
+ * {@link LOOM_DRIVEN_ROLES} out of `pty/host.ts`): `packages/web` cannot import the daemon, and the
+ * Agents profile picker must know which profiles actually confer their role. A hand-listed copy in the
+ * web would silently drift from the clamp it claims to mirror — the picker would keep offering a rig as
+ * if its role were real long after this set moved.
+ */
+export const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker", "assistant"]);
+
+/**
+ * Whether binding a profile carrying `role` yields a session that silently LOSES that role — i.e. the
+ * role is set but outside {@link PROFILE_SPAWNABLE_ROLES}, so the spawn clamps it to a plain session.
+ * A role-null profile is NOT this case: it asks for a plain session and gets one.
+ */
+export function profileRoleBindsAsPlainSession(role: SessionRole | null | undefined): boolean {
+  return role != null && !PROFILE_SPAWNABLE_ROLES.has(role);
+}
+
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
 /**
  * An AgentRun's lifecycle status (Agent Runs R2). queued/starting/running are in-flight; the rest are

@@ -67,6 +67,11 @@ async function pinActiveProject(page: Page, projectId: string) {
 // a <select>, so a role-button filter on the unique name pins exactly the agent row.
 const agentRow = (page: Page, name: string) => page.getByRole("button").filter({ hasText: name }).first();
 
+// Must match `PLAIN_BIND_GROUP_LABEL` in pages/Projects.tsx verbatim. Deliberately a copy rather than an
+// import: pulling that module into the Playwright process would drag in React, the theme and the whole UI
+// kit for one string. Drift fails loudly (the optgroup simply isn't found), never silently passes.
+const PLAIN_BIND_GROUP_LABEL = "role not conferred — binds as a plain session";
+
 // The profile-assignment control is the ONLY <select> on the page carrying the "— none —" placeholder option
 // (the board-preset select in the project form does not), so this filter disambiguates it from that select.
 const profileSelect = (page: Page) => page.locator("select").filter({ hasText: "— none —" });
@@ -297,6 +302,79 @@ test.describe("profiles & agents", () => {
     await expect(select.locator("option").filter({ hasText: platform.name })).toHaveCount(1);
     await expect(select).toHaveValue(platform.id);
     // …and it is grouped under the label that states what binding it actually does.
-    await expect(select.locator('optgroup[label="platform-tier — binds as a plain session"]')).toHaveCount(1);
+    await expect(select.locator(`optgroup[label="${PLAIN_BIND_GROUP_LABEL}"]`)).toHaveCount(1);
+  });
+
+  // Card c40489c6 — 921e06b0 (above) keyed the picker's filter off `isDevLayerRole` (RoleConfer "dev"),
+  // which covers platform/auditor only. setup / operator / workspace-auditor are equally outside
+  // PROFILE_SPAWNABLE_ROLES ({manager, worker, assistant}) — binding one ALSO spawns a plain session with
+  // the role silently dropped — but they are `confer: "user"`/`"hidden"`, so that filter deliberately let
+  // them through and the picker kept offering them as if their role were real. They stay OFFERED (a user
+  // can legitimately create one) but under the group label, and a bound one says so inline.
+  test("the agent profile picker groups non-dev non-spawnable rigs instead of offering them as real roles", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`agents-nonspawn-${Date.now()}`);
+    await seedAgent(loomDaemon.baseURL, project.id, "Chooser");
+    // The two non-spawnable, NON-dev-layer roles a human can actually mint over REST. (`auditor` and
+    // `workspace-auditor` are refused by roleCarryForwardOnlyError, so the direct-child sweep below is
+    // what covers them — same reasoning as 921e06b0's own auditor note.)
+    const setupRig = await seedProfile(loomDaemon.baseURL, { name: `Setup Rig ${Date.now()}`, role: "setup", icon: "⚙" });
+    const operatorRig = await seedProfile(loomDaemon.baseURL, { name: `Operator Rig ${Date.now()}`, role: "operator", icon: "▲" });
+    // POSITIVE CONTROL: a genuinely spawnable rig, seeded the same way through the same route. Without it
+    // an empty/mislocated dropdown would satisfy the "not a direct option" assertions for the wrong reason.
+    const workerRig = await seedProfile(loomDaemon.baseURL, { name: `Worker Rig ${Date.now()}`, role: "worker", icon: "▸" });
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
+
+    await agentRow(page, "Chooser").click();
+    const select = profileSelect(page);
+    await expect(select).toBeVisible();
+
+    // A DIRECT child <option> is one the picker offers as an ordinary, role-conferring rig; one nested in
+    // the optgroup is disclosed as binding plain. The child combinator is what separates the two.
+    const directOption = (name: string) => select.locator(":scope > option").filter({ hasText: name });
+    const groupedOption = (name: string) =>
+      select.locator(`optgroup[label="${PLAIN_BIND_GROUP_LABEL}"] > option`).filter({ hasText: name });
+
+    // POSITIVE CONTROL: the worker rig IS offered directly — the picker is populated and the locators work.
+    await expect(directOption(workerRig.name)).toHaveCount(1);
+    await expect(groupedOption(workerRig.name)).toHaveCount(0);
+
+    // Both non-spawnable rigs are still OFFERED (not hidden — unlike the dev-layer pair) …
+    await expect(select.locator("option").filter({ hasText: setupRig.name })).toHaveCount(1);
+    await expect(select.locator("option").filter({ hasText: operatorRig.name })).toHaveCount(1);
+    // … but under the group label, never as a plain top-level option.
+    await expect(groupedOption(setupRig.name)).toHaveCount(1);
+    await expect(directOption(setupRig.name)).toHaveCount(0);
+    await expect(groupedOption(operatorRig.name)).toHaveCount(1);
+    await expect(directOption(operatorRig.name)).toHaveCount(0);
+
+    // Sweep: NO direct option carries a non-spawnable role, so a bundled setup/operator/workspace-auditor
+    // profile seeded outside this test can't slip through either. Nothing is bound yet, so the
+    // always-keep-the-current-assignment rule has no exception in play here.
+    for (const text of await select.locator(":scope > option").allTextContents()) {
+      expect(text).not.toMatch(/\((platform|auditor|workspace-auditor|setup|operator|run)\)/);
+    }
+
+    // EXERCISE the control, with an observable before/after on the inline disclosure. BEFORE: nothing is
+    // bound, so no note.
+    await expect(select).toHaveValue("");
+    await expect(page.getByTestId("agent-profile-plain-bind")).toHaveCount(0);
+
+    // ACT + AFTER (observable #1 — UI): binding the setup rig surfaces the inline note, because a
+    // collapsed <select> hides the optgroup label that carried this fact a moment ago.
+    await select.selectOption(setupRig.id);
+    await expect(select).toHaveValue(setupRig.id);
+    await expect(page.getByTestId("agent-profile-plain-bind")).toBeVisible();
+
+    // AFTER (observable #2 — REST): the bind really landed; this is a UI filter, not a server-side change.
+    await expect
+      .poll(async () => (await listAgents(loomDaemon.baseURL, project.id)).find((a) => a.name === "Chooser")?.profileId ?? null)
+      .toBe(setupRig.id);
+
+    // ACT + AFTER (observable #3 — the note is CONDITIONAL, not always-on): rebinding to the spawnable
+    // worker rig retires it. Without this, an unconditionally-rendered note would pass #1 for free.
+    await select.selectOption(workerRig.id);
+    await expect(select).toHaveValue(workerRig.id);
+    await expect(page.getByTestId("agent-profile-plain-bind")).toHaveCount(0);
   });
 });

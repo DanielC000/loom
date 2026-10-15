@@ -20,8 +20,12 @@ import { sessionRoleTone, tone as toneVar, type Tone } from "../theme";
 //   • manager/platform → NOT in the human-prompt disallow (they legitimately surface decisions); manager
 //     spawns + controls workers, reviews + merges via the gate, files decisions to the human.
 //   • setup → the curated, fail-closed loom-setup surface (create/configure projects, agents, profiles).
-//   • platform/auditor → dev-layer (LOOM_DEV): platform is the only agent-facing git/vault write surface;
-//     auditor is read-mostly transcript review with two narrow daemon-local writes.
+//   • platform → the only agent-facing git/vault write surface. NOT LOOM_DEV-gated since epic f437d4e9:
+//     mcp/platform.ts's resolveRole is a bare role check carrying an explicit "do not reintroduce an
+//     isLoomDev() gate" decision, so the Lead ships to EVERY install; only daemon_restart and bundled-asset
+//     writes stay dev-only. It is `confer: "dev"` because it is CORE-SEEDED, not because it is dev-gated.
+//   • auditor → genuinely still dev-layer: its rig seeds only on a dev install (platform/seed.ts's
+//     `if (!isLoomDev()) return []`); read-mostly transcript review with two narrow daemon-local writes.
 
 export type RoleKey = "plain" | SessionRole;
 
@@ -156,7 +160,7 @@ export const ROLE_DISPLAY: Record<RoleKey, RoleDisplay> = {
     powers: [
       { text: "git & vault writes", has: true },
       { text: "Cross-project session control", has: true },
-      { text: "Gated behind LOOM_DEV", has: false },
+      { text: "Core-seeded — never UI-assignable", has: false },
     ],
     confer: "dev",
   },
@@ -243,6 +247,11 @@ export function roleDisplay(role: SessionRole | null | undefined): RoleDisplay {
 // picker uses it to LOCK a card; the Agents profile picker uses it to hide a dev-layer PROFILE from the
 // bind dropdown on a non-dev install. An unknown role falls back to the plain record (confer "user"), so
 // this is deliberately fail-open — it governs what a picker OFFERS, never what the daemon permits.
+//
+// ⚠️ This answers VISIBILITY only, never "would binding this profile actually confer its role" — the two
+// came apart in card c40489c6: setup / operator / workspace-auditor are equally non-spawnable yet are
+// `confer: "user"`/`"hidden"`, so this returns false for them. That second question is
+// `profileRoleBindsAsPlainSession` (@loom/shared), derived from the daemon's PROFILE_SPAWNABLE_ROLES.
 export function isDevLayerRole(role: SessionRole | null | undefined): boolean {
   return roleDisplay(role).confer === "dev";
 }
