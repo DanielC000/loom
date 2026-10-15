@@ -3,7 +3,7 @@ import path from "node:path";
 import type { RepoRegistryEntry } from "@loom/shared";
 import { isGitRepo } from "../git/reader.js";
 import { expandTilde } from "../paths.js";
-import { splitGateSteps } from "../orchestration/gate-runner.js";
+import { splitGateSteps, gateStateOnlyStepWarning } from "../orchestration/gate-runner.js";
 import { STALE_ASIDE_SUFFIX_RE, TASK_KEY_SHAPE_RE } from "../git/worktrees.js";
 
 /**
@@ -39,9 +39,12 @@ export function comparisonKey(canonicalPath: string): string {
   return process.platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath;
 }
 
-/** Result of {@link validateRepoRegistry}. `ok:false` names the FIRST offending entry. */
+/** Result of {@link validateRepoRegistry}. `ok:false` names the FIRST offending entry. `warnings`
+ *  (ok:true only) is a non-blocking advisory list — never a rejection reason — naming any entry whose
+ *  `gateCommand`/`ungatedLandingCheckCommand` has a step that is a state-only shell builtin (`cd`, …)
+ *  immediately followed by another step (card c6543bbd); `[]` when none. */
 export type RepoRegistryCheck =
-  | { ok: true; value: RepoRegistryEntry[] }
+  | { ok: true; value: RepoRegistryEntry[]; warnings: string[] }
   | { ok: false; error: string };
 
 /**
@@ -105,6 +108,7 @@ export async function validateRepoRegistry(
   // is actually portable.
   const seenKeyFolds = new Map<string, string>();
   const out: RepoRegistryEntry[] = [];
+  const warnings: string[] = [];
   for (const raw of input) {
     if (typeof raw !== "object" || raw === null) {
       return { ok: false, error: "each repos entry must be an object with key + path" };
@@ -209,6 +213,10 @@ export async function validateRepoRegistry(
       if (splitGateSteps(entry.gateCommand).length === 0) {
         return { ok: false, error: `repos entry "${key}" gateCommand must split into at least one non-empty step (via top-level "&&" joins) — a whitespace-only or "&&"-only command is not a valid gate` };
       }
+      // Card c6543bbd: non-blocking — a step like `cd web` is a WHOLE top-level `&&` step that runs as
+      // its own process and never reaches the step after it.
+      const stateWarning = gateStateOnlyStepWarning(entry.gateCommand);
+      if (stateWarning) warnings.push(`repos entry "${key}" gateCommand: ${stateWarning}`);
       gateCommand = entry.gateCommand;
     }
     let noGateByDesign: boolean | undefined;
@@ -228,6 +236,9 @@ export async function validateRepoRegistry(
       if (splitGateSteps(entry.ungatedLandingCheckCommand).length === 0) {
         return { ok: false, error: `repos entry "${key}" ungatedLandingCheckCommand must split into at least one non-empty step (via top-level "&&" joins) — a whitespace-only or "&&"-only command is not a valid check` };
       }
+      // Card c6543bbd: mirrors the gateCommand warning immediately above.
+      const stateWarning = gateStateOnlyStepWarning(entry.ungatedLandingCheckCommand);
+      if (stateWarning) warnings.push(`repos entry "${key}" ungatedLandingCheckCommand: ${stateWarning}`);
       ungatedLandingCheckCommand = entry.ungatedLandingCheckCommand;
     }
     seenKeys.add(key);
@@ -239,7 +250,7 @@ export async function validateRepoRegistry(
       ...(ungatedLandingCheckCommand === undefined ? {} : { ungatedLandingCheckCommand }),
     });
   }
-  return { ok: true, value: out };
+  return { ok: true, value: out, warnings };
 }
 
 /** Result of {@link diffRepoRegistry} — a project's live manager/platform sessions need to be told which

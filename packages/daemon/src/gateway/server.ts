@@ -74,6 +74,7 @@ import {
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
+import { gateCommandFieldWarnings } from "../orchestration/gate-runner.js";
 import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { isActiveDocumentContentType, listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
@@ -4032,10 +4033,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // repos (multi-repo epic 49136451): HUMAN-only on this REST create path, same trust class as above —
     // validated against the PREDICTED repoPath/vaultPath (not yet created) to check path-aliasing.
     let repos: RepoRegistryEntry[] = [];
+    let repoGateWarning: string | undefined;
     if (b.repos !== undefined) {
       const check = await validateRepoRegistry(b.repos, { repoPath: targetCheck.target, vaultPath });
       if (!check.ok) return reply.code(400).send({ error: check.error });
       repos = check.value;
+      if (check.warnings.length) repoGateWarning = check.warnings.join(" | ");
     }
     // This route was the one CREATE surface accepting `repos` that never ran the shared containment
     // check — validateRepoRegistry above only catches an EXACT alias, not containment. `pairingIsIntentional:
@@ -4061,11 +4064,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Card ce9a3a91: redact sessionEnv on BOTH exits below like the other project-returning WRITE routes
     // (0c5d6851) — nothing in the setup wizard reads config.sessionEnv back out of this response.
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
+    const projectRead = redactSessionEnvForRead(project);
     if (isGit) {
       const identity = await checkCommitIdentity(boot.dir);
-      if (identity.warning) return reply.code(201).send({ ...redactSessionEnvForRead(project), identityWarning: identity.warning });
+      if (identity.warning) return reply.code(201).send({ ...projectRead, identityWarning: identity.warning, ...(repoGateWarning ? { warning: repoGateWarning } : {}) });
     }
-    return reply.code(201).send(redactSessionEnvForRead(project));
+    return reply.code(201).send(repoGateWarning ? { ...projectRead, warning: repoGateWarning } : projectRead);
   });
 
   app.post("/api/setup/templates/apply", async (req, reply) => {
@@ -4817,10 +4821,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // each entry carries its own gateCommand (host-RCE), validated by validateRepoRegistry (unique key,
     // reserved "primary", absolute + isGitRepo path, no aliasing repoPath/vaultPath/another entry).
     let repos: RepoRegistryEntry[] = [];
+    let repoGateWarning: string | undefined;
     if (b.repos !== undefined) {
       const check = await validateRepoRegistry(b.repos, { repoPath: finalRepoPath, vaultPath: finalVaultPath });
       if (!check.ok) return reply.code(400).send({ error: check.error });
       repos = check.value;
+      if (check.warnings.length) repoGateWarning = check.warnings.join(" | ");
     }
     // Card 5ba4412d (+ review follow-up): the SHARED containment check on the FULL {repoPath, vaultPath,
     // repos} triple, run UNCONDITIONALLY for every create — including the vault-only branch, where
@@ -4844,7 +4850,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       vaultOnly: !repoPath, // the vault-only branch above — no separate repo was ever given
     };
     deps.db.insertProject(project);
-    return reply.code(201).send(redactSessionEnvForRead(project));
+    const projectRead = redactSessionEnvForRead(project);
+    return reply.code(201).send(repoGateWarning ? { ...projectRead, warning: repoGateWarning } : projectRead);
   });
 
   // Soft-archived projects (read-only) — the web "Archived" section that surfaces restore / permanent-
@@ -4932,11 +4939,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // which re-validates the SAME array and so always diffs empty) — the live-manager/platform notify
     // fired after the write below (card 540a3281).
     let repoRegistryDiff: RepoRegistryDiff | undefined;
+    let repoGateWarning: string | undefined;
     if (b.repos !== undefined) {
       // existingKeys (card e3fcd8ea): the PRE-patch stored keys — exempts a legacy stale-shaped key this
       // PATCH is merely carrying forward (echoed or kept) from the shape check, never one newly added here.
       const check = await validateRepoRegistry(b.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath, existingKeys: new Set(p.repos.map((r) => r.key)) });
       if (!check.ok) return reply.code(400).send({ error: check.error });
+      if (check.warnings.length) repoGateWarning = check.warnings.join(" | ");
       // LIVE-WORKTREE GUARD (CARRIED 3, multi-repo epic 49136451 phase 2): a `repos` edit can repath or
       // remove an entry a LIVE worker's worktree was cut from — stranding it exactly like an unguarded
       // repoPath rebind would. Same blanket per-project policy as checkRepoRebind (registry edits are
@@ -5029,7 +5038,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     // staleStartupPrompts is ADDITIVE on this response — always present (possibly []), never a field on
     // the stored Project itself; a rename/repoPath-change lint result, not project state.
-    return { ...redactSessionEnvForRead(deps.db.getProject(id)!), staleStartupPrompts };
+    return { ...redactSessionEnvForRead(deps.db.getProject(id)!), staleStartupPrompts, ...(repoGateWarning ? { warning: repoGateWarning } : {}) };
   });
 
   // Soft-remove (archive) a project — hides it from the project list; rows/sessions are retained.
@@ -5142,7 +5151,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (resolveCodescapeConfig(v.value).enabled && !resolveCodescapeConfig(existing.config).enabled) {
       console.log(`[codescape] project ${id} codescape.enabled set — a daemon restart is required to ingest this project (v1)`);
     }
-    return redactSessionEnvForRead(deps.db.getProject(id)!);
+    // Card c6543bbd: a non-blocking advisory, scoped to whichever of these THIS PATCH actually wrote
+    // (v.value.orchestration — never the pre-existing stored value) — a step like `cd web` that is a
+    // WHOLE top-level `&&` step runs as its own process and never reaches the step after it.
+    const gateWarning = gateCommandFieldWarnings({
+      gateCommand: v.value.orchestration?.gateCommand,
+      ungatedLandingCheckCommand: v.value.orchestration?.ungatedLandingCheckCommand,
+      deployCommand: v.value.orchestration?.deployCommand,
+    });
+    const projectAfter = redactSessionEnvForRead(deps.db.getProject(id)!);
+    return gateWarning ? { ...projectAfter, warning: gateWarning } : projectAfter;
   });
 
   // Read-only bounded change history for ONE project's config override (card a0cafef2, sibling of

@@ -397,6 +397,11 @@ export interface OrchestrationConfig {
    * Build/test command run in a worker's worktree before a merge (the build/DoD gate).
    * Empty string = no automated gate; at this stage the two-step manager review IS the gate.
    * (#17 will REQUIRE a non-empty gate before autonomy is enabled.)
+   * Each top-level `&&`-joined step runs as its OWN process — shell state (cwd, env vars) set by one
+   * step does NOT carry over to the next (e.g. `cd web && npm test` runs `npm test` at the repo root,
+   * not inside `web/`; use a per-step form like `npm --prefix web test` instead). Setting a command
+   * shaped like this via `project_configure` / the REST config PATCH returns a non-blocking `warning`
+   * naming the offending step, but it is still accepted and stored as given.
    */
   gateCommand: string;
   /**

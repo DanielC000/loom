@@ -39,6 +39,90 @@ export function splitGateSteps(gate: string): string[] {
   return steps.filter((s) => s.length > 0);
 }
 
+/** Shell builtins/directives whose ENTIRE effect is a change to the current process's own shell state
+ *  (cwd, variables, sourced functions) — they have no effect at all once the process that ran them
+ *  exits. `.` (POSIX dot-source, an alias for `source`) is matched separately below since it isn't a
+ *  bare word. */
+const STATE_ONLY_SHELL_BUILTINS = ["cd", "pushd", "set", "export", "source"] as const;
+
+/** True if `step` chains a SECOND command after its leading builtin via a top-level `;`/`|` (outside
+ *  quotes) — in that case the builtin's state change DOES reach something (the rest of the same
+ *  process), so the step is not purely state-only. Deliberately narrow (just `;`/`|`): `gateCommand` is
+ *  HUMAN-set/trusted text already split on top-level `&&` by {@link splitGateSteps}, so this only needs
+ *  to rule out the common "cd x; run y" shape within one step, not parse a full shell grammar. */
+function hasTopLevelChain(step: string): boolean {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < step.length; i++) {
+    const ch = step[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === ";" || ch === "|") return true;
+  }
+  return false;
+}
+
+/** True if `step` is JUST a state-only shell builtin/directive invocation (see
+ *  {@link STATE_ONLY_SHELL_BUILTINS}) with no other command chained after it in the same step. */
+function isStateOnlyGateStep(step: string): boolean {
+  const trimmed = step.trim();
+  const isBuiltin = STATE_ONLY_SHELL_BUILTINS.some((b) => new RegExp(`^${b}\\b`).test(trimmed)) || /^\.\s+\S/.test(trimmed);
+  return isBuiltin && !hasTopLevelChain(trimmed);
+}
+
+/**
+ * Non-blocking warning (card c6543bbd, from a real escalation, `f0e38d76`): a `gateCommand`-shaped
+ * string (also `ungatedLandingCheckCommand`/`deployCommand`, or a `repos[].gateCommand`/
+ * `repos[].ungatedLandingCheckCommand` entry — anything run through {@link splitGateSteps}) can name a
+ * step that is JUST a state-only shell builtin (`cd`, `pushd`, `set`, `export`, `source`/`.`) followed
+ * by another step. Each top-level `&&` step runs as its OWN process (see {@link splitGateSteps}'s own
+ * doc) — so that step's cwd/env change is discarded the instant it exits and never reaches the next
+ * step. The incident: `cd web && npm ci && npm test` ran `cd web` in its own process (a no-op), then
+ * `npm ci`/`npm test` at the repo root instead of inside `web/`. Returns `undefined` when no step in
+ * `gate` has this shape (including when `gate` splits into fewer than 2 steps — there's no "next step"
+ * for a lone step's state to fail to reach).
+ */
+export function gateStateOnlyStepWarning(gate: string): string | undefined {
+  const steps = splitGateSteps(gate);
+  if (steps.length < 2) return undefined;
+  // The LAST step has no "next step" to lose its effect on, so it is excluded even if it happens to
+  // match — flagging it would be a true statement ("this step does nothing useful") but a different
+  // claim than the one this warning makes.
+  const offending = steps.slice(0, -1).filter(isStateOnlyGateStep);
+  if (offending.length === 0) return undefined;
+  const named = offending.map((s) => `"${s}"`).join(", ");
+  return (
+    `gate step(s) ${named} only change shell state (working directory / environment) — each top-level ` +
+    `"&&" step runs as its own process, so that change is discarded before the next step runs and never ` +
+    `reaches it. Use a per-step form instead (e.g. "npm --prefix web ..." instead of "cd web && npm ...", ` +
+    `or "cargo --manifest-path <path>/Cargo.toml ..."), or run the whole thing as one step (e.g. ` +
+    `cmd /c "cd web && npm ci && npm test" on Windows, or a single shell -c string on POSIX).`
+  );
+}
+
+/**
+ * Convenience wrapper over {@link gateStateOnlyStepWarning} for a config-write caller setting several
+ * gate-shaped fields in one call (`orchestration.gateCommand` / `ungatedLandingCheckCommand` /
+ * `deployCommand`, or a `repos[]` entry's `gateCommand` / `ungatedLandingCheckCommand`) — checks each
+ * named value and prefixes any resulting warning with its field name, so a caller setting more than one
+ * at once still gets an unambiguous combined message. Omit/undefined a field that wasn't written on this
+ * call. Returns `undefined` when none of the given fields has the state-only-step shape.
+ */
+export function gateCommandFieldWarnings(fields: Record<string, string | undefined>): string | undefined {
+  const parts: string[] = [];
+  for (const [name, value] of Object.entries(fields)) {
+    if (!value) continue;
+    const warning = gateStateOnlyStepWarning(value);
+    if (warning) parts.push(`${name}: ${warning}`);
+  }
+  return parts.length > 0 ? parts.join(" | ") : undefined;
+}
+
 /** Cap (bytes) on the captured stdout+stderr tail kept per gate step, for diagnostics on a rejection —
  *  a bounded ring, never the full log. Mirrors python/venv.ts's `OUTPUT_TAIL_BYTES`. */
 const OUTPUT_TAIL_BYTES = 4096;
