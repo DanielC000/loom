@@ -47,7 +47,7 @@ import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } 
 import { searchProjectMemory, DEFAULT_MEMORY_SEARCH_CAP, MAX_MEMORY_SEARCH_CAP } from "./projectMemorySearch.js";
 
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate, templateAssignableProfileError } from "../setup/templates.js";
-import { PLATFORM_PROJECT_NAME, resolveLivePlatformHome } from "../platform/seed.js";
+import { resolveLiveLeadHome } from "../projects/live-lead-home.js";
 import { resolvePlatformLeadResumeDocPath } from "../sessions/platform-lead-prompt.js";
 import { lineageRootId } from "../sessions/lineage.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
@@ -2744,7 +2744,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. REJECTS a NAME CHANGE on a reserved/system project (the Loom Platform home) — DELIBERATELY, as a least-privilege trust-boundary choice: renaming a reserved home is a rare administrative action kept human-REST-only, never surfaced on this or any agent-facing tool (even the elevated Platform Lead's own), even though every runtime lookup that resolves these homes now survives a rename via the stable id marker (card 5dff8d08) and no longer needs this refusal for correctness; rename it via the Projects UI/REST instead. vaultPath/repoPath/config edits to a reserved project remain allowed. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos and repos (the writable multi-repo registry) are NOT settable even here — both are REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project PLUS `staleStartupPrompts`: any agent in this project whose startupPrompt still references a name/repoPath/vaultPath value THIS call just changed away from (a rename lint, WARN-only — it never edits the prompt; fix stale content via agent_update). The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
+        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. REJECTS a NAME CHANGE on a reserved/system project (your platform home board) — DELIBERATELY, as a least-privilege trust-boundary choice: renaming a reserved home is a rare administrative action kept human-REST-only, never surfaced on this or any agent-facing tool (even the elevated Platform Lead's own), even though every runtime lookup that resolves these homes now survives a rename via the stable id marker (card 5dff8d08) and no longer needs this refusal for correctness; rename it via the Projects UI/REST instead. vaultPath/repoPath/config edits to a reserved project remain allowed. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos and repos (the writable multi-repo registry) are NOT settable even here — both are REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project PLUS `staleStartupPrompts`: any agent in this project whose startupPrompt still references a name/repoPath/vaultPath value THIS call just changed away from (a rename lint, WARN-only — it never edits the prompt; fix stale content via agent_update). The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({ projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional(), repoPath: z.string().optional() }),
       },
       async ({ projectId, name, vaultPath, repoPath }) => {
@@ -2759,7 +2759,7 @@ export class PlatformMcpRouter {
         // CHANGE (name !== current); a same-name no-op call, and any vaultPath/repoPath/config edit, stay
         // allowed — this surface is elevated/dev-only and legitimately edits its own home's other fields.
         if (name !== undefined && project.reserved && name !== project.name) {
-          return ok({ error: "cannot rename a reserved/system project (the Loom Platform home) — renaming stays human-REST-only (least privilege, never surfaced on this agent-facing tool); rename it via the Projects UI/REST." });
+          return ok({ error: "cannot rename a reserved/system project (your platform home board) — renaming stays human-REST-only (least privilege, never surfaced on this agent-facing tool); rename it via the Projects UI/REST." });
         }
         // repoPath REBIND (elevated/human-only): fronted by the SHARED guard (isGitRepo + live-worktree
         // refusal), identical to the human REST PATCH path. Non-repo or a live worktree → reject, no write.
@@ -2828,7 +2828,7 @@ export class PlatformMcpRouter {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
         // Guard: never let the Lead archive its own reserved home (or any system project).
-        if (p.reserved) return ok({ error: "cannot archive a reserved/system project (the Loom Platform home)" });
+        if (p.reserved) return ok({ error: "cannot archive a reserved/system project (your platform home board)" });
         db.archiveProject(projectId);
         return ok({ archived: true, projectId });
       },
@@ -2915,8 +2915,8 @@ export class PlatformMcpRouter {
       resolvesEscalation: string | undefined,
     ): { error: string } | { escalationTaskId: string | undefined } {
       if (resolvesEscalation === undefined) return { escalationTaskId: undefined };
-      const home = resolveLivePlatformHome(db);
-      if (!home) return { error: "no reserved Loom Platform project exists — cannot resolve resolvesEscalation" };
+      const home = resolveLiveLeadHome(db);
+      if (!home) return { error: "no reserved platform home exists — cannot resolve resolvesEscalation" };
       const escTask = getByIdPrefix(
         resolvesEscalation,
         (id) => { const t = db.getTask(id); return t && t.projectId === home.id ? t : undefined; },
@@ -2954,9 +2954,9 @@ export class PlatformMcpRouter {
           "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.\n" +
           "`resolvesEscalation` (card ba04d607): when this new card IS the fix for a `platform_escalate` " +
           "you triaged, pass that escalation's taskId (full id or unambiguous prefix, resolved on YOUR OWN " +
-          "\"" + PLATFORM_PROJECT_NAME + "\" board — never a task on the destination board) to STRUCTURALLY " +
+          "platform home board — never a task on the destination board) to STRUCTURALLY " +
           "link the two. This is what lets `escalation_status` DERIVE `resolved` from this new card's own " +
-          "git-verified merged state instead of asserting it from your Platform board's own terminal column " +
+          "git-verified merged state instead of asserting it from your platform home board's own terminal column " +
           "— the exact defect ba04d607 exists to fix. Skipping this on an escalation's fix leaves that " +
           "escalation reading `triaged` forever, even after the fix ships — a body-text note is NOT a " +
           "substitute (that remedy already failed twice; see the card). An unknown/ambiguous/out-of-scope " +
@@ -3191,7 +3191,7 @@ export class PlatformMcpRouter {
           "as a backstop against a buggy one). Returns the full updated Task row, same as a `body` write.\n" +
           "`resolvesEscalation` (card de90f22a, single-`taskId` path only) is the AFTER-CREATION counterpart " +
           "to `project_task_create`'s param of the same name: pass an escalation's taskId (full id or " +
-          "unambiguous prefix, resolved on YOUR OWN \"" + PLATFORM_PROJECT_NAME + "\" board — never a task on " +
+          "unambiguous prefix, resolved on YOUR OWN platform home board — never a task on " +
           "the destination board) to STRUCTURALLY link THIS existing card as that escalation's fix, exactly " +
           "as if you'd passed it at create time. Exists because the create-time-only param left no way to " +
           "link a SECOND escalation to a fix that already exists — the link had to be conveyed in prose or " +

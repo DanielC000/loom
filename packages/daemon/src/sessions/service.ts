@@ -39,7 +39,7 @@ import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, WORKTREES_DIR } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { isDurablyResumable, type RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
 import type { HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
@@ -99,6 +99,7 @@ import { mergeConfigOverride, validateAgentProjectConfigOverride, isHumanSetPerm
 import { appendTaskBodySection, checkTitleHtmlEntities } from "../mcp/tasks.js";
 import { cancelQuestionForAgent } from "../mcp/questionTool.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
+import { resolveLiveLeadHome } from "../projects/live-lead-home.js";
 import { resolveLiveSetupHome } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
 import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
@@ -10563,10 +10564,10 @@ export class SessionService {
    * Card e2a3c613 — a stuck MANAGER has no parentSessionId to nudge, so this mirrors `platformEscalate`'s
    * own pattern instead of the parent-nudge path above: best-effort live-nudge a live Platform Lead
    * (suppressed if the Lead is itself live-and-pre-boot on the same dialog family — the identical hazard
-   * 850eb55c already guards for a manager parent), AND file a durable task onto the reserved Platform-
-   * home board so an offline/not-yet-live Lead still sees it later. LOOM_DEV-gated: on a non-dev install
-   * there is no reserved Platform project at all, so this is a no-op — the owner-attention path is the
-   * only one for that case, and it still fires regardless (see the caller).
+   * 850eb55c already guards for a manager parent), AND file a durable task onto whichever platform-tier
+   * home is actually live (`resolveLiveLeadHome`, card 1731ab5b) so an offline/not-yet-live Lead still
+   * sees it later — the owner-attention path always fires too regardless (see the caller), so an absent
+   * home is never a silent drop.
    */
   private notifyLeadOfStuckManager(
     sessionId: string,
@@ -10574,8 +10575,7 @@ export class SessionService {
     info: { timeoutMs: number; signatureName: string | null },
     sigLabel: string,
   ): { leadNotified: boolean; leadBoardTaskId?: string } {
-    if (!isLoomDev()) return { leadNotified: false };
-    const home = resolveLivePlatformHome(this.db);
+    const home = resolveLiveLeadHome(this.db);
     if (!home) return { leadNotified: false };
 
     // Dedup the BOARD TASK per session id (never per timer fire/boot): a resumed session that gets stuck
@@ -11313,13 +11313,13 @@ export class SessionService {
   } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
-    // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the manager.
-    // MARKER-SCOPED (card 5dff8d08): resolve via resolvePlatformHome, not a bare `.find(reserved)` or a
-    // name compare — a second reserved home (the ungated "Platform" setup home) now coexists, so "the one
-    // reserved project" is ambiguous, and a name-only lookup would stop finding this home the moment a
-    // human renames it via PATCH /api/projects/:id, mis-filing or dropping the escalation.
-    const home = resolveLivePlatformHome(this.db);
-    if (!home) throw new Error("no reserved Loom Platform project exists — cannot escalate");
+    // HARDCODED target: whichever platform-tier home is actually LIVE for this install — never an
+    // arbitrary projectId from the manager. MARKER-SCOPED (card 5dff8d08) via `resolveLiveLeadHome`
+    // (card 1731ab5b, epic f437d4e9 C2): the dev "Loom Platform" home when it exists, else the end-user
+    // "Platform" home — never a bare `.find(reserved)` (more than one reserved project can coexist) and
+    // never hardcoded to one install type, since a non-dev install never seeds the dev home at all.
+    const home = resolveLiveLeadHome(this.db);
+    if (!home) throw new Error("no reserved platform home exists — cannot escalate");
 
     // @decision 97c2c37b — a still-open, same-title escalation is reused (never duplicated) unless its
     // severity genuinely INCREASED, in which case the same task is reused but a fresh event still fires

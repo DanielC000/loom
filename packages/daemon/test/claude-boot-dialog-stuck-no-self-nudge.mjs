@@ -28,13 +28,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //   (M1)-(M5) Card e2a3c613: a stuck MANAGER has no parentSessionId at all, so (B)-(E) above never apply
 //       to it — NEW coverage for the Platform-Lead escalation `notifyLeadOfStuckManager` adds (labeled
 //       M1-M5, not F-J, to avoid colliding with the UNRELATED (F)/(G)/(H) labels the real-PtyHost block
-//       at the end of this file already uses). (M1) LOOM_DEV off: no-op, event-only. (M2) LOOM_DEV on,
-//       no live Lead: a durable board task still files (mirrors `platformEscalate`'s durable-first
+//       at the end of this file already uses). (M1) card 1731ab5b: NO platform-tier home exists at all
+//       (`resolveLiveLeadHome` resolves neither the dev "Loom Platform" home nor an end-user "Platform"
+//       home) — no-op, event-only. (M1b) card 1731ab5b round 2 (Code Review MAJOR): a STALE dev
+//       "Loom Platform" row exists (as if this LOOM_HOME previously booted with LOOM_DEV=1) AND the
+//       end-user "Platform" home ALSO exists, but LOOM_DEV is OFF now — `resolveLiveLeadHome`'s STRICT
+//       mutual exclusion on `isLoomDev()` must file the board task onto the end-user home, NEVER the
+//       stale dev row just because it still resolves by marker/name; a `??` fallback (the round-1 shape)
+//       would have wrongly kept using the stale dev row here. (M2) the dev home now exists, LOOM_DEV is
+//       ON, but no live Lead: a durable board task still files (mirrors `platformEscalate`'s durable-first
 //       design) but no live nudge. (M3) a live, past-boot Lead: ONE enqueueStdin call to the Lead (never
 //       to the stuck manager — the self-nudge rule is unaffected) plus the board task. (M3b) card 5dff8d08:
 //       the SAME live-Lead-nudge scenario as (M3), but AFTER a human rename of the reserved Platform home
 //       (PATCH /api/projects/:id) — notifyLeadOfStuckManager must still resolve it via the stable marker
-//       (resolveLivePlatformHome) and still file onto the SAME project id. (M4) the Lead is
+//       (`resolveLiveLeadHome`) and still file onto the SAME project id. (M4) the Lead is
 //       ITSELF live-and-pre-boot: suppress the live nudge (same hazard (D) guards for a manager parent)
 //       but the board task still files. (M5) a SECOND stuck episode for the SAME session id reuses the
 //       EXISTING board task (never a duplicate `insertTask`), while the live-nudge-to-Lead itself is NOT
@@ -228,11 +235,12 @@ try {
   // =====================     nudge branch never fires for it (parentNudged is always false); this is ======
   // =====================     NEW coverage: the Platform-Lead escalation + owner-attention routing. ========
   const home = `cbdsns-platform-home-${sfx}`;
-  db.insertProject({ id: home, name: "Loom Platform", repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null, reserved: true });
 
-  // ===================== (M1) manager, LOOM_DEV OFF: no Lead escalation attempted at all (notifyLeadOf- =
-  // =====================      StuckManager is a no-op pre-isLoomDev-check) — event-only, parentNudged: ===
-  // =====================      false, leadNotified:false, no board task, ZERO enqueueStdin calls anywhere.
+  // ===================== (M1) NO platform-tier home exists at all yet (neither the dev "Loom Platform" ===
+  // =====================      home below NOR an end-user "Platform" home has been seeded in this test) — =
+  // =====================      card 1731ab5b's `resolveLiveLeadHome` resolves nothing, so notifyLeadOf- ====
+  // =====================      StuckManager is a no-op: event-only, parentNudged:false, leadNotified:false,
+  // =====================      no board task, ZERO enqueueStdin calls anywhere.
   {
     delete process.env.LOOM_DEV;
     const pty = new PtyStub();
@@ -244,18 +252,53 @@ try {
     sessions.handleClaudeBootDialogStuck(mgr, { timeoutMs: 150_000, signatureName: "workspace-trust", role: "manager" });
 
     const events = db.listEventsForWorker(mgr).filter((e) => e.kind === "claude_boot_dialog_stuck");
-    check("(M1) the durable event fires for a stuck manager even with LOOM_DEV off", events.length === 1);
+    check("(M1) the durable event fires for a stuck manager even with no platform-tier home", events.length === 1);
     check("(M1) event detail records parentNudged:false — a manager never has a parentSessionId", events[0]?.detail?.parentNudged === false);
-    check("(M1) event detail records leadNotified:false — LOOM_DEV is off, no Lead escalation attempted", events[0]?.detail?.leadNotified === false);
+    check("(M1) event detail records leadNotified:false — no platform-tier home resolves, no Lead escalation attempted", events[0]?.detail?.leadNotified === false);
     check("(M1) event detail carries no leadBoardTaskId — no board task was filed", events[0]?.detail?.leadBoardTaskId === undefined);
     check("(M1) ZERO enqueueStdin calls anywhere — no parent, no Lead, and the self-nudge rule still holds", pty.enqueueCalls.length === 0);
-    check("(M1) zero tasks filed on the Platform home", db.listTasks(home).length === 0);
+    check("(M1) zero tasks filed on the (not-yet-created) Platform home", db.listTasks(home).length === 0);
+  }
+
+  // The dev "Loom Platform" reserved home — inserted here (after M1, which deliberately has NO
+  // platform-tier home at all) so M1b onward can exercise the live-home path via `resolveLiveLeadHome`.
+  db.insertProject({ id: home, name: "Loom Platform", repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null, reserved: true });
+  // The end-user "Platform" setup home — inserted ALONGSIDE the dev home (never alone) so (M1b) can prove
+  // the STRICT mutual-exclusion ruling: both rows coexist from here on, exactly simulating an install
+  // whose LOOM_HOME once booted with LOOM_DEV=1 (seeding the dev home, which nothing ever archives) and
+  // has since gone back to LOOM_DEV off — `resolveLiveLeadHome` must switch homes ENTIRELY on the flag,
+  // never fall through from an absent "right" home to whichever "wrong" one still happens to resolve.
+  const setupHome = `cbdsns-setup-home-${sfx}`;
+  db.insertProject({ id: setupHome, name: "Platform", repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null, reserved: true });
+
+  // ===================== (M1b) a STALE dev "Loom Platform" row + the end-user "Platform" home BOTH ======
+  // =====================       exist, but LOOM_DEV is OFF: the board task must land on the end-user =====
+  // =====================       home, NEVER the stale dev row — the flag decides, not row survival. ======
+  {
+    delete process.env.LOOM_DEV;
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `cbdsns-m1b-mgr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    pty.setLive(mgr);
+
+    sessions.handleClaudeBootDialogStuck(mgr, { timeoutMs: 150_000, signatureName: "workspace-trust", role: "manager" });
+
+    const events = db.listEventsForWorker(mgr).filter((e) => e.kind === "claude_boot_dialog_stuck");
+    check("(M1b) event detail records leadNotified:false — LOOM_DEV is off, no live Lead to nudge either way", events[0]?.detail?.leadNotified === false);
+    const taskId = events[0]?.detail?.leadBoardTaskId;
+    check("(M1b) event detail carries a leadBoardTaskId — a durable task WAS filed, onto the end-user home", typeof taskId === "string");
+    const task = typeof taskId === "string" ? db.getTask(taskId) : undefined;
+    check("(M1b) the filed task lands on the END-USER setup home, never the stale dev home", task?.projectId === setupHome);
+    check("(M1b) zero tasks were filed on the stale dev 'Loom Platform' home", db.listTasks(home).length === 0);
   }
 
   // ===================== (M2) manager, LOOM_DEV ON but NO live Lead: a durable board task IS filed on ===
-  // =====================      the Platform home (so an offline Lead sees it later), but leadNotified =====
+  // =====================      the DEV home (so an offline Lead sees it later), but leadNotified =========
   // =====================      stays false (nobody live to nudge) — mirrors platformEscalate's own ========
-  // =====================      durable-first design. ========================================================
+  // =====================      durable-first design. The LOOM_DEV=1 toggle is load-bearing here (not just =
+  // =====================      a leftover): the end-user home ALSO exists from (M1b) onward, so if this ===
+  // =====================      toggle were dropped, resolveLiveLeadHome would resolve THAT home instead. ==
   {
     process.env.LOOM_DEV = "1";
     const pty = new PtyStub();

@@ -5805,7 +5805,7 @@ export class OrchestrationMcpRouter {
         description:
           "Soft-archive a project: it disappears from the active project list, but its rows and sessions are " +
           "retained (not deleted). Structural, reversible-by-a-human. YOUR project only — a projectId outside " +
-          "your own (e.g. the reserved Loom Platform home) is REJECTED.",
+          "your own (e.g. the reserved platform home board) is REJECTED.",
         inputSchema: strictShape({ projectId: z.string() }),
       },
       async ({ projectId }) => {
@@ -5937,8 +5937,8 @@ export class OrchestrationMcpRouter {
           "Escalate a discovered Loom bug or friction UP to the Platform Lead — or notify it of a status/" +
           "completion it asked to hear about. This is the " +
           "ONE durable channel for anything the Lead needs to know; don't invent an ad hoc 'I'll ping you' — " +
-          "that reaches no one reliably. Files a DURABLE, structured task on the reserved Loom Platform " +
-          "board (the Lead's inbox — it survives whether or not a Lead session is live), capturing your " +
+          "that reaches no one reliably. Files a DURABLE, structured task on your own reserved platform " +
+          "home board (the Lead's inbox — it survives whether or not a Lead session is live), capturing your " +
           "origin project + this manager session, the title, the detail/evidence, and a severity. The target " +
           "is the Platform board, fixed server-side (you cannot pick a project) — for a LINKED peer " +
           "project's manager instead, use peer_message. Returns the created Platform task id plus a " +
