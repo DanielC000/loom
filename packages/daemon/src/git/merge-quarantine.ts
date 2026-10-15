@@ -4587,6 +4587,10 @@ function reenterMergeQuarantinesAtBootImpl(
   // by its OWN, simpler loop below that is ALWAYS a pure pending-divert, never the resolvable self-heal
   // branch `deferredCorruptJsons` can take — an ancestor walk is never proof of ownership.
   const deferredAncestorCorruptJsons: { f: string; matchedRepo: string }[] = [];
+  // @decision 8db913e2 (Follow-up 8bff3cae) — collect-then-decide: ANY way this boot can independently
+  // arm this stale key (clean parse, corrupt `.json`, or corrupt tmp) gets its own chance FIRST —
+  // resolved once, below, only after every one of those has fully settled, never right after PASS 1.
+  const staleKeyRetentionCandidates: { currentKey: string; staleKey: string }[] = [];
 
   // PASS 1 — process EVERY file, never return early.
   for (const f of files) {
@@ -4666,6 +4670,24 @@ function reenterMergeQuarantinesAtBootImpl(
           // never on an unresolvable path, or a transient drive-unmount destroys a genuinely good latch.
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} was filed under a STALE key for ${entry.repoPath} (its canonical key resolution changed) — migrating to ${freshHash}.json so a future clear can find it.`);
+          // @decision 8db913e2 (Follow-up 8bff3cae) — fold the scalar's OWN already-informative key
+          // forward before it is overwritten below; a stale-but-still-live SIBLING key is handled
+          // separately, deferred — see the decision record's own "Follow-up 8bff3cae" section.
+          if (isInformativeKey(entry, currentKey)) {
+            entry = { ...entry, resolvedKeys: unionResolvedKeysRetaining(entry.resolvedKeys, [entry.resolvedKey!], `PASS1-migrate(${entry.repoPath})`) };
+          }
+          // @decision 8db913e2 (Follow-up 8bff3cae) — queue `hash` for deferred retention (never fold it
+          // in HERE) — see `staleKeyRetentionCandidates`'s own doc comment for why.
+          const staleKeyStillOwnedBy = hashToRepo.get(hash);
+          if (staleKeyStillOwnedBy !== undefined) {
+            const staleKeyStillLive = canonicalRepoLockKey(staleKeyStillOwnedBy);
+            // @decision 8db913e2 (Follow-up 8bff3cae, CR 0b975d2a) — never trust a LEGACY-tier
+            // `hashToRepo` match without this check: it can recompute to an ANCESTOR's key that durably
+            // blocks an unrelated repo, never `hash`'s own true owner.
+            if (staleKeyStillLive !== currentKey && quarantineHashForKey(staleKeyStillLive) === hash) {
+              staleKeyRetentionCandidates.push({ currentKey, staleKey: staleKeyStillLive });
+            }
+          }
           entry = { ...entry, resolvedKey: currentKey };
           // @decision a6fa60e2 — strip any dangling `f` reference up front: it's about to be collected
           // for a LATER delete/fold, and a persisted/armed entry still naming it would falsely "protect"
@@ -5355,6 +5377,17 @@ function reenterMergeQuarantinesAtBootImpl(
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
     };
     pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+  }
+
+  // @decision 8db913e2 (Follow-up 8bff3cae) — resolve every deferred stale-key candidate only NOW, with
+  // every OTHER kind of arm already settled and before any migrate-pass write below — see the decision
+  // record for why this exact point (an occupied key is left to its own owner; an unclaimed one is armed).
+  for (const { currentKey, staleKey } of staleKeyRetentionCandidates) {
+    if (byRepoKey.has(staleKey)) continue;
+    const occupant = byRepoKey.get(currentKey);
+    if (!occupant) continue;
+    const armed = armKeyUnlessDegradedCollision(staleKey, occupant, false);
+    if (armed !== undefined) byRepoKey.set(currentKey, armed);
   }
 
   // @decision 4480b077 (round 3) — WRITE-ALL then DELETE-ALL, never interleaved per key: a stale migrate
