@@ -1455,6 +1455,10 @@ try {
       contributorRepoPaths: undefined,
       provenanceUnknown: undefined,
       provenanceTracked: undefined,
+      // @decision 8db913e2 (Follow-up 43cf3b26) — `unionQuarantineEntries` now ALSO folds each side's own
+      // scalar `resolvedKey` into `resolvedKeys` (never gated on the correction above, purely additive) —
+      // prior's kA then entry's kB, in that order (see `unionResolvedKeysRetaining`'s own doc).
+      resolvedKeys: [prior.resolvedKey, entry.resolvedKey],
     };
 
     const byRepoKey = new Map([[key, prior]]);

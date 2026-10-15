@@ -38,14 +38,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   "raise-y-after-boot0"     — two colliding tmps (see "two-tmps" below), boot-0, then a genuine runtime
 //                                `enterMergeQuarantine(y, ...)` raise — proves the KEPT key (K1) survives
 //                                a raise + reboot too, not just a plain reboot.
-//   "two-tmps"                — two sibling tmps for one key (RK=k1 older/KEPT, RK=k2 newer/DROPPED, per
-//                                92c645cc round 2's own "a key can carry MORE THAN ONE tmp"). A
-//                                REGRESSION PIN for the ACCEPTED RESIDUAL (card 43cf3b26, NOT fixed by
-//                                this card): the scalar `resolvedKey` field can only ever carry ONE of
-//                                two genuinely different, equally informative keys. W1 (K1, the legacy
-//                                union's own age-based winner) stays blocked across TWO reboots; W2 (K2,
-//                                the loser) is UNBLOCKED after the FIRST reboot — that is the residual,
-//                                not a regression — and boot-0 must log the drop loudly (never silently).
+//   "two-tmps"                — two sibling tmps for one key (RK=k1 older, RK=k2 newer, per 92c645cc
+//                                round 2's own "a key can carry MORE THAN ONE tmp"). FIXED by card
+//                                43cf3b26's own persisted, plural `resolvedKeys`: BOTH W1 (K1) and W2 (K2)
+//                                now stay blocked across TWO reboots — the former ACCEPTED RESIDUAL ("K2
+//                                is unblocked after a reboot") is retired. Boot-0 still reports the
+//                                collision, now at INFO level (no longer a loss to flag loudly).
 //   "json-plus-tmp"           — a clean, already-correct Ky.json (RK=k1) PLUS an unrelated, harmless
 //                                stale tmp sharing Ky's hash (no resolvedKey of its own — not a
 //                                two-informative-keys collision at all). FIXED: W1 stays blocked after a
@@ -90,6 +88,8 @@ const SCENARIOS = [
   "two-tmps",
   "json-plus-tmp",
   "json-plus-tmp-subpath",
+  "identity-invariant-two-secondaries",
+  "identity-invariant-two-secondaries-remount",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -113,8 +113,8 @@ if (!scenarioArg) {
   }
   console.log(failedScenarios === 0
     ? "\n✅ ALL SCENARIOS PASS — PASS 1b's tmp-promotion write preserves a genuinely dual-armed key's own "
-      + "secondary resolvedKey when exactly one key is informative (Fix 1); the two-informative-keys "
-      + "collision stays an ACCEPTED, LOUDLY-LOGGED residual (card 43cf3b26), pinned by 'two-tmps'."
+      + "secondary resolvedKey (Fix 1, card 1e739f4a); the two-informative-keys collision is now FULLY "
+      + "FIXED (card 43cf3b26's own persisted, plural resolvedKeys), pinned by 'two-tmps'."
     : `\n❌ ${failedScenarios} SCENARIO(S) FAILED.`);
   process.exit(failedScenarios === 0 ? 0 : 1);
 }
@@ -130,7 +130,8 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, assertRepoNotQuarantined, MERGE_QUARANTINE_DIR,
-  listActiveMergeQuarantines, enterMergeQuarantine,
+  listActiveMergeQuarantines, enterMergeQuarantine, assertQuarantineIdentityInvariantTestOnly,
+  clearMergeQuarantine,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -150,17 +151,20 @@ function hashForKey(key) {
   return createHash("sha256").update(key).digest("hex").slice(0, 24);
 }
 
-// Captures everything written to `console.error` while `fn` runs (synchronous or async), restoring the
-// real `console.error` afterward even on throw — used to assert card 43cf3b26's own residual is logged
-// loudly, never silently.
-async function captureConsoleError(fn) {
+// Captures everything written to `console.error`/`console.log` while `fn` runs (synchronous or async),
+// restoring the real functions afterward even on throw — used to assert card 43cf3b26's own fix reports
+// the collision at info level (no longer a loss) rather than silently.
+async function captureConsole(fn) {
   const lines = [];
-  const real = console.error;
-  console.error = (...args) => { lines.push(args.map(String).join(" ")); real(...args); };
+  const realErr = console.error;
+  const realLog = console.log;
+  console.error = (...args) => { lines.push(args.map(String).join(" ")); realErr(...args); };
+  console.log = (...args) => { lines.push(args.map(String).join(" ")); realLog(...args); };
   try {
     await fn();
   } finally {
-    console.error = real;
+    console.error = realErr;
+    console.log = realLog;
   }
   return lines;
 }
@@ -328,15 +332,14 @@ try {
       !!w1EntryAfterReboot && (w1EntryAfterReboot.armedKeys ?? []).includes(k1));
   } else if (scenarioName === "two-tmps") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
-    // TWO-TMPS — REGRESSION PIN for the ACCEPTED RESIDUAL (card 43cf3b26, deliberately NOT fixed by
-    // 1e739f4a — see docs/decisions/8db913e2-*.md's "Follow-up 1e739f4a", Round 2). Two sibling tmps for
-    // the SAME key, each carrying its OWN, DIFFERENT, genuinely informative resolvedKey (K1 older/kept,
-    // K2 newer/dropped). A scalar `resolvedKey` field can only ever carry ONE of the two — PASS 1b's own
-    // primary-arm union (the plain legacy `{...older}` rule) keeps K1 and has no representation for K2 at
-    // all. This is NOT silent: boot-0 must log the drop loudly via `console.error`, naming the dropped
-    // key and card 43cf3b26. W1 (K1) stays blocked across TWO reboots; W2 (K2) is UNBLOCKED after the
-    // FIRST reboot and STAYS unblocked — asserting that is pinning the residual's real, current
-    // behaviour, not a regression in this test.
+    // TWO-TMPS — FIXED by card 43cf3b26's own persisted, plural `resolvedKeys` (generalizing THIS card's
+    // own single-scalar `resolvedKey` mechanism) — see docs/decisions/8db913e2-*.md's "Follow-up
+    // 43cf3b26" section. Two sibling tmps for the SAME key, each carrying its OWN, DIFFERENT, genuinely
+    // informative resolvedKey (K1 older, K2 newer). The scalar `resolvedKey` field still only ever keeps
+    // ONE (K1, for backward compat with an old reader) — but BOTH now survive via `resolvedKeys`, so BOTH
+    // W1 (K1) and W2 (K2) stay blocked across TWO reboots. The former ACCEPTED RESIDUAL ("W2 unblocked
+    // after a reboot") is RETIRED by this card; boot-0's own collision report moved from `console.error`
+    // (an unrecoverable-loss signal) to `console.log` (informational — nothing is lost any more).
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const { y, kyHash, w1, k1, w2, k2 } = buildYAndWitnesses("two-tmps", { twoWitnesses: true });
     writeLatchTmp(kyHash, "111111", {
@@ -348,13 +351,13 @@ try {
       enteredAt: Date.now(), tokens: ["a2"], resolvedKey: k2,
     });
 
-    const errorLines = await captureConsoleError(() => { reenterMergeQuarantinesAtBoot([]); }); // boot-0, deliberately unregistered
+    const consoleLines = await captureConsole(() => { reenterMergeQuarantinesAtBoot([]); }); // boot-0, deliberately unregistered
     check("(precondition) boot-0 keeps K1 (the kept side) armed in memory", (() => {
       const yEntry = listActiveMergeQuarantines().find((e) => (e.armedKeys ?? []).includes(k1));
       return !!yEntry;
     })());
-    check("*** RESIDUAL (card 43cf3b26) *** boot-0 logs the dropped-key collision via console.error, naming K2 and the card",
-      errorLines.some((l) => l.includes(k2) && l.includes("43cf3b26")));
+    check("*** CARD 43cf3b26 *** boot-0 reports the collision at INFO level, naming K2 and the card (no longer a loss)",
+      consoleLines.some((l) => l.includes(k2) && l.includes("43cf3b26")));
 
     const filesAfterBoot0 = fs.readdirSync(MERGE_QUARANTINE_DIR).sort();
 
@@ -362,24 +365,24 @@ try {
     fresh.reenterMergeQuarantinesAtBoot([]);
     const w1EntryAfterReboot = fresh.activeMergeQuarantineFor(w1);
     const w2EntryAfterReboot = fresh.activeMergeQuarantineFor(w2);
-    check("*** FIX 1 *** W1 (K1, the kept key) stays blocked after a reboot",
+    check("*** FIX 1 (1e739f4a) *** W1 (K1, the legacy-kept key) stays blocked after a reboot",
       !!w1EntryAfterReboot && (w1EntryAfterReboot.armedKeys ?? []).includes(k1));
-    check("*** RESIDUAL (card 43cf3b26) *** W2 (K2, the dropped key) is UNBLOCKED after a reboot — this is the known, logged residual, not a regression",
-      !w2EntryAfterReboot);
+    check("*** CARD 43cf3b26 *** W2 (K2) ALSO stays blocked after a reboot — the former residual is FIXED",
+      !!w2EntryAfterReboot && (w2EntryAfterReboot.armedKeys ?? []).includes(k2));
     const filesAfterBoot1 = fs.readdirSync(MERGE_QUARANTINE_DIR).sort();
     check("(sanity) no new/duplicated latch files appeared after boot 1 (file set unchanged)",
       filesAfterBoot1.length === filesAfterBoot0.length && filesAfterBoot1.every((f, i) => f === filesAfterBoot0[i]));
 
-    // A SECOND reboot — W1 must STILL be blocked (the fix is durable, not a one-boot fluke); W2 stays
-    // unblocked (the residual doesn't somehow self-heal, nor does it grow/duplicate anything on disk).
+    // A SECOND reboot — BOTH must STILL be blocked (the fix is durable and idempotent, not a one-boot
+    // fluke), and the on-disk file set must not grow across repeated boots.
     const fresh2 = await rebootSim();
     fresh2.reenterMergeQuarantinesAtBoot([]);
     const w1EntryAfterReboot2 = fresh2.activeMergeQuarantineFor(w1);
     const w2EntryAfterReboot2 = fresh2.activeMergeQuarantineFor(w2);
-    check("*** FIX 1 *** W1 (K1, the kept key) stays blocked after a SECOND reboot",
+    check("*** FIX 1 (1e739f4a) *** W1 (K1) stays blocked after a SECOND reboot",
       !!w1EntryAfterReboot2 && (w1EntryAfterReboot2.armedKeys ?? []).includes(k1));
-    check("*** RESIDUAL (card 43cf3b26) *** W2 (K2) stays unblocked after a SECOND reboot too (no self-heal)",
-      !w2EntryAfterReboot2);
+    check("*** CARD 43cf3b26 *** W2 (K2) ALSO stays blocked after a SECOND reboot (idempotent)",
+      !!w2EntryAfterReboot2 && (w2EntryAfterReboot2.armedKeys ?? []).includes(k2));
     const filesAfterBoot2 = fs.readdirSync(MERGE_QUARANTINE_DIR).sort();
     check("(sanity) no new/duplicated latch files appeared after a SECOND reboot either",
       filesAfterBoot2.length === filesAfterBoot1.length && filesAfterBoot2.every((f, i) => f === filesAfterBoot1[i]));
@@ -453,6 +456,90 @@ try {
     const w1EntryAfterReboot = fresh.activeMergeQuarantineFor(w1);
     check("*** CARD 1e739f4a (Fix 1) *** W1 stays blocked after a reboot, even though the real final was NEVER wrong",
       !!w1EntryAfterReboot && (w1EntryAfterReboot.armedKeys ?? []).includes(k1));
+  } else if (scenarioName === "identity-invariant-two-secondaries") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // IDENTITY-INVARIANT-TWO-SECONDARIES — card 43cf3b26, round 3 (Code Review 4c59172f, MAJOR,
+    // two-path asymmetry). Y is MOUNTED (a real, resolvable repo) throughout, so this exercises PASS 1b's
+    // own RESOLVABLE secondary-arm loop, never the degraded branch (which already threaded correctly). A
+    // SINGLE tmp residue carries TWO secondary keys (K1, K2) at once — the shape that actually trips the
+    // bug: with only one secondary, a stale (never-reassigned) accumulator is invisible, since nothing
+    // ever reads it again. FIXED: the loop now threads its own accumulator forward exactly like PASS 1's
+    // own primary-arm loop, so Y/K1/K2 all end up pointing at ONE shared object — never three keys
+    // split across two distinct, silently-diverging objects for the same identity.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { y, kyHash, w1, k1, w2, k2 } = buildYAndWitnesses("identity-invariant-two-secondaries", { twoWitnesses: true });
+    writeLatchTmp(kyHash, "111111", {
+      repoPath: y, branch: "y-branch", reason: "Y dual-armed via TWO secondary keys K1,K2 in one PASS 1b tmp",
+      enteredAt: Date.now(), tokens: ["a1"], resolvedKey: k1, resolvedKeys: [k1, k2],
+    });
+
+    reenterMergeQuarantinesAtBoot([]); // boot-0, deliberately unregistered — Y is resolvable throughout
+    check("*** CARD 43cf3b26 (round 3) *** the identity invariant holds right after boot-0 — Y/K1/K2 share ONE object",
+      assertQuarantineIdentityInvariantTestOnly().ok);
+    check("(precondition) W1 (K1) is blocked", !!activeMergeQuarantineFor(w1));
+    check("(precondition) W2 (K2) is blocked", !!activeMergeQuarantineFor(w2));
+
+    clearMergeQuarantine(y);
+    check("*** CARD 43cf3b26 (round 3) *** assertRepoNotQuarantined(w1) succeeds — before the fix, K1 (armed FIRST) was ORPHANED at a stale object: the LATER K2 arm call re-points the anchor Ky's own slot (plus K2) onto a fresh object, leaving K1 behind pointing at the pre-loop one the clear via Ky never reaches",
+      assertRepoNotQuarantined(w1).ok === true);
+    check("*** CARD 43cf3b26 (round 3) *** assertRepoNotQuarantined(w2) succeeds — K2 (armed LAST) always shared the anchor's own final object even pre-fix in this exact two-iteration case, so this is the non-discriminating sibling of the W1 check above",
+      assertRepoNotQuarantined(w2).ok === true);
+    check("(sanity) Y itself is unblocked too", !activeMergeQuarantineFor(y));
+  } else if (scenarioName === "identity-invariant-two-secondaries-remount") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // IDENTITY-INVARIANT-TWO-SECONDARIES-REMOUNT — the SAME shape, but Y is UNRESOLVABLE at boot-0 (the
+    // tmp is processed via the degraded branch instead, diverting to pending — unaffected by this round's
+    // fix) and only becomes resolvable on a LATER boot, exercising the FIXED resolvable loop on a SECOND
+    // pass over the SAME on-disk tmp file (never deleted/promoted while degraded).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const tag = "identity-invariant-two-secondaries-remount";
+    const y = path.join(os.tmpdir(), `loom-mqtpda-y-${tag}-never-yet-${freshSfx()}`); // NOT created yet
+    const ky = canonicalRepoLockKey(y);
+    const kyHash = hashForKey(ky);
+    const w1 = path.join(os.tmpdir(), `loom-mqtpda-w1-${tag}-never-exists-${freshSfx()}`);
+    const k1 = canonicalRepoLockKey(w1);
+    if (hashForKey(k1) === kyHash) throw new Error(`${tag}: k1 collided with ky — re-run`);
+    let w2, k2;
+    for (let attempt = 0; ; attempt++) {
+      w2 = path.join(os.tmpdir(), `loom-mqtpda-w2-${tag}-never-exists-${freshSfx()}`);
+      k2 = canonicalRepoLockKey(w2);
+      if (hashForKey(k2) !== kyHash && k2 !== k1) break;
+      if (attempt > 200_000) throw new Error(`${tag}: could not mint distinct keys after 200,000 attempts`);
+    }
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    writeLatchTmp(kyHash, "222222", {
+      repoPath: y, branch: "y-branch", reason: "Y (not yet mounted) dual-armed via TWO secondary keys K1,K2",
+      enteredAt: Date.now(), tokens: ["a1"], resolvedKey: k1, resolvedKeys: [k1, k2],
+    });
+
+    reenterMergeQuarantinesAtBoot([]); // boot-0 — Y does NOT exist yet; the degraded branch (already
+    // correct, unaffected by this round's fix) still arms each secondary key directly and diverts only
+    // Y's OWN degraded, walked-up signal to pending.
+    check("(precondition) boot-0 still arms W1 (K1) via the (already-correct) degraded branch",
+      !!activeMergeQuarantineFor(w1));
+    check("(precondition) boot-0 still arms W2 (K2) too", !!activeMergeQuarantineFor(w2));
+
+    // Remount: Y now exists as a real repo — canonicalRepoLockKey(y) must still equal `ky` (it does, since
+    // it's computed purely from the path string's own toplevel walk, unaffected by mkdir/git init order).
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), `# ${tag}\n`);
+    execSync(`git init -q && git config user.email mqtpda@loom && git config user.name mqtpda`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    if (canonicalRepoLockKey(y) !== ky) throw new Error(`${tag}: Y's own key drifted after mkdir+git init — fixture assumption broken`);
+
+    const fresh = await rebootSim();
+    fresh.reenterMergeQuarantinesAtBoot([]); // boot-1 — Y is NOW resolvable; the SAME tmp re-processes via the FIXED loop
+    check("*** CARD 43cf3b26 (round 3) *** the identity invariant holds after the remount boot",
+      fresh.assertQuarantineIdentityInvariantTestOnly().ok);
+    check("(precondition) W1 (K1) is blocked after remount", !!fresh.activeMergeQuarantineFor(w1));
+    check("(precondition) W2 (K2) is blocked after remount", !!fresh.activeMergeQuarantineFor(w2));
+
+    fresh.clearMergeQuarantine(y);
+    check("*** CARD 43cf3b26 (round 3) *** assertRepoNotQuarantined(w1) succeeds after remount — K1 (armed FIRST) was the one left ORPHANED pre-fix, at a stale object the LATER K2 arm's re-point of the anchor Ky never reaches",
+      fresh.assertRepoNotQuarantined(w1).ok === true);
+    check("*** CARD 43cf3b26 (round 3) *** assertRepoNotQuarantined(w2) succeeds after remount — K2 (armed LAST) always shared the anchor's own final object, non-discriminating sibling of the W1 check above",
+      fresh.assertRepoNotQuarantined(w2).ok === true);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

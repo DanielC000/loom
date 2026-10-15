@@ -296,7 +296,10 @@ try {
   }, null, 2) + "\n");
 
   reenterMergeQuarantinesAtBoot([]);
-  check("(tp precondition) R's own token survives D's tautological-primary-arm eviction", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("r-token-tp"));
+  // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — R is no longer evicted at all: D's own
+  // coincidentally-matching scalar now diverts D to pending at boot (card 43cf3b26's own fix) rather than
+  // falling through to a tautological primary arm that used to evict R.
+  check("(tp precondition) R's own token is active, never evicted by D", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("r-token-tp"));
   check("(tp precondition) D's own token is active too", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token-tp"));
   check("(tp precondition) D's own tmp residue is still on disk before the clear", fs.existsSync(dTmpFile));
 
@@ -311,9 +314,14 @@ try {
   check("*** THE FIX (tmp-path) *** D's own tmp residue SURVIVES a read failure (marked kept, never swept)", fs.existsSync(dTmpFile));
   check("*** THE FIX (tmp-path) *** D's own content is still physically present in the tmp residue", (contentIfExists(dTmpFile) ?? "").includes("d-token-tp"));
   check("*** THE FIX (tmp-path) *** R's own file is still cleanly removed (its own clear is unaffected by D's read failure)", !fs.existsSync(rFile));
-  // ⚠️ ACCEPTED RESIDUAL (see file header) — same reasoning as the final-path scenario: the tmp
-  // residue's read failure means its content was never parsed, so there is nothing to self-own D from.
-  check("(tp accepted residual) assertRepoNotQuarantined(d) is NOT blocked in-process right after the failed clear", assertRepoNotQuarantined(d).ok === true);
+  // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — this residual is RETIRED, not merely
+  // unaffected: D's own degraded identity (resolvedKey coincidentally equal to its own walked-up
+  // currentKey, same shape as card 43cf3b26's own natural.mjs repro) is now UNCONDITIONALLY diverted to
+  // `pendingUnresolvedQuarantines` at BOOT TIME, independent of R's own key — so D's own content was
+  // never entangled with R's entry (no tautological-primary-arm eviction of R by D, the mechanism that
+  // used to make D's survival depend on this read succeeding) and is untouched by R's clear regardless of
+  // whether this read fails. D is correctly reported blocked, not as an "accepted residual" fallback.
+  check("*** THE FIX (tmp-path, CR 46c5c492) *** assertRepoNotQuarantined(d) IS blocked in-process right after the clear -- D's own pending entry was never entangled with R's", assertRepoNotQuarantined(d).ok === false);
 
   const fresh = await freshBootModule();
   fresh.reenterMergeQuarantinesAtBoot([]);
@@ -611,7 +619,19 @@ try {
   // ROUND 3 — B2: round 2's stub, if RESOLVABLE, graduated into `activeQuarantines` on D's very next
   // ordinary raise (`enterMergeQuarantine`'s own `existing` branch identity-matched it), polluting D's
   // real branch/reason with the stub's placeholder ("" branch, anchor reason) plus a phantom token. With
-  // the identity-less Set, a fresh raise after a failed clear finds NOTHING to absorb and starts clean.
+  // the identity-less Set, a fresh raise after a failed clear finds NOTHING STUB-SHAPED to absorb.
+  //
+  // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — RE-GROUNDED, not merely re-asserted: card
+  // 43cf3b26's own fix means D's tmp here is no longer a transient residue the CLEAR's own protect call
+  // first learns about — D's coincidentally-matching scalar diverts it to `pendingUnresolvedQuarantines`
+  // at BOOT, independent of R's own key (same mechanism as the "tp" scenario above), so D's own REAL
+  // content (never a round-2-shaped stub: a real branch/reason/token, not "" / an ownership anchor)
+  // SURVIVES R's clear untouched regardless of the injected read failure. A fresh raise on D then
+  // correctly UNIONS with that surviving record (this module's own stated "a repo can be quarantined by
+  // more than one outstanding unconfirmed kill at once" design) — keeping the older side's branch/reason
+  // and BOTH tokens, never starting "clean". This is distinct from, and does not reopen, the round-3 bug:
+  // the M3 checks below (empty branch / ownership-anchor reason) still pin that the ACTUAL stub shape
+  // never appears anywhere.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r = makeToplevelRepo("round3-b2-r");
@@ -625,32 +645,33 @@ try {
     repoPath: r, branch: "r-branch", reason: "R's own genuine, currently-active raise",
     enteredAt: Date.now() - 30_000, tokens: ["r-token-round3-b2"],
   }, null, 2) + "\n");
-  // D's own content lives ONLY in the tmp residue — the SAME shape as the pre-existing B2 scenario above:
-  // protectForeignTmpResidueBeforeSweep's own FIRST read succeeds (learning D's real, unresolvable
-  // identity), then protectOccupantContentBeforeDelete's own SECOND, independent read of the identical
-  // path fails — `occupantRepoPath` passed to the keep-mark is D's own identity itself, unresolvable, so
-  // round 2's stub used it VERBATIM: this is the exact shape that let a later `enterMergeQuarantine(d)`
-  // identity-match the stub.
+  // D's own content lives ONLY in a tmp residue carrying a REAL branch/reason/token (never the round-2
+  // stub shape) -- this now represents a genuine, surviving prior raise on D (card 43cf3b26's own shape),
+  // not something the clear's own protect call originates.
   const dTmpFile = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json.tmp-999`);
   fs.writeFileSync(dTmpFile, JSON.stringify({
-    repoPath: d, branch: "d-branch-stale", reason: "D's own degraded entry, walked up to R's own real key",
-    enteredAt: Date.now(), tokens: ["d-token-round3-b2-stale"], resolvedKey: Kr,
+    repoPath: d, branch: "d-branch-prior", reason: "D's own genuine prior raise, now degraded",
+    enteredAt: Date.now() - 60_000, tokens: ["d-token-round3-b2-prior"], resolvedKey: Kr,
   }, null, 2) + "\n");
   reenterMergeQuarantinesAtBoot([]);
+  check("(round3-b2 precondition) D's own prior raise is ALREADY pending at boot, independent of R", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token-round3-b2-prior"));
 
   const inject = injectReadFailureFromNth(dTmpFile, 2);
   clearMergeQuarantineReporting(r); // clears R; D's tmp residue is foreign — 2nd read of it injected to fail
   inject.restore();
   check("(round3-b2 precondition) D's own tmp residue SURVIVES the failed clear", fs.existsSync(dTmpFile));
+  check("*** (CR 46c5c492) *** D's own prior raise is UNAFFECTED by R's clear (never entangled with R's key)", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token-round3-b2-prior"));
 
   const freshToken = enterMergeQuarantine(d, "REAL-BRANCH", "REAL REASON");
   const all = listActiveMergeQuarantines();
   const dEntries = all.filter((q) => q.repoPath === d);
   check("*** THE FIX (round3-b2) *** exactly one entry now represents D", dEntries.length === 1);
-  check("*** THE FIX (round3-b2) *** D's real branch is kept, never a stub's", dEntries[0]?.branch === "REAL-BRANCH");
-  check("*** THE FIX (round3-b2) *** D's real reason is kept, never a stub's", dEntries[0]?.reason === "REAL REASON");
-  check("*** THE FIX (round3-b2) *** D's token set is exactly the fresh raise's own, no phantom anchor token",
-    JSON.stringify(dEntries[0]?.tokens) === JSON.stringify([freshToken]));
+  check("*** (CR 46c5c492) *** the fresh raise UNIONS with D's own surviving prior raise, keeping the older (prior) branch", dEntries[0]?.branch === "d-branch-prior");
+  check("*** (CR 46c5c492) *** the fresh raise UNIONS with D's own surviving prior raise, keeping the older (prior) reason", dEntries[0]?.reason === "D's own genuine prior raise, now degraded");
+  check("*** (CR 46c5c492) *** D's token set is the UNION of the prior raise's own token AND the fresh raise's own -- never just one, never a phantom anchor token",
+    new Set(dEntries[0]?.tokens ?? []).size === 2
+    && (dEntries[0]?.tokens ?? []).includes("d-token-round3-b2-prior")
+    && (dEntries[0]?.tokens ?? []).includes(freshToken));
   check("*** THE FIX (round3-b2 / M3) *** no entry anywhere carries an empty/stub branch", !all.some((q) => q.branch === ""));
   check("*** THE FIX (round3-b2 / M3) *** no entry anywhere carries a content-less ownership-anchor reason",
     !all.some((q) => q.reason.includes("ownership anchor") || q.reason.includes("content-less")));

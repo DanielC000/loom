@@ -4389,6 +4389,197 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // UNIT-LEVEL CHECK, NEW-FORMAT VARIANT -- Code Review 46c5c492 (card 43cf3b26 Round 2) MAJOR, `case3.mjs`.
+  // Byte-identical fixture to "case 3/3" immediately above, except BOTH records ALSO carry their own
+  // `resolvedKeys` array matching their own scalar (`twin.resolvedKeys=[Ks]`, `older.resolvedKeys=[Kt]`)
+  // -- the shape a record written by 43cf3b26's own code actually has. MAJOR (fixed): the explicit-rule
+  // fail-closed gate used to exclude only the two conflicting SCALARS from the fold -- the
+  // `older.resolvedKeys ∪ newer.resolvedKeys` path still carried both Ks and Kt through UNFILTERED, so a
+  // new-format collision here durably blocked the UNRELATED repo S until a human cleared it. THE RULE
+  // (unchanged from the scalar-only case): fail closed over the KEY SET, not just the scalars -- S stays
+  // unblocked after reboot, identically to the legacy "case 3/3" above.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("43cf3b26-union-both-diff-newformat-s");
+  const Ks = canonicalRepoLockKey(s);
+  const t = makeToplevelRepo("43cf3b26-union-both-diff-newformat-t");
+  const Kt = canonicalRepoLockKey(t);
+  const r = makeToplevelRepo("43cf3b26-union-both-diff-newformat-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-43cf3b26-union-both-diff-newformat-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "43cf3b26 union-rule case 3/3 (new format): D degraded twin, filed at R's own name, resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["43cf3b26-ubd-nf-tok-d"], resolvedKey: Ks, resolvedKeys: [Ks],
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d)), JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "43cf3b26 union-rule case 3/3 (new format): D's own OLDER pending-divert record, carrying a DIFFERENT resolvedKey=T's key",
+    enteredAt: Date.now() - 60_000, tokens: ["43cf3b26-ubd-nf-tok-old"], resolvedKey: Kt, resolvedKeys: [Kt],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  const rTokenUBDnf = enterMergeQuarantine(r, "r-branch", "43cf3b26 union-rule case 3/3 (new format): r raises");
+
+  const freshUBDnf = await freshBootModule();
+  freshUBDnf.reenterMergeQuarantinesAtBoot([]);
+  check("*** MAJOR (CR 46c5c492) *** NEW-FORMAT case 3/3: activeMergeQuarantineFor(s) is NOT blocked by D after reboot -- the array union must fail closed too, not just the scalars",
+    !freshUBDnf.activeMergeQuarantineFor(s));
+  check("(new-format union-rule case 3/3) D's own tokens are still independently enforced via direct identity", (() => {
+    const tokens = new Set(freshUBDnf.activeMergeQuarantineFor(d)?.tokens ?? []);
+    return tokens.has("43cf3b26-ubd-nf-tok-d") && tokens.has("43cf3b26-ubd-nf-tok-old");
+  })());
+
+  freshUBDnf.clearMergeQuarantineByToken(r, rTokenUBDnf);
+  freshUBDnf.clearMergeQuarantineByToken(d, "43cf3b26-ubd-nf-tok-d");
+  freshUBDnf.clearMergeQuarantineByToken(d, "43cf3b26-ubd-nf-tok-old");
+  freshUBDnf.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // ROUND 3 (Code Review 4c59172f, card 43cf3b26) — SET-SEMANTICS variants of case 3/3, Lead ruling.
+  // Round 2's own fix excluded only the two conflicting SCALARS from the fold; it still compared the
+  // scalars alone to decide WHETHER a conflict existed at all, so an ARRAY-ONLY side (no scalar of its
+  // own at all) was invisible to that comparison and sailed through UNFILTERED, durably blocking S.
+  // THE RULE: A = informativeKeysFor(older), B = informativeKeysFor(newer) (scalar UNION resolvedKeys,
+  // never scalar alone). Either side empty -> union everything (unchanged). Both non-empty -> keep the
+  // INTERSECTION, exclude the whole SYMMETRIC DIFFERENCE from the union (arrays included) -- this reduces
+  // exactly to the scalar rule when each side carries exactly one key.
+  //
+  // These checks assert through `assertRepoNotQuarantined` (Round 3, Code Review 4c59172f, finding 3),
+  // never a bare `activeMergeQuarantineFor` call -- see the decision record's own Round-2 "A SEPARATE,
+  // newly-discovered interaction" correction for why `activeMergeQuarantineFor`'s own tier-4 pending
+  // fallback is never reached via the real `assertRepoNotQuarantined`/clear-reporting call chain for a
+  // resolvable query (both S and T are real, resolvable repos here) -- it degrades to a plain
+  // `activeMergeQuarantineFor` call either way, so this is purely about exercising the SHIPPED entry point.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  // olderArrayOnly: D's OLDER pending-divert record carries ONLY an array ([Kt], no scalar at all) --
+  // the ordinary pre-generalization SHAPE is reversed from case 3/3 (there, both sides had a scalar).
+  const s = makeToplevelRepo("43cf3b26-r3-olderArrayOnly-s");
+  const Ks = canonicalRepoLockKey(s);
+  const t = makeToplevelRepo("43cf3b26-r3-olderArrayOnly-t");
+  const Kt = canonicalRepoLockKey(t);
+  const r = makeToplevelRepo("43cf3b26-r3-olderArrayOnly-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-43cf3b26-r3-olderArrayOnly-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "43cf3b26 round 3, olderArrayOnly: D's twin, scalar-only Ks",
+    enteredAt: Date.now(), tokens: ["43cf3b26-r3-oao-tok-d"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d)), JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "43cf3b26 round 3, olderArrayOnly: D's OLDER pending, array-only [Kt], NO scalar",
+    enteredAt: Date.now() - 60_000, tokens: ["43cf3b26-r3-oao-tok-old"], resolvedKeys: [Kt],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  const rTokenOAO = enterMergeQuarantine(r, "r-branch", "43cf3b26 round 3, olderArrayOnly: r raises");
+
+  const freshOAO = await freshBootModule();
+  freshOAO.reenterMergeQuarantinesAtBoot([]);
+  check("*** MAJOR (CR 4c59172f) *** olderArrayOnly: assertRepoNotQuarantined(s) succeeds -- an array-only side must be visible to the conflict check too, not just a scalar",
+    freshOAO.assertRepoNotQuarantined(s).ok === true);
+  check("(olderArrayOnly) D's own tokens are still independently enforced via direct identity", (() => {
+    const tokens = new Set(freshOAO.activeMergeQuarantineFor(d)?.tokens ?? []);
+    return tokens.has("43cf3b26-r3-oao-tok-d") && tokens.has("43cf3b26-r3-oao-tok-old");
+  })());
+
+  freshOAO.clearMergeQuarantineByToken(r, rTokenOAO);
+  freshOAO.clearMergeQuarantineByToken(d, "43cf3b26-r3-oao-tok-d");
+  freshOAO.clearMergeQuarantineByToken(d, "43cf3b26-r3-oao-tok-old");
+  freshOAO.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  {
+  // twinArrayOnly: the mirror shape -- D's TWIN (the physically-colliding record) carries ONLY an array
+  // ([Ks], no scalar), while D's older pending file carries a plain scalar (Kt, no array).
+  const s = makeToplevelRepo("43cf3b26-r3-twinArrayOnly-s");
+  const Ks = canonicalRepoLockKey(s);
+  const t = makeToplevelRepo("43cf3b26-r3-twinArrayOnly-t");
+  const Kt = canonicalRepoLockKey(t);
+  const r = makeToplevelRepo("43cf3b26-r3-twinArrayOnly-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-43cf3b26-r3-twinArrayOnly-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "43cf3b26 round 3, twinArrayOnly: D's twin, array-only [Ks], NO scalar",
+    enteredAt: Date.now(), tokens: ["43cf3b26-r3-tao-tok-d"], resolvedKeys: [Ks],
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d)), JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "43cf3b26 round 3, twinArrayOnly: D's OLDER pending, scalar-only Kt",
+    enteredAt: Date.now() - 60_000, tokens: ["43cf3b26-r3-tao-tok-old"], resolvedKey: Kt,
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  const rTokenTAO = enterMergeQuarantine(r, "r-branch", "43cf3b26 round 3, twinArrayOnly: r raises");
+
+  const freshTAO = await freshBootModule();
+  freshTAO.reenterMergeQuarantinesAtBoot([]);
+  check("*** MAJOR (CR 4c59172f) *** twinArrayOnly: assertRepoNotQuarantined(s) succeeds",
+    freshTAO.assertRepoNotQuarantined(s).ok === true);
+  check("(twinArrayOnly) D's own tokens are still independently enforced via direct identity", (() => {
+    const tokens = new Set(freshTAO.activeMergeQuarantineFor(d)?.tokens ?? []);
+    return tokens.has("43cf3b26-r3-tao-tok-d") && tokens.has("43cf3b26-r3-tao-tok-old");
+  })());
+
+  freshTAO.clearMergeQuarantineByToken(r, rTokenTAO);
+  freshTAO.clearMergeQuarantineByToken(d, "43cf3b26-r3-tao-tok-d");
+  freshTAO.clearMergeQuarantineByToken(d, "43cf3b26-r3-tao-tok-old");
+  freshTAO.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  {
+  // [Kt,Ks]-vs-[Ks]: D's OLDER pending record carries BOTH keys ([Kt,Ks]); D's twin carries only the
+  // AGREED key ([Ks]). Per the Lead's own worked example: intersection={Ks} survives (S stays blocked --
+  // that is INTENDED, both sides genuinely agree on Ks), symmetric difference={Kt} is excluded (T is
+  // unblocked). This is the asymmetric-intersection case the plain "both different, exclude both" scalar
+  // rule could never express at all (a scalar can only ever hold ONE value per side).
+  const s = makeToplevelRepo("43cf3b26-r3-ktks-s");
+  const Ks = canonicalRepoLockKey(s);
+  const t = makeToplevelRepo("43cf3b26-r3-ktks-t");
+  const Kt = canonicalRepoLockKey(t);
+  const r = makeToplevelRepo("43cf3b26-r3-ktks-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-43cf3b26-r3-ktks-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`), JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "43cf3b26 round 3, ktks: D's twin, [Ks]",
+    enteredAt: Date.now(), tokens: ["43cf3b26-r3-ktks-tok-d"], resolvedKey: Ks, resolvedKeys: [Ks],
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d)), JSON.stringify({
+    repoPath: d, branch: "d-old-branch", reason: "43cf3b26 round 3, ktks: D's OLDER pending, [Kt,Ks]",
+    enteredAt: Date.now() - 60_000, tokens: ["43cf3b26-r3-ktks-tok-old"], resolvedKey: Kt, resolvedKeys: [Kt, Ks],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  const rTokenKtKs = enterMergeQuarantine(r, "r-branch", "43cf3b26 round 3, ktks: r raises");
+
+  const freshKtKs = await freshBootModule();
+  freshKtKs.reenterMergeQuarantinesAtBoot([]);
+  check("*** MAJOR (CR 4c59172f) *** [Kt,Ks]-vs-[Ks]: assertRepoNotQuarantined(s) STILL FAILS -- Ks is the agreed intersection, this is intended, not a regression",
+    freshKtKs.assertRepoNotQuarantined(s).ok === false);
+  check("*** MAJOR (CR 4c59172f) *** [Kt,Ks]-vs-[Ks]: assertRepoNotQuarantined(t) succeeds -- Kt is the symmetric difference, correctly excluded",
+    freshKtKs.assertRepoNotQuarantined(t).ok === true);
+  check("(ktks) D's own tokens are still independently enforced via direct identity", (() => {
+    const tokens = new Set(freshKtKs.activeMergeQuarantineFor(d)?.tokens ?? []);
+    return tokens.has("43cf3b26-r3-ktks-tok-d") && tokens.has("43cf3b26-r3-ktks-tok-old");
+  })());
+
+  freshKtKs.clearMergeQuarantineByToken(r, rTokenKtKs);
+  freshKtKs.clearMergeQuarantineByToken(d, "43cf3b26-r3-ktks-tok-d");
+  freshKtKs.clearMergeQuarantineByToken(d, "43cf3b26-r3-ktks-tok-old");
+  freshKtKs.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // PROBE E — Round-2 CR a61d0bec (card 4b06875f), MAJOR: readPendingDivertFileAt's own resolvedKey read
   // (merge-quarantine.ts, the `readPendingDivertFileAt` reader) had NO discriminating test. Probe C's own
   // fixture never needed it: there, the OLDER pending file carries NO resolvedKey at all, so reverting

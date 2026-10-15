@@ -126,6 +126,71 @@ export interface MergeQuarantineEntry {
    *  "Do not" list for the bounded false-positive this narrow window accepts. Carry this field forward at
    *  every copy/rebuild site exactly like `provenanceUnknown`. */
   provenanceTracked?: true;
+  /** PERSISTED (unlike `armedKeys`) — the historical, deduped set of every OTHER key this logical entry
+   *  has ever been armed at besides whichever key a given physical latch file is itself filed under,
+   *  capped at {@link RESOLVED_KEYS_CAP}. Generalizes the legacy scalar `resolvedKey` (kept for backward
+   *  compat) from exactly one surviving secondary key to N.
+   *
+   *  @decision 8db913e2 (Follow-up 43cf3b26) — see the decision record's own "Follow-up 43cf3b26" section. */
+  resolvedKeys?: string[];
+}
+
+/** Cap on {@link MergeQuarantineEntry.resolvedKeys}' own length — see
+ *  {@link unionResolvedKeysRetaining}'s own doc for the retention/eviction rule this enforces.
+ *  @decision 8db913e2 (Follow-up 43cf3b26) — Lead-ruled cap value; see the decision record. */
+const RESOLVED_KEYS_CAP = 16;
+
+/** Unions `fresh` into `existing` (both treated as "keys this entry is, or has been, armed at"), deduped,
+ *  moving a re-confirmed key to the end (most-recently-armed) — then caps the result at
+ *  {@link RESOLVED_KEYS_CAP}, evicting the OLDEST (least-recently-armed) key(s) with a loud
+ *  `console.error` naming `label`, the evicted count/keys, and card 43cf3b26 (never silent). A key is
+ *  NEVER removed for any other reason (no verification in this file proves a key that merely fails to
+ *  re-arm one boot is permanently invalid) — only a human clear or this cap ever drops one.
+ *
+ *  @decision 8db913e2 (Follow-up 43cf3b26) — see the decision record's own "retention rule" section. */
+function unionResolvedKeysRetaining(existing: string[] | undefined, fresh: Iterable<string>, label: string): string[] {
+  const ordered = [...(existing ?? [])];
+  for (const k of fresh) {
+    const idx = ordered.indexOf(k);
+    if (idx >= 0) ordered.splice(idx, 1);
+    ordered.push(k);
+  }
+  if (ordered.length > RESOLVED_KEYS_CAP) {
+    const evicted = ordered.splice(0, ordered.length - RESOLVED_KEYS_CAP);
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] ${label} exceeded the ${RESOLVED_KEYS_CAP}-key resolvedKeys cap — evicting ${evicted.length} least-recently-armed key(s) (${evicted.join(", ")}); see card 43cf3b26.`);
+  }
+  return ordered;
+}
+
+/** Parses `parsed.resolvedKeys` off a raw latch record the SAME way every reader in this file already
+ *  whitelists `orphanLatchFiles`/`contributorRepoPaths` — `undefined` unless it is an array of strings.
+ *  Centralized so every one of this field's many parse sites reads it identically. */
+function parseResolvedKeysField(parsed: { resolvedKeys?: unknown }): string[] | undefined {
+  return Array.isArray(parsed.resolvedKeys) && parsed.resolvedKeys.every((s): s is string => typeof s === "string")
+    ? parsed.resolvedKeys : undefined;
+}
+
+/** EVERY informative key `entry` carries — the scalar `resolvedKey` UNIONED with the plural
+ *  `resolvedKeys`, deduped — never "array else scalar". A record can legitimately carry a scalar with no
+ *  array (pre-this-generalization), an array with no scalar (CR `46c5c492`'s probe2: a pending entry
+ *  whose scalar was never set but whose array was), or both — this is the ONE place that reads either
+ *  field without risking a caller that only checks one of them.
+ *
+ *  @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — every scalar-only gate must route through
+ *  this. See the decision record's own CR-46c5c492 section. */
+function informativeKeysFor(entry: MergeQuarantineEntry): string[] {
+  return [...new Set([
+    ...(entry.resolvedKey !== undefined ? [entry.resolvedKey] : []),
+    ...(entry.resolvedKeys ?? []),
+  ])];
+}
+
+/** The candidate secondary keys a boot-time arm site should ATTEMPT to re-arm `entry` at, besides
+ *  whichever key is already being handled as the primary/anchor arm (`anchorKey`) at this call site —
+ *  {@link informativeKeysFor}'s own UNION (never "array else scalar"), minus `anchorKey` itself. */
+function secondaryKeysToAttempt(entry: MergeQuarantineEntry, anchorKey: string): string[] {
+  return informativeKeysFor(entry).filter((k) => k !== anchorKey);
 }
 
 /** The two literal `branch` strings this module writes into every GENERIC placeholder entry it mints
@@ -628,15 +693,38 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
   const provenanceUnknown = older.provenanceUnknown || newer.provenanceUnknown ? true : undefined;
   // @decision db0a9db0 (round 2) — same OR, same carry-forward posture, for the precision-guard field.
   const provenanceTracked = older.provenanceTracked || newer.provenanceTracked ? true : undefined;
-  // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — EXPLICIT rule, opt-in ONLY (see this function's
-  // own doc above for the scope): equal ⇒ keep it; one side undefined ⇒ keep the other (age-independent);
-  // both set and DIFFERENT ⇒ fail closed (`undefined`). Every other caller keeps the legacy `older.resolvedKey`.
+  // @decision 8db913e2 (Follow-up 43cf3b26, CR 4c59172f round 2, MAJOR) — SET semantics over A/B =
+  // informativeKeysFor(older/newer), not scalar-only: either empty ⇒ union everything; both non-empty ⇒
+  // keep the intersection, exclude the whole symmetric difference. See the decision record's Round 3.
+  const olderInformativeKeys = informativeKeysFor(older);
+  const newerInformativeKeys = informativeKeysFor(newer);
+  const symmetricKeyDifference = olderInformativeKeys.length > 0 && newerInformativeKeys.length > 0
+    ? new Set([
+        ...olderInformativeKeys.filter((k) => !newerInformativeKeys.includes(k)),
+        ...newerInformativeKeys.filter((k) => !olderInformativeKeys.includes(k)),
+      ])
+    : new Set<string>();
+  const explicitRuleFailedClosed = !!options?.explicitResolvedKeyRule && symmetricKeyDifference.size > 0;
+  const conflictExclusions = explicitRuleFailedClosed ? symmetricKeyDifference : undefined;
+  // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — EXPLICIT rule, opt-in ONLY: equal ⇒ keep it; one
+  // side undefined ⇒ keep the other UNLESS it lost the SET arbitration above; both DIFFERENT ⇒ `undefined`.
+  // Every other caller keeps the legacy `older.resolvedKey`.
   const resolvedKey = !options?.explicitResolvedKeyRule ? older.resolvedKey
     : older.resolvedKey === newer.resolvedKey ? older.resolvedKey
-    : older.resolvedKey === undefined ? newer.resolvedKey
-    : newer.resolvedKey === undefined ? older.resolvedKey
+    : older.resolvedKey === undefined
+      ? (newer.resolvedKey !== undefined && conflictExclusions?.has(newer.resolvedKey) ? undefined : newer.resolvedKey)
+    : newer.resolvedKey === undefined
+      ? (conflictExclusions?.has(older.resolvedKey) ? undefined : older.resolvedKey)
     : undefined;
-  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys, contributorRepoPaths, provenanceUnknown, provenanceTracked, resolvedKey };
+  const filterConflicts = (keys: string[] | undefined): string[] =>
+    conflictExclusions ? (keys ?? []).filter((k) => !conflictExclusions.has(k)) : (keys ?? []);
+  const resolvedKeysRaw = unionResolvedKeysRetaining(
+    filterConflicts(older.resolvedKeys),
+    [...filterConflicts(newer.resolvedKeys), ...(!conflictExclusions && older.resolvedKey !== undefined ? [older.resolvedKey] : []), ...(!conflictExclusions && newer.resolvedKey !== undefined ? [newer.resolvedKey] : [])],
+    `unionQuarantineEntries(${older.repoPath})`,
+  );
+  const resolvedKeys = resolvedKeysRaw.length > 0 ? resolvedKeysRaw : undefined;
+  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys, contributorRepoPaths, provenanceUnknown, provenanceTracked, resolvedKey, resolvedKeys };
 }
 
 /**
@@ -1099,9 +1187,20 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOn
     // rebuilds it fresh via arming, and a stale persisted value from a PRIOR process's keying would be
     // actively misleading to a human reading the raw file.
     const { armedKeys: _armedKeys, ...persistable } = entry;
+    // @decision 8db913e2 (Follow-up 43cf3b26) — the retention formula (prior resolvedKeys UNION this
+    // write's own fresh secondary armedKeys) — see the decision record's own "retention rule" section.
+    const ownKeyForWrite = targetKey ?? canonicalRepoLockKey(entry.repoPath);
+    const freshSecondaryKeys = (entry.armedKeys ?? []).filter((k) => k !== ownKeyForWrite);
+    const retainedResolvedKeys = unionResolvedKeysRetaining(entry.resolvedKeys, freshSecondaryKeys, `writeMergeQuarantineLatch(${entry.repoPath})`);
+    const resolvedKeys = retainedResolvedKeys.length > 0 ? retainedResolvedKeys : undefined;
+    // Backward compat: an OLD reader only ever looks at the scalar — promote the first surviving
+    // informative key into it if the in-memory scalar itself isn't already informative.
+    const resolvedKey = isInformativeKey(persistable, ownKeyForWrite)
+      ? persistable.resolvedKey
+      : retainedResolvedKeys.find((k) => k !== ownKeyForWrite) ?? persistable.resolvedKey;
     // @decision db0a9db0 (round 2) — THE one chokepoint stamping `provenanceTracked: true` unconditionally;
     // see that field's own doc for why only this (never writeSafetyTmpResidueAtHash/writePendingDivertFile).
-    fs.writeSync(fd, JSON.stringify({ ...persistable, provenanceTracked: true }, null, 2) + "\n");
+    fs.writeSync(fd, JSON.stringify({ ...persistable, resolvedKey, resolvedKeys, provenanceTracked: true }, null, 2) + "\n");
     fs.fsyncSync(fd); // round 6 — durable on disk BEFORE the rename makes it visible, not just buffered
     fs.closeSync(fd);
     fd = undefined;
@@ -1306,7 +1405,20 @@ function consumeMatchedPendingsIntoArmedEntry(
   // @decision 500e307a — stamp provenanceTracked on the newly-armed in-memory entry too; never a
   // launder, since provenanceUnknown (if any) already arrived via unioned's own sticky OR and wins at
   // the next boot's parse regardless. See the decision record.
-  let armed: MergeQuarantineEntry = { ...unioned, resolvedKey: key, armedKeys, orphanLatchFiles: strippedOrphanLatchFiles, provenanceTracked: true };
+  //
+  // @decision 8db913e2 (Follow-up 43cf3b26) — never self-stamp `resolvedKey` away from an already-
+  // informative value; fold it into `resolvedKeys` too — see the decision record's own "silent loss" section.
+  const resolvedKeysForArm = unionResolvedKeysRetaining(
+    unioned.resolvedKeys,
+    unioned.resolvedKey !== undefined ? [unioned.resolvedKey] : [],
+    `consumeMatchedPendingsIntoArmedEntry(${unioned.repoPath})`,
+  );
+  let armed: MergeQuarantineEntry = {
+    ...unioned,
+    resolvedKey: isInformativeKey(unioned, key) ? unioned.resolvedKey : key,
+    resolvedKeys: resolvedKeysForArm.length > 0 ? resolvedKeysForArm : undefined,
+    armedKeys, orphanLatchFiles: strippedOrphanLatchFiles, provenanceTracked: true,
+  };
   // @decision 8db913e2 (round 2; round 3 — now also the ONE read for the write below, per
   // foldInOnDiskTokensIfMarked's own doc) — fold on-disk tokens forward before arming, so every caller
   // here sets an in-memory record matching the durable bytes.
@@ -1329,9 +1441,11 @@ function consumeMatchedPendingsIntoArmedEntry(
       // @decision 8db913e2 (Follow-up 6c04633d, M2) — PRESERVE the field set this function's own `armed` object always
       // stamped before a divert (resolvedKey/armedKeys/provenanceTracked, `500e307a`) — this card is
       // about identity partition, never about what a divert record carries. See the decision record.
+      // @decision 8db913e2 (Follow-up 43cf3b26) — never self-stamp away an already-informative
+      // `resolvedKey` here either — same `isInformativeKey` guard as this function's own main arm above.
       raiserUnion = {
         ...raiserUnion,
-        resolvedKey: key,
+        resolvedKey: isInformativeKey(raiserUnion, key) ? raiserUnion.resolvedKey : key,
         armedKeys: [...new Set([...(raiserUnion.armedKeys ?? []), key])],
         provenanceTracked: true,
       };
@@ -1815,6 +1929,16 @@ function excludeLiftedResolvedKey(resolvedKey: string | undefined, final: string
   return resolvedKey;
 }
 
+/** The plural counterpart of {@link excludeLiftedResolvedKey} — applies the SAME per-key exclusion to
+ *  every member of a `resolvedKeys` array, so a protective copy made during a clear can never carry
+ *  forward a key that clear is itself lifting.
+ *
+ *  @decision 8db913e2 (Follow-up 43cf3b26) — see the decision record's own "retention rule" section. */
+function excludeLiftedResolvedKeys(keys: string[] | undefined, final: string, liftedKeys: ReadonlySet<string>): string[] | undefined {
+  const filtered = (keys ?? []).filter((k): k is string => excludeLiftedResolvedKey(k, final, liftedKeys) !== undefined);
+  return filtered.length > 0 ? filtered : undefined;
+}
+
 /** Shared tail for both protect-before-delete wrappers above — durably copies `final`'s own content
  *  aside (under `occupantRepoPath`'s own pending-divert filename) before the caller's own unconditional
  *  unlink proceeds. `describeClearer` is used only for the failure log's own wording.
@@ -1857,6 +1981,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // `toPersist` via the shared {@link excludeLiftedResolvedKey} chokepoint — see that function's own doc.
   const occupantResolvedKey = typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined;
   const resolvedKeyToCarry = excludeLiftedResolvedKey(occupantResolvedKey, final, liftedKeys);
+  // @decision 8db913e2 (Follow-up 43cf3b26) — plural counterpart of the scalar carry-forward just above.
+  const occupantResolvedKeys = Array.isArray(parsed.resolvedKeys) && parsed.resolvedKeys.every((s): s is string => typeof s === "string")
+    ? parsed.resolvedKeys : undefined;
+  const resolvedKeysToCarry = excludeLiftedResolvedKeys(occupantResolvedKeys, final, liftedKeys);
   const toPersist: MergeQuarantineEntry = {
     repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
     opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
@@ -1876,6 +2004,7 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // @decision 8db913e2 (Follow-up 4b06875f) — see the guard computed just above; `undefined` here is the pre-existing,
     // unchanged behavior for every self-consistently-filed (collision) occupant.
     resolvedKey: resolvedKeyToCarry,
+    resolvedKeys: resolvedKeysToCarry,
   };
   const finalBasename = path.basename(final);
   // @decision 8db913e2 (Follow-up 6451a749) — route through the SAME chokepoint `mintPendingDivert`
@@ -1896,9 +2025,14 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — re-apply the SAME exclusion to whatever either
   // union above produced — a union against an on-disk or in-memory sibling can reintroduce a key
   // `toPersist` already correctly excluded; never trust a union's own output unfiltered.
-  const toWrite: MergeQuarantineEntry = toWriteUnfiltered.resolvedKey === undefined
+  // @decision 8db913e2 (Follow-up 43cf3b26) — plural counterpart of the re-filter just above.
+  const toWrite: MergeQuarantineEntry = toWriteUnfiltered.resolvedKey === undefined && toWriteUnfiltered.resolvedKeys === undefined
     ? toWriteUnfiltered
-    : { ...toWriteUnfiltered, resolvedKey: excludeLiftedResolvedKey(toWriteUnfiltered.resolvedKey, final, liftedKeys) };
+    : {
+      ...toWriteUnfiltered,
+      resolvedKey: excludeLiftedResolvedKey(toWriteUnfiltered.resolvedKey, final, liftedKeys),
+      resolvedKeys: excludeLiftedResolvedKeys(toWriteUnfiltered.resolvedKeys, final, liftedKeys),
+    };
   // Capture BOTH indices' own current entries before anything below mutates the array — `oldAtFinalBasename`
   // in particular must be read NOW, since branch 1 below splices that slot away.
   const oldAtFilename = atFilenameIdx >= 0 ? pendingUnresolvedQuarantines[atFilenameIdx]!.entry : undefined;
@@ -2179,6 +2313,7 @@ function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { stat
     // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — this reader used to drop `resolvedKey`
     // entirely, so a union against it always saw it as absent regardless of the file's real content.
     resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
+    resolvedKeys: parseResolvedKeysField(parsed),
   };
   return { state: "entry", entry };
 }
@@ -3566,7 +3701,9 @@ function findPendingIndicesFor(repoPath: string, key: string): number[] {
   if (indices.length === 0) {
     // @decision 883e29bc — match a STILL-unresolvable entry by key, gated on its OWN resolvedKey (PASS
     // 1/1b's divert); never a bare never-resolved no-resolvedKey latch (abccee85/r7's "nothing to walk").
-    indices = collectPendingIndices((p) => !isRepoPathCurrentlyResolvable(p.entry.repoPath) && !!p.entry.resolvedKey && canonicalRepoLockKey(p.entry.repoPath) === key);
+    // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — gate on informativeKeysFor (scalar ∪
+    // resolvedKeys), never the scalar alone, or a plural-only pending entry never matches here.
+    indices = collectPendingIndices((p) => !isRepoPathCurrentlyResolvable(p.entry.repoPath) && informativeKeysFor(p.entry).length > 0 && canonicalRepoLockKey(p.entry.repoPath) === key);
   }
   return indices;
 }
@@ -3592,7 +3729,11 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
       // @decision d163aef5 — changes WHICH entry is returned, never WHETHER one is; no match (or a
       // resolvable `repoPath`) still returns `direct` exactly as before, and the verified-`direct`
       // branch below stays untouched.
-      if (!isRepoPathCurrentlyResolvable(repoPath)) {
+      //
+      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, CRITICAL) — skip the pending search entirely
+      // when `direct` is ALREADY the query's own identity — tier 4 matches purely by KEY, so an unrelated
+      // sibling sharing this key could otherwise shadow an already-correct `direct` with its own content.
+      if (!isRepoPathCurrentlyResolvable(repoPath) && directPathIdentity(direct.repoPath) !== directPathIdentity(repoPath)) {
         const matchIndices = findPendingIndicesFor(repoPath, key);
         if (matchIndices.length > 0) {
           return (pendingUnresolvedQuarantines[matchIndices[0]!] as PendingUnresolvedQuarantine).entry;
@@ -4474,6 +4615,7 @@ function reenterMergeQuarantinesAtBootImpl(
         orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
           ? parsed.orphanLatchFiles : undefined,
         resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
+        resolvedKeys: parseResolvedKeysField(parsed),
         placeholder: parsedIsPlaceholder ? true : undefined,
         // @decision 82032b5c — carry a persisted `contributorRepoPaths` back in at boot, or clear-by-id's
         // refusal for a runtime-union entry silently stops working the moment the process restarts.
@@ -4498,7 +4640,10 @@ function reenterMergeQuarantinesAtBootImpl(
       if (!parsedIsPlaceholder) cleanlyParsedKeys.add(currentKey);
       const freshHash = createHash("sha256").update(currentKey).digest("hex").slice(0, 24);
       const resolvableNow = isRepoPathCurrentlyResolvable(entry.repoPath);
-      if (!resolvableNow && !entry.resolvedKey) {
+      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — gate on informativeKeysFor (scalar ∪
+      // resolvedKeys), never the scalar alone (CR 46c5c492's probe2: a plural-only record, no scalar at
+      // all, was wrongly treated as a pre-upgrade no-key latch and never got its own resolvedKeys attempted).
+      if (!resolvableNow && informativeKeysFor(entry).length === 0) {
         // A PRE-upgrade latch (no resolvedKey recorded at all) whose path can't be verified AT ALL right
         // now — there is no second, trustworthy key to dual-arm under. This check runs BEFORE the
         // freshHash/hash comparison below, deliberately: when NOTHING in the path's ancestor chain
@@ -4536,29 +4681,48 @@ function reenterMergeQuarantinesAtBootImpl(
           migratedSourcesByKey.set(currentKey, migratedList);
           originalEntryBySource.set(f, entry);
         } else {
-          // entry.resolvedKey is guaranteed set here (the no-resolvedKey+unresolvable case is handled, and
-          // `continue`d past, above).
+          // informativeKeysFor(entry) is guaranteed non-empty here (the no-informative-key+unresolvable
+          // case is handled, and `continue`d past, above) — never just the bare scalar `entry.resolvedKey`.
           //
           // @decision 883e29bc — never arm at the degraded walked-up `currentKey` directly, only at
-          // resolvedKey; divert the degraded key's signal to pendingUnresolvedQuarantines instead.
+          // resolvedKey(s); divert the degraded key's signal to pendingUnresolvedQuarantines instead.
           //
           // @decision d163aef5 — but never union at resolvedKey either, if that key is ALREADY occupied
           // by a different, currently-verified entry — see armKeyUnlessDegradedCollision's own doc.
-          const armedAtResolvedKey = armKeyUnlessDegradedCollision(entry.resolvedKey!, entry, false);
-          if (armedAtResolvedKey === undefined) {
+          //
+          // @decision 8db913e2 (Follow-up 43cf3b26) — generalized from ONE `entry.resolvedKey` attempt to
+          // a loop over EVERY candidate in `entry.resolvedKeys` (falling back to the scalar) — see the
+          // decision record's own "boot-time re-arm generalization" section.
+          const secondaryCandidates = secondaryKeysToAttempt(entry, currentKey);
+          let armedAtResolvedKey: MergeQuarantineEntry | undefined;
+          for (const k of secondaryCandidates) {
+            const attempt = armKeyUnlessDegradedCollision(k, armedAtResolvedKey ?? entry, false);
+            if (attempt === undefined) {
+              // eslint-disable-next-line no-console
+              console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and one of its own recorded resolvedKeys (${k}) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); that key is skipped, enforcement continues at every other candidate.`);
+              continue;
+            }
+            armedAtResolvedKey = attempt;
+          }
+          // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, MINOR) — reached only when every
+          // candidate was attempted AND refused; wording no longer fires when there was nothing to try.
+          if (secondaryCandidates.length > 0 && armedAtResolvedKey === undefined) {
             // eslint-disable-next-line no-console
-            console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and its own recorded resolvedKey (${entry.resolvedKey}) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); leaving ${entry.repoPath} as a standalone, fail-closed pending entry instead.`);
+            console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and every one of its own recorded resolvedKey(s) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); leaving ${entry.repoPath} as a standalone, fail-closed pending entry instead.`);
             pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
             continue;
           }
           // eslint-disable-next-line no-console
-          console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the latch file AS WRITTEN rather than risk migrating/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
+          console.warn(`[merge-quarantine] boot-time latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the latch file AS WRITTEN rather than risk migrating/deleting it on an unreliable reading; arming enforcement under its recorded original key(s) and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
           // @decision 4480b077 (round 2) — this entry's own backing file physically lives at
-          // sha(resolvedKey); record it so no write pass below ever writes there.
-          degradedOccupiedKeys.add(entry.resolvedKey!);
-          if (currentKey !== entry.resolvedKey) {
-            degradedDivertsToFlush.push({ entry: armedAtResolvedKey, sourceFile: f });
+          // sha(resolvedKey); record EVERY successfully-armed key so no write pass below ever writes there.
+          for (const k of armedAtResolvedKey?.armedKeys ?? []) {
+            if (k === currentKey) continue;
+            degradedOccupiedKeys.add(k);
           }
+          // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, CRITICAL) — ALWAYS divert, even when the
+          // scalar happens to equal `currentKey` — see the decision record's own CR-46c5c492 section.
+          degradedDivertsToFlush.push({ entry: armedAtResolvedKey ?? entry, sourceFile: f });
           continue;
         }
       }
@@ -4568,13 +4732,16 @@ function reenterMergeQuarantinesAtBootImpl(
       // docs/decisions/54054c01-clear-lifts-every-key-an-entry-was-armed-under.md, round 2 finding 2).
       // @decision d163aef5 — `entry` can ALSO be degraded here (self-consistently named at its own
       // degenerate key) — a primary arm's claim is tautological either way; see the helper's own doc.
+      //
+      // @decision 8db913e2 (Follow-up 43cf3b26) — generalized to a loop over every candidate secondary
+      // key, threading the accumulator through each attempt exactly like the single-key case did.
       let armedEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
-      if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
-        // `entry` can ALSO be degraded here — self-consistently NAMED (so the degraded-divert branch
-        // above never ran) yet still carrying a STALE `resolvedKey` field that differs from its own
+      for (const k of secondaryKeysToAttempt(armedEntry, currentKey)) {
+        // `entry`/`armedEntry` can ALSO be degraded here — self-consistently NAMED (so the degraded-divert
+        // branch above never ran) yet still carrying a STALE resolvedKey(s) that differ from its own
         // currentKey (the Code Review's own `X` repro). The helper itself is symmetric either way; this
         // is a plain secondary arm, never the tautological one.
-        const secondArm = armKeyUnlessDegradedCollision(entry.resolvedKey, armedEntry, false);
+        const secondArm = armKeyUnlessDegradedCollision(k, armedEntry, false);
         if (secondArm !== undefined) {
           armedEntry = secondArm;
           byRepoKey.set(currentKey, armedEntry);
@@ -4708,6 +4875,7 @@ function reenterMergeQuarantinesAtBootImpl(
         orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
           ? parsed.orphanLatchFiles : undefined,
         resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
+        resolvedKeys: parseResolvedKeysField(parsed),
         placeholder: isPlaceholderEntryShape(parsed) ? true : undefined,
         // @decision 82032b5c — same carry-forward as PASS 1's own parse above, for a tmp-residue recovery.
         contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
@@ -4726,55 +4894,77 @@ function reenterMergeQuarantinesAtBootImpl(
       // @decision 6237bef6 — mirror PASS 1's own unresolvable/no-resolvedKey gate (card 369b97be): defer
       // to pendingUnresolvedQuarantines here too, rather than arming a tmp-sourced entry under a possibly-
       // degraded key the way the rest of this loop otherwise would.
-      if (!isRepoPathCurrentlyResolvable(entry.repoPath) && !entry.resolvedKey) {
+      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — gate on informativeKeysFor, never the
+      // scalar alone (mirrors PASS 1's own identical fix above).
+      if (!isRepoPathCurrentlyResolvable(entry.repoPath) && informativeKeysFor(entry).length === 0) {
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} has no recorded resolvedKey and could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk — leaving the tmp file AS WRITTEN and deferring enforcement to a lazy re-resolve on first query.`);
         pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
         continue;
       }
-      if (!isRepoPathCurrentlyResolvable(entry.repoPath) && entry.resolvedKey && entry.resolvedKey !== currentKey) {
+      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, CRITICAL) — this branch's own ENTRY gate no
+      // longer requires `entry.resolvedKey !== currentKey` to fire — a coincidental match used to skip
+      // this branch entirely, arming currentKey directly instead. See the decision record's CR section.
+      if (!isRepoPathCurrentlyResolvable(entry.repoPath)) {
         // @decision 883e29bc — mirror PASS 1's own fix above: never arm this tmp-sourced entry at its
-        // degraded walked-up `currentKey`, only at resolvedKey; divert the degraded signal to pending.
+        // degraded walked-up `currentKey`, only at resolvedKey(s); divert the degraded signal to pending.
         //
         // @decision d163aef5 — but never union at resolvedKey either, if that key is ALREADY occupied by
         // a different, currently-verified entry — mirrors PASS 1's own fix above.
-        const armedAtResolvedKey = armKeyUnlessDegradedCollision(entry.resolvedKey, entry, false);
-        if (armedAtResolvedKey === undefined) {
+        const secondaryCandidates = secondaryKeysToAttempt(entry, currentKey);
+        let armedAtResolvedKey: MergeQuarantineEntry | undefined;
+        for (const k of secondaryCandidates) {
+          const attempt = armKeyUnlessDegradedCollision(k, armedAtResolvedKey ?? entry, false);
+          if (attempt === undefined) {
+            // eslint-disable-next-line no-console
+            console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and one of its own recorded resolvedKeys (${k}) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); that key is skipped, enforcement continues at every other candidate.`);
+            continue;
+          }
+          armedAtResolvedKey = attempt;
+        }
+        // Reached only when every candidate was attempted AND refused (never when there was nothing to try).
+        if (secondaryCandidates.length > 0 && armedAtResolvedKey === undefined) {
           // eslint-disable-next-line no-console
-          console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and its own recorded resolvedKey (${entry.resolvedKey}) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); leaving ${entry.repoPath} as a standalone, fail-closed pending entry instead.`);
+          console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key, and every one of its own recorded resolvedKey(s) is ALREADY occupied by a different, currently-VERIFIED entry — never unioning a degraded entry into a verified sibling's slot (card d163aef5); leaving ${entry.repoPath} as a standalone, fail-closed pending entry instead.`);
           pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
           continue;
         }
         // eslint-disable-next-line no-console
-        console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the tmp file AS WRITTEN rather than risk promoting/deleting it on an unreliable reading; arming enforcement under its recorded original key and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
+        console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${entry.repoPath} could NOT be verified against its current key — ${entry.repoPath} does not currently resolve on disk (an unmounted drive? a not-yet-synced folder?) — leaving the tmp file AS WRITTEN rather than risk promoting/deleting it on an unreliable reading; arming enforcement under its recorded original key(s) and deferring the degraded, walked-up key to a lazy re-resolve on first query.`);
         // @decision 4480b077 (round 2) — same tracking as PASS 1's own degraded branch, shared across
         // both passes so EITHER one's degraded find protects BOTH write passes below.
-        degradedOccupiedKeys.add(entry.resolvedKey);
-        degradedDivertsToFlush.push({ entry: armedAtResolvedKey, sourceFile: f });
+        for (const k of armedAtResolvedKey?.armedKeys ?? []) {
+          if (k === currentKey) continue;
+          degradedOccupiedKeys.add(k);
+        }
+        // ALWAYS divert — see the CRITICAL note on this branch's own entry gate, above.
+        degradedDivertsToFlush.push({ entry: armedAtResolvedKey ?? entry, sourceFile: f });
         continue;
       }
       // See PASS 1's identical threading note above — the second call must build on the first's result.
       // @decision d163aef5 — mirrors PASS 1's own primary arm: `entry` can be degraded here too (same
       // no-mismatch, self-consistent shape) — its claim is tautological either way.
       const priorAtCurrentKey = byRepoKey.get(currentKey);
-      const armedTmpEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
-      // @decision 8db913e2 (Follow-up 1e739f4a) — a collision HERE between two informative, DIFFERENT
-      // `resolvedKey`s (same or different identity) can only keep ONE in the scalar field; log it and
-      // accept the loss (card 43cf3b26 owns a real fix) rather than attempt an undurable recovery.
+      let armedTmpEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
+      // @decision 8db913e2 (Follow-up 43cf3b26) — a collision HERE no longer drops either side (both
+      // ride `resolvedKeys` now); downgraded to an info-level line — see the decision record.
       if (isInformativeKey(priorAtCurrentKey, currentKey) && isInformativeKey(entry, currentKey) && priorAtCurrentKey!.resolvedKey !== entry.resolvedKey) {
-        const keptKey = armedTmpEntry.resolvedKey;
-        const droppedKey = keptKey === priorAtCurrentKey!.resolvedKey ? entry.resolvedKey : priorAtCurrentKey!.resolvedKey;
         const priorSourceList = tmpsToUnlinkByKey.get(currentKey);
         const priorSourceFile = priorSourceList?.find((p) => originalEntryBySource.get(path.basename(p))?.resolvedKey === priorAtCurrentKey!.resolvedKey);
         const priorSourceDisplay = priorSourceFile !== undefined ? path.basename(priorSourceFile) : path.basename(quarantinePathForKey(currentKey));
         // eslint-disable-next-line no-console
-        console.error(`[merge-quarantine] boot found sibling latches for ${entry.repoPath} with DIFFERENT, equally informative resolvedKeys (kept: ${keptKey}, DROPPED: ${droppedKey}) — sources: ${path.basename(tmpPath)} and ${priorSourceDisplay} — ${droppedKey} fails open after reboot; see card 43cf3b26.`);
+        console.log(`[merge-quarantine] boot found sibling latches for ${entry.repoPath} with DIFFERENT, equally informative resolvedKeys (${priorAtCurrentKey!.resolvedKey}, ${entry.resolvedKey}) — sources: ${path.basename(tmpPath)} and ${priorSourceDisplay} — both retained via resolvedKeys (card 43cf3b26); no enforcement is lost.`);
       }
-      if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
+      // @decision 8db913e2 (Follow-up 43cf3b26, CR 4c59172f round 2, MAJOR) — thread the accumulator like
+      // PASS 1's own loop above: never reassigning broke the identity invariant with >=2 secondaries.
+      for (const k of secondaryKeysToAttempt(armedTmpEntry, currentKey)) {
         // `entry` can ALSO be degraded here — mirrors PASS 1's own second-arm note above (a
         // self-consistently-named entry with a stale, diverging `resolvedKey`); the helper is symmetric.
-        const dualArmed = armKeyUnlessDegradedCollision(entry.resolvedKey, armedTmpEntry, false);
-        if (dualArmed !== undefined) byRepoKey.set(currentKey, dualArmed);
+        const dualArmed = armKeyUnlessDegradedCollision(k, armedTmpEntry, false);
+        if (dualArmed !== undefined) {
+          armedTmpEntry = dualArmed;
+          byRepoKey.set(currentKey, armedTmpEntry);
+        }
       }
       originalEntryBySource.set(path.basename(tmpPath), entry);
       // Collect this tmp for the single per-key write/unlink pass below, grouped by the entry's OWN
@@ -4851,6 +5041,7 @@ function reenterMergeQuarantinesAtBootImpl(
         orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
           ? parsed.orphanLatchFiles : undefined,
         resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
+        resolvedKeys: parseResolvedKeysField(parsed),
         // @decision 82032b5c — same carry-forward as PASS 1/1b's own parses, for a safety-tmp recovery.
         contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
           ? parsed.contributorRepoPaths : undefined,
@@ -4885,11 +5076,16 @@ function reenterMergeQuarantinesAtBootImpl(
       // @decision d163aef5 — `entry` is always resolvable here (the unresolvable branch above always
       // `continue`s) — this primary arm's own claim is tautological anyway; only a degraded PRIOR
       // sharing `currentKey` only via some unrelated secondary claim could ever be evicted.
-      const armedSafety = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
-      if (entry.resolvedKey && entry.resolvedKey !== currentKey) {
+      let armedSafety = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
+      // @decision 8db913e2 (Follow-up 43cf3b26) — generalized to a loop, mirrors PASS 1/1b's own identical
+      // generalization.
+      for (const k of secondaryKeysToAttempt(armedSafety, currentKey)) {
         // This second arm can only decline-and-evict a DIFFERENT, degraded occupant at this stale key.
-        const dualArmed = armKeyUnlessDegradedCollision(entry.resolvedKey, armedSafety, false);
-        if (dualArmed !== undefined) byRepoKey.set(currentKey, dualArmed);
+        const dualArmed = armKeyUnlessDegradedCollision(k, armedSafety, false);
+        if (dualArmed !== undefined) {
+          armedSafety = dualArmed;
+          byRepoKey.set(currentKey, armedSafety);
+        }
       }
       safetyTmpRecoveryByFile.set(f, currentKey);
       // @decision 97cff6db (round 3, finding E) — when degraded-occupied, give this source its OWN
