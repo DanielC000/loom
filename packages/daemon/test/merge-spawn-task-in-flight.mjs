@@ -67,8 +67,16 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Deterministic "the gate is genuinely running" wait — never a blind fixed sleep. Bounded so a genuine
 // regression (the gate never starts at all) fails fast instead of hanging the suite.
+// Card deb7c294: the 15_000 ceiling this used to carry was itself too tight under real host load, not a
+// race in WHAT this waits on — `markMergeInFlightForTask` (service.ts, scenario 5's own "mid-flight"
+// precondition) already runs synchronously, before any await, well before the gate subprocess that
+// writes this marker ever spawns, so a marker sighting always postdates the mark. Reproduced directly:
+// under a synthetic 10-process CPU-saturation load (16-core host), scenario 5's wait measured 15,005ms
+// (timed out, `ok:false` — the exact reported flake) at the old ceiling, and 27,595ms to genuinely
+// resolve once the ceiling was raised for the same load — the real precondition, not a logic race. 60_000
+// gives >2x that measured worst case while still failing fast on a genuine regression.
 const waitForMarker = async (marker) => {
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 60_000;
   while (!fs.existsSync(marker) && Date.now() < deadline) await sleep(20);
   return fs.existsSync(marker);
 };
