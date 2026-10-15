@@ -351,8 +351,8 @@ park; `wake_me` (available on every session, same as a worker's) covers a one-sh
 future time instead. The daemon can see and auto-manage both.
 
 **Re-read before you park.** Before ANY `idle_report('done')`/`idle_report('waiting')` — or any park,
-`recycle_me`, stop, or irreversible fleet-wide action (a `daemon_restart`/deploy, a force-push, a
-deletion) — do a FRESH `tasks_list` and drain your inbox (`inbox_pull`); never conclude the
+`recycle_me`, stop, or irreversible fleet-wide action (a `daemon_restart`/deploy where your surface has
+it, a force-push, a deletion) — do a FRESH `tasks_list` and drain your inbox (`inbox_pull`); never conclude the
 queue is "drained" from an earlier read or from memory. New actionable cards land continuously — owner
 intake drops, Platform dispatches, folded-in escalations, worker-discovered follow-ups — so "drained"
 is only ever a statement about a board you *just* re-read. If that fresh read shows any non-`held`
@@ -502,8 +502,8 @@ alongside `worker_message` (which APPENDS, compounding an already-oversized unco
 `worker_stop` + respawn (which DISCARDS whatever the worker had accumulated) — but call it FIRST, before
 either of those, and always before any destructive remedy. It's a documented no-op on a genuinely clean
 composer, so calling it speculatively costs nothing; a `confirmed:false` result on a truly dirty one just
-means this attempt didn't land, not that nothing can be done. **Read `recovered` alongside `confirmed`
-(card 29b3c396)**: `recovered:true` means your OWN call is what unstuck the worker — busy was cleared and
+means this attempt didn't land, not that nothing can be done. **Read `recovered` alongside `confirmed`**:
+`recovered:true` means your OWN call is what unstuck the worker — busy was cleared and
 the stranded text requeued for delivery on its next natural drain, so don't keep re-flushing a state that
 already resolved. `recovered:false`/absent alongside `confirmed:false` means it's still genuinely
 unresolved — either a real turn may still land the hook shortly, or the worker is still stuck and another
@@ -524,7 +524,7 @@ forward belongs on the board first.
 
 **Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening, and try `worker_flush` first, before you reach for stop-and-respawn; treat that as a last resort, not a first response to an idle-looking row.
 
-**`staleReport` (on `worker_list`/`worker_status`) is the reverse-direction signal — about YOUR OWN session, not the worker's.** It fires once you've kept taking turns since a worker's report landed without ever resolving it, which can mean the report never actually surfaced in your own context even though it was durably recorded — don't assume you already handled it just because turns have passed since. Pull `worker_report_get(workerSessionId)` to read it in full before deciding there's nothing to act on — it reads the report straight from durable event storage, not a rendered transcript, so it can't lose anything to a truncated tool-call argument or a rotated engine session id (card 68d85015). `worker_transcript(lastN:2)` is still fine for general "what has this worker been doing" context, but is no longer the documented recovery path for a specific missed report.
+**`staleReport` (on `worker_list`/`worker_status`) is the reverse-direction signal — about YOUR OWN session, not the worker's.** It fires once you've kept taking turns since a worker's report landed without ever resolving it, which can mean the report never actually surfaced in your own context even though it was durably recorded — don't assume you already handled it just because turns have passed since. Pull `worker_report_get(workerSessionId)` to read it in full before deciding there's nothing to act on — it reads the report straight from durable event storage, not a rendered transcript, so it can't lose anything to a truncated tool-call argument or a rotated engine session id. `worker_transcript(lastN:2)` is still fine for general "what has this worker been doing" context, but is no longer the documented recovery path for a specific missed report.
 
 **Don't double-dispatch an already-approved worker.** Once you've unblocked or approved a worker to
 proceed, a redundant "start now" / "keep driving" nudge queues on top of work already in flight — and if
@@ -828,7 +828,7 @@ what you checked. Found none? Treat it as live.
      legitimately admitted (or correctly reported "queued") while an ORPHANED process from an earlier,
      already-evicted attempt on the SAME worktree is still alive and consuming the box — invisible to
      `gate_status`/`gate_queue`'s own live registry. **`recentTimeoutStreak` carries on ANY entry that has a
-     `branch` — your own project's AND a peer's alike** (card 80d54122: unlike task/branch identity, a bare
+     `branch` — your own project's AND a peer's alike** (unlike task/branch identity, a bare
      non-negative integer discloses nothing about what the peer is doing, and the orphan hazard it flags
      consumes the shared host regardless of which project spawned it), so `0` on an entry is a real, measured
      zero, never an omission standing in for zero — the same `null`-vs-`0` contract as `composerDirtyLen`

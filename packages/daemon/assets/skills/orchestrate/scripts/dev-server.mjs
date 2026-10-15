@@ -190,7 +190,7 @@ const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
 const DECOY_CONTEXT_RE = /\b(?:proxy|proxying|forward(?:ing)?|target|upstream)\b/i;
 // A LINE reporting a FAILED bind — e.g. Node's own `Error: listen EACCES: permission denied
 // 127.0.0.1:49685` — carries a host:port that matches PORT_BANNER_RE exactly like a real bound-server
-// banner, but describes a failure, not a success (card f3e7dcc2: a Windows WinNAT/Hyper-V reserved-port
+// banner, but describes a failure, not a success (observed case: a Windows WinNAT/Hyper-V reserved-port
 // EACCES was scraped as a confident, wrong "Bound:" line — with no portDetectionFailed key at all, from
 // a process that bound nothing). BOUND_AFFIRMATION_RE's `\blistening\b` does NOT catch this: Node's
 // message says "listen EACCES", and "listen" != "listening" under a word boundary — so the line fell
@@ -223,7 +223,7 @@ const BOUND_AFFIRMATION_RE = /\b(?:local|loopback|listening|ready|serving)\b/i;
 // KNOWN LIMIT (stated, not silently assumed): this is a heuristic, not a proof — a framework whose
 // banner happens to use none of BOUND_AFFIRMATION_RE's words falls back to "first non-excluded", which
 // is wrong if a legitimate non-banner port mention (an HMR port, a "press h for help" hint) appears
-// before the real banner — an error line is now excluded (isErrorLine, above; card f3e7dcc2), so it can
+// before the real banner — an error line is now excluded (isErrorLine, above), so it can
 // no longer be that undetected decoy. Generalizing further (e.g. verifying the candidate is actually
 // listening) doesn't strictly dominate this: the observed real decoy case (a reverse-proxy target) is
 // genuinely alive too — it's the daemon — so a liveness check alone cannot tell it apart from the real
@@ -277,9 +277,7 @@ const SUPERVISOR_CODE = [
   "const payload = JSON.parse(process.argv[1]);",
   // 'a', not 'w': `start()` already truncates this file synchronously before ever spawning this
   // supervisor. A truncating open here raced (and could wipe) the 'error' handler's own diagnostic
-  // write below — a DIFFERENT race than 4946f01d's write/exit one.
-  //
-  // @decision 4946f01d
+  // write below — a DIFFERENT race than the write/exit one handled just below.
   "const out = fs.createWriteStream(payload.logPath, { flags: 'a' });",
   "const child = spawn(payload.cmd, payload.args, { cwd: payload.cwd, shell: payload.shell, stdio: ['ignore', 'pipe', 'pipe'] });",
   // { end: false } on BOTH — the exit handler below owns closing `out` once the real command exits, so
@@ -288,7 +286,7 @@ const SUPERVISOR_CODE = [
   // drop the other's later output.
   "child.stdout.pipe(out, { end: false });",
   "child.stderr.pipe(out, { end: false });",
-  // card 4946f01d: without this, a genuine spawn failure (the shell/target failing to launch — resource
+  // Without this, a genuine spawn failure (the shell/target failing to launch — resource
   // exhaustion under host contention is the realistic trigger, not a bad command, since `cmd`/`args` are
   // already validated by the time this runs) emits an unhandled 'error' on `child`, which Node re-throws
   // as an uncaught exception — killing THIS supervisor almost immediately after `start` already printed
@@ -299,6 +297,9 @@ const SUPERVISOR_CODE = [
   // ever happens, silently dropping the one line this handler exists to leave behind. Confirmed on this
   // host: `out.write(...)` here lost the diagnostic 5/5 trials (test section (o)); `appendFileSync` is
   // synchronous, so the write is durable before `process.exit` runs, no matter how `out` itself is doing.
+  // Don't "fix" a rare, hard-to-reproduce loss of this line by widening a timeout or adding a retry — this
+  // is a genuine ordering bug between two writers of the same file (see the 'a', not 'w' note above), not
+  // a slow host needing more time.
   "child.on('error', (err) => { try { fs.appendFileSync(payload.logPath, '[dev-server supervisor] spawn error: ' + (err && err.stack || err) + '\\n'); } catch {} try { out.end(); } catch {} process.exit(1); });",
   // Exit once the real command does, so a target that dies on its own (a bad command, a crash) doesn't
   // leave an orphaned supervisor sitting around forever.
@@ -373,7 +374,7 @@ async function start(dir, cmdArgs) {
     shell: win32,
   });
   // Truncate the log HERE, in the launcher, synchronously, BEFORE spawning the supervisor. This is the
-  // actual fix for the stale-port race (card 7d0eceab): waitForBinding's first read fires immediately
+  // actual fix for the stale-port race: waitForBinding's first read fires immediately
   // after spawn, while the detached supervisor is still booting its own node process — well before the
   // supervisor ever touches this file. A leftover log from a previous `start` at this same <dir> would
   // otherwise be read as this run's port banner, and since this first read is essentially instantaneous,
@@ -382,8 +383,6 @@ async function start(dir, cmdArgs) {
   // This is also the ONLY truncation of the log: the supervisor's own log stream (see SUPERVISOR_CODE
   // above) opens in append mode, not truncate — a truncating open there could land after, and wipe, the
   // supervisor's own spawn-error diagnostic.
-  //
-  // @decision 4946f01d
   fs.writeFileSync(logPath, "", "utf8");
 
   // See the SUPERVISOR note at the top of this file: the detached, TRACKED process is this supervisor,

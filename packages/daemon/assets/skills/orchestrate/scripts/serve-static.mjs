@@ -209,7 +209,7 @@ async function start(dirArg, portArg) {
 
   // The child knows the ACTUAL bound port (0 means OS-assigned); wait for it to write that back to
   // trackFile rather than guessing. Bounded so a broken child fails fast instead of hanging forever.
-  // Ceiling stays 5000ms (card cb1101a0: do not widen — the previous remedy for a sibling site was a
+  // Ceiling stays 5000ms (do not widen — a previous remedy for a sibling site was a
   // widen that only held 12 days). The one real intermediate signal available here is the CHILD'S OWN
   // LIVENESS: this launcher holds child.pid directly, so a crash before trackFile is written is an
   // immediate, genuine terminal signal — distinct from "still starting, just slow under host load" —

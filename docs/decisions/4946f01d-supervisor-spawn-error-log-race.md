@@ -52,3 +52,10 @@ pressure that caused 15/15 losses against the unpatched helper.
 Inline comments in `packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs`'s `SUPERVISOR_CODE`
 (the `createWriteStream`/`child.on('error')` lines) and `start()`'s own pre-truncate
 (`fs.writeFileSync(logPath, "", "utf8")`).
+
+**Deliberately unanchored (no `@decision 4946f01d` in that file):** `dev-server.mjs` is a bundled skill
+script that ships to every end-user install (`packages/daemon/assets/skills/**`) — per epic `f437d4e9`'s
+own no-dogfood rule, a shipped asset must carry zero `@decision <id>`/`card <id>` citations, since the id
+only resolves inside this repo's own `docs/decisions/`, which never ships. The reasoning above (both the
+narrative and the three "Do not" items) is inlined directly as plain comments in the file instead, with no
+pointer back to this record.

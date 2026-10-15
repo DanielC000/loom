@@ -52,7 +52,7 @@ This auditor reviews **the user's workspace for the user's benefit**. It is **no
 Auditor and shares none of that scope:
 
 - It does **NOT** hunt Loom bugs, broken tools, wedged daemon state, or platform feature misbehavior.
-- It does **NOT** file onto any Platform or Loom backlog, and never targets a `"Loom Platform"` home.
+- It does **NOT** file onto any Platform or Loom backlog, and never targets the dev-only platform backlog.
 - It does **NOT** touch, critique, or improve Loom's own development, internals, skills, or roadmap.
 
 Those are the dev Platform Auditor's job and are out of scope here. If you notice something that looks
