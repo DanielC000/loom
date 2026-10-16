@@ -47,24 +47,47 @@
 // Enter-only still fires — but that is never WORSE than today's unconditional Enter-only, only less
 // protective than this fix otherwise is. This suite does not exercise or claim to close that gap.
 //
+// 🔴🔴 ROUND 2 (Code Review 8555d247, card 844ca34e) — read this before trusting scenarios (1)/(2) below;
+// this is the SECOND rewrite of this section, and the first one (card 844ca34e round 1) was WRONG.
+// Round 1 made a marked lineage (`Live.giveUpLineages`) take Enter-only UNCONDITIONALLY, reasoning that
+// content-identity across a lineage's OWN attempts is structural. That's true, but it answers the wrong
+// question: `composerDirtyLen>0` says something is dirty, never WHOSE text is actually sitting there. In
+// BOTH scenarios below, A gives up, then B — a genuinely DIFFERENT lineage — clears+pastes its OWN body
+// and ALSO gives up. Round 1 would have A's later redelivery go Enter-only (A is marked) and submit B's
+// still-unconfirmed body under A's identity on a real terminal: A lost, B delivered twice. This is
+// EXACTLY the fusion/substitution risk card 4796f999 was built to prevent, reopened by round 1's own fix.
+//
+// THE FIX, round 2: `Live.composerOwnerLineage` tracks whichever logicalId(s) LAST PHYSICALLY wrote the
+// composer's body (set at the same two sites `composerBodyWrittenForGen` is, cleared at the same two
+// decisive-confirm resets `composerDirtyLen` is). A marked lineage may trust Enter-only ONLY when it is
+// ALSO the current owner. B's own write makes B the owner; A's later redelivery finds owner=B, not A —
+// mismatch — and takes neither Enter nor a re-paste, converging through the ordinary bounded give-up
+// machinery instead (`giveUpWithoutWriting`). Card 4796f999's own `composerDirtyLenBelieved ===
+// composerDirtyLen` trust check is RETIRED and its code deleted (card 844ca34e's own record proves it was
+// already subsumed by lineage history alone, before ownership even entered the picture) — ownership is
+// the real discriminator cards 4796f999 and 844ca34e-round-1 were both informally reaching for.
+//
 // Two scenarios reproduce the code-level mechanism each real specimen traced back to (the RECOVERY vs.
 // SUPPRESSED flavor of the INTERVENING message's own give-up — the two ways a real specimen's clear ended
-// up unresolved), plus a third regression guard proving the fix does not weaken `b9b8f8db` itself:
+// up unresolved), plus a third regression guard proving none of this weakens `b9b8f8db` itself:
 //   (1) mirrors specimen 1's mechanism: the intervening message's own give-up is a genuine RECOVERY drop.
+//       A's redelivery finds B owns the composer — writes NOTHING (no Enter, no re-paste) and converges
+//       through the ordinary give-up machinery instead of ever risking a wrong-identity submission.
 //   (2) mirrors specimen 2's mechanism: the intervening message's own give-up is SUPPRESSED (a false
 //       negative — the engine produced output after the final Enter) and only requeues later via
-//       healIfStuck, exactly like the real specimen's own gen2->gen3 transition.
+//       healIfStuck, exactly like the real specimen's own gen2->gen3 transition. Same ownership mismatch.
 //   (3) REGRESSION GUARD: the plain single-message repeated-retry case (no OTHER message's clear ever
-//       intervenes — the scenario b9b8f8db itself exists to fix) still takes Enter-only, unchanged.
+//       intervenes — the scenario b9b8f8db itself exists to fix) still takes Enter-only, unchanged: A
+//       stays its OWN composer's sole owner throughout, so ownership always matches.
 //
-// Every assertion reads the actual bytes physically written to the fake pty by the REAL submit() control
-// flow (never a value re-derived from the same test-side computation it's compared against) — see project
-// memory [[a-control-whose-two-sides-share-a-source-is-a-tautology]]: could this check fail if the
-// production code were deleted? Yes — verified by reverting this card's fix locally (temporarily, via the
-// sanctioned `git diff`/`git checkout HEAD --`/`git apply` patch recipe, never `git stash`) and re-running
-// this file: scenarios (1) and (2) both go RED (the fallback-body assertion fails — Enter-only fires
-// unconditionally, writing zero body bytes), scenario (3) stays GREEN either way (it is not this fix's own
-// assertion).
+// Every assertion reads the actual bytes physically written to the fake pty (or the real `onGiveUpExhausted`
+// callback PtyHost itself invokes) by the REAL submit() control flow — never a value re-derived from the
+// same test-side computation it's compared against (project memory
+// [[a-control-whose-two-sides-share-a-source-is-a-tautology]]). Verified RED at commit 4af1e476 (round 1,
+// ownership tracking absent) via the sanctioned `git diff`/`git checkout HEAD --`/`git apply` patch recipe
+// (never `git stash`): scenarios (1)/(2)'s "writes nothing" assertions fail there — round 1's code takes
+// Enter-only instead, exactly the reopened bug this rewrite exists to close. Scenario (3) stays GREEN
+// across every revision (it is not any of these fixes' own assertion).
 //
 // RUN (daemon must be built first — reads ../dist/pty/host.js): from packages/daemon, `pnpm build` then
 // `node test/pty-enter-only-verifies-composer-trust.mjs`.
@@ -222,16 +245,18 @@ async function waitForBusyFalseAfter(sid, sinceLen, label) {
 
 try {
   // ===================== (1) MIRRORS SPECIMEN 1: the intervening message's own give-up is a genuine ======
-  // ===================== RECOVERY drop (no engine output at all) ===========================================
+  // ===================== RECOVERY drop (no engine output at all). Card 844ca34e round 2: ownership =========
+  // ===================== mismatch — see this file's header for why Enter-only is now REFUSED here. ========
   {
     const host = new TestPtyHost(events);
     const SID = "sess-trust-fusion-shape";
     const TEXT_A = "ORIGINAL_NOTICE_BODY_MUST_NOT_BE_LOST_OR_FUSED_AAAAAAAAAAAAAAAAAAAA";
     const TEXT_B = "REPLACEMENT_UNRELATED_MESSAGE_ARRIVES_WHILE_DIRTY_BBBBBBBBBBBBBBBBBBBBBBBBBBBB";
     const fake = spawnReady(host, SID);
+    let aGaveUpExhausted = false;
 
     let lenBefore = busyLog[SID]?.length ?? 0;
-    const rA = host.enqueueStdin(SID, TEXT_A, "system", undefined, undefined, "agent");
+    const rA = host.enqueueStdin(SID, TEXT_A, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, () => { aGaveUpExhausted = true; });
     check("(1) setup: A delivered immediately, busy armed", rA.delivered === true && busyLog[SID].at(-1) === true);
     await waitForBusyFalseAfter(SID, lenBefore, "(1) A's own give-up (RECOVERY)");
     check("(1) setup: A gave up — dirty from a plain (non-clear) mark, both fields in lockstep",
@@ -262,35 +287,47 @@ try {
     // A's redelivery: A's own hold (set way back at its first give-up) is long expired by now — B's is
     // FRESH (just set by its own give-up above) — so drainPending must skip held B and redeliver A. Fire
     // this the instant B's give-up settles (well inside B's own fresh HOLD_MS window, well past A's).
-    const dirtyBeforeRedeliver = host.getComposerDirtyLen(SID);
+    const lenBeforeRedeliver = busyLog[SID].length;
     const writesBeforeRedeliver = fake.writes.length;
     host.reconcile();
-    const newBurst = fake.writes.slice(writesBeforeRedeliver).join("");
-    check("(1) ordering confirmed: A's redelivery drained (busy re-armed), not B's",
+    const newBurstSync = fake.writes.slice(writesBeforeRedeliver).join("");
+    check("(1) ordering confirmed: A's redelivery drained (busy re-armed SYNCHRONOUSLY — the M1 invariant "
+      + "— even though the branch below writes nothing), not B's",
       busyLog[SID].at(-1) === true);
-    check("(1) THE FIX: A's redelivery falls back to a full clear+repaste and re-pastes A's OWN real body "
-      + "(not a bare Enter-only zero-length paste) — this is the assertion that goes RED against pre-fix code",
-      newBurst.includes(TEXT_A));
-    check("(1) THE FIX, the specific assertion the manager asked for: the re-pasted body is A's OWN, "
-      + "not a foreign/wrong body (B's content is absent from this burst)",
-      !newBurst.includes(TEXT_B));
-    check("(1) the fallback backspaces the FULL conservative dirty amount (A+B) before repasting",
-      newBurst.includes(BACKSPACE.repeat(dirtyBeforeRedeliver)));
+    check("(1) THE FIX (round 2): A's redelivery writes NOTHING AT ALL, synchronously — no Enter, no "
+      + "re-paste — because the composer's owner is B, not A. This is the assertion that goes RED against "
+      + "commit 4af1e476 (round 1): there, A's marked lineage alone was enough to trust Enter-only, and "
+      + "it would have submitted B's still-unconfirmed body under A's identity",
+      newBurstSync === "");
+
+    // The give-up-without-writing sequence is deliberately ASYNC (so the M1 invariant's trailing
+    // `setBusy(true)` above is never fought) — wait for it to settle before reading the outcome.
+    await waitForBusyFalseAfter(SID, lenBeforeRedeliver, "(1) A's give-up-without-writing settles");
+    check("(1) A's own message is terminally resolved (its wired onGiveUpExhausted fired) rather than "
+      + "silently retried forever OR wrongly matched to B's content",
+      aGaveUpExhausted === true);
+    check("(1) A is genuinely gone from pending — not stuck in a loop, and never confused with B",
+      !host.getPendingEntries(SID).some((e) => e.text === TEXT_A));
+    check("(1) sanity: STILL zero bytes written for A's identity after settling — the async resolution "
+      + "itself never writes anything either",
+      fake.writes.slice(writesBeforeRedeliver).join("") === "");
 
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
   // ===================== (2) MIRRORS SPECIMEN 2: the intervening message's own give-up is SUPPRESSED =====
-  // ===================== (a false negative) and only requeues later via healIfStuck ========================
+  // ===================== (a false negative) and only requeues later via healIfStuck. Same ownership ========
+  // ===================== mismatch as (1) — see this file's header for why. =================================
   {
     const host = new TestPtyHost(events);
     const SID = "sess-trust-suppressed-shape";
     const TEXT_A = "ORIGINAL_LARGE_NOTICE_LOST_IF_BLINDLY_ENTERED_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const TEXT_B = "SECOND_UNRELATED_MESSAGE_ITS_OWN_GIVEUP_IS_SUPPRESSED_BBBBBBBBBBBBBBBBBBBBBBBBBBBB";
     const fake = spawnReady(host, SID);
+    let aGaveUpExhausted = false;
 
     let lenBefore = busyLog[SID]?.length ?? 0;
-    const rA = host.enqueueStdin(SID, TEXT_A, "system", undefined, undefined, "agent");
+    const rA = host.enqueueStdin(SID, TEXT_A, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, () => { aGaveUpExhausted = true; });
     check("(2) setup: A delivered immediately, busy armed", rA.delivered === true && busyLog[SID].at(-1) === true);
     // A's own give-up is a genuine drop (emitData is never called for A) — ordinary RECOVERY.
     await waitForBusyFalseAfter(SID, lenBefore, "(2) A's own give-up (RECOVERY)");
@@ -322,20 +359,26 @@ try {
     // Drive healIfStuck: ONE reconcile() call both (a) requeues B (via the stale-busy backstop, exactly
     // like specimen 2's real gen2->gen3 transition) AND, in the SAME synchronous pass, (b) drains the
     // queue — B is freshly held (ineligible), A's hold from long ago is expired, so A redelivers.
-    const dirtyBeforeRedeliver = host.getComposerDirtyLen(SID);
+    const lenBeforeHeal = busyLog[SID].length;
     const writesBeforeHeal = fake.writes.length;
     await sleepUntil(t1, giveUpAt() + FIRST_TURN_STALE + FIRST_TURN_STALE / 2);
     host.reconcile();
-    const newBurst = fake.writes.slice(writesBeforeHeal).join("");
-    check("(2) heal requeued B (giving it a fresh hold) and, same pass, redelivered A instead — busy re-armed",
+    const newBurstSync = fake.writes.slice(writesBeforeHeal).join("");
+    check("(2) heal requeued B (giving it a fresh hold) and, same pass, redelivered A instead — busy "
+      + "re-armed SYNCHRONOUSLY (the M1 invariant) even though the branch below writes nothing",
       busyLog[SID].at(-1) === true);
-    check("(2) THE FIX: A's redelivery falls back to a full clear+repaste and re-pastes A's OWN real body "
-      + "— this is the assertion that goes RED against pre-fix code",
-      newBurst.includes(TEXT_A));
-    check("(2) the re-pasted body is A's OWN, not a foreign/wrong body (B's content is absent from this burst)",
-      !newBurst.includes(TEXT_B));
-    check("(2) the fallback backspaces the FULL conservative dirty amount (A+B) before repasting",
-      newBurst.includes(BACKSPACE.repeat(dirtyBeforeRedeliver)));
+    check("(2) THE FIX (round 2): A's redelivery writes NOTHING AT ALL, synchronously — same ownership "
+      + "mismatch as (1), now against the SUPPRESSED flavor of B's own give-up — this is the assertion "
+      + "that goes RED against commit 4af1e476 (round 1)",
+      newBurstSync === "");
+
+    await waitForBusyFalseAfter(SID, lenBeforeHeal, "(2) A's give-up-without-writing settles");
+    check("(2) A's own message is terminally resolved (its wired onGiveUpExhausted fired)",
+      aGaveUpExhausted === true);
+    check("(2) A is genuinely gone from pending — not stuck in a loop, and never confused with B",
+      !host.getPendingEntries(SID).some((e) => e.text === TEXT_A));
+    check("(2) sanity: STILL zero bytes written for A's identity after settling",
+      fake.writes.slice(writesBeforeHeal).join("") === "");
 
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
@@ -380,12 +423,14 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card 4796f999: an Enter-only give-up redelivery now verifies what the composer holds "
-    + "before trusting it, reusing composerDirtyLenBelieved (card c148f118) rather than blindly trusting "
-    + "composerDirtyLen>0 alone. Mirrors both real specimens' own mechanism (RECOVERY-flavored intervening "
-    + "clear, and SUPPRESSED-flavored via healIfStuck) — both fall back to a full clear+repaste that "
-    + "re-pastes the redelivered message's OWN real body, never a foreign one. Card b9b8f8db's own win (no "
-    + "intervening message, Enter-only, body written exactly once) is unweakened. See this file's header "
-    + "for what a hermetic write-recorder harness does and does not prove."
+  ? "\n✅ ALL PASS — card 4796f999's trust-gate is RETIRED (its code deleted), and card 844ca34e round 1's "
+    + "unconditional Enter-only-for-any-marked-lineage is ALSO superseded: `Live.composerOwnerLineage` now "
+    + "gates Enter-only on OWNERSHIP, not just lineage history. When a DIFFERENT lineage currently owns the "
+    + "composer (scenarios (1)/(2): B does, by the time A redelivers), A writes NOTHING AT ALL — no Enter, "
+    + "no re-paste — and converges through the ordinary give-up machinery instead of ever risking a "
+    + "wrong-identity submission. Card b9b8f8db's own win (no intervening message, Enter-only, body "
+    + "written exactly once) is unweakened (3) — A stays its own composer's sole owner there, so ownership "
+    + "always matches. See this file's header for what a hermetic write-recorder harness does and does "
+    + "not prove."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

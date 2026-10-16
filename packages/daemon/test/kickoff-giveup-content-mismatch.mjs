@@ -149,8 +149,10 @@ const mkSession = (o) => db.insertSession({
 // -> (re-mint) this SAME host's own enqueueStdin. This is the actual call graph index.ts wires, not a stub.
 const sessions = new SessionService(db, host, new OrchestrationControl());
 const rootMsgIdBySession = {};
+const exhaustionCountBySession = {};
 events.onKickoffGiveUpExhausted = (sessionId, msgId, rootMsgId, kickoffText) => {
   rootMsgIdBySession[sessionId] ??= rootMsgId;
+  exhaustionCountBySession[sessionId] = (exhaustionCountBySession[sessionId] ?? 0) + 1;
   sessions.handleKickoffGiveUpExhausted(sessionId, msgId, rootMsgId, kickoffText);
 };
 
@@ -192,15 +194,17 @@ async function driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount) {
 try {
   // ===== (C) THE RACE, FORCED: a GENUINE confirming hook arrives (UserPromptSubmit+Stop, the same shape ====
   // ===== kickoff-giveup-exhausted.mjs's own (H2) "real confirm" negative control uses) but its `prompt` ======
-  // ===== is NOT byte-identical to cycle 2's own text — the re-mint is left un-purged and DOES go on to =======
-  // ===== drain and physically write a genuine second, duplicate paste. =========================================
+  // ===== is NOT byte-identical to cycle 2's own text — the re-mint is left un-purged. Card 844ca34e round ===
+  // ===== 2 (Shape 2 — this is the real production trace that motivated it): the mismatch ALSO triggers a ==
+  // ===== genuine [loom:prompt-mismatch] notice that physically OWNS the composer by the time the kickoff ===
+  // ===== re-mint finally drains — an ownership mismatch means it writes NOTHING, never a duplicate paste. =
   {
     const SID = "kickoff-mismatch-unpurged";
     const mgr = `kgcm-mgr-c-${sfx}`;
     mkSession({ id: mgr, role: "manager" });
     mkSession({ id: SID, role: "worker", parentSessionId: mgr, taskId: `tk-mismatch-c-${sfx}` });
     const KICKOFF = "orchestrate task tk-mismatch-c — the confirming hook arrives but its content is truncated";
-    const { bodyCount } = spawnReady(SID, KICKOFF);
+    const { fake, bodyCount } = spawnReady(SID, KICKOFF);
 
     const cycle2Text = await driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount);
     check("(C) setup: exactly ONE physical body write so far", bodyCount(KICKOFF) === 1);
@@ -231,15 +235,55 @@ try {
     await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(C) after Stop: still un-purged", host.getPendingEntries(SID).length === 1);
 
-    // Advance past the re-mint's OWN hold with nothing having purged it. NOTE: the mismatch ALSO triggers
-    // the real `[loom:prompt-mismatch]` notice (a genuine production side effect of submitWasOutstanding +
-    // hook.prompt !== live.lastPrompt) — that notice dispatches, itself gives up, and gets held AHEAD of the
-    // kickoff re-mint (pending.unshift) — so this polls rather than assuming one hold window is enough.
-    await reconcileUntil(() => bodyCount(KICKOFF) >= 2, 15_000);
-    check("(C) THE RACE, FORCED: the re-mint DRAINS and physically writes a genuine SECOND, duplicate paste of " +
-      "the kickoff body — DESPITE a real confirming hook having arrived in between. The hook's mere arrival " +
-      "did not resolve the ambiguity; only an exact content match would have, and this one wasn't exact.",
-      bodyCount(KICKOFF) === 2);
+    // Advance past the re-mint's OWN hold with nothing having purged it. The mismatch ALSO triggers the
+    // real `[loom:prompt-mismatch]` notice (a genuine production side effect of submitWasOutstanding +
+    // hook.prompt !== live.lastPrompt) — that notice dispatches, clears+pastes its OWN body (a fresh,
+    // never-given-up lineage), and gives up too, PHYSICALLY OWNING the composer by the time the kickoff
+    // re-mint's own held entry finally gets its turn (`pending.unshift` put the notice ahead of it). Card
+    // 844ca34e round 2: the kickoff re-mint's own lineage is marked, but it does NOT own the composer —
+    // ownership mismatch means it writes nothing at all, converging through its own bounded give-up chain
+    // to a terminal resolution instead of ever risking submitting the notice's text as the kickoff.
+    //
+    // NOTE: that terminal resolution is NOT a recorded "parked" event in THIS exact scenario — the earlier
+    // mismatched UserPromptSubmit hook already set `live.firstTurnStarted = true` (unconditional on ANY
+    // UserPromptSubmit, content match or not), so by the time the re-mint's own give-up exhausts a SECOND
+    // time, `handleKickoffGiveUpExhausted`'s own "late confirmation, not a dropped kickoff" check fires
+    // and suppresses the notice with no durable record at all (see the `hasFirstTurnStarted` branch,
+    // sessions/service.ts) — a pre-existing property of this test's own setup, unrelated to either card.
+    // The REACHABLE, durable signals are: the message is gone from `pending` (requeueGiveUpOrigin removes
+    // an exhausted entry regardless of what its callback does) and `onKickoffGiveUpExhausted` fired twice
+    // (the re-mint, then its own exhaustion).
+    //
+    // Card 844ca34e round 4 (CR round 3, MINOR 5): round 3 replaced the body-count guard below with a
+    // `composerBodyWrittenForGen`-vs-gen snapshot captured at the ownership-mismatch log line, reasoning
+    // it was a stronger, non-racy check. CR round 3 (8d98f9d4) judged that snapshot ITSELF tautological:
+    // `giveUpWithoutWriting`'s whole branch structurally never touches `composerBodyWrittenForGen` for
+    // ITS OWN generation — once you're inside that branch (proven by the log firing at all), the snapshot
+    // is true by construction, regardless of whether reaching that branch was itself the right decision.
+    // Restored instead: the generation's own PHYSICAL body-write count, read right after the deferred
+    // give-up-without-writing timer settles (same placement the original pre-round-3 check used) — a real
+    // behavioral signal, not an internal-field snapshot.
+    const writesBeforeMismatchSettle = fake.writes.length;
+    await reconcileUntil(() => host.getPendingEntries(SID).length === 0, 15_000);
+    check("(C) THE RESTORED BODY-COUNT GUARD: zero NEW physical writes for the KICKOFF text occurred while "
+      + "the ownership-mismatch decision and its deferred settle ran — the mismatch generation never wrote "
+      + "the kickoff's body a second time (Enter-only writes no body either way, so this does not by itself "
+      + "discriminate round 1 from round 2+ — see the log-based check below for that)",
+      fake.writes.slice(writesBeforeMismatchSettle).join("").split(KICKOFF).length - 1 === 0);
+    check("(C) sanity: the kickoff body was NEVER physically pasted a second time, CUMULATIVELY, across "
+      + "the whole scenario",
+      bodyCount(KICKOFF) === 1);
+    check("(C) THE FIX (round 2), THE ASSERTION THAT GOES RED AGAINST COMMIT 4af1e476 (round 1): the " +
+      "ownership-mismatch mechanism fired for this session — round 1 has no such check at all and would " +
+      "have pressed Enter against the [loom:prompt-mismatch] notice's own unconfirmed body under the " +
+      "kickoff's identity instead",
+      submitLog.some((l) => l.includes("GIVE-UP (composer ownership mismatch")));
+    check("(C) the kickoff's own chain genuinely ran at least once through onKickoffGiveUpExhausted (the " +
+      "re-mint) and is no longer stuck in `pending` (the poll above settled) — never a silent infinite " +
+      "loop, never a wrong-identity submission. (Exactly how many further exhaustions the re-mint itself " +
+      "goes through before settling is a race against the notice's own INDEPENDENT give-up chain — both " +
+      "compete for drain priority — so this does not pin an exact count.)",
+      exhaustionCountBySession[SID] >= 1 && host.getPendingEntries(SID).length === 0);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -284,8 +328,13 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — card ee9f3974: a GENUINE confirming hook (UserPromptSubmit+Stop) whose reported content " +
     "is NOT byte-identical to the exhausted generation's own tracked signature leaves a re-minted kickoff " +
-    "un-purged, and it goes on to drain and physically write a real, duplicate second paste (C) — DoD-1's " +
-    "race is forced deterministically, not sampled for. The identical setup with an exact-match hook resolves " +
-    "cleanly and never duplicates (D), proving the rig discriminates the two cases rather than always failing."
+    "un-purged (C) — DoD-1's race is forced deterministically, not sampled for. Card 844ca34e round 2: the " +
+    "same mismatch's own [loom:prompt-mismatch] notice physically owns the composer by the time that " +
+    "un-purged re-mint finally drains, and `composerOwnerLineage` catches it — the re-mint writes nothing " +
+    "at all, never a duplicate paste, converging through its own bounded give-up chain to a terminal " +
+    "resolution instead (not necessarily a recorded park in this exact scenario — see the test's own note " +
+    "on why hasFirstTurnStarted suppresses it here). The identical setup with an exact-match hook resolves " +
+    "cleanly and never duplicates (D), proving the rig discriminates the two cases rather than always " +
+    "failing."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

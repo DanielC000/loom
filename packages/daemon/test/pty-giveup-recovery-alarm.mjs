@@ -183,6 +183,66 @@ try {
     check("(4) the second alarm is its own entry (count resets to THRESHOLD, not a running total)",
       alarmCalls[alarmCalls.length - 1]?.count === THRESHOLD);
   }
+
+  // ===================== (5) card 844ca34e round 3 MINOR 7: an OWNERSHIP-MISMATCH give-up (the
+  // ===================== `giveUpWithoutWriting` branch — a DIFFERENT code path from the ordinary GIVE-UP
+  // ===================== RECOVERY branch every scenario above exercises) also counts toward THIS SAME =====
+  // ===================== manager burst alarm, not just the ordinary give-up flavor ========================
+  {
+    const SID = "sess-giveup-alarm-manager-mismatch";
+    const TEXT_A = "MANAGER_A_GIVES_UP_THEN_HITS_OWNERSHIP_MISMATCH";
+    const TEXT_B = "MANAGER_B_TAKES_THE_COMPOSER_AAAAAAAAAAAAAAAAAA";
+    spawnReady(SID, "manager");
+    const callsBefore = alarmCalls.length;
+
+    host.enqueueStdin(SID, TEXT_A, "system", undefined, undefined, "agent");
+    check("(5) setup: A delivered immediately, busy armed", busyLog[SID].at(-1) === true);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: `${SID} A cycle 1` });
+    check("(5) setup: A's own (ordinary) give-up — count 1, no alarm yet", alarmCalls.length === callsBefore);
+    // Pin A's own requeued entry held indefinitely: A's real HOLD_MS (10ms) would otherwise long since
+    // have expired by the time B is dispatched below (the `sharedWaitUntil` poll + check overhead alone
+    // can exceed 10ms), making A — now un-held and still FIFO-front — eligible for B's OWN enqueue call
+    // to drain INSTEAD of B itself (same race pty-giveup-resend-bypass-unsuppressed-park.mjs's own
+    // scenario (3) hit). Decouples this from wall-clock timing entirely.
+    host.live.get(SID).pending[0].giveUpHeldUntil = Date.now() + 10_000_000;
+
+    // B: a genuinely different lineage writes and gives up too (ordinary path) — this is what makes
+    // `composerOwnerLineage` point at B, not A, the exact precondition for A's NEXT redelivery to hit the
+    // ownership-mismatch branch instead of Enter-only.
+    host.enqueueStdin(SID, TEXT_B, "system", undefined, undefined, "agent");
+    check("(5) setup: B delivered immediately (A pinned held)", busyLog[SID].at(-1) === true);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: `${SID} B cycle 1` });
+    check("(5) setup: B's own (ordinary) give-up — count 2, STILL no alarm (2 < threshold)", alarmCalls.length === callsBefore);
+    const liveNow = host.live.get(SID);
+    const bLogicalId = liveNow.composerOwnerLineage ? [...liveNow.composerOwnerLineage][0] : undefined;
+    check("(5) setup: composerOwnerLineage now points at B specifically, not A (an EXACT-identity check, "
+      + "not merely non-null — the earlier draft of this check was vacuous and passed even when ownership "
+      + "pointed at A)",
+      bLogicalId !== undefined && liveNow.composerDirtyLen > 0
+      && !liveNow.pending.some((m) => m.text.includes(TEXT_A) && m.logicalId === bLogicalId));
+
+    // A's redelivery: un-pin A's own hold now (force-expire it). B's OWN requeued entry (also sitting in
+    // `pending`, unshifted ahead of A by its own give-up) must ALSO stay pinned held — otherwise
+    // `drainPending` picks B (FIFO-front) over A regardless of A's own hold state, redraining B's own
+    // (Enter-only, ownership-MATCHED) cycle instead of exercising A's mismatch at all, exactly what the
+    // first draft of this scenario did. Only A may be eligible for this specific reconcile() call.
+    const aEntry = liveNow.pending.find((m) => m.text.includes(TEXT_A));
+    const bEntry = liveNow.pending.find((m) => m.logicalId === bLogicalId);
+    check("(5) setup: both A's and B's own requeued entries are still in pending", aEntry !== undefined && bEntry !== undefined);
+    bEntry.giveUpHeldUntil = Date.now() + 10_000_000;
+    aEntry.giveUpHeldUntil = Date.now() - 1;
+    const writesBefore = fakes.at(-1).writes.length;
+    host.reconcile();
+    check("(5) THE MISMATCH FIRED: A's redelivery wrote zero bytes (ownership mismatch, no write attempted)",
+      fakes.at(-1).writes.slice(writesBefore).join("") === "");
+    await sharedWaitUntil(() => alarmCalls.length === callsBefore + 1, { timeoutMs: 10_000, intervalMs: 2, label: `${SID} ownership-mismatch give-up fires the alarm` });
+    check("(5) THE FIX (MINOR 7), THE ASSERTION THAT GOES RED WITHOUT IT: the OWNERSHIP-MISMATCH give-up "
+      + "itself crossed THRESHOLD and fired the alarm — this give-up flavor was previously invisible to "
+      + "maybeFireGiveUpRecoveryAlarm entirely (giveUpWithoutWriting never called it)",
+      alarmCalls.length === callsBefore + 1 && alarmCalls[alarmCalls.length - 1]?.count === THRESHOLD);
+
+    try { host.stop(SID, "hard"); } catch { /* ignore */ }
+  }
 } finally {
   for (const sid of ["sess-giveup-alarm-manager", "sess-giveup-alarm-worker"]) {
     try { host.stop(sid, "hard"); } catch { /* best-effort cleanup */ }

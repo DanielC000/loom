@@ -31,16 +31,26 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       pending. THEN the ORIGINAL write's late confirmation arrives (cycle 2's own exact text as
 //       `hook.prompt`) BEFORE the re-mint's hold expires. Assert: the queued re-mint is PURGED by
 //       logicalId (pending goes to zero), the purge's own "content-matched" log fires, and — advancing
-//       past the hold and reconciling — the kickoff body count STAYS at 2 (1 untagged original write + 1
-//       tagged cycle-2 write) forever; the re-mint never produces a THIRD write. Asserts the COUNT, not
-//       merely the absence of an error.
-//   (B) THE RED, PROVING THE COUNTING RIG CAN ACTUALLY FAIL: identical setup, but NO confirming hook ever
+//       past the hold and reconciling — the kickoff body count STAYS at 1 forever; the re-mint never
+//       produces a second write. Asserts the COUNT, not merely the absence of an error. (Card 844ca34e:
+//       the purge still matters here even though the re-mint can no longer physically re-paste either way
+//       (B) — an unpurged re-mint still drains and spends a real Enter-only cycle, which (A) shows the
+//       purge correctly avoids entirely.)
+//   (B) card 844ca34e's OWN fix, re-pointed at this exact rig: identical setup, but NO confirming hook ever
 //       arrives before the re-mint's hold expires (the purge never gets anything to act on for this entry —
-//       functionally identical, from this test's perspective, to disabling the purge). Advancing past the
-//       hold and reconciling: the re-mint DOES drain and DOES write a real THIRD, physical paste of the
-//       kickoff body. bodyCount reaches 3 — proving this rig is not vacuously "no duplicate observed
-//       because nothing exercised the mechanism" — it genuinely detects a duplicate when the confirming
-//       hook (and therefore the purge) never runs.
+//       functionally identical, from this test's perspective, to disabling the purge). Before card
+//       844ca34e, advancing past the hold and reconciling here produced a real SECOND, physical paste of
+//       the kickoff body (bodyCount reached 2) — the exact production bug (3 real specimens, see card
+//       844ca34e's investigation) where a re-mint is a BRAND NEW QueuedMessage, so the old `isGiveUpRedelivery`
+//       check (keyed off a per-message `giveUpGen` stamp) never recognized it as a redelivery of the SAME
+//       lineage and let it fall into the full backspace+repaste branch on its own first attempt, every time
+//       it re-minted. card 844ca34e closes that gap generically, at `Live.giveUpLineages` (keyed by
+//       `logicalId`, which a re-mint always shares with its originating chain via `rootMsgId` — survives the
+//       re-mint's own brand-new msgId): the re-mint STILL drains unpurged, but now takes Enter-only, exactly
+//       like an ordinary same-msgId redelivery always could — bodyCount STAYS at 1, forever. Since nobody
+//       ever confirms the re-mint's Enter-only cycle either, it runs through its OWN one-requeue budget and
+//       exhausts a SECOND time — which PARKS (chainDepth 1 >= GIVE_UP_REMINT_LIMIT), exactly once, never a
+//       silent loop.
 //
 // RUN: pnpm build (from packages/daemon) then `node test/kickoff-giveup-remint-purge.mjs`.
 import fs from "node:fs";
@@ -187,7 +197,7 @@ async function driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount) {
 try {
   // ===== (A) THE FIX: the original's late confirmation, arriving AFTER the re-mint is queued, purges it — ====
   // ===== the kickoff body count stays at 1 (card b9b8f8db: cycle 2 no longer re-pastes) forever; the =========
-  // ===== re-mint (which WOULD be a real second physical write, being a fresh message) never lands at all ====
+  // ===== re-mint never drains at all (purged), so it never even reaches its own Enter-only cycle (B) ========
   {
     const SID = "kickoff-remint-purged";
     const mgr = `kgrp-mgr-a-${sfx}`;
@@ -231,9 +241,10 @@ try {
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
-  // ===== (B) THE RED: same setup, but NO confirming hook ever arrives before the hold expires — the purge ====
-  // ===== has nothing to act on, so the re-mint DOES drain and DOES write a real SECOND, duplicate paste ======
-  // ===== (the re-mint is a genuinely fresh QueuedMessage — its OWN first attempt still pastes in full) =======
+  // ===== (B) card 844ca34e: same setup, but NO confirming hook ever arrives before the hold expires — the ===
+  // ===== purge has nothing to act on, so the re-mint DOES drain unpurged — but, unlike pre-844ca34e, it ======
+  // ===== takes Enter-only (its own lineage already gave up once), never a second physical paste. Its own ====
+  // ===== Enter-only cycle also never confirms, so it exhausts AGAIN and PARKS — exactly once. =================
   {
     const SID = "kickoff-remint-unpurged";
     const mgr = `kgrp-mgr-b-${sfx}`;
@@ -247,20 +258,64 @@ try {
     await sharedWaitUntil(() => host.getPendingEntries(SID).length === 1, { timeoutMs: 10_000, intervalMs: 2 });
     check("(B) setup: the re-mint is queued (held), same as (A)", host.getPendingEntries(SID).length === 1);
 
-    // NO confirming hook this time — advance past the hold with nothing to purge the re-mint.
+    // NO confirming hook this time — advance past the hold with nothing to purge the re-mint. It drains
+    // unpurged (this is what (A)'s purge exists to avoid), but card 844ca34e means its drain is Enter-only:
+    // the re-mint's OWN logicalId (rootMsgId) is already in `Live.giveUpLineages` from cycle 1/2's earlier
+    // give-up, so submit() never re-enters the backspace+repaste branch for it, even on this brand-new
+    // QueuedMessage's own first attempt.
+    submitLog.length = 0;
     await sleep(HOLD_WAIT);
+    const writesBeforeRemintDrain = fakes[fakes.length - 1].writes.length;
     host.reconcile();
-    await sharedWaitUntil(() => bodyCount(KICKOFF) >= 2, { timeoutMs: 5_000, intervalMs: 2 });
-    // Label reworded to avoid the fixed-wait-negative-guard's keyword scan ("absent"/"not"/"no ") — the
-    // preceding waitUntil (line above) is a bounded POLL for this POSITIVE condition, not a fixed sleep
-    // guarding a "did not happen" claim; the guard's static text scan can't see that distinction, so the
-    // fix is to state this positive claim in positive language rather than exempt a genuinely different shape.
-    check("(B) THE RED: with the confirming hook withheld entirely, the re-mint DRAINS and physically writes a " +
-      "genuine SECOND, duplicate paste of the kickoff body (its OWN first attempt, a fresh QueuedMessage, " +
-      "still pastes in full — card b9b8f8db's Enter-only path applies only to an already-attempted message) " +
-      "— proving the (A) count-based assertion is a rig that truly detects a duplicate, rather than one that " +
-      "always reports success",
-      bodyCount(KICKOFF) === 2);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === true, { timeoutMs: 10_000, intervalMs: 2 });
+    const remintDrainBurst = fakes[fakes.length - 1].writes.slice(writesBeforeRemintDrain).join("");
+    check("(B) THE FIX: the re-mint DOES drain unpurged, but its own physical write carries none of the "
+      + "kickoff body — Enter-only (card 844ca34e), not a backspace+repaste",
+      remintDrainBurst.length > 0 && !remintDrainBurst.includes(KICKOFF));
+    check("(B) THE FIX, the count-based proof: the kickoff body was NEVER physically pasted a second time, "
+      + "even though the re-mint genuinely drained unpurged — this is the assertion that goes RED against "
+      + "pre-844ca34e code (there it reaches 2)",
+      bodyCount(KICKOFF) === 1);
+    check("(B) the Enter-only drain logged the lineage-protected reason, not the old trust-gate one",
+      submitLog.some((l) => l.includes("retrying the Enter only") && l.includes("844ca34e")));
+
+    // The re-mint's own Enter-only cycle ALSO never confirms — it runs through its own one-requeue budget
+    // (same GIVE_UP_REQUEUE_LIMIT=1 every message gets) and exhausts a SECOND time, which PARKS
+    // (chainDepth 1 >= GIVE_UP_REMINT_LIMIT) rather than re-minting again — never a silent loop.
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
+    await sharedWaitUntil(() => host.getPendingEntries(SID).length === 1, { timeoutMs: 10_000, intervalMs: 2 });
+    await sleep(HOLD_WAIT);
+    const writesBeforeSecondCycle = fakes[fakes.length - 1].writes.length;
+    host.reconcile();
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === true, { timeoutMs: 10_000, intervalMs: 2 });
+    // Witness a write genuinely happened before asserting what it did NOT contain — a negative assertion
+    // with no such precondition could pass vacuously if this cycle somehow wrote nothing at all yet.
+    await sharedWaitUntil(() => fakes[fakes.length - 1].writes.length > writesBeforeSecondCycle, { timeoutMs: 10_000, intervalMs: 2 });
+    check("(B) precondition: the re-mint's own 2nd cycle actually wrote something (the poll above resolved)",
+      fakes[fakes.length - 1].writes.length > writesBeforeSecondCycle);
+    const secondCycleBurst = fakes[fakes.length - 1].writes.slice(writesBeforeSecondCycle).join("");
+    check("(B) the re-mint's OWN redelivery (its 2nd cycle) is ALSO Enter-only, not a body write",
+      secondCycleBurst.length > 0 && !secondCycleBurst.includes(KICKOFF));
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
+    const parkedEvents = db.listEventsForWorker(SID)
+      .filter((e) => e.kind === "session_message_gave_up" && e.detail?.outcome === "parked");
+    check("(B) THE SECOND EXHAUSTION PARKS — exactly once, never a silent re-mint loop", parkedEvents.length === 1);
+    const remintedEvents = db.listEventsForWorker(SID)
+      .filter((e) => e.kind === "session_message_gave_up" && e.detail?.outcome === "reminted");
+    check("(B) sanity: exactly ONE re-mint happened total (chainDepth bound, GIVE_UP_REMINT_LIMIT=1), never a THIRD",
+      remintedEvents.length === 1);
+    check("(B) sanity: the kickoff body was STILL never pasted a second time, even after the park",
+      bodyCount(KICKOFF) === 1);
+    // Card 844ca34e DoD: bounded total bytes across the FULL chain (the ONE real body paste + cycle 2's +
+    // the re-mint's own two Enter-only cycles), not just "never a second body paste" — a bare-Enter burst
+    // is a handful of bytes (paste-bracket markers + one `\r`), so three full cycles of Enter-only retries
+    // on TOP of the one real paste still stays comfortably under 3x one kickoff length. Pre-844ca34e code
+    // would have blown well past this on the re-mint's own first attempt alone (a SECOND full body paste
+    // plus a backspace burst sized off the accumulated conservative total, then a THIRD on its redelivery).
+    const totalBytesWritten = fakes[fakes.length - 1].writes.join("").length;
+    check(`(B) BOUNDED TOTAL BYTES across the whole chain: ${totalBytesWritten} chars written, comfortably `
+      + `under 3x one kickoff length (${KICKOFF.length * 3}) — no escalating backspace+repaste ever fired`,
+      totalBytesWritten < KICKOFF.length * 3);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -274,9 +329,11 @@ console.log(failures === 0
     "is what the existing content-match purge (card 4a0af485) keys on, proven end to end against the REAL " +
     "PtyHost (not a SessionService-level stub) — an original kickoff that confirms LATE, after its re-mint " +
     "is already queued, has that re-mint PURGED before it can ever drain, so the kickoff body count never " +
-    "goes past 1 (A; card b9b8f8db's Enter-only redelivery means cycle 2 itself never re-pastes). The SAME " +
-    "two-cycle setup with no confirming hook (the purge has nothing to act on) DOES produce a real second, " +
-    "duplicate write from the re-mint's own first attempt (B) — proving the count-based assertion in (A) is " +
-    "a rig that can genuinely detect a duplicate, not one that vacuously reports success."
+    "goes past 1 (A). And card 844ca34e: when the purge has nothing to act on and the re-mint drains " +
+    "UNPURGED (B), it no longer re-pastes the body either — `Live.giveUpLineages` recognizes a brand-new " +
+    "re-mint QueuedMessage as the SAME lineage (shared `logicalId`/`rootMsgId`) that already gave up once, " +
+    "so it takes Enter-only on its own first attempt, same as an ordinary same-msgId redelivery always " +
+    "could. Its own Enter-only cycle also never confirms, so it exhausts a second time and PARKS exactly " +
+    "once — never a silent re-mint loop."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

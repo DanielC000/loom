@@ -2507,7 +2507,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * different value between `drainPending`'s real write and `requeueGiveUpOrigin`'s later reconstruction,
  * silently breaking the late-confirmation content-match/purge mechanism.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; ownerTextSeq?: number | null; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; ownerTextSeq?: number | null; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string; bypassOwnershipGateOnce?: boolean };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -2621,6 +2621,9 @@ export type EnqueueStdinTail = {
    * outranks"), distinct from `undefined` ("not supplied — fresh capture, mint now"); see that record.
    */
   ownerTextSeq?: number | null;
+  /** @decision 844ca34e (round 3) — ONE-SHOT: lets this exact write skip the ownership-mismatch gate
+   *  despite an already-marked `logicalId`. Options-object only (card 3f09f9ce); stripped on requeue. */
+  bypassOwnershipGateOnce?: boolean;
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
@@ -2840,6 +2843,14 @@ interface Live {
   // gate, composerDirtyLen would still inflate by a further `lastPrompt.length` on every failed Enter-only
   // retry even though the fix's whole point is that cycle writes zero body bytes.
   composerBodyWrittenForGen: number | null;
+  // @decision 844ca34e — every `logicalId` whose lineage has given up at least once; a candidate for
+  // Enter-only (gated by `composerOwnerLineage` below), never for a SECOND physical re-paste. Never
+  // unmarked for this `Live`'s lifetime.
+  giveUpLineages: Set<string>;
+  // @decision 844ca34e (round 2) — the logicalId(s) that last PHYSICALLY wrote the composer's body;
+  // null when unknown. A marked lineage may trust Enter-only ONLY when this exactly matches its own
+  // origin — a mismatch means Enter would submit a DIFFERENT lineage's text under the wrong identity.
+  composerOwnerLineage: Set<string> | null;
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   // Card d88163b7 (CR fix): a CALLER-held drain suppression — SUPPRESS drain/submit (mirrors `stopping`,
@@ -6139,6 +6150,8 @@ export class PtyHost {
       composerDirtyLenClearedByGen: null,
       composerDirtyMarkedGens: new Map(),
       composerBodyWrittenForGen: null,
+      giveUpLineages: new Set(),
+      composerOwnerLineage: null,
       rawDraftText: "",
       pending: [],
       stopping: false,
@@ -6465,7 +6478,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
@@ -7724,7 +7737,7 @@ export class PtyHost {
       logBroken: false,
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
@@ -8846,6 +8859,19 @@ export class PtyHost {
         const submitWasOutstanding = !live.enterConfirmed;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
         this.resolveFlushMarker(sessionId, live); // card ac7884e3 — see that method's own doc
+        // @decision 4a0af485 — captured BEFORE the purge call below (which can itself delete an entry): with
+        // no pre-existing ambiguity this hook can only be about the CURRENT generation, making the CONFIRMED
+        // log below safe; otherwise the purge call's return value settles which generation it belongs to.
+        // @decision dbc7ffea — REVERTED (Code Review Major 3): do NOT widen this to also require
+        // retiredGiveUpSignatures.size===0 — the AND with resolvedByContentMatch already covers it, and
+        // widening would suppress the CONFIRMED-gen log (a named measurement corpus) for ordinary confirms.
+        const hadNoAmbiguityBeforeThisHook = live.ambiguousDispatches.size === 0;
+        const reportedPromptForPurge = typeof hook.prompt === "string" ? hook.prompt : undefined;
+        // @decision 844ca34e (round 5) — moved AHEAD of the composerDirtyLenClearedByGen block below
+        // (value-equivalent either way — see that block's own note); `contentMatchedLogicalIds` is what
+        // the giveUpLineages release just below now gates on.
+        const purgeResult = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge); // card 441499ee/09e655d5/4a0af485 — see the method doc; UserPromptSubmit purges without advancing the queue
+        const resolvedByContentMatch = purgeResult.resolved;
         // @decision 3ce3fa39 — GATED reset: only when this hook's submitGeneration matches
         // composerDirtyLenClearedByGen — an unrelated hook can flip enterConfirmed without
         // proving THIS generation's clear-prefix landed (first-hand confirmed in production).
@@ -8857,16 +8883,14 @@ export class PtyHost {
           // the FULL accumulated total; clear composerDirtyMarkedGens whole, not just the scalars, or an
           // older generation's entry lingers orphaned.
           live.composerDirtyMarkedGens.clear();
+          // @decision 844ca34e (round 2) — the composer is now PROVEN empty; no lineage owns it until
+          // the next write sets this again.
+          // @decision 844ca34e (round 5) — release ONLY the logicalIds the purge call above just proved
+          // delivered BY POSITIVE CONTENT MATCH (reusing that normalized machinery, never a second, raw
+          // comparison) — see this decision's own record for why the round 4 raw comparison was dead code.
+          for (const id of purgeResult.contentMatchedLogicalIds) live.giveUpLineages.delete(id);
+          live.composerOwnerLineage = null;
         }
-        // @decision 4a0af485 — captured BEFORE the purge call below (which can itself delete an entry): with
-        // no pre-existing ambiguity this hook can only be about the CURRENT generation, making the CONFIRMED
-        // log below safe; otherwise the purge call's return value settles which generation it belongs to.
-        // @decision dbc7ffea — REVERTED (Code Review Major 3): do NOT widen this to also require
-        // retiredGiveUpSignatures.size===0 — the AND with resolvedByContentMatch already covers it, and
-        // widening would suppress the CONFIRMED-gen log (a named measurement corpus) for ordinary confirms.
-        const hadNoAmbiguityBeforeThisHook = live.ambiguousDispatches.size === 0;
-        const reportedPromptForPurge = typeof hook.prompt === "string" ? hook.prompt : undefined;
-        const resolvedByContentMatch = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge); // card 441499ee/09e655d5/4a0af485 — see the method doc; UserPromptSubmit purges without advancing the queue
         // @decision b4b9b707 — SECURITY INVARIANT: pendingRawOwnerSubmit can only originate from writeStdin
         // (submit() clears it before writing); TTL-bounded (RAW_OWNER_SUBMIT_TTL_MS) and always consumed
         // (cleared) whether attributed or discarded stale — never let it survive into a later turn.
@@ -9717,6 +9741,10 @@ export class PtyHost {
         } else {
           live.humanSubmitHeldUntil = null;
         }
+        // @decision 844ca34e (round 5) — moved ahead of the composerDirtyLen reset block below (still
+        // before the early park-break further down); Stop/StopFailure carries no `prompt` field, so this
+        // call's `contentMatchedLogicalIds` is always empty — see the reset block's own note.
+        this.purgeConfirmedGiveUpRequeue(sessionId, live, true); // card 441499ee/09e655d5 — see the method doc; Stop/StopFailure advances the queue past its front
         // @decision 3ce3fa39 — same GATED composerDirtyLen reset as UserPromptSubmit's: fires only when
         // composerDirtyLenClearedByGen === live.submitGeneration (see a6c1d413 for why the whole map clears).
         if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
@@ -9728,8 +9756,11 @@ export class PtyHost {
           // @decision a6c1d413 — same full-map clear as UserPromptSubmit's: clearing only the scalars here
           // would strand an older generation's composerDirtyMarkedGens entry.
           live.composerDirtyMarkedGens.clear();
+          // @decision 844ca34e (round 5) — Stop/StopFailure never has a positive content match (no
+          // `prompt` field on this hook), so this site never releases a giveUpLineages mark — only
+          // UserPromptSubmit's content-matched release (above) may.
+          live.composerOwnerLineage = null;
         }
-        this.purgeConfirmedGiveUpRequeue(sessionId, live, true); // card 441499ee/09e655d5 — see the method doc; before any early park-break below on purpose; Stop/StopFailure advances the queue past its front
         this.finalizingTurn = true;
         try {
           this.setBusy(sessionId, false, "stop-hook"); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
@@ -10044,6 +10075,8 @@ export class PtyHost {
     // `ownerTextSeq` has NO positional legacy form (options-object only, like `resolveTailAtDelivery`) —
     // read here, resolved into a real rank just below once `live` (and its counter) is in hand.
     const ownerTextSeqOverride = isTailObject ? tailOrGiveUpHeldUntil.ownerTextSeq : undefined;
+    // `bypassOwnershipGateOnce` has NO positional legacy form (card 844ca34e round 3, same convention).
+    const bypassOwnershipGateOnce = isTailObject ? tailOrGiveUpHeldUntil.bypassOwnershipGateOnce === true : false;
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #3(c)/#5: dispatch to codex's OWN,
     // simpler push+drain path BEFORE any of the claude-specific machinery below runs (`this.live.get`
     // would return undefined for a codex sessionId anyway — WITHOUT this branch that would silently
@@ -10153,7 +10186,7 @@ export class PtyHost {
         // same function the drain path uses, so there is exactly one place this logic lives. In practice
         // this is a no-op for the immediate path (nothing has run yet to make it stale), but it stays
         // correct rather than assumed.
-        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}) };
+        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}), ...(bypassOwnershipGateOnce ? { bypassOwnershipGateOnce: true } : {}) };
         this.submit(sessionId, joinSubmittedText([entry], live.submitGeneration), route, ownerText, proactive, senderId, "immediate", [entry]);
       }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
@@ -10183,7 +10216,7 @@ export class PtyHost {
     const id = randomUUID();
     // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
     // (`joinSubmittedText`, called from `drainPending`), never baked in here.
-    const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}) };
+    const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}), ...(bypassOwnershipGateOnce ? { bypassOwnershipGateOnce: true } : {}) };
     {
       // @decision eac3464d — a SAME-SENDER agent-kind arrival reorders to land right after that
       // sender's own last (eligible) queued entry, never the FIFO tail, so same-sender coalescing has
@@ -11533,34 +11566,52 @@ export class PtyHost {
     // at a number this large (a measured specimen read 88606 with the real composer content unknown either
     // way). See 2960c3bf's record for the specimen and the two still-open candidate causes.
     //
-    // @decision 4796f999 — Enter-only redelivery is safe ONLY when composerDirtyLenBelieved ===
-    // composerDirtyLen (no OTHER generation's clear unresolved) — a gap can silently fuse or lose a
-    // message, so it falls through to a full clear+repaste of THIS redelivery's own body instead.
+    // @decision 844ca34e (round 2, Code Review 8555d247) — card 4796f999's `composerDirtyLenBelieved ===
+    // composerDirtyLen` trust check is RETIRED and deleted (provably subsumed, never left dormant
+    // alongside its replacement): `composerOwnerLineage` now gates Enter-only on OWNERSHIP instead.
     //
-    // @decision fa27d262 — `every`, not `some`: ALL of `origin` must already be `giveUpGen`-tagged before
-    // trusting Enter-only, or a batch mixing a fresh, never-written neighbour silently loses that
-    // neighbour's body while onDeliver() still fires for it as delivered. See fa27d262's record.
-    const isGiveUpRedelivery = origin?.every((m) => m.giveUpGen !== undefined) ?? false;
-    const composerBelievedTrustworthy = live.composerDirtyLenBelieved === live.composerDirtyLen;
-    if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery && composerBelievedTrustworthy) {
-      // Stamp the same way the full-clear branch below does: a confirmed Enter for THIS generation proves
-      // the turn was submitted, i.e. the composer is now genuinely empty — see composerDirtyLenClearedByGen's
-      // doc. True regardless of whether we backspaced or not; the confirmation is what proves it either way.
-      live.composerDirtyLenClearedByGen = gen;
-      // eslint-disable-next-line no-console
-      console.log(`[submit] ${sessionId} redelivering an already-attempted message (composer possibly dirty, ${live.composerDirtyLen} chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db)`);
-      this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
-      const reassertWrittenAt = Date.now();
-      this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen, live), live);
+    // @decision fa27d262 — `every`, not `some`: ALL of `origin` must already be marked before trusting
+    // Enter-only, or a batch mixing a fresh, never-given-up neighbour silently loses that neighbour's
+    // body while onDeliver() still fires for it as delivered. See fa27d262's record.
+    const lineageEverGaveUp = origin !== undefined && origin.length > 0 && origin.every((m) => live.giveUpLineages.has(m.logicalId));
+    // @decision 844ca34e (round 3/4) — a ONE-SHOT escape for an auto-joined resend of an ALREADY-PARKED
+    // root. `.every`, not `.some` (round 4, mirroring `lineageEverGaveUp`'s fa27d262 discipline above):
+    // a coalesced batch mixing a flagged member with an unflagged one must not ride the bypass.
+    const bypassOwnershipGateOnce = origin !== undefined && origin.length > 0 && origin.every((m) => m.bypassOwnershipGateOnce === true);
+    if (live.composerDirtyLen > 0 && live.composerLen === 0 && lineageEverGaveUp && !bypassOwnershipGateOnce) {
+      // @decision 844ca34e (round 2) — OWNERSHIP, not just lineage history: a different/unknown owner
+      // means a DIFFERENT lineage's unconfirmed paste is what's physically sitting there, and Enter
+      // would submit THAT content under THIS lineage's identity.
+      const originIds = new Set(origin.map((m) => m.logicalId));
+      const ownsComposer = live.composerOwnerLineage !== null
+        && live.composerOwnerLineage.size === originIds.size
+        && [...originIds].every((id) => live.composerOwnerLineage!.has(id));
+      if (ownsComposer) {
+        // Stamp the same way the full-clear branch below does: a confirmed Enter for THIS generation proves
+        // the turn was submitted, i.e. the composer is now genuinely empty — see composerDirtyLenClearedByGen's
+        // doc. True regardless of whether we backspaced or not; the confirmation is what proves it either way.
+        live.composerDirtyLenClearedByGen = gen;
+        // eslint-disable-next-line no-console
+        console.log(`[submit] ${sessionId} redelivering an already-attempted message (composer possibly dirty, ${live.composerDirtyLen} chars) — retrying the Enter only, not re-pasting the body while the composer holds this lineage's own unconfirmed text (card 844ca34e)`);
+        this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
+        const reassertWrittenAt = Date.now();
+        this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen, live), live);
+      } else {
+        // @decision 844ca34e (round 2) — never Enter (would submit a foreign lineage's text under this
+        // identity), never re-paste (would blindly stomp content this lineage never owned). Treat this
+        // cycle as an immediate give-up instead, writing nothing at all — reuses the SAME bounded
+        // requeue/re-mint/park machinery (`requeueGiveUpOrigin`) any other give-up converges through.
+        // eslint-disable-next-line no-console
+        console.error(`[submit] ${sessionId} GIVE-UP (composer ownership mismatch, no write attempted) — this lineage's own give-up mark is set, but the composer's current body belongs to ${live.composerOwnerLineage === null ? "an UNKNOWN owner" : "a DIFFERENT lineage"}; refusing to Enter or re-paste under the wrong identity (card 844ca34e)`);
+        this.giveUpWithoutWriting(sessionId, gen, live);
+      }
     } else if (live.composerDirtyLen > 0 && live.composerLen === 0) {
-      // Card 4796f999: this branch now ALSO catches a give-up redelivery whose composer trust is broken
-      // (isGiveUpRedelivery true but composerBelievedTrustworthy false, above) — `text` here is still this
-      // redelivery's own real body (see the comment above `isGiveUpRedelivery`), so the backspace+repaste
-      // below correctly re-asserts it instead of blindly trusting whatever the composer currently holds.
-      // Card fa27d262: ALSO catches a mixed batch (isGiveUpRedelivery now false because at least one
-      // member of `origin` never gave up) — `text` here is `joinSubmittedText(drained, …)` over the SAME
-      // `drained` array, so it still carries every member's real body, fresh neighbour included; the
-      // backspace+repaste below writes all of it instead of silently dropping the fresh member's share.
+      // Reached when this write's own lineage has NEVER given up before (`lineageEverGaveUp` false),
+      // OR it's a `bypassOwnershipGateOnce`-flagged resend of an already-parked root — including card
+      // fa27d262's mixed-batch case (at least one member of `origin` is fresh): `text` here is
+      // `joinSubmittedText(drained, …)` over the SAME `drained` array, so it still carries every
+      // member's real body, fresh neighbour included; the backspace+repaste below writes all of it
+      // instead of silently dropping the fresh member's share.
       const dirty = live.composerDirtyLen;
       // Stamp WHICH generation is attempting this clear — the confirming-hook sites only reset
       // composerDirtyLen when they observe THIS SAME generation still current (see the field's doc); an
@@ -11578,6 +11629,9 @@ export class PtyHost {
       // Card b9b8f8db: THIS generation IS writing a fresh body (the repaste below) — gate composerDirtyLen's
       // additive mark side on this, see `composerBodyWrittenForGen`'s own doc.
       live.composerBodyWrittenForGen = gen;
+      // @decision 844ca34e (round 2) — this write now PHYSICALLY owns the composer; record it so a LATER
+      // cycle of a marked lineage can tell whether it still does.
+      live.composerOwnerLineage = origin ? new Set(origin.map((m) => m.logicalId)) : null;
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} composer possibly dirty from an earlier unconfirmed give-up (${dirty} chars) — clearing defensively before this write`);
       this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
@@ -11588,18 +11642,46 @@ export class PtyHost {
       // 0` — whenever `composerLen > 0` (a human mid-draft on the raw terminal), the two dirty branches
       // above are both gated `composerLen === 0` and fall through here WITHOUT running the defensive
       // clear-prefix, so an earlier generation's still-stranded contribution is left completely untouched.
-      // Only stamp `composerBodyWrittenForGen` when there is NOTHING outstanding to protect
-      // (`composerDirtyLen === 0`) — this generation's own give-up mark / healIfStuck's backstop are both
-      // gated on this exact stamp (`composerBodyWrittenForGen === gen`), so stamping here would let THIS
-      // generation acquire its own `composerDirtyMarkedGens` entry despite never having attempted to clear
-      // the earlier one — and a later DECISIVE (content-matched) confirmation for this generation would
-      // then wrongly resolve `g <= gen` in one shot, wiping the earlier, genuinely-unresolved mark too
-      // (a FALSE ZERO — composerDirtyLen reads clean while the real terminal still holds the earlier
-      // generation's stray, never-cleared text). See pty-composerlen-else-no-clear-stamp.mjs.
-      if (live.composerDirtyLen === 0) live.composerBodyWrittenForGen = gen;
+      // Only stamp `composerBodyWrittenForGen`/`composerOwnerLineage` when there is NOTHING outstanding to
+      // protect (`composerDirtyLen === 0`) — this generation's own give-up mark / healIfStuck's backstop
+      // are both gated on this exact stamp (`composerBodyWrittenForGen === gen`), so stamping here would
+      // let THIS generation acquire its own `composerDirtyMarkedGens` entry despite never having
+      // attempted to clear the earlier one — and a later DECISIVE (content-matched) confirmation for this
+      // generation would then wrongly resolve `g <= gen` in one shot, wiping the earlier, genuinely-
+      // unresolved mark too (a FALSE ZERO — composerDirtyLen reads clean while the real terminal still
+      // holds the earlier generation's stray, never-cleared text). See pty-composerlen-else-no-clear-stamp.mjs.
+      // @decision 844ca34e (round 2) — a marked lineage reaching HERE (composerDirtyLen===0, genuinely
+      // clean) still takes this plain full paste: `lineageEverGaveUp` is never even consulted in this
+      // branch, so a clean composer never gets silently skipped in favor of a no-op Enter.
+      if (live.composerDirtyLen === 0) {
+        live.composerBodyWrittenForGen = gen;
+        live.composerOwnerLineage = origin ? new Set(origin.map((m) => m.logicalId)) : null;
+      } else {
+        // @decision 844ca34e (round 3) — this write FUSES with still-stranded content (card ef78c885);
+        // ownership is no longer attributable to one lineage — mark UNKNOWN so a later marked lineage
+        // parks loudly instead of wrongly Enter-only-ing into fused content.
+        live.composerOwnerLineage = null;
+      }
       writeNewTurn();
     }
     this.setBusy(sessionId, true, reason); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
+  }
+
+  /**
+   * @decision 844ca34e (round 2/3) — a marked lineage whose ownership check failed writes NOTHING;
+   * schedules the terminal give-up sequence off-stack (so `submit()`'s trailing M1 `setBusy(true)` is
+   * never fought), checking only identity/alive/generation — deliberately no `enterConfirmed` bail.
+   * @decision 17339316 — bound to `boundLive` by identity, re-checked on fire.
+   */
+  private giveUpWithoutWriting(sessionId: string, gen: number, boundLive: Live): void {
+    setTimeout(() => {
+      if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
+      const live = boundLive;
+      if (!live.alive || live.submitGeneration !== gen) return; // stale / dead — nothing more to do
+      this.maybeFireGiveUpRecoveryAlarm(sessionId, live); // card 844ca34e round 3: counts toward c00231e2's burst alarm like any other give-up
+      this.setBusy(sessionId, false, "give-up-ownership-mismatch");
+      this.requeueGiveUpOrigin(sessionId, gen, true); // wroteNothing:true — see that param's own doc
+    }, 0);
   }
 
   /**
@@ -12067,8 +12149,12 @@ export class PtyHost {
    * is a real gap this card does not close — only a durable message minted via `enqueueDurableMessage`
    * (worker_message/redirect/recycle-carry, plus the settle nudges this card converted) gets the "never
    * orphaned" guarantee; nothing here claims a raw human turn does too.
+   *
+   * @decision 844ca34e (round 3) — `wroteNothing` (default false, set only by `giveUpWithoutWriting`):
+   * a generation that never physically wrote anything must not enroll in `giveUpConfirmQueue`'s
+   * content-blind positional fallback — see that param's own inline doc below for the full mechanism.
    */
-  private requeueGiveUpOrigin(sessionId: string, gen: number): void {
+  private requeueGiveUpOrigin(sessionId: string, gen: number, wroteNothing = false): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     const origin = live.giveUpOrigin;
@@ -12140,6 +12226,18 @@ export class PtyHost {
       this.archiveAmbiguousDispatch(live, m.logicalId);
       live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, memberSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
       this.capAmbiguousDispatches(live);
+      // @decision 844ca34e — mark unconditionally, for EVERY origin member, kept or exhausted: this
+      // lineage has now given up at least once, so no future attempt (same-msgId redelivery OR a
+      // cross-turn re-mint sharing this logicalId) may ever take the backspace+repaste branch again.
+      // @decision 844ca34e (round 3) — now LRU: delete-then-add moves a re-touched id to the
+      // most-recently-used end, so eviction below drops the genuinely LEAST-recently-touched id
+      // (mirrors a9e4240f's identical fix for `ambiguousDispatches`).
+      live.giveUpLineages.delete(m.logicalId);
+      live.giveUpLineages.add(m.logicalId);
+      if (live.giveUpLineages.size > AMBIGUOUS_DISPATCH_CAP) {
+        const oldest = live.giveUpLineages.values().next().value;
+        if (oldest !== undefined) live.giveUpLineages.delete(oldest);
+      }
       const requeues = (m.giveUpRequeues ?? 0) + 1;
       if (requeues > GIVE_UP_REQUEUE_LIMIT) {
         // Card d4f60cc1: this line is now durably captured (daemon stdout is teed to a rotated file), so
@@ -12158,13 +12256,18 @@ export class PtyHost {
         }
         continue;
       }
-      kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS });
+      // @decision 844ca34e (round 4, MAJOR) — `...m` would otherwise carry `bypassOwnershipGateOnce`
+      // forward unchanged, defeating its own "stripped on requeue" doc (EnqueueStdinTail, above) —
+      // explicitly override so a requeued entry's later give-ups never re-skip the ownership check.
+      kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS, bypassOwnershipGateOnce: undefined });
     }
     if (kept.length > 0) {
       live.pending.unshift(...kept);
-      live.giveUpConfirmQueue.push(gen);
+      // @decision 844ca34e (round 3) — a no-write generation never enrolls in the positional queue; see
+      // `wroteNothing`'s own doc on this method's signature.
+      if (!wroteNothing) live.giveUpConfirmQueue.push(gen);
       // eslint-disable-next-line no-console
-      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending, HELD from drain for up to ${GIVE_UP_HOLD_MS}ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld`);
+      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending, HELD from drain for up to ${GIVE_UP_HOLD_MS}ms pending a confirming hook${wroteNothing ? " (no-write generation — excluded from the positional queue)" : ""} — see purgeConfirmedGiveUpRequeue/isGiveUpHeld`);
     }
   }
 
@@ -12521,13 +12624,15 @@ export class PtyHost {
    * with a later, unrelated message indefinitely. Wrapping here — rather than adding the same call at each
    * of Core's four exits — makes it structurally impossible for a future exit path to forget it.
    */
-  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
-    const resolved = this.purgeConfirmedGiveUpRequeueCore(sessionId, live, turnEnded, reportedPrompt);
+  // @decision 844ca34e (round 5) — `contentMatchedLogicalIds` lets a caller release a `giveUpLineages`
+  // mark only on a PROVEN content match, never on the content-blind FIFO fallback (always empty there).
+  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): { resolved: boolean; contentMatchedLogicalIds: string[] } {
+    const result = this.purgeConfirmedGiveUpRequeueCore(sessionId, live, turnEnded, reportedPrompt);
     if (turnEnded) this.retireResolvedArchiveEntries(live);
-    return resolved;
+    return result;
   }
 
-  private purgeConfirmedGiveUpRequeueCore(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
+  private purgeConfirmedGiveUpRequeueCore(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): { resolved: boolean; contentMatchedLogicalIds: string[] } {
     if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && (live.ambiguousDispatches.size > 0 || live.retiredGiveUpSignatures.size > 0)) {
       const sig = textSignature(reportedPrompt);
       // @decision 0658d6d8 — unwrap PASTED_CONTENT_WRAP_RE before this check (exact whole-inner equality
@@ -12593,7 +12698,7 @@ export class PtyHost {
           if (batchIds.size > 1) {
             // eslint-disable-next-line no-console
             console.log(`[submit] ${sessionId} AMBIGUOUS content match: ${matchedLogicalIds.length} logicalId(s) span ${batchIds.size} distinct give-up batches sharing this signature (current+retired combined) — cannot attribute by content alone, leaving ALL untouched rather than guess (fails toward a duplicate, never a loss)`);
-            return true; // still "handled" by content — do NOT fall through to the content-BLIND FIFO-position fallback, which could purge an entry whose text doesn't even match reportedPrompt
+            return { resolved: true, contentMatchedLogicalIds: [] }; // still "handled" by content — do NOT fall through to the content-BLIND FIFO-position fallback, which could purge an entry whose text doesn't even match reportedPrompt; nothing was actually ATTRIBUTED (declined, not resolved), so nothing is release-eligible
           }
           resolvedBatchId = [...batchIds][0]!;
         }
@@ -12637,12 +12742,13 @@ export class PtyHost {
             try { dropped!.onDeliver?.("duplicate-of-confirmed-original"); } catch { /* never break the purge */ }
           }
         }
-        return true; // resolved by content — do NOT also run the FIFO-position fallback below for this hook, and tell the caller not to ALSO attribute this hook to the current generation (it just proved this hook is about a DIFFERENT, older one)
+        return { resolved: true, contentMatchedLogicalIds: matchedLogicalIds }; // resolved by content — do NOT also run the FIFO-position fallback below for this hook, and tell the caller not to ALSO attribute this hook to the current generation (it just proved this hook is about a DIFFERENT, older one)
       }
     }
     // FALLBACK — UNCHANGED pre-card FIFO-position logic (Requirement C: identical to today whenever
-    // content matching didn't apply above).
-    if (live.giveUpConfirmQueue.length === 0) return false;
+    // content matching didn't apply above). Content-BLIND: never returns a non-empty
+    // `contentMatchedLogicalIds` — see `purgeConfirmedGiveUpRequeue`'s own doc.
+    if (live.giveUpConfirmQueue.length === 0) return { resolved: false, contentMatchedLogicalIds: [] };
     const gen = live.giveUpConfirmQueue[0]!;
     const genIsCurrentOrAlsoAmbiguous = live.submitGeneration === gen || live.giveUpConfirmQueue.includes(live.submitGeneration);
     if (genIsCurrentOrAlsoAmbiguous) {
@@ -12674,7 +12780,7 @@ export class PtyHost {
     // Unconditional even when the branch above declined to delete anything (see the method doc): this only
     // discards bookkeeping, never a pending entry.
     if (turnEnded) live.giveUpConfirmQueue.shift();
-    return false; // this fallback path never definitively attributes to a SPECIFIC generation by content — see the method doc
+    return { resolved: false, contentMatchedLogicalIds: [] }; // this fallback path never definitively attributes to a SPECIFIC generation by content — see the method doc
   }
 
   /**
