@@ -803,8 +803,11 @@ try {
     // Wait for the WHOLE drain to settle, not just CR1 going live — its own `for(;;)` loop continues
     // straight on to pop CR2 too (to check for leftover headroom), and CR2's own spawnWorker call needs a
     // moment to reach its cap-reject and requeueFront before the registry reflects its final, settled state.
+    // Card 9c06fab1: this waits on a REAL worktree spawn reaching processState:"live" (CR1) — the SAME
+    // flake surface this file's own :601 and sibling rate-limit-clear-cap-queue-drain.mjs (card f11f3aae)
+    // already widen to, but this site was left on the bare 50*20=1000ms default. Widened identically.
     check("(34 setup) the drain settles: F1's review is live AND the sibling is back in a stable queued state",
-      await waitUntil(() => liveCRCount() === 1 && cr2StillQueued()));
+      await waitUntil(() => liveCRCount() === 1 && cr2StillQueued(), { tries: 250, delayMs: 20 }));
 
     // ===== THE ASSERTION THAT MUST GO RED ON UNFIXED CODE: the SECOND entry must still be queued — not
     // ===== silently wiped as a side effect of the FIRST entry's own successful auto-fire. =====
@@ -888,8 +891,11 @@ try {
     const ah2StillQueued = () => svc.capQueue.listByManager("mgr6").some((e) => e.opId === rejAH2.capQueued.opId);
     const doneG1 = await svc.workerReport(spawnG1.workerSessionId, { status: "done", summary: "no findings", noChanges: true });
     check("(G1 setup) G1's done report auto-retires (declared no-op)", doneG1.autoRetired === true);
+    // Card 9c06fab1: preventive — the identical real-worktree-spawn-live race as the (34 setup) site
+    // above (not observed failing in the 5 gate logs this card was classified from), widened the same way
+    // so it doesn't become the next twin flake.
     check("(G1 setup) the drain settles: the first ad-hoc entry is live AND the sibling is back in a stable queued state",
-      await waitUntil(() => liveAHCount() === 1 && ah2StillQueued()));
+      await waitUntil(() => liveAHCount() === 1 && ah2StillQueued(), { tries: 250, delayMs: 20 }));
 
     // ===== THE ASSERTION THAT MUST GO RED ON UNFIXED CODE: the SECOND plain entry must still be queued —
     // ===== NOT silently wiped as a side effect of the FIRST entry's own successful auto-fire (both share

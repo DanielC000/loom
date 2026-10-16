@@ -89,7 +89,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { registerForCleanup, mkdtempManaged } from "./_tmp-fixture.mjs";
 
 let failures = 0;
@@ -520,7 +520,10 @@ try {
     await manager.client.close();
 
     releaseGate({ passed: true });
-    await waitUntil(() => (sessions.gateStatus(opId).state === "settled" ? true : undefined), { timeoutMs: 10_000, label: "antipoll merge op to settle" });
+    // Card 9c06fab1: arrived late at 12006ms (1.2x) under full-gate load even though this settle is PURE
+    // in-process (resolve a promise, then re-read local state) — no real git/subprocess work at all, so a
+    // modest margin (2) is enough here, unlike the real-subprocess-shaped waits elsewhere that use 3.
+    await waitUntil(() => (sessions.gateStatus(opId).state === "settled" ? true : undefined), { timeoutMs: ambientScaledBudget(10_000, 2), label: "antipoll merge op to settle" });
   }
 
   // ── (e2e gate, FAST PATH) card e3e40167's central defect, reproduced directly: a gate that settles

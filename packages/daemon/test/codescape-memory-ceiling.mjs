@@ -53,6 +53,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => {
@@ -62,9 +63,16 @@ const check = (label, cond) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Card 9c06fab1: each completed tick re-exercises a REAL subprocess round-trip (checkBuildDrift ->
+// readInstalledBuild), so under ambient load even the GAP between two completed ticks can legitimately
+// exceed a fixed 8000ms stall budget — margin 3 matches dist-importer-check-glue.mjs's
+// SEMAPHORE_ADMISSION_WAIT_MS precedent for this same "repeated real-subprocess-round-trip pushed by
+// ambient load" shape.
+const STALL_TIMEOUT_MS = ambientScaledBudget(8000, 3);
+
 // Same progress-keyed discipline as codescape-health-probe.mjs's identical helper (card cc43c74d) —
 // never a fixed-duration budget; only gives up on a genuine STALL (no completed tick for stallTimeoutMs).
-async function waitForCompletedCondition(cond, tickCounter, { pollMs = 10, stallTimeoutMs = 8000 } = {}) {
+async function waitForCompletedCondition(cond, tickCounter, { pollMs = 10, stallTimeoutMs = STALL_TIMEOUT_MS } = {}) {
   let lastTicks = tickCounter();
   let lastProgressAt = Date.now();
   while (!cond()) {
@@ -89,7 +97,7 @@ async function checkWait(label, cond, tickCounter, opts) {
 // Mirrors codescape-health-probe.mjs's identical helper (card bab0e772) — settles a count to STABLE
 // across `settleTicks` completed probe ticks before trusting it, rather than racing a would-be flood of
 // more activity landing just after a bare threshold is first satisfied.
-async function waitForStableCount(getCount, tickCounter, { settleTicks = 3, pollMs = 10, stallTimeoutMs = 8000 } = {}) {
+async function waitForStableCount(getCount, tickCounter, { settleTicks = 3, pollMs = 10, stallTimeoutMs = STALL_TIMEOUT_MS } = {}) {
   let lastCount = getCount();
   let lastTicks = tickCounter();
   let stableSinceTicks = lastTicks;
@@ -288,6 +296,15 @@ const MB = 1024 * 1024;
     healthyRunMs: 60_000,
     healthProbeIntervalMs: 60,
     healthProbeTimeoutMs: 40,
+    // Card 9c06fab1: this scenario's own subject is the MEMORY backstop's live ceiling re-resolution,
+    // not health-probe wedge detection — reproduced directly (confirmed by reverting the calibration
+    // fix above and re-running this file repeatedly on an otherwise-idle host): under real contention a
+    // tight 40ms health-probe timeout racing a real cold-start can legitimately fail 3x consecutively and
+    // fire an UNRELATED wedge-kill restart, inflating `recycleCalls`/`sup.getSpawnCount()` and failing
+    // "(5) exactly one recycle" for a reason that has nothing to do with the ceiling logic under test.
+    // Same disarm, same rationale, as scenario (7) below (decision bab0e772's sanctioned pattern) — only
+    // the wedge-kill branch is disabled; checkMemoryCeiling and the tick itself still run as normal.
+    healthProbeWedgeKillEnabled: false,
     memorySampleTickInterval: 1,
     getMemoryCeilingMb: () => ceilingMb, // a LIVE closure, re-read on every sample tick
     // Only the FIRST child reports the leak-shaped 200MB; any respawn reports comfortably low — keeps

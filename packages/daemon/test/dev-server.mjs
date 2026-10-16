@@ -49,7 +49,7 @@ import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, ambientScaledBudget } from "./_wait.mjs";
 
 requireHermeticEnv();
 
@@ -144,7 +144,12 @@ try {
   trackedPid = startMatch ? Number(startMatch[1]) : null;
 
   check("(a) tracked pid is alive", trackedPid != null && isAlive(trackedPid));
-  const heartbeatAdvanced = trackedPid != null && await waitUntil(() => fs.existsSync(heartbeatOut) && Date.now() - fs.statSync(heartbeatOut).mtimeMs < 2000);
+  // Card 9c06fab1: arrived late at 3.1x the old fixed 5000ms default under gate load — the real fixture
+  // child's own first write still has to get scheduled, which competes with ambient CPU contention like
+  // any other real-subprocess startup. Margin 3 matches this suite's existing precedent (e.g.
+  // dist-importer-check-glue.mjs's SEMAPHORE_ADMISSION_WAIT_MS) for a real-but-normally-sub-second op
+  // pushed by ambient load, never a rare multi-minute stall.
+  const heartbeatAdvanced = trackedPid != null && await waitUntil(() => fs.existsSync(heartbeatOut) && Date.now() - fs.statSync(heartbeatOut).mtimeMs < 2000, ambientScaledBudget(5000, 3));
   check("(a) fixture is actually running (heartbeat file advancing)", heartbeatAdvanced);
 
   // card 744028c4 — a permanent detection timeout must leave the terminal state legible IN THE FILE, not

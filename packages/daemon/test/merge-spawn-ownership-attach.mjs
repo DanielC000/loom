@@ -361,7 +361,12 @@ try {
     const taskId = randomUUID();
     db.insertTask({ id: taskId, projectId: P, title: "ts7", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
-    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 2_000 });
+    // Card 9c06fab1: was spawnOpRetainMs: 2_000 — too tight, since TWO real git/worktree ops (the
+    // owner's own spawn below, then recycleManager) run BEFORE the recall that must still land inside
+    // the window. Widened to this file's own established, load-proof value for exactly this race
+    // (matches SPAWN (9)/REVIVE (10) below) plus the SAME positive-witness `peek()` those scenarios use,
+    // so a wide window can never silently stop discriminating a real regression under load.
+    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { reapWorktreeProcesses: noReap, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 60_000 });
 
     const owner = await svcRetain.spawnWorkerTracked(`${P}-owner`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     check("(spawn successor) owner's call settles + creates the live worker", owner.settled === true && owner.ok === true);
@@ -370,6 +375,12 @@ try {
     const successor = await svcRetain.recycleManager(`${P}-owner`, "handoff");
     check("(spawn successor) owner recycled successfully", !!successor?.id);
     stopSeamPty(successor.id);
+
+    // [witness] raw peek() (not peekAttachable) proves the retained done entry is genuinely still
+    // present right before the recall, so the widened spawnOpRetainMs above can never silently stop
+    // discriminating under load the way the old tight 2_000ms window could.
+    const retainedPeek7 = svcRetain.pendingOps.peek(`spawn:${taskId}`);
+    check("(spawn successor) [witness] the retained done view for this op is still present right before the recall", retainedPeek7?.state === "done");
 
     const recall = await svcRetain.spawnWorkerTracked(successor.id, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     check("(spawn successor) the SUCCESSOR re-calling within the window SUCCEEDS (same worker, cache hit)", recall.settled === true && recall.ok === true && recall.value.id === owner.value.id && recall.cacheHit !== undefined);

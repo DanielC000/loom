@@ -1266,7 +1266,12 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   // once per tick and not silently forever (the pre-fix defect this card exists to close).
   const MIN_TICKS = 5;
   const ticksAtRestart = sup.getCompletedProbeTickCount();
-  for (let i = 0; i < 160 && sup.getCompletedProbeTickCount() < ticksAtRestart + MIN_TICKS; i++) await sleep(50);
+  // Card 9c06fab1: was a hand-rolled `for` loop with a fixed 160*50=8000ms TOTAL budget — under gate
+  // load the real per-tick subprocess round-trip can legitimately slow down enough to blow that fixed
+  // cap even while still making steady progress. `waitForCompletedCondition` (this file's own helper,
+  // already used identically by scenario (8) above) only times out after its own stallTimeoutMs of NO
+  // progress at all, so routine-but-slow ticks under load never trip it.
+  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= ticksAtRestart + MIN_TICKS, () => sup.getCompletedProbeTickCount());
   check(`(12) at least ${MIN_TICKS} more probe ticks completed after the one allowed restart`,
     sup.getCompletedProbeTickCount() >= ticksAtRestart + MIN_TICKS);
   await sleep(200); // settle window — catch a would-be flood before asserting

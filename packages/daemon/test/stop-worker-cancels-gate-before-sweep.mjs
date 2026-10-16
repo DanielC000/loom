@@ -72,7 +72,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-swgc-home-${Date.now()}-${process.pid}`);
@@ -512,11 +512,15 @@ try {
     // WHILE the self-check is still live, short enough that it clears well inside the 500ms bound (so this
     // block exercises the self-check genuinely CLEARING and falling through to the NEW re-check — never
     // the already-covered "still live after the wait" skip path from blocks (B)/(E)/(F)).
+    // Card 9c06fab1: the assertion only needs the VERIFY bound to stay comfortably LARGER than the gate's
+    // own 80ms settle delay — it never depends on their exact ratio, and both run under the SAME ambient
+    // clock, so scaling only the bound (never the 80ms delay) by the measured overshoot preserves (and
+    // under load, widens) the margin rather than needing to touch both sides.
     const gate = makeDelayedRespondingGate(80);
     const sweepCalls = [];
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
       runGate: gate.fn,
-      gateCancelVerifyMs: 500, stopGateCancelPollMs: 20,
+      gateCancelVerifyMs: ambientScaledBudget(500, 3), stopGateCancelPollMs: 20,
       reapWorktreeProcesses: async (wtPath) => { sweepCalls.push(wtPath); return { killedPids: [] }; },
     });
 
