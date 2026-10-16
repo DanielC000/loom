@@ -92,3 +92,60 @@ have been destroyed silently, with a notice telling the manager it was safe.
 Cited (causal-fix reference only) in `worktree-vanished-watcher.ts`'s `WorktreeVanishedWatcher` class
 doc, lines 107-119, tranche 1 HEAD. Full narrative above is from card `40b63f1c`'s own body — no
 source comment carried it before this tranche.
+
+## Worktree path IDENTITY no longer relies on `resolveWorktreePath` purity alone (card `9a7df0a7`)
+
+### Narrative
+
+`git/worktrees.ts`'s own round-2 "Do not normalize" bullet (card `a5d9c458`) argues raw-string equality
+is safe for `claimedWorktreePaths`/wedge-tracking because every value compared there is the output of
+the SAME `resolveWorktreePath(projectId, taskId, repoKey)` call, given the SAME inputs — and names its
+own limit: "if that formula ever stops being a pure deterministic function of exactly those inputs,
+re-verify this bullet." That bullet's own guarantee is narrower than it may read: one spawn claims a
+path and compares against it synchronously, no await between — it is untouched by this card, and its
+own re-verification is tracked separately; do not fix the wedge lookup here.
+
+What card `9a7df0a7` found is that the GENERAL premise — "two `resolveWorktreePath` outputs for the same
+inputs always match byte-for-byte" — is false across the WIDER windows this card's own structures
+(`handledWorktrees`, `protectedWorktreePaths`, `currentGenerationIds` in `sessions/service.ts`, and
+`reviewBaseShaConsensusByPath` in `git/worktrees.ts`) actually span: every past boot, and every past
+repo-registry edit. Two concrete mechanisms, neither requiring `resolveWorktreePath` itself to change:
+
+1. **A repoKey re-case between two spawns of the same task.** `Session.repoKey` is stamped once at spawn
+   and never re-resolved; a human editing an existing `project.repos` entry's `key` field to a different
+   casing (e.g. `"Api"` → `"api"`) makes a later respawn's `resolveWorktreePath(..., "api", taskKey)`
+   produce a DIFFERENT string than an earlier row's `resolveWorktreePath(..., "Api", taskKey)` — yet both
+   name the SAME directory on win32's case-insensitive filesystem.
+2. **A `LOOM_HOME`/`WORKTREES_DIR` casing or slash difference across daemon restarts.** `WORKTREES_DIR` is
+   a module constant fixed for one process's lifetime, but boot-reconcile scans rows spanning EVERY past
+   boot — an env-level casing change between restarts (CLAUDE.md documents overriding `LOOM_HOME` for a
+   throwaway daemon as a real, supported knob) produces the same kind of alias across two rows.
+
+Either way, two session rows can carry genuinely differently-spelled strings for the exact same on-disk
+directory, and every Set/Map in boot-reconcile that compared those strings RAW could let one row's
+decision (protect a worktree, trust a `reviewBaseSha`, or treat a stale generation as current) miss the
+other row's spelling entirely.
+
+### Do not
+
+- Do not key `handledWorktrees`, `protectedWorktreePaths`, `currentGenerationIds`, or
+  `reviewBaseShaConsensusByPath`'s own grouping/lookup on the raw `worktreePath` string — route every one
+  of those Set/Map identity comparisons through the shared `worktreeIdentityKey` helper (git/worktrees.ts)
+  instead.
+- Do not route an actual fs/git call (`fs.existsSync`, `gcWorktreeDir`, `worktreeHasWork`, …) through
+  `worktreeIdentityKey` — it exists only for Set/Map IDENTITY comparisons; a real filesystem/git operation
+  must keep using the row's own original, raw path string.
+- Do not add a new ad hoc case-fold at a new worktree-identity call site — reuse `worktreeIdentityKey`
+  (itself a thin wrapper over `normForCompare`), so every site stays provably consistent with each other.
+
+### Source
+
+`packages/daemon/src/git/worktrees.ts` (`worktreeIdentityKey`, `reviewBaseShaConsensusByPath`) and
+`packages/daemon/src/sessions/service.ts` (`handledWorktrees`, `protectedWorktreePaths`,
+`currentGenerationIds`, `listNodeModulesReclaimCandidates`/`reclaimNodeModules`, and every call site that
+adds to or checks any of them) — fixed on card `9a7df0a7`, caught by
+`packages/daemon/test/worktree-path-identity-alias.mjs` and its fixtures for
+`currentGenerationIds`/node_modules reclaim. `commitsAheadOfBase` ALSO changed (same card, same shape) but
+is currently MASKED — `trustedReviewBaseSha`'s all-taskless gate (this file, `trustedReviewBaseSha`'s own
+doc) rejects a TASKED `w` before ever reading the siblings this fix fetches, so no fixture exists for it
+and no test caught it; the change is kept for if/when that gate loosens.

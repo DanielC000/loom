@@ -1233,12 +1233,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return deps.sessions.listNodeModulesReclaimCandidates(parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined);
   });
   // POST actually reclaims. `worktreePaths` (optional) narrows to an explicit set (e.g. hand-picked from
-  // the GET listing above) — matched by EXACT STRING EQUALITY against the freshly recomputed candidate
-  // set's own `worktreePath`, so the reliable way to use it is a GET immediately followed by a POST with
-  // the paths copied verbatim from that response, not hand-typed or normalized. Omitted reclaims every
-  // currently-eligible candidate at `minAgeHours`. Eligibility is RE-DERIVED fresh at call time regardless
-  // of what was requested — see SessionService.reclaimNodeModules's own doc for why a caller-supplied list
-  // is never trusted blind.
+  // the GET listing above) — matched by `worktreeIdentityKey` (card 40b63f1c) against the freshly
+  // recomputed candidate set's own `worktreePath`, never raw string equality: the GET's representative
+  // row for a shared identity can change (lastActivity shifts) before the POST runs, so a caller's
+  // verbatim-copied path can legitimately differ in spelling from the fresh recompute's own and still
+  // match. Omitted reclaims every currently-eligible candidate at `minAgeHours`. Eligibility is RE-DERIVED
+  // fresh at call time regardless of what was requested — see SessionService.reclaimNodeModules's own doc
+  // for why a caller-supplied list is never trusted blind.
   app.post("/api/worktrees/reclaim-node-modules", async (req) => {
     const body = (req.body ?? {}) as { minAgeHours?: number; worktreePaths?: string[] };
     return deps.sessions.reclaimNodeModules(body);

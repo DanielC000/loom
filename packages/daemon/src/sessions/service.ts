@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -24983,22 +24983,28 @@ export class SessionService {
     // @decision 9ac3a739 — do not let Pass A decide a worktree's fate from a per-row protectedSessionIds
     // check; a recycle predecessor aliases the live successor's path, so BOTH passes must key on this
     // ONE path-built set instead, computed once up front from every row.
+    // @decision 40b63f1c — keyed on worktreeIdentityKey, never the raw worktreePath string: a repoKey
+    // re-case or a cross-boot LOOM_HOME casing change can make two rows for the same dir disagree on
+    // spelling, and a raw-string key would let one row's decision miss the other's protection.
     const protectedWorktreePaths = new Set<string>();
     for (const s of all) {
       if (!s.worktreePath) continue;
       const isLive = s.processState !== "exited" && s.resumability !== "dead";
-      if (protectedSessionIds.has(s.id) || isLive) protectedWorktreePaths.add(s.worktreePath);
+      if (protectedSessionIds.has(s.id) || isLive) protectedWorktreePaths.add(worktreeIdentityKey(s.worktreePath));
     }
     // @decision 21b53e6a — never key a worktree/branch-destroying decision, or a squash lookup by the
     // shared BRANCH NAME, on fs.existsSync(worktreePath) alone: a re-task reuses a PRIOR worker's exact
     // path/branch with no recycle relationship, so that check reads a NEWER generation's state as its own.
+    // @decision 40b63f1c — keyed on worktreeIdentityKey, never the raw worktreePath string: two
+    // generations of one task at aliased spellings must group into ONE path's lineage decision, not two.
     const currentGenerationIds = new Map<string, Set<string>>();
     {
       const byPath = new Map<string, Session[]>();
       for (const s of all) {
         if (s.role !== "worker" || !s.worktreePath) continue;
-        const arr = byPath.get(s.worktreePath);
-        if (arr) arr.push(s); else byPath.set(s.worktreePath, [s]);
+        const key = worktreeIdentityKey(s.worktreePath);
+        const arr = byPath.get(key);
+        if (arr) arr.push(s); else byPath.set(key, [s]);
       }
       // @decision 21b53e6a — round 2: a failed recycle's dead successor is otherwise indistinguishable
       // from a fresh re-task generation and would win the tiebreak below on its newer createdAt.
@@ -25101,14 +25107,14 @@ export class SessionService {
       // @decision 9ac3a739 — key protection on the worktree PATH, never this row's own id alone, but
       // keep `protectedSessionIds.has(s.id)` alongside it so a protected row with no resolvable
       // worktreePath still can't fall through unprotected.
-      if (protectedSessionIds.has(s.id) || (worktreePath && protectedWorktreePaths.has(worktreePath))) continue;
+      if (protectedSessionIds.has(s.id) || (worktreePath && protectedWorktreePaths.has(worktreeIdentityKey(worktreePath)))) continue;
       const project = projectMap.get(s.projectId);
       if (!project) continue;
       try {
         // @decision 21b53e6a — a STALE generation (this row is NOT the current-generation owner of
         // its own worktreePath, nor its recycle-lineage ancestor) never gets to treat that path's
         // on-disk state as its OWN — a re-task's newer generation may have put a live worktree there.
-        const staleGeneration = !!s.worktreePath && !(currentGenerationIds.get(s.worktreePath)?.has(s.id) ?? true);
+        const staleGeneration = !!s.worktreePath && !(currentGenerationIds.get(worktreeIdentityKey(s.worktreePath))?.has(s.id) ?? true);
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath) && !staleGeneration;
         // "Already reconciled" is an EVENT signal (a recorded merge_done), not the task's CURRENT column —
         // a human can freely move a merged card OFF the terminal column afterward (e.g. into a review lane)
@@ -25287,7 +25293,7 @@ export class SessionService {
         const heldA = await this.isBranchHeld(s.branch, repoPath, s.repoKey ?? null);
         if (heldA) {
           mergesHeld++;
-          handledWorktrees.add(worktreePath);
+          handledWorktrees.add(worktreeIdentityKey(worktreePath));
           // eslint-disable-next-line no-console
           console.warn(heldA.gitUnverified
             ? `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo) and its release could NOT be VERIFIED (a git read of main failed) — skipping its finalize this boot (branch/worktree kept; a later boot retries)`
@@ -25348,13 +25354,13 @@ export class SessionService {
                     gitFactory: gitDeps.gitFactory,
                   });
                   if (result.worktreeRemoved) worktreesPruned++;
-                  else handledWorktrees.add(worktreePath); // retained (dirty/wedged/nested/etc) — never re-decide it as a plain Pass B orphan
+                  else handledWorktrees.add(worktreeIdentityKey(worktreePath)); // retained (dirty/wedged/nested/etc) — never re-decide it as a plain Pass B orphan
                 } catch (e) {
                   // eslint-disable-next-line no-console
                   console.warn(`[reconcile] could not clean up worktree/branch for worker ${s.id} (branch ${s.branch}; already finalized, this row or another): ${(e as Error).message}`);
                 }
               }
-              handledWorktrees.add(worktreePath);
+              handledWorktrees.add(worktreeIdentityKey(worktreePath));
             }
             continue;
           }
@@ -25384,7 +25390,7 @@ export class SessionService {
             if (freshColumnKey !== undefined) taskColumnKeyMap.set(s.taskId!, freshColumnKey);
           },
         });
-        handledWorktrees.add(worktreePath);
+        handledWorktrees.add(worktreeIdentityKey(worktreePath));
         if (!paGuard.warning()) mergesFinished++; // a retained branch was NOT finished (held; its worktree stays out of Pass B's GC via handledWorktrees)
       } catch (e) {
         mergesFailed++;
@@ -25470,7 +25476,7 @@ export class SessionService {
       // @decision e5458ccd — A2 is otherwise generation-blind: a stale row sharing a worktreePath with the
       // current generation could get `detail.branch: s.branch` (the SHARED branch) filed below. Skip it —
       // Pass A (already run this boot) has already attributed or escalated its own landing.
-      if (s.worktreePath && !(currentGenerationIds.get(s.worktreePath)?.has(s.id) ?? true)) continue;
+      if (s.worktreePath && !(currentGenerationIds.get(worktreeIdentityKey(s.worktreePath))?.has(s.id) ?? true)) continue;
       // Row-id check stays here (unlike Pass A above) — A2 never touches a worktree/branch, it only
       // files a missing event, so there's no destructive aliasing hazard for protectedWorktreePaths to guard.
       // Card 1d10aea9: `terminalKey` is checked for `undefined` BEFORE the comparison, not folded into
@@ -25536,12 +25542,12 @@ export class SessionService {
     const bReviewBaseConsensus = reviewBaseShaConsensusByPath(all);
     for (const s of all) {
       const worktreePath = s.worktreePath;
-      if (!worktreePath || handledWorktrees.has(worktreePath)) continue;
+      if (!worktreePath || handledWorktrees.has(worktreeIdentityKey(worktreePath))) continue;
       // CLAIM the path before continuing — a protected worktree is decided exactly once, so no aliased
       // dangling row visited later in this same pass can re-decide it (this is what makes the decide-
-      // once contract in `handledWorktrees.add(worktreePath); // recycle chains share a worktree → decide
-      // once` below actually hold for the protected case too).
-      if (protectedWorktreePaths.has(worktreePath)) { handledWorktrees.add(worktreePath); continue; }
+      // once contract in `handledWorktrees.add(worktreeIdentityKey(worktreePath)); // recycle chains
+      // share a worktree → decide once` below actually hold for the protected case too).
+      if (protectedWorktreePaths.has(worktreeIdentityKey(worktreePath))) { handledWorktrees.add(worktreeIdentityKey(worktreePath)); continue; }
       if (!fs.existsSync(worktreePath)) continue;
       const project = bProjectMap.get(s.projectId);
       if (!project) continue;
@@ -25563,7 +25569,7 @@ export class SessionService {
         console.warn(`[reconcile] session ${s.id} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — skipping its worktree ${worktreePath} for this boot pass`);
         continue;
       }
-      handledWorktrees.add(worktreePath); // recycle chains share a worktree → decide once
+      handledWorktrees.add(worktreeIdentityKey(worktreePath)); // recycle chains share a worktree → decide once
       // DEAD LEFTOVER: a dir with NO `.git` linkage file is the residue of an already-completed
       // removeWorktree whose Windows fs delete partially failed (node_modules handle-lock) — git dropped
       // the admin entry + the `.git` linkage file, but the directory survived on disk. It has NO
@@ -25594,7 +25600,7 @@ export class SessionService {
       // @decision 37fe091c — the PATH's trusted reviewBaseSha, already gated PATH-LEVEL (every row on
       // the path taskless AND agreeing) by reviewBaseShaConsensusByPath/trustedReviewBaseSha — never
       // re-derive a per-row taskless check here, or the decision depends on visit order (round 3).
-      const consensusReviewBaseSha = bReviewBaseConsensus.get(worktreePath) ?? null;
+      const consensusReviewBaseSha = bReviewBaseConsensus.get(worktreeIdentityKey(worktreePath)) ?? null;
       const isReviewSpawn = consensusReviewBaseSha !== null;
       const base = workerBaseRef(consensusReviewBaseSha);
       if (await worktreeHasWork(repoPath, worktreePath, s.branch ?? null, base, { timeoutMs: this.gitOpMs })) {
@@ -25897,20 +25903,24 @@ export class SessionService {
     // must be decided ONCE per PATH from the union of every session that ever held it, never from a
     // single row in isolation — and the representative row kept per path is the one with the most recent
     // `lastActivity`, so age is never over-estimated from a stale predecessor row.
+    // @decision 40b63f1c — keyed on worktreeIdentityKey, never the raw worktreePath string: a resumable
+    // row's node_modules must not be reclaimable just because a DIFFERENTLY-SPELLED alias row looks dead.
     const protectedPaths = new Set<string>();
     const byPath = new Map<string, Session>();
     for (const s of all) {
       if (!s.worktreePath) continue;
-      if (s.resumability !== "dead") protectedPaths.add(s.worktreePath);
-      const existing = byPath.get(s.worktreePath);
+      const key = worktreeIdentityKey(s.worktreePath);
+      if (s.resumability !== "dead") protectedPaths.add(key);
+      const existing = byPath.get(key);
       if (!existing || new Date(s.lastActivity).getTime() > new Date(existing.lastActivity).getTime()) {
-        byPath.set(s.worktreePath, s);
+        byPath.set(key, s);
       }
     }
     const now = Date.now();
     const entries: NodeModulesReclaimCandidate[] = [];
-    for (const [worktreePath, s] of byPath) {
-      if (protectedPaths.has(worktreePath)) continue;
+    for (const [key, s] of byPath) {
+      if (protectedPaths.has(key)) continue;
+      const worktreePath = s.worktreePath!; // the representative row's own RAW path — reported/operated on verbatim, never the identity key
       if (!fs.existsSync(worktreePath)) continue;
       const nodeModulesPath = path.join(worktreePath, "node_modules");
       if (!fs.existsSync(nodeModulesPath)) continue;
@@ -25944,7 +25954,11 @@ export class SessionService {
    */
   async reclaimNodeModules(opts: { minAgeHours?: number; worktreePaths?: string[] } = {}): Promise<NodeModulesReclaimRunResult> {
     const { entries } = await this.listNodeModulesReclaimCandidates(opts.minAgeHours);
-    const scoped = opts.worktreePaths ? entries.filter((e) => opts.worktreePaths!.includes(e.worktreePath)) : entries;
+    // @decision 40b63f1c — matched by worktreeIdentityKey, not raw string: the GET's representative row
+    // for a shared identity can change (lastActivity shifts) before this POST runs, so a human's
+    // verbatim-copied path can legitimately differ in spelling from the fresh recompute's own.
+    const requestedKeys = opts.worktreePaths ? new Set(opts.worktreePaths.map(worktreeIdentityKey)) : null;
+    const scoped = requestedKeys ? entries.filter((e) => requestedKeys.has(worktreeIdentityKey(e.worktreePath))) : entries;
     const result: NodeModulesReclaimRunResult = {
       candidatesConsidered: scoped.length, removed: 0, bytesReclaimed: 0, sizeTruncatedCount: 0,
       noLongerEligible: 0, missing: 0, wedged: 0, leftOnDisk: 0, results: [],
@@ -25974,9 +25988,9 @@ export class SessionService {
     // retry, etc.) — reported for visibility, never acted on. The specific reason isn't distinguished
     // here (any of several honest causes) — see this method's own doc for why that's deliberate.
     if (opts.worktreePaths) {
-      const scopedPaths = new Set(scoped.map((e) => e.worktreePath));
+      const scopedKeys = new Set(scoped.map((e) => worktreeIdentityKey(e.worktreePath)));
       for (const p of opts.worktreePaths) {
-        if (scopedPaths.has(p)) continue;
+        if (scopedKeys.has(worktreeIdentityKey(p))) continue;
         result.noLongerEligible++;
         result.results.push({ worktreePath: p, projectId: "", projectName: "", taskId: null, outcome: "no-longer-eligible", bytesReclaimed: null });
       }
@@ -26229,7 +26243,13 @@ export class SessionService {
     try {
       const repoPath = resolveRepoByKey(project, w.repoKey).path;
       const timeoutMs = this.gitOpMs ?? 15_000;
-      const siblings = w.worktreePath ? this.db.listSessionsAtWorktreePath(w.worktreePath, w.id) : [];
+      // @decision 40b63f1c — TASKED `w`: siblings by TASK, filtered by identity key (TASKLESS `w`'s path
+      // leaf is a fresh per-spawn UUID, never aliased — untouched). Currently MASKED for TASKED `w`:
+      // `trustedReviewBaseSha`'s all-taskless gate (worktrees.ts ~:2483) rejects `w` before reading `siblings`.
+      const siblings = !w.worktreePath ? []
+        : w.taskId
+          ? this.db.listWorktreeSessionsForTask(w.taskId).filter((s) => s.id !== w.id && s.worktreePath && worktreeIdentityKey(s.worktreePath) === worktreeIdentityKey(w.worktreePath!))
+          : this.db.listSessionsAtWorktreePath(w.worktreePath, w.id);
       const trusted = trustedReviewBaseSha([{ taskId: w.taskId, reviewBaseSha: w.reviewBaseSha }, ...siblings]);
       const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `${workerBaseRef(trusted)}..${w.branch}`]);
       const parsed = parseInt(raw.trim(), 10);

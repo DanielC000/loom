@@ -1451,6 +1451,19 @@ export function normForCompare(p: string): string {
   return process.platform === "win32" ? r.toLowerCase() : r;
 }
 
+/**
+ * The ONE key every worktree-protection/GC-decision Set/Map (`handledWorktrees`,
+ * `protectedWorktreePaths`, {@link reviewBaseShaConsensusByPath}) uses for identity, so two rows naming
+ * the SAME dir with a case/slash variant collapse to one. fs/git calls keep the raw path — only
+ * Set/Map identity comparisons route through this.
+ *
+ * @decision 40b63f1c — never key one of these structures on the raw `worktreePath` string; a repoKey
+ * re-case or a cross-boot LOOM_HOME casing change can make two rows for the same dir disagree on spelling.
+ */
+export function worktreeIdentityKey(p: string): string {
+  return normForCompare(p);
+}
+
 /** `child` is strictly below `parent` (never equal). Both already normalized. */
 function isStrictlyUnder(child: string, parent: string): boolean {
   return child.startsWith(parent + path.sep) && child.length > parent.length + 1;
@@ -2481,18 +2494,21 @@ export function trustedReviewBaseSha(
  * @decision 37fe091c — defense-in-depth half of the aliasing fix (the other half gates stamping at the
  * source — see `WorktreeInfo.forkedFromReviewed`); see that record's "Round 2"/"Round 3" sections.
  */
+// @decision 40b63f1c — grouped (and must be looked up, via `worktreeIdentityKey`) by IDENTITY, never the
+// raw `worktreePath` string — see that function's own doc for why two rows' raw strings can disagree.
 export function reviewBaseShaConsensusByPath(
   sessions: ReadonlyArray<{ worktreePath?: string | null; taskId?: string | null; reviewBaseSha?: string | null }>,
 ): Map<string, string | null> {
   const byPath = new Map<string, Array<{ taskId?: string | null; reviewBaseSha?: string | null }>>();
   for (const s of sessions) {
     if (!s.worktreePath) continue;
-    const rows = byPath.get(s.worktreePath) ?? [];
+    const key = worktreeIdentityKey(s.worktreePath);
+    const rows = byPath.get(key) ?? [];
     rows.push({ taskId: s.taskId, reviewBaseSha: s.reviewBaseSha });
-    byPath.set(s.worktreePath, rows);
+    byPath.set(key, rows);
   }
   const consensus = new Map<string, string | null>();
-  for (const [path, rows] of byPath) consensus.set(path, trustedReviewBaseSha(rows));
+  for (const [key, rows] of byPath) consensus.set(key, trustedReviewBaseSha(rows));
   return consensus;
 }
 
