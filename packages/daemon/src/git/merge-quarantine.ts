@@ -1514,8 +1514,14 @@ function consumeMatchedPendingsIntoArmedEntry(
       if (ownSourceFiles.length > 0) {
         raiserUnion = { ...raiserUnion, orphanLatchFiles: [...new Set([...(raiserUnion.orphanLatchFiles ?? []), ...ownSourceFiles])] };
       }
+      // @decision af948556 — an `ownGroup` member can already be an 883e29bc/64283e06 boot twin, armed
+      // under a DIFFERENT key — re-point it (replacement only, never a union source, c9114934) before
+      // diverting, or that slot is stranded holding a stale, pre-raise snapshot. See the decision record.
+      for (const p of ownGroup) replaceEntryEverywhere(activeQuarantines, p.entry, raiserUnion);
       // Raise: divert this union rather than arm/write at `key`'s own final — e1cb7d33 still holds via
-      // the divert. Nothing has been armed into `activeQuarantines` yet, so there is nothing to undo.
+      // the divert. `key` itself is never armed here (this raise's own final goes through the divert,
+      // never `activeQuarantines.set(key, ...)`) — see the `replaceEntryEverywhere` call just above for
+      // why a DIFFERENT, pre-existing key can already hold this identity regardless.
       divertRaiseEntry(raiserUnion);
       // Every OTHER identity's own matched entries never touched the raiser's write at all — put each
       // group straight back under its OWN identity, merged only within itself (never across identities).
