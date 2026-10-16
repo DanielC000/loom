@@ -56,6 +56,7 @@ import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { STAMPED_STALENESS } from "./_deploy-staleness-fixture.mjs";
 
 // Both read LIVE (per-call, via resolveConfig) — not module-load-time constants — so setting them here
 // affects every scenario in this file uniformly; harmless for (1)-(5), which never reach a timeout-kill
@@ -159,11 +160,19 @@ const events = {
 };
 const db = new Db();
 const host = new SpyHost(events);
-const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_SYNC_BUDGET_MS });
+// Card 97b60350: `deployStaleness: STAMPED_STALENESS` pins the build-currency stamp both (1)/(2)'s nudges
+// assert, below — the real `currentDeployStaleness()` these nudges default to is a live, uncached git
+// read that can go `available:false` under host load (the fde10c75 flake: 2/6 RED on a loaded host).
+const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_SYNC_BUDGET_MS, deployStaleness: STAMPED_STALENESS });
 // Separate instance, SAME db/host, only for scenario (3)'s fast-path budget (see TEST_FAST_PATH_BUDGET_MS's
 // doc) — the two instances' pendingOps registries are independent, and each scenario uses a distinct
 // worker/session id, so there's no cross-instance key collision.
-const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_FAST_PATH_BUDGET_MS });
+const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_FAST_PATH_BUDGET_MS, deployStaleness: STAMPED_STALENESS });
+// The exact stamp text `advisoryBuildStamp`/`buildStampSuffix` produce for STAMPED_STALENESS (available,
+// not stale) — asserted against directly below instead of the old loose `/\[build: (current|stale,)/`
+// pattern, which was satisfiable by either a real "current" OR a real "stale" read and so never actually
+// distinguished "the stamp mechanism fired" from "it fired with whatever the live host happened to say".
+const EXPECTED_BUILD_STAMP = `[build: current (running code built ${STAMPED_STALENESS.runningCodeBuiltAt})]`;
 
 function makeRepo() {
   const repo = path.join(os.tmpdir(), `loom-mcn-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
@@ -223,9 +232,9 @@ try {
     check("(1) carries the landed squash subject (card 7a1a76e9 DoD-1 — the queued path was previously silent on this)",
       nudges[0] && nudges[0].text.includes('subject="chore: t1"'));
     check("(1) the merge actually landed on main (the underlying behavior is unchanged)", fs.existsSync(path.join(repo, "feat1.txt")));
-    // Card fde10c75: this test runs from a real Loom source checkout, so the deploy-staleness signal is
-    // genuinely available — the nudge carries a build-currency stamp.
-    check("(1, fde10c75) the [loom:merge-done] nudge carries a build-currency stamp", nudges[0] && /\[build: (current|stale,)/.test(nudges[0].text));
+    // Card 97b60350/fde10c75: HERMETIC — `svc` was constructed with `deployStaleness: STAMPED_STALENESS`
+    // above, so this is pinned regardless of host load, never a live git read racing the real signal.
+    check("(1, fde10c75) the [loom:merge-done] nudge carries the injected build-currency stamp", nudges[0] && nudges[0].text.includes(EXPECTED_BUILD_STAMP));
     worktrees.push([repo, undefined]); // already merged/removed — no worktree left to clean up, kept for symmetry
   }
 
@@ -262,7 +271,8 @@ try {
       rejectedNudges[0] && rejectedNudges[0].text.includes("task t2") && rejectedNudges[0].text.includes(pendingOpId2));
     check("(2) NO generic [loom:merge-failed] echo for the SAME event (card 9eea3901 double-notify fix)", failedNudges.length === 0);
     check("(2) fail-closed: worktree retained (gate failed, nothing merged)", fs.existsSync(worktreePath));
-    check("(2, fde10c75) the rich [loom:merge-rejected] nudge ALSO carries a build-currency stamp", rejectedNudges[0] && /\[build: (current|stale,)/.test(rejectedNudges[0].text));
+    // Card 97b60350/fde10c75: HERMETIC, same pinned stamp as (1) above.
+    check("(2, fde10c75) the rich [loom:merge-rejected] nudge ALSO carries the injected build-currency stamp", rejectedNudges[0] && rejectedNudges[0].text.includes(EXPECTED_BUILD_STAMP));
     worktrees.push([repo, worktreePath]);
   }
 

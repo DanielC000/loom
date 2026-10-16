@@ -3,7 +3,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (1) `advisoryBuildStamp` (deploy-staleness.ts), in isolation, against fixture DeployStalenessResult
 //       shapes — unavailable/current/stale — never fabricating a verdict.
 //   (2) the WIRING: a REAL `gate_status(opId)` MCP tool call, for a REAL settled worker-gate op, carries
-//       an `emittedBuild` field derived from `currentDeployStaleness()` — mirrors
+//       an `emittedBuild` field derived from `SessionService.resolveDeployStaleness()` — mirrors
 //       gate-status-timing-band.mjs's "a read path a manager will actually use" pattern — plus that the
 //       field is genuinely ABSENT (never a fabricated "current") when the underlying signal itself is
 //       unavailable (LOOM_REPO_ROOT pointed at a dir with no `.git`).
@@ -11,6 +11,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // RED-PROVEN per /worker doctrine: hand-verified to FAIL against the pre-card dist (no `emittedBuild`
 // field existed on the return type or the handler at all, so `status.emittedBuild` read `undefined` even
 // against a real, available deploy-staleness signal).
+//
+// Card 97b60350: PART 2's positive case is pinned via `sessions.setDeployStalenessOverrideForTest` —
+// the real `currentDeployStaleness()` git read `resolveDeployStaleness()` falls back to can legitimately
+// go `available:false` under host load, which used to make this assertion flaky. PART 3's negative
+// control clears the override and keeps using the real read, which is deterministic here (no `.git`
+// found is instant, not host-load-dependent).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-status-emitted-build.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -19,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { STAMPED_STALENESS } from "./_deploy-staleness-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gseb-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -90,6 +97,11 @@ try {
   const fastGate = async () => ({ passed: true });
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fastGate });
 
+  // Card 97b60350: PART 2 below pins the signal via `setDeployStalenessOverrideForTest` instead of
+  // racing the real `currentDeployStaleness()` git read (which can go `available:false` under host
+  // load) — hermetic, deterministic shape. Cleared back to the live read before PART 3, which
+  // deliberately wants the REAL (and here, instant/no-git — never host-load-dependent) signal.
+  sessions.setDeployStalenessOverrideForTest(STAMPED_STALENESS);
   const result = await sessions.runWorkerGate(workerId);
   check("(2, precondition) the gate settles INLINE and passes", result.settled === true && result.ok === true && result.value.passed === true);
   const opId = result.value.opId;
@@ -103,18 +115,15 @@ try {
   const toolStatus = JSON.parse((await client.callTool({ name: "gate_status", arguments: { opId } })).content[0].text);
 
   check("(2) gate_status reports the same settled/passed verdict", toolStatus.state === "settled" && toolStatus.passed === true);
-  // This process is a real Loom source checkout (this repo's own worktree — `loomRepoRoot()` resolves
-  // there absent a LOOM_REPO_ROOT override), with a real built dist (this test runs post-`pnpm build`),
-  // so the signal is genuinely AVAILABLE here — assert presence + shape, not an exact stale/current
-  // verdict (that depends on this worktree's own live git/dist state, which this test doesn't control).
   check(
-    "(2, THE FIX) emittedBuild is present at the actual tool-call boundary, and is one of the two real shapes advisoryBuildStamp produces",
-    typeof toolStatus.emittedBuild === "string" && (toolStatus.emittedBuild.startsWith("current") || toolStatus.emittedBuild.startsWith("stale")),
+    "(2, THE FIX) emittedBuild is present at the actual tool-call boundary, and matches the injected STAMPED_STALENESS signal exactly",
+    toolStatus.emittedBuild === `current (running code built ${STAMPED_STALENESS.runningCodeBuiltAt})`,
   );
 
-  // ── PART 3 — negative control: point LOOM_REPO_ROOT at a dir with no `.git` (not-applicable) and prove ──
-  // emittedBuild goes genuinely ABSENT, never a fabricated "current", for a SECOND settled op — same
-  // client/server, same live session, only the ambient repo-root signal changed.
+  // ── PART 3 — negative control: clear the override, point LOOM_REPO_ROOT at a dir with no `.git` ──────
+  // (not-applicable) and prove emittedBuild goes genuinely ABSENT, never a fabricated "current", for a
+  // SECOND settled op — same client/server, same live session, only the ambient repo-root signal changed.
+  sessions.setDeployStalenessOverrideForTest(undefined);
   const noGitDir = path.join(os.tmpdir(), `gseb-nogit-${Date.now()}-${process.pid}-${randomUUID()}`);
   fs.mkdirSync(noGitDir, { recursive: true });
   registerForCleanup(noGitDir);

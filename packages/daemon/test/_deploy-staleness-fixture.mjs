@@ -34,3 +34,13 @@ export const CLEAN_STALENESS = {
  * with for realism.
  */
 export const MISMATCH_STALENESS = { ...CLEAN_STALENESS, available: true, deploySignatureMismatch: true };
+
+/**
+ * Card 97b60350 — a deterministic "current, not stale" build stamp signal, for every test that asserts
+ * a nudge/advisory CARRIES a `[build: ...]` stamp. The real `currentDeployStaleness()` read those nudges
+ * default to is a live, uncached `execFileSync("git", ...)` (see deploy-staleness.ts's own module doc)
+ * that can legitimately return `available:false` under host load — the exact mechanism behind the
+ * fde10c75 flake (2/6 RED on a loaded host). Inject this via `SessionService.setDeployStalenessOverrideForTest`
+ * (or the constructor's `deployStaleness` opt) instead of racing that real read.
+ */
+export const STAMPED_STALENESS = { ...CLEAN_STALENESS, available: true, runningCodeBuiltAt: "2026-01-01T00:00:00.000Z", stale: false, commitsBehind: 0 };

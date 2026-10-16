@@ -46,6 +46,7 @@ import { execSync } from "node:child_process";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { STAMPED_STALENESS } from "./_deploy-staleness-fixture.mjs";
 
 // Disables runGateStep's one-time auto-extend (card 24642c3d) for the WHOLE file — a module-load-time
 // constant, so this must be set before gate-runner.js is ever imported (transitively, via service.js
@@ -136,11 +137,18 @@ const events = {
 };
 const db = new Db();
 const host = new SpyHost(events);
-const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_SYNC_BUDGET_MS });
+// Card 97b60350: `deployStaleness: STAMPED_STALENESS` pins the build-currency stamp both (1)/(2)'s nudges
+// assert, below — the real `currentDeployStaleness()` these nudges default to is a live, uncached git
+// read that can go `available:false` under host load (the sibling merge-confirm-completion-nudge.mjs
+// flake: 2/6 RED on a loaded host — same unpinned dependency, same fix here).
+const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_SYNC_BUDGET_MS, deployStaleness: STAMPED_STALENESS });
 // Separate instance, SAME db/host, only for scenario (3)'s fast-path budget — see TEST_FAST_PATH_BUDGET_MS's
 // doc. The two instances' pendingOps registries are independent, and each scenario uses a distinct worker
 // id, so there's no cross-instance key collision.
-const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_FAST_PATH_BUDGET_MS });
+const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_FAST_PATH_BUDGET_MS, deployStaleness: STAMPED_STALENESS });
+// The exact stamp text for STAMPED_STALENESS — see merge-confirm-completion-nudge.mjs's own doc on why
+// this replaces the old loose `/\[build: (current|stale,)/` pattern.
+const EXPECTED_BUILD_STAMP = `[build: current (running code built ${STAMPED_STALENESS.runningCodeBuiltAt})]`;
 
 function makeRepo() {
   const repo = mkdtempManaged("loom-wgn-repo-");
@@ -188,10 +196,9 @@ try {
     check("(1) pushed with kind:\"warning\" (a Loom operational nudge — same-route coalescing is correct)", nudges[0] && nudges[0].kind === "warning");
     check("(1) delivered to the WORKER's OWN session (not any manager)", nudges[0] && nudges[0].sessionId === workerId);
     check("(1) carries the SAME opId the pending response returned (correlation stamp)", nudges[0] && nudges[0].text.includes(pendingOpId1));
-    // Card fde10c75: this test runs from a real Loom source checkout (this repo's own worktree), so the
-    // deploy-staleness signal is genuinely available — the nudge carries a build stamp, not a fabricated
-    // "current" and not a silently-omitted field.
-    check("(1, fde10c75) the completion nudge carries a build-currency stamp", nudges[0] && /\[build: (current|stale,)/.test(nudges[0].text));
+    // Card 97b60350/fde10c75: HERMETIC — `svc` was constructed with `deployStaleness: STAMPED_STALENESS`
+    // above, so this is pinned regardless of host load, never a live git read racing the real signal.
+    check("(1, fde10c75) the completion nudge carries the injected build-currency stamp", nudges[0] && nudges[0].text.includes(EXPECTED_BUILD_STAMP));
     worktrees.push([repo, worktreePath]);
   }
 
@@ -213,7 +220,8 @@ try {
     check("(2) pushed with kind:\"warning\"", nudges[0] && nudges[0].kind === "warning");
     check("(2) delivered to the WORKER's OWN session (not any manager)", nudges[0] && nudges[0].sessionId === workerId);
     check("(2) carries the SAME opId the pending response returned", nudges[0] && nudges[0].text.includes(pendingOpId2));
-    check("(2, fde10c75) the FAILURE nudge ALSO carries a build-currency stamp", nudges[0] && /\[build: (current|stale,)/.test(nudges[0].text));
+    // Card 97b60350/fde10c75: HERMETIC, same pinned stamp as (1) above.
+    check("(2, fde10c75) the FAILURE nudge ALSO carries the injected build-currency stamp", nudges[0] && nudges[0].text.includes(EXPECTED_BUILD_STAMP));
     worktrees.push([repo, worktreePath]);
   }
 

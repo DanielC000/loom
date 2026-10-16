@@ -36,7 +36,7 @@ import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
-import { buildServedStatus, currentDeployStaleness } from "../served-status.js";
+import { buildServedStatus } from "../served-status.js";
 import { advisoryBuildStamp } from "../deploy-staleness.js";
 import { lineageRootId } from "../sessions/lineage.js";
 import { isSupersededByRecycle, retiredCallerMessage, currentUnresolvedSettleSuccessor, unresolvedSettleEscalationHint } from "../orchestration/crash-orphaned-workers.js";
@@ -772,7 +772,11 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
           // "recompute at read time" posture as `deferredTriggerNotice` below. Best-effort, same posture
           // as `timingBand` immediately above.
           try {
-            const emittedBuild = advisoryBuildStamp(currentDeployStaleness());
+            // Card 97b60350: resolved through `sessions.resolveDeployStaleness()` (not the bare
+            // imported `currentDeployStaleness()`) so a hermetic test can pin this read via
+            // `setDeployStalenessOverrideForTest` instead of racing a real git call — see that
+            // method's own doc on `SessionService`.
+            const emittedBuild = advisoryBuildStamp(sessions.resolveDeployStaleness());
             if (emittedBuild) enriched = { ...enriched, emittedBuild };
           } catch {
             // Advisory only, same posture as timingBand above.

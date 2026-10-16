@@ -2636,6 +2636,17 @@ export class SessionService {
    *  settle-lineage) no longer has to block on a real ~12-16s wall-clock sleep to cross it — it sets this
    *  small and sleeps just past IT instead, at the same logical outcome. */
   private readonly syncAttachBudgetMs: number;
+  /** Test seam (card 97b60350): overrides the live `currentDeployStaleness()` read every
+   *  build-stamp-bearing nudge/advisory (`buildStampSuffix`'s callers, and `gate_status`'s own
+   *  `emittedBuild` read-time enrichment) would otherwise make with no seam of its own — that read is a
+   *  real, uncached git call (see deploy-staleness.ts's own module doc) and can go `available:false`
+   *  under host load, silently omitting the stamp a test asserts is present. Set via
+   *  {@link setDeployStalenessOverrideForTest}; `undefined` in production, and in every test that never
+   *  calls that setter. Mirrors `resumeFleetOnBoot`'s own per-call `deployStaleness` opt and
+   *  `composeManagerStartupPrompt`'s `stalenessOverride` — a THIRD, instance-scoped seam for the paths
+   *  those two don't cover (deep inside async merge/gate settle callbacks with no options bag of their
+   *  own to thread a per-call override through). */
+  private deployStalenessOverride: DeployStalenessResult | undefined;
   /** @decision 47a22d40 — test-only override for {@link deadOwnerEvictionCeilingMs}'s resolved ceiling;
    *  `undefined` in production (the real per-project/global ceiling is always resolved fresh). */
   private readonly deadOwnerEvictionCeilingMsOverride: number | undefined;
@@ -3088,6 +3099,11 @@ export class SessionService {
       /** TEST SEAM (card 289f2607): poll interval for `cancelWorkerGateThenSweep`'s bounded wait — see that field's own doc. */
       stopGateCancelPollMs?: number;
       syncAttachBudgetMs?: number;
+      /** Test seam (card 97b60350): initial value for {@link deployStalenessOverride} — see that
+       *  field's own doc. Equivalent to constructing without it and then calling
+       *  {@link setDeployStalenessOverrideForTest} once; offered here only for a one-shot construction
+       *  convenience. */
+      deployStaleness?: DeployStalenessResult;
       /** TEST SEAM (card 47a22d40): overrides {@link SessionService.deadOwnerEvictionCeilingMs}'s resolved
        *  ceiling outright, so a test can exercise "stuck past the ceiling ⇒ evict" without waiting out a
        *  real `gateCommandTimeoutMs * 6` / `DEFAULT_REST_MERGE_CEILING_MS` window. Unset in production. */
@@ -3129,6 +3145,7 @@ export class SessionService {
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
     this.stopGateCancelPollMs = opts?.stopGateCancelPollMs ?? 100;
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
+    this.deployStalenessOverride = opts?.deployStaleness;
     this.deadOwnerEvictionCeilingMsOverride = opts?.deadOwnerEvictionCeilingMs;
     this.finalizeWorkerDeathPolls = opts?.finalizeWorkerDeathPolls ?? 50;
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
@@ -9218,6 +9235,28 @@ export class SessionService {
   }
 
   /**
+   * Card 97b60350 — the live `currentDeployStaleness()` read for every `buildStampSuffix` call site
+   * (and `gate_status`'s own `emittedBuild` enrichment, via `mcp/orchestration.ts`) that has no
+   * per-call seam of its own resolves through here instead of calling the imported function directly —
+   * see {@link deployStalenessOverride}'s own doc for why. Byte-identical to calling
+   * `currentDeployStaleness()` directly whenever no override is set (the production default, and every
+   * test that never calls {@link setDeployStalenessOverrideForTest}).
+   */
+  resolveDeployStaleness(): DeployStalenessResult {
+    return this.deployStalenessOverride ?? currentDeployStaleness();
+  }
+
+  /**
+   * TEST SEAM (card 97b60350) — see {@link deployStalenessOverride}'s own doc. Pass `undefined` to
+   * fall back to the live read again (e.g. to exercise a second, genuinely different signal within the
+   * same test, mirroring `served-status.ts`'s own `__setProcessBuiltInfoForTest`). Never called from
+   * production code.
+   */
+  setDeployStalenessOverrideForTest(staleness: DeployStalenessResult | undefined): void {
+    this.deployStalenessOverride = staleness;
+  }
+
+  /**
    * @decision 9d521792 — auto-cancels a parked session's fallback `wake_me` the instant its settle
    *  nudge lands (time-scoped by `createdAt >= opStartedAt`, never a settle-time re-derive — that raced
    *  under concurrent load); unknown start time cancels nothing, logged, never silent.
@@ -9303,7 +9342,7 @@ export class SessionService {
     // git-call-laden read (see deploy-staleness.ts's own module doc); a fresh call per row would multiply
     // that cost by the row count for no benefit (every row settles in the SAME boot, so the answer can't
     // change between them).
-    const deployStaleness = currentDeployStaleness();
+    const deployStaleness = this.resolveDeployStaleness();
     for (const row of this.db.listSurfacedPendingGateOps(beforeInstant)) {
       // STRUCTURALLY UNREACHABLE for "deploy" (card bed91595): `deployOwnProject`'s tombstone is minted
       // and settled back-to-back in one synchronous span (see that insert's own comment) — it never calls
@@ -16988,7 +17027,7 @@ export class SessionService {
           // gate_status's own read-time enrichment — this rejection nudge may be read long after the
           // event, possibly across a restart, so it needs the CURRENT build's stamp, not one captured
           // earlier in this method.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId, kind: "agent" });
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId, kind: "agent" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): after a real hand-off — delivered OR durably queued/held
           // (card 646de997: `r.delivered` alone missed the queued case, see shouldCancelSettleWakeAfter's
           // own doc) — see autoCancelSettleWakes's doc for why a dropped push must leave every pending
@@ -19885,7 +19924,7 @@ export class SessionService {
         const target = this.resolveSettleNudgeTarget(args.managerSessionId);
         // Card 791def40: fresh read — this success announcement may be read long after the event,
         // possibly across a restart, and carries no other staleness-derived claim.
-        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main${args.gateSkipped ? ` (commit ${(args.attributedSha ?? args.mergedSha ?? "unknown").slice(0, 8)}); finished as already-landed WITHOUT running the merge gate — this is not a gate pass` : ""}; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(currentDeployStaleness());
+        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main${args.gateSkipped ? ` (commit ${(args.attributedSha ?? args.mergedSha ?? "unknown").slice(0, 8)}); finished as already-landed WITHOUT running the merge gate — this is not a gate pass` : ""}; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness());
         try {
           // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
           // other settle nudge.
@@ -21227,7 +21266,7 @@ export class SessionService {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
           // onSettledAfterPending) — this settle carries no other staleness-derived claim, and it may be
           // read long after the event, possibly across a restart.
-          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId: null, kind: "warning" });
+          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId: null, kind: "warning" });
         } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
       },
       {
@@ -22834,7 +22873,7 @@ export class SessionService {
           // give-up here was a total, unrecoverable loss even across a daemon restart. A ONE-SHOT TERMINAL
           // signal (never re-sent) — now durable like every other settle nudge.
           // Card fde10c75: same build-stamp suffix as the merge-rejected nudge above.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId, kind: "warning" });
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId, kind: "warning" });
           // @decision 9d521792 — reaps fallback wakes after a real hand-off (delivered OR durably
           // queued/held — card 646de997, see shouldCancelSettleWakeAfter's own doc); `opStartedAt` is
           // the CLOSED-OVER value captured before `attach()`, never a settle-time `peek()` re-derive.
@@ -23558,7 +23597,7 @@ export class SessionService {
               `[loom:${tag}] op ${opId} — your gate self-check was cancelled (${outcome.value.reason ?? "cancelled"}). ` +
                 "This is NOT a failure — no verdict was reached, there is nothing to fix." +
                 this.settleNudgeAttribution(target, workerSessionId) +
-                this.buildStampSuffix(currentDeployStaleness()),
+                this.buildStampSuffix(this.resolveDeployStaleness()),
               { sender: "system", taskId: worker.taskId ?? null },
             );
           } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
@@ -23649,7 +23688,7 @@ export class SessionService {
           // Card ccb407eb: a ONE-SHOT TERMINAL gate outcome (never re-sent) — durable like every other
           // settle nudge.
           // Card fde10c75: same build-stamp suffix as the merge nudges above.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): after a real hand-off — delivered OR durably queued/
           // held (card 646de997: `r.delivered` alone missed the queued case — see
           // shouldCancelSettleWakeAfter's own doc). `opStartedAt` is the CLOSED-OVER value captured
@@ -24738,7 +24777,7 @@ export class SessionService {
     const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${s.branch ?? "?"}, task ${(s.taskId ?? "?").slice(0, 8)}) on project "${project.name}" has a merge reconciliation that can never complete automatically: repoKey "${entry.repoKey}" does not name a registered repo on this project, and retrying will never change that. Wedged since ${entry.firstWedgedAt} (~${ageDays} day(s), ${entry.attempts} boot retries) — NOTE: "wedged since" is when this daemon started TRACKING the wedge, not necessarily when it first began; a record can predate this tracking and be older than it reports. This is NOT a transient failure — a human should either register that repoKey on the project, or confirm the branch is gone and close the task by hand.`
       // Card 791def40: fresh read — this escalation fires rarely (past a give-up attempts/age threshold),
       // never in a per-row sweep like reconcileOrphanedGateOps, so a shared read buys nothing here.
-      + this.buildStampSuffix(currentDeployStaleness());
+      + this.buildStampSuffix(this.resolveDeployStaleness());
     try {
       this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" });
     } catch {
@@ -24830,7 +24869,7 @@ export class SessionService {
         ? "Loom found this worker's own recorded tip carries no changes of its own relative to its own recorded landing base, so there is nothing of its own work to attribute to any landed commit"
         : "Loom checked every landed commit on this branch for a content match against this worker's own recorded tip and found none it could verify";
       const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path${tipNote}, active from ${s.createdAt} to ${s.lastActivity}. ${checkedNote} — the shared branch/worktree now belong to a different generation, so there is no further safe DB-only way to resolve it automatically, and no dedicated action exists to close just this alert. The branch name ${branch} is SHARED with the current generation — \`git log --grep "Loom-Worker-Branch: ${branch}"\` on the project's mainline will also match the CURRENT generation's own, later landing, not just this worker's; use this worker's own recorded tip and its createdAt→lastActivity window above to tell the generations apart. If this worker's own work is found there, this alert is stale and can be ignored (or the task closed by hand if it is otherwise idle); if not, the work may need to be redone.`
-        + this.buildStampSuffix(currentDeployStaleness());
+        + this.buildStampSuffix(this.resolveDeployStaleness());
       try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
       this.db.markStaleGenerationEscalated(s.id);
       // eslint-disable-next-line no-console
