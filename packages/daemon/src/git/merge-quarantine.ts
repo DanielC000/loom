@@ -676,6 +676,20 @@ function legacyQuarantineHashFor(repoPath: string): string {
   return createHash("sha256").update(directPathIdentity(repoPath)).digest("hex").slice(0, 24);
 }
 
+/**
+ * `true` iff `key`'s own freshly-hashed value still equals `hash` — i.e. whatever currently resolves to
+ * `key` genuinely owns the latch filename `hash` names, never merely a LEGACY-tier `hashToRepo` match
+ * whose matched repo has since walked up (lost its own `.git`) to a DIFFERENT, ancestor key. Factored out
+ * of the PASS 1 migrate branch's own check (8bff3cae/3a9e0027) so the deferred corrupt-`.json`/corrupt-tmp
+ * resolution loops (card 4783df46) can share the IDENTICAL verification rather than each hand-rolling it.
+ *
+ * @decision 4783df46 — a FALSE result arms at `key` anyway and sets `provenanceUnknown`; it must never
+ * divert to pending instead — see the decision record for why that "obvious" fix doesn't work.
+ */
+function legacyMatchStillResolvesToHash(key: string, hash: string): boolean {
+  return quarantineHashForKey(key) === hash;
+}
+
 function quarantinePathForKey(key: string): string {
   return path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKey(key)}.json`);
 }
@@ -4727,7 +4741,7 @@ function reenterMergeQuarantinesAtBootImpl(
             // @decision 8db913e2 (Follow-up 8bff3cae, CR 0b975d2a) — never trust a LEGACY-tier
             // `hashToRepo` match without this check: it can recompute to an ANCESTOR's key that durably
             // blocks an unrelated repo, never `hash`'s own true owner.
-            if (staleKeyStillLive !== currentKey && quarantineHashForKey(staleKeyStillLive) === hash) {
+            if (staleKeyStillLive !== currentKey && legacyMatchStillResolvesToHash(staleKeyStillLive, hash)) {
               staleKeyRetentionCandidates.push({ currentKey, staleKey: staleKeyStillLive });
             }
           }
@@ -4862,10 +4876,21 @@ function reenterMergeQuarantinesAtBootImpl(
       continue;
     }
     const key = canonicalRepoLockKey(matchedRepo);
+    const hash = f.slice(0, -".json".length);
+    // @decision 4783df46 — a walked-up LEGACY match still arms at `key` (never diverts); it only gains
+    // `provenanceUnknown` below. See `legacyMatchStillResolvesToHash`'s own doc and the decision record.
+    const verified = legacyMatchStillResolvesToHash(key, hash);
+    if (!verified) {
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] boot-time latch ${f} is CORRUPT/unparsable and matches registered repo ${matchedRepo}'s own LEGACY (direct-path) identity, but ${matchedRepo}'s current canonical key ${key} no longer hashes to this file (walked up, or a pre-7673d096 subdir binding) — fail-closed by arming ${key} anyway rather than risk discarding a real quarantine, but this is NOT a verified match for whatever currently owns ${key}; marking provenanceUnknown.`);
+    }
     const entry: MergeQuarantineEntry = {
       repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
-      reason: `boot found a CORRUPT/unparsable quarantine latch (${f}) matching this repo's hash — fail-closed rather than risk discarding a real quarantine`,
+      reason: verified
+        ? `boot found a CORRUPT/unparsable quarantine latch (${f}) matching this repo's hash — fail-closed rather than risk discarding a real quarantine`
+        : `boot found a CORRUPT/unparsable quarantine latch (${f}) matched only by a legacy (direct-path) identity — ${matchedRepo}'s own direct-path identity matches this file's hash, but its current canonical key no longer does (walked up, or a pre-7673d096 subdir binding); fail-closed by arming its current key (${key}) anyway, but this is NOT a verified match for whatever currently owns it`,
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+      provenanceUnknown: verified ? undefined : true,
     };
     // @decision d163aef5 — `matchedRepo` is resolvable (gated above), so this placeholder's own primary
     // arm is tautological too — never diverts `entry`, only ever evicts an illegitimate degraded prior.
@@ -5391,10 +5416,21 @@ function reenterMergeQuarantinesAtBootImpl(
       tmpsToUnlinkByKey.set(key, list);
       continue;
     }
+    const hash = f.slice(0, f.indexOf(".json.tmp-"));
+    // @decision 4783df46 — a walked-up LEGACY match still arms at `key` (never diverts); it only gains
+    // `provenanceUnknown` below. See `legacyMatchStillResolvesToHash`'s own doc and the decision record.
+    const verified = legacyMatchStillResolvesToHash(key, hash);
+    if (!verified) {
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable and matches registered repo ${matchedRepo}'s own LEGACY (direct-path) identity, but ${matchedRepo}'s current canonical key ${key} no longer hashes to this file (walked up, or a pre-7673d096 subdir binding) — fail-closed by arming ${key} anyway rather than risk discarding a real quarantine, but this is NOT a verified match for whatever currently owns ${key}; marking provenanceUnknown.`);
+    }
     const entry: MergeQuarantineEntry = {
       repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
-      reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, with no real sibling data — fail-closed rather than risk discarding a real quarantine`,
+      reason: verified
+        ? `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, with no real sibling data — fail-closed rather than risk discarding a real quarantine`
+        : `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matched only by a legacy (direct-path) identity — ${matchedRepo}'s own direct-path identity matches this file's hash, but its current canonical key no longer does (walked up, or a pre-7673d096 subdir binding); fail-closed by arming its current key (${key}) anyway, but this is NOT a verified match for whatever currently owns it`,
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+      provenanceUnknown: verified ? undefined : true,
     };
     // @decision d163aef5 — `matchedRepo` is resolvable (gated above), so this placeholder's own primary
     // arm is tautological too — never diverts `entry`, only ever evicts an illegitimate degraded prior.
@@ -5402,7 +5438,19 @@ function reenterMergeQuarantinesAtBootImpl(
     byRepoKey.set(key, armed);
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable with no real sibling data recovered for registered repo ${matchedRepo} — quarantining THAT repo rather than risk discarding a real quarantine (bootWriteLatch may still refuse — see its own log line above/below for why).`);
-    if (!bootWriteLatch(key, armed)) {
+    if (bootWriteLatch(key, armed)) {
+      // @decision 4783df46 (CR MAJOR) — delete the now-superseded corrupt tmp `f` immediately, never
+      // deferred (unlike the json site's stale source, `f`'s pid-suffixed name can't collide with
+      // another key's write target this pass) — see the decision record for the leak this closes.
+      if (!deleteSourceLatchIfSuperseded(f, armed, key)) {
+        const folded: MergeQuarantineEntry = { ...armed, orphanLatchFiles: [...new Set([...(armed.orphanLatchFiles ?? []), f])] };
+        replaceEntryEverywhere(byRepoKey, armed, folded);
+        if (!bootWriteLatch(key, folded)) {
+          // eslint-disable-next-line no-console
+          console.error(`[merge-quarantine] could not re-persist ${folded.repoPath} after its own superseded corrupt tmp (${f}) failed to unlink — it stays on disk, UNTRACKED by this entry's own bookkeeping in THIS process; a restart may re-arm this quarantine from it.`);
+        }
+      }
+    } else {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] fail-closed quarantine for ${matchedRepo} (matched-corrupt tmp latch ${f}) could NOT be durably persisted this boot — it will NOT survive another restart until this is fixed.`);
     }
