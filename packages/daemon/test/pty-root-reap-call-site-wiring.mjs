@@ -179,7 +179,11 @@ function spawnCodex(sid) {
   host.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });
   host.stop(SID, "hard");
   check("(1) kill() was actually called", fake.killCalled === true);
-  check("(1) 'exit-reap' trigger fired synchronously, right pid", callsFor(SID, "exit-reap").some((c) => c.rootPid === fake.pid));
+  // @decision b1ea823d — reapExitedDescendants now awaits a bounded creationTime capture (card 0201b378,
+  // item B) before this trigger fires, so it is no longer guaranteed same-tick; wait for it like the
+  // "hard-stop" trigger right below already does, never assert synchronicity nothing downstream needs.
+  await waitUntil(() => callsFor(SID, "exit-reap").length > 0, { label: "(1) 'exit-reap' trigger to fire" });
+  check("(1) 'exit-reap' trigger fired, right pid", callsFor(SID, "exit-reap").some((c) => c.rootPid === fake.pid));
   await waitUntil(() => callsFor(SID, "hard-stop").length > 0, { label: "(1) 'hard-stop' trigger to fire" });
   check("(1) 'hard-stop' trigger fired with the right pid", callsFor(SID, "hard-stop").some((c) => c.rootPid === fake.pid));
 }
@@ -223,7 +227,9 @@ function spawnCodex(sid) {
   const fake = spawnCodex(SID);
   host.stop(SID, "hard");
   check("(4) hard stop never writes a Ctrl-C (it kills directly)", fake.writes.length === 0);
-  check("(4) 'exit-reap' trigger fired synchronously, right pid", callsFor(SID, "exit-reap").some((c) => c.rootPid === fake.pid));
+  // @decision b1ea823d — same reasoning as (1) above: exit-reap is no longer guaranteed same-tick.
+  await waitUntil(() => callsFor(SID, "exit-reap").length > 0, { label: "(4) 'exit-reap' trigger to fire" });
+  check("(4) 'exit-reap' trigger fired, right pid", callsFor(SID, "exit-reap").some((c) => c.rootPid === fake.pid));
   await waitUntil(() => callsFor(SID, "hard-stop").length > 0, { label: "(4) codex 'hard-stop' trigger to fire" });
   check("(4) codex 'hard-stop' trigger fired with the right pid", callsFor(SID, "hard-stop").some((c) => c.rootPid === fake.pid));
 }

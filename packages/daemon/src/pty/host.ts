@@ -7948,8 +7948,20 @@ export class PtyHost {
    * process-tree enumeration + SIGKILL sweep against whatever pid 4242 happens to be on the host (card
    * d634cd2e: harmless on a Windows dev box, but a real pid 4242 on Linux CI is plausible). That fixture
    * is the ONE place this is overridden to a no-op — see its own doc comment.
+   *
+   * @decision b1ea823d — do not call `sweepOrphanedDescendants` before awaiting the bounded
+   * `creationTimeReady` race below; a fast-exiting root's still-unresolved capture must get a real
+   * chance to land first, or the guard reads a permanently-null creationTime it could have had.
    */
-  protected reapExitedDescendants(rootPid: number, sessionId: string, liveRef: Live | CodexLive): void {
+  protected async reapExitedDescendants(rootPid: number, sessionId: string, liveRef: Live | CodexLive): Promise<void> {
+    // @decision b1ea823d — never await `creationTimeReady` on Linux: `armRootCreationTime` returns
+    // early there and never arms it, so an unconditional await would hang this call forever.
+    if (this.resolveRootReapPlatform() !== "linux" && liveRef.creationTime == null) {
+      let boundTimer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<void>((resolve) => { boundTimer = setTimeout(resolve, ROOT_CREATION_CAPTURE_AWAIT_MS); });
+      await Promise.race([liveRef.creationTimeReady, bound]);
+      clearTimeout(boundTimer);
+    }
     try {
       // @decision 87691385 — never drop this second argument: the shared planner's abort needs the
       // root's own OS creation time to tell genuine pid reuse apart from our own still-alive root

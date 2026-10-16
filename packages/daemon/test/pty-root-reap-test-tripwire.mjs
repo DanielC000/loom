@@ -454,6 +454,15 @@ try {
     // Never let the real post-sweep verify step run any real OS probe here — it is not what this
     // scenario tests, and reapExitedDescendants's own catch must decide before it is ever reached.
     host.verifyRootDeadOrForceKill = async () => ({ pid: SENTINEL_PID, dead: false, identityConfirmed: null, forceKilled: false, checkFailed: true, identity: "unreadable" });
+    // CR 018fba2a — force win32 regardless of the REAL host platform, same reasoning + same seam as
+    // RealKillRootHost above (~L353): G3 below is win32-shaped (a win32 CIM-ticks mismatch, no
+    // startTicksLinux/creationTicks), and reapExitedDescendants's own await-the-capture gate (card
+    // 0201b378, item B) is ITSELF gated on `resolveRootReapPlatform() !== "linux"` — on an unpinned real
+    // Linux host this reads "linux", the await is correctly skipped (by design — armRootCreationTime never
+    // arms creationTimeReady there), creationTime stays null, and G3's mismatch check never gets a chance
+    // to run at all, falling through to the throwing ancestry walk. Pinning win32 here makes G3 exercise
+    // the win32 mechanism it actually tests on every OS, including a real Linux CI runner.
+    host.resolveRootReapPlatform = () => "win32";
 
     // (G1) enumeration failure through reapExitedDescendants: caught, logged, NOT a crash.
     {
@@ -464,7 +473,9 @@ try {
       syncBuiltinESMExports();
       let threw = null;
       try {
-        try { host.reapExitedDescendants(SENTINEL_PID, "sess-b1ea823d-enum-fail", { creationTime: null }); }
+        // @decision b1ea823d — reapExitedDescendants is now async (card 0201b378, item B); await it so a
+        // rejection is caught by this SAME try/catch, exactly as the old synchronous throw was.
+        try { await host.reapExitedDescendants(SENTINEL_PID, "sess-b1ea823d-enum-fail", { creationTime: null, creationTimeReady: Promise.resolve() }); }
         catch (err) { threw = err; }
       } finally {
         cp.execFileSync = originalExecFileSync;
@@ -489,7 +500,9 @@ try {
       syncBuiltinESMExports();
       let threw = null;
       try {
-        try { host.reapExitedDescendants(SENTINEL_PID, "sess-b1ea823d-lineage", { creationTime: null }); }
+        // @decision b1ea823d — reapExitedDescendants is now async (card 0201b378, item B); await it so a
+        // rejection is caught by this SAME try/catch, exactly as the old synchronous throw was.
+        try { await host.reapExitedDescendants(SENTINEL_PID, "sess-b1ea823d-lineage", { creationTime: null, creationTimeReady: Promise.resolve() }); }
         catch (err) { threw = err; }
       } finally {
         cp.execFileSync = originalExecFileSync;
@@ -497,6 +510,51 @@ try {
       }
       check("(G2) a lineage refusal through the real onExit chokepoint STILL throws (propagates, unswallowed)",
         threw instanceof Error && threw.message.includes("not a live descendant"));
+      check("(G2) the lineage refusal is NOT the enumeration-failure code — this stays an unswallowed REFUSAL, never routed through the one code reapExitedDescendants's own catch tolerates",
+        threw instanceof Error && threw.code !== "LOOM_REAP_TEST_GUARD_ENUMERATION_FAILED");
+    }
+
+    // (G3) card 0201b378, item B — the ORIGINAL specimen: a fast-exiting root whose creation-time capture
+    // resolves SHORTLY AFTER onExit fires is now correctly VERIFIED (a proven pid-reuse mismatch → silent
+    // skip), not REFUSED. Before this fix, `liveRef.creationTime` was read synchronously at onExit and was
+    // always still `null` here (the capture hadn't settled yet) — the mismatch check never got a chance to
+    // run, and execution fell through to the unconditional, throwing ancestry walk (the
+    // mcp-config-secret-lifecycle incident's exact shape, since SENTINEL_PID is never a real descendant of
+    // this process). Same monkeypatch technique as scenario H: the guard's own synchronous enumeration
+    // reports SENTINEL_PID as LIVE with a foreign ppid and a creationTime that will mismatch our own, once
+    // ours actually arrives.
+    {
+      const requireHere = createRequire(import.meta.url);
+      const cp = requireHere("node:child_process");
+      const originalExecFileSync = cp.execFileSync;
+      const DOTNET_UNIX_EPOCH_TICKS = 621_355_968_000_000_000;
+      const occupantTicks = Date.now() * 10_000 + DOTNET_UNIX_EPOCH_TICKS; // guard's view: "occupant is live right now"
+      cp.execFileSync = () => `${SENTINEL_PID},999999,${occupantTicks}\n`;
+      syncBuiltinESMExports();
+
+      let resolveCreationTime;
+      const creationTimeReady = new Promise((resolve) => { resolveCreationTime = resolve; });
+      const liveRef = { creationTime: null, creationTimeReady };
+      // Mirrors armRootCreationTime's own real side effect: the capture settles by MUTATING `creationTime`
+      // on the live object, not merely resolving a value nobody reads. "Our real root" was created a day
+      // ago — provably mismatched against the guard's "live right now" occupant above.
+      setTimeout(() => {
+        liveRef.creationTime = Date.now() - 86_400_000;
+        resolveCreationTime();
+      }, 50); // well inside ROOT_CREATION_CAPTURE_AWAIT_MS's 3000ms default — this is the specimen's whole point
+
+      let threw = null;
+      try {
+        try { await host.reapExitedDescendants(SENTINEL_PID, "sess-0201b378-timing", liveRef); }
+        catch (err) { threw = err; }
+      } finally {
+        cp.execFileSync = originalExecFileSync;
+        syncBuiltinESMExports();
+      }
+      check("(G3) a fast-exiting root whose capture resolves shortly AFTER onExit does NOT throw (the await gave the mismatch check real data)",
+        threw === null);
+      check("(G3) the guard's own SKIPPED log line fired — the mismatch was genuinely VERIFIED, not an unresolved fallthrough",
+        capturedLines.some((l) => l.includes(`[pty-reap-test-guard] SKIPPED reapOrphanedDescendants(pid=${SENTINEL_PID})`)));
     }
   }
 
@@ -551,14 +609,19 @@ try {
       syncBuiltinESMExports();
     }
 
-    // Everything downstream of the guard on THIS call is pure in-process Promise chaining with no real
-    // timer/OS latency (the semaphore's fast path, `deps.enumerate`, the kill loop, the completion log) —
-    // draining a bounded number of microtask turns deterministically settles the WHOLE chain if the guard
-    // ever started it, with zero real elapsed time. This is not a blind sleep-and-hope: if nothing was
-    // scheduled, nothing ever WILL be (no pending timer/callback exists to fire later), so `enumerateCalled`
-    // staying false after this flush is a durable fact, not a one-trial guess (contrast the project's own
-    // fixed-wait-negative-assertion concern, which is specifically about a genuinely-pending later event).
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // card 0201b378, item D — wait for a POSITIVE witness that this call actually settled, never a blind
+    // fixed-turn flush: the guard's own `SKIPPED` log line (fired SYNCHRONOUSLY, same tick, on the fixed
+    // code) OR the downstream `deps.enumerate()` actually being invoked (only reachable on a regression,
+    // and possibly delayed behind `rootReapEnumerationSemaphore`'s own queue under contention — NOT
+    // reachable via a fixed microtask count, since a queued waiter resolves only via another release() or
+    // a real 30s timeout). Whichever happens first is a genuine, observable settling — not an assumption
+    // about which path the semaphore happened to take.
+    const guardSkippedLine = `[pty-reap-test-guard] SKIPPED reapOrphanedDescendants(pid=${SENTINEL_PID})`;
+    await waitUntil(
+      () => capturedLines.some((l) => l.includes(guardSkippedLine)) || enumerateCalled,
+      { timeoutMs: 8_000, label: "(H) guard SKIPPED witness or downstream enumerate() fired" },
+    );
+    const guardSkipped = capturedLines.some((l) => l.includes(guardSkippedLine));
     if (enumerateCalled) {
       // Only reachable on the (reverted) buggy code — wait for the real kill's own completion log before
       // checking survival below, so that assertion never races the kill.
@@ -569,6 +632,8 @@ try {
     }
 
     check("(H) a proven pid-reuse at the guard does NOT throw (silent skip, not a crash)", threw === null);
+    check("(H) the guard's own SKIPPED log line fired — the skip path genuinely ran (a positive witness, not an absence)",
+      guardSkipped === true);
     check("(H) the downstream enumeration was NEVER invoked — the guard's skip is a genuine no-op, not merely 'no throw' (CR 79a80cd5)",
       enumerateCalled === false);
     const grandchildAlive = (() => { try { process.kill(grandchildPid, 0); return true; } catch { return false; } })();
