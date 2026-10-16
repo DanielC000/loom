@@ -252,8 +252,12 @@ export interface SupervisorProcRow {
 
 /** Bound the OS enumeration (PowerShell `Get-CimInstance`/`ps`) so a hung/slow call can't wedge a restart
  * request indefinitely — a timeout REFUSES the restart (see {@link isSupervisorProcessAlive}), it never
- * silently treats "couldn't check in time" as "must be fine". */
-const SUPERVISOR_ENUM_TIMEOUT_MS = 8_000;
+ * silently treats "couldn't check in time" as "must be fine".
+ *
+ * @decision 4656fb56 — do not raise this past 60_000, or match it to the 120_000 sibling scan bounds:
+ * this check is paid up to twice per `daemon_restart`, the second time right before exit, so a larger
+ * bound costs the whole fleet real wait on every genuine hang here. */
+const SUPERVISOR_ENUM_TIMEOUT_MS = 60_000;
 
 /**
  * How many ancestor hops {@link walkSupervisorAncestry} climbs before giving up. MEASURED against this
