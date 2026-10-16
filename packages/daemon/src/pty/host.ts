@@ -4481,15 +4481,29 @@ export function isDescendantPid(
   return false; // exceeded maxHops — fail closed, never a false "yes"
 }
 
-/** @decision 8c8ee0ee — bound for {@link assertReapTargetIsOwnLiveDescendantUnderTest}'s own OS
- *  enumeration. Test-mode only; never reached in production (see that function's own `inTestMode()`
- *  gate), so a slow CIM/`ps` query only ever makes one test call slower, never hangs anything. */
-const TEST_GUARD_ENUMERATION_TIMEOUT_MS = 5_000;
-
 /** @decision 8c8ee0ee — bound for {@link reapOrphanedDescendants}'s OWN enumeration spawn, which had
  *  NO timeout at all before this card (unlike {@link enumerateWin32SweepRows}'s existing 10s default) —
  *  a wedged powershell.exe/ps could hang this fire-and-forget sweep indefinitely. Applies in prod too. */
 const REAP_ENUMERATION_TIMEOUT_MS = 10_000;
+
+/** @decision b1ea823d — a non-finite/non-integer/non-positive raw value falls back to `floorMs`, never
+ * reaching `execFileSync`'s `timeout` option (an out-of-range value THROWS `ERR_OUT_OF_RANGE` there).
+ * A valid raw value below `floorMs` is clamped UP, never accepted as a lower bound. */
+export function resolveTestGuardEnumerationTimeoutMs(rawEnvValue: string | undefined, floorMs: number): number {
+  const raw = Number(rawEnvValue);
+  if (!Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) return floorMs;
+  return Math.max(floorMs, raw);
+}
+
+/** @decision 8c8ee0ee — bound for {@link assertReapTargetIsOwnLiveDescendantUnderTest}'s own OS
+ *  enumeration. Test-mode only; never reached in production (see that function's own `inTestMode()`
+ *  gate), so a slow CIM/`ps` query only ever makes one test call slower, never hangs anything.
+ *
+ * @decision b1ea823d — never tighter than REAP_ENUMERATION_TIMEOUT_MS; `LOOM_TEST_GUARD_ENUMERATION_
+ * TIMEOUT_MS` may only RAISE it further, never below that floor (see {@link resolveTestGuardEnumerationTimeoutMs}). */
+const TEST_GUARD_ENUMERATION_TIMEOUT_MS = resolveTestGuardEnumerationTimeoutMs(
+  process.env.LOOM_TEST_GUARD_ENUMERATION_TIMEOUT_MS, REAP_ENUMERATION_TIMEOUT_MS,
+);
 
 /** @decision 8c8ee0ee — reuses WIN32_SWEEP_PS_COMMAND verbatim (never hand-copy it). Synchronous +
  *  bounded by `timeout` since every guarded caller must stay synchronous. Throws on any failure — a
@@ -4523,14 +4537,26 @@ function creationTimeFromTestSpawnRegistry(pid: number): number | null {
   return registry?.get(pid) ?? null;
 }
 
+/** @decision b1ea823d — the ONE enumeration-failure refusal (never any other refusal) that {@link
+ * PtyHost.reapExitedDescendants}'s onExit chokepoint may swallow instead of letting crash the exit path;
+ * set structurally on the thrown error's own `code`, never matched by message text at the catch site. */
+const REAP_TEST_GUARD_ENUMERATION_FAILURE_CODE = "LOOM_REAP_TEST_GUARD_ENUMERATION_FAILED";
+
 /** @decision dbbb52db — logs unconditionally; THROWS only when `hasRegistry`, else refuses silently
- * (returns false — caller MUST check it) so a registry-less LOOM_TEST process can never crash here. */
-function refuseReapTarget(label: string, pid: number, reason: string, hasRegistry: boolean): boolean {
+ * (returns false — caller MUST check it) so a registry-less LOOM_TEST process can never crash here.
+ *
+ * @decision b1ea823d — `code`, when passed, is stamped on the thrown Error so a caller several frames up
+ * (the onExit chokepoint) can discriminate WHICH refusal this was without ever parsing `message`. */
+function refuseReapTarget(label: string, pid: number, reason: string, hasRegistry: boolean, code?: string): boolean {
   const tag = hasRegistry ? "REFUSED" : "REFUSED (no registry)";
   const msg = `[pty-reap-test-guard] ${tag} ${label}(pid=${pid}): ${reason}`;
   // eslint-disable-next-line no-console
   console.error(msg);
-  if (hasRegistry) throw new Error(msg);
+  if (hasRegistry) {
+    const err = new Error(msg) as Error & { code?: string };
+    if (code) err.code = code;
+    throw err;
+  }
   return false;
 }
 
@@ -4539,8 +4565,12 @@ function refuseReapTarget(label: string, pid: number, reason: string, hasRegistr
  *  reaching a real OS kill/enumeration by caller-supplied pid; production (`!inTestMode()`) is unchanged.
  *
  * @decision dbbb52db — returns true/false (refused — caller MUST bail out); never let a registry hit
- * accept a pid that is CURRENTLY LIVE — only a dead (no live row) registry hit may short-circuit. */
-function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string): boolean {
+ * accept a pid that is CURRENTLY LIVE — only a dead (no live row) registry hit may short-circuit.
+ *
+ * @decision b1ea823d — `expectedCreationTime` (optional): a PROVEN reused pid becomes a silent skip
+ * (false, never throw, never true/proceed) — the caller's own later enumeration is a separate, later
+ * read that can't be trusted to see the same occupant. See this function's own body comment. */
+function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string, expectedCreationTime: number | null = null): boolean {
   if (!inTestMode()) return true;
   const hasRegistry = hasTestSpawnRegistry();
   let rows: OrphanSweepRow[];
@@ -4549,10 +4579,20 @@ function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string
   } catch (err) {
     return refuseReapTarget(label, pid,
       `could not enumerate the real OS process table to verify lineage (${(err as Error).message}) — fail-closed under LOOM_TEST`,
-      hasRegistry);
+      hasRegistry, REAP_TEST_GUARD_ENUMERATION_FAILURE_CODE);
   }
   const isLiveNow = rows.some((r) => r.pid === pid);
   if (!isLiveNow && wasSpawnedByThisTestProcess(pid)) return true;
+  if (isLiveNow && expectedCreationTime != null) {
+    // @decision b1ea823d — PROVEN pid reuse: silent skip (false), never proceed — the caller's own later
+    // enumeration is a separate read and could see the occupant already gone (CR 79a80cd5).
+    const liveRow = rows.find((r) => r.pid === pid);
+    if (liveRow?.creationTime != null && Math.abs(liveRow.creationTime - expectedCreationTime) > ROOT_CREATION_MATCH_TOLERANCE_MS) {
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap-test-guard] SKIPPED ${label}(pid=${pid}): the live occupant's own creation time proves this is a reused pid, not our root — treating as nothing to reap (no throw, no further enumeration, no kill)`);
+      return false;
+    }
+  }
   if (!isDescendantPid(rows, pid, process.pid)) {
     return refuseReapTarget(label, pid,
       `not a live descendant of this test process (pid=${process.pid}), and this test process never spawned it (or it is now live and no longer verifiable as ours) — a test may only reap/kill a process it itself (transitively) spawned`,
@@ -4656,13 +4696,15 @@ export function reapOrphanedDescendants(
   rootPid: number, rootCreationTime: number | null = null,
   deps: { enumerate?: () => Promise<OrphanSweepRow[]>; kill?: (pid: number, signal: string) => void } = {},
 ): void {
-  if (!assertReapTargetIsOwnLiveDescendantUnderTest(rootPid, "reapOrphanedDescendants")) return;
+  // @decision b1ea823d — computed BEFORE the guard call (moved up from after it) so the guard can prove
+  // a live-but-reused rootPid is NOT ours via this same expected creation time, rather than refusing.
+  const effectiveRootCreationTime = rootCreationTime ?? creationTimeFromTestSpawnRegistry(rootPid);
+  if (!assertReapTargetIsOwnLiveDescendantUnderTest(rootPid, "reapOrphanedDescendants", effectiveRootCreationTime)) return;
   if (!Number.isInteger(rootPid) || rootPid <= 1 || rootPid === process.pid || rootPid === process.ppid) {
     // eslint-disable-next-line no-console
     console.log(`[pty-reap] root=${rootPid}: skipped (not a reapable root pid)`);
     return;
   }
-  const effectiveRootCreationTime = rootCreationTime ?? creationTimeFromTestSpawnRegistry(rootPid);
   const killFn = deps.kill ?? ((pid: number, signal: string) => { process.kill(pid, signal); });
   const sweep = (rows: OrphanSweepRow[]): void => {
     const { toKill, skippedStale, abortedRootPidLive } = computeOrphanSweepPlan(rows, rootPid, effectiveRootCreationTime);
@@ -7908,10 +7950,18 @@ export class PtyHost {
    * is the ONE place this is overridden to a no-op — see its own doc comment.
    */
   protected reapExitedDescendants(rootPid: number, sessionId: string, liveRef: Live | CodexLive): void {
-    // @decision 87691385 — never drop this second argument: the shared planner's abort needs the root's
-    // own OS creation time to tell genuine pid reuse apart from our own still-alive root (unknown/null
-    // still fails the abort closed, never silently promotes to "ours").
-    this.sweepOrphanedDescendants(rootPid, liveRef.creationTime);
+    try {
+      // @decision 87691385 — never drop this second argument: the shared planner's abort needs the
+      // root's own OS creation time to tell genuine pid reuse apart from our own still-alive root
+      // (unknown/null still fails the abort closed, never silently promotes to "ours").
+      this.sweepOrphanedDescendants(rootPid, liveRef.creationTime);
+    } catch (err) {
+      // @decision b1ea823d — swallow ONLY the enumeration-failure refusal (code-discriminated, never by
+      // message text); every other throw, incl. a lineage refusal, must keep propagating unchanged.
+      if ((err as { code?: string }).code !== REAP_TEST_GUARD_ENUMERATION_FAILURE_CODE) throw err;
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap] ${sessionId} pid=${rootPid}: onExit sweep's enumeration-failure refusal caught at the exit chokepoint, not crashing (${(err as Error).message})`);
+    }
     // Card 2897acc4 (S1): node-pty's own exit notification is not always true — confirm the root itself
     // is actually gone, independent of that signal, rather than trusting it the way the descendant sweep
     // above (unchanged, see its own doc) always has. Fire-and-forget: never let a crashed check become a

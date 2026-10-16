@@ -44,7 +44,7 @@ requireHermeticEnv();
 enableRootCreationCapture();
 
 const hostMod = await import("../dist/pty/host.js");
-const { PtyHost, reapOrphanedDescendants, isDescendantPid, reapProcessesRootedInWorktree } = hostMod;
+const { PtyHost, reapOrphanedDescendants, isDescendantPid, reapProcessesRootedInWorktree, resolveTestGuardEnumerationTimeoutMs } = hostMod;
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // =====================================================================================================
@@ -87,6 +87,31 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
     ) === false);
 }
 
+// =====================================================================================================
+// (unit) resolveTestGuardEnumerationTimeoutMs — card b1ea823d, CR 79a80cd5 minor 2: a non-finite/
+// non-integer/non-positive raw env value must NEVER reach execFileSync's own `timeout` option (an
+// out-of-range value THROWS ERR_OUT_OF_RANGE there, failing EVERY enumeration, not just skipping the
+// override). Pure, hermetic, no OS calls, no risk.
+// =====================================================================================================
+{
+  check("(unit, timeout-clamp) Infinity falls back to the floor, never passed through",
+    resolveTestGuardEnumerationTimeoutMs("Infinity", 10_000) === 10_000);
+  check("(unit, timeout-clamp) -Infinity falls back to the floor",
+    resolveTestGuardEnumerationTimeoutMs("-Infinity", 10_000) === 10_000);
+  check("(unit, timeout-clamp) a fractional value falls back to the floor (never truncated/rounded through)",
+    resolveTestGuardEnumerationTimeoutMs("12345.5", 10_000) === 10_000);
+  check("(unit, timeout-clamp) NaN (unparsable) falls back to the floor",
+    resolveTestGuardEnumerationTimeoutMs("not-a-number", 10_000) === 10_000);
+  check("(unit, timeout-clamp) unset (undefined) falls back to the floor",
+    resolveTestGuardEnumerationTimeoutMs(undefined, 10_000) === 10_000);
+  check("(unit, timeout-clamp) zero and negative values fall back to the floor",
+    resolveTestGuardEnumerationTimeoutMs("0", 10_000) === 10_000 && resolveTestGuardEnumerationTimeoutMs("-5000", 10_000) === 10_000);
+  check("(unit, timeout-clamp) a valid integer BELOW the floor is clamped UP to the floor, never accepted as a lower bound",
+    resolveTestGuardEnumerationTimeoutMs("5000", 10_000) === 10_000);
+  check("(unit, timeout-clamp) a valid integer ABOVE the floor is honored",
+    resolveTestGuardEnumerationTimeoutMs("20000", 10_000) === 20_000);
+}
+
 // Capture every console.log/error line from here on (mirrors pty-exit-reap-seam.mjs's own pattern) —
 // restored in the outer `finally` at the bottom.
 const capturedLines = [];
@@ -98,6 +123,8 @@ console.error = (...args) => { capturedLines.push(args.join(" ")); realErr(...ar
 let fabWitnessChild = null;
 let deadChild = null;
 let liveRootLikeChild = null;
+let mismatchedRootChild = null;
+let toctouGrandchild = null;
 try {
   // ===================================================================================================
   // (behavioral A) reapOrphanedDescendants(SENTINEL_PID) — REFUSED, never enumerated, never killed.
@@ -415,12 +442,168 @@ try {
       try { fs.rmSync(noRegistryTmp, { recursive: true, force: true }); } catch { /* best-effort */ }
     }
   }
+
+  // ===================================================================================================
+  // (behavioral G) card b1ea823d — PtyHost.reapExitedDescendants (the real onExit chokepoint both the
+  // claude and codex pty.onExit handlers call) swallows ONLY an enumeration-failure refusal; a lineage
+  // refusal through the SAME chokepoint must still propagate (the genuine tripwire finding stays loud).
+  // ===================================================================================================
+  {
+    const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
+    const host = new PtyHost(events);
+    // Never let the real post-sweep verify step run any real OS probe here — it is not what this
+    // scenario tests, and reapExitedDescendants's own catch must decide before it is ever reached.
+    host.verifyRootDeadOrForceKill = async () => ({ pid: SENTINEL_PID, dead: false, identityConfirmed: null, forceKilled: false, checkFailed: true, identity: "unreadable" });
+
+    // (G1) enumeration failure through reapExitedDescendants: caught, logged, NOT a crash.
+    {
+      const requireHere = createRequire(import.meta.url);
+      const cp = requireHere("node:child_process");
+      const originalExecFileSync = cp.execFileSync;
+      cp.execFileSync = () => { throw new Error("simulated enumeration failure (card b1ea823d test, G1)"); };
+      syncBuiltinESMExports();
+      let threw = null;
+      try {
+        try { host.reapExitedDescendants(SENTINEL_PID, "sess-b1ea823d-enum-fail", { creationTime: null }); }
+        catch (err) { threw = err; }
+      } finally {
+        cp.execFileSync = originalExecFileSync;
+        syncBuiltinESMExports();
+      }
+      check("(G1) an enumeration-failure refusal through the real onExit chokepoint does NOT crash (no throw escapes reapExitedDescendants)",
+        threw === null);
+      check("(G1) the swallowed refusal was logged, naming the chokepoint and that it did not crash",
+        capturedLines.some((l) => l.includes("onExit sweep's enumeration-failure refusal caught at the exit chokepoint, not crashing")));
+    }
+
+    // (G2) a lineage refusal through the SAME chokepoint must still propagate — unchanged from before this
+    // card. Feeds the guard's OWN enumeration a FABRICATED, deterministic empty snapshot (same execFileSync
+    // monkeypatch technique as G1/scenario E) rather than letting the real OS enumeration run: a real
+    // `powershell.exe`/`ps` call can itself ETIMEDOUT under exactly the load this card targets, which would
+    // make this specific assertion flake for a reason unrelated to what it's checking (CR 79a80cd5, minor 4).
+    {
+      const requireHere = createRequire(import.meta.url);
+      const cp = requireHere("node:child_process");
+      const originalExecFileSync = cp.execFileSync;
+      cp.execFileSync = () => ""; // zero rows: SENTINEL_PID is provably absent, never a descendant.
+      syncBuiltinESMExports();
+      let threw = null;
+      try {
+        try { host.reapExitedDescendants(SENTINEL_PID, "sess-b1ea823d-lineage", { creationTime: null }); }
+        catch (err) { threw = err; }
+      } finally {
+        cp.execFileSync = originalExecFileSync;
+        syncBuiltinESMExports();
+      }
+      check("(G2) a lineage refusal through the real onExit chokepoint STILL throws (propagates, unswallowed)",
+        threw instanceof Error && threw.message.includes("not a live descendant"));
+    }
+  }
+
+  // ===================================================================================================
+  // (behavioral H) card b1ea823d, CR 79a80cd5 (BLOCKING fix) — the TOCTOU this card's guard-level mismatch
+  // check must NOT paper over: the guard's own enumeration and reapOrphanedDescendants' DOWNSTREAM
+  // enumeration are two SEPARATE, independently-timed OS reads (up to the semaphore's own queue-wait
+  // apart, decision 6d484a46). A proven creation-time mismatch at the guard must be a SILENT SKIP — no
+  // throw, no further enumeration, no kill — never a "proceed", because the downstream read can see a
+  // DIFFERENT, later snapshot where the occupant has since exited, letting a genuinely foreign child of
+  // the reused pid number pass the stale-ppid filter and get SIGKILLed for real. (The original, reverted
+  // fix returned `true` here — proceed — which is exactly the bug this scenario controls against.)
+  //
+  // Both reads are independently controlled: the GUARD's own enumeration (`execFileSync`, monkeypatched —
+  // same technique as scenario E/G1) reports a live, foreign-ppid occupant at SENTINEL_PID with a
+  // mismatched creationTime (the guard's own view of "the race is happening"). The DOWNSTREAM sweep's
+  // enumeration (`deps.enumerate`, the file's existing injection seam — same technique as scenario B4)
+  // reports NO live row at all for SENTINEL_PID (the occupant has since exited) but DOES report a real,
+  // still-alive grandchild `K` whose ppid is SENTINEL_PID and whose creationTime is AFTER the stale-ppid
+  // filter's cutoff — the exact row shape that widened the kill set before this fix. `deps.kill` is
+  // deliberately left UNSET so a real SIGKILL would actually reach K if the bug were still present.
+  // ===================================================================================================
+  {
+    toctouGrandchild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const grandchildPid = toctouGrandchild.pid;
+
+    const requireHere = createRequire(import.meta.url);
+    const cp = requireHere("node:child_process");
+    const originalExecFileSync = cp.execFileSync;
+    const DOTNET_UNIX_EPOCH_TICKS = 621_355_968_000_000_000;
+    const occupantTicks = Date.now() * 10_000 + DOTNET_UNIX_EPOCH_TICKS; // guard's view: "occupant is live right now"
+    cp.execFileSync = () => `${SENTINEL_PID},999999,${occupantTicks}\n`;
+    syncBuiltinESMExports();
+
+    const ourOriginalRootCreationTime = Date.now() - 86_400_000; // "our real root" was supposedly created a day ago
+    let enumerateCalled = false;
+    let threw = null;
+    try {
+      try {
+        reapOrphanedDescendants(SENTINEL_PID, ourOriginalRootCreationTime, {
+          // DOWNSTREAM read: occupant already gone (no row at all for SENTINEL_PID itself), but its real
+          // grandchild K is live, ppid=SENTINEL_PID, created well AFTER ourOriginalRootCreationTime — the
+          // exact row the pre-fix code would have swept. Must NEVER be reached on the fixed code.
+          enumerate: async () => {
+            enumerateCalled = true;
+            return [{ pid: grandchildPid, ppid: SENTINEL_PID, creationTime: Date.now() }];
+          },
+        });
+      } catch (err) { threw = err; }
+    } finally {
+      cp.execFileSync = originalExecFileSync;
+      syncBuiltinESMExports();
+    }
+
+    // Everything downstream of the guard on THIS call is pure in-process Promise chaining with no real
+    // timer/OS latency (the semaphore's fast path, `deps.enumerate`, the kill loop, the completion log) —
+    // draining a bounded number of microtask turns deterministically settles the WHOLE chain if the guard
+    // ever started it, with zero real elapsed time. This is not a blind sleep-and-hope: if nothing was
+    // scheduled, nothing ever WILL be (no pending timer/callback exists to fire later), so `enumerateCalled`
+    // staying false after this flush is a durable fact, not a one-trial guess (contrast the project's own
+    // fixed-wait-negative-assertion concern, which is specifically about a genuinely-pending later event).
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    if (enumerateCalled) {
+      // Only reachable on the (reverted) buggy code — wait for the real kill's own completion log before
+      // checking survival below, so that assertion never races the kill.
+      await waitUntil(
+        () => capturedLines.some((l) => l.includes(`[pty-reap] root=${SENTINEL_PID}:`)),
+        { timeoutMs: 8_000, label: "(H) sweep completion log (only reachable pre-fix)" },
+      );
+    }
+
+    check("(H) a proven pid-reuse at the guard does NOT throw (silent skip, not a crash)", threw === null);
+    check("(H) the downstream enumeration was NEVER invoked — the guard's skip is a genuine no-op, not merely 'no throw' (CR 79a80cd5)",
+      enumerateCalled === false);
+    const grandchildAlive = (() => { try { process.kill(grandchildPid, 0); return true; } catch { return false; } })();
+    check("(H) THE REGRESSION THIS CONTROLS AGAINST: the real grandchild of the reused pid SURVIVES (would be SIGKILLed on the reverted fix — CR 79a80cd5)",
+      grandchildAlive);
+  }
+
+  // ===================================================================================================
+  // (behavioral H2) card b1ea823d — when NO expected creation time is available on either side (caller
+  // passes null AND the registry's own entry is cleared), behavior is byte-identical to before this card:
+  // the mismatch branch is gated on `expectedCreationTime != null` and never evaluates, so the REAL
+  // (unmonkeypatched) guard enumeration runs and a genuinely own, still-live descendant passes via the
+  // unchanged ancestry walk alone — same path scenario (A, positive control) above already exercises.
+  // ===================================================================================================
+  {
+    mismatchedRootChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const mismatchedPid = mismatchedRootChild.pid;
+    // Awaited (value unused) so the real async capture settles BEFORE the registry delete below — else a
+    // still-in-flight capture could re-populate the entry right after the delete.
+    await awaitRootCreationCapture(mismatchedPid);
+    globalThis.__LOOM_TEST_SPAWNED_PID_CREATION_TIMES__.delete(mismatchedPid);
+    let threw2 = null;
+    try { reapOrphanedDescendants(mismatchedPid, null); }
+    catch (err) { threw2 = err; }
+    check("(H2) with no expected creation time available on either side, a genuine own descendant still does not throw (unchanged ancestry-walk path)",
+      threw2 === null);
+  }
 } finally {
   console.log = realLog;
   console.error = realErr;
   try { fabWitnessChild?.kill(); } catch { /* already gone */ }
   try { deadChild?.kill(); } catch { /* already gone */ }
   try { liveRootLikeChild?.kill(); } catch { /* already gone */ }
+  try { mismatchedRootChild?.kill(); } catch { /* already gone */ }
+  try { toctouGrandchild?.kill(); } catch { /* already gone */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
