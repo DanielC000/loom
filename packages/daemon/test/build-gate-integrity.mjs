@@ -5,8 +5,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Guards the two ways a BROKEN/STALE main could pass the deploy gate green (P1 6865de1f):
 //   (A) a stale FULL TURBO cache replaying a green build over broken source → the build step must defeat
-//       the cache with `--force` passed DIRECTLY to turbo (`node <turbo> build … --force`), NOT the
-//       `pnpm run build --force` shape that forwards --force to vite and leaves the cache intact.
+//       the cache with `--cache=local:,remote:` passed DIRECTLY to turbo (`node <turbo> build …
+//       --cache=local:,remote:`; card ec6ead9d — replaces the old `--force`, which also WRITES a deploy
+//       cache entry every deploy), NOT the `pnpm run build --cache=…`/`--force` shape that
+//       forwards the flag to vite and leaves the cache intact.
 //   (B) a merged dep-add never linked → an INSTALL step (`pnpm install --frozen-lockfile`) must run
 //       BEFORE the build, and a failing install must SHORT-CIRCUIT the build (don't compile a tree whose
 //       deps aren't installed).
@@ -84,18 +86,22 @@ try {
   const build = steps[1];
   check("(A) build invokes turbo via ABSOLUTE node (no shell, no PATH reliance — 51522f05-proof)",
     build.shell === false && build.command === process.execPath);
-  check("(A) build passes `--force` DIRECTLY to turbo (cache-defeating), not to a build script",
-    build.args.includes("--force") && build.args.some((a) => /turbo/.test(a)) && build.args.indexOf("--force") > build.args.findIndex((a) => /turbo/.test(a)));
+  check("(A/ec6ead9d) build passes `--cache=local:,remote:` DIRECTLY to turbo (cache-defeating, read AND write), not to a build script",
+    build.args.includes("--cache=local:,remote:") && build.args.some((a) => /turbo/.test(a)) && build.args.indexOf("--cache=local:,remote:") > build.args.findIndex((a) => /turbo/.test(a)));
+  check("(ec6ead9d) build does NOT fall back to the old `--force` (which still WRITES a deploy cache entry every deploy)",
+    !build.args.includes("--force"));
   check("(A) build covers BOTH @loom/daemon and @loom/web (served UI can't go stale)",
     build.args.includes("--filter=@loom/daemon") && build.args.includes("--filter=@loom/web"));
   // Card 3d7dccb9 / 24f53a72 — "stamp" (turbo.json: cache:false, dependsOn:["build"]) must ride the SAME
   // turbo invocation as "build", right after it, so dist/build-info.json is always re-stamped from THIS
   // checkout's real HEAD. NOT merely "for consistency" with other build paths — since 24f53a72, "build"'s
   // own outputs glob EXCLUDES build-info.json ("!dist/build-info.json"), so "stamp" is that file's ONLY
-  // writer, full stop; an invocation that omitted it (even --force'd) would leave build-info.json entirely
-  // untouched rather than reflecting the just-built HEAD. See restart.ts's own comment, and deploy-staleness
-  // .ts's module doc, for why --force alone was never enough (it doesn't stop "build"'s own successful-run
-  // cache WRITE, which could poison a LATER, unrelated non-forced invocation's cache-hit read).
+  // writer, full stop; an invocation that omitted it (even cache-defeated) would leave build-info.json
+  // entirely untouched rather than reflecting the just-built HEAD. See restart.ts's own comment, and
+  // deploy-staleness.ts's module doc, for why a cache-defeating flag alone was never enough on its own
+  // (card 24f53a72: it doesn't stop "build"'s own successful-run cache WRITE from poisoning a LATER,
+  // unrelated cache-hit read — ec6ead9d's `--cache=local:,remote:` closes that specific write, but the
+  // "stamp" task below still has to ride every invocation regardless, including any that doesn't).
   check("(3d7dccb9) build ALSO runs the \"stamp\" task, positioned right after \"build\" (turbo's own dependsOn ordering, not this array's)",
     build.args.includes("stamp") && build.args.indexOf("stamp") === build.args.indexOf("build") + 1);
   // Card bce50c22 — "skills-sync" (turbo.json: cache:false, dependsOn:["build"], same shape as "stamp")
@@ -104,9 +110,10 @@ try {
   // "build" script and is now a separate uncached task that must be explicitly requested).
   check("(bce50c22) build ALSO runs the \"skills-sync\" task, right after \"stamp\"",
     build.args.includes("skills-sync") && build.args.indexOf("skills-sync") === build.args.indexOf("stamp") + 1);
-  // The aad5fff3 footgun guard: the build must NOT be the `pnpm … build --force` shape (where --force
-  // reaches vite, not turbo). Proven by the absence of a `pnpm`-script invocation in the command/args.
-  check("(A) build is NOT the `pnpm run build --force` footgun shape (--force would forward to vite)",
+  // The aad5fff3 footgun guard: the build must NOT be the `pnpm … build --cache=…`/`--force` shape
+  // (where the cache-defeating flag reaches vite, not turbo). Proven by the absence of a `pnpm`-script
+  // invocation in the command/args.
+  check("(A) build is NOT the `pnpm run build --cache=…` footgun shape (the flag would forward to vite)",
     !/\bpnpm\b/.test(build.command) && !build.args.some((a) => /^pnpm$/.test(a)));
 
   // --- (0ec6fb57, win32-only) the third "buildNative" step's shape ---
@@ -297,6 +304,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the deploy build installs (--frozen-lockfile) BEFORE it force-builds turbo directly, a failing install short-circuits the build, a broken build can't verify a broken main green, (card 3d7dccb9) the same invocation also runs the uncached \"stamp\" task right after \"build\", and (card bde5d1fe) a quarantined checkout refuses before either step runs."
+  ? "\n✅ ALL PASS — the deploy build installs (--frozen-lockfile) BEFORE it cache-defeats turbo directly (--cache=local:,remote:, card ec6ead9d), a failing install short-circuits the build, a broken build can't verify a broken main green, (card 3d7dccb9) the same invocation also runs the uncached \"stamp\" task right after \"build\", and (card bde5d1fe) a quarantined checkout refuses before either step runs."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -20,6 +20,10 @@ This card caught it live: a genuinely-current daemon read `processBuiltShaMatche
 
 - Do not remove or bypass the `"stamp"` task from the deploy build's turbo invocation, and do not let it run cached — an uncached, same-invocation stamp is what guarantees the deploy's artifact identity reflects the checkout that actually built it, not a replayed cache entry from a different worktree.
 
+## Follow-up (card `ec6ead9d`)
+
+The literal invocation quoted above (`[turboBin(), "build", "stamp", ...filters, "--force"]`) is a point-in-time quote as of commit `779f3ce7` — the `"--force"` element was replaced by `"--cache=local:,remote:"` by card `ec6ead9d` (bounding the shared `.turbo/cache`'s growth; see that card's own decision record for why and the empirical proof it still defeats the cache read). "stamp" still rides the same invocation, immediately after "build", unchanged — only the cache-defeating flag's exact form changed.
+
 ## Source
 
 Inline comment in `packages/daemon/src/orchestration/restart.ts` (`deployBuildSteps`, STEP 2), as of commit `779f3ce7`. Relocated by card `0a525ae1` ("restart.ts, tranche 1"); no wording changed, `//`-prefixed lines joined into a flowing paragraph.

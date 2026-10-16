@@ -23,6 +23,10 @@ The fix is in `turbo.json`: `"build"`'s `outputs` now explicitly exclude `"!dist
 - Do not weaken or silence `deploySignatureMismatch`/`builtContentMatchesHead` to quiet a stamp-freeze symptom — they are correctly reporting on the (bad) input they're given; muting a correct alarm because it's fed bad data is how a real staleness signal becomes untrustworthy.
 - Do not assume a forced `"build"` task protects its own cache WRITE the way it protects the READ — the two are independent, and only excluding `dist/build-info.json` from `"build"`'s tracked `outputs` (in `turbo.json`) closes the write side.
 
+## Follow-up (card `ec6ead9d`)
+
+The deploy build's "build" step no longer uses `--force` at all — card `ec6ead9d` changed it to `--cache=local:,remote:`, which disables both the read AND the write for that one invocation (verified empirically, not assumed — see that card's own decision record). This closes this card's write-side gap for the deploy step SPECIFICALLY; the general lesson above ("don't assume a cache-defeating flag also stops the write") still holds for every OTHER non-deploy invocation (gate runs, worker self-checks, plain dev builds), which still use ordinary `turbo build` with no cache-defeating flag at all and so still write on every cache miss as designed.
+
 ## Source
 
 Inline comment in `packages/daemon/src/orchestration/restart.ts` (`deployBuildSteps`, STEP 2), as of commit `779f3ce7`. Relocated by card `0a525ae1` ("restart.ts, tranche 1"); no wording changed, `//`-prefixed lines joined into a flowing paragraph. See also card `3d7dccb9` (this defect's first sighting) and its own record, `docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md`.

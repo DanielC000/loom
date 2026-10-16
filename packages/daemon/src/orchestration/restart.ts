@@ -658,11 +658,12 @@ export function deployBuildSteps(root: string): BuildStep[] {
     { label: "install", command: "pnpm install --frozen-lockfile --prefer-offline", args: [], shell: true, timeoutMs: DEPLOY_INSTALL_TIMEOUT_MS },
     // STEP 2 — BUILD (closes face A: a stale FULL TURBO cache replaying a green build over broken/stale
     // source). Invoke turbo via ABSOLUTE node + ABSOLUTE turbo JS, NO shell — see below.
-    // `--force` is a DIRECT turbo argument here (`node <turbo> build … --force`), which is what actually
-    // bypasses turbo's content-keyed cache so a deploy ALWAYS does a real compile. ⚠️ Do NOT "simplify"
-    // this to `pnpm --filter @loom/web build --force`: there `--force` is forwarded to the package's build
-    // SCRIPT (vite), NOT to turbo, so the cache is NOT defeated and a stale build replays green (the
-    // aad5fff3 footgun). Filters come from DEPLOY_PACKAGES (../deploy-packages.js) — the single source of
+    // `--cache=local:,remote:` is a DIRECT turbo argument here (`node <turbo> build … --cache=local:,remote:`),
+    // which is what actually bypasses turbo's content-keyed cache so a deploy ALWAYS does a real compile.
+    // ⚠️ Do NOT "simplify" this to `pnpm --filter @loom/web build --cache=local:,remote:` (the old
+    // aad5fff3 footgun, same shape as the `--force` it used to carry): there the flag is forwarded to the
+    // package's build SCRIPT (vite), NOT to turbo, so the cache is NOT defeated and a stale build replays
+    // green. Filters come from DEPLOY_PACKAGES (../deploy-packages.js) — the single source of
     // truth this deploy build shares with deploy-staleness.ts's signal (card c3ce92ea), so the two can't
     // silently diverge on which packages a deploy actually rebuilds. Covers @loom/daemon, @loom/shared, AND
     // @loom/web — the daemon serves packages/web/dist statically, so a deploy that only rebuilt the daemon
@@ -673,15 +674,20 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // @decision 3d7dccb9 — do NOT remove/bypass "stamp" from this invocation or let it run cached: an
     // uncached, same-invocation stamp is what guarantees the deploy's artifact identity reflects THIS
     // checkout, not a replayed cache entry from a different git worktree (turbo's cache is shared across all).
-    // @decision 24f53a72 — `--force` on "build" does NOT also protect "build"'s own CACHE WRITE: turbo.json
-    // excludes "!dist/build-info.json" from "build"'s outputs so a cache hit/restore, forced or not, can
-    // never clobber what "stamp" (cache:false) most recently wrote.
+    // @decision 24f53a72 — a forced "build" does NOT also protect "build"'s own CACHE WRITE: turbo.json
+    // excludes "!dist/build-info.json" from "build"'s outputs so a cache hit/restore, cache-defeated or
+    // not, can never clobber what "stamp" (cache:false) most recently wrote.
+    // @decision ec6ead9d — do not revert `--cache=local:,remote:` back to `--force` without re-proving
+    // (isolated fixture, never the real shared cache) it still defeats the cache READ: unlike `--force`,
+    // this ALSO disables the WRITE, closing the per-deploy growth that fed `.turbo/cache`'s unbounded size.
+    //
     // Card bce50c22 — "skills-sync" (turbo.json: cache:false, dependsOn:["build"], same shape as "stamp")
     // rides the SAME invocation for the same reason: it used to run INSIDE @loom/daemon's cached "build"
-    // script, so a cache hit (even --force'd builds still WRITE a cache entry a later non-forced deploy
-    // could read) could leave this checkout's .claude/skills mirror unrefreshed. Omitting it here would
-    // silently stop self-hosting deploys from ever picking up a merged assets/skills/** change.
-    { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", "skills-sync", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
+    // script, so a cache hit (even a cache-defeated build's OWN run still used to WRITE an entry a later
+    // non-defeated deploy could read — no longer true since ec6ead9d) could leave this checkout's
+    // .claude/skills mirror unrefreshed. Omitting it here would silently stop self-hosting deploys from
+    // ever picking up a merged assets/skills/** change.
+    { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", "skills-sync", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--cache=local:,remote:"], shell: false, timeoutMs: 0 },
     // STEP 3 — BUILD-NATIVE, win32-only (card 0ec6fb57): recompiles the win-job-launcher.exe Windows Job
     // Object launcher (docs/decisions/1718416d-*.md) from source on EVERY deploy, so a merged launcher.cs
     // fix goes live through an ordinary restart with no manual `build:native` needed. ABSOLUTE node +
@@ -773,8 +779,8 @@ export function runBuildStep(step: BuildStep, cwd: string, cancelSignal?: AbortS
 }
 
 /** Injectable seam for {@link buildDaemon} — a test swaps in a fake runner to record the steps + force
- * results (prove install→build order, the --force/--frozen-lockfile flags, and install-fail short-circuit)
- * without a real spawn. Defaults to {@link runBuildStep}. */
+ * results (prove install→build order, the --cache=local:,remote:/--frozen-lockfile flags, and install-fail
+ * short-circuit) without a real spawn. Defaults to {@link runBuildStep}. */
 export interface BuildDeps {
   runStep?: (step: BuildStep, cwd: string) => Promise<{ code: number; out: string }>;
   /** Test-only repo-root override, so a hermetic test can point the snapshot/restore logic below (and the

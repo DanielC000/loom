@@ -3,9 +3,17 @@
   // Key EVERY task's cache on install-state: a change to the root lockfile (a dep add/bump) invalidates
   // all build caches, so a stale FULL TURBO replay can never serve a build that predates the dependency
   // change. turbo already tracks the lockfile implicitly; declaring it makes the dep→rebuild contract
-  // explicit and version-independent. (The daemon-deploy build additionally `--force`s — see
-  // packages/daemon/src/orchestration/restart.ts › deployBuildSteps — so its cache is fully defeated.)
+  // explicit and version-independent. (The daemon-deploy build additionally passes `--cache=local:,remote:`
+  // — see packages/daemon/src/orchestration/restart.ts › deployBuildSteps — so its cache is fully defeated.)
   "globalDependencies": ["pnpm-lock.yaml"],
+  // @decision ec6ead9d — turbo's OWN native local-cache eviction (not a hand-rolled prune script): the
+  // shared `.turbo/cache` at the main checkout (every worktree of this repo reads/writes the SAME dir —
+  // see turbo.json's own "stamp" task comment below) had no eviction at all and grew to ~19.8GB,
+  // unevicted since the repo's own `.turbo` first existed. Both run automatically, in a background
+  // thread, at the start of every `turbo run` — age-eviction first, then size. See the decision record
+  // for the full investigation and why these particular values.
+  "cacheMaxAge": "14d",
+  "cacheMaxSize": "5GB",
   "tasks": {
     // A CACHE HIT restores a task's cached `outputs` files without ever re-running its script — so it
     // never triggers Vite's own `emptyOutDir` clean, which only fires when `vite build` actually
