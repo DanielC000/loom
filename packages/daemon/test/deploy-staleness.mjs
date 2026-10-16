@@ -1357,7 +1357,11 @@ try {
 
   // SANITY, unpatched: this repo genuinely has no soundness hazard, so the check must resolve true here
   // — proving the injected failure below is what causes the null, not some unrelated fixture defect.
-  const rRaceSanity = computeDeployStalenessRaw({ distEntry: raceDistEntry2, repoRoot: raceRepo, processBuiltSha: raceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  // Card a295432b: this precondition used to call computeDeployStalenessRaw directly, with no retry at
+  // all — unlike its (23o) sibling just below, which retries the identical calls on elapsed-time evidence
+  // of a transient git timeout (GIT_TIMEOUT_RETRY_MIN_ATTEMPTS/GIT_TIMEOUT_EVIDENCE_MS). Route it through
+  // the SAME computeAtCapWithRetry helper instead of inventing a second copy of that retry logic.
+  const rRaceSanity = computeAtCapWithRetry({ distEntry: raceDistEntry2, repoRoot: raceRepo, processBuiltSha: raceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START }, "23o-sanity");
   check("(23o-sanity) UNPATCHED: this repo has no real soundness hazard, so the check resolves true" + reasonSuffix(rRaceSanity),
     rRaceSanity.builtContentMatchesHead === true && rRaceSanity.stale === false);
 

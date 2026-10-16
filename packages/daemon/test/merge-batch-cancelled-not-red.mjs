@@ -249,7 +249,16 @@ try {
     ctx.gate.failNext = true;
     const r = await ctx.sessions.mergeBatchTracked(P.mgrId, [b1.workerId, b2.workerId]);
     const v = r.settled && r.ok ? r.value : undefined;
-    const s = db.getMergeGateState(P.projId);
+    // runFallback (service.ts) reports a candidate `started:true` even when its own nested
+    // confirmWorkerMergeTracked degrades to {settled:false} past its sync-attach budget — it does not
+    // block on that solo confirm's real completion. So the per-candidate fallback's own DB write (the
+    // thing that "legitimately passes and clears owed") can still be in flight once mergeBatchTracked's
+    // OUTER promise has already resolved. Poll for the real state instead of reading it once
+    // synchronously right after the await (same pattern (C1)/(C6) already use for their own preconditions).
+    const s = await waitUntil(() => {
+      const state = db.getMergeGateState(P.projId);
+      return state.recent.filter((e) => e.result === "fail" && e.candidates === 2).length === 1 ? state : undefined;
+    }, { timeoutMs: 60000, intervalMs: 20, label: "merge-batch-cancelled-not-red (C3): the batch red lands in mergeGateState.recent" });
     check("(C3) a REAL failing batch gate is still a red: recorded exactly once with candidates:2 (its per-candidate fallback gated solos then legitimately pass and clear owed), not marked cancelled", v?.ok === false && v.cancelled === undefined && spy.red === 1 && s.recent.filter((e) => e.result === "fail" && e.candidates === 2).length === 1);
   }
 } finally {

@@ -98,10 +98,23 @@ const git = (repo, args) => execFileSync("git", ["-C", repo, ...args], { encodin
 
 // SMALL_MS < HOOK_TOTAL_MS < 2*SMALL_MS — see header doc for why this specific window matters for
 // scenario 1's RED reproduction (not for its GREEN outcome, which is timing-independent).
-const SMALL_MS = 2000;
-const HOOK_TICKS = 13;
+//
+// Card a295432b: scenario 2 failed under real gate load (HEAD never moved — the commit itself was
+// killed before landing, not just its post-commit hook). Measured 5 plain `git commit` calls on a
+// contended host under ordinary ambient load (no deliberate stress): 934, 1562, 2329, 1022, 889ms —
+// the max (2329ms) already exceeds the old SMALL_MS=2000 from nothing more than everyday contention,
+// well before a real gate's own 3-lane pool. Re-derived SMALL_MS at ~2.5x that measured max (this
+// project's standard safety-multiplier convention applied to a real measurement, not a guess),
+// rounded: 2329 * 2.5 ≈ 5823 -> 6000ms.
+// GRANDCHILD_DELAY_MS/A_ADD_DELAY_MS/S5_HOLD_MS (below) are already expressed as formulas of
+// SMALL_MS, so raising it alone re-derives all three. HOOK_TOTAL_MS is the one constant NOT
+// formula-coupled (HOOK_TICKS * HOOK_TICK_MS) — HOOK_TICKS is raised here to preserve the SAME
+// documented 1.3x-of-SMALL_MS ratio (HOOK_TICK_MS stays 200ms: it's the hook's own internal polling
+// grain, not a host-load margin): 6000 * 1.3 / 200 = 39 ticks exactly.
+const SMALL_MS = 6000;
+const HOOK_TICKS = 39;
 const HOOK_TICK_MS = 200;
-const HOOK_TOTAL_MS = HOOK_TICKS * HOOK_TICK_MS; // 2600ms, 1.3x SMALL_MS
+const HOOK_TOTAL_MS = HOOK_TICKS * HOOK_TICK_MS; // 7800ms, 1.3x SMALL_MS
 const SETTLE_MARGIN_MS = 3000; // extra wait AFTER both merges settle, comfortably past either hook's own
                                 // natural completion (see header doc's timeline) before we trust check().
 
