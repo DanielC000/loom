@@ -1088,7 +1088,12 @@ try {
   gitCb('-c user.email=t@loom -c user.name=t commit -q -m "docs(daemon): anchor a comment"', "2027-03-04T00:00:00Z");
   const cbCommentSha = execSync("git rev-parse HEAD", { cwd: cbRepo }).toString().trim();
 
-  const r25aRaw = computeDeployStalenessRaw({ distEntry: cbDistEntry, repoRoot: cbRepo, processBuiltSha: cbBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  // Card 28080a26: this call used to go through computeDeployStalenessRaw directly, with no retry on the
+  // computeAncestorBehaviouralMatch per-file `git show` timeout shape — unlike its (23o-sanity) sibling
+  // (card a295432b), which already routes through computeAtCapWithRetry. A standalone run on main under
+  // host load (lead gen 421, 1 red in 7) caught exactly that: both (23e) checks below failed with the
+  // fail-closed `builtContentMatchesHead:null`/`stale:true` shape. Route it through the same helper.
+  const r25aRaw = computeAtCapWithRetry({ distEntry: cbDistEntry, repoRoot: cbRepo, processBuiltSha: cbBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START }, "23e");
   check("(23e-setup) the date-based clock alone would have called this stale (commitsBehind counts the comment-only commit)" + reasonSuffix(r25aRaw),
     r25aRaw.commitsBehind === 1);
   check("(23e-setup) cbBaseSha genuinely IS an ancestor of the comment commit (the ordinary case, not a divergent branch)",
