@@ -61,7 +61,7 @@ import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
-import { waitUntil, sleepPast } from "./_wait.mjs";
+import { waitUntil, sleepPast, ambientScaledBudget } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -352,8 +352,10 @@ try {
     commitAll(a.worktreePath, "fix", GIT_ID);
     const afterFix = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
     if (!afterFix.settled) {
+      // Card 7b9bafb7: timeoutMs ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own log
+      // showed this re-fire ARRIVE LATE at 1.6x a bare 60_000ms budget under real contention.
       await waitUntil(() => sessions.gateStatus(afterFix.op.opId).state === "settled",
-        { timeoutMs: 60_000, label: "post-branch-change re-fire to settle (proving it re-derived, not replayed)" });
+        { timeoutMs: ambientScaledBudget(60_000, 3), label: "post-branch-change re-fire to settle (proving it re-derived, not replayed)" });
     }
     check("(e2e, FAIL) card cf803152: a re-fire after a candidate branch genuinely moves is NEVER served the stale cached verdict (no cacheHit — verdictIdentity mismatch forced a fresh re-derive)", !afterFix.settled || afterFix.cacheHit == null);
   }

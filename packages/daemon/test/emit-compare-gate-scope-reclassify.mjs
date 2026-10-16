@@ -49,6 +49,7 @@ import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce, pollUntil } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecgs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -168,7 +169,9 @@ try {
 
     // POSITIVE wait (not a negative fixed-wait): M2 must settle on its own while M1's held-open gate STILL occupies the cap's only slot — proof it never
     // needed a slot. A broken wiring (M2 queues behind M1) leaves this false after the bounded timeout instead of hanging the file; M1 is released after.
-    const settledWhileM1Holds = await pollUntil(() => confirm2Settled, { timeoutMs: 30000 });
+    // Card 7b9bafb7: ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own log showed the whole
+    // file SIGTERM-killed with this exact wait the last one printed before the file-level ceiling tripped.
+    const settledWhileM1Holds = await pollUntil(() => confirm2Settled, { timeoutMs: ambientScaledBudget(30000, 3) });
     const activeWhileM2Settled = sessions.gateSemaphore.snapshot().active;
     const m2QueuedEntries = sessions.gateSemaphore.snapshot().entries.filter((e) => e.projectId === M2.projId);
     check("(M) M2 (pure preLanded) settled while M1's held-open gate still occupied the cap's only slot — it never waited on the cap", settledWhileM1Holds && activeWhileM2Settled === 1);
@@ -260,9 +263,11 @@ try {
     check("(M2) P1 genuinely admitted and holds the cap's only slot", sessions.gateSemaphore.snapshot().active === 1);
 
     const p2 = sessions.confirmWorkerMerge(P2.mgrId, P2.workerId);
+    // Card 7b9bafb7: ambient-overshoot-calibrated (see _wait.mjs) — same real-git-before-admission
+    // exposure as (N)/(O) below, under real contention a bare fixed budget here is thin.
     const queued = await pollUntil(
       () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === P2.projId),
-      { timeoutMs: 30000 },
+      { timeoutMs: ambientScaledBudget(30000, 3) },
     );
     check("(M2) the race was staged (dirty at the skip-path stamp, clean at the gate-path stamp)", racedClean);
     check("(M2) P2 (preLanded) genuinely reached the semaphore's CAP-queue wait before P1 released", queued);
@@ -373,10 +378,13 @@ try {
     // prior 10s budget on this same pre-queue work with zero injected load — consistent with (O)'s own
     // ~4.1s baseline. 20s keeps this a genuine, bounded condition-wait (a real hang still fails well short
     // of the per-file timeout) while giving real git subprocess scheduling delay room that production's own
-    // GIT_OP_TIMEOUT_MS (15_000ms) already tolerates for any ONE of these calls.
+    // GIT_OP_TIMEOUT_MS (15_000ms) already tolerates for any ONE of these calls. Card 7b9bafb7:
+    // ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own log showed N2 had not even reached
+    // "queued" within a bare 20000ms under real contention (its OWN confirm never settled either — the
+    // mechanism is deterministic, only the pre-admission git work's wall time varies with load).
     const queued = await pollUntil(
       () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === N2.projId),
-      { timeoutMs: 20000 },
+      { timeoutMs: ambientScaledBudget(20000, 3) },
     );
     check("(N) N2 genuinely reached the semaphore's CAP-queue wait before N1 released", queued);
 
@@ -512,10 +520,11 @@ try {
     // spent ~4.1s of the prior 10s budget on this same pre-queue work with zero injected load. 20s keeps
     // this a genuine, bounded condition-wait (a real hang still fails well short of the per-file timeout)
     // while giving real git subprocess scheduling delay room that production's own GIT_OP_TIMEOUT_MS
-    // (15_000ms) already tolerates for any ONE of these calls.
+    // (15_000ms) already tolerates for any ONE of these calls. Card 7b9bafb7: ambient-overshoot-calibrated
+    // (see _wait.mjs) — same thin-margin shape as (M)/(M2)/(N) above, widened together.
     const queued = await pollUntil(
       () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === O2.projId),
-      { timeoutMs: 20000 },
+      { timeoutMs: ambientScaledBudget(20000, 3) },
     );
     check("(O) O2 genuinely reached the semaphore's CAP-queue wait before O1 released", queued);
 

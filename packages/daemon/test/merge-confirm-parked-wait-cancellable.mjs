@@ -49,7 +49,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mpwc-home-${Date.now()}-${process.pid}`);
@@ -71,8 +71,11 @@ const GENEROUS_SYNC_BUDGET_MS = 600_000; // DI seam only — never the productio
 // Code Review round 2: a FAIL-FAST bound for a promise that a regression could leave hanging forever (the
 // reviewer's own mutations B/C turned this file's unbounded `await pConfirm` into an exit-124 hang, not a
 // FAIL). NEVER gates the GREEN path — a successful cancel resolves in low milliseconds, orders of
-// magnitude under this — it only turns "hangs forever" into a prompt, named FAIL.
-const DEADLINE_MS = 10_000;
+// magnitude under this — it only turns "hangs forever" into a prompt, named FAIL. Card 7b9bafb7: scenario
+// (2b) deliberately lets the real squash land (cancel loses the race on purpose), so this must also cover
+// a genuine real-git merge completing under contention — a full gate's own log showed (2b)'s pConfirm not
+// settling within a bare 10_000ms, twice — now ambient-overshoot-calibrated (see _wait.mjs).
+const DEADLINE_MS = ambientScaledBudget(10_000, 3);
 
 async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 16000, label } = {}) {
   try {

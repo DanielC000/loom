@@ -29,6 +29,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -103,13 +104,23 @@ try {
     // still fails this test loudly instead of silently synthesizing a wrong-shaped result (the original
     // defect here: a `{settled:false}` case was papered over into a fabricated `ok:false` value whose
     // `reason` text didn't match this test's own precondition check, failing it for the wrong reason).
-    const deadline = Date.now() + 60_000;
-    let r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
-    while (!r.settled) {
-      if (Date.now() > deadline) throw new Error(`mergeBatchTracked did not settle within 60s (last op state: ${JSON.stringify(r.op)})`);
-      r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
-    }
-    result = r.ok ? r.value : { ok: false, landed: [], fallback: [], reason: `mergeBatchTracked errored: ${r.error instanceof Error ? r.error.message : String(r.error)}` };
+    //
+    // Card 7b9bafb7: converted from a hand-rolled fixed-60s re-poll loop to the shared `waitUntil` — SAME
+    // condition awaited (`r.settled`), SAME re-poll-the-whole-call shape, but now ambient-overshoot
+    // calibrated (see _wait.mjs) and gets the ARRIVED-LATE/ABSENT timeout diagnostic the hand-rolled loop
+    // never had. A real gate log showed this op still genuinely `"state":"running"` (not stuck) when the
+    // bare 60s deadline tripped under contention.
+    let lastOpState;
+    const settled = await waitUntil(async () => {
+      const r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+      lastOpState = r.op;
+      return r.settled ? r : false;
+    }, { timeoutMs: ambientScaledBudget(60_000, 3), intervalMs: 0, label: "mergeBatchTracked settle" })
+      .catch((err) => {
+        console.error(`mergeBatchTracked did not settle (last op state: ${JSON.stringify(lastOpState)})`);
+        throw err;
+      });
+    result = settled.ok ? settled.value : { ok: false, landed: [], fallback: [], reason: `mergeBatchTracked errored: ${settled.error instanceof Error ? settled.error.message : String(settled.error)}` };
   } finally {
     console.log = origLog;
   }

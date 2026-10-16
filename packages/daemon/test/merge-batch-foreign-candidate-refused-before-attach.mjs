@@ -54,7 +54,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -159,7 +159,9 @@ try {
   // The rejected gate above drives mergeBatchTracked's OWN fallback path (a real, async
   // confirmWorkerMergeTracked per candidate) — drain it before closing the db, or its tail settles after
   // close() and logs a caught-but-noisy "database connection is not open" (no assertion depends on this).
-  await waitUntil(() => svc.pendingOps.listAllOfKind("merge").length === 0, { label: "fallback confirms drained before db.close()", timeoutMs: 30_000 });
+  // Card 7b9bafb7: timeoutMs ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own 5-log sample
+  // showed this drain ARRIVE LATE at up to 1.5x a bare 30_000ms budget under real contention, twice.
+  await waitUntil(() => svc.pendingOps.listAllOfKind("merge").length === 0, { label: "fallback confirms drained before db.close()", timeoutMs: ambientScaledBudget(30_000, 3) });
 } finally {
   if (db) db.close();
   for (const wt of worktrees) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* best-effort */ } }

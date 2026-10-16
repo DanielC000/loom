@@ -31,7 +31,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");
 useOwnLoomHome("loom-bmdun-home-");
 
@@ -136,7 +136,9 @@ try {
 
     const r = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
     check("(B) precondition: the batch degraded to pending (tiny syncAttachBudgetMs)", r.settled === false);
-    await waitUntil(() => nudges.some((n) => n.target === P.mgrId && /\[loom:merge-batch-unverified\]/.test(n.text)), { timeoutMs: 30_000, intervalMs: 50, label: "merge-batch-unverified settle nudge" });
+    // Card 7b9bafb7: timeoutMs ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own 5-log
+    // sample showed this nudge ARRIVE LATE at up to 1.7x a bare 30_000ms budget under real contention.
+    await waitUntil(() => nudges.some((n) => n.target === P.mgrId && /\[loom:merge-batch-unverified\]/.test(n.text)), { timeoutMs: ambientScaledBudget(30_000, 3), intervalMs: 50, label: "merge-batch-unverified settle nudge" });
     const nudge = nudges.find((n) => n.target === P.mgrId && /\[loom:merge-batch-unverified\]/.test(n.text)).text;
     check("(B) the nudge carries the pre-existing git-log/ALREADY_MERGED guidance", /check git log on the mainline branch/.test(nudge) && /ALREADY_MERGED/.test(nudge));
     check("(B) (DoD item 4) the nudge ALSO carries the NEW checkout-confirmation guidance", /confirm canonical is checked out on the mainline branch before any worker_merge_confirm/.test(nudge));

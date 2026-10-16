@@ -206,3 +206,64 @@ export async function waitForJsonFile(path, { timeoutMs = 15000, intervalMs = 10
   });
   return wrapped.value;
 }
+
+// AMBIENT-OVERSHOOT CALIBRATION (card 7b9bafb7) — promoted from the inline "[calib] ambient overshoot"
+// pattern three files had independently hand-copied (dev-server-teardown.mjs, dist-importer-check-glue.mjs,
+// trust-lock.mjs — grep their git history for the string this comment names), into one shared helper so a
+// new caller needing the same scaling never has to re-derive or hand-copy the probe.
+//
+// Measures how much slower a nominal 50ms sleep runs RIGHT NOW under whatever contention this process's
+// host currently has (1 = none observed, >1 scales with it), and uses that factor to scale a caller's own
+// fixed-ms wait budget instead of guessing a bigger fixed number a more-loaded run could still blow
+// through. The probe is measured ONCE per process and memoized — every `ambientScaledBudget` call after
+// the first reuses that SAME factor, so a file with several calibrated budgets never re-measures (and
+// risks drifting) mid-run.
+const AMBIENT_PROBE_MS = 50;
+let cachedAmbientOvershoot;
+function measureAmbientOvershoot() {
+  if (cachedAmbientOvershoot !== undefined) return cachedAmbientOvershoot;
+  const t0 = performance.now();
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, AMBIENT_PROBE_MS);
+  const dt = performance.now() - t0;
+  cachedAmbientOvershoot = Math.max(1, dt / AMBIENT_PROBE_MS);
+  console.log(`[calib] ambient overshoot ${cachedAmbientOvershoot.toFixed(2)}x (probe: nominal ${AMBIENT_PROBE_MS}ms sleep took ${dt.toFixed(1)}ms)`);
+  return cachedAmbientOvershoot;
+}
+
+// Caps the measured OVERSHOOT factor alone (never a caller's own `marginMultiplier`, below) at this
+// multiple — a single bad probe sample (a momentary, extreme host stall right when this process happened
+// to measure) can't compound through every budget this helper scales and turn a bounded wait into
+// something close to a hang. 4x mirrors the largest margin already in use among this suite's pre-existing
+// calibrated waits (dev-server-teardown.mjs's own REAP_TIMEOUT_MS). Exported so the helper's own selftest
+// can assert against it directly instead of hand-copying the number.
+export const AMBIENT_OVERSHOOT_CAP = 4;
+
+/**
+ * The pure scaling math, factored out so the helper's own selftest (wait-ambient-scaled-budget.mjs) can
+ * unit-test the floor/cap clamp deterministically by passing an arbitrary `overshoot` — without needing to
+ * force real host contention to exercise the cap. Production callers want `ambientScaledBudget` below,
+ * never this directly: it takes the overshoot as a parameter instead of measuring it live.
+ * @param {number} baseMs
+ * @param {number} overshoot
+ * @param {number} [marginMultiplier]
+ * @returns {number}
+ */
+export function scaleAmbientBudget(baseMs, overshoot, marginMultiplier = 1) {
+  const cappedOvershoot = Math.min(overshoot, AMBIENT_OVERSHOOT_CAP);
+  return Math.max(baseMs, Math.round(baseMs * cappedOvershoot * marginMultiplier));
+}
+
+/**
+ * Scale `baseMs` by this process's measured ambient-contention overshoot (capped at
+ * `AMBIENT_OVERSHOOT_CAP`×), times an optional caller-supplied safety `marginMultiplier` (default 1,
+ * itself uncapped — a caller choosing a bigger margin for a riskier wait keeps that choice in full).
+ * Never returns less than `baseMs`: an idle host (overshoot 1x) with the default margin leaves it
+ * unchanged, and the overshoot component alone never exceeds the cap regardless of how extreme the probe
+ * reading was.
+ * @param {number} baseMs the wait's own unscaled budget.
+ * @param {number} [marginMultiplier] an extra safety factor applied on top of the capped overshoot.
+ * @returns {number}
+ */
+export function ambientScaledBudget(baseMs, marginMultiplier = 1) {
+  return scaleAmbientBudget(baseMs, measureAmbientOvershoot(), marginMultiplier);
+}

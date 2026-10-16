@@ -50,7 +50,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
-import { waitUntil, deferred } from "./_wait.mjs";
+import { waitUntil, deferred, ambientScaledBudget } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -144,11 +144,14 @@ try {
   // settled), and (2) canonical main's HEAD has genuinely advanced (the fast-forward this card's own
   // finding is about has ALREADY happened). Both are real state this test only OBSERVES, never controls —
   // exactly the waitUntil discipline test/_wait.mjs documents, not a blind sleep standing in for either.
+  // Card 7b9bafb7: timeoutMs ambient-overshoot-calibrated on all three (see _wait.mjs) — a full gate's own
+  // 5-log sample showed the FIRST of these three ARRIVE LATE (up to 1.2x a bare 30_000ms budget) under
+  // real contention, twice; the other two race the SAME contention in the SAME scenario so widen together.
   await waitUntil(() => !!db.getLatestEventForManagerByKind(mgrId, "build_gate"),
-    { timeoutMs: 30_000, label: "the batch's own build_gate audit event to land" });
+    { timeoutMs: ambientScaledBudget(30_000, 3), label: "the batch's own build_gate audit event to land" });
   await waitUntil(() => execSync("git rev-parse HEAD", { cwd: repo }).toString().trim() !== baseMainSha,
-    { timeoutMs: 30_000, label: "canonical main to actually fast-forward past baseMainSha" });
-  await waitUntil(() => finishCalls > 0, { timeoutMs: 30_000, label: "finishAlreadyMerged to actually be reached (blocked on this test's own gate)" });
+    { timeoutMs: ambientScaledBudget(30_000, 3), label: "canonical main to actually fast-forward past baseMainSha" });
+  await waitUntil(() => finishCalls > 0, { timeoutMs: ambientScaledBudget(30_000, 3), label: "finishAlreadyMerged to actually be reached (blocked on this test's own gate)" });
 
   // ── THE RACE ASSERTION ─────────────────────────────────────────────────────────────────────────────────
   // At this exact point: the gate ran, main already advanced, and the ONLY thing left before mergeBatchTracked's

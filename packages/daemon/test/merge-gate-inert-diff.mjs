@@ -69,7 +69,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, ambientScaledBudget } from "./_wait.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // This file asserts merge/gate-skip behavior, never the pre-removal process reap. The real reap runs a win32
 // powershell Get-CimInstance enumeration (pty/host.ts enumerateProcessesWin32, ~1-2s under load) per worktree
@@ -688,8 +688,11 @@ try {
     db.insertSession({ id: worker3Id, projectId: I.projId, agentId: I.agentId, engineSessionId: null, title: null, cwd: wt3.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: I.mgrId, taskId: task3Id, worktreePath: wt3.worktreePath, branch: wt3.branch });
     // 20s, not a tight bound: this is only a leaked-guard tripwire (a genuine leak hangs FOREVER, so any
     // finite bound catches it) — a tight one risks flaking on ordinary git-subprocess variance this deep
-    // into the suite (observed: an occasional real confirm taking a few seconds under load).
-    const confirm3 = await confirmWithTimeout(sessions, I.mgrId, worker3Id, 20000);
+    // into the suite (observed: an occasional real confirm taking a few seconds under load). Card
+    // 7b9bafb7: that "a few seconds" turned out thin under FULL-GATE contention (a real gate log showed
+    // this timing out outright) — now ambient-overshoot-calibrated (see _wait.mjs) instead of a bigger
+    // fixed guess.
+    const confirm3 = await confirmWithTimeout(sessions, I.mgrId, worker3Id, ambientScaledBudget(20000, 3));
     check("(I) a THIRD, unrelated inert worker on the same repo did NOT hang behind a leaked guard", confirm3 !== "TIMEOUT");
     check("(I) and it merged successfully — the repo guard was genuinely free", confirm3 !== "TIMEOUT" && confirm3.merged === true && confirm3.gateRan !== true);
   }

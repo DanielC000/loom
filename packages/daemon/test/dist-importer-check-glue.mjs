@@ -56,7 +56,7 @@ import { randomUUID } from "node:crypto";
 import { execSync, execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil, deferred } from "./_wait.mjs";
+import { waitUntil, deferred, ambientScaledBudget } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-dic-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -118,19 +118,14 @@ const noReap = async () => ({ killedPids: [] });
 // proven to cover every future stall.
 const DIST_IMPORTER_REAL_GIT_OP_WAIT_MS = 120_000;
 
-// Card 47e70868: ambient-load calibration, mirroring dev-server-teardown.mjs/trust-lock.mjs's own
-// established pattern (grep "[calib] ambient overshoot") — measure how much slower a nominal 50ms sleep
-// runs RIGHT NOW under whatever contention this run's host currently has, and scale the host-load-
-// sensitive SEMAPHORE-ADMISSION wait budgets below by that measured factor instead of a bigger fixed
-// guess a more loaded pool run (3 gate lanes + a sibling project's own gate) could still blow through.
-// 1 = no contention observed; >1 scales with it. Deliberately NOT applied to
+// Card 47e70868 (promoted to the shared `ambientScaledBudget` helper by card 7b9bafb7 — see `_wait.mjs`
+// for the probe + cap mechanics): scale the host-load-sensitive SEMAPHORE-ADMISSION wait budgets below by
+// this process's measured ambient overshoot instead of a bigger fixed guess a more loaded pool run (3
+// gate lanes + a sibling project's own gate) could still blow through. Deliberately NOT applied to
 // DIST_IMPORTER_REAL_GIT_OP_WAIT_MS above — that constant covers a rare, intermittent real-createWorktree
 // STALL (not ordinary ambient slowness; see its own comment and card 69dc8fcd's non-repro investigation),
 // a different failure shape this calibration is not meant to paper over.
-const calibT0 = performance.now();
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-const calibDt = performance.now() - calibT0;
-const overshoot = Math.max(1, calibDt / 50);
+//
 // These waits observe a REAL but normally sub-second git/admission step — kickDistImporterCheck's own
 // changedDaemonSrcTsPathsForCommit() git-diff call ((6)/(7)'s "admitted and held" waits, (13)'s queued-
 // behind-cap visibility), or an ordinary confirmWorkerMergeTracked's own real-git admission into the live
@@ -141,8 +136,8 @@ const overshoot = Math.max(1, calibDt / 50);
 // a multi-minute stall like DIST_IMPORTER_REAL_GIT_OP_WAIT_MS's own case) pushed these sub-second ops
 // past a few seconds. A 3x margin over the measured ambient overshoot is cheap insurance on a healthy
 // host (overshoot ~1x ⇒ ~30s) and genuinely protective on a loaded one, never a blind widen.
-const SEMAPHORE_ADMISSION_WAIT_MS = Math.round(10_000 * overshoot * 3);
-console.log(`[calib] ambient overshoot ${overshoot.toFixed(2)}x → semaphore-admission bound ${SEMAPHORE_ADMISSION_WAIT_MS}ms`);
+const SEMAPHORE_ADMISSION_WAIT_MS = ambientScaledBudget(10_000, 3);
+console.log(`[calib] semaphore-admission bound ${SEMAPHORE_ADMISSION_WAIT_MS}ms`);
 
 // Negative control (card 47e70868 DoD): prove the wait mechanism powering both the calibrated budget
 // above and every other `waitUntil` call in this file still FAILS when the awaited condition never

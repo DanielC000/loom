@@ -19,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn as spawnProcess } from "node:child_process";
 import { requireHermeticEnv, enableRootCreationCapture, awaitRootCreationCapture } from "./_guard.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, ambientScaledBudget } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -39,23 +39,19 @@ const waitUntil = async (cond, timeoutMs, stepMs = 100) => {
   }
 };
 
-// Ambient-load calibration (mirrors trust-lock.mjs): measure how much slower a nominal 50ms sleep runs
-// RIGHT NOW under whatever contention this run's host currently has, and scale the load-sensitive reap
-// bounds below by that measured factor instead of guessing a fixed number a more loaded pool run could
-// still blow through. 1 = no contention observed; >1 scales with it.
-const calibT0 = performance.now();
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-const calibDt = performance.now() - calibT0;
-const overshoot = Math.max(1, calibDt / 50);
+// Ambient-load calibration (card 7b9bafb7: promoted into the shared `ambientScaledBudget` helper,
+// `_wait.mjs` — see its own doc for the probe + cap mechanics): scale the load-sensitive reap bounds below
+// by this process's measured ambient overshoot instead of guessing a fixed number a more loaded pool run
+// could still blow through.
 // Killing an already-spawned local process is a plain OS syscall — not itself contention-sensitive the
 // way spawning a NEW helper process is — but scale it too for headroom.
-const ROOT_DEATH_TIMEOUT_MS = Math.round(3000 * overshoot * 2);
+const ROOT_DEATH_TIMEOUT_MS = ambientScaledBudget(3000, 2);
 // reapOrphanedDescendants spawns a NEW powershell.exe that queries the FULL system process list via CIM
 // — real external-process work (process creation + WMI provider IPC), not just scheduler delay, so it
 // gets the most generous scaling: under a loaded pool this genuinely observed >5000ms to complete
 // (confirmed by a 16-way-concurrency + CPU-burn repro mirroring the real gate's pool-8 contention).
-const REAP_TIMEOUT_MS = Math.round(5000 * overshoot * 4);
-console.log(`[calib] ambient overshoot ${overshoot.toFixed(2)}x → root-death bound ${ROOT_DEATH_TIMEOUT_MS}ms, reap bound ${REAP_TIMEOUT_MS}ms`);
+const REAP_TIMEOUT_MS = ambientScaledBudget(5000, 4);
+console.log(`[calib] root-death bound ${ROOT_DEATH_TIMEOUT_MS}ms, reap bound ${REAP_TIMEOUT_MS}ms`);
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()).
 const tmpHome = path.join(os.tmpdir(), `loom-devserver-teardown-${Date.now()}-${process.pid}`);

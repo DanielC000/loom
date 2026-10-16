@@ -22,6 +22,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
 useOwnLoomHome("loom-bgrot-home-");
@@ -38,7 +39,10 @@ const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const noReap = async () => ({ killedPids: [] });
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-const ADMIT_BUDGET_MS = 20_000; // a POSITIVE wait: a leaked guard never admits, so this only ever expires on a real leak
+// a POSITIVE wait: a leaked guard never admits, so this only ever expires on a real leak. Card 7b9bafb7:
+// ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own log showed scenario (b)'s following
+// confirm never even reach admission within a bare 20_000ms under real contention.
+const ADMIT_BUDGET_MS = ambientScaledBudget(20_000, 3);
 
 const mk = (label) => ({
   projId: `bgrot-${label}-proj-${sfx}`, agentId: `bgrot-${label}-agent-${sfx}`, mgrId: `bgrot-${label}-mgr-${sfx}`,

@@ -20,7 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
@@ -151,7 +151,9 @@ try {
     const nBefore = nudges.length;
     const r = await svcAsync.mergeBatchTracked(s.mgr1, s.workers.map((w) => w.workerId));
     check("(C) precondition: batch degraded to pending (the nudge is where the outcome is announced)", r.settled === false);
-    await waitUntil(() => nudges.slice(nBefore).some((x) => /\[loom:merge-batch-failed\]/.test(x.text)), { timeoutMs: 30_000, intervalMs: 50, label: "batch-failed nudge (C)" });
+    // Card 7b9bafb7: timeoutMs ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own 5-log
+    // sample showed this nudge ARRIVE LATE at up to 1.6x a bare 30_000ms budget under real contention.
+    await waitUntil(() => nudges.slice(nBefore).some((x) => /\[loom:merge-batch-failed\]/.test(x.text)), { timeoutMs: ambientScaledBudget(30_000, 3), intervalMs: 50, label: "batch-failed nudge (C)" });
     const nudge = nudges.slice(nBefore).find((x) => /\[loom:merge-batch-failed\]/.test(x.text)).text;
     // the in-lineage fallback confirm degrades to pending on the 1ms budget and gates asynchronously — wait for it.
     await waitUntil(() => fallbackGateCalls.includes(s.workers[0].worktreePath), { timeoutMs: 30_000, intervalMs: 50, label: "in-lineage fallback gate (C)" });
