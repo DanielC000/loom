@@ -381,3 +381,113 @@ never exists at all, with no `.git` anywhere in its own ancestor chain, so its w
 value with no relationship to `Y`'s (or `Z`'s) real, resolvable key — reproducing the "untracked,
 unreferenced hash" `82032b5c`'s own round-1 text already measured for the live runtime-union defect this
 card's own stray-file residual descends from.
+
+## Follow-up 150aed7b — the scalar-only gate never reached the hash check for an array-only record
+
+Card `150aed7b`, flagged by `43cf3b26`'s own round-3 Code Review (`5220fda9`): `detectUnknownProvenance`'s
+own precondition `if (!entry.resolvedKey) return false;` reads ONLY the scalar field. Card `43cf3b26`
+generalized `resolvedKey` (singular) to `resolvedKeys` (plural, N keys) at every OTHER read site in this
+module via its own `informativeKeysFor` helper (scalar ∪ plural, deduped) — but this detector's own gate
+was never updated to match. An array-only record (plural `resolvedKeys` populated, no scalar at all —
+`43cf3b26`'s own `probe2.mjs`/"plural-only-no-scalar" shape) short-circuited at the scalar check and
+never reached the hash-mismatch comparison at all, regardless of whether it would otherwise match the
+defect-A signature this detector exists to catch.
+
+### Confirmed reachable, not merely theoretical
+
+All THREE call sites that construct `entry` from raw parsed JSON parse `resolvedKey` (scalar) and
+`resolvedKeys` (plural) as separate fields, straight off the raw bytes, and call
+`detectUnknownProvenance` immediately after, before any other derivation — PASS 1's own main loop, PASS
+1b's tmp-residue recovery, and the safety-tmp recovery pass. An array-only record reaching ANY of the
+three arrives at the scalar-only gate with `entry.resolvedKey === undefined` identically at all three;
+none of them derives the scalar from the plural array first. Confirmed directly at each site (not
+inferred from one and assumed for the others) before writing the fix.
+
+### The fix
+
+Generalized the gate to `informativeKeysFor(entry).length === 0` (the SAME helper `43cf3b26` already
+introduced for every other scalar-only gate in this module) and the hash check to
+`informativeKeysFor(entry).some((k) => quarantineHashForKey(k) !== hash)`. With exactly one informative
+key (the pre-150aed7b population of every record that ever reached this function, since `43cf3b26`'s own
+plural field didn't exist before it), `.some()` over a one-element array reduces to the ORIGINAL
+single-key comparison byte-for-byte — this is a pure generalization, never a behavior change for any
+record shaped the way every existing caller already produces.
+
+**Why `.some()`, not `.every()`:** the scalar case's original semantics were "the one recorded key
+mismatches the physical hash ⇒ suspicious." Generalizing to N keys while preserving that same meaning
+means each key is independently checked against the SAME predicate and ORed together — exactly how this
+module's own sibling helper (`secondaryKeysToAttempt`'s per-key boot-time re-arm loop) already treats a
+plural `resolvedKeys` as N independent candidates, never as a single aggregate fact.
+
+### Do not
+
+- Do not revert to deriving a single scalar from `informativeKeysFor(entry)[0]` (e.g. "pick the first
+  key") before the hash check — that silently drops every OTHER key's own independent signal and
+  reintroduces an order-dependent, arbitrary answer for a record carrying more than one key.
+- Do not forget this detector is called at THREE sites, not one — a future change here must be verified
+  against all three, since they share no common call-through chokepoint (unlike most write-side logic in
+  this module, which funnels through `writeMergeQuarantineLatch`).
+
+### Tests
+
+`merge-quarantine-unknown-provenance-array-only-150aed7b.mjs` (new, 2 scenarios, each in its own child
+process with its own fresh `LOOM_HOME`): `scalar` (the pre-existing, unchanged behavior — a positive
+control) and `array-only` (the fix — a record shaped identically except `resolvedKeys` instead of
+`resolvedKey`, now ALSO correctly flagged `provenanceUnknown:true`). Verified this does not regress
+`merge-quarantine-dual-key-persistence-43cf3b26.mjs`'s own `plural-only-no-scalar` scenario — that
+scenario's own record carries `provenanceTracked: true`, so it never reaches the generalized gate at all
+(short-circuits earlier, at the `provenanceTracked` check); all 12 of that file's scenarios re-confirmed
+green, unaffected. `pnpm --filter @loom/daemon negative-control --file
+packages/daemon/src/git/merge-quarantine.ts --test
+packages/daemon/test/merge-quarantine-unknown-provenance-array-only-150aed7b.mjs --test
+packages/daemon/test/merge-quarantine-dual-key-persistence-43cf3b26.mjs` proves RED (reverted to `HEAD`
+— the array-only scenario fails, the 43cf3b26 suite unaffected in both phases) → GREEN (restored) →
+byte-identical clean tree.
+
+### CR follow-up (same card) — precision/coverage, and a text-side asymmetry
+
+**Six more scenarios** added to the array-only test (8 total): `provenance-tracked-array-only-unaffected`
+and `single-token-array-only-unaffected` (the precision guard and the one-token guard both still apply to
+an array-only record, not just the scalar case); `self-ref-scalar-plus-foreign-plural-flagged` (a scalar
+that hashes to its OWN physical file — i.e. would NEVER trip the old scalar-only check alone — paired
+with a genuinely foreign plural key; the foreign key, not the scalar, must still trip detection);
+`array-only-pass1b-tmp-residue` and `array-only-safety-tmp` (the OTHER two call sites sharing the
+identical scalar/plural raw-JSON parse pattern, confirmed directly — a bare `.json.tmp-<n>` or
+`.json.tmp-safety-<n>-<hex>` residue with no `.json` final, since `hashToRepo` is always empty in this
+suite and can never make either site's own "stale, skip" branch fire).
+
+**A separate, real bug this round surfaced: the remediation TEXT still named only the scalar
+`resolvedKey`**, never any plural key — `AmbiguousIdentities.unknownProvenanceKeyPath` (singular) was
+computed as `absoluteKeyPathOrUndefined(entry.resolvedKey)` at its two construction sites
+(`ambiguousIdentitiesFor`, `ambiguousIdentitiesForLatchId`) and ad hoc at a third (the pending-tier
+refusal in `clearMergeQuarantineLatchFile`). This gave FALSE text for an array-only record ("resolvedKey
+is not recorded... no further repo to name" even when a real foreign key sat in `resolvedKeys`) and named
+the WRONG repo for a self-referencing scalar (naming the entry's own key, which is never foreign, instead
+of a genuinely foreign plural key sitting right next to it).
+
+**THE FIX:** `unknownProvenanceKeyPathsFor(entry, ownKey?)` — ONE shared helper, used at all three sites
+— returns every one of `entry`'s own `informativeKeysFor` OTHER than `ownKey` (via
+`secondaryKeysToAttempt`, the SAME per-key exclusion `43cf3b26`'s own boot-time re-arm loop already
+uses), filtered to absolute-path-shaped values, deduped. `ownKey` omitted (the pending tier, which has no
+single armed key) falls back to every informative key. `AmbiguousIdentities.unknownProvenanceKeyPath`
+(singular `string | undefined`) is now `unknownProvenanceKeyPaths` (plural `string[]`);
+`remediationTextFor` names every one of them, or falls back to the old "nothing to name" text only when
+the array is genuinely empty.
+
+**A real regression caught in the same round, before it ever reached a committed state:** the first draft
+named the array via `JSON.stringify(ambiguous.unknownProvenanceKeyPaths)` — `JSON.stringify` DOUBLES every
+backslash in a Windows path, so the embedded text no longer byte-matched the real path string.
+`merge-quarantine-runtime-union-provenance.mjs`'s own `48bda567-migrate-union-drops-dual-arm-b-older`
+scenario (a pre-existing, unrelated test asserting `refusal.reason.toLowerCase().includes(w.toLowerCase())`)
+caught this immediately on a full re-run. Fixed by joining with plain single-quotes
+(`.map((p) => \`'${p}'\`).join(", ")`) — the SAME convention `contributorRepoPaths`' own clause already
+uses — never `JSON.stringify` a path destined for an exact-text match.
+
+**Tests:** the self-ref and pure-array-only scenarios each also drive a real
+`clearMergeQuarantineLatchFile` refusal and assert the refusal text names the foreign key (never the
+self-reference, never the old "nothing to name" fallback). `pnpm --filter @loom/daemon negative-control
+--file packages/daemon/src/git/merge-quarantine.ts --test
+packages/daemon/test/merge-quarantine-unknown-provenance-array-only-150aed7b.mjs --ref 3a9e0027` proves
+5 of 8 scenarios RED (every one that depends on either the generalized detection or the text fix) →
+GREEN (restored) → byte-identical clean tree. `merge-quarantine-runtime-union-provenance.mjs` and
+`merge-quarantine-unknown-provenance.mjs` re-confirmed green after the backslash fix.

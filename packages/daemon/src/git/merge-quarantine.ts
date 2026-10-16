@@ -409,11 +409,16 @@ interface AmbiguousIdentities {
   siblingRepoPaths: string[];
   contributorRepoPaths: string[];
   unknownProvenance: boolean;
-  /** The entry's own `resolvedKey`, ONLY when `unknownProvenance` is true and that key is itself an
-   *  absolute filesystem path (see {@link absoluteKeyPathOrUndefined}) — `undefined` otherwise (which
-   *  also covers a protect-copy pending entry, whose own whitelist strips `resolvedKey` entirely — see
-   *  `protectDegradedOccupantBeforeDelete`'s own doc). Never fabricated when the key isn't path-shaped. */
-  unknownProvenanceKeyPath?: string;
+  /** Every one of the entry's OWN informative keys (other than the one it's being reported under), when
+   *  itself an absolute filesystem path — see {@link unknownProvenanceKeyPathsFor}. `[]` whenever
+   *  `unknownProvenance` is false, or no OTHER informative key is path-shaped (which also covers a
+   *  protect-copy pending entry, whose own whitelist strips `resolvedKey`/`resolvedKeys` entirely — see
+   *  `protectDegradedOccupantBeforeDelete`'s own doc). Never fabricated when a key isn't path-shaped.
+   *
+   *  @decision db0a9db0 (Follow-up 150aed7b) — generalized from a single scalar path to every one; the
+   *  scalar alone can miss a genuinely foreign plural key, or BE a self-reference that names nothing
+   *  useful while masking a real foreign key sitting in `resolvedKeys`. */
+  unknownProvenanceKeyPaths: string[];
 }
 
 function totalAmbiguousCount(a: AmbiguousIdentities): number {
@@ -425,7 +430,7 @@ function ambiguousIdentitiesFor(key: string, entry: MergeQuarantineEntry): Ambig
     siblingRepoPaths: canonicalSiblingsFor(key, entry.repoPath).map((p) => p.entry.repoPath),
     contributorRepoPaths: entry.contributorRepoPaths ?? [],
     unknownProvenance: !!entry.provenanceUnknown,
-    unknownProvenanceKeyPath: entry.provenanceUnknown ? absoluteKeyPathOrUndefined(entry.resolvedKey) : undefined,
+    unknownProvenanceKeyPaths: entry.provenanceUnknown ? unknownProvenanceKeyPathsFor(entry, key) : [],
   };
 }
 
@@ -439,7 +444,7 @@ function ambiguousIdentitiesForLatchId(entry: MergeQuarantineEntry, latchId: str
     siblingRepoPaths: key ? canonicalSiblingsFor(key, entry.repoPath).map((p) => p.entry.repoPath) : [],
     contributorRepoPaths: entry.contributorRepoPaths ?? [],
     unknownProvenance: !!entry.provenanceUnknown,
-    unknownProvenanceKeyPath: entry.provenanceUnknown ? absoluteKeyPathOrUndefined(entry.resolvedKey) : undefined,
+    unknownProvenanceKeyPaths: entry.provenanceUnknown ? unknownProvenanceKeyPathsFor(entry, key) : [],
   };
 }
 
@@ -473,35 +478,43 @@ function remediationTextFor(ownRepoPaths: string[], ambiguous: AmbiguousIdentiti
     `. ${ambiguous.contributorRepoPaths.length} other identit${ambiguous.contributorRepoPaths.length === 1 ? "y" : "ies"} ` +
     `(${ambiguous.contributorRepoPaths.map((p) => `'${p}'`).join(", ")}) had their own raise folded into this union's token set at runtime — ` +
     `clear-by-path with a contributor's own path does nothing; clearing by the entry's own path above lifts its token too`;
-  // @decision db0a9db0 — one generic sentence, never a fabricated identity; see the decision record.
+  // @decision db0a9db0 (Follow-up 150aed7b) — names every recorded key, never just the scalar; NEVER
+  // `JSON.stringify` a path here — it doubles every backslash, breaking an exact match against a real
+  // Windows path (caught by `merge-quarantine-runtime-union-provenance.mjs` going RED).
   const unknownProvenanceSuffix = !ambiguous.unknownProvenance ? "" : (
-    ambiguous.unknownProvenanceKeyPath
-      ? `. This entry may also fold together raises from more than one repo from before provenance tracking existed, and clearing lifts all of them — confirm no git/hook process is still running under ${JSON.stringify(clearByPathTargets)} AND under '${ambiguous.unknownProvenanceKeyPath}' (the repo this entry's own resolvedKey names) before clearing`
-      : `. This entry may also fold together raises from more than one repo from before provenance tracking existed, and clearing lifts all of them — this entry's own resolvedKey is not recorded (or is not itself a path), so there is no further repo to name here beyond the listed path(s); confirm no git/hook process is still running under ${JSON.stringify(clearByPathTargets)} before clearing`
+    ambiguous.unknownProvenanceKeyPaths.length > 0
+      ? `. This entry may also fold together raises from more than one repo from before provenance tracking existed, and clearing lifts all of them — confirm no git/hook process is still running under ${JSON.stringify(clearByPathTargets)} AND under ${ambiguous.unknownProvenanceKeyPaths.map((p) => `'${p}'`).join(", ")} (the repo(s) this entry's own recorded key(s) name) before clearing`
+      : `. This entry may also fold together raises from more than one repo from before provenance tracking existed, and clearing lifts all of them — this entry's own recorded key(s) are not themselves paths (or are not recorded at all), so there is no further repo to name here beyond the listed path(s); confirm no git/hook process is still running under ${JSON.stringify(clearByPathTargets)} before clearing`
   );
   return note + contributorSuffix + unknownProvenanceSuffix;
 }
 
 /**
  * Detects the pre-82032b5c defect-(A) stray-union shape purely from `entry`'s OWN static signature —
- * `hash` (the file's physical filename hash) vs. `quarantineHashForKey(entry.resolvedKey)` — never a
- * branch-dependent fact like current resolvability. `tokens.length > 1` is load-bearing, not incidental:
- * one raise mints exactly one token, so a single-token entry can never be a union regardless of every
- * other condition here. `provenanceTracked`'s ABSENCE is the precision guard: a CURRENT-format file can
- * legitimately sit at a hash differing from its own `resolvedKey`'s hash (a dual-armed same-identity
- * entry) without ever being the defect this detects — see both fields' own doc comments.
+ * `hash` (the file's physical filename hash) vs. `quarantineHashForKey(k)` for every one of `entry`'s own
+ * {@link informativeKeysFor} (scalar ∪ plural — never the scalar alone) — never a branch-dependent fact
+ * like current resolvability. `tokens.length > 1` is load-bearing, not incidental: one raise mints
+ * exactly one token, so a single-token entry can never be a union regardless of every other condition
+ * here. `provenanceTracked`'s ABSENCE is the precision guard: a CURRENT-format file can legitimately sit
+ * at a hash differing from one of its own keys' hash (a dual-armed same-identity entry) without ever
+ * being the defect this detects — see both fields' own doc comments.
  *
  * @decision db0a9db0 (round 2) — call this ONCE, immediately after parsing, BEFORE any branch dispatch
  * (degraded-divert / migrate / dual-arm) and BEFORE any field on `entry` is mutated — see the decision
  * record's own round-2 section for the migrate-branch fail-open this ordering closes.
+ *
+ * @decision db0a9db0 (Follow-up 150aed7b) — generalized from the scalar `resolvedKey` alone to every
+ * `informativeKeysFor` key; an array-only record used to short-circuit before the hash check ever ran.
+ * See the decision record's own section.
  */
 function detectUnknownProvenance(entry: MergeQuarantineEntry, hash: string): boolean {
   if (entry.provenanceUnknown) return true;
   if (entry.provenanceTracked) return false;
-  if (!entry.resolvedKey) return false;
+  const keys = informativeKeysFor(entry);
+  if (keys.length === 0) return false;
   if (entry.tokens.length <= 1) return false;
   if (entry.contributorRepoPaths && entry.contributorRepoPaths.length > 0) return false;
-  return quarantineHashForKey(entry.resolvedKey) !== hash;
+  return keys.some((k) => quarantineHashForKey(k) !== hash);
 }
 
 /** `canonicalRepoLockKey` always returns a filesystem path today (realpath of a resolved `.git` toplevel,
@@ -511,6 +524,18 @@ function detectUnknownProvenance(entry: MergeQuarantineEntry, hash: string): boo
  *  back instead of a best-guess string. */
 function absoluteKeyPathOrUndefined(key: string | undefined): string | undefined {
   return typeof key === "string" && path.isAbsolute(key) ? key : undefined;
+}
+
+/** Every one of `entry`'s own {@link informativeKeysFor} that is ITSELF absolute-path-shaped, excluding
+ *  `ownKey` (there is nothing "foreign" about an entry's own key — never worth naming). `ownKey` omitted
+ *  falls back to every informative key (the pending tier has no single armed key to exclude by).
+ *
+ * @decision db0a9db0 (Follow-up 150aed7b) — THE one shared helper every remediation-text site uses; a
+ * scalar-only re-derivation at each site is exactly how this card's own asymmetry happened. See the
+ * decision record's own section. */
+function unknownProvenanceKeyPathsFor(entry: MergeQuarantineEntry, ownKey?: string): string[] {
+  const candidates = ownKey !== undefined ? secondaryKeysToAttempt(entry, ownKey) : informativeKeysFor(entry);
+  return [...new Set(candidates.map((k) => absoluteKeyPathOrUndefined(k)).filter((p): p is string => p !== undefined))];
 }
 
 export const MERGE_QUARANTINE_DIR = path.join(LOOM_HOME, "merge-quarantines");
@@ -1068,15 +1093,19 @@ function survivingTokenHolderRepoPaths(tokens: string[], excludeIdentity: string
  * Returns `entry` unchanged when there is nothing to protect or carry forward (ENOENT, EISDIR, corrupt,
  * a different identity — the pre-existing write-side guard, or `enterMergeQuarantine`'s own divert
  * decision for a skipped-guard raise, already govern those cases); returns `entry` UNIONED with
- * `final`'s own on-disk tokens when a fresh read confirms the SAME identity physically sitting there
- * right now (closing the same-identity-overwrite-loses-tokens shape, at the one place every writer goes
- * through); returns the literal string `"unreadable"` when `final` is a genuinely unreadable FILE (not a
- * directory) RIGHT NOW — the caller decides what that means for its own write (see
- * {@link writeMergeQuarantineLatch}'s own call site).
+ * `final`'s own on-disk tokens AND informative keys when a fresh read confirms the SAME identity
+ * physically sitting there right now (closing the same-identity-overwrite-loses-tokens shape, at the one
+ * place every writer goes through); returns the literal string `"unreadable"` when `final` is a
+ * genuinely unreadable FILE (not a directory) RIGHT NOW — the caller decides what that means for its own
+ * write (see {@link writeMergeQuarantineLatch}'s own call site).
  *
  * @decision 8db913e2 (round 2) — the chokepoint round 1 was missing: its union lived only inside
  * `enterMergeQuarantine`, so a DIFFERENT writer reaching the SAME marked basename (lazy graduation, via
  * {@link consumeMatchedPendingsIntoArmedEntry}) lost whatever only `final`'s own bytes still held.
+ *
+ * @decision 8db913e2 (Follow-up 150aed7b) — also folds the on-disk record's own
+ * {@link informativeKeysFor}, not just `tokens`; dropping them here silently unblocked a dual-armed
+ * entry's own secondary worktrees after the next reboot. See the decision record's own section.
  */
 function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantineEntry): MergeQuarantineEntry | "unreadable" {
   let raw: string;
@@ -1099,7 +1128,22 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
   if (typeof parsed.repoPath !== "string") return entry;
   if (directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) return entry; // a different identity — the pre-existing guard/protect rules already govern this
   const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed);
-  return resurrectable.length > 0 ? { ...entry, tokens: [...new Set([...resurrectable, ...entry.tokens])] } : entry;
+  // @decision 8db913e2 (Follow-up 150aed7b) — exclude the key `final`'s OWN basename hash names, never
+  // a recomputed `canonicalRepoLockKey(entry.repoPath)` (82032b5c/97cff6db's own rule: this write may
+  // target a SECONDARY key via `targetKey`, which can differ from entry's own repoPath-derived key).
+  const finalOwnHash = path.basename(final, ".json");
+  const onDiskKeys = informativeKeysFor({
+    resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
+    resolvedKeys: parseResolvedKeysField(parsed),
+  } as MergeQuarantineEntry).filter((k) => quarantineHashForKey(k) !== finalOwnHash);
+  if (resurrectable.length === 0 && onDiskKeys.length === 0) return entry;
+  return {
+    ...entry,
+    tokens: [...new Set([...resurrectable, ...entry.tokens])],
+    resolvedKeys: onDiskKeys.length > 0
+      ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeys, `reconcileMarkedBasenameBeforeWrite(${entry.repoPath})`)
+      : entry.resolvedKeys,
+  };
 }
 
 /**
@@ -4103,12 +4147,11 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     const pendingUnknownProvenance = matchedPending.some((p) => p.entry.provenanceUnknown);
     if (pendingContributors.length > 0 || pendingUnknownProvenance) {
       const matchedRepoPaths = [...new Set(matchedPending.map((p) => p.entry.repoPath))];
-      // @decision db0a9db0 — a protect-copy pending entry's own whitelist strips `resolvedKey` entirely
-      // (c9114934's own rule — it must never be re-armed later), so this is routinely `undefined` here,
-      // never evidence of an "unresolvable" key that was attempted and failed.
-      const unknownKeyPath = pendingUnknownProvenance
-        ? absoluteKeyPathOrUndefined(matchedPending.find((p) => p.entry.provenanceUnknown)?.entry.resolvedKey)
-        : undefined;
+      // @decision db0a9db0 (Follow-up 150aed7b) — union EVERY flagged pending entry's own keys, never
+      // just the first match's scalar; routinely `[]` for a protect-copy whitelist (strips both fields).
+      const unknownKeyPaths = pendingUnknownProvenance
+        ? [...new Set(matchedPending.filter((p) => p.entry.provenanceUnknown).flatMap((p) => unknownProvenanceKeyPathsFor(p.entry)))]
+        : [];
       // @decision db0a9db0 — each clause is a full standalone "whose own ..." clause so joining them never
       // produces the broken "token set carries this entry's own provenance is incomplete" sentence a bare
       // noun-phrase splice did in round 1.
@@ -4122,7 +4165,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       return {
         ok: false,
         reason: `latch id '${id}' matches a PENDING entry ${collisionClause} — a bare id cannot tell which identity you mean to clear. Nothing was cleared. ` +
-          `${remediationTextFor(matchedRepoPaths, { siblingRepoPaths: [], contributorRepoPaths: pendingContributors, unknownProvenance: pendingUnknownProvenance, unknownProvenanceKeyPath: unknownKeyPath })}.`,
+          `${remediationTextFor(matchedRepoPaths, { siblingRepoPaths: [], contributorRepoPaths: pendingContributors, unknownProvenance: pendingUnknownProvenance, unknownProvenanceKeyPaths: unknownKeyPaths })}.`,
       };
     }
     // A pending entry isn't armed into activeQuarantines under any key — drop ONLY these exact pending
