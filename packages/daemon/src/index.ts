@@ -1216,6 +1216,14 @@ async function main(): Promise<void> {
         : "";
       console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesHeld} skipped as HELD by a merge retain (branch/worktree kept for review), ${retriableFailed} failed (retry next boot)${wedgedPhrase}, resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), ${reconciled.worktreesStillWedged} still wedged (retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
     }
+    // Card 37fe091c: a SEPARATE, non-zero-gated line — a review-fork worktree reclaimed ONLY because
+    // worktreeHasWork now compares against reviewBaseSha instead of a hardcoded mainline HEAD. Kept
+    // distinct from the combined line above (readability, matching this file's own convention for new
+    // counters — see the fdf93d3a/8e5a7a5e anchors on the combined line) so the first post-deploy boot
+    // makes the fix's own effect visible at a glance.
+    if (reconciled.worktreesReviewForkReclaimed > 0) {
+      console.log(`[boot] orchestration reconcile: reclaimed ${reconciled.worktreesReviewForkReclaimed} review-fork worktree(s) whose only "work" was inherited from the reviewed branch, not authored by the reviewer (card 37fe091c)`);
+    }
   }).catch((err) => {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   });

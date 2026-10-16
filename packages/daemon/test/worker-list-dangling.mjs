@@ -39,6 +39,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       but `markReady`'s own timer still delivers the kickoff via submit()) — with a real commit and NO
 //       `recycle_failed` event → still APPEARS. Proves the fix keys off genuine pre-spawn-failure evidence,
 //       not off `engineSessionId IS NULL` (which this scenario would wrongly exclude).
+//   (M) card 37fe091c round 3 (REQUIRED): a lone TASKED row carrying a (legacy, pre-round-2-fix)
+//       reviewBaseSha equal to its OWN current tip, with a real unmerged commit → APPEARS. Without the
+//       path-level `trustedReviewBaseSha` gate, commitsAheadOfBase would trust this row's raw stamp,
+//       read 0-ahead against its own tip, and wrongly hide the real work from this view.
 //
 // REAL git on temp repos, NO claude + NO live daemon. Run: 1) build daemon, 2) node test/worker-list-dangling.mjs
 import fs from "node:fs";
@@ -96,7 +100,7 @@ function seedProject(p) {
   });
 }
 
-function seedWorker(p, { worktreePath, branch, taskId, archived, parentId }) {
+function seedWorker(p, { worktreePath, branch, taskId, archived, parentId, reviewBaseSha }) {
   if (taskId) {
     db.insertTask({ id: taskId, projectId: p.projId, title: "WLD-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   }
@@ -104,7 +108,7 @@ function seedWorker(p, { worktreePath, branch, taskId, archived, parentId }) {
     id: p.workerId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: worktreePath,
     processState: "exited", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "worker", parentSessionId: parentId ?? p.mgrId, taskId: taskId ?? null,
-    worktreePath, branch,
+    worktreePath, branch, reviewBaseSha: reviewBaseSha ?? null,
   });
   // insertSession does NOT bind archived_at at all (verified by reading its INSERT column list — not a
   // silent-no-op assumption) — archiving is a distinct write, mirroring how archiveOnExit itself is a
@@ -130,6 +134,10 @@ I.predWorkerId = `${I.workerId}-pred`;
 I.succWorkerId = `${I.workerId}-succ`;
 
 const J = mk("j"); // readiness-fallback recovered: engineSessionId null, but genuinely ran + committed
+
+const K = mk("k"); // card 37fe091c minor #2: taskless REVIEW spawn, 0 own commits beyond reviewBaseSha
+const L = mk("l"); // taskless REVIEW spawn, 1 own commit beyond reviewBaseSha
+const M = mk("m"); // round 3: lone TASKED row, legacy-aliased reviewBaseSha (== its own tip), real commit
 
 try {
   // --- (A) tasked, genuinely unmerged ---
@@ -249,6 +257,55 @@ try {
     db.archiveSession(J.workerId);
     J.worktreePath = worktreePath; }
 
+  // --- (K) card 37fe091c minor #2: taskless REVIEW spawn, 0 own commits beyond reviewBaseSha — the
+  // Code-Reviewer-shape taskless exclusion, but for a REVIEW spawn whose inherited commits must NOT be
+  // read as "the reviewer's own ahead-of-main work" (commitsAheadOfBase, not commitsAheadOfMain). ---
+  seedProject(K);
+  initRepo(K.repo, "# wld-k\n");
+  {
+    // the REVIEWED branch: a real commit, exactly like any other tasked worker.
+    const { worktreePath: reviewedWt, branch: reviewedBranch } = await createWorktree(K.repo, K.projId, K.taskId);
+    commitToBranch(reviewedWt, "k-reviewed.txt");
+    const reviewedTip = execSync("git rev-parse HEAD", { cwd: reviewedWt }).toString().trim();
+    // the REVIEWER's worktree: forked from the reviewed tip, taskless, zero own commits.
+    const { worktreePath, branch } = await createWorktree(K.repo, K.projId, `wld-k-wt-${sfx}`, {}, undefined, reviewedBranch);
+    // NEGATIVE CONTROL for this fixture's own validity: the reviewer's branch DOES carry commits ahead of
+    // mainline HEAD (inherited from the reviewed branch) — proving that a non-review-aware check (ahead of
+    // main) would have wrongly found this non-empty, which is exactly the discriminator this scenario tests.
+    const aheadOfMain = parseInt(execSync(`git rev-list --count HEAD..${branch}`, { cwd: K.repo }).toString().trim(), 10);
+    check(`(K) NEGATIVE CONTROL — the reviewer's branch IS ahead of mainline HEAD (inherited, got ${aheadOfMain}) — proves this fixture would wrongly surface under a mainline-only check`, aheadOfMain > 0);
+    seedWorker(K, { worktreePath, branch, taskId: null, archived: true, reviewBaseSha: reviewedTip });
+    K.worktreePath = worktreePath;
+  }
+
+  // --- (L) taskless REVIEW spawn, 1 REAL own commit beyond reviewBaseSha — the other half: proves (K)'s
+  // exclusion isn't "every review spawn is always excluded". ---
+  seedProject(L);
+  initRepo(L.repo, "# wld-l\n");
+  {
+    const { worktreePath: reviewedWt, branch: reviewedBranch } = await createWorktree(L.repo, L.projId, L.taskId);
+    commitToBranch(reviewedWt, "l-reviewed.txt");
+    const reviewedTip = execSync("git rev-parse HEAD", { cwd: reviewedWt }).toString().trim();
+    const { worktreePath, branch } = await createWorktree(L.repo, L.projId, `wld-l-wt-${sfx}`, {}, undefined, reviewedBranch);
+    commitToBranch(worktreePath, "l-reviewer-own.txt"); // the reviewer's OWN real commit, beyond reviewBaseSha
+    seedWorker(L, { worktreePath, branch, taskId: null, archived: true, reviewBaseSha: reviewedTip });
+    L.worktreePath = worktreePath;
+  }
+
+  // --- (M) round 3 REQUIRED: a lone TASKED row carrying a (legacy, pre-round-2-fix) reviewBaseSha equal
+  // to its OWN current tip, with a real unmerged commit — no sibling row to disagree (simulates the
+  // author's own row having been hard-deleted). Must APPEAR: commitsAheadOfBase must never trust a
+  // TASKED row's raw reviewBaseSha, or this reads 0-ahead against itself and hides real work. ---
+  seedProject(M);
+  initRepo(M.repo, "# wld-m\n");
+  {
+    const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
+    commitToBranch(worktreePath, "m.txt");
+    const legacyTip = execSync("git rev-parse HEAD", { cwd: worktreePath }).toString().trim();
+    seedWorker(M, { worktreePath, branch, taskId: M.taskId, archived: true, reviewBaseSha: legacyTip });
+    M.worktreePath = worktreePath;
+  }
+
   // ============================== assertions ==============================
 
   const a = await sessions.getDanglingWorkers(A.mgrId);
@@ -272,7 +329,7 @@ try {
   // (D) again — the taskless git-rev-list result is memoized per (sessionId, archivedAt); a repeat call
   // must still correctly include D from the CACHED value, not merely from a second live git call.
   const dAgain = await sessions.getDanglingWorkers(D.mgrId);
-  check("(D) a SECOND call still APPEARS (exercises the memoized commitsAheadOfMain path)",
+  check("(D) a SECOND call still APPEARS (exercises the memoized commitsAheadOfBase path)",
     dAgain.some((e) => e.workerSessionId === D.workerId));
 
   // (E) precondition: appears before cleanup, exactly like (A).
@@ -305,9 +362,21 @@ try {
   const j = await sessions.getDanglingWorkers(J.mgrId);
   check("(J) REGRESSION GUARD — engineSessionId:null but a GENUINE (readiness-fallback-recovered) worker with a real commit and NO recycle_failed event still APPEARS",
     j.some((e) => e.workerSessionId === J.workerId));
+
+  const k = await sessions.getDanglingWorkers(K.mgrId);
+  check("(K) taskless REVIEW spawn, 0 own commits beyond reviewBaseSha — EXCLUDED (inherited commits don't count)",
+    !k.some((e) => e.workerSessionId === K.workerId));
+
+  const l = await sessions.getDanglingWorkers(L.mgrId);
+  check("(L) taskless REVIEW spawn, 1 own commit beyond reviewBaseSha — APPEARS",
+    l.some((e) => e.workerSessionId === L.workerId));
+
+  const m = await sessions.getDanglingWorkers(M.mgrId);
+  check("(M) round 3 REQUIRED — a lone TASKED row's (legacy) reviewBaseSha is never trusted; its real unmerged commit vs mainline HEAD still APPEARS",
+    m.some((e) => e.workerSessionId === M.workerId));
 } finally {
   db.close();
-  for (const p of [A, B, C, D, E, F, G, H, I, J]) {
+  for (const p of [A, B, C, D, E, F, G, H, I, J, K, L, M]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -315,6 +384,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getDanglingWorkers surfaces a stopped-but-genuinely-unmerged worker (task-level mergedSha, not branch content/existence), correctly EXCLUDES a taskless zero-commit rig (the Code Reviewer shape) while still surfacing a taskless worker with real commits, respects current on-disk truth, ignores live workers, is lineage- (not exact-parent-) scoped, EXCLUDES a never-started recycle successor (keyed on its recycle_failed event, not engineSessionId) while still surfacing its predecessor's real unmerged work, and still surfaces a genuine engineSessionId:null worker that actually ran via the readiness-fallback path."
+  ? "\n✅ ALL PASS — getDanglingWorkers surfaces a stopped-but-genuinely-unmerged worker (task-level mergedSha, not branch content/existence), correctly EXCLUDES a taskless zero-commit rig (the Code Reviewer shape) while still surfacing a taskless worker with real commits, respects current on-disk truth, ignores live workers, is lineage- (not exact-parent-) scoped, EXCLUDES a never-started recycle successor (keyed on its recycle_failed event, not engineSessionId) while still surfacing its predecessor's real unmerged work, still surfaces a genuine engineSessionId:null worker that actually ran via the readiness-fallback path, (card 37fe091c) correctly measures a taskless REVIEW spawn's ahead-count against its real reviewBaseSha rather than mainline HEAD — excluding one with zero own commits despite real INHERITED commits, while still surfacing one with a real own commit — and (round 3) never trusts a lone TASKED row's own raw reviewBaseSha either, so a legacy-aliased stamp can't hide its real unmerged work."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

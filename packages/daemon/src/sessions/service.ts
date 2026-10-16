@@ -3,6 +3,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
+import { mapWithConcurrency } from "../concurrency.js";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
   usesOrchestrationMcp, contextPercentFor, PROFILE_SPAWNABLE_ROLES,
@@ -29,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -421,6 +422,10 @@ interface RetainedWorktreeRecord {
   /** The owning session's `lastActivity` at the moment Pass B recorded it — see {@link RetainedWorktreeEntry.lastActivityAt}. */
   lastActivityAt: string;
   repoPath: string;
+  /** The owning session's `reviewBaseSha` (card 37fe091c) — a review spawn's `commitsAhead`/`reason` must
+   *  be derived against THIS, not mainline HEAD, same as the KEEP decision that retained it. `null` for
+   *  every non-review session, byte-identical to before this field existed. */
+  reviewBaseSha: string | null;
   /** The owning session's project — captured here (Pass B already has `project` in hand for this
    *  session, see the resolveRepoByKey call above its push site) so {@link getRetainedWorktrees} needs
    *  NO extra DB lookup to attribute an entry to its project (card fixing 90fffe03's first production
@@ -478,11 +483,16 @@ export interface RetainedWorktreeEntry {
    *  human's attention" (card 31df7e2f). */
   ageDays: number;
   /** Which of `worktreeHasWork`'s two checks currently holds: a dirty working tree, unmerged commits
-   *  ahead of the repo's HEAD, or both. Derived at READ time (see {@link RetainedWorktreeRecord}'s doc),
-   *  so this reflects the worktree's CURRENT state, not a stale snapshot from whichever boot recorded it. */
+   *  ahead of the worker's real base, or both. Derived at READ time (see {@link RetainedWorktreeRecord}'s
+   *  doc), so this reflects the worktree's CURRENT state, not a stale snapshot from whichever boot
+   *  recorded it. */
   reason: "dirty-tree" | "unmerged-commits" | "both";
-  /** `git rev-list --count HEAD..<branch>`, read live. `null` only when that probe itself failed/timed
-   *  out (best-effort, observability-only — never blocks or excludes the entry). */
+  /** The owning session's `reviewBaseSha` (card 37fe091c) — present (non-null) only for a review spawn,
+   *  and is the base `commitsAhead` below was actually measured against (via `workerBaseRef`), NOT
+   *  mainline HEAD. Surfaced so a reader isn't misled into reading `commitsAhead` as "ahead of main". */
+  reviewBaseSha: string | null;
+  /** `git rev-list --count <workerBaseRef(reviewBaseSha)>..<branch>`, read live. `null` only when that
+   *  probe itself failed/timed out (best-effort, observability-only — never blocks or excludes the entry). */
   commitsAhead: number | null;
 }
 
@@ -490,6 +500,11 @@ export interface RetainedWorktreeEntry {
  *  becomes reclaim-eligible — see {@link SessionService.listNodeModulesReclaimCandidates}'s own doc for
  *  the justification. A human-supplied `minAgeHours` at the REST call site always overrides this. */
 export const DEFAULT_NODE_MODULES_RECLAIM_MIN_AGE_HOURS = 24;
+
+/** Card 37fe091c: `getRetainedWorktrees`' classify loop runs through {@link mapWithConcurrency} at this
+ *  bound — a fully serial loop measured ~2.5s of git work per entry, which at ~485 retained worktrees is
+ *  what made `/api/worktrees/retained` time out at 120s. Small and fixed, never unbounded `Promise.all`. */
+export const RETAINED_WORKTREE_CLASSIFY_CONCURRENCY = 6;
 
 /** One entry in {@link SessionService.listNodeModulesReclaimCandidates}'s result (card 1008e305). */
 export interface NodeModulesReclaimCandidate {
@@ -2509,7 +2524,7 @@ export class SessionService {
   private readonly haltedSuccessorReadyWaitDeadlines = new Map<string, number>();
 
   /**
-   * Memoizes {@link commitsAheadOfMain} per ARCHIVED worker (card ba41b402 mgr review). Keyed on
+   * Memoizes {@link commitsAheadOfBase} per ARCHIVED worker (card ba41b402 mgr review). Keyed on
    * `${sessionId}:${archivedAt}`, not just `sessionId`: an archived worker's branch is frozen (nothing
    * commits to it again while it stays archived — only a resume, which clears `archivedAt`, could change
    * that), so the count for a GIVEN `archivedAt` stamp never changes and is safe to cache forever. If the
@@ -8557,7 +8572,7 @@ export class SessionService {
         : false);
       // @decision a5d9c458 — clear any stale wedged-worktree tracking for this exact path BEFORE createWorktree can claim it.
       releaseWorktreePathClaim = this.reclaimWedgedWorktreePathForSpawn(project.id, taskId ?? claimKey, targetRepo.key).release;
-      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
+      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase, forkedFromReviewed } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
       // Card 088afc94 (P4 wiring): register this worktree with codescape's fleet daemon — fire-and-forget,
       // NEVER blocks the spawn. DELIBERATELY pinned to `project.repoPath` (the primary), NOT
       // `targetRepo.path` — Codescape indexes ONE graph per project regardless of which repo a given task
@@ -8599,7 +8614,9 @@ export class SessionService {
         // Card b866ab64: review-spawn fork point (the reviewed branch's tip, NOT mainline HEAD) — stamped
         // once so the done-report ahead-of-base precheck can compare against the worker's REAL base
         // instead of mainline. null for every normal (non-review) spawn — see Session.reviewBaseSha's doc.
-        reviewBaseSha: reviewForkFrom?.headSha ?? null,
+        // @decision 37fe091c — gated on `forkedFromReviewed`, not merely `reviewForkFrom` being set: an
+        // aliased taskId/reviewOf* silently takes the reuse/reattach path (forkFrom never consulted).
+        reviewBaseSha: reviewBaseShaToStamp(forkedFromReviewed, reviewForkFrom?.headSha),
         repoKey: targetRepo.key === "primary" ? null : targetRepo.key, // stamped once — see Session.repoKey's doc
       };
       this.db.insertSession(worker);
@@ -12597,10 +12614,15 @@ export class SessionService {
         // none of which the reviewer authored. Comparing against mainline `HEAD` (the old, unconditional
         // base) made `noChanges:true` structurally unreachable for a reviewer that authored nothing: the
         // inherited commit(s) always counted as "ahead of base". Compare against the worker's REAL base —
-        // `worker.reviewBaseSha` (the reviewed branch's tip at spawn time) for a review spawn, mainline
-        // `HEAD` for every other worker (byte-identical to before this fix for the non-review case).
-        const reviewSpawn = typeof worker.reviewBaseSha === "string" && worker.reviewBaseSha.length > 0;
-        const doneBase = worker.reviewBaseSha ?? "HEAD";
+        // `workerBaseRef` resolves to `worker.reviewBaseSha` (the reviewed branch's tip at spawn time) for
+        // a review spawn, mainline `HEAD` for every other worker (byte-identical to before this fix for
+        // the non-review case) — see `workerBaseRef`'s own doc (card 37fe091c) for why every caller that
+        // measures a worker's OWN ahead-of-base work must route through it rather than recomputing inline.
+        // @decision 37fe091c — reads `worker.reviewBaseSha` RAW, unlike Pass B/commitsAheadOfBase's
+        // `trustedReviewBaseSha` gate: safe ONLY because `worker` is the LIVE session reporting on
+        // ITSELF, which post-round-2-fix can never carry a wrongly-aliased stamp in the first place.
+        const reviewSpawn = normalizeReviewBaseSha(worker.reviewBaseSha) !== null;
+        const doneBase = workerBaseRef(worker.reviewBaseSha);
 
         // CODEX AUTO-COMMIT (board card 00a6cdd6, owner-approved via request 54aba8b2): the LAST gate
         // before the uncommitted-files precheck below, never earlier — every OTHER done-report refusal
@@ -24891,7 +24913,7 @@ export class SessionService {
   // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
   // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
   // prove Pass A's early-out never spawns git for an already-finalized worker.
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number; staleGenerationUnresolvedEscalated: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesReviewForkReclaimed: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number; staleGenerationUnresolvedEscalated: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     // @decision dd494a9b — precompute both maps for Pass A (per-session calls were 96% of a ~7-min boot
@@ -24978,6 +25000,7 @@ export class SessionService {
     let mergesFailed = 0;
     let staleMergesResolved = 0;
     let worktreesPruned = 0;
+    let worktreesReviewForkReclaimed = 0; // card 37fe091c: subset of worktreesPruned reclaimed ONLY via workerBaseRef(s.reviewBaseSha)
     let worktreesKept = 0;
     let worktreesNeedsHuman = 0;
     let worktreesStaleRepoKey = 0;
@@ -25471,6 +25494,10 @@ export class SessionService {
     // rebuild above: Pass A's `projectMap` is stale by the time Pass B runs (a project deleted/rebound
     // during Pass A's git awaits must read as gone, not as Pass A's pre-deletion snapshot).
     const bProjectMap = new Map(this.db.listAllProjectsIncludingArchived().map((p) => [p.id, p]));
+    // @decision 37fe091c — computed from the FULL `all` set (every session this pass considers), never a
+    // filtered subset — see reviewBaseShaConsensusByPath's own doc for why a path's reviewBaseSha is only
+    // trustworthy when EVERY row aliasing it agrees.
+    const bReviewBaseConsensus = reviewBaseShaConsensusByPath(all);
     for (const s of all) {
       const worktreePath = s.worktreePath;
       if (!worktreePath || handledWorktrees.has(worktreePath)) continue;
@@ -25528,7 +25555,13 @@ export class SessionService {
         else if (outcome === "path-refused") worktreesPathRefused++;
         continue;
       }
-      if (await worktreeHasWork(repoPath, worktreePath, s.branch ?? null, "HEAD", { timeoutMs: this.gitOpMs })) {
+      // @decision 37fe091c — the PATH's trusted reviewBaseSha, already gated PATH-LEVEL (every row on
+      // the path taskless AND agreeing) by reviewBaseShaConsensusByPath/trustedReviewBaseSha — never
+      // re-derive a per-row taskless check here, or the decision depends on visit order (round 3).
+      const consensusReviewBaseSha = bReviewBaseConsensus.get(worktreePath) ?? null;
+      const isReviewSpawn = consensusReviewBaseSha !== null;
+      const base = workerBaseRef(consensusReviewBaseSha);
+      if (await worktreeHasWork(repoPath, worktreePath, s.branch ?? null, base, { timeoutMs: this.gitOpMs })) {
         // eslint-disable-next-line no-console
         console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);
         worktreesKept++;
@@ -25536,7 +25569,7 @@ export class SessionService {
         // calls here. `reason`/`commitsAhead` are derived lazily, at read time, by getRetainedWorktrees.
         this.retainedWorktreeRecords.push({
           worktreePath, branch: s.branch ?? null, sessionId: s.id, taskId: s.taskId ?? null,
-          lastActivityAt: s.lastActivity, repoPath,
+          lastActivityAt: s.lastActivity, repoPath, reviewBaseSha: consensusReviewBaseSha,
           projectId: project.id, projectName: project.name,
         });
         continue;
@@ -25553,7 +25586,13 @@ export class SessionService {
       }, { branch: s.branch ?? undefined, staleKnowledge: true }).catch(() => ({ outcome: "left-on-disk" as const }));
       // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
       if (outcome === "needs-human-skip") worktreesNeedsHuman++;
-      else if (outcome === "removed") worktreesPruned++;
+      else if (outcome === "removed") {
+        worktreesPruned++;
+        // Card 37fe091c: a review-fork worktree reclaimed ONLY because worktreeHasWork compared against
+        // reviewBaseSha instead of mainline HEAD — surfaced separately so the first post-deploy boot shows
+        // how many of this specific, previously-stuck class actually went.
+        if (isReviewSpawn) worktreesReviewForkReclaimed++;
+      }
       else if (outcome === "path-refused") worktreesPathRefused++;
       else if (outcome === "left-on-disk") {
         // Finding 1 (card 40b63f1c): a failed removal here is NOT routine fs flakiness to log once and
@@ -25568,7 +25607,7 @@ export class SessionService {
         console.warn(`[reconcile] worktree ${worktreePath} could not be fully removed — treating as POSSIBLY STILL LIVE rather than routine GC backlog (Pass B); retained for a human/next pass to investigate`);
         this.retainedWorktreeRecords.push({
           worktreePath, branch: s.branch ?? null, sessionId: s.id, taskId: s.taskId ?? null,
-          lastActivityAt: s.lastActivity, repoPath,
+          lastActivityAt: s.lastActivity, repoPath, reviewBaseSha: consensusReviewBaseSha,
           projectId: project.id, projectName: project.name,
         });
       }
@@ -25752,7 +25791,7 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${staleAsideLeftovers.length} renamed-aside stale worktree dir(s) found under WORKTREES_DIR — never auto-deleted; see GET /api/worktrees/stale-leftovers to review and reclaim.`);
     }
-    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero, staleGenerationUnresolvedEscalated };
+    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesReviewForkReclaimed, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero, staleGenerationUnresolvedEscalated };
   }
 
   /**
@@ -25769,17 +25808,22 @@ export class SessionService {
    * (dirty tree, commits ahead) to LABEL an outcome, never to decide one.
    */
   async getRetainedWorktrees(): Promise<{ count: number; entries: RetainedWorktreeEntry[] }> {
-    const entries: RetainedWorktreeEntry[] = [];
     const now = Date.now();
-    for (const rec of this.retainedWorktreeRecords) {
-      if (!fs.existsSync(rec.worktreePath)) continue; // gone since boot — current truth, not a stale report
-      const classified = await this.classifyRetainedWorktree(rec.repoPath, rec.worktreePath, rec.branch);
-      if (!classified) continue; // no longer holds work (e.g. merged/cleaned by hand since boot)
+    // card 37fe091c: the live set FIRST (a cheap fs.existsSync, no git) — mapWithConcurrency then only
+    // ever spends its bounded pool on worktrees actually worth classifying, not ones gone since boot.
+    const live = this.retainedWorktreeRecords.filter((rec) => fs.existsSync(rec.worktreePath));
+    const classified = await mapWithConcurrency(live, RETAINED_WORKTREE_CLASSIFY_CONCURRENCY, (rec) =>
+      this.classifyRetainedWorktree(rec.repoPath, rec.worktreePath, rec.branch, rec.reviewBaseSha));
+    const entries: RetainedWorktreeEntry[] = [];
+    for (let i = 0; i < live.length; i++) {
+      const rec = live[i]!; // i < live.length, by construction
+      const result = classified[i];
+      if (!result) continue; // no longer holds work (e.g. merged/cleaned by hand since boot)
       const ageDays = Math.max(0, Math.floor((now - new Date(rec.lastActivityAt).getTime()) / 86_400_000));
       entries.push({
         worktreePath: rec.worktreePath, branch: rec.branch, sessionId: rec.sessionId, taskId: rec.taskId,
-        projectId: rec.projectId, projectName: rec.projectName,
-        lastActivityAt: rec.lastActivityAt, ageDays, reason: classified.reason, commitsAhead: classified.commitsAhead,
+        projectId: rec.projectId, projectName: rec.projectName, reviewBaseSha: rec.reviewBaseSha,
+        lastActivityAt: rec.lastActivityAt, ageDays, reason: result.reason, commitsAhead: result.commitsAhead,
       });
     }
     return { count: entries.length, entries };
@@ -25991,7 +26035,7 @@ export class SessionService {
    * probes cleanly agree the worktree no longer holds work.
    */
   private async classifyRetainedWorktree(
-    repoPath: string, worktreePath: string, branch: string | null,
+    repoPath: string, worktreePath: string, branch: string | null, reviewBaseSha: string | null,
   ): Promise<{ reason: RetainedWorktreeEntry["reason"]; commitsAhead: number | null } | null> {
     const timeoutMs = this.gitOpMs ?? 15_000; // mirrors git/worktrees.ts's own GIT_OP_TIMEOUT_MS default
     let dirty: boolean;
@@ -26004,7 +26048,10 @@ export class SessionService {
     let commitsAhead: number | null = null;
     if (branch) {
       try {
-        const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `HEAD..${branch}`]);
+        // card 37fe091c: the SAME base the KEEP decision itself used (workerBaseRef) — a review spawn's
+        // commitsAhead must never be measured against mainline HEAD, or this display misreports inherited
+        // reviewed-branch commits as the reviewer's own unmerged work.
+        const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `${workerBaseRef(reviewBaseSha)}..${branch}`]);
         const parsed = parseInt(raw.trim(), 10);
         commitsAhead = Number.isFinite(parsed) ? parsed : null;
       } catch {
@@ -26034,15 +26081,15 @@ export class SessionService {
    * taskless BY CONVENTION with `filesChanged:0` as its CORRECT outcome) as perpetually "dangling", never
    * resolvable, training a manager to ignore the whole surface (the exact failure this card warns
    * against) — a taskless candidate additionally requires its branch to carry at least one commit not
-   * already on the repo's mainline (`git rev-list --count HEAD..branch` > 0, HEAD of the canonical
-   * repoPath being this codebase's existing stand-in for "mainline" — see worktreeHasWork/
-   * classifyRetainedWorktree above). This is used ONLY as a NECESSARY condition to EXCLUDE a genuinely
-   * empty branch, never as a SUFFICIENT condition to INCLUDE one: DoD-3 on card ba41b402 is still correct
-   * that a non-empty `main..branch` is NOT proof of unmerged content under squash (a landed branch's tip
-   * is never main's ancestor either) — but a genuinely EMPTY one is a decisive negative regardless, since
-   * there is nothing to lose. On a git probe failure this fails SAFE toward INCLUDING the candidate (same
-   * asymmetry as `worktreeHasWork`/`precheckWorkerDone` throughout this file) — an unproven "maybe empty"
-   * must never suppress a real row.
+   * already on its real base (`git rev-list --count <workerBaseRef(w.reviewBaseSha)>..branch` > 0 — see
+   * `commitsAheadOfBase` below; mainline `HEAD` for every non-review worker, the reviewed branch's tip for
+   * a review spawn, same as `worktreeHasWork`/`classifyRetainedWorktree` above). This is used ONLY as a
+   * NECESSARY condition to EXCLUDE a genuinely empty branch, never as a SUFFICIENT condition to INCLUDE
+   * one: DoD-3 on card ba41b402 is still correct that a non-empty `base..branch` is NOT proof of unmerged
+   * content under squash (a landed branch's tip is never its base's ancestor either) — but a genuinely
+   * EMPTY one is a decisive negative regardless, since there is nothing to lose. On a git probe failure
+   * this fails SAFE toward INCLUDING the candidate (same asymmetry as `worktreeHasWork`/`precheckWorkerDone`
+   * throughout this file) — an unproven "maybe empty" must never suppress a real row.
    *
    * Scoped by LINEAGE, not exact parent match — mirrors orchestration.ts's `archivedUnreported` fleetView
    * category (card 93609ef3's reasoning applies verbatim): a stopped worker's `parentSessionId` still
@@ -26058,7 +26105,7 @@ export class SessionService {
    * manager's most-polled tool — so cost matters here in a way it doesn't for a one-off read.
    * `listArchivedWorkersInProject` is itself BOUNDED (see its own doc for the trade-off). Below, the
    * CHEAP checks (worktree existence via `fs.existsSync`, the task's `mergedSha` via a plain DB read) run
-   * BEFORE the one EXPENSIVE check (`commitsAheadOfMain`'s git subprocess) — deliberately ordered so the
+   * BEFORE the one EXPENSIVE check (`commitsAheadOfBase`'s git subprocess) — deliberately ordered so the
    * subprocess only ever runs on a candidate that survived every cheaper filter, never on the full pool.
    * The subprocess is further MEMOIZED per archived worker (see `danglingAheadCache`'s own doc), so a
    * taskless candidate's git call only ever fires once per archive lifetime, not once per `worker_list`
@@ -26106,12 +26153,14 @@ export class SessionService {
       // CHEAP (plain DB read): the TASK already shipped — not unmerged, whichever branch did it.
       const task = w.taskId ? this.db.getTask(w.taskId) : undefined;
       if (task?.mergedSha) continue;
-      if (!w.taskId) {
-        // EXPENSIVE (git subprocess, memoized — see commitsAheadOfMain's own doc): reached ONLY after
-        // both cheap filters above have already passed. Taskless has no task-level signal, so — see this
-        // method's own doc for why a zero-commit branch is excluded here (necessary, not sufficient)
-        // rather than surfaced by default.
-        const ahead = await this.commitsAheadOfMain(w);
+      if (!w.taskId || normalizeReviewBaseSha(w.reviewBaseSha) !== null) {
+        // EXPENSIVE (git subprocess, memoized — see commitsAheadOfBase's own doc): reached ONLY after
+        // both cheap filters above have already passed. Taskless has no task-level signal at all; a
+        // TASKED review spawn (reviewBaseSha set) is included here too (round 3) so its dangling status
+        // is judged by its OWN ahead-count rather than left to rely solely on a review task's own
+        // mergedSha — see this method's own doc for why a zero-commit branch is excluded here
+        // (necessary, not sufficient) rather than surfaced by default.
+        const ahead = await this.commitsAheadOfBase(w);
         if (ahead === 0) continue; // provably empty: nothing exists to lose
         // ahead > 0, or null (probe failed — fail safe toward surfacing), both fall through to inclusion.
       }
@@ -26123,13 +26172,19 @@ export class SessionService {
     return entries;
   }
 
-  /** `git rev-list --count HEAD..<branch>` for a session's own repo, read live — MEMOIZED per {@link
-   *  danglingAheadCache}'s own doc for an ARCHIVED session (its branch is frozen, so a real result never
-   *  changes). `null` only when the probe itself failed/timed out or the session's project/repo couldn't
-   *  be resolved — see {@link getDanglingWorkers}'s doc for why a `null` here is treated as "unknown",
-   *  never as zero. A `null` (probe failure) is deliberately NEVER cached — only a real numeric result is,
-   *  so a transient git hiccup retries next call instead of being pinned as "unknown" forever. */
-  private async commitsAheadOfMain(w: Session): Promise<number | null> {
+  /** `git rev-list --count <workerBaseRef(trusted)>..<branch>` for a session's own repo, read live
+   *  — MEMOIZED per {@link danglingAheadCache}'s own doc for an ARCHIVED session (its branch is frozen, so
+   *  a real result never changes). `null` only when the probe itself failed/timed out or the session's
+   *  project/repo couldn't be resolved — see {@link getDanglingWorkers}'s doc for why a `null` here is
+   *  treated as "unknown", never as zero. A `null` (probe failure) is deliberately NEVER cached — only a
+   *  real numeric result is, so a transient git hiccup retries next call instead of being pinned as
+   *  "unknown" forever. Card 37fe091c: routes through `workerBaseRef` so a taskless, zero-added-commit
+   *  review spawn isn't surfaced here as "dangling" purely from commits it only ever inherited.
+   *
+   *  @decision 37fe091c — `trusted` routes `w`'s reviewBaseSha through the SAME path-level trust gate
+   *  Pass B uses (every sibling row sharing `w.worktreePath`), never `w.reviewBaseSha` read raw — a
+   *  legacy aliased TASKED row's wrong stamp must not hide real unmerged work here either. */
+  private async commitsAheadOfBase(w: Session): Promise<number | null> {
     if (!w.branch) return null;
     const cacheKey = w.archivedAt ? `${w.id}:${w.archivedAt}` : null;
     if (cacheKey && this.danglingAheadCache.has(cacheKey)) return this.danglingAheadCache.get(cacheKey)!;
@@ -26138,7 +26193,9 @@ export class SessionService {
     try {
       const repoPath = resolveRepoByKey(project, w.repoKey).path;
       const timeoutMs = this.gitOpMs ?? 15_000;
-      const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `HEAD..${w.branch}`]);
+      const siblings = w.worktreePath ? this.db.listSessionsAtWorktreePath(w.worktreePath, w.id) : [];
+      const trusted = trustedReviewBaseSha([{ taskId: w.taskId, reviewBaseSha: w.reviewBaseSha }, ...siblings]);
+      const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `${workerBaseRef(trusted)}..${w.branch}`]);
       const parsed = parseInt(raw.trim(), 10);
       const result = Number.isFinite(parsed) ? parsed : null;
       if (cacheKey && result !== null) this.danglingAheadCache.set(cacheKey, result);

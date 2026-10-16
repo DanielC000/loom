@@ -66,6 +66,15 @@ export interface WorktreeInfo {
    * see {@link mayRecutOntoMain}).
    */
   discardedOnRecut?: DiscardedOnRecutInfo;
+  /**
+   * True ONLY when this call actually cut a FRESH `-b branch forkFrom` worktree — never for a reuse or a
+   * reattach (either case silently ignores `forkFrom`). A caller must gate `Session.reviewBaseSha`
+   * stamping on THIS, never on "a `reviewOf*` option was passed".
+   *
+   * @decision 37fe091c — an aliased reuse/reattach spawn must stamp `reviewBaseSha: null`, never the
+   * reviewed tip, or boot-reconcile reads the author's real unmerged work as 0-ahead.
+   */
+  forkedFromReviewed: boolean;
 }
 
 /** {@link WorktreeInfo.reusedDirtyWorktree} — a bounded summary of a reused worktree's leftover uncommitted work. */
@@ -1070,7 +1079,7 @@ export async function createWorktree(
     // nothing to trigger installing them.
     if (forwarded || !hasIntactNodeModules(worktreePath)) await provisionWorktreeDeps(worktreePath, deps);
     return {
-      worktreePath, branch, mainSha,
+      worktreePath, branch, mainSha, forkedFromReviewed: false, // reuse path — forkFrom was never consulted
       ...(discardedOnRecut ? { discardedOnRecut } : {}),
       ...(reusedDirtyWorktree ? { reusedDirtyWorktree } : {}),
       ...(staleBase ? { staleBase } : {}),
@@ -1164,7 +1173,13 @@ export async function createWorktree(
   // Populate node_modules so the worker is build-ready without paying a full `pnpm install` first.
   // Best-effort + bounded; on failure the worker just installs on its own (see provisionWorktreeDeps).
   await provisionWorktreeDeps(worktreePath, deps);
-  return staleBase ? { worktreePath, branch, mainSha, staleBase } : { worktreePath, branch, mainSha };
+  // @decision 37fe091c — true ONLY for the genuine `-b branch forkFrom` cut (branchExists false AND
+  // forkFrom given); a reattach (branchExists true) never consulted forkFrom at all. See
+  // WorktreeInfo.forkedFromReviewed's own doc for why a caller must gate reviewBaseSha stamping on this.
+  const forkedFromReviewed = !branchExists && !!forkFrom;
+  return staleBase
+    ? { worktreePath, branch, mainSha, staleBase, forkedFromReviewed }
+    : { worktreePath, branch, mainSha, forkedFromReviewed };
 }
 
 /**
@@ -2395,6 +2410,90 @@ export interface DoneReportPrecheck {
    *  degrade below). A caller that needs to distinguish "verified N commits ahead" from "couldn't
    *  determine" must check this is a number before trusting it — a falsy/undefined value is NOT 0. */
   aheadCount?: number;
+}
+
+/**
+ * The ONE predicate for "is this a USABLE review-base sha" — `null`/`undefined`/`""` all mean "no review
+ * base". Returns the usable sha itself (narrowed to `string`) or `null`.
+ *
+ * @decision 37fe091c — every call site needing this predicate routes through here, never a duplicated
+ * ad hoc inline check that can drift from `workerBaseRef`'s own fallback.
+ */
+export function normalizeReviewBaseSha(reviewBaseSha: string | null | undefined): string | null {
+  return typeof reviewBaseSha === "string" && reviewBaseSha.length > 0 ? reviewBaseSha : null;
+}
+
+/**
+ * The value to stamp on `Session.reviewBaseSha` at spawn time — the reviewed tip ONLY when `createWorktree`
+ * actually took the fresh forkFrom cut (`WorktreeInfo.forkedFromReviewed`); `null` for an aliased
+ * reuse/reattach, exactly like a non-review spawn.
+ *
+ * @decision 37fe091c — every spawn-time stamping call site routes through here, never a duplicated
+ * gating expression that could silently drift from what a test exercises.
+ */
+export function reviewBaseShaToStamp(forkedFromReviewed: boolean, reviewedHeadSha: string | null | undefined): string | null {
+  return forkedFromReviewed ? (reviewedHeadSha ?? null) : null;
+}
+
+/**
+ * The ONE place that decides what a worker's OWN work is measured against: a review spawn's branch is cut
+ * from the REVIEWED branch's tip (`createWorktree`'s `forkFrom` param), not mainline, so it starts out
+ * already carrying every commit the reviewed branch had at fork time — none of which the reviewer
+ * authored. Comparing against mainline `HEAD` makes every inherited commit count as "the worker's own
+ * ahead-of-base work", which is wrong for a review spawn and right for everyone else. `Session.reviewBaseSha`
+ * (stamped once at spawn, card b866ab64) already records the correct base for a review spawn; `null`/
+ * absent (the overwhelming majority) keeps comparing against mainline `HEAD`, byte-identical to before
+ * this function existed.
+ *
+ * @decision 37fe091c — every ahead-of-base caller routes through this, never through an inline fallback.
+ */
+export function workerBaseRef(reviewBaseSha: string | null | undefined): string {
+  return normalizeReviewBaseSha(reviewBaseSha) ?? "HEAD";
+}
+
+/**
+ * The ONE place that decides whether a set of session rows sharing ONE worktree PATH agree on a
+ * trustworthy `reviewBaseSha` — trusted ONLY when EVERY row is TASKLESS (`taskId` null; a taskless
+ * row's own path can never be aliased, see project memory `worktreepath-is-per-task-not-per-spawn`) AND
+ * they all agree on the same non-empty value; `null` otherwise (→ `workerBaseRef` falls back to
+ * mainline `HEAD`). Pass every row sharing the path, never a single row in isolation — a TASKED path
+ * CAN be shared by an aliasing sibling (the CR-round-2 defect), so trust must be decided PATH-level, not
+ * per-row, or it depends on which row happens to be visited/read first.
+ *
+ * @decision 37fe091c — the ONE shared trust primitive every ahead-of-base-trust caller routes through —
+ * both Pass B (via `reviewBaseShaConsensusByPath` below, grouping a full session set) and
+ * `commitsAheadOfBase` (fed this row's freshly-read siblings) — never a duplicated predicate.
+ */
+export function trustedReviewBaseSha(
+  rows: ReadonlyArray<{ taskId?: string | null; reviewBaseSha?: string | null }>,
+): string | null {
+  if (rows.length === 0 || !rows.every((r) => r.taskId == null)) return null;
+  const seen = new Set<string | null>();
+  for (const r of rows) seen.add(normalizeReviewBaseSha(r.reviewBaseSha));
+  return seen.size === 1 ? [...seen][0]! : null;
+}
+
+/**
+ * Groups every session row by `worktreePath` and resolves, per path, the `reviewBaseSha` to trust via
+ * {@link trustedReviewBaseSha}. `sessions` is typically the FULL session set for a project boot pass,
+ * never a filtered subset — a narrowed set would silently hide a real alias elsewhere in the full set.
+ *
+ * @decision 37fe091c — defense-in-depth half of the aliasing fix (the other half gates stamping at the
+ * source — see `WorktreeInfo.forkedFromReviewed`); see that record's "Round 2"/"Round 3" sections.
+ */
+export function reviewBaseShaConsensusByPath(
+  sessions: ReadonlyArray<{ worktreePath?: string | null; taskId?: string | null; reviewBaseSha?: string | null }>,
+): Map<string, string | null> {
+  const byPath = new Map<string, Array<{ taskId?: string | null; reviewBaseSha?: string | null }>>();
+  for (const s of sessions) {
+    if (!s.worktreePath) continue;
+    const rows = byPath.get(s.worktreePath) ?? [];
+    rows.push({ taskId: s.taskId, reviewBaseSha: s.reviewBaseSha });
+    byPath.set(s.worktreePath, rows);
+  }
+  const consensus = new Map<string, string | null>();
+  for (const [path, rows] of byPath) consensus.set(path, trustedReviewBaseSha(rows));
+  return consensus;
 }
 
 /** @decision 907b9f50 — catch a worker's forgotten commit AT THE SOURCE, before `done` reaches review;

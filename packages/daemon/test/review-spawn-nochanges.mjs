@@ -19,6 +19,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (incorrectly) claims noChanges:true, and the refusal message names the REAL base (the reviewed
 //       tip) instead of sending the reviewer hunting for "uncommitted" work or leaving it to wonder
 //       whether its branch should be merged.
+//
+// Card 37fe091c (round 3, REQUIRED test gap): (A)/(B) above hand-build their review worker via a direct
+// createWorktree + db.insertSession call, never through the REAL spawnWorker — so the actual spawn-time
+// stamping call site (reviewBaseShaToStamp, service.ts ~8619) and the forkedFromReviewed gate it reads
+// went completely unexercised by this file. Two more scenarios drive the REAL spawnWorker instead, and
+// read the STAMPED session row back off the db:
+//   (C) FRESH — a taskless spawnWorker(reviewOfTaskId:...) cuts a genuine fresh forkFrom branch ⇒ the
+//       stamped reviewBaseSha equals the reviewed tip.
+//   (D) ALIASED — spawnWorker(taskId:T, reviewOfTaskId:T) resolves to T's OWN existing worktree/branch
+//       (createWorktree's reuse path, forkFrom never consulted) ⇒ the stamped reviewBaseSha is null.
 // Run: 1) build daemon (pnpm build), 2) node test/review-spawn-nochanges.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -33,6 +43,8 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -45,6 +57,19 @@ const db = new Db();
 // {delivered} keeps it hermetic — no real claude, no live daemon.
 const ptyStub = { enqueueStdin() { return { delivered: true }; } };
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+
+// Round 3 (C)/(D): spawnWorker (unlike workerReport above) actually calls pty.spawn() — a fake pty via
+// PtyHost's own createPty() seam (shared _seam-host-fixture.mjs base), same pattern as worker-prompt.mjs.
+// A SEPARATE SessionService sharing the SAME db, so (A)/(B)'s minimal ptyStub-backed `sessions` instance
+// stays byte-identical.
+const SeamHost = createSeamHost(PtyHost);
+const seamEvents = {
+  onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
+  onBusy(id, busy) { db.setBusy(id, busy); },
+  onContextStats() {}, onRateLimited() {},
+  onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
+};
+const sessionsSpawn = new SessionService(db, new SeamHost(seamEvents), new OrchestrationControl());
 
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
@@ -67,6 +92,9 @@ db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null,
 // ── The "author" branch under review: cut off mainline HEAD, one real commit — exactly what a review
 // spawn's `reviewOfWorkerSessionId`/`reviewOfTaskId` resolves to (sessions/service.ts spawnWorker).
 const authorTaskId = `rsn-author-task-${sfx}`;
+// Round 3 (C)/(D): a REAL spawnWorker call with reviewOfTaskId needs the task to actually resolve
+// (this.db.getTask) — not just the branch to exist in git — so the task row is inserted up front.
+db.insertTask({ id: authorTaskId, projectId: projId, title: "RSN-AUTHOR", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
 const { worktreePath: authorWt, branch: authorBranch } = await createWorktree(repo, projId, authorTaskId);
 cleanupDirs.push(authorWt);
 fs.writeFileSync(path.join(authorWt, "feature.txt"), "the reviewed change\n");
@@ -119,6 +147,26 @@ try {
   check("(B) review spawn refusal event recorded with aheadCount:1",
     db.listEvents(mgrId).some((e) => e.kind === "worker_report_rejected" && e.detail && e.detail.reason === "nochanges-with-commits" && e.detail.aheadCount === 1));
   check("(B) session stays live (refused, not retired)", db.getSession(B.workerId).processState === "live");
+
+  // ── (C) FRESH, via REAL spawnWorker (round 3 test gap): a taskless spawnWorker(reviewOfTaskId:...)
+  //    actually drives createWorktree's own fresh forkFrom cut — the REAL spawn-time stamping call site
+  //    (reviewBaseShaToStamp, service.ts ~8619) must stamp reviewBaseSha === the reviewed tip. ──────────
+  const C = await sessionsSpawn.spawnWorker(mgrId, { agentId, kickoffPrompt: "REVIEW_C", reviewOfTaskId: authorTaskId });
+  cleanupDirs.push(C.worktreePath);
+  const cRow = db.getSession(C.id);
+  check("(C) FRESH spawnWorker review spawn: taskless", cRow.taskId === null);
+  check("(C) FRESH spawnWorker review spawn: reviewBaseSha stamped to the reviewed tip (the REAL spawn-time stamping call site)", cRow.reviewBaseSha === reviewedHeadSha);
+  check("(C) FRESH spawnWorker review spawn: cut its OWN branch, never the author's", cRow.branch !== authorBranch);
+
+  // ── (D) ALIASED, via REAL spawnWorker (round 3 test gap, the exact CR-round-2 aliasing scenario): a
+  //    TASKED spawnWorker(taskId:T, reviewOfTaskId:T) resolves to T's OWN existing worktree/branch
+  //    (createWorktree's reuse path — forkFrom never consulted), so the stamped reviewBaseSha must be
+  //    null, exactly like a non-review spawn — never the aliased tip. ────────────────────────────────
+  const D = await sessionsSpawn.spawnWorker(mgrId, { taskId: authorTaskId, agentId, kickoffPrompt: "REVIEW_D", reviewOfTaskId: authorTaskId });
+  const dRow = db.getSession(D.id);
+  check("(D) ALIASED spawnWorker review spawn: resolves to the author's OWN existing worktree (reuse, not a fresh fork)", D.worktreePath === authorWt);
+  check("(D) ALIASED spawnWorker review spawn: resolves to the author's OWN existing branch", dRow.branch === authorBranch);
+  check("(D) ALIASED spawnWorker review spawn: reviewBaseSha stamped to null (never the aliased tip — CR round 2's fix)", dRow.reviewBaseSha === null);
 } finally {
   db.close();
   for (const dir of cleanupDirs) {
@@ -128,6 +176,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a review spawn's ahead-of-base check now compares against Session.reviewBaseSha (the reviewed branch's tip), not mainline HEAD: a reviewer that authors nothing can report noChanges:true and auto-retires; one that DID author a commit is still refused, with a message naming the real base instead of sending it hunting for uncommitted work or leaving merge status ambiguous."
+  ? "\n✅ ALL PASS — a review spawn's ahead-of-base check now compares against Session.reviewBaseSha (the reviewed branch's tip), not mainline HEAD: a reviewer that authors nothing can report noChanges:true and auto-retires; one that DID author a commit is still refused, with a message naming the real base instead of sending it hunting for uncommitted work or leaving merge status ambiguous. A REAL spawnWorker review spawn (fresh AND aliased) stamps reviewBaseSha correctly either way."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
