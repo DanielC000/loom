@@ -892,6 +892,13 @@ export class CodescapeSupervisor {
    *  `PATCH` is the sanctioned way to recover from the backstop). `null` while not suspended. */
   private memoryRecycleSuspendedAtCeilingMb: number | null = null;
   /**
+   * The pid a kill has already been issued for, via either {@link checkMemoryCeiling} or
+   * {@link probeHealth}'s wedge kill (both routed through {@link issueChildKill}). `null` = no kill in
+   * flight. Cleared in `onDeath` once the exit is observed; reset on {@link stop}/{@link start}.
+   * @decision df32be98 — never issue a second kill() on a child pid before its exit is observed.
+   */
+  private childKillPid: number | null = null;
+  /**
    * Test seam: count of {@link probeHealth} invocations that ran to full completion (a tick skipped by the
    * `probeInFlight` guard does NOT count). A REAL subprocess spawn now sits inside every successful probe
    * (`checkBuildDrift` -> `readInstalledBuild`), so the number of probes that complete in any given
@@ -991,6 +998,12 @@ export class CodescapeSupervisor {
   /** The live child's PID, or null when not running. Diagnostic / test seam. */
   getPid(): number | null {
     return this.child?.pid ?? null;
+  }
+
+  /** True iff a kill has already been issued for the CURRENT child's pid — see {@link childKillPid}. */
+  private isChildKillLatched(): boolean {
+    const pid = this.getPid();
+    return pid != null && this.childKillPid === pid;
   }
 
   /** Test seam — see {@link completedProbeTicks}. */
@@ -1168,6 +1181,7 @@ export class CodescapeSupervisor {
       this.consecutiveUnproductiveRecycles = 0;
       this.memoryRecycleSuspended = false;
       this.memoryRecycleSuspendedAtCeilingMb = null;
+      this.childKillPid = null;
       this.spawnServe();
       this.startHealthMonitor();
       // Card 4e0df6ce: `this.port` is no longer necessarily known synchronously at this point (a capable
@@ -1230,6 +1244,7 @@ export class CodescapeSupervisor {
     this.consecutiveUnproductiveRecycles = 0;
     this.memoryRecycleSuspended = false;
     this.memoryRecycleSuspendedAtCeilingMb = null;
+    this.childKillPid = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -1477,6 +1492,7 @@ export class CodescapeSupervisor {
       this.child = null;
       this.alive = false;
       this.spawnedAt = null;
+      this.childKillPid = null; // the exit is now observed — clear the shared kill latch (see issueChildKill)
       if (this.stopped) return; // an explicit stop() — not a death, no restart
       const tail = Buffer.concat(chunks).toString("utf-8").trim().slice(-OUTPUT_TAIL_BYTES);
       console.warn(`[codescape] serve ${reason} — scheduling restart${tail ? `\n${tail}` : ""}`);
@@ -1484,6 +1500,20 @@ export class CodescapeSupervisor {
     };
     child.on("error", (err) => onDeath(`process error: ${err.message}`));
     child.on("exit", (code, signal) => onDeath(`exited (code ${code ?? "null"}, signal ${signal ?? "null"})`));
+  }
+
+  /**
+   * The ONE choke point both kill sites — {@link checkMemoryCeiling}'s memory-ceiling kill and
+   * {@link probeHealth}'s wedge kill — route through. Refuses a second kill for a pid already latched
+   * (see {@link childKillPid}); the caller's own post-kill bookkeeping (recycle callback, failure-count
+   * reset, logging) should only run when this returns `true`.
+   * @decision df32be98 — never issue a second kill() on a child pid before its exit is observed.
+   */
+  private issueChildKill(child: ChildProcess, pid: number): boolean {
+    if (this.childKillPid === pid) return false;
+    this.childKillPid = pid;
+    try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ }
+    return true;
   }
 
   /**
@@ -1573,6 +1603,9 @@ export class CodescapeSupervisor {
     // Nit (CR follow-up): a real OS pid is always a safe positive integer — validate it rather than
     // trust it blindly, since `pid` is substituted directly into the win32 sampler's shell command.
     if (pid == null || !Number.isSafeInteger(pid) || pid <= 0) return false;
+    // A kill (this site OR probeHealth's wedge kill, both routed through issueChildKill) is already in
+    // flight for this exact pid — its exit hasn't been observed yet; see childKillPid's own doc.
+    if (this.childKillPid === pid) return false;
     // Finding 3 (CR follow-up): captured BEFORE the await — `this.child` can change WHILE the sample is
     // in flight (a concurrent wedge-kill, a build-drift kill, an explicit stop()+start()). A kill below
     // must target THIS exact child object, never whatever `this.child` has become by the time the
@@ -1644,7 +1677,7 @@ export class CodescapeSupervisor {
         console.error(`[codescape] onMemoryCeilingRecycle callback threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
       }
       if (this.child === childAtSampleTime && childAtSampleTime?.pid === pid) {
-        try { childAtSampleTime.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ }
+        this.issueChildKill(childAtSampleTime, pid);
       }
       return true;
     } finally {
@@ -1665,6 +1698,7 @@ export class CodescapeSupervisor {
     this.probeInFlight = true;
     try {
       if (await this.checkMemoryCeiling()) return; // recycled this tick — child is being torn down, skip the HTTP round-trip
+      if (this.isChildKillLatched()) return; // a kill is already in flight for this child (memory-ceiling or wedge) — its exit just isn't observed yet; don't treat the dying child's non-answer as fresh wedge evidence, and don't probe a child we already know we're tearing down
       const res = await this.request("GET", "/graph/health", undefined, this.healthProbeTimeoutMs);
       // stop() may have raced this in-flight probe (its fetch was already underway when stop() ran) —
       // abandon silently rather than act on a dead instance (no stray warn/kill after stop()).
@@ -1715,7 +1749,8 @@ export class CodescapeSupervisor {
       console.warn(`[codescape] serve health probe failed ${this.consecutiveHealthFailures}x consecutively (alive but unresponsive) — killing for restart`);
       this.consecutiveHealthFailures = 0;
       const child = this.child;
-      if (child) { try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ } }
+      const pid = this.getPid();
+      if (child && pid != null) this.issueChildKill(child, pid);
     } finally {
       this.probeInFlight = false;
       this.completedProbeTicks++;
@@ -1766,6 +1801,39 @@ export class CodescapeSupervisor {
     this.stopped = false;
     try {
       await this.checkToolDrift();
+    } finally {
+      this.stopped = wasStopped;
+    }
+  }
+
+  /**
+   * Test seam, same shape as {@link runToolDriftProbeForTest}: run ONE {@link checkMemoryCeiling} pass
+   * directly, bypassing the real {@link healthProbeIntervalMs} timer. Lets a test drive TWO checks
+   * back-to-back with no event-loop yield in between, deterministically reproducing "a second
+   * health-probe tick observes the same still-dying child before its real OS exit is observed" without
+   * racing real timer/OS-exit timing (unlike the scenarios above, which do) — see {@link childKillPid}.
+   */
+  async runOneMemoryCeilingCheckForTest(): Promise<boolean> {
+    const wasStopped = this.stopped;
+    this.stopped = false;
+    try {
+      return await this.checkMemoryCeiling();
+    } finally {
+      this.stopped = wasStopped;
+    }
+  }
+
+  /**
+   * Test seam, same shape as {@link runOneMemoryCeilingCheckForTest}: run ONE {@link probeHealth} pass
+   * directly, bypassing the real {@link healthProbeIntervalMs} timer, so a test can drive TWO wedge-kill
+   * ticks back-to-back — deterministic coverage for the shared {@link childKillPid} latch on the wedge
+   * kill site, the same shape as the memory-ceiling seam above.
+   */
+  async runOneHealthProbeForTest(): Promise<void> {
+    const wasStopped = this.stopped;
+    this.stopped = false;
+    try {
+      await this.probeHealth();
     } finally {
       this.stopped = wasStopped;
     }

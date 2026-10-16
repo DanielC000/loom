@@ -31,6 +31,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       ceiling) stop memory-based recycling for the rest of the supervisor lifetime, serve stays up
 //       despite remaining over ceiling, a durable "suspended" callback fires exactly once, and a later
 //       ceiling CHANGE re-arms it.
+//   (8) card df32be98: a shared kill latch stops `checkMemoryCeiling` from firing a SECOND kill against
+//       the same still-dying child when a second tick (driven directly, deterministically, via the
+//       runOneMemoryCeilingCheckForTest seam — never racing real timer/OS-exit timing) observes it before
+//       its real exit is seen — exactly once, not once per tick — while a genuinely NEW over-ceiling pid
+//       still recycles normally (pid-scoped, not a one-time switch).
 //
 // Every POSITIVE wait below (T1, CR follow-up) is asserted via a NAMED, progress-keyed check on the wait
 // itself succeeding — never just on the state it was waiting for — so a regression that makes the
@@ -447,6 +452,58 @@ const MB = 1024 * 1024;
   sup.stop();
 }
 
+// ===================== (8) card df32be98: the shared kill latch stops a double recycle =====================
+// Scenarios (1)/(5)/(7) above reproduce the real bug (a second kill fired for the same still-dying child)
+// only by racing a REAL subprocess's actual OS-level exit against a REAL healthProbeIntervalMs timer —
+// exactly what made them load-sensitive under host contention (see card df32be98's own triage note).
+// This scenario proves the fix DETERMINISTICALLY instead: two DIRECT calls to the
+// runOneMemoryCeilingCheckForTest seam, back-to-back with no sleep, so the second call runs well before
+// the real fixture child's OS-level exit has had any realistic chance to be observed by wireDeathHandling.
+{
+  const homeDir = path.join(tmpHome, "double-kill-latch-home");
+  const recycleCalls = [];
+  let overCeilingPid = null;
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [40, 80, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: 10 * 60_000, // long enough the real timer never fires during this scenario — every tick here is driven directly
+    healthProbeTimeoutMs: 40,
+    memorySampleTickInterval: 1,
+    getMemoryCeilingMb: () => 100,
+    memorySampler: async (pid) => ({ ok: true, bytes: pid === overCeilingPid ? 200 * MB : 10 * MB }),
+    onMemoryCeilingRecycle: (detail) => { recycleCalls.push(detail); },
+  });
+  await sup.start(["/fake/repo/double-kill-latch"]);
+  await checkWait("(8) wait for the initial spawn succeeded", () => sup.getSpawnCount() >= 1, () => sup.getHealthProbeTickCount());
+  overCeilingPid = sup.getPid();
+  check("(8) initial serve spawned with a real pid", typeof overCeilingPid === "number");
+
+  const fired1 = await sup.runOneMemoryCeilingCheckForTest();
+  check("(8) first direct check fires the kill", fired1 === true);
+  check("(8) exactly one recycle after the first check", recycleCalls.length === 1);
+  check("(8) the still-dying child's pid is unchanged immediately after the kill — its exit is not yet observed",
+    sup.getPid() === overCeilingPid);
+
+  // THE REPRO: a second direct check, called immediately — this is the "more than one health-probe tick
+  // elapses before the real OS exit is observed" condition from the card, forced deterministically.
+  const fired2 = await sup.runOneMemoryCeilingCheckForTest();
+  check("(8) the shared latch refuses a second kill for the SAME still-dying pid", fired2 === false);
+  check("(8) exactly one recycle total — the latch suppressed the double-fire", recycleCalls.length === 1);
+
+  // Pid-scoped negative control: let the real exit land, then prove a genuinely NEW over-ceiling child
+  // still recycles — the latch must be pid-scoped, never a blanket "recycle once ever for this supervisor".
+  await checkWait("(8) wait for the respawn after the real exit succeeded", () => sup.getSpawnCount() >= 2, () => sup.getHealthProbeTickCount());
+  const newPid = sup.getPid();
+  check("(8) the respawn produced a genuinely new pid", newPid !== overCeilingPid && newPid !== null);
+  overCeilingPid = newPid; // the sampler keys "over ceiling" off this var — reuse it to send generation 2 over ceiling too
+  const fired3 = await sup.runOneMemoryCeilingCheckForTest();
+  check("(8) a genuinely NEW pid still recycles normally — the latch is pid-scoped, not a one-time switch", fired3 === true);
+  check("(8) recycle count is now 2 — one per real over-ceiling pid, never per tick", recycleCalls.length === 2);
+
+  sup.stop();
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -455,6 +512,6 @@ delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — codescape memory-ceiling recycle (7 scenarios): over-ceiling recycle-exactly-once + event shape + pid-scoping, negative control, sampler-failure fail-safe, sample-cadence cost control, live (non-frozen) ceiling resolution, pure OS-output parser units (incl. the empty-stdout regression), and the 3-strikes unproductive-recycle backstop (stays up, re-arms on a ceiling change). See this file's own scenario-header comments for the full per-scenario DoD."
+  ? "\n✅ ALL PASS — codescape memory-ceiling recycle (8 scenarios): over-ceiling recycle-exactly-once + event shape + pid-scoping, negative control, sampler-failure fail-safe, sample-cadence cost control, live (non-frozen) ceiling resolution, pure OS-output parser units (incl. the empty-stdout regression), the 3-strikes unproductive-recycle backstop (stays up, re-arms on a ceiling change), and the shared kill-latch's double-recycle suppression (deterministic, pid-scoped). See this file's own scenario-header comments for the full per-scenario DoD."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

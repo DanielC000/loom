@@ -20,6 +20,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       probe used to be gated off by project count, leaving that boot's serve unwatched for its entire
 //       lifetime — since v1 has no runtime project registration, a project enabling codescape later in the
 //       same boot could never re-arm it either.)
+//   (19) card df32be98: the shared kill latch (childKillPid) stops the wedge-kill site from firing a
+//        SECOND kill against the same still-dying child — deterministically, via the
+//        runOneHealthProbeForTest seam — while a genuinely new pid still wedge-kills normally.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codescape-health-probe.mjs
 import fs from "node:fs";
@@ -1944,6 +1947,61 @@ for (const kind of ["PASS", "diagnostic"]) {
   delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
 }
 
+// ===================== (19) card df32be98: the shared kill latch stops the wedge kill's double-fire =====================
+// Scenario (1) above reproduces a WANTED wedge-kill by racing a REAL timer against REAL OS exit timing.
+// This proves the SAME shared latch (childKillPid, see supervisor.ts's issueChildKill) that fixed
+// checkMemoryCeiling's double-recycle also covers THIS, separate kill site — deterministically, via the
+// runOneHealthProbeForTest seam: two DIRECT calls back-to-back, no sleep, well before the first kill's
+// real OS exit has any realistic chance to be observed by wireDeathHandling.
+{
+  const homeDir = path.join(tmpHome, "wedge-double-kill-latch-home");
+  const wedgeFile = path.join(tmpHome, "wedge-double-kill-latch-flag");
+  fs.writeFileSync(wedgeFile, "1"); // wedged from the very first probe onward
+  process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }), // well under any ceiling — isolate this scenario's own subject (the wedge kill)
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: 10 * 60_000, // long enough the real timer never fires — every tick here is driven directly
+    healthProbeTimeoutMs: 40,
+    healthProbeFailureThreshold: 1, // one failing direct probe is enough to fire the kill, deterministically
+  });
+  await sup.start(["/fake/repo/wedge-double-kill-latch"]);
+  await waitForCompletedCondition(() => sup.getPort() !== null, () => sup.getCompletedProbeTickCount());
+  const pidBefore = sup.getPid();
+  check("(19) initial serve spawned and port-confirmed", sup.getSpawnCount() === 1 && typeof pidBefore === "number");
+
+  const warnings = captureWarnings();
+  await sup.runOneHealthProbeForTest(); // wedged (the fixture never answers) -> fires the wedge kill
+  check("(19) the first direct probe fires the wedge kill",
+    warnings.lines.filter((l) => l.includes("killing for restart")).length === 1);
+  check("(19) the still-dying child's pid is unchanged immediately after the kill — its exit is not yet observed",
+    sup.getPid() === pidBefore);
+
+  // THE REPRO: a second direct probe, called immediately — the shared latch must refuse a second kill
+  // for the SAME still-dying pid.
+  await sup.runOneHealthProbeForTest();
+  check("(19) the shared latch suppresses a second wedge kill for the SAME still-dying pid",
+    warnings.lines.filter((l) => l.includes("killing for restart")).length === 1);
+  warnings.restore();
+
+  // Pid-scoped negative control: once the real exit lands and a new child spawns, a genuinely NEW pid
+  // still wedge-kills normally — the latch must be pid-scoped, never a blanket one-time switch.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 2, () => sup.getCompletedProbeTickCount());
+  const newPid = sup.getPid();
+  check("(19) the respawn produced a genuinely new pid", newPid !== pidBefore && newPid !== null);
+  const warnings2 = captureWarnings();
+  await sup.runOneHealthProbeForTest();
+  check("(19) a genuinely NEW pid still wedge-kills normally — the latch is pid-scoped, not a one-time switch",
+    warnings2.lines.filter((l) => l.includes("killing for restart")).length === 1);
+  warnings2.restore();
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -1965,6 +2023,6 @@ const suppressionNote = () => {
   return parts.length > 0 ? ` (${parts.join("; ")} — FAIL lines above are never capped.)` : "";
 };
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe (18 scenarios + control): wedge detection/restart, give-up terminality, sub-threshold non-restart, zero-project arming, build-drift detection/dedup/burst-collapse/give-up, drift-check-state distinguishability, sustained-500 non-wedge, unbounded-cadence rate ceiling, getDriftDetail()'s served_status-facing remaining-window/UNRESOLVED messages actually firing and staying silent when there's nothing to report, and (card 5112d392 DoD-2) this file's own PASS-output and forwarded-diagnostic volume are both capped and positive-controlled. See this file's own scenario-header comments for the full per-scenario DoD."
+  ? "\n✅ ALL PASS — Codescape supervisor health probe (19 scenarios + control): wedge detection/restart, give-up terminality, sub-threshold non-restart, zero-project arming, build-drift detection/dedup/burst-collapse/give-up, drift-check-state distinguishability, sustained-500 non-wedge, unbounded-cadence rate ceiling, getDriftDetail()'s served_status-facing remaining-window/UNRESOLVED messages actually firing and staying silent when there's nothing to report, the shared kill-latch's double-wedge-kill suppression (deterministic, pid-scoped), and (card 5112d392 DoD-2) this file's own PASS-output and forwarded-diagnostic volume are both capped and positive-controlled. See this file's own scenario-header comments for the full per-scenario DoD."
   : `\n❌ ${failures} FAILURE(S).${suppressionNote()}`);
 process.exit(failures === 0 ? 0 : 1);
