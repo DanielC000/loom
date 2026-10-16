@@ -11,7 +11,7 @@ import { commitAll } from "./_git-commit.mjs";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, deriveTasklessSubject, killableRemoveDir } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, deriveTasklessSubject, killableRemoveDir, GIT_OP_TIMEOUT_MS, WORKTREE_ADD_TIMEOUT_MS } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
 
@@ -934,16 +934,85 @@ try {
     }
 
     // (r7) default (no timeoutMs) per-op block timeout is 15000ms for the new `gitDeps` seam too —
-    //      matching every other bounded op in this file (GIT_OP_TIMEOUT_MS). Fast stub (no hang) so the
-    //      assertion stays hermetic and doesn't pay a real 15s wait.
+    //      matching every other bounded op in this file (GIT_OP_TIMEOUT_MS) — EXCEPT `worktree add`
+    //      itself, which (card f2c976ea) now defaults to the larger WORKTREE_ADD_TIMEOUT_MS. Fast stub
+    //      (no hang) so the assertion stays hermetic and doesn't pay a real wait of either duration — a
+    //      NEW instance is constructed per real killableCanonicalRaw/boundedGit call (verified: every git
+    //      op this fresh-cut path makes is its own single raw() call), so recording `ms` at construction
+    //      time and keying by subcommand (`args[1]` too, for "worktree <sub>") correctly attributes each
+    //      value to the call that actually used it, not just whichever ran last.
     {
       const tR7 = "bounded-default-timeout-mainsha";
-      let seenMs = -1;
-      const seededR7 = await createWorktree(repo, "projWT", tR7, {}, undefined, undefined,
-        { gitFactory: (p, ms) => { seenMs = ms; return realSimpleGit(p); } });
-      check("(r7) default per-op block timeout is 15000ms (generous-but-bounded), same as GIT_OP_TIMEOUT_MS", seenMs === 15000);
+      const seenMsBySubcommand = {};
+      const gitFactoryR7 = (p, ms) => ({
+        raw: (args) => {
+          const key = args[0] === "worktree" ? `worktree ${args[1]}` : args[0];
+          seenMsBySubcommand[key] = ms;
+          return realSimpleGit(p).raw(args);
+        },
+      });
+      const seededR7 = await createWorktree(repo, "projWT", tR7, {}, undefined, undefined, { gitFactory: gitFactoryR7 });
+      check("(r7) mainSha rev-parse keeps the default 15000ms ref-op bound (GIT_OP_TIMEOUT_MS)",
+        seenMsBySubcommand["rev-parse"] === GIT_OP_TIMEOUT_MS);
+      check("(r7) worktree prune keeps the default 15000ms ref-op bound (GIT_OP_TIMEOUT_MS)",
+        seenMsBySubcommand["worktree prune"] === GIT_OP_TIMEOUT_MS);
+      check("(r7) branch --list keeps the default 15000ms ref-op bound (GIT_OP_TIMEOUT_MS)",
+        seenMsBySubcommand["branch"] === GIT_OP_TIMEOUT_MS);
+      check("(r7) worktree add defaults to the larger WORKTREE_ADD_TIMEOUT_MS, not GIT_OP_TIMEOUT_MS",
+        seenMsBySubcommand["worktree add"] === WORKTREE_ADD_TIMEOUT_MS && WORKTREE_ADD_TIMEOUT_MS > GIT_OP_TIMEOUT_MS);
       await removeWorktree(repo, seededR7.worktreePath);
       await deleteBranch(repo, seededR7.branch);
+    }
+
+    // (s1) card f2c976ea — `worktree add` tolerates a delay LONGER than the ref-op bound (GIT_OP_TIMEOUT_MS
+    //      analog here, via `timeoutMs`) but still within its OWN larger budget (`addWorktreeTimeoutMs`,
+    //      the test-seam override for WORKTREE_ADD_TIMEOUT_MS) — proving the two calls are bounded
+    //      INDEPENDENTLY, not that "a sufficiently large timeout works trivially": the SAME delay would
+    //      have rejected under the pre-fix shared-bound design (prune/branch-list's own 200ms), and (s2)
+    //      below proves prune still rejects fast despite add's own budget being much larger.
+    {
+      const tS1 = "worktree-add-tolerates-longer-than-refop-bound";
+      const refOpMs = 200;
+      const addBudgetMs = 2000;
+      const addDelayMs = 600; // > refOpMs (would have failed the OLD shared bound), < addBudgetMs
+      const delayedAddFactory = (repoPathArg, _blockMs) => {
+        const real = realSimpleGit(repoPathArg);
+        return {
+          raw: (args) => (args[0] === "worktree" && args[1] === "add"
+            ? new Promise((resolve, reject) => setTimeout(() => real.raw(args).then(resolve, reject), addDelayMs))
+            : real.raw(args)),
+        };
+      };
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tS1, {}, undefined, undefined,
+        { gitFactory: delayedAddFactory, timeoutMs: refOpMs, addWorktreeTimeoutMs: addBudgetMs }));
+      check("(s1) worktree add RESOLVES despite a delay longer than the ref-op bound (not confirmed-killed)", res.ok === true);
+      check(`(s1) the delay genuinely happened — elapsed (${Math.round(res.elapsed)}ms) >= the simulated add delay (${addDelayMs}ms)`,
+        res.elapsed >= addDelayMs - TIMER_SLACK_MS);
+      check(`(s1) still bounded, not accidentally unbounded — elapsed < add's own budget (${addBudgetMs}ms)`, res.elapsed < addBudgetMs);
+      check("(s1) the worktree actually landed (the delayed call really completed, not a false resolve)",
+        res.ok === true && fs.existsSync(res.value?.worktreePath ?? ""));
+      if (res.ok) {
+        await removeWorktree(repo, res.value.worktreePath);
+        await deleteBranch(repo, res.value.branch);
+      }
+    }
+
+    // (s2) card f2c976ea — `worktree prune` stays bounded by the ORIGINAL tight ref-op timeout even
+    //      though `worktree add`'s own budget (set deliberately much larger here) is now independent of
+    //      it — proving the widened add budget never rescues a genuinely wedged prune/branch-list call.
+    {
+      const tS2 = "worktree-prune-still-bounded-despite-larger-add-budget";
+      const refOpMs = 200;
+      const addBudgetMs = 10_000; // deliberately much larger than refOpMs — must NOT bail prune out
+      const hangOnPruneFactory = (repoPathArg, _blockMs) => {
+        const real = realSimpleGit(repoPathArg);
+        return { raw: (args) => (args[0] === "worktree" && args[1] === "prune" ? new Promise(() => {}) : real.raw(args)) };
+      };
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tS2, {}, undefined, undefined,
+        { gitFactory: hangOnPruneFactory, timeoutMs: refOpMs, addWorktreeTimeoutMs: addBudgetMs }));
+      check("(s2) worktree prune: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check(`(s2) bounded by the ref-op timeout, NOT add's much larger budget — settled in ${Math.round(res.elapsed)}ms (cap ${refOpMs}ms, not ${addBudgetMs}ms)`,
+        res.elapsed >= refOpMs - TIMER_SLACK_MS && res.elapsed < addBudgetMs);
     }
   }
 } finally {

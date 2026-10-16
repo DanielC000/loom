@@ -119,6 +119,11 @@ export interface StaleBaseInfo {
 // casually — it's sized to fail a genuinely wedged op fast, not to rush a slow-but-legitimate one.
 export const GIT_OP_TIMEOUT_MS = 15_000; // exported so a test can assert the floored value, not restate it
 
+// @decision f2c976ea — do not lower this back toward GIT_OP_TIMEOUT_MS: the checkout is a bulk
+// filesystem write, not a ref op, and 15s already confirmed-killed two real adds under ordinary
+// foreign-gate host load. Do not raise it past this without re-measuring the canonical-lock hold-time cost.
+export const WORKTREE_ADD_TIMEOUT_MS = 60_000; // exported so a test can assert the floored value, not restate it
+
 /**
  * Injectable seam for the bounded git ops. Lets a test simulate a hanging git child with a tiny budget
  * and assert the call returns/throws within the window (not never). `gitFactory` defaults to a simpleGit
@@ -162,6 +167,14 @@ export interface BoundedGitDeps {
   /** @decision a5d9c458 — do not check this only once before {@link removeWorktree}'s retry loop starts;
    *  re-consult it before EVERY attempt, or a claim arriving mid-retry goes unnoticed until too late. */
   abortIfClaimed?: () => boolean;
+  /**
+   * Card f2c976ea — TEST SEAM ONLY: overrides {@link createWorktree}'s own `worktree add` call
+   * specifically, independent of `timeoutMs` above (which still bounds its sibling `prune`/
+   * `branch --list` calls in the same locked sequence). Production code never sets this (so
+   * {@link WORKTREE_ADD_TIMEOUT_MS} always applies to `add`); a test shrinks it to prove the two calls
+   * are bounded independently without paying either real-world duration.
+   */
+  addWorktreeTimeoutMs?: number;
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -1089,6 +1102,9 @@ export async function createWorktree(
   // BOUNDED (card c801d688) — same rationale as the rev-parse above: no local catch, so a timeout
   // propagates exactly like any other git failure already did, just bounded instead of unbounded.
   const timeoutMs = gitDeps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  // @decision f2c976ea — `add` alone gets its own, larger budget (see WORKTREE_ADD_TIMEOUT_MS's own doc);
+  // `prune`/`branch --list` below stay on `timeoutMs`, unchanged.
+  const addTimeoutMs = gitDeps.addWorktreeTimeoutMs ?? WORKTREE_ADD_TIMEOUT_MS;
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
   // @decision 2fcd5eae — serialize prune -> branch --list -> add per canonical repo under
   // withCanonicalIndexLock; never wrap provisionWorktreeDeps in it (an install can take minutes and would
@@ -1096,8 +1112,8 @@ export async function createWorktree(
   //
   // Release the lock only once the child is confirmed dead — never on a
   // bare withTimeout race.
-  const boundedLockedRaw = (args: string[], label: string): Promise<string> =>
-    killableCanonicalRaw(repoPath, args, timeoutMs, label, gitDeps.gitFactory);
+  const boundedLockedRaw = (args: string[], label: string, ms: number = timeoutMs): Promise<string> =>
+    killableCanonicalRaw(repoPath, args, ms, label, gitDeps.gitFactory);
   // @decision 62c4953a — deliberately NO `checkIndexLock`: a held lock must never block a worker/review
   // spawn (`worktree prune`/`branch --list`/`worktree add` all work fine with one present, real git 2.47).
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
@@ -1109,7 +1125,7 @@ export async function createWorktree(
         : forkFrom
           ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
           : ["worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
-        "git worktree add");
+        "git worktree add", addTimeoutMs);
     } catch (addErr) {
       // @decision af436c99 — recognize git worktree add's own benign progress text (mistaken for failure by a
       // simple-git exitCode race) as success, only once independently confirmed landed via worktreeAddLanded;
