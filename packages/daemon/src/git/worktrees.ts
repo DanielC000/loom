@@ -6176,9 +6176,12 @@ export async function computeEmitCompareGate(
   };
 }
 
-/** Bound on evaluating the worktree's harness config in a child process. Generous for a plain module load
- *  (measured well under a second); exists only so a hung/looping branch copy can never wedge a merge. */
-export const HARNESS_CONFIG_LOAD_TIMEOUT_MS = 20_000;
+/** Bound on evaluating the worktree's harness config in a child process. Card fd6d497e: raised from
+ *  20_000 to align with {@link TEST_IMPORTER_SCAN_TIMEOUT_MS}/{@link DIRECT_DIST_IMPORTER_SCAN_TIMEOUT_MS}
+ *  — measured ~2.2s idle (solo and 3-concurrent), but real full-gate load showed eligible:false/ok:false
+ *  right at the old 20s bound. Every consumer fails closed, so the only cost of this raise is worst-case
+ *  latency before falling back to the full gate, never a correctness regression. */
+export const HARNESS_CONFIG_LOAD_TIMEOUT_MS = 120_000;
 
 /** argv[1] of the child is deliberately `process.execPath` (a real, resolvable path that is NOT the script):
  *  test-daemon.mjs's main-module guard realpaths `process.argv[1]` and REFUSES (exit 1) if it can't, so under
