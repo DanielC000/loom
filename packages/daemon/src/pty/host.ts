@@ -155,15 +155,29 @@ export const CODEX_BOOT_READY_TIMEOUT_MS = Number(process.env.LOOM_CODEX_BOOT_RE
  */
 const SUBMIT_ENTER_DELAY_MS = Number(process.env.LOOM_SUBMIT_ENTER_DELAY_MS) || 150;
 
+/**
+ * Shared linear-with-cap scaling shape: `aboveChars` excess characters absorbed per extra ms, never
+ * more than `maxExtraMs` total — the ONE formula every size-scaled settle/hold window in this file
+ * reuses (card fd4704bc), rather than each call site inventing its own divergent arithmetic. `ceil()`
+ * so even a single excess char counts; `aboveChars` lets a call site declare "ordinary small writes
+ * get exactly zero extra" without a separate branch — `textLength <= aboveChars` always returns 0.
+ */
+function scaledExtraMs(textLength: number, aboveChars: number, bytesPerMs: number, maxExtraMs: number): number {
+  const excess = textLength - aboveChars;
+  if (excess <= 0) return 0;
+  return Math.min(maxExtraMs, Math.ceil(excess / bytesPerMs));
+}
+
 /** Extra bytes of paste body absorbed per extra ms added to the initial pre-Enter delay — a larger
  * injected message (a worker report, a coalesced multi-message drain) gives claude's TUI more real
  * time to finish ingesting/re-rendering the paste before the first Enter races it. Capped by
  * SUBMIT_ENTER_DELAY_MAX_EXTRA_MS so a huge paste can't stall the first attempt for seconds — the
- * verify-retry loop is what actually guarantees delivery, this is just a better-aimed first shot. */
+ * verify-retry loop is what actually guarantees delivery, this is just a better-aimed first shot.
+ * No `aboveChars` floor here (0) — unchanged from before `scaledExtraMs` existed. */
 const SUBMIT_ENTER_DELAY_BYTES_PER_MS = 50;
 const SUBMIT_ENTER_DELAY_MAX_EXTRA_MS = 1500;
 function pasteSettleExtraMs(textLength: number): number {
-  return Math.min(SUBMIT_ENTER_DELAY_MAX_EXTRA_MS, Math.ceil(textLength / SUBMIT_ENTER_DELAY_BYTES_PER_MS));
+  return scaledExtraMs(textLength, 0, SUBMIT_ENTER_DELAY_BYTES_PER_MS, SUBMIT_ENTER_DELAY_MAX_EXTRA_MS);
 }
 
 /**
@@ -733,6 +747,18 @@ const FLUSH_CONFIRM_MAX_POLLS = Number(process.env.LOOM_FLUSH_CONFIRM_MAX_POLLS)
  *  interval (this file has no access to that daemon config); sessions/service.ts's cross-turn re-mint
  *  MUST reuse this constant, never a second one, or the two disciplines could silently drift apart. */
 export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
+
+/**
+ * @decision fd4704bc — do not widen GIVE_UP_HOLD_MS itself (a blind fixed bump delays every small
+ * write's recovery too); scale only the EXCESS over GIVE_UP_HOLD_SCALE_ABOVE_CHARS, via the shared
+ * scaledExtraMs shape, so an ordinary small dispatch's hold timing stays byte-identical.
+ */
+const GIVE_UP_HOLD_SCALE_ABOVE_CHARS = Number(process.env.LOOM_GIVE_UP_HOLD_SCALE_ABOVE_CHARS) || 8_000;
+const GIVE_UP_HOLD_SCALE_BYTES_PER_MS = Number(process.env.LOOM_GIVE_UP_HOLD_SCALE_BYTES_PER_MS) || 1;
+const GIVE_UP_HOLD_SCALE_MAX_EXTRA_MS = Number(process.env.LOOM_GIVE_UP_HOLD_SCALE_MAX_EXTRA_MS) || 90_000;
+export function giveUpHoldExtraMs(textLength: number): number {
+  return scaledExtraMs(textLength, GIVE_UP_HOLD_SCALE_ABOVE_CHARS, GIVE_UP_HOLD_SCALE_BYTES_PER_MS, GIVE_UP_HOLD_SCALE_MAX_EXTRA_MS);
+}
 
 /**
  * Card 2521bf51: bound on `Live.humanSubmitHeldUntil` — how long `drainPending` will hold a queued
@@ -12259,15 +12285,25 @@ export class PtyHost {
       // @decision 844ca34e (round 4, MAJOR) — `...m` would otherwise carry `bypassOwnershipGateOnce`
       // forward unchanged, defeating its own "stripped on requeue" doc (EnqueueStdinTail, above) —
       // explicitly override so a requeued entry's later give-ups never re-skip the ownership check.
-      kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS, bypassOwnershipGateOnce: undefined });
+      // Card fd4704bc: scale the hold with the ACTUAL physically-written text (submittedText — shared
+      // across every member of a coalesced batch), not each member's own `.text`, mirroring why
+      // `submittedSig` above is seeded the same way.
+      kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS + giveUpHoldExtraMs(submittedText.length), bypassOwnershipGateOnce: undefined });
     }
     if (kept.length > 0) {
       live.pending.unshift(...kept);
       // @decision 844ca34e (round 3) — a no-write generation never enrolls in the positional queue; see
       // `wroteNothing`'s own doc on this method's signature.
       if (!wroteNothing) live.giveUpConfirmQueue.push(gen);
+      // Card fd4704bc (CR catch): log the REAL computed hold (base + size-scaled extra), not the bare
+      // GIVE_UP_HOLD_MS constant — this line is the evidence a future strand diagnosis actually reads,
+      // and a large paste's real hold can be many times longer than the base constant alone suggests.
+      // Every `kept` member is seeded from the SAME shared submittedText above, but each push calls its
+      // own `Date.now()` — so their `giveUpHeldUntil` values can differ by a few ms. `kept[0]` is always
+      // the EARLIEST of them, so this log line is correct to within ms, not an exact reading.
+      const actualHoldMs = kept[0]!.giveUpHeldUntil! - Date.now();
       // eslint-disable-next-line no-console
-      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending, HELD from drain for up to ${GIVE_UP_HOLD_MS}ms pending a confirming hook${wroteNothing ? " (no-write generation — excluded from the positional queue)" : ""} — see purgeConfirmedGiveUpRequeue/isGiveUpHeld`);
+      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending, HELD from drain for up to ${actualHoldMs}ms pending a confirming hook${wroteNothing ? " (no-write generation — excluded from the positional queue)" : ""} — see purgeConfirmedGiveUpRequeue/isGiveUpHeld`);
     }
   }
 

@@ -23,7 +23,7 @@ import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdic
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, giveUpHoldExtraMs, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
 import { removeClaudeConfigEntryForWorktree } from "../pty/claude-config.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -10254,8 +10254,10 @@ export class SessionService {
       // in-session re-mints UNTAGGED, so `purgeQueuedByReportEventIds` can never later drop it once
       // `worker_report_get` reads the report it announces (the SAME defect this card fixes at the
       // persistence/recycle boundaries). `undefined` for every non-report caller, byte-identical to before.
+      // Card fd4704bc: reuses pty/host.ts's own giveUpHoldExtraMs — never a second, divergent formula —
+      // so this re-mint's hold scales with `text`'s size the same way requeueGiveUpOrigin's does.
       const reminted = this.enqueueDurableMessage(recipientId, framePossibleDuplicate(text, rootMsgId), {
-        sender, taskId, kind, rootMsgId, chainDepth: chainDepth + 1, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS, reportEventId,
+        sender, taskId, kind, rootMsgId, chainDepth: chainDepth + 1, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS + giveUpHoldExtraMs(text.length), reportEventId,
         joinedOntoParkedRoot, // card a5987cf3 — carry forward across this re-mint; see ctx field's own doc
       });
       // eslint-disable-next-line no-console
@@ -10419,8 +10421,10 @@ export class SessionService {
       // reasoning (shared `logicalId` -> the existing content-match purge) and for why this recurses back
       // into THIS method (not the generic handler) on the re-mint's own eventual exhaustion.
       const remintMsgId = randomUUID();
+      // Card fd4704bc: a large first-turn kickoff's own hold scales with its size — see
+      // giveUpHoldExtraMs's own doc (pty/host.ts); byte-identical for an ordinary-sized kickoff.
       this.pty.enqueueStdin(sessionId, framePossibleDuplicate(kickoffText, rootMsgId), "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, {
-        giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS,
+        giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS + giveUpHoldExtraMs(kickoffText.length),
         onGiveUpExhausted: () => this.handleKickoffGiveUpExhausted(sessionId, remintMsgId, rootMsgId, kickoffText, chainDepth + 1),
         logicalId: rootMsgId,
       });

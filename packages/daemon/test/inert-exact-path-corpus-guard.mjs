@@ -137,6 +137,11 @@ function assertExactHits(label, filename, expected) {
 // If this ever reads {} (no hits), the scan technique itself is broken and every "clear" below means
 // nothing — this must be checked FIRST and must fail loudly on its own if it regresses.
 assertExactHits("(1) positive control", "CLAUDE.md", {
+  // Card fd4704bc: a THIRD real, for-real read, same shape as kickoff-real-spawn.mjs's own — this file
+  // builds a realistic-size kickoff from the repo's own real CLAUDE.md/SKILL.md prose (never synthetic
+  // padding) to exercise the real writeChunked path at scale. Key order here must match readCallHits'
+  // own scan order (alphabetical by filename) — the comparison below is a JSON.stringify string compare.
+  "give-up-hold-scale-real-spawn.mjs": 1,
   "kickoff-real-spawn.mjs": 1,
   "spawn-command-line-preflight.mjs": 1,
 });
