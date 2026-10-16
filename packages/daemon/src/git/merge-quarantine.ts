@@ -1536,6 +1536,10 @@ function consumeMatchedPendingsIntoArmedEntry(
         let foreignUnion = others.reduce((acc, p) => unionQuarantineEntries(acc, p.entry), base.entry);
         const otherSourceFiles = others.map((p) => p.sourceFile);
         foreignUnion = { ...foreignUnion, orphanLatchFiles: [...new Set([...(foreignUnion.orphanLatchFiles ?? []), ...otherSourceFiles])] };
+        // @decision 67136b71 — a foreign-group member can ALSO be an 883e29bc/64283e06 boot twin, armed
+        // under a DIFFERENT key — re-point it (replacement only, never a union source, c9114934) before
+        // re-inserting, or that slot is stranded holding a stale, pre-raise snapshot.
+        for (const p of group) replaceEntryEverywhere(activeQuarantines, p.entry, foreignUnion);
         pendingUnresolvedQuarantines.push({ entry: foreignUnion, sourceFile: base.sourceFile });
         if (!writePendingDivertFile(base.sourceFile, foreignUnion)) {
           // eslint-disable-next-line no-console
