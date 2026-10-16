@@ -247,6 +247,9 @@ constructed — a 2-member batch with only ONE member flagged — RED if `.every
   `ctx.isAutoJoinedResend`, the other reads only THIS call's own fresh `autoJoinedId` match AND requires
   the root to be PARKED) for exactly the reason round 3's MAJOR bug existed: conflating them re-grants the
   write bypass on every re-mint retry.
+  **Superseded in part by `a5987cf3`: the notice override now keys on `joinedOntoParkedRoot` (renamed
+  from `isAutoJoinedResend`, narrowed to require the matched root was already PARKED) — see that card's
+  own record for why "ever auto-joined" alone was too broad.**
 - Do not release a lineage from `giveUpLineages` at a content-blind decisive-confirm site without also
   checking whether this SPECIFIC hook was a genuine content match — `UserPromptSubmit`'s own gated reset
   fires on a bare generation match, which a mismatched hook still satisfies.

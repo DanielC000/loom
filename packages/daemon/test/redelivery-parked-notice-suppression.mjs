@@ -38,6 +38,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       resolving effective roots, not raw msgIds.
 //   (4) SHORTENED: the notice no longer inlines the resend-join caveats/confirmation hedge; the relocated
 //       content is verified present in mcp/orchestration.ts's worker_message/worker_list descriptions.
+//   (5) @decision a5987cf3 — ROUND 3's INTENT PRESERVED: a resend that auto-joins a root which has
+//       ALREADY parked still fires its OWN unsuppressed notice when it later parks too — the
+//       duplicate-parked exemption is scoped to THAT condition specifically, never to "ever auto-joined"
+//       (the regression (1) above guards: a chain auto-joining a merely-REQUEUED, not-yet-parked root
+//       must get no such exemption).
 //
 // Run: 1) build daemon (pnpm build from packages/daemon), 2) node test/redelivery-parked-notice-suppression.mjs
 import fs from "node:fs";
@@ -227,12 +232,42 @@ try {
     check("(4) RELOCATED: both relocations cite this card", (orchSrc.match(/card 085d9422/g) ?? []).length >= 2);
   }
 
+  // ===== (5) ROUND 3's INTENT PRESERVED: a resend that auto-joins a root which has ALREADY parked still ==
+  // ===== fires its OWN unsuppressed notice when it later parks too (card a5987cf3) ========================
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `pns-e-mgr-${sfx}`, wkr = `pns-e-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr); pty.setBusy(mgr, false);
+
+    sessions.messageWorker(mgr, wkr, "RESEND_ONTO_ALREADY_PARKED_ROOT");
+    for (let i = 0; i <= REMINT_LIMIT; i++) { pty.giveUpOn(wkr); pty.setBusy(wkr); } // A: exhausts fully to PARK
+    check("(5) setup: A reached PARKED", gaveUpEventsFor(wkr).filter((e) => e.detail?.outcome === "parked").length === 1);
+
+    sessions.messageWorker(mgr, wkr, "RESEND_ONTO_ALREADY_PARKED_ROOT"); // B: a fresh resend, A's root is NOW parked
+    for (let i = 0; i <= REMINT_LIMIT; i++) { pty.giveUpOn(wkr); pty.setBusy(wkr); } // B: exhausts fully to PARK too
+
+    const parkedEvents = gaveUpEventsFor(wkr).filter((e) => e.detail?.outcome === "parked");
+    check("(5) BOTH chains recorded their OWN parked event", parkedEvents.length === 2);
+    // The real join signal — NOT `pty.ambiguous.size` (A's own PARK notice to mgr also occupies a slot in
+    // that shared, recipient-blind map, so a naive size check can't tell "joined" apart from "didn't").
+    check("(5) setup: B genuinely auto-joined A's rootMsgId (both parked events share it)",
+      parkedEvents[0]?.detail?.rootMsgId === parkedEvents[1]?.detail?.rootMsgId);
+
+    const mgrSent = pty.sent.filter((s) => s.id === mgr).map((s) => s.text);
+    const parkedNotices = mgrSent.filter((t) => t.includes("[loom:redelivery-parked]"));
+    check("(5) THE INTENT: B's own park, onto an ALREADY-parked root, fires its OWN SECOND notice (not suppressed)", parkedNotices.length === 2);
+    check("(5) NEITHER park is marked noticeSuppressed:true", parkedEvents.every((e) => e.detail?.noticeSuppressed !== true));
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a moot [loom:redelivery-parked] notice (duplicate-park via auto-join, or superseded by a genuinely newer directive) is suppressed while its audit event is still recorded; a genuinely lost message is still reported at the same latency as before; and the relocated invariant boilerplate is verifiably present where it was moved to."
+  ? "\n✅ ALL PASS — a moot [loom:redelivery-parked] notice (duplicate-park via auto-join onto a NOT-yet-parked root, or superseded by a genuinely newer directive) is suppressed while its audit event is still recorded; a genuinely lost message is still reported at the same latency as before; a deliberate resend onto an ALREADY-parked root still fires its own unsuppressed notice (round 3's intent, card a5987cf3); and the relocated invariant boilerplate is verifiably present where it was moved to."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

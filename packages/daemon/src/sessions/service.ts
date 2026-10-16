@@ -9993,10 +9993,9 @@ export class SessionService {
        *  reads the report it announces. Every other caller omits it, byte-identical to before this field
        *  existed. */
       reportEventId?: string;
-      /** @decision 844ca34e (round 3) — carried forward across a re-mint (which always supplies its own
-       *  `rootMsgId`, short-circuiting fresh auto-join detection below) so the property survives the
-       *  WHOLE chain a manual resend started, not just its first dispatch. Every other caller omits it. */
-      isAutoJoinedResend?: boolean;
+      /** @decision a5987cf3 — true only once this chain joined onto an ALREADY-parked root; OR'd forward
+       *  across a re-mint, unlike the one-shot `bypassOwnershipGateOnce` below. Every other caller omits it. */
+      joinedOntoParkedRoot?: boolean;
     },
   ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
@@ -10038,14 +10037,13 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.log(`[give-up] ${recipientId} a fresh dispatch's content auto-matched still-ambiguous logicalId=${autoJoinedId} — joining that chain instead of self-rooting a disconnected one`);
     }
-    // @decision 844ca34e (round 3) — ONLY for the duplicate-parked override below; `!= null` (`hasAmbiguousMatch`
-    // returns `string | null`, and `null !== undefined` is true in JS). OR'd with `ctx.isAutoJoinedResend`
-    // so it survives a re-mint of this chain — see `bypassOwnershipGateOnce` below for why that carry must NOT also gate the write bypass (CR round 3 MAJOR).
-    const isAutoJoinedResend = ctx.isAutoJoinedResend === true || autoJoinedId != null;
-    // @decision 844ca34e (round 4) — never reads `ctx.isAutoJoinedResend` (that carry previously
+    // @decision 844ca34e (round 4) — never reads `ctx.joinedOntoParkedRoot` (that carry previously
     // re-granted the bypass on every re-mint retry, CR round 3 MAJOR, measured 4x writes) and only
     // applies once the matched chain has actually PARKED (ruling: "onto a PARKED root") — merely requeued gets no bypass.
     const bypassOwnershipGateOnce = autoJoinedId != null && this.isRootParked(recipientId, autoJoinedId);
+    // @decision a5987cf3 — ONLY for the duplicate-parked override below; OR'd with `ctx.joinedOntoParkedRoot`
+    // so it survives a re-mint of this chain, unlike the one-shot `bypassOwnershipGateOnce` just above.
+    const joinedOntoParkedRoot = ctx.joinedOntoParkedRoot === true || bypassOwnershipGateOnce;
     const rootMsgId = ctx.rootMsgId ?? ctx.resendOf ?? autoJoinedId ?? msgId; // self-root only when nothing above applies
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
@@ -10065,11 +10063,11 @@ export class SessionService {
       // mapping now happens inside `enqueueStdin`, not here.
       ctx.route, kind, undefined, undefined, undefined, ctx.sender, {
         giveUpHeldUntil: ctx.giveUpHeldUntil,
-        onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind, ctx.reportEventId, isAutoJoinedResend),
+        onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind, ctx.reportEventId, joinedOntoParkedRoot),
         logicalId: rootMsgId, // card 4a0af485 — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
         mintedAtWallClock: ctx.mintedAtWallClock,
         reportEventId: ctx.reportEventId,
-        bypassOwnershipGateOnce, // card 844ca34e round 4 — see this variable's own doc above (never isAutoJoinedResend)
+        bypassOwnershipGateOnce, // card 844ca34e round 4 — see this variable's own doc above (never joinedOntoParkedRoot)
         // Card 21a281b6 merge-gate fix: EXPLICIT opt-in, only when THIS call actually carries a fresh mint
         // (never for a carry/re-mint call that omits `ctx.mintedAtWallClock`) — see EnqueueStdinTail
         // .captureMintGen's own doc (pty/host.ts) for why a `mintedAtWallClock`-presence fallback there was
@@ -10199,10 +10197,9 @@ export class SessionService {
   private handleGiveUpExhausted(
     recipientId: string, text: string, msgId: string, rootMsgId: string, chainDepth: number,
     sender: string, taskId: string | null, kind: QueuedMessageKind, reportEventId?: string,
-    // @decision 844ca34e (round 3/4) — true for the dispatch that itself auto-joined via
-    // `hasAmbiguousMatch`, OR a re-mint descending from it. ONLY overrides "duplicate-parked" below —
-    // never read to grant the write bypass again (that's the separate, PARKED-gated `bypassOwnershipGateOnce`).
-    isAutoJoinedResend = false,
+    // @decision a5987cf3 — true for the dispatch that itself joined onto an ALREADY-parked root, OR a
+    // re-mint descending from it. ONLY overrides "duplicate-parked" below; never the write bypass.
+    joinedOntoParkedRoot = false,
   ): void {
     if (chainDepth < GIVE_UP_REMINT_LIMIT) {
       // Re-mint FIRST so `remintedAs` below is the REAL new msgId (enqueueDurableMessage mints its own,
@@ -10220,7 +10217,7 @@ export class SessionService {
       // persistence/recycle boundaries). `undefined` for every non-report caller, byte-identical to before.
       const reminted = this.enqueueDurableMessage(recipientId, framePossibleDuplicate(text, rootMsgId), {
         sender, taskId, kind, rootMsgId, chainDepth: chainDepth + 1, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS, reportEventId,
-        isAutoJoinedResend, // card 844ca34e round 3 — carry forward across this re-mint; see ctx field's own doc
+        joinedOntoParkedRoot, // card a5987cf3 — carry forward across this re-mint; see ctx field's own doc
       });
       // eslint-disable-next-line no-console
       console.warn(`[give-up] ${recipientId} message ${msgId} (root ${rootMsgId}, chainDepth ${chainDepth}) exhausted its in-session budget — re-minted as ${reminted.msgId} (attempt ${chainDepth + 1}/${GIVE_UP_REMINT_LIMIT})`);
@@ -10237,11 +10234,11 @@ export class SessionService {
     // Card 085d9422: computed BEFORE the durable park event below, so that event's OWN detail can carry
     // whether the sender-facing notice actually went out — the parked outcome is recorded EITHER way (a
     // suppressed notice never means a suppressed AUDIT record); only the notice dispatch itself is gated.
-    // @decision 844ca34e (round 3) — a manual resend's OWN park is never moot as "duplicate-parked" of
-    // the chain's earlier park — the sender deliberately re-attempted, so a second failure is genuinely
-    // new, not a repeat. Other moot reasons still apply unchanged.
+    // @decision a5987cf3 — only a dispatch that joined onto an ALREADY-parked root is exempt from
+    // "duplicate-parked" here; a chain that merely auto-joined a still-REQUEUED root gets no exemption.
+    // Other moot reasons still apply unchanged.
     const rawMootReason = this.suppressMootParkNotice(recipientId, sender, rootMsgId);
-    const mootReason = isAutoJoinedResend && rawMootReason === "duplicate-parked" ? null : rawMootReason;
+    const mootReason = joinedOntoParkedRoot && rawMootReason === "duplicate-parked" ? null : rawMootReason;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sender, workerSessionId: recipientId, taskId,
       kind: "session_message_gave_up",
