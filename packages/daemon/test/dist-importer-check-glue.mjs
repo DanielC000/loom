@@ -118,6 +118,47 @@ const noReap = async () => ({ killedPids: [] });
 // proven to cover every future stall.
 const DIST_IMPORTER_REAL_GIT_OP_WAIT_MS = 120_000;
 
+// Card 47e70868: ambient-load calibration, mirroring dev-server-teardown.mjs/trust-lock.mjs's own
+// established pattern (grep "[calib] ambient overshoot") — measure how much slower a nominal 50ms sleep
+// runs RIGHT NOW under whatever contention this run's host currently has, and scale the host-load-
+// sensitive SEMAPHORE-ADMISSION wait budgets below by that measured factor instead of a bigger fixed
+// guess a more loaded pool run (3 gate lanes + a sibling project's own gate) could still blow through.
+// 1 = no contention observed; >1 scales with it. Deliberately NOT applied to
+// DIST_IMPORTER_REAL_GIT_OP_WAIT_MS above — that constant covers a rare, intermittent real-createWorktree
+// STALL (not ordinary ambient slowness; see its own comment and card 69dc8fcd's non-repro investigation),
+// a different failure shape this calibration is not meant to paper over.
+const calibT0 = performance.now();
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+const calibDt = performance.now() - calibT0;
+const overshoot = Math.max(1, calibDt / 50);
+// These waits observe a REAL but normally sub-second git/admission step — kickDistImporterCheck's own
+// changedDaemonSrcTsPathsForCommit() git-diff call ((6)/(7)'s "admitted and held" waits, (13)'s queued-
+// behind-cap visibility), or an ordinary confirmWorkerMergeTracked's own real-git admission into the live
+// GateSemaphore registry ((7)'s v2Entry wait — the ACTUAL production failure this card fixes: card
+// 47e70868's own full-gate reds showed `waitUntil: timed out after 10000ms … ARRIVED LATE at 13104ms
+// (overshoot 1.3x) for (7) v2's own merge entry appears in the live registry`, test L~495). A fixed
+// 10_000ms budget was never wrong on an idle host — it just had no margin left once real ambient load (not
+// a multi-minute stall like DIST_IMPORTER_REAL_GIT_OP_WAIT_MS's own case) pushed these sub-second ops
+// past a few seconds. A 3x margin over the measured ambient overshoot is cheap insurance on a healthy
+// host (overshoot ~1x ⇒ ~30s) and genuinely protective on a loaded one, never a blind widen.
+const SEMAPHORE_ADMISSION_WAIT_MS = Math.round(10_000 * overshoot * 3);
+console.log(`[calib] ambient overshoot ${overshoot.toFixed(2)}x → semaphore-admission bound ${SEMAPHORE_ADMISSION_WAIT_MS}ms`);
+
+// Negative control (card 47e70868 DoD): prove the wait mechanism powering both the calibrated budget
+// above and every other `waitUntil` call in this file still FAILS when the awaited condition never
+// becomes true — never run against the full scaled `SEMAPHORE_ADMISSION_WAIT_MS` itself (which can
+// legitimately run to tens of seconds under real contention and would make this control expensive), a
+// short, fixed budget on the SAME underlying `waitUntil` is sufficient to prove falsifiability.
+{
+  let threw = false;
+  try {
+    await waitUntil(() => false, { timeoutMs: 200, intervalMs: 20, label: "(negative control) a predicate that never becomes true" });
+  } catch (err) {
+    threw = err instanceof Error && /timed out/.test(err.message);
+  }
+  check("(negative control) waitUntil still throws when the awaited condition never happens", threw);
+}
+
 // ── fixture: a tiny repo shaped like packages/daemon, so the real path-prefix filter matches ──────────
 const TEMPLATE_REPO = path.join(os.tmpdir(), `loom-dic-tmpl-${sfx}`);
 registerForCleanup(TEMPLATE_REPO);
@@ -328,8 +369,13 @@ const confirm = async (sessions, mgrId, workerId) => {
 // that exact promise to completion before returning. So by the time such a wait's predicate is first
 // polled, the condition is already true — these default-5s budgets were investigated under card de66fe8e
 // and found NOT to need widening. The waits that genuinely DO race real git-op duration are the ones that
-// observe MID-FLIGHT state BEFORE any such drain can run (see DIST_IMPORTER_REAL_GIT_OP_WAIT_MS's comment
-// above, and its two call sites in scenarios (14)/(20), plus scenario (25)'s backgrounded-cut wait).
+// observe MID-FLIGHT state BEFORE any such drain can run: the rare, multi-minute real-createWorktree
+// STALL (see DIST_IMPORTER_REAL_GIT_OP_WAIT_MS's own comment above, and its three call sites in scenarios
+// (14)/(20)/(25)), and — correcting this comment's own prior omission, card 47e70868: the actual
+// production failure this fixed was exactly one of these — the ORDINARY, sub-second real git-op admission
+// waits in (6)/(7)/(13) (an op reaching "pending"/"queued" state, or a real merge's own entry appearing in
+// the live GateSemaphore registry), which race real ambient host load rather than a rare stall. See
+// SEMAPHORE_ADMISSION_WAIT_MS's own comment above for the calibrated budget that now covers them.
 const settleAllKicks = async (spy) => { while (spy.kicks.length) await Promise.all(spy.kicks.splice(0)); };
 
 const dbs = [];
@@ -454,7 +500,7 @@ try {
     // wait until run #1 is genuinely HELD at its own `--only=` admission (observable: the pending gate op
     // for this project now exists and is still state:"pending") before landing #2 arrives.
     await waitUntil(() => db.listPendingGateOps().some((o) => o.projectId === P.projId && o.kind === "gate" && o.key.startsWith("dist-importer-check:") && o.state === "pending"),
-      { label: "(6) run #1 admitted and held", timeoutMs: 10_000 });
+      { label: "(6) run #1 admitted and held", timeoutMs: SEMAPHORE_ADMISSION_WAIT_MS });
     const w2 = await addWorker(db, P, { "packages/daemon/src/bar.ts": "export const BAR = 6;\n" });
     const v2 = await confirm(ctx.sessions, P.mgrId, w2.workerId);
     check("(6) landing 2 ALSO merged ungated (both independently landed)", v2.merged === true && v2.skipReason === "gate-interval");
@@ -480,7 +526,7 @@ try {
     const v1 = await confirm(ctx.sessions, P.mgrId, w1.workerId);
     check("(7) landing 1 merged ungated", v1.merged === true);
     await waitUntil(() => db.listPendingGateOps().some((o) => o.projectId === P.projId && o.kind === "gate" && o.key.startsWith("dist-importer-check:") && o.state === "pending"),
-      { label: "(7) the check's own run is admitted and held", timeoutMs: 10_000 });
+      { label: "(7) the check's own run is admitted and held", timeoutMs: SEMAPHORE_ADMISSION_WAIT_MS });
     // A DIFFERENT worker's ORDINARY gated merge on the SAME repo, started WHILE the check holds —
     // ctx.gate.pass defaults true and its own command ("pnpm gate") never matches "--only=", so it is
     // NOT held by `hold`; it must complete promptly if (and only if) no per-repo guard serializes it
@@ -493,7 +539,7 @@ try {
     // flag is false — the semaphore's own admission-level signal for "a per-repo guard is why I'm
     // waiting", never inferred from wall-clock timing.
     const v2Entry = await waitUntil(() => ctx.sessions.gateSemaphore.snapshot().entries.find((e) => e.gateType === "merge" && e.projectId === P.projId),
-      { label: "(7) v2's own merge entry appears in the live registry", timeoutMs: 10_000 });
+      { label: "(7) v2's own merge entry appears in the live registry", timeoutMs: SEMAPHORE_ADMISSION_WAIT_MS });
     check("(7) v2's merge entry is NOT repo-contended — the check's own worker-kind descriptor carries no repoPath, so the per-repo guard has nothing to match", v2Entry.repoContended === false);
     const v2 = await v2Promise;
     // Card cee17efe (LEAD round-2 ruling 6): the wall-clock `elapsedMs < 5_000` bound this used to carry
@@ -670,7 +716,7 @@ try {
     const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
     check("(13) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     const queuedEntry = await waitUntil(() => ctx.sessions.gateSemaphore.snapshot().entries.find((e) => e.distImporterCheckOnly === true && e.phase === "queued"),
-      { label: "(13) [setup] the check's own run genuinely queues behind the saturated cap", timeoutMs: 10_000 });
+      { label: "(13) [setup] the check's own run genuinely queues behind the saturated cap", timeoutMs: SEMAPHORE_ADMISSION_WAIT_MS });
     check("(13) [setup] the queued entry carries distImporterCheckOnly:true", !!queuedEntry && queuedEntry.distImporterCheckOnly === true);
     const cancelOk = queuedEntry ? ctx.sessions.gateSemaphore.cancelQueued(queuedEntry.id, "manual", "test queued cancel (card cee17efe round-3 proof)") : false;
     check("(13) the queued-cancel call itself succeeded", cancelOk === true);
