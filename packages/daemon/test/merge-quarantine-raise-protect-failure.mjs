@@ -5120,6 +5120,115 @@ try {
   check("*** CARD 00fd29d7 (reboot) *** Z7's own real repo STAYS BLOCKED after a reboot, even though m2-token was never cleared — the fix's own union survives both the partial clear and the reboot",
     fresh00fd.assertRepoNotQuarantined(zRepo7).ok === false);
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 3d27c045, MERGETOKENINTOPENDINGENTRIES DROPS armedKeys, ORPHANING A BOOT-DIVERTED TWIN'S OTHER
+  // KEY FOREVER — mergeTokenIntoPendingEntries (the SAME `!verified` merge branch 00fd29d7 fixed for
+  // resolvedKey/resolvedKeys above) built `merged` with NO `armedKeys` field at all, even though a
+  // matched entry can be an 883e29bc boot-diverted TWIN (armed in activeQuarantines under its own
+  // resolvedKey(s), per @decision 64283e06's own replaceEntryEverywhere re-point). d9 = r9/gone-subdir9
+  // is genuinely unresolvable; M1 (no key, enteredAt 1000, becomes `base`), M2 (resolvedKeys=[Z9],
+  // enteredAt 2000) and M3 (resolvedKeys=[W9], enteredAt 3000) are three independent pending-divert
+  // records for d9's own identity — M2 and M3 each graduate into a genuine 883e29bc twin at boot (armed
+  // in activeQuarantines at their own resolvedKey). A fresh raise on d9 (still unresolvable) merges all
+  // three via mergeTokenIntoPendingEntries — pre-fix, the merged record's own `armedKeys` is dropped
+  // entirely even though it now sits in activeQuarantines at BOTH Z9 and W9 (replaceEntryEverywhere
+  // re-points by VALUE, so the in-memory slots stay consistent regardless — the drop is invisible until
+  // something walks "every key this entry is armed under" via `entry.armedKeys` itself, which several
+  // clear-path helpers fall back to `[key]` — the ONE key already in hand — when it's empty):
+  // `clearMergeQuarantineByKey`'s own `keysToLift` (merge-quarantine.ts) is exactly such a helper. Clearing
+  // EVERY outstanding token (t1, t2, t3, the raise token) therefore lifts only ONE of Z9/W9 — whichever
+  // key `clearMergeQuarantineByToken`'s own Map iteration happens to visit first — and leaves the OTHER
+  // stuck, armed forever in-process, holding a stale, should-be-empty token set with no pending reference
+  // left to recover it on a later query; a REBOOT then makes it WORSE, not better — see the decision
+  // record's own "Why this is a DURABLE, cross-reboot loss" section. A PARTIAL clear (only two of the four
+  // tokens) is also pinned below, both in-process and after a reboot, so a future regression in the
+  // OPPOSITE direction (over-lifting on a partial clear) goes red too.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r9 = makeToplevelRepo("3d27c045-r9");
+  const d9 = path.join(r9, "gone-subdir9");
+  const zRepo9 = makeToplevelRepo("3d27c045-Z9");
+  const wRepo9 = makeToplevelRepo("3d27c045-W9");
+  const Z9 = canonicalRepoLockKey(zRepo9);
+  const W9 = canonicalRepoLockKey(wRepo9);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // M1 — no key at all, earliest enteredAt (becomes `base`, keeps its own sourceFile as the merge target).
+  const m1Path9 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m1Path9, JSON.stringify({
+    repoPath: d9, branch: "3d27c045-m1-branch", reason: "3d27c045 M1: no key",
+    enteredAt: 1000, tokens: ["3d27c045-m1-token"],
+  }, null, 2) + "\n");
+  // M2 — resolvedKeys=[Z9]: graduates into an 883e29bc twin armed at Z9.
+  const m2Path9 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m2Path9, JSON.stringify({
+    repoPath: d9, branch: "3d27c045-m2-branch", reason: "3d27c045 M2: resolvedKeys=[Z9]",
+    enteredAt: 2000, tokens: ["3d27c045-m2-token"], resolvedKeys: [Z9],
+  }, null, 2) + "\n");
+  // M3 — resolvedKeys=[W9]: graduates into an 883e29bc twin armed at W9.
+  const m3Path9 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m3Path9, JSON.stringify({
+    repoPath: d9, branch: "3d27c045-m3-branch", reason: "3d27c045 M3: resolvedKeys=[W9]",
+    enteredAt: 3000, tokens: ["3d27c045-m3-token"], resolvedKeys: [W9],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  check("(3d27c045 precondition) Z9's own real repo is blocked right after boot (M2's own twin arm)", assertRepoNotQuarantined(zRepo9).ok === false);
+  check("(3d27c045 precondition) W9's own real repo is blocked right after boot (M3's own twin arm)", assertRepoNotQuarantined(wRepo9).ok === false);
+  check("(3d27c045 precondition) M2 is a genuine 883e29bc twin — armed in activeQuarantines at Z9, with its own armedKeys naming Z9",
+    (activeMergeQuarantineFor(zRepo9)?.armedKeys ?? []).includes(Z9));
+  check("(3d27c045 precondition) M3 is a genuine 883e29bc twin — armed in activeQuarantines at W9, with its own armedKeys naming W9",
+    (activeMergeQuarantineFor(wRepo9)?.armedKeys ?? []).includes(W9));
+  check("(3d27c045 precondition) M1, M2 and M3 remain genuinely distinct pending entries for d9's identity after boot", (() => {
+    const d9Entries = listActiveMergeQuarantines().filter((e) => e.repoPath === d9);
+    return d9Entries.some((e) => e.tokens.length === 1 && e.tokens[0] === "3d27c045-m1-token")
+      && d9Entries.some((e) => e.tokens.length === 1 && e.tokens[0] === "3d27c045-m2-token")
+      && d9Entries.some((e) => e.tokens.length === 1 && e.tokens[0] === "3d27c045-m3-token");
+  })());
+
+  const raiseToken9 = enterMergeQuarantine(d9, "3d27c045-raise-branch", "3d27c045: a fresh raise on d9, still unresolvable — routes into mergeTokenIntoPendingEntries, merging all three twins");
+
+  check("*** CARD 3d27c045 *** the merged entry's own armedKeys carries BOTH twins' keys forward (Z9 and W9), never dropped just because `base` (M1) was never armed anywhere",
+    (() => {
+      const merged = activeMergeQuarantineFor(zRepo9);
+      return merged !== undefined && merged === activeMergeQuarantineFor(wRepo9)
+        && (merged.armedKeys ?? []).includes(Z9) && (merged.armedKeys ?? []).includes(W9);
+    })());
+  check("(sanity) Z9 and W9 are still blocked right after the merge (in-process)",
+    assertRepoNotQuarantined(zRepo9).ok === false && assertRepoNotQuarantined(wRepo9).ok === false);
+
+  // A PARTIAL clear (only two of the four outstanding tokens) must never OVER-lift either key — the
+  // opposite failure from this card's own bug. Pinned so a future regression in the OTHER direction
+  // (lifting too much on a partial clear) goes red too, not just the under-lift this card fixes.
+  clearMergeQuarantineByToken(d9, "3d27c045-m2-token");
+  clearMergeQuarantineByToken(d9, "3d27c045-m3-token");
+  check("*** CARD 3d27c045 (partial clear) *** Z9 and W9 BOTH stay blocked in-process after clearing only m2/m3 — the merged entry still correctly owns both keys with two tokens (m1, raise) still outstanding",
+    assertRepoNotQuarantined(zRepo9).ok === false && assertRepoNotQuarantined(wRepo9).ok === false);
+  const freshPartial9 = await freshBootModule();
+  freshPartial9.reenterMergeQuarantinesAtBoot([]);
+  check("*** CARD 3d27c045 (partial clear, reboot) *** Z9 and W9 BOTH stay blocked after a reboot too — a partial clear must never under- OR over-lift either key",
+    freshPartial9.assertRepoNotQuarantined(zRepo9).ok === false && freshPartial9.assertRepoNotQuarantined(wRepo9).ok === false);
+
+  // The DoD's own "clears EVERY token" scenario: the remaining two partial clears (tokens still
+  // outstanding after the first) followed by the fourth, LAST clear (a genuine full lift of the merged entry).
+  clearMergeQuarantineByToken(d9, "3d27c045-m1-token");
+  clearMergeQuarantineByToken(d9, raiseToken9);
+
+  check("*** CARD 3d27c045 (in-process) *** Z9's own real repo is NO LONGER blocked after every token is cleared",
+    assertRepoNotQuarantined(zRepo9).ok === true);
+  check("*** CARD 3d27c045 (in-process) *** W9's own real repo is NO LONGER blocked after every token is cleared",
+    assertRepoNotQuarantined(wRepo9).ok === true);
+  check("*** CARD 3d27c045 (in-process) *** no stale entry for d9's identity survives the full clear (neither pending nor an orphaned active arm)",
+    listActiveMergeQuarantines().filter((e) => e.repoPath === d9).length === 0);
+
+  const fresh3d27c045 = await freshBootModule();
+  fresh3d27c045.reenterMergeQuarantinesAtBoot([]);
+  check("*** CARD 3d27c045 (reboot) *** Z9's own real repo is NOT re-blocked after a reboot — nothing durable survives naming an already-cleared token",
+    fresh3d27c045.assertRepoNotQuarantined(zRepo9).ok === true);
+  check("*** CARD 3d27c045 (reboot) *** W9's own real repo is NOT re-blocked after a reboot — nothing durable survives naming an already-cleared token",
+    fresh3d27c045.assertRepoNotQuarantined(wRepo9).ok === true);
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }

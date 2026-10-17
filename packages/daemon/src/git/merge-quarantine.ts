@@ -216,6 +216,27 @@ function unionInformativeResolvedKeys(all: MergeQuarantineEntry[], label: string
   return { resolvedKey, resolvedKeys };
 }
 
+/** ALWAYS-UNION: the deduplicated union of every key any of `all` is CURRENTLY armed under, normalized
+ *  back to `undefined` when that union is empty — never a cosmetic `armedKeys: []` on a record with
+ *  nothing to carry there (mirrors {@link divertRaiseEntry}'s own long-standing "never a cosmetic
+ *  `armedKeys: []`" rule, and {@link unionInformativeResolvedKeys}'s own normalization for the sibling
+ *  field). A matched pending entry is ORDINARILY `armedKeys:undefined` (it was never armed anywhere), but
+ *  it can ALSO be an 883e29bc boot-diverted TWIN — the SAME reference also armed in `activeQuarantines`
+ *  under one or more keys, per decision 64283e06 — and dropping that twin's own `armedKeys` here
+ *  silently orphans whichever OTHER key(s) it was armed under the moment a caller re-points every
+ *  matched reference onto this merged object: the merged object then sits in `activeQuarantines` at
+ *  those keys with no record of being armed there, so a later "every key this entry is armed under"
+ *  walk (clear, latch rewrite) sees only the ONE key it was told about and never touches the other's
+ *  physical file.
+ *
+ *  @decision 8db913e2 (Follow-up 3d27c045) — extracted so {@link divertRaiseEntry} and {@link mergeTokenIntoPendingEntries}
+ *  share ONE implementation instead of two that can drift, same reason {@link unionInformativeResolvedKeys}
+ *  was extracted for the sibling field. */
+function unionArmedKeys(all: MergeQuarantineEntry[]): string[] | undefined {
+  const armedKeys = [...new Set(all.flatMap((e) => e.armedKeys ?? []))];
+  return armedKeys.length > 0 ? armedKeys : undefined;
+}
+
 /** The two literal `branch` strings this module writes into every GENERIC placeholder entry it mints
  *  itself (never a real raise) — centralized so every call site shares the exact text, and so
  *  {@link isPlaceholderEntryShape} can recognize a LEGACY placeholder final/tmp written before the
@@ -2198,9 +2219,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
  * @decision d4b25feb — never route a still-unresolvable repoPath's own second raise through
  * `consumeMatchedPendingsIntoArmedEntry` (it arms at a canonical key) — merge in place, here, instead.
  *
- * Built by hand, never via {@link unionQuarantineEntries} — that helper also unions `armedKeys`, which a
- * pure-pending entry must never carry (it was never armed anywhere); reusing it here would leave a
- * cosmetic-but-needless `armedKeys: []` on an entry that has always been `undefined` in that field.
+ * Built by hand, never via {@link unionQuarantineEntries} (its binary older/newer arbitration and
+ * `explicitResolvedKeyRule` plumbing don't fit this function's own N-ary matched set) — `armedKeys`
+ * itself is carried forward via the SAME shared {@link unionArmedKeys} helper {@link divertRaiseEntry}
+ * uses, never hand-rolled a second time.
  * Keeps (and durably rewrites) the EARLIEST-`enteredAt` matched entry's own `sourceFile` — mirrors
  * `enterMergeQuarantine`'s own "existing" branch's "longest-outstanding raise wins the identity" rule —
  * folding every OTHER matched entry's own `sourceFile` into `orphanLatchFiles` (defensive: in production
@@ -2210,6 +2232,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
  * @decision 64283e06 — a matched entry can be an 883e29bc boot-diverted TWIN (same reference ALSO armed
  * in `activeQuarantines`) — never rewrite only the pending side; route each through {@link
  * replaceEntryEverywhere} onto `merged`, or the active side goes stale.
+ *
+ * @decision 8db913e2 (Follow-up 3d27c045) — `merged` must ALSO carry that twin's own `armedKeys` forward (via {@link
+ * unionArmedKeys}), not just get re-pointed to by `replaceEntryEverywhere` — see the decision record for
+ * the post-reboot re-block this fixes.
  */
 function mergeTokenIntoPendingEntries(indices: number[], token: string): string {
   const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine);
@@ -2236,11 +2262,15 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   // matched entries, never spread only `base.entry`'s own (the SAME fail-open d524d1c4 fixed in
   // divertRaiseEntry) — see the shared helper's own doc.
   const { resolvedKey, resolvedKeys } = unionInformativeResolvedKeys(matched.map((p) => p.entry), `mergeTokenIntoPendingEntries(${base.entry.repoPath})`);
+  // @decision 8db913e2 (Follow-up 3d27c045) — union EVERY matched entry's own `armedKeys` too, never spread only `base.entry`'s
+  // own (the SAME fail-open d524d1c4/00fd29d7 fixed for resolvedKey/resolvedKeys) — see the shared
+  // helper's own doc.
+  const armedKeys = unionArmedKeys(matched.map((p) => p.entry));
   const merged: MergeQuarantineEntry = {
     ...base.entry, tokens, orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
     contributorRepoPaths: contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
     provenanceUnknown, provenanceTracked,
-    resolvedKey, resolvedKeys,
+    resolvedKey, resolvedKeys, armedKeys,
   };
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
   // @decision 8db913e2 (Follow-up 0dc514dc) — a DIFFERENT surviving pending entry can structurally depend on this EXACT
@@ -2552,9 +2582,11 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
  * (mirroring `enterMergeQuarantine`'s own `!verified` brand-new-divert branch) only when no such record
  * exists yet. Never touches `final` itself — whatever is physically there stays exactly as it was.
  *
- * Built by hand, never via {@link unionQuarantineEntries} — same reason {@link mergeTokenIntoPendingEntries}
- * is: that helper always stamps `armedKeys` as an array (never `undefined`), which would leave a
- * cosmetic-but-needless `armedKeys: []` on a record with nothing to carry there.
+ * Built by hand, never via {@link unionQuarantineEntries} — that helper always stamps `armedKeys` as an
+ * array (never `undefined`), which would leave a cosmetic-but-needless `armedKeys: []` on a record with
+ * nothing to carry there; `armedKeys` itself is still unioned, via the shared {@link unionArmedKeys}
+ * helper {@link mergeTokenIntoPendingEntries} also uses, which already normalizes an empty union back to
+ * `undefined`.
  *
  * @decision 8db913e2 (round 2, nitpick 4) — mirrors `188b145f`'s own "collect every identity-matching
  * index, never just the first" rule.
@@ -2576,7 +2608,6 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
     ...all.flatMap((e) => e.orphanLatchFiles ?? []),
     ...others.map((p) => p.sourceFile).filter((f) => f !== base.sourceFile),
   ])];
-  const armedKeys = [...new Set(all.flatMap((e) => e.armedKeys ?? []))];
   const contributorRepoPaths = [...new Set(all.flatMap((e) => e.contributorRepoPaths ?? []))];
   const provenanceUnknown = all.some((e) => e.provenanceUnknown) ? true : undefined;
   const provenanceTracked = all.some((e) => e.provenanceTracked) ? true : undefined;
@@ -2587,7 +2618,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   const merged: MergeQuarantineEntry = {
     ...base.entry, tokens,
     orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
-    armedKeys: armedKeys.length > 0 ? armedKeys : undefined,
+    armedKeys: unionArmedKeys(all),
     contributorRepoPaths: contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
     provenanceUnknown, provenanceTracked,
     resolvedKey, resolvedKeys,
