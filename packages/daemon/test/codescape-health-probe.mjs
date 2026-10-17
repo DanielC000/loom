@@ -2077,6 +2077,26 @@ for (const kind of ["PASS", "diagnostic"]) {
   check("(20) the first direct probe only defers — no kill yet",
     warnings.lines.some((l) => l.includes("deferring restart")) && !warnings.lines.some((l) => l.includes("killing for restart")));
 
+  // Card 044808ea: the drift-restart kill below (checkBuildDrift -> issueChildKill -> sendSignal,
+  // supervisor.ts:2174-2176 / 1674-1690 / 1647-1662) calls the REAL fixture child's `kill()`, which
+  // delivers a genuine OS signal; that process's real `'exit'` event (wireDeathHandling,
+  // supervisor.ts:1579-1636) is then reported asynchronously by Node/libuv, with NO ordering guarantee
+  // against the very next statement below (the "pid unchanged / exit not yet observed" precondition
+  // check). `probeHealth`'s own `await this.checkToolDrift()` (supervisor.ts:1931, which runs AFTER the
+  // drift kill fires but still inside the SAME `runOneHealthProbeForTest()` call below) yields the event
+  // loop on a real network round-trip, which is exactly the window the real exit event could land in
+  // before this test's check ever runs — a genuine ~1.8% flake (worker 63161f49, card bfce0891's log
+  // catch3-dev1-3.log), not a flaw in the latch itself.
+  // `issueChildKill`/`sendSignal` only ever act on `child.kill()`'s own RETURN VALUE (delivered or not) —
+  // never on whether the OS actually reports a death — so stub the REAL child's `kill()` to report
+  // "delivered" without ever touching the real process. This drives the exact same production code path
+  // (latch set, sendSignal invoked, delivered === true) while making "the exit is not yet observed"
+  // trivially and permanently true instead of racing a real one. Restored below, before `sup.stop()`, so
+  // the real fixture process still gets torn down for real rather than leaking.
+  const realChild = sup.getChildForTest();
+  const realChildKill = realChild.kill.bind(realChild);
+  realChild.kill = () => true;
+
   await sup.runOneHealthProbeForTest(); // SAME candidate observed again -> driftStabilityMs:0 is already satisfied -> fires the drift-restart kill
   check("(20) the second direct probe fires the drift-restart kill",
     warnings.lines.filter((l) => l.includes("killing for restart")).length === 1);
@@ -2097,6 +2117,7 @@ for (const kind of ["PASS", "diagnostic"]) {
     memorySamplerCalls === samplerCallsBeforeCrossCheck);
   warnings.restore();
 
+  realChild.kill = realChildKill; // restore the real kill() so stop() below actually terminates the fixture process
   sup.stop();
   delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
   delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
