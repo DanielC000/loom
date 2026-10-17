@@ -404,12 +404,10 @@ function hashKey(key) {
 // order has the NO-FILE key first and the HAS-FILE key second — the shape PASS 1's original (now-removed)
 // degraded-dual-arm used to produce, and the one the round-3 sort (card c0be9bf9) exists for.
 //
-// @decision 3152ec90 — a bare, hand-constructed entry object (never actually armed anywhere) is no longer
-// a valid fixture here: quarantineLatchFileIdsFor now gates every armedKeys member through
-// entryStillOwnsKey, so an unarmed synthetic object reports ZERO ids regardless of what it claims. Arm
-// BOTH synthetic keys for real via a single pending latch's own `resolvedKeys` (PASS 1's genuine degraded
-// dual-arm, never a constructed object) — natural insertion order is still [no-file, has-file], and this
-// is now a genuinely-armed entry the entryStillOwnsKey gate itself approves of. See the decision record.
+// @decision 8db913e2 (Follow-up 3152ec90) — a bare, hand-constructed entry object (never actually armed
+// anywhere) is no longer valid here: quarantineLatchFileIdsFor now gates every armedKeys member through
+// entryStillOwnsKey, so an unarmed synthetic object reports ZERO ids. Arm both synthetic keys for real
+// via a single pending latch's own `resolvedKeys` (PASS 1's genuine degraded dual-arm) instead.
 {
   const keyNoFile = `/synthetic/sort-check/no-file-${sfx}`;
   const keyHasFile = `/synthetic/sort-check/has-file-${sfx}`;

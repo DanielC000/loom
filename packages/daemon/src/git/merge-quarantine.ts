@@ -3508,9 +3508,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // an orphan merge REBUILDS the entry object, so a map slot holding an OLDER build of the "same" logical
   // entry is no longer `===` the one `key` resolves to (round 2 finding 2).
   //
-  // @decision 3152ec90 — gate every OTHER `armedKeys` member through `entryStillOwnsKey` (never `key`
-  // itself, already freshly matched) — an unconditional lift here deletes an unrelated raise's own live
-  // map slot once a boot-diverted twin's `armedKeys` goes stale. See the decision record.
+  // @decision 8db913e2 (Follow-up 3152ec90) — gate every OTHER `armedKeys` member through
+  // `entryStillOwnsKey` (never `key` itself, already freshly matched) — an unconditional lift here
+  // deletes an unrelated raise's own live map slot once a boot-diverted twin's `armedKeys` goes stale.
   const keysToLift = entry?.armedKeys?.length
     ? [key, ...entry.armedKeys.filter((k) => k !== key && entryStillOwnsKey(k, entry))]
     : [key];
@@ -3693,8 +3693,8 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   // matched-active clears will unconditionally lift, collected HERE (before any clear runs) so the
   // matchedPending loop below can union it into its own liftedKeysOverride — see the decision record.
   //
-  // @decision 3152ec90 — gated through `entryStillOwnsKey` (never `key` itself) — same reason as
-  // `clearMergeQuarantineByKey`'s own `keysToLift`. See the decision record.
+  // @decision 8db913e2 (Follow-up 3152ec90) — gated through `entryStillOwnsKey` (never `key` itself) —
+  // same reason as `clearMergeQuarantineByKey`'s own `keysToLift`.
   const activeLiftedKeys = new Set<string>();
   for (const [key, entry] of activeQuarantines) {
     if (directPathIdentity(entry.repoPath) !== identity) continue;
@@ -4071,9 +4071,9 @@ function pendingLatchIdFor(sourceFile: string): string {
  * none with a file at all — see the decision record.
  */
 export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[] {
-  // @decision 3152ec90 — gate every member through `entryStillOwnsKey` first — a stale `armedKeys`
-  // member would otherwise hand out a FOREIGN entry's own latch id as if it belonged to `entry`.
-  // See the decision record.
+  // @decision 8db913e2 (Follow-up 3152ec90) — gate every member through `entryStillOwnsKey` first — a
+  // stale `armedKeys` member would otherwise hand out a FOREIGN entry's own latch id as if it belonged
+  // to `entry`.
   const ownedArmedKeys = entry.armedKeys?.filter((k) => entryStillOwnsKey(k, entry)) ?? [];
   if (ownedArmedKeys.length) {
     const ids = [...new Set(ownedArmedKeys.map(quarantineHashForKey))];
