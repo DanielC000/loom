@@ -4780,6 +4780,274 @@ try {
   check("*** CARD 050a4428 (reboot) *** w3 (Kw3's own real repo) STAYS BLOCKED after a reboot, with K3's own redundant copy gone — the SECOND union's own write genuinely carried Kw3 forward and persisted it",
     freshMemOnly.assertRepoNotQuarantined(w3).ok === false);
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD d524d1c4, RESOLVEDKEY SURVIVES A MERGE-BRANCH DIVERT — divertRaiseEntry's merge branch
+  // (indices.length > 0) used to build `merged` as `{...base.entry, ...}`, which NEVER read the
+  // incoming raise's own resolvedKey/resolvedKeys at all — an ORDINARY single read fault (no triple
+  // fault needed, unlike the MEMORY-ONLY-KEY GUARD above), reproduced via a production sequence with
+  // zero out-of-band mutation to establish the premise: d4 is dual-armed [K4,Kw4] (its own physical slot
+  // K4, legacy resolvedKey=Kw4); y4 (a totally independent raiser) finds d4 degraded-occupying y4's own
+  // key, with ordinary, successfully-readable, no-resolvedKey content, minting a genuinely
+  // reference-distinct pending record for d4's identity; r4 then raises AGAIN into d4's dual-armed
+  // `existing` entry, final unreadable (ONE fault, the write itself succeeds normally) — the merge
+  // branch runs, and pre-fix dropped Kw4 from the written record entirely.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r4 = makeToplevelRepo("d524d1c4-r4");
+  const K4 = canonicalRepoLockKey(r4);
+  const K4hash = createHash("sha256").update(K4).digest("hex").slice(0, 24);
+  const w4 = makeToplevelRepo("d524d1c4-w4");
+  const Kw4 = canonicalRepoLockKey(w4);
+  if (createHash("sha256").update(Kw4).digest("hex").slice(0, 24) === K4hash) throw new Error("d524d1c4: Kw4 collided with K4 — re-run");
+  const d4 = path.join(r4, "gone-subdir4");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const K4FinalPath = path.join(MERGE_QUARANTINE_DIR, `${K4hash}.json`);
+  fs.writeFileSync(K4FinalPath, JSON.stringify({
+    repoPath: d4, branch: "d4-branch", reason: "d4 dual-armed: own physical slot K4, legacy resolvedKey=Kw4",
+    enteredAt: Date.now(), tokens: ["d4-token-orig"], resolvedKey: Kw4,
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("(d524d1c4 precondition) d4 is `existing` at r4's own key K4", activeMergeQuarantineFor(r4)?.repoPath === d4);
+  check("(d524d1c4 precondition) d4 is dual-armed at BOTH K4 and Kw4", (() => {
+    const keys = new Set(activeMergeQuarantineFor(r4)?.armedKeys ?? []);
+    return keys.has(K4) && keys.has(Kw4);
+  })());
+
+  // An independent raiser y4 finds d4 degraded-occupying ITS OWN key, ordinary no-resolvedKey content,
+  // NO injection — mints a genuinely reference-distinct pending record for d4's identity (EXACTLY the
+  // MEMORY-ONLY-KEY GUARD's own Step 2 shape above, but under ordinary, non-triple-fault conditions).
+  const y4 = makeToplevelRepo("d524d1c4-y4");
+  const Ky4 = canonicalRepoLockKey(y4);
+  const Ky4hash = createHash("sha256").update(Ky4).digest("hex").slice(0, 24);
+  if (Ky4hash === K4hash || Ky4hash === createHash("sha256").update(Kw4).digest("hex").slice(0, 24)) throw new Error("d524d1c4: Ky4 collided — re-run");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Ky4hash}.json`), JSON.stringify({
+    repoPath: d4, branch: "d4-branch-2", reason: "d4 degraded-occupying a SECOND, unrelated key, ordinary content, no resolvedKey",
+    enteredAt: Date.now(), tokens: ["d4-token-step2"],
+  }, null, 2) + "\n");
+  const y4Token = enterMergeQuarantine(y4, "y4-branch", "y4 raises fresh; d4 is found degraded-occupying y4's own key, no injection");
+  check("(d524d1c4 precondition) y4's own raise proceeded", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(y4Token));
+
+  const d4PendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d4));
+  check("(d524d1c4 precondition) a protective pending copy for d4 was durably minted at d4's OWN deterministic filename", fs.existsSync(d4PendingPath));
+  const d4PendingBefore = JSON.parse(fs.readFileSync(d4PendingPath, "utf8"));
+  check("(d524d1c4 precondition) that protective copy carries NO resolvedKey of its own", d4PendingBefore.resolvedKey === undefined);
+
+  // r4 raises AGAIN — enterMergeQuarantine's `existing` branch — forcing ONE ordinary read fault on d4's
+  // own `final` (NOT a triple fault: the divert's own write below is left to succeed normally).
+  const injectRead = injectPersistentReadFailure(K4FinalPath);
+  let r4Token;
+  try {
+    r4Token = enterMergeQuarantine(r4, "r4-branch", "r4 raises again into d4's dual-armed existing entry; final unreadable, ORDINARY single fault");
+  } finally {
+    injectRead.restore();
+  }
+  check("(d524d1c4) the read failure was actually attempted", injectRead.count() >= 1);
+  check("(d524d1c4) r4's own raise still persists IN-PROCESS despite the divert", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(r4Token));
+
+  const d4PendingAfter = JSON.parse(fs.readFileSync(d4PendingPath, "utf8"));
+  check("*** CARD d524d1c4 *** the merge branch's own write carries Kw4 forward — the INCOMING raise's own dual-armed resolvedKey, never dropped just because the pre-existing pending record had none",
+    d4PendingAfter.resolvedKey === Kw4 || (d4PendingAfter.resolvedKeys ?? []).includes(Kw4));
+  check("(sanity) w4 is still blocked right after the merge divert (in-process)", assertRepoNotQuarantined(w4).ok === false);
+
+  // Direct final-file removal as the isolation step — SAME technique, and SAME justification, as the
+  // MEMORY-ONLY-KEY GUARD scenario above: K4's own original physical file is a genuinely redundant,
+  // independent source of Kw4 that the divert never touched (divertRaiseEntry never writes to `final`);
+  // the premise itself needed ZERO out-of-band mutation (both d4's dual-arm and the independent pending
+  // record came from real production code paths above) — this step only removes an unrelated confound
+  // so the reboot check below isolates the mechanism actually under test, never a substitute for it.
+  fs.rmSync(K4FinalPath);
+  check("(d524d1c4 precondition) K4's own original file is genuinely gone before the reboot", !fs.existsSync(K4FinalPath));
+
+  const freshD524 = await freshBootModule();
+  freshD524.reenterMergeQuarantinesAtBoot([]);
+  check("*** CARD d524d1c4 (reboot) *** w4 (Kw4's own real repo) STAYS BLOCKED after a reboot, with K4's own redundant copy gone — the merge branch's own write genuinely carried Kw4 forward and persisted it",
+    freshD524.assertRepoNotQuarantined(w4).ok === false);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD d524d1c4, NO-KEY-DROPPED MATRIX — 3 matched pending entries (varying scalar/array shapes) plus
+  // the incoming raise, DISAGREEING scalars. Exercises divertRaiseEntry's merge branch with
+  // indices.length === 3 (never just 1, unlike the scenario above) by seeding three independent,
+  // reference-distinct pending-divert files for the SAME unresolvable identity directly (the established
+  // boot-time fixture technique — PASS 1 processes every `.json` file in the directory independently and
+  // pushes each unresolvable/no-real-key one to `pendingUnresolvedQuarantines` on its own, with no
+  // cross-file dedup by repoPath). M1 carries a scalar only; M2 an array only; M3 carries no key at all;
+  // the incoming raise (via d5's own dual-armed `existing`) carries a scalar that DISAGREES with M1's.
+  // Expected: the output's informative-key set is the union of every input's (minus nothing — see
+  // below), and the scalar is dropped to `undefined` on disagreement while every key still survives in
+  // `resolvedKeys`.
+  //
+  // M1/M2/M3's own keys are DELIBERATELY DISJOINT (Y, Z, no key — never a shared key across any two of
+  // them): boot's own PRE-EXISTING, correct secondary-key-arming (`armQuarantineKey`/
+  // `unionQuarantineEntries`, unrelated to this card) already unions any two degraded-divert entries
+  // that happen to share an informative key, at ARM time, before divertRaiseEntry ever sees them — a
+  // first draft of this fixture gave M2 `resolvedKeys:[Z,Y]` (deliberately overlapping M1's own Y) and
+  // that boot-time union silently collapsed M1+M2 into ONE shared object, leaving only 2 genuinely
+  // distinct matched entries where 3 were intended — caught by the `(precondition) M1 and M2 remain
+  // genuinely distinct` check below, which would have failed loudly instead of silently testing a
+  // smaller matrix than documented. Disjoint keys are what make `indices.length === 3` actually mean
+  // three INDEPENDENT inputs reaching divertRaiseEntry's own merge logic, not boot's.
+  //
+  // `excludeLiftedResolvedKey`/`excludeLiftedResolvedKeys` are DELIBERATELY not exercised/applied here:
+  // this path never touches `final` (divertRaiseEntry's own doc), so neither exclusion's premise (a
+  // protective copy read from `final`, about to be superseded by THIS operation's own fresh write to
+  // that same `final`) ever arises — there is nothing to subtract.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r5 = makeToplevelRepo("d524d1c4-matrix-r5");
+  const K5 = canonicalRepoLockKey(r5);
+  const K5hash = createHash("sha256").update(K5).digest("hex").slice(0, 24);
+  const yKeyRepo = makeToplevelRepo("d524d1c4-matrix-Y");
+  const Y = canonicalRepoLockKey(yKeyRepo);
+  const zKeyRepo = makeToplevelRepo("d524d1c4-matrix-Z");
+  const Z = canonicalRepoLockKey(zKeyRepo);
+  const wKeyRepo = makeToplevelRepo("d524d1c4-matrix-W");
+  const W = canonicalRepoLockKey(wKeyRepo);
+  const allHashes = [K5hash, Y, Z, W].map((k) => createHash("sha256").update(k).digest("hex").slice(0, 24));
+  if (new Set(allHashes).size !== allHashes.length) throw new Error("d524d1c4-matrix: a hash collided among K5/Y/Z/W — re-run");
+  const d5 = path.join(r5, "gone-subdir5");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // d5's own `final` — dual-armed with the INCOMING raise's own scalar resolvedKey = W.
+  const K5FinalPath = path.join(MERGE_QUARANTINE_DIR, `${K5hash}.json`);
+  fs.writeFileSync(K5FinalPath, JSON.stringify({
+    repoPath: d5, branch: "d524d1c4-matrix-d5-branch", reason: "d5 dual-armed: own physical slot K5, legacy resolvedKey=W",
+    enteredAt: Date.now(), tokens: ["d524d1c4-matrix-d5-token-orig"], resolvedKey: W,
+  }, null, 2) + "\n");
+  // M1 — scalar only (resolvedKey=Y), earliest enteredAt (becomes `base`).
+  const m1Path = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m1Path, JSON.stringify({
+    repoPath: d5, branch: "d524d1c4-matrix-m1-branch", reason: "d524d1c4 matrix M1: scalar only",
+    enteredAt: 1000, tokens: ["d524d1c4-matrix-m1-token"], resolvedKey: Y,
+  }, null, 2) + "\n");
+  // M2 — array only (resolvedKeys=[Z], DISJOINT from M1's own Y — see the header comment above).
+  const m2Path = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m2Path, JSON.stringify({
+    repoPath: d5, branch: "d524d1c4-matrix-m2-branch", reason: "d524d1c4 matrix M2: array only",
+    enteredAt: 2000, tokens: ["d524d1c4-matrix-m2-token"], resolvedKeys: [Z],
+  }, null, 2) + "\n");
+  // M3 — no key at all.
+  const m3Path = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m3Path, JSON.stringify({
+    repoPath: d5, branch: "d524d1c4-matrix-m3-branch", reason: "d524d1c4 matrix M3: no key",
+    enteredAt: 3000, tokens: ["d524d1c4-matrix-m3-token"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("(d524d1c4 matrix precondition) d5 is `existing` at r5's own key K5, dual-armed at W too", (() => {
+    const e = activeMergeQuarantineFor(r5);
+    const keys = new Set(e?.armedKeys ?? []);
+    return e?.repoPath === d5 && keys.has(K5) && keys.has(W);
+  })());
+  check("(d524d1c4 matrix precondition) all three M1/M2/M3 landed as SEPARATE pending entries for d5's identity",
+    [m1Path, m2Path, m3Path].every((p) => fs.existsSync(p)));
+  // CR 3555435b: boot's own arm-time union (when it fires) happens IN MEMORY only and never rewrites
+  // either source file — reading m1Path/m2Path's own on-disk bytes here would pass identically whether
+  // or not they were actually unioned, so it can't catch the collapse it documents. Assert IN-MEMORY
+  // distinctness instead, via `listActiveMergeQuarantines()` (the same accessor the CR used to observe
+  // the collapse): confirm there are two SEPARATE live entries for d5, one carrying ONLY M1's own token
+  // and one carrying ONLY M2's own token — if boot had unioned them, a single entry would carry BOTH.
+  check("(d524d1c4 matrix precondition) M1 and M2 remain genuinely distinct in-memory entries after boot (disjoint keys: boot's own secondary-key arming never unions them together before the divert)", (() => {
+    const d5Entries = listActiveMergeQuarantines().filter((e) => e.repoPath === d5);
+    const hasM1Alone = d5Entries.some((e) => e.tokens.length === 1 && e.tokens[0] === "d524d1c4-matrix-m1-token");
+    const hasM2Alone = d5Entries.some((e) => e.tokens.length === 1 && e.tokens[0] === "d524d1c4-matrix-m2-token");
+    return hasM1Alone && hasM2Alone;
+  })());
+
+  const injectRead5 = injectPersistentReadFailure(K5FinalPath);
+  let r5Token;
+  try {
+    r5Token = enterMergeQuarantine(r5, "r5-branch", "d524d1c4 matrix: r5 raises again into d5's dual-armed existing entry; final unreadable, ordinary single fault");
+  } finally {
+    injectRead5.restore();
+  }
+  check("(d524d1c4 matrix) the read failure was actually attempted", injectRead5.count() >= 1);
+
+  // M1 (earliest enteredAt) is `base` — the merged record lands at M1's own sourceFile.
+  const mergedAfter = JSON.parse(fs.readFileSync(m1Path, "utf8"));
+  const informativeAfter = new Set([
+    ...(mergedAfter.resolvedKey !== undefined ? [mergedAfter.resolvedKey] : []),
+    ...(mergedAfter.resolvedKeys ?? []),
+  ]);
+  check("*** CARD d524d1c4 (matrix) *** the output's informative-key set is >= the union of every input's own informative keys (Y from M1, Z from M2, W from the incoming raise) — minus nothing, since no lifted-key exclusion applies on this path",
+    informativeAfter.has(Y) && informativeAfter.has(Z) && informativeAfter.has(W));
+  check("*** CARD d524d1c4 (matrix) *** the scalar resolvedKey is left undefined on disagreement (M1's Y != the incoming raise's W), NOT arbitrarily picked from one side",
+    mergedAfter.resolvedKey === undefined);
+  check("(d524d1c4 matrix) M2's and M3's own sourceFiles were folded into the merged entry's orphanLatchFiles, never left dangling",
+    (mergedAfter.orphanLatchFiles ?? []).includes(path.basename(m2Path)) && (mergedAfter.orphanLatchFiles ?? []).includes(path.basename(m3Path)));
+
+  // Remove K5's own redundant final, AND M2's/M3's own still-physically-present original files — ALL
+  // genuinely redundant, independent sources the divert's own write never touched (divertRaiseEntry only
+  // ever rewrites `base.sourceFile`, i.e. m1Path; `others` — M2, M3 — are folded into the merged entry's
+  // `orphanLatchFiles` but their own ORIGINAL bytes are never swept). CR 3555435b: without this removal,
+  // Z would trivially re-arm from M2's own surviving orphan file (still carrying `resolvedKeys:[Z]`
+  // unchanged) rather than from the merged record, so its reboot check would not discriminate the fix at
+  // all. Removing it makes Z (and W, already isolated via K5FinalPath's own removal) genuinely depend on
+  // the merged record at m1Path. Y stays a SANITY check regardless of this removal — it is `base`/M1's
+  // OWN scalar, which even the ORIGINAL, buggy `{...base.entry}` spread always kept unconditionally
+  // (base's own fields were never the ones this card's bug dropped); verified empirically via
+  // `negative-control --ref HEAD~2` against the pre-fix source: Z and W's own reboot checks go RED,
+  // Y's does not — see the check's own label below.
+  fs.rmSync(K5FinalPath);
+  fs.rmSync(m2Path);
+  fs.rmSync(m3Path);
+  check("(d524d1c4 matrix precondition) K5's, M2's, and M3's own original files are ALL genuinely gone before the reboot — the merged record at m1Path is the SOLE surviving source",
+    !fs.existsSync(K5FinalPath) && !fs.existsSync(m2Path) && !fs.existsSync(m3Path));
+  const freshMatrix = await freshBootModule();
+  freshMatrix.reenterMergeQuarantinesAtBoot([]);
+  check("(sanity, NOT hazard-discriminating — Y is base/M1's own key, always kept even by the pre-fix code; see the comment above) Y's own real repo STAYS BLOCKED after a reboot (resolvedKeys-only re-arm)", freshMatrix.assertRepoNotQuarantined(yKeyRepo).ok === false);
+  check("*** CARD d524d1c4 (matrix, reboot) *** Z's own real repo STAYS BLOCKED after a reboot — the SOLE surviving source is the merged record's own resolvedKeys array (resolvedKeys-only re-arm)", freshMatrix.assertRepoNotQuarantined(zKeyRepo).ok === false);
+  check("*** CARD d524d1c4 (matrix, reboot) *** W's own real repo STAYS BLOCKED after a reboot — the SOLE surviving source is the merged record's own resolvedKeys array (resolvedKeys-only re-arm)", freshMatrix.assertRepoNotQuarantined(wKeyRepo).ok === false);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD d524d1c4, SCALAR KEPT WHEN EVERY INFORMATIVE INPUT AGREES — NOT a repro of this card's own bug
+  // (it passes on main too, by construction: with a single matched entry that IS `base`, the original
+  // buggy `{...base.entry}` spread trivially keeps that entry's own scalar regardless of this card's
+  // fix). This instead guards against a DIFFERENT, hypothetical regression — some future change that
+  // drops the scalar to `undefined` any time a union occurs at all, even when every informative input
+  // agrees on the same key — which the matrix scenario above cannot catch (it only ever disagrees).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r6 = makeToplevelRepo("d524d1c4-agree-r6");
+  const K6 = canonicalRepoLockKey(r6);
+  const K6hash = createHash("sha256").update(K6).digest("hex").slice(0, 24);
+  const yKeyRepo6 = makeToplevelRepo("d524d1c4-agree-Y6");
+  const Y6 = canonicalRepoLockKey(yKeyRepo6);
+  if (createHash("sha256").update(Y6).digest("hex").slice(0, 24) === K6hash) throw new Error("d524d1c4-agree: Y6 collided with K6 — re-run");
+  const d6 = path.join(r6, "gone-subdir6");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const K6FinalPath = path.join(MERGE_QUARANTINE_DIR, `${K6hash}.json`);
+  fs.writeFileSync(K6FinalPath, JSON.stringify({
+    repoPath: d6, branch: "d524d1c4-agree-d6-branch", reason: "d6 dual-armed: own physical slot K6, legacy resolvedKey=Y6",
+    enteredAt: Date.now(), tokens: ["d524d1c4-agree-d6-token-orig"], resolvedKey: Y6,
+  }, null, 2) + "\n");
+  const m6Path = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m6Path, JSON.stringify({
+    repoPath: d6, branch: "d524d1c4-agree-m6-branch", reason: "d524d1c4 agree M6: SAME scalar resolvedKey=Y6 as the incoming raise's own dual-arm",
+    enteredAt: Date.now(), tokens: ["d524d1c4-agree-m6-token"], resolvedKey: Y6,
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("(d524d1c4 agree precondition) d6 is `existing` at r6's own key K6, dual-armed at Y6 too", (() => {
+    const e = activeMergeQuarantineFor(r6);
+    const keys = new Set(e?.armedKeys ?? []);
+    return e?.repoPath === d6 && keys.has(K6) && keys.has(Y6);
+  })());
+
+  const injectRead6 = injectPersistentReadFailure(K6FinalPath);
+  try {
+    enterMergeQuarantine(r6, "r6-branch", "d524d1c4 agree: r6 raises again into d6's dual-armed existing entry; final unreadable");
+  } finally {
+    injectRead6.restore();
+  }
+  const mergedAfter6 = JSON.parse(fs.readFileSync(m6Path, "utf8"));
+  check("*** CARD d524d1c4 (agree) *** the scalar resolvedKey is KEPT (not needlessly dropped to undefined) when every informative input agrees",
+    mergedAfter6.resolvedKey === Y6);
+  check("(d524d1c4 agree) resolvedKeys still carries Y6 too (informativeKeysFor is a union, never scalar-xor-array)",
+    (mergedAfter6.resolvedKeys ?? []).includes(Y6));
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -4838,6 +5106,12 @@ console.log(failures === 0
     "(`reconcilePendingDivertTarget`), whose same-identity union carries tokens AND orphanLatchFiles/" +
     "contributorRepoPaths/provenanceUnknown/provenanceTracked forward (via `unionQuarantineEntries` " +
     "itself, never a token-only re-implementation), and which unions a repeated collision into an EXISTING " +
-    "same-identity collision file rather than minting an unbounded number of fresh ones (collision-reuse)."
+    "same-identity collision file rather than minting an unbounded number of fresh ones (collision-reuse). " +
+    "FOLLOW-UP (card d524d1c4): divertRaiseEntry's own merge branch (indices.length > 0) used to build " +
+    "`merged` by spreading ONLY `base.entry`, silently dropping the incoming raise's own resolvedKey/" +
+    "resolvedKeys (and every OTHER matched entry's) — a real post-reboot fail-open for a dual-armed " +
+    "twin's own secondary key, reproduced via an ORDINARY single fault (no triple fault needed). THE FIX: " +
+    "the merge branch now unions every informative key (scalar UNION array) across ALL matched entries " +
+    "plus the incoming raise, keeping the scalar only when every input that carries one agrees."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

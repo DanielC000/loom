@@ -2552,12 +2552,20 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   const contributorRepoPaths = [...new Set(all.flatMap((e) => e.contributorRepoPaths ?? []))];
   const provenanceUnknown = all.some((e) => e.provenanceUnknown) ? true : undefined;
   const provenanceTracked = all.some((e) => e.provenanceTracked) ? true : undefined;
+  // @decision 8db913e2 — union EVERY informative resolvedKey/resolvedKeys across all of `all`, never
+  // spread only `base.entry`'s own (a real post-reboot fail-open). Not `explicitResolvedKeyRule`, not
+  // `excludeLiftedResolvedKey(s)` — see the decision record's own "Follow-up d524d1c4" for why neither applies here.
+  const resolvedKeysRaw = unionResolvedKeysRetaining(undefined, all.flatMap((e) => informativeKeysFor(e)), `divertRaiseEntry(${base.entry.repoPath})`);
+  const resolvedKeys = resolvedKeysRaw.length > 0 ? resolvedKeysRaw : undefined;
+  const scalarsPresent = all.map((e) => e.resolvedKey).filter((k): k is string => k !== undefined);
+  const resolvedKey = scalarsPresent.length > 0 && scalarsPresent.every((k) => k === scalarsPresent[0]) ? scalarsPresent[0] : undefined;
   const merged: MergeQuarantineEntry = {
     ...base.entry, tokens,
     orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
     armedKeys: armedKeys.length > 0 ? armedKeys : undefined,
     contributorRepoPaths: contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
     provenanceUnknown, provenanceTracked,
+    resolvedKey, resolvedKeys,
   };
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
   replaceEntryEverywhere(activeQuarantines, entry, merged);
