@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 
 let failures = 0;
@@ -38,6 +39,16 @@ function captureWarnings() {
   const lines = [];
   console.warn = (...args) => { lines.push(args.join(" ")); original(...args); };
   return { lines, restore: () => { console.warn = original; } };
+}
+
+// Card df32be98 (7de21027): same shape as captureWarnings above, for stop()'s own escalation log line
+// (console.error, not console.warn — matching maybeEscalateStuckKill's own log level for the same class
+// of message elsewhere in this file's sibling codescape-health-probe.mjs).
+function captureErrors() {
+  const original = console.error;
+  const lines = [];
+  console.error = (...args) => { lines.push(args.join(" ")); original(...args); };
+  return { lines, restore: () => { console.error = original; } };
 }
 
 // Card 468df031: bounded-retry a real control-plane round trip until it reports genuine liveness, rather
@@ -922,6 +933,258 @@ await new Promise((resolve) => hungServer.close(resolve));
     identitySup.getSpawnCount() === spawnCountBeforeRealKill + 1 && identitySup.getPid() !== pidB && identitySup.getPid() !== null);
 
   identitySup.stop();
+}
+
+// ===================== (df32be98-stop) stop()'s own bounded SIGTERM→SIGKILL escalation — PLATFORM-
+// ===================== INDEPENDENT, via a fake EventEmitter-shaped child (never a real spawn). Card
+// ===================== 7de21027: the real-spawn POSIX scenario below this one can only ever run on a
+// ===================== POSIX CI runner; this one exercises the SAME escalation logic (terminateKilledChild)
+// ===================== deterministically on ANY host, including this dev machine, via the
+// ===================== stopKillEscalationMs test seam (tiny bound) in place of the real 3s default.
+{
+  class FakeKillRecordingChild extends EventEmitter {
+    constructor(pid) { super(); this.pid = pid; this.killCalls = []; }
+    kill(signal) { this.killCalls.push(signal ?? "SIGTERM"); return true; } // "delivered", never actually exits on its own
+  }
+
+  // --- (df32be98-stop-timeout) the child never exits ⇒ exactly ONE SIGKILL after the bound, logged once,
+  // and stop() resolves promptly once SIGKILL is ISSUED (never waits a second time for a confirmation). ---
+  {
+    const fakeChild = new FakeKillRecordingChild(900001);
+    const sup = new CodescapeSupervisor({
+      homeDir: path.join(tmpHome, "stop-escalation-timeout-home"),
+      stopKillEscalationMs: 60,
+      stopKillEscalationSupported: true, // test seam: exercise the SIGKILL branch regardless of this host's real platform
+    });
+    sup.child = fakeChild; // test-only direct assignment, same technique (22-zombie) uses in codescape-health-probe.mjs
+    sup.alive = true;
+    const errs = captureErrors();
+    const t0 = performance.now();
+    await sup.stop();
+    const elapsed = performance.now() - t0;
+    errs.restore();
+    check("(df32be98-stop-timeout) SIGTERM sent first", fakeChild.killCalls[0] === "SIGTERM");
+    check("(df32be98-stop-timeout) exactly ONE SIGKILL (the child never exits)",
+      fakeChild.killCalls.filter((s) => s === "SIGKILL").length === 1);
+    check("(df32be98-stop-timeout) exactly 2 kill calls total — nothing beyond SIGTERM then SIGKILL",
+      fakeChild.killCalls.length === 2);
+    check("(df32be98-stop-timeout) the escalation is logged exactly once",
+      errs.lines.filter((l) => l.includes("escalating to SIGKILL")).length === 1);
+    // stop() genuinely WAITED for the bound (not an instant no-op pass-through) — falsifiable: a
+    // regression that drops the wait entirely would resolve near-0ms and fail this floor. Slack below
+    // the configured 60ms bound (CR b05bf612): libuv timer deadlines are checked against a cached loop
+    // time, not re-sampled per comparison, so a real fire can land a few ms early on a loaded host.
+    check("(df32be98-stop-timeout) stop() did not resolve before the escalation bound elapsed", elapsed >= 50);
+    // Generous ceiling — proves stop() resolves PROMPTLY once SIGKILL is issued, never waiting again for a
+    // second confirmation (host-jitter margin, never anywhere near a multi-second hang).
+    check("(df32be98-stop-timeout) stop() resolved promptly after issuing SIGKILL (no second wait)", elapsed < 60 + 3_000);
+  }
+
+  // --- (df32be98-stop-reentrant) CR b05bf612, item 2: a SECOND stop() call arriving while the first
+  // one's own termination wait is still pending (e.g. a repeated shutdown signal re-entering
+  // gracefulShutdown during stop()'s ≤stopKillEscalationMs wait) must AWAIT THE SAME in-flight
+  // escalation, so the second caller's own subsequent exit() can never fire before it — rather than
+  // finding this.child already null and resolving near-instantly, racing a caller's exit() ahead of the
+  // FIRST call's still-pending SIGKILL timer (the exact bug this card's CR found). Only ONE SIGTERM +
+  // ONE SIGKILL may ever be issued for the one real child, regardless of how many callers awaited it.
+  {
+    const fakeChild = new FakeKillRecordingChild(900003);
+    const sup = new CodescapeSupervisor({
+      homeDir: path.join(tmpHome, "stop-escalation-reentrant-home"),
+      stopKillEscalationMs: 60,
+      stopKillEscalationSupported: true,
+    });
+    sup.child = fakeChild;
+    sup.alive = true;
+    const errs = captureErrors();
+    // The FIRST call is NOT awaited here — it simulates gracefulShutdown's first invocation, off doing
+    // its own thing (its caller will eventually await/exit on its own). It runs synchronously up to its
+    // own `await termination` (stop() only ever suspends there) before returning control here.
+    const p1 = sup.stop();
+    const t0 = performance.now();
+    // The SECOND call's own, INDEPENDENT await — this is the one the bug actually hits: a second
+    // shutdown signal re-entering the path and awaiting stop() directly, whose own subsequent exit()
+    // must not fire before the FIRST call's escalation has genuinely finished. Pre-fix, this used to
+    // find `this.child` already null (nulled by the first call) and resolve near-instantly — racing
+    // the second caller's exit() ahead of the first call's still-pending SIGKILL timer.
+    await sup.stop();
+    const elapsed = performance.now() - t0;
+    await p1; // the first call must also settle — never leave it dangling past the end of this scenario
+    errs.restore();
+    check("(df32be98-stop-reentrant) exactly ONE SIGTERM was sent (the re-entrant call didn't re-send it)",
+      fakeChild.killCalls.filter((s) => s === "SIGTERM").length === 1);
+    check("(df32be98-stop-reentrant) exactly ONE SIGKILL went out (not two, one per caller)",
+      fakeChild.killCalls.filter((s) => s === "SIGKILL").length === 1);
+    check("(df32be98-stop-reentrant) exactly 2 kill calls total across BOTH concurrent callers",
+      fakeChild.killCalls.length === 2);
+    check("(df32be98-stop-reentrant) the escalation is logged exactly once, not once per caller",
+      errs.lines.filter((l) => l.includes("escalating to SIGKILL")).length === 1);
+    // Slack below the configured 60ms bound — same libuv cached-loop-time reasoning as its sibling above.
+    check("(df32be98-stop-reentrant) both callers' promises settled only once the shared escalation bound elapsed",
+      elapsed >= 50);
+    check("(df32be98-stop-reentrant) both callers settled promptly after the shared SIGKILL (no second wait)",
+      elapsed < 60 + 3_000);
+  }
+
+  // --- (df32be98-stop-identity-guard) CR b05bf612 follow-up (manager review): the `pendingTermination`
+  // clear in stop()'s own finally must be IDENTITY-guarded, not unconditional. Sequence: stop() on A
+  // starts a short-bound termination T_A; a simulated start() spawns B (clearing pendingTermination,
+  // exactly as spawnServeExplicit/spawnServeSelfReporting do); stop() on B starts a LONG-bound
+  // termination T_B, tracked as pendingTermination (B's own stop() call already nulled `this.child`
+  // back to null as part of ITS OWN synchronous resets — same as any stop() call). T_A then settles —
+  // an unconditional clear in its finally would wrongly null pendingTermination even though it now
+  // holds T_B. A THIRD stop() call made right then finds BOTH `pendingTermination` AND `this.child`
+  // null (the bug), so it takes the `if (!killed) return;` early-out and resolves near-INSTANTLY —
+  // exactly the original re-entrancy bug's shape, just reached via a different clobbering path: the
+  // caller believes the shutdown is done while B's real termination is still genuinely in flight.
+  {
+    const fakeA = new FakeKillRecordingChild(900006);
+    const fakeB = new FakeKillRecordingChild(900007);
+    const sup = new CodescapeSupervisor({
+      homeDir: path.join(tmpHome, "stop-identity-guard-home"),
+      stopKillEscalationMs: 30, // A's short bound — settles first
+      stopKillEscalationSupported: true,
+    });
+    sup.child = fakeA;
+    sup.alive = true;
+    const pA = sup.stop(); // T_A pending (~30ms bound)
+
+    // Simulate start() spawning B — mirrors exactly what spawnServeExplicit/spawnServeSelfReporting do
+    // (assign the new live child, clear any stale pendingTermination) via direct field manipulation,
+    // same technique other scenarios in this file/its sibling use for a private field or method —
+    // bypasses a real process spawn deliberately, since only the pendingTermination bookkeeping matters
+    // here.
+    sup.child = fakeB;
+    sup.alive = true;
+    sup.pendingTermination = null;
+    sup.stopKillEscalationMs = 1_000; // B's LONG bound — still pending when A settles below
+    const pB = sup.stop(); // T_B pending, tracked as sup.pendingTermination
+
+    await pA; // A's shorter bound elapses first, settling T_A and running A's own finally
+    // `pB` is stop()'s own OUTER wrapper promise, not the inner escalation promise tracked as
+    // `pendingTermination` (a local the method never exposes) — so this can only assert non-null, not
+    // reference equality to a value this test has no way to name. Non-null is still the exact fact that
+    // matters: pre-fix, A's finally cleared this unconditionally, to null, regardless of what it held.
+    check("(df32be98-stop-identity-guard) B's termination is still tracked after A's finally ran (not wrongly cleared to null)",
+      sup.pendingTermination !== null);
+
+    // THE HAZARD PROOF: `this.child` is ALREADY null at this point (B's own stop() call nulled it as
+    // part of its own synchronous resets, like every stop() call does) — so pre-fix, a third stop()
+    // call here finds BOTH pendingTermination AND this.child null and takes the `if (!killed) return;`
+    // early-out, resolving near-INSTANTLY instead of genuinely waiting for B's still-pending
+    // termination. Measure exactly that: the third call must NOT resolve until B's own (long) bound
+    // has elapsed, same as if it had awaited pendingTermination directly.
+    const t0 = performance.now();
+    const pC = sup.stop();
+    await pC;
+    const elapsedC = performance.now() - t0;
+    await pB; // tidy up — B's own call must also settle before the scenario ends
+    check("(df32be98-stop-identity-guard) the third stop() call did NOT resolve instantly — it genuinely waited for B's still-pending termination",
+      elapsedC >= 500); // B's bound is 1000ms minus whatever already elapsed waiting on A — comfortably short of an instant resolve
+    check("(df32be98-stop-identity-guard) B received exactly ONE SIGTERM despite the third stop() call",
+      fakeB.killCalls.filter((s) => s === "SIGTERM").length === 1);
+    check("(df32be98-stop-identity-guard) B received exactly ONE SIGKILL (its own escalation, never duplicated)",
+      fakeB.killCalls.filter((s) => s === "SIGKILL").length === 1);
+  }
+
+  // --- (df32be98-stop-exit) the child's real 'exit' fires BEFORE the bound ⇒ NO SIGKILL ever arrives,
+  // including after the full bound has since elapsed. NOTE on scope (CR b05bf612): this proves the
+  // BEHAVIORAL guarantee (no stray SIGKILL/log, ever, past this point) via the `settled` flag — it does
+  // NOT distinguish whether the underlying `setTimeout` handle was actually `clearTimeout`'d versus left
+  // pending-but-harmlessly-no-op'd, since both produce byte-identical observable behavior from outside
+  // the method. Do not read "no SIGKILL after waiting past the bound" as proof the timer handle itself
+  // was cleared — only that nothing it could still fire has any effect. ---------------------------------
+  {
+    const fakeChild = new FakeKillRecordingChild(900002);
+    const stopKillEscalationMs = 150;
+    const sup = new CodescapeSupervisor({
+      homeDir: path.join(tmpHome, "stop-escalation-exit-home"),
+      stopKillEscalationMs,
+      stopKillEscalationSupported: true, // irrelevant here (exit beats the timer) — set for parity with its sibling scenario
+    });
+    sup.child = fakeChild;
+    sup.alive = true;
+    // Scheduled before stop() is even called — safe because stop()'s own listener attaches synchronously,
+    // well before this timer's 30ms can fire (single-threaded JS, no await in between).
+    setTimeout(() => fakeChild.emit("exit", 0, null), 30);
+    const errs = captureErrors();
+    const t0 = performance.now();
+    await sup.stop();
+    const elapsed = performance.now() - t0;
+    check("(df32be98-stop-exit) SIGTERM sent", fakeChild.killCalls[0] === "SIGTERM");
+    check("(df32be98-stop-exit) NO SIGKILL — the real exit beat the timer", fakeChild.killCalls.length === 1);
+    check("(df32be98-stop-exit) no escalation line logged (yet)", errs.lines.filter((l) => l.includes("escalating to SIGKILL")).length === 0);
+    // TIMING-GUARD-SAFE: fully-awaited-completion — `elapsed` is measured against the REAL settlement of
+    // the `stop()` promise (not a blind sleep); stop() resolves promptly once the real 'exit' fires,
+    // never waiting out the full escalation bound regardless of what the underlying timer later does.
+    check("(df32be98-stop-exit) stop() resolved promptly once the real exit fired, without waiting for the bound",
+      elapsed < stopKillEscalationMs);
+    // Wait PAST the full bound (the OLD version of this scenario never looked at this window at all) and
+    // re-check — strengthens the behavioral guarantee ("no stray SIGKILL/log ever lands") versus only
+    // checking the instant stop() resolves. ⚠️ Still does NOT independently verify clearTimeout itself:
+    // the `settled` flag guards the timer callback's own body regardless of whether the handle was ever
+    // cleared, so removing just the `clearTimeout(timer)` call stays behaviorally silent here too — that
+    // specific property has no test-visible seam in this codebase and is not asserted by this scenario.
+    // TIMING-GUARD-SAFE: sync-early-return — "no belated SIGKILL" is not a timing race: the pending
+    // timer's own callback checks `if (settled) return;` SYNCHRONOUSLY, before anything else, the instant
+    // it fires — and `settled` was already set true (by the real 'exit' event, well before this sleep)
+    // — so no later firing of that timer can ever send a SIGKILL, deterministically, regardless of how
+    // long this sleep runs.
+    await sleep(stopKillEscalationMs + 200);
+    check("(df32be98-stop-exit) still exactly one kill call after the full bound has elapsed (no belated SIGKILL)",
+      fakeChild.killCalls.length === 1);
+    check("(df32be98-stop-exit) still no escalation line logged after the full bound has elapsed",
+      errs.lines.filter((l) => l.includes("escalating to SIGKILL")).length === 0);
+    errs.restore();
+  }
+}
+
+// ===================== (df32be98-stop-posix) real-spawn POSIX escalation: the already-existing
+// ===================== FAKE_CODESCAPE_IGNORE_SIGTERM fixture (test/fixtures/fake-codescape-cli.mjs, built
+// ===================== for card bfce0891's own (22-posix) scenario) traps and swallows SIGTERM for real —
+// ===================== SKIPPED on win32 (this dev host): POSIX-only by construction (Windows
+// ===================== `child.kill()` is unconditionally TerminateProcess, untrappable — see
+// ===================== terminateKilledChild's own doc). UNVERIFIED on this host; CI's ubuntu runner is the
+// ===================== only place this scenario actually executes — the platform-independent fake-child
+// ===================== scenario above is what proves the escalation LOGIC on every host, including this one.
+if (process.platform === "win32") {
+  console.log("SKIP  (df32be98-stop-posix) SIGTERM-survives-then-SIGKILL via a real spawn is POSIX-only; this host is 'win32'. Covered instead by the platform-independent (df32be98-stop-*) fake-child scenarios above. UNVERIFIED here — CI's ubuntu runner is this scenario's only runner.");
+} else {
+  const posixStopHomeDir = path.join(tmpHome, "stop-escalation-posix-home");
+  process.env.FAKE_CODESCAPE_IGNORE_SIGTERM = "1";
+  const posixStopSup = new CodescapeSupervisor({ homeDir: posixStopHomeDir, ingestTimeoutMs: 15_000, stopKillEscalationMs: 400 });
+  await posixStopSup.start(["/fake/repo/stop-escalation-posix"]);
+  for (let i = 0; i < 100 && posixStopSup.getPort() === null; i++) await sleep(50);
+  check("(df32be98-stop-posix) precondition: the real SIGTERM-trapping child spawned", posixStopSup.getPort() !== null);
+
+  // Witness the child's REAL OS exit via its own 'exit' event (never an immediate process.kill(pid,0)
+  // probe right after `await stop()` — signal delivery/reaping is async, and an immediate probe would
+  // flake exactly as the manager's amendment warned). A second listener on the SAME real child object
+  // `stop()` itself kills — EventEmitters allow multiple listeners, same technique section (c) above uses.
+  const childBeforeStop = posixStopSup.getChildForTest();
+  let childReallyExited = false;
+  childBeforeStop?.once("exit", () => { childReallyExited = true; });
+
+  const errs = captureErrors();
+  const t0 = performance.now();
+  await posixStopSup.stop();
+  const elapsed = performance.now() - t0;
+  check("(df32be98-stop-posix) the escalation fired exactly once", errs.lines.filter((l) => l.includes("escalating to SIGKILL")).length === 1);
+  errs.restore();
+  // Slack below the configured 400ms bound (CR b05bf612): libuv timer deadlines are checked against a
+  // cached loop time, not re-sampled per comparison, so a real fire can land a few ms early under load.
+  check("(df32be98-stop-posix) stop() waited for the real escalation bound before resolving", elapsed >= 380);
+  check("(df32be98-stop-posix) stop() resolved promptly, not hung", elapsed < 400 + 5_000);
+
+  // TIMING-GUARD-SAFE: fully-awaited-completion — this loop's own exit condition (`childReallyExited`) is
+  // set by the real OS 'exit' event on the real killed child, mirroring section (c)'s identical pattern;
+  // the check right after reads an already-observed fact, never an unbounded-vs-arbitrary-window guess.
+  for (let i = 0; i < 100 && !childReallyExited; i++) await sleep(50);
+  check("(df32be98-stop-posix) the real OS process was genuinely terminated by the escalating SIGKILL",
+    childReallyExited === true);
+  check("(df32be98-stop-posix) the supervisor's own tracked state is cleared regardless", posixStopSup.getPort() === null && posixStopSup.getPid() === null);
+
+  delete process.env.FAKE_CODESCAPE_IGNORE_SIGTERM;
 }
 
 // ===================== cleanup =====================

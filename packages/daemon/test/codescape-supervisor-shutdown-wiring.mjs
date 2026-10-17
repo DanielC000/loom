@@ -56,8 +56,12 @@ function stripComments(source) {
 // reorder a simple const-then-call sequence). No fixed byte budget, same reasoning as
 // gracefulShutdownRegion: survives future comment/line additions inside the function.
 function flushCleanupRegion(codeOnly) {
-  const start = codeOnly.indexOf("flushVaultsAndStopCodescape = (");
-  if (start < 0) return ""; // anchor gone — assertions on "" fail loudly, which is the point
+  // Card df32be98: the function is now `async` (it awaits codescapeSupervisor.stop()'s own bounded
+  // escalation) — the compiled form is `flushVaultsAndStopCodescape = async (...`, so the anchor must
+  // tolerate an optional `async ` between `=` and `(` rather than requiring them adjacent.
+  const anchorMatch = /flushVaultsAndStopCodescape\s*=\s*(?:async\s+)?\(/.exec(codeOnly);
+  if (!anchorMatch) return ""; // anchor gone — assertions on "" fail loudly, which is the point
+  const start = anchorMatch.index;
   const end = codeOnly.indexOf("sessions.setShutdownCleanup(", start);
   return end >= 0 ? codeOnly.slice(start, end) : codeOnly.slice(start);
 }
@@ -82,7 +86,17 @@ check("the graceful-shutdown path invokes flushVaultsAndStopCodescape in CODE be
   /flushVaultsAndStopCodescape\s*\(\s*\)/.test(gracefulRegion) &&
     gracefulRegion.indexOf("flushVaultsAndStopCodescape()") < gracefulRegion.indexOf("process.exit(0)"));
 
+// Card 7de21027 CR follow-up (b05bf612), BLOCKING: codescapeSupervisor.stop()'s own bounded SIGTERM→
+// SIGKILL escalation is USELESS unless something actually awaits it — a CR surgical control (dropping
+// just the `await` keyword at either call site) proved the full test suite stayed green with neither
+// await in place, since nothing checked for the keyword itself, only for the call's PRESENCE. These two
+// checks assert `await` immediately precedes each call, not merely that the call exists somewhere.
+check("`await` immediately precedes the codescapeSupervisor.stop( call inside flushVaultsAndStopCodescape's own body",
+  /\bawait\s+codescapeSupervisor\.stop\s*\(/.test(cleanupRegion));
+check("`await` immediately precedes the flushVaultsAndStopCodescape( call inside the graceful-shutdown region",
+  /\bawait\s+flushVaultsAndStopCodescape\s*\(\s*\)/.test(gracefulRegion));
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the shared graceful-shutdown path calls flushVaultsAndStopCodescape() before its clean-stop exit, and that shared function's own body genuinely calls codescapeSupervisor.stop() in real code (verified comment-stripped, so the adjacent explanatory comment mentioning the same symbol can't mask a dropped call), so the codescape serve child is reaped explicitly rather than depending on an undocumented platform default."
+  ? "\n✅ ALL PASS — the shared graceful-shutdown path AWAITS flushVaultsAndStopCodescape() before its clean-stop exit, and that shared function's own body genuinely AWAITS the codescapeSupervisor.stop() call in real code (verified comment-stripped, so the adjacent explanatory comment mentioning the same symbol can't mask a dropped call or a dropped await), so the codescape serve child is reaped explicitly — and its own bounded escalation wait is actually honored — rather than depending on an undocumented platform default or a fire-and-forget call."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

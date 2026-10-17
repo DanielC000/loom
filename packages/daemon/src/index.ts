@@ -1600,12 +1600,13 @@ async function main(): Promise<void> {
   // vaultVersioners itself is ready — a `daemon_restart` requested any time before this line has nothing
   // to flush yet either way (the watcher isn't running), so the brief pre-registration window during boot
   // is harmless by construction, not by luck.
-  const flushVaultsAndStopCodescape = (): void => {
+  const flushVaultsAndStopCodescape = async (): Promise<void> => {
     // Vault auto-commit final flush: synchronous, so an edit still inside the debounced-commit window
     // reaches git before the process dies instead of waiting for a debounced commit that may never fire
     // again (versioner.ts's chokidar watcher re-arms with `ignoreInitial: true` on the next boot).
     // flushSync honors its own externally-managed/pause-lease backoffs and is a no-op when nothing is
-    // staged. Best-effort + never-throws; must not block exit.
+    // staged. Best-effort + never-throws; must not block exit. Unchanged by card df32be98's await below —
+    // this half stays fully synchronous, exactly as before.
     try {
       let flushed = 0;
       for (const v of vaultVersioners) { if (v.flushSync()) flushed++; }
@@ -1615,12 +1616,16 @@ async function main(): Promise<void> {
     // with this process via the OS job-object default. Do not remove this call on that theory — POSIX reparents
     // instead, so a POSIX host running this supervisor needs it explicitly.
     //
-    // Guarded like the vault half above, not incidentally: stop() itself cannot currently throw, but a
-    // throw HERE would differ across this function's two callers — gracefulShutdown just loses a clean
-    // exit(0), while daemon_restart's exit-flush timer would escape as an uncaughtException routed through
-    // crashlog.ts's handler (exits 1, not the restart sentinel 75), so the supervisor would NOT relaunch.
-    // Swallowing here makes that impossible by construction, not by accident.
-    try { codescapeSupervisor.stop(); } catch { /* never block the exit */ }
+    // Guarded like the vault half above, not incidentally: stop() is designed to never reject, but a
+    // throw/rejection HERE would differ across this function's two callers — gracefulShutdown just loses a
+    // clean exit(0), while daemon_restart's exit-flush timer would escape as an uncaughtException routed
+    // through crashlog.ts's handler (exits 1, not the restart sentinel 75), so the supervisor would NOT
+    // relaunch. Swallowing here makes that impossible by construction, not by accident.
+    //
+    // @decision df32be98 — now awaited: stop()'s own bounded POSIX SIGTERM→SIGKILL escalation only
+    // actually delays exit if something here awaits it; both callers of this closure already propagate
+    // the resulting promise (see runGracefulTeardown / requestDaemonRestart's own finally-guarded await).
+    try { await codescapeSupervisor.stop(); } catch { /* never block the exit */ }
   };
   // Card 7f9444f3 audit: this function's only two writes (the `console.log` above and the
   // `codescapeSupervisor.stop()` call) are ALREADY each individually try/catch-guarded, so a throw here
@@ -1854,7 +1859,7 @@ async function main(): Promise<void> {
     // guard entirely and turned a clean stop into a phantom crash.log. Wrapping the whole body (not just
     // that one write) means the guard below always runs, and no future write/throw added to this
     // teardown sequence can reopen either hole — see graceful-teardown.ts for the full reasoning.
-    runGracefulTeardown((step) => {
+    runGracefulTeardown(async (step) => {
       step("writeShutdownMarker");
       writeShutdownMarker({ kind: isSignal ? "signal" : "intentional", reason, signal: isSignal ? reason : null });
       // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
@@ -1869,7 +1874,7 @@ async function main(): Promise<void> {
       // once above), never the watchdog's flat per-step default — a healthy multi-minute flush must not
       // be killed mid `git commit`.
       step("flushVaultsAndStopCodescape", flushVaultsStepBudgetMs);
-      flushVaultsAndStopCodescape();
+      await flushVaultsAndStopCodescape();
       // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
       // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
       step("companionStop");

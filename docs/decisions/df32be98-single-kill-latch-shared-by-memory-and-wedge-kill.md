@@ -165,6 +165,71 @@ Four more fixes before merge:
    recycle-callback/logging bookkeeping UNCONDITIONALLY, before `issueChildKill` is even called, never
    gated on its return value. Both corrected in the source and here.
 
+## Follow-up (card 7de21027): `stop()` gets its OWN bounded SIGTERM→SIGKILL escalation
+
+Found by Code Review (`18f6a9ac`, on card `bfce0891`): `stop()` sent only SIGTERM, with no escalation,
+and nulled `this.child` synchronously regardless of whether the real OS process ever actually died. On
+POSIX, a `serve` that traps or ignores SIGTERM survived every `stop()` and every daemon shutdown as an
+untracked orphan holding its port and memory — the same "survives SIGTERM" failure this card's item 3
+(`maybeEscalateStuckKill`) already handles for the supervision path, on a SECOND path that item never
+covered. Windows is unaffected (`TerminateProcess`).
+
+**`stop()` is now `async`.** Every synchronous reset stays in the exact same order as before (including
+`this.child = null`/`this.alive = false`/`this.port = null`) — a caller that doesn't need to know the
+child has actually gone (every existing test call site) can keep calling it fire-and-forget. After the
+synchronous resets, if a child was actually running, `stop()` captures it in a LOCAL variable (never
+`this.child`, which is already null by then) and awaits a new private `terminateKilledChild(killed)`:
+it sends SIGTERM via `sendSignal` (same choke point, same kill-delivery-failure suppression
+`issueChildKill` gets), then races `killed`'s own real `'exit'` event against a bounded timer
+(`stopKillEscalationMs`, default 3s, independent of `healthProbeIntervalMs` — that cadence is
+minutes-scale and the wrong fit for a shutdown path that wants to stay fast). If the timer wins, it logs
+once and issues ONE SIGKILL (same `sendSignal` choke point) and resolves immediately — never waiting a
+second time for a confirmation, same one-shot posture `maybeEscalateStuckKill` already established.
+
+**Deliberately NOT a 4th `issueChildKill` site** — this card's own earlier text (above) already ruled
+`stop()`'s kill out of the shared `childKillPid` latch, since `stop()` nulls `this.child` and resets the
+latch synchronously, leaving no "already dying, latched" state for anything else to agree on. The new
+escalation machinery lives entirely in closure-local variables (the captured `killed`, a local `settled`
+flag, the timer) — it never reads or writes `this.child`/`this.childKillPid` — so it cannot collide with
+a `start()` that spawns a fresh child while an old one's escalation is still pending: that race is
+already handled by `wireDeathHandling`'s existing identity guard (`this.child === child`), unchanged.
+
+**Plumbing so the wait actually delays exit.** `stop()`'s bounded wait is useless unless the daemon's own
+shutdown path awaits it instead of firing `exit()` the instant the (now-async) cleanup call returns.
+`SessionService.setShutdownCleanup`'s `fn` param and the `shutdownCleanup.run` field both widen to
+`() => void | Promise<void>`; `flushVaultsAndStopCodescape` (index.ts) is now `async` and `await`s the
+supervisor's `stop()` call — its OWN vault-flush half stays fully synchronous and unchanged, since
+`flushSync()` was never a promise to begin with. Both of `flushVaultsAndStopCodescape`'s callers now
+propagate the wait: `runGracefulTeardown`'s `teardown` callback type widens to allow a promise, and the
+function wraps its body in an async IIFE that `await`s `teardown(...)` (catching a REJECTION the same way
+a synchronous throw was always caught) before unconditionally proceeding to the merge-danger-aware exit;
+`requestDaemonRestart`'s own analogous `setTimeout` cleanup (which does NOT go through
+`runGracefulTeardown` — see this file's existing note) wraps its body in an async IIFE too, with
+`watchdog.disarm()`/`exit(RESTART_EXIT_CODE)` moved into a `finally` so they still run even if `await
+cleanup?.run()` ever rejected (it shouldn't — `stop()`/`terminateKilledChild` are designed to never
+reject — but the `finally` makes "restart exit still happens" true by construction, not by the callee's
+good behavior).
+
+**Never blocks shutdown indefinitely, by two independent bounds.** `terminateKilledChild`'s own fixed
+`setTimeout(stopKillEscalationMs)` is a hard ceiling by construction — the promise resolves via EITHER
+the real `'exit'` event OR the timer firing and immediately issuing SIGKILL without waiting again.
+Underneath that, the pre-existing, independent-OS-thread `armHardShutdownWatchdog` step budget (≥30s
+margin via `FLUSH_VAULTS_STEP_BUDGET_MARGIN_MS`, untouched by this card) remains armed as a structural
+backstop regardless of any bug in the new code.
+
+**`stopKillEscalationSupported` test seam.** Production defaults this to `process.platform !== "win32"`
+— the same reasoning `maybeEscalateStuckKill` already uses. ⚠️ CORRECTED (CR `b05bf612`): this is NOT
+the pid-reuse hazard this record's Narrative section documents — `ChildProcess.kill()` signals through
+Node's own internal libuv process handle (held open by the `ChildProcess` object itself), which no-ops
+once the process has already been reaped, and a Windows `HANDLE` cannot be reused for an unrelated
+process while it's still open; a second call is simply redundant, never dangerous, by that mechanism. The
+REAL, sufficient reason is that win32's `child.kill()` is unconditionally `TerminateProcess`, which
+cannot be trapped or survived — so the original "SIGTERM" already ended the process unconditionally, and
+there is nothing left to escalate to by the time the timer could fire. A platform-independent test needs
+to exercise the REAL SIGKILL branch deterministically on any host (including a win32 dev/CI machine) via
+a fake child that never really dies — this boolean test seam lets it do that without weakening the real
+platform guard in production.
+
 ## Do not
 
 - Never issue a second `kill()` on a child pid before its exit is observed — route every "this child
@@ -192,6 +257,21 @@ Four more fixes before merge:
 - Do not shorten `healthProbeIntervalMs` to make a test's escalation age threshold reachable — the real
   health-probe timer must stay too slow to ever fire during a test driven by direct `probeHealth`/
   `runOneHealthProbeForTest()` calls; fast-forward `childKillIssuedAt`/`childKillEscalatedAt` instead.
+- Do not route `stop()`'s own kill through `issueChildKill`/`childKillPid` — `stop()` already nulls that
+  latch synchronously, so there is no "already dying, latched" state for a 4th site to agree on.
+- Do not remove `stopKillEscalationSupported`'s win32 default guard, and do not run the real SIGKILL
+  branch unconditionally on every platform — win32's `child.kill()` is unconditionally `TerminateProcess`,
+  untrappable, so a genuine timer-fire there means there is nothing left to escalate to (NOT a pid-reuse
+  risk — `ChildProcess.kill()` signals through Node's own held-open process handle, which simply no-ops
+  once reaped). Use the boolean test seam to exercise the branch on a win32 host instead.
+- Do not let `terminateKilledChild` wait a second time after issuing its own SIGKILL — resolve
+  immediately once it's issued, same one-shot posture as `maybeEscalateStuckKill`.
+- Do not forget to `await` `flushVaultsAndStopCodescape()`/`cleanup?.run()` at either call site — an
+  un-awaited call makes `stop()`'s bounded wait pointless, since `exit()` fires before it ever settles.
+- Do not mention codescape by name in `graceful-teardown.ts`'s own comments — that file is generic
+  shutdown infrastructure, not on the compiled-output codescape-privacy allowlist (`codescape-privacy-
+  guard.mjs`), and a mention there is a real, guard-caught leak of a private product name into shipped
+  `dist/`.
 
 ## Source
 
@@ -211,3 +291,15 @@ CR follow-up (18f6a9ac): the null-child branch in `onDeath`'s stale-child guard,
 `onDeath`/`start()`/`stop()`, `test/codescape-supervisor.mjs`'s new `captureWarnings` helper + the plain-
 `stop()`-is-silent assertion in section (c), and `test/codescape-health-probe.mjs`'s rewritten
 `(22-win32)` scenario.
+
+Card 7de21027 follow-up: `supervisor.ts`'s now-`async` `stop()`, the new `terminateKilledChild` method,
+the `stopKillEscalationMs`/`stopKillEscalationSupported` opts + their defaults, and
+`DEFAULT_STOP_KILL_ESCALATION_MS`. The shutdown-plumbing half: `index.ts`'s now-`async`
+`flushVaultsAndStopCodescape`, `sessions/service.ts`'s `setShutdownCleanup`/`shutdownCleanup.run` type
+widening and `requestDaemonRestart`'s now-async `setTimeout` callback (disarm/exit moved into a
+`finally`), and `graceful-teardown.ts`'s `runGracefulTeardown` (the `teardown` param now allows a
+promise, awaited inside a new async IIFE). Tests: `test/codescape-supervisor.mjs`'s
+`(df32be98-stop-timeout)`/`(df32be98-stop-exit)` platform-independent fake-child scenarios and the
+`(df32be98-stop-posix)` real-spawn POSIX scenario (SKIP on win32, CI-ubuntu-only), plus
+`test/graceful-teardown-hard-exit-backstop.mjs`'s `[async teardown]`/`[async teardown rejects]`
+scenarios.

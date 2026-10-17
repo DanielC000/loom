@@ -23,6 +23,7 @@ const { pollUntil } = await import("./_timing-guard.mjs");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const makeExit = () => { const calls = []; return { calls, fn: (code) => calls.push({ code, at: performance.now() }) }; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function fakeArmFactory(armCalls) {
   return (opts) => {
@@ -82,6 +83,74 @@ try {
   check("disarm() was called (cleanup completed, watchdog stood down) before exit() fired", armCalls[0]?.events.includes("disarmed") && exit.calls.length === 1);
 
   clearRestartIntent();
+
+  // ---------------------------------------------------------------------------------------------------
+  // CR b05bf612 (card 7de21027), BLOCKING: the registered cleanup may now be ASYNC (codescapeSupervisor's
+  // own bounded SIGTERM→SIGKILL escalation), and that wait is USELESS unless requestDaemonRestart's own
+  // exit-flush timer actually `await`s it instead of firing exit(75) the instant the (now-async) cleanup
+  // call returns. Pin that directly: a cleanup that returns a held, externally-resolved promise must
+  // keep exit(75) from firing for as long as that promise stays pending, and fire it the instant it's
+  // released — never before, never indefinitely after.
+  // ---------------------------------------------------------------------------------------------------
+  {
+    const mgrId2 = `drw-mgr2-${sfx}`;
+    db.insertSession({ id: mgrId2, projectId: ids.projId, agentId: ids.agentId, engineSessionId: null, title: null, cwd: "/none", processState: "running", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    sessions.setShutdownCleanup(() => held, testFlushVaultsStepBudgetMs);
+
+    const armCalls2 = [];
+    const exit2 = makeExit();
+    const r2 = await sessions.requestDaemonRestart(mgrId2, "test async cleanup is genuinely awaited", {
+      buildDeps, exit: exit2.fn, mergeDangerGraceMs: 500, isSupervisorAlive,
+      armHardShutdownWatchdog: fakeArmFactory(armCalls2), watchdogHardExitMs: 4242,
+    });
+    check("[async cleanup pinned] restarting:true", r2.restarting === true);
+    // Well past the 300ms exit-flush delay — if the plumbing ever regresses back to fire-and-forget, this
+    // is exactly the window exit(75) would have already fired in.
+    // TIMING-GUARD-SAFE: sync-early-return — "exit(75) has NOT fired" is not a timing race: `held` is a
+    // bare, developer-controlled promise with no timer of its own attached (only `release()`, called
+    // nowhere above this line, can ever settle it) — so no amount of real wall-clock waiting can resolve
+    // it on its own, deterministically, regardless of this sleep's duration.
+    await sleep(600);
+    check("[async cleanup pinned] exit(75) has NOT fired while the cleanup's own promise is still held", exit2.calls.length === 0);
+    release();
+    const exitFired2 = await pollUntil(() => exit2.calls.length > 0, { timeoutMs: 2000, intervalMs: 20 });
+    check("[async cleanup pinned] exit(75) fires once the held cleanup promise is finally released", exitFired2);
+    check("[async cleanup pinned] the exit code is RESTART_EXIT_CODE (75)", exit2.calls[0]?.code === RESTART_EXIT_CODE);
+    check("[async cleanup pinned] disarm() ran before exit() fired", armCalls2[0]?.events.includes("disarmed"));
+    clearRestartIntent();
+  }
+
+  // ---------------------------------------------------------------------------------------------------
+  // CR b05bf612, item 4: a REJECTING async cleanup must still reach disarm()/exit(75) — never an
+  // unhandled rejection that silently strands the restart. The async mirror of the sync-throw case
+  // `flushVaultsAndStopCodescape`'s own try/catch already covered.
+  // ---------------------------------------------------------------------------------------------------
+  {
+    const mgrId3 = `drw-mgr3-${sfx}`;
+    db.insertSession({ id: mgrId3, projectId: ids.projId, agentId: ids.agentId, engineSessionId: null, title: null, cwd: "/none", processState: "running", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    const unhandledRejections = [];
+    const onUnhandled = (err) => unhandledRejections.push(err);
+    process.on("unhandledRejection", onUnhandled);
+    sessions.setShutdownCleanup(() => Promise.reject(new Error("cleanup boom")), testFlushVaultsStepBudgetMs);
+
+    const armCalls3 = [];
+    const exit3 = makeExit();
+    const r3 = await sessions.requestDaemonRestart(mgrId3, "test rejecting cleanup still reaches exit", {
+      buildDeps, exit: exit3.fn, mergeDangerGraceMs: 500, isSupervisorAlive,
+      armHardShutdownWatchdog: fakeArmFactory(armCalls3), watchdogHardExitMs: 4242,
+    });
+    check("[rejecting cleanup] restarting:true", r3.restarting === true);
+    const exitFired3 = await pollUntil(() => exit3.calls.length > 0, { timeoutMs: 2000, intervalMs: 20 });
+    process.removeListener("unhandledRejection", onUnhandled);
+    check("[rejecting cleanup] exit(75) still fires despite the rejecting cleanup", exitFired3 && exit3.calls[0]?.code === RESTART_EXIT_CODE);
+    check("[rejecting cleanup] disarm() still ran", armCalls3[0]?.events.includes("disarmed"));
+    check("[rejecting cleanup] no unhandledRejection escaped the process", unhandledRejections.length === 0);
+    clearRestartIntent();
+  }
 } finally {
   db.close();
 }

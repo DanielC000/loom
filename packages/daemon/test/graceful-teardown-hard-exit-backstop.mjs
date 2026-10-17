@@ -310,6 +310,52 @@ function fakeArm(events) {
 }
 
 {
+  // Card df32be98 (7de21027): `teardown()` may now return a PROMISE — codescape's own stop() escalation
+  // needs its own bounded wait to actually DELAY exit, which only happens if something here genuinely
+  // awaits it. disarm()/exit() must wait for that promise, not fire the moment the (now-async)
+  // teardown() call returns a still-pending promise. Same "held promise" technique as [held waitFn]
+  // below — the "not fired yet" checks are true by construction (the promise genuinely hasn't settled),
+  // never an inference from elapsed time in one trial.
+  const events = [];
+  let release;
+  const heldTeardown = () => new Promise((resolve) => { release = resolve; });
+  runGracefulTeardown(
+    () => heldTeardown(),
+    () => { events.push("exit-called"); },
+    () => Promise.resolve(),
+    { arm: fakeArm(events) },
+  );
+  await Promise.resolve();
+  check("[async teardown] disarm() has NOT fired while the async teardown's own promise is still unresolved", !events.includes("disarmed"));
+  check("[async teardown] exit() has NOT fired either, for the same reason", !events.includes("exit-called"));
+  release();
+  const settled = await pollUntil(() => events.includes("disarmed") && events.includes("exit-called"), { timeoutMs: 2000, intervalMs: 5 });
+  check("[async teardown] disarm()/exit() fire once the async teardown's own promise is finally released", settled);
+}
+
+{
+  // The async mirror of [teardown throws] above: a teardown() that returns a REJECTED promise must
+  // still reach exit()/disarm() — never an unhandled rejection that silently skips them (the exact
+  // failure mode runGracefulTeardown's own try/catch exists to prevent, now for the async case too).
+  const events = [];
+  let exited = false;
+  const unhandledRejections = [];
+  const onUnhandled = (err) => unhandledRejections.push(err);
+  process.on("unhandledRejection", onUnhandled);
+  runGracefulTeardown(
+    () => { events.push("teardown-rejecting"); return Promise.reject(new Error("async boom")); },
+    () => { events.push("exit-called"); exited = true; },
+    () => Promise.resolve(),
+    { arm: fakeArm(events) },
+  );
+  const reachedExit = await pollUntil(() => exited, { timeoutMs: 2000, intervalMs: 5 });
+  process.removeListener("unhandledRejection", onUnhandled);
+  check("[async teardown rejects] the rejection is swallowed and exit() still runs", reachedExit && exited === true);
+  check("[async teardown rejects] disarm() still runs despite the rejection", events.includes("disarmed"));
+  check("[async teardown rejects] no unhandledRejection escaped to the process", unhandledRejections.length === 0);
+}
+
+{
   // waitFn() is slow (not instant) — disarm()/exit() must wait for it, not fire the moment teardown()
   // itself returns. Proves the watchdog stays armed through the WHOLE wait, not just through teardown().
   //

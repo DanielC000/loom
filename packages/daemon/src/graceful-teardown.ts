@@ -25,7 +25,7 @@ import { VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS, VAULT_GIT_OP_TIMEOUT_MS } from "./
  * does, or a hung teardown step can again strand the whole process for hours with no bound at all.
  */
 export function runGracefulTeardown(
-  teardown: (step: TeardownStepFn) => void,
+  teardown: (step: TeardownStepFn) => void | Promise<void>,
   exit: () => void,
   waitFn: () => Promise<void> = waitForMergeDangerWindowsToClear,
   watchdogDeps: { arm?: typeof armHardShutdownWatchdog; hardExitMs?: number; intendedExitCode?: number } = {},
@@ -35,14 +35,20 @@ export function runGracefulTeardown(
     intendedExitCode: watchdogDeps.intendedExitCode ?? 0,
     label: "gracefulShutdown",
   });
-  try {
-    teardown(watchdog.step);
-  } catch {
-    /* never let a teardown-step failure (incl. a destroyed stdout/stderr) block the merge-danger-aware exit below */
-  }
-  // always a clean stop — NOT exit 75 (the supervisor's restart sentinel) — UNLESS the watchdog itself
-  // already force-exited with a different code (see its own doc: once it fires, this line never runs).
-  void waitFn().finally(() => { watchdog.disarm(); exit(); });
+  // `teardown` may now return a promise (a supervised child's own bounded stop escalation needs its
+  // wait to actually delay exit). The async IIFE awaits it, catching a REJECTION the same way a sync
+  // throw always was.
+  // @decision df32be98 — a rejecting teardown must still unconditionally reach the exit below.
+  void (async () => {
+    try {
+      await teardown(watchdog.step);
+    } catch {
+      /* never let a teardown-step failure (incl. a destroyed stdout/stderr, or now a rejection) block the merge-danger-aware exit below */
+    }
+    // always a clean stop — NOT exit 75 (the supervisor's restart sentinel) — UNLESS the watchdog itself
+    // already force-exited with a different code (see its own doc: once it fires, this line never runs).
+    await waitFn().finally(() => { watchdog.disarm(); exit(); });
+  })();
 }
 
 /** A caller-supplied diagnostic hook: `runGracefulTeardown`'s `teardown` callback (and `requestDaemonRestart`'s

@@ -3073,7 +3073,7 @@ export class SessionService {
    * (below) can use the IDENTICAL derived figure `gracefulShutdown`'s own call to that step uses — never
    * a second, independently-computed copy that could drift from it.
    */
-  private shutdownCleanup: { run: () => void; flushVaultsStepBudgetMs: number } | undefined;
+  private shutdownCleanup: { run: () => void | Promise<void>; flushVaultsStepBudgetMs: number } | undefined;
   /**
    * Card 8e84e4a6: process-wide single-flight for {@link requestDaemonRestart}'s build-and-exit
    * sequence. Two overlapping calls (two managers, Lead + manager, or an MCP client retrying mid-build)
@@ -3187,7 +3187,7 @@ export class SessionService {
    * round 2) defaults to the watchdog's own flat per-step default — real boot always passes its derived
    * figure explicitly; the default here only keeps every existing test call (one arg) unchanged.
    */
-  setShutdownCleanup(fn: () => void, flushVaultsStepBudgetMs: number = GRACEFUL_TEARDOWN_HARD_EXIT_MS): void {
+  setShutdownCleanup(fn: () => void | Promise<void>, flushVaultsStepBudgetMs: number = GRACEFUL_TEARDOWN_HARD_EXIT_MS): void {
     this.shutdownCleanup = { run: fn, flushVaultsStepBudgetMs };
   }
 
@@ -4990,21 +4990,32 @@ export class SessionService {
     // it shares only `cleanup` with gracefulShutdown, so it needs its OWN hard-exit watchdog arm, with
     // RESTART_EXIT_CODE as the intended code — never assume gracefulShutdown's own arm covers this path.
     setTimeout(() => {
-      const watchdog = (deps.armHardShutdownWatchdog ?? armHardShutdownWatchdog)({
-        hardExitMs: deps.watchdogHardExitMs, intendedExitCode: RESTART_EXIT_CODE, label: "daemon_restart",
-      });
-      try { watchdog.step("flushVaultsAndStopCodescape", cleanup?.flushVaultsStepBudgetMs); cleanup?.run(); } catch { /* never block the restart exit */ }
-      watchdog.disarm();
-      exit(RESTART_EXIT_CODE);
-      // Card 8e84e4a6 Code Review MINOR 1: the single-flight lock stays LATCHED (see the clearing logic
-      // below `attempt`'s own closing `})()`) until the point the exit has actually been INVOKED, not
-      // merely until this promise resolved — closing the "late caller starts a competing build in the
-      // exit window" gap. In production `exit` IS `process.exit`, which never returns, so this line is
-      // moot there (a fresh process — and a fresh, unset `inFlightRestart` field — follows). It only ever
-      // actually runs under a hermetic test's captured/stubbed `exit` callback, which is also exactly what
-      // lets a test drive a SECOND, genuinely fresh `requestDaemonRestart` call after simulating one
-      // restart, the same way the real daemon would after actually relaunching.
-      if (this.inFlightRestart?.promise === attempt) this.inFlightRestart = null;
+      void (async () => {
+        const watchdog = (deps.armHardShutdownWatchdog ?? armHardShutdownWatchdog)({
+          hardExitMs: deps.watchdogHardExitMs, intendedExitCode: RESTART_EXIT_CODE, label: "daemon_restart",
+        });
+        try {
+          watchdog.step("flushVaultsAndStopCodescape", cleanup?.flushVaultsStepBudgetMs);
+          await cleanup?.run();
+        } catch { /* never block the restart exit */ } finally {
+          // Card df32be98 — `cleanup.run()` now awaits codescapeSupervisor.stop()'s own bounded
+          // SIGTERM→SIGKILL escalation; this finally guarantees disarm+exit still run even if that
+          // await rejects (it shouldn't — stop() never rejects — but never let a future regression there
+          // skip the restart exit).
+          watchdog.disarm();
+          exit(RESTART_EXIT_CODE);
+          // Card 8e84e4a6 Code Review MINOR 1: the single-flight lock stays LATCHED (see the clearing
+          // logic below `attempt`'s own closing `})()`) until the point the exit has actually been
+          // INVOKED, not merely until this promise resolved — closing the "late caller starts a competing
+          // build in the exit window" gap. In production `exit` IS `process.exit`, which never returns, so
+          // this line is moot there (a fresh process — and a fresh, unset `inFlightRestart` field —
+          // follows). It only ever actually runs under a hermetic test's captured/stubbed `exit` callback,
+          // which is also exactly what lets a test drive a SECOND, genuinely fresh `requestDaemonRestart`
+          // call after simulating one restart, the same way the real daemon would after actually
+          // relaunching.
+          if (this.inFlightRestart?.promise === attempt) this.inFlightRestart = null;
+        }
+      })();
     }, 300);
     return {
       restarting: true,

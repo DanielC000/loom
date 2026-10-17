@@ -104,6 +104,17 @@ const DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD = 3;
  */
 const DEFAULT_KILL_ESCALATION_PROBE_TICKS = 3;
 /**
+ * Card 7de21027: bound (ms) for {@link CodescapeSupervisor.stop}'s own SIGTERM→SIGKILL escalation —
+ * POSIX only, same rationale as {@link DEFAULT_KILL_ESCALATION_PROBE_TICKS} (Windows `child.kill()` is
+ * unconditionally `TerminateProcess`, untrappable, nothing to escalate). Deliberately independent of
+ * {@link DEFAULT_HEALTH_PROBE_INTERVAL_MS}/{@link DEFAULT_KILL_ESCALATION_PROBE_TICKS} — that cadence is
+ * minutes-scale and tuned for ongoing supervision, the wrong fit for a shutdown path that wants to stay
+ * fast. Comfortably inside the ≥30s `FLUSH_VAULTS_STEP_BUDGET_MARGIN_MS` the shared shutdown-cleanup step
+ * budget already reserves for "the cheap supervisor-stop half" (graceful-teardown.ts) — that margin is
+ * NOT touched by this card.
+ */
+const DEFAULT_STOP_KILL_ESCALATION_MS = 3_000;
+/**
  * Bound (ms) for reading the INSTALLED codescape binary's own build id (a `--version`-style call) —
  * card 90550a97's build-id drift detection. Short, mirroring the health-probe timeout: this is a cheap
  * local process spawn, never a network call, so a healthy install answers fast.
@@ -270,6 +281,24 @@ export interface CodescapeSupervisorOpts {
    * {@link DEFAULT_KILL_ESCALATION_PROBE_TICKS} so a test doesn't need to wait out real probe intervals.
    */
   killEscalationProbeTicks?: number;
+  /**
+   * Card 7de21027: bound (ms) for {@link CodescapeSupervisor.stop}'s own SIGTERM→SIGKILL escalation
+   * (POSIX only). Test seam: override {@link DEFAULT_STOP_KILL_ESCALATION_MS} so a test doesn't need to
+   * wait out the real bound.
+   */
+  stopKillEscalationMs?: number;
+  /**
+   * Card 7de21027: TEST SEAM ONLY — overrides whether {@link CodescapeSupervisor.stop}'s escalation
+   * timer may actually issue a SIGKILL. Defaults to `process.platform !== "win32"` (production is
+   * deliberately POSIX-only here — win32's `child.kill()` is unconditionally `TerminateProcess`,
+   * untrappable, so by the time this timer could fire the process is already unconditionally dead;
+   * there is nothing left to escalate to, not a pid-reuse risk — CORRECTED by CR `b05bf612`:
+   * `ChildProcess.kill()` signals through Node's own held-open process handle, which simply no-ops once
+   * the process has been reaped, not a raw pid lookup that could hit a reused one). Lets a test exercise
+   * the SIGKILL branch deterministically on ANY host — including a win32 dev/CI machine — via a fake
+   * child that never really dies, without weakening the real platform guard in production.
+   */
+  stopKillEscalationSupported?: boolean;
 }
 
 export interface CodescapeRequestResult {
@@ -708,6 +737,22 @@ export class CodescapeSupervisor {
   private readonly toolsProbeTimeoutMs: number;
   private readonly portReportTimeoutMs: number;
   private readonly killEscalationProbeTicks: number;
+  private readonly stopKillEscalationMs: number;
+  private readonly stopKillEscalationSupported: boolean;
+  /**
+   * Card 7de21027 CR follow-up (b05bf612): re-entrancy guard for {@link stop}'s own bounded escalation
+   * wait. `stop()` nulls `this.child` SYNCHRONOUSLY, so a second `stop()` call arriving while the first
+   * one's `terminateKilledChild` await is still pending (e.g. a second SIGINT/SIGTERM re-entering
+   * `gracefulShutdown` during the ≤{@link stopKillEscalationMs} wait) used to see `this.child === null`
+   * and resolve INSTANTLY — racing `exit()` ahead of the first call's still-pending SIGKILL timer and
+   * abandoning the trapping child all over again, the exact bug this field closes. `null` when no
+   * termination is in flight; set to the live {@link terminateKilledChild} promise for its duration,
+   * and cleared the instant it settles. Reset to `null` whenever a FRESH child actually spawns
+   * ({@link spawnServeExplicit}/{@link spawnServeSelfReporting}) — a new child has nothing pending to
+   * collide with, so a `stop()` call after a `start()` must stop the NEW child, never await a stale
+   * promise for an old one that's already gone.
+   */
+  private pendingTermination: Promise<void> | null = null;
   private readonly memorySampler: MemorySampler;
   private readonly memorySampleTimeoutMs: number;
   private readonly memorySampleTickInterval: number;
@@ -910,9 +955,10 @@ export class CodescapeSupervisor {
    * The pid a kill has already been issued for, via ANY of this class's three "this child needs to die"
    * sites — {@link checkMemoryCeiling}, {@link probeHealth}'s wedge kill, and {@link checkBuildDrift}'s
    * drift-restart kill (all routed through {@link issueChildKill}). `null` = no kill in flight. Cleared
-   * in `onDeath` once the exit is observed; reset on {@link stop}/{@link start}. `stop()`'s own direct
-   * `this.child.kill()` is legitimately separate — it resets this latch and nulls `child` itself, so
-   * there is no "already dying" state left for a second call to collide with.
+   * in `onDeath` once the exit is observed; reset on {@link stop}/{@link start}. `stop()`'s own kill is
+   * legitimately separate from THIS latch — it resets `childKillPid` and nulls `child` itself, so there
+   * is no "already dying" state tracked HERE for a second call to collide with. `stop()` has its OWN,
+   * separate re-entrancy guard for its own kill — see {@link pendingTermination}.
    * @decision df32be98 — never issue a second kill() on a child pid before its exit is observed.
    */
   private childKillPid: number | null = null;
@@ -1036,6 +1082,8 @@ export class CodescapeSupervisor {
     this.toolsProbeTimeoutMs = opts?.toolsProbeTimeoutMs ?? DEFAULT_TOOLS_PROBE_TIMEOUT_MS;
     this.portReportTimeoutMs = opts?.portReportTimeoutMs ?? DEFAULT_PORT_REPORT_TIMEOUT_MS;
     this.killEscalationProbeTicks = opts?.killEscalationProbeTicks ?? DEFAULT_KILL_ESCALATION_PROBE_TICKS;
+    this.stopKillEscalationMs = opts?.stopKillEscalationMs ?? DEFAULT_STOP_KILL_ESCALATION_MS;
+    this.stopKillEscalationSupported = opts?.stopKillEscalationSupported ?? (process.platform !== "win32");
     this.memorySampler = opts?.memorySampler ?? sampleProcessMemoryBytes;
     this.memorySampleTimeoutMs = opts?.memorySampleTimeoutMs ?? DEFAULT_MEMORY_SAMPLE_TIMEOUT_MS;
     this.memorySampleTickInterval = opts?.memorySampleTickInterval ?? DEFAULT_MEMORY_SAMPLE_TICK_INTERVAL;
@@ -1306,9 +1354,24 @@ export class CodescapeSupervisor {
     }
   }
 
-  /** Stop supervision: kills the live child (if any), cancels any pending restart, disarms restart-on-death,
-   *  and stops the health-probe timer. */
-  stop(): void {
+  /**
+   * Stop supervision: kills the live child (if any), cancels any pending restart, disarms
+   * restart-on-death, and stops the health-probe timer. Every synchronous reset below (including
+   * `this.child = null`/`this.alive = false`) still happens BEFORE any await — a fire-and-forget caller
+   * (every test call site today) is unaffected.
+   *
+   * @decision df32be98 — the returned promise additionally resolves only once a killed child's real
+   * exit is observed, or a bounded SIGTERM→SIGKILL escalation has issued the SIGKILL. See that record's
+   * "stop() escalation" follow-up for why this is NOT a 4th {@link issueChildKill} latch site.
+   *
+   * Re-entrant-safe (CR b05bf612): a SECOND `stop()` call arriving while an earlier one's own
+   * termination is still pending (e.g. a repeated shutdown signal) returns the SAME
+   * {@link pendingTermination} promise instead of redoing the resets and finding `this.child` already
+   * null — which used to resolve instantly and let a caller's `exit()` race ahead of the FIRST call's
+   * still-pending SIGKILL timer, abandoning the trapping child all over again.
+   */
+  async stop(): Promise<void> {
+    if (this.pendingTermination) { await this.pendingTermination; return; }
     this.stopped = true;
     if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
     if (this.healthProbeTimer) { clearInterval(this.healthProbeTimer); this.healthProbeTimer = null; }
@@ -1338,12 +1401,75 @@ export class CodescapeSupervisor {
     this.childKillZombieWarned = false;
     this.lastKillSignalFailurePid = null;
     this.lastKillSignalFailureReason = null;
-    if (this.child) {
-      try { this.child.kill(); } catch { /* best-effort */ }
-      this.child = null;
-    }
+    const killed = this.child;
+    this.child = null;
     this.alive = false;
     this.port = null;
+    if (!killed) return;
+    // Card 7de21027 CR follow-up (manager review, post-b05bf612): the finally below must clear
+    // `pendingTermination` ONLY if it still holds THIS call's own promise, via an identity check —
+    // never unconditionally. A stop()+start()+stop() sequence (stop() on A starts this wait; start()
+    // spawns B, clearing this field; stop() on B sets this field to B's OWN termination promise) means
+    // THIS call's finally can settle AFTER a newer call has already overwritten `pendingTermination`
+    // with a DIFFERENT promise (B's) — an unconditional null there would clobber B's tracking and
+    // reopen the exact re-entrancy hole the identity guard at the top of this method exists to close.
+    // `handle.promise` (a property read, not a bare identifier) sidesteps TS's "used before being
+    // assigned" check on a const/let that self-references its own initializer inside a closure — the
+    // object itself is fully assigned before the closure is even created; only its `promise` property
+    // is filled in moments later, which TS does not flag.
+    const handle: { promise?: Promise<void> } = {};
+    handle.promise = (async () => {
+      try {
+        await this.terminateKilledChild(killed);
+      } catch {
+        /* never block the exit — terminateKilledChild is designed to never reject anyway */
+      } finally {
+        if (this.pendingTermination === handle.promise) this.pendingTermination = null;
+      }
+    })();
+    this.pendingTermination = handle.promise;
+    await handle.promise;
+  }
+
+  /**
+   * `stop()`'s own bounded SIGTERM→SIGKILL escalation. `killed` is a LOCAL snapshot of the child
+   * `stop()` already nulled out of `this.child` — this never reads or writes
+   * `this.child`/`this.childKillPid`, so it cannot collide with a `start()` that spawns a fresh child
+   * while this is still waiting (that race is already handled by `wireDeathHandling`'s identity guard:
+   * `killed`'s own belated 'exit'/'error' sees `this.child !== killed` and no-ops).
+   *
+   * Resolves on whichever comes first: `killed`'s real 'exit', or the bounded timer firing. On the
+   * timer branch, when {@link stopKillEscalationSupported} (POSIX by default), issues ONE SIGKILL via
+   * the same {@link sendSignal} choke point {@link issueChildKill} uses, for the same kill-delivery-
+   * failure suppression, and resolves immediately without waiting for a second confirmation (SIGKILL is
+   * unblockable there; an uninterruptible zombie surviving even that is the same accepted residual
+   * {@link maybeEscalateStuckKill} already documents). When not supported (win32 in production — see
+   * that field's own doc), the timer firing means nothing more to do but resolve — never rejects.
+   *
+   * @decision df32be98 — deliberately NOT a 4th {@link issueChildKill} site; see that record.
+   */
+  private terminateKilledChild(killed: ChildProcess): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        killed.removeListener("exit", onExit);
+        resolve();
+      };
+      const onExit = (): void => finish();
+      killed.once("exit", onExit);
+      const timer = setTimeout(() => {
+        if (settled) return;
+        if (this.stopKillEscalationSupported) {
+          console.error(`[codescape] serve pid ${killed.pid ?? "?"} survived SIGTERM during stop() — escalating to SIGKILL`);
+          this.sendSignal(killed, "SIGKILL");
+        }
+        finish();
+      }, this.stopKillEscalationMs);
+      this.sendSignal(killed);
+    });
   }
 
   /**
@@ -1388,6 +1514,10 @@ export class CodescapeSupervisor {
     this.child = child;
     this.alive = true;
     this.spawnedAt = Date.now();
+    // Card 7de21027 CR follow-up (b05bf612): a fresh child has nothing pending to collide with — clear
+    // any stale old-child termination wait so a SUBSEQUENT stop() stops THIS child, never awaits a
+    // promise for one that's already gone. See pendingTermination's own doc.
+    this.pendingTermination = null;
     // A fresh child is presumed responsive — don't let a wedge-count from the PREVIOUS (now-dead) process
     // carry over and trip the threshold after only one or two real probes against the new one.
     this.consecutiveHealthFailures = 0;
@@ -1446,6 +1576,9 @@ export class CodescapeSupervisor {
     this.child = child;
     this.spawnedAt = Date.now();
     this.consecutiveHealthFailures = 0;
+    // Card 7de21027 CR follow-up — see spawnServeExplicit's identical comment: clear any stale old-child
+    // termination wait so a subsequent stop() stops THIS child.
+    this.pendingTermination = null;
     // Card ba22005b CR follow-up — see spawnServeExplicit's identical comment: give this fresh child a
     // predictable, immediate first memory sample on the very next health-probe tick.
     this.healthProbeTickCount = this.memorySampleTickInterval - 1;
@@ -1640,9 +1773,11 @@ export class CodescapeSupervisor {
    * Send `signal` (default SIGTERM) to `child`, suppressing {@link wireDeathHandling}'s reaction to a
    * synchronous kill-failure `'error'` (see {@link issuingChildKill}) for the duration of the call.
    * Returns whether the signal was actually delivered (`child.kill()`'s own real return value).
-   * @decision df32be98 — the ONE place `issueChildKill`/`maybeEscalateStuckKill` route their `kill()`
-   * through, applying the suppression to both. `stop()`'s own direct kill and the self-reporting spawn's
-   * abandon-on-timeout kill deliberately bypass it — see those call sites for why neither needs it.
+   * The choke point `issueChildKill`/`maybeEscalateStuckKill` route their `kill()` through, applying the
+   * suppression to both — and, since card 7de21027, `terminateKilledChild` routes BOTH `stop()`'s own
+   * SIGTERM and its escalating SIGKILL through here too.
+   * @decision df32be98 — the self-reporting spawn's abandon-on-timeout kill is the one remaining
+   * deliberate bypass; see that call site for why it doesn't need the suppression.
    */
   private sendSignal(child: ChildProcess, signal?: NodeJS.Signals): boolean {
     this.childKillSignalFailed = false;
