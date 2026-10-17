@@ -8,7 +8,10 @@
 //     With `--out`, ALSO writes a tiny stub JSON file there (mirrors the real CLI writing a graph.json) so
 //     a downstream `fs.existsSync(graphPath)` gate (codescapeMcpServer) sees a real file.
 //   - `serve --port <p>`  — records the call, then stays alive (a long-lived foreground process, exactly
-//     like the real `serve`) until the supervisor kills it. Card 4e0df6ce: DEFAULT behavior models a
+//     like the real `serve`) until the supervisor kills it. Card bfce0891: env
+//     `FAKE_CODESCAPE_IGNORE_SIGTERM=1` traps and swallows SIGTERM (POSIX only — simulates a `serve` that
+//     survives a delivered kill signal); SIGKILL is never trapped (unblockable on POSIX), so the
+//     supervisor's own SIGKILL escalation still genuinely ends this process for real. Card 4e0df6ce: DEFAULT behavior models a
 //     capable (>= f7a5684) installed binary — `--port 0` binds an OS-assigned ephemeral port (Node's own
 //     `listen(0, ...)` semantics), and on EVERY successful invocation (any port, not just 0) the fixture
 //     prints the self-reported-bound-port contract line on stdout: `{"url":"http://127.0.0.1:<port>",
@@ -143,6 +146,12 @@ if (args[0] === "ingest") {
   console.log("[fake-codescape] mcp: server ready on stdio");
   setInterval(() => {}, 1 << 30);
 } else if (args[0] === "serve") {
+  // Card bfce0891: env FAKE_CODESCAPE_IGNORE_SIGTERM=1 traps and swallows SIGTERM (`process.on("SIGTERM",
+  // () => {})`) — simulating a `serve` that genuinely survives a delivered kill signal, POSIX only (a
+  // Windows child.kill() default path is unconditionally TerminateProcess, which cannot be trapped at
+  // all — see supervisor.ts's maybeEscalateStuckKill). SIGKILL is NEVER trapped here (or anywhere — it is
+  // unblockable on POSIX), so the escalation's own SIGKILL still genuinely ends this process for real.
+  if (process.env.FAKE_CODESCAPE_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
   const portIdx = args.indexOf("--port");
   const portArg = portIdx === -1 ? null : args[portIdx + 1];
   const requestedPort = portArg == null ? null : Number(portArg);

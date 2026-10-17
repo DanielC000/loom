@@ -31,6 +31,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { ambientScaledBudget } from "./_wait.mjs";
 
@@ -2101,6 +2102,243 @@ for (const kind of ["PASS", "diagnostic"]) {
   delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
 }
 
+// ===================== (21) card bfce0891 item 2: a kill-delivery failure is never treated as a death ====
+// Verified against Node's REAL internal ChildProcess.prototype.kill source (`node --expose-internals`,
+// v22.16.0): err===0 -> success; err===UV_ESRCH -> silently returns false, NO event (already dead — the
+// real exit is still pending, so the latch must STAY held); err===UV_EINVAL/ENOSYS -> throws
+// synchronously; any OTHER error ("almost certainly EPERM") -> `this.emit('error', ...)` SYNCHRONOUSLY,
+// before kill() even returns. A genuine cross-privilege EPERM is not reproducible hermetically on either
+// this host or WSL/Ubuntu (both tried — see the df32be98 decision record's Follow-up section) without
+// real cross-UID permission separation. Manager-approved bounded exception: a minimal EventEmitter double
+// whose `.kill()` mirrors EXACTLY that confirmed contract (never invented behavior) — the real OS kill
+// mechanics are exercised for real elsewhere (scenarios (1)/(19)/(20) here, codescape-supervisor.mjs's
+// (b)/(bfce0891-1)); this double exists only to reach the one branch no real spawn can portably trigger.
+// Reads/writes the supervisor's own fields/methods directly (TypeScript `private` is erased at the
+// compiled-JS boundary this test imports — plain properties/methods, same as every `*ForTest()` seam).
+{
+  class FakeChild extends EventEmitter {
+    constructor(pid, mode) { super(); this.pid = pid; this.mode = mode; this.killCalls = []; }
+    kill(signal) {
+      this.killCalls.push(signal ?? null);
+      if (this.mode === "success") return true;
+      if (this.mode === "esrch") return false; // already dead — Node returns false silently, no event
+      if (this.mode === "eperm") { // "almost certainly EPERM" per Node's own source comment
+        this.emit("error", Object.assign(new Error("kill EPERM"), { code: "EPERM" }));
+        return false;
+      }
+      throw new Error(`unknown FakeChild.mode: ${this.mode}`);
+    }
+  }
+
+  const sup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "kill-failure-home"), port: 44555 });
+
+  // --- sub-case A: ESRCH (already dead) — the latch must STAY held; nothing else would ever clear it
+  // early, and the real, already-pending exit does the job momentarily, same as the untouched path.
+  const esrchChild = new FakeChild(910001, "esrch");
+  sup.child = esrchChild;
+  sup.wireDeathHandling(esrchChild, []);
+  sup.childKillPid = null;
+  const errsA = captureErrors();
+  const warnsA = captureWarnings();
+  const deliveredA = sup.issueChildKill(esrchChild, esrchChild.pid);
+  check("(21-esrch) kill() reports NOT delivered", deliveredA === false);
+  check("(21-esrch) the latch STAYS held (the real exit is still pending)", sup.childKillPid === esrchChild.pid);
+  check("(21-esrch) no 'failed to deliver' error was logged (no event fired at all)",
+    !errsA.lines.some((l) => l.includes("failed to deliver")));
+  check("(21-esrch) NOT treated as a death: child/alive untouched", sup.child === esrchChild && sup.alive === true);
+  check("(21-esrch) NO restart was scheduled", !warnsA.lines.some((l) => l.includes("scheduling restart")));
+  errsA.restore();
+  warnsA.restore();
+
+  // --- sub-case B: EPERM-style (a genuine, non-ESRCH failure) — must be logged loudly, NEVER treated as
+  // a death, and the latch must be RELEASED immediately (nothing is actually "in flight" any more).
+  const epermChild = new FakeChild(910002, "eperm");
+  sup.child = epermChild;
+  sup.wireDeathHandling(epermChild, []);
+  sup.childKillPid = null;
+  const errsB = captureErrors();
+  const warnsB = captureWarnings();
+  const deliveredB = sup.issueChildKill(epermChild, epermChild.pid);
+  check("(21-eperm) kill() reports NOT delivered", deliveredB === false);
+  check("(21-eperm) exactly one loud 'failed to deliver a signal' error was logged",
+    errsB.lines.filter((l) => l.includes("failed to deliver a signal")).length === 1);
+  check("(21-eperm) the latch is RELEASED immediately (nothing is coming)", sup.childKillPid === null);
+  check("(21-eperm) NOT treated as a death: child/alive untouched", sup.child === epermChild && sup.alive === true);
+  check("(21-eperm) NO restart was scheduled", !warnsB.lines.some((l) => l.includes("scheduling restart")));
+  errsB.restore();
+  warnsB.restore();
+
+  // --- negative control (reviewer-requested): a GENUINE, independent async 'error' — NOT a synchronous
+  // side effect of our own kill() call (issuingChildKill is false here) — must still route to onDeath
+  // exactly as before this card's fix. The suppression must never swallow a REAL death.
+  const genuineErrorChild = new FakeChild(910003, "success");
+  sup.child = genuineErrorChild;
+  sup.alive = true;
+  sup.childKillPid = null;
+  sup.stopped = false; // this supervisor's own `stopped` field defaults to true until a real start() flips it — never called here
+  sup.wireDeathHandling(genuineErrorChild, []);
+  const warnsC = captureWarnings();
+  genuineErrorChild.emit("error", new Error("a genuine, unrelated async process error"));
+  check("(21-negctrl) a genuine, independent 'error' (not during our own kill()) STILL triggers onDeath",
+    sup.child === null && sup.alive === false);
+  check("(21-negctrl) the latch is cleared as part of a REAL death", sup.childKillPid === null);
+  check("(21-negctrl) the normal 'scheduling restart' log line fired",
+    warnsC.lines.some((l) => l.includes("process error") && l.includes("scheduling restart")));
+  warnsC.restore();
+  sup.stop(); // cancels scheduleRestart's pending timer before it could ever fire a real spawn
+}
+
+// ===================== (22) card bfce0891 item 3: SIGKILL escalation when a child survives SIGTERM ======
+// POSIX only — on win32, child.kill()'s default path is unconditionally TerminateProcess, which cannot be
+// trapped, so there is nothing to escalate (checked directly, below). This repo's own dev/CI hosts are
+// win32; the SIGTERM-survives-then-SIGKILL path is exercised for real only on CI's ubuntu-latest runner.
+// A standalone POSIX mechanism probe was ALSO run under WSL/Ubuntu (real node, real Linux kernel) to prove
+// the underlying signal semantics ahead of writing this — see the df32be98 decision record's Follow-up
+// section for that evidence; it could not exercise this actual class (node-pty, a native dep with no
+// Linux build here, is transitively imported), only a standalone reimplementation of the same state
+// machine.
+{
+  // --- (22-win32) the guard clause itself must be the ONLY thing preventing escalation. CR follow-up:
+  // the original version used killEscalationProbeTicks:1 with the SAME healthProbeIntervalMs the age
+  // threshold is computed from, so the threshold (intervalMs * ticks) could never be reached in a real
+  // test run regardless of the win32 guard — "never escalates" passed vacuously, true even with the
+  // guard removed. Fixed by fast-forwarding childKillIssuedAt (same technique as (22-zombie) below) so
+  // the age threshold is GENUINELY satisfied, and calling maybeEscalateStuckKill() directly rather than
+  // ticking — the only thing left standing between a satisfied age threshold and a real SIGKILL is the
+  // guard itself. healthProbeIntervalMs itself stays LONG (the real timer must never fire — see below),
+  // which is exactly why the fast-forward subtracts that same long interval rather than shortening it.
+  // Surgical RED/GREEN control run: with the `if (process.platform === "win32") return;` line temporarily
+  // removed from maybeEscalateStuckKill, this exact check went RED (a real "escalating to SIGKILL" line
+  // appeared and childKillPid cleared); restoring the guard made it GREEN again.
+  const win32HomeDir = path.join(tmpHome, "kill-escalation-win32-home");
+  const win32WedgeFile = path.join(tmpHome, "kill-escalation-win32-wedge-flag");
+  fs.writeFileSync(win32WedgeFile, "1");
+  process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = win32WedgeFile;
+  const win32HealthProbeIntervalMs = 10 * 60_000; // long enough the REAL timer never fires — every tick here is driven directly (see scenario (19)/(20)'s own identical rationale); a short interval here previously let the real timer race ahead of the explicit call below and clear the latch before this test ever observed it latched
+  const win32Sup = new CodescapeSupervisor({
+    homeDir: win32HomeDir,
+    memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }),
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: win32HealthProbeIntervalMs,
+    healthProbeTimeoutMs: 40,
+    healthProbeFailureThreshold: 1,
+    killEscalationProbeTicks: 1,
+  });
+  await win32Sup.start(["/fake/repo/kill-escalation-win32"]);
+  await waitForCompletedCondition(() => win32Sup.getPort() !== null, () => win32Sup.getCompletedProbeTickCount());
+  await win32Sup.runOneHealthProbeForTest(); // fires the wedge kill, latches
+  check("(22-win32) the wedge kill latched", win32Sup.childKillPid !== null);
+  win32Sup.childKillIssuedAt = Date.now() - (win32HealthProbeIntervalMs * 1 + 1000); // genuinely past the escalation threshold now, regardless of how long the interval is
+  const errsWin = captureErrors();
+  win32Sup.maybeEscalateStuckKill(); // direct call — deterministic, no tick/timer dependency
+  if (process.platform === "win32") {
+    check("(22-win32) win32 does not escalate even with the age threshold genuinely satisfied",
+      !errsWin.lines.some((l) => l.includes("escalating to SIGKILL")));
+    check("(22-win32) the latch is untouched by the non-escalation", win32Sup.childKillPid !== null);
+  } else {
+    console.log(`SKIP  (22-win32) this host is '${process.platform}', not win32 — cannot exercise the win32 no-op branch here.`);
+  }
+  errsWin.restore();
+  win32Sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
+
+  // --- (22-posix) a child that traps and survives SIGTERM gets escalated to a real SIGKILL, which
+  // genuinely ends it (SIGKILL is unblockable on POSIX).
+  if (process.platform === "win32") {
+    console.log("SKIP  (22-posix) SIGTERM-survives-then-SIGKILL escalation is POSIX-only; this host is 'win32'.");
+  } else {
+    const posixHomeDir = path.join(tmpHome, "kill-escalation-posix-home");
+    process.env.FAKE_CODESCAPE_IGNORE_SIGTERM = "1";
+    const wedgeFile2 = path.join(tmpHome, "kill-escalation-posix-wedge-flag");
+    fs.writeFileSync(wedgeFile2, "1");
+    process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile2;
+    const posixSup = new CodescapeSupervisor({
+      homeDir: posixHomeDir,
+      memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }),
+      restartBackoffMs: [50, 100, 150],
+      healthyRunMs: 60_000,
+      healthProbeIntervalMs: 60,
+      healthProbeTimeoutMs: 40,
+      healthProbeFailureThreshold: 1,
+      killEscalationProbeTicks: 2,
+    });
+    await posixSup.start(["/fake/repo/kill-escalation-posix"]);
+    await waitForCompletedCondition(() => posixSup.getPort() !== null, () => posixSup.getCompletedProbeTickCount());
+    const pidBefore = posixSup.getPid();
+    check("(22-posix) initial serve spawned", typeof pidBefore === "number");
+
+    const errs = captureErrors();
+    await posixSup.runOneHealthProbeForTest(); // fires the wedge kill (SIGTERM) — the fixture traps it, survives
+    check("(22-posix) the wedge kill latched and the child genuinely survives the SIGTERM",
+      posixSup.getPid() === pidBefore);
+
+    // killEscalationProbeTicks=2 @ healthProbeIntervalMs=60 — age must reach >=120ms. Direct ticks bypass
+    // the real timer, but the escalation's own clock is wall-clock Date.now(), so real time must actually
+    // elapse between ticks here.
+    let escalated = false;
+    for (let i = 0; i < 20 && !escalated; i++) {
+      await sleep(70);
+      await posixSup.runOneHealthProbeForTest();
+      escalated = errs.lines.some((l) => l.includes("escalating to SIGKILL"));
+    }
+    check("(22-posix) precondition: the loop above actually observed the escalation within its bound", escalated === true);
+    check("(22-posix) the escalation fires exactly once", errs.lines.filter((l) => l.includes("escalating to SIGKILL")).length === 1);
+
+    await waitForCompletedCondition(() => posixSup.getPid() !== pidBefore, () => posixSup.getCompletedProbeTickCount());
+    check("(22-posix) SIGKILL genuinely ended the trapped child — a real respawn followed",
+      posixSup.getPid() !== pidBefore && posixSup.getPid() !== null);
+    check("(22-posix) no 'still alive after SIGKILL' warning (the real SIGKILL worked)",
+      !errs.lines.some((l) => l.includes("still alive after SIGKILL")));
+    errs.restore();
+
+    posixSup.stop();
+    delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
+    delete process.env.FAKE_CODESCAPE_IGNORE_SIGTERM;
+  }
+
+  // --- (22-zombie) one-shot "still alive after SIGKILL" + latch-never-cleared — logic-only (no real
+  // process can survive a genuine SIGKILL for this to observe against): directly manipulates the
+  // supervisor's own bookkeeping to fast-forward elapsed time, same bounded-exception posture as (21).
+  if (process.platform === "win32") {
+    console.log("SKIP  (22-zombie) reached only past maybeEscalateStuckKill's own win32 guard; this host is 'win32'.");
+  } else {
+    class StubbornChild extends EventEmitter {
+      constructor(pid) { super(); this.pid = pid; this.killCalls = []; }
+      kill(signal) { this.killCalls.push(signal ?? null); return true; } // "delivered", but never actually exits
+    }
+    const zombieSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "kill-escalation-zombie-home"), port: 44556, killEscalationProbeTicks: 2, healthProbeIntervalMs: 50 });
+    const zombieChild = new StubbornChild(920001);
+    zombieSup.child = zombieChild;
+    zombieSup.wireDeathHandling(zombieChild, []);
+    zombieSup.issueChildKill(zombieChild, zombieChild.pid); // original kill issued, latch set
+    zombieSup.childKillIssuedAt = Date.now() - (50 * 2 + 10); // fast-forward past the escalation threshold
+
+    const errsZ = captureErrors();
+    zombieSup.maybeEscalateStuckKill();
+    check("(22-zombie) escalates to SIGKILL exactly once", zombieChild.killCalls.filter((s) => s === "SIGKILL").length === 1);
+    check("(22-zombie) the latch is still held (no real exit observed)", zombieSup.childKillPid === zombieChild.pid);
+
+    zombieSup.maybeEscalateStuckKill(); // immediately again — not enough time since the escalation
+    check("(22-zombie) no second SIGKILL yet", zombieChild.killCalls.filter((s) => s === "SIGKILL").length === 1);
+    check("(22-zombie) no 'still alive' warning yet", !errsZ.lines.some((l) => l.includes("still alive after SIGKILL")));
+
+    zombieSup.childKillEscalatedAt = Date.now() - (50 * 2 + 10); // fast-forward past the SECOND threshold
+    zombieSup.maybeEscalateStuckKill();
+    check("(22-zombie) exactly one 'still alive after SIGKILL' warning",
+      errsZ.lines.filter((l) => l.includes("still alive after SIGKILL")).length === 1);
+    check("(22-zombie) still no second SIGKILL", zombieChild.killCalls.filter((s) => s === "SIGKILL").length === 1);
+    check("(22-zombie) the latch is NEVER cleared by the escalation path itself", zombieSup.childKillPid === zombieChild.pid);
+
+    zombieSup.maybeEscalateStuckKill(); // one more tick — both one-shots already fired, nothing further happens
+    check("(22-zombie) stable afterward — no further kills, no further warnings",
+      zombieChild.killCalls.filter((s) => s === "SIGKILL").length === 1 &&
+      errsZ.lines.filter((l) => l.includes("still alive after SIGKILL")).length === 1);
+    errsZ.restore();
+    zombieSup.stop();
+  }
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -2109,6 +2347,7 @@ delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
 delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
 delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
 delete process.env.FAKE_CODESCAPE_HEALTH_VERSION;
+delete process.env.FAKE_CODESCAPE_IGNORE_SIGTERM;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 // Card 5112d392 DoD-2: this summary used to restate the full per-scenario DoD inline (~3.4KB, printed

@@ -29,6 +29,17 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Card bfce0891 CR follow-up: same technique as codescape-health-probe.mjs's identical helper — intercepts
+// console.warn for the duration of a scenario so a test can assert on, or the absence of, a specific
+// diagnostic line across a real async window (here: proving a plain stop() never logs the "superseded by
+// a newer spawn" line, since nothing superseded anything).
+function captureWarnings() {
+  const original = console.warn;
+  const lines = [];
+  console.warn = (...args) => { lines.push(args.join(" ")); original(...args); };
+  return { lines, restore: () => { console.warn = original; } };
+}
+
 // Card 468df031: bounded-retry a real control-plane round trip until it reports genuine liveness, rather
 // than trusting a single call or a getPort()/getPid() snapshot. Both matter here: `alive`/`port` flip
 // SYNCHRONOUSLY at spawn time (see spawnServeExplicit's own doc), strictly BEFORE the OS-level bind has
@@ -416,9 +427,32 @@ check("(b) restart-on-death genuinely recovers — a real control-plane call suc
 check("(b) the restarted serve ran from the SAME shared homeDir", calls2[2]?.cwd === calls2[0]?.cwd);
 
 // ===================== (c) stop() disarms restart + clears state =====================
+// Card bfce0891 CR follow-up: a plain stop() must emit NO "superseded by a newer spawn" line when the
+// killed child's real, belated exit eventually arrives — this.child is null at that point (nothing
+// superseded it, nothing to react to either), not some OTHER, different child. Witnessed on the REAL
+// OS exit event itself (a second 'exit' listener on the same child object stop() just killed — Node
+// EventEmitters allow multiple listeners), never a blind sleep-then-check: the wait below ends the
+// instant that real event fires, so the negative assertion right after it is anchored to an observed
+// fact, not to "hasn't happened yet within an arbitrary window."
+const childBeforeStop = sup.getChildForTest();
+let childReallyExited = false;
+childBeforeStop?.once("exit", () => { childReallyExited = true; });
+const stopWarnings = captureWarnings();
 sup.stop();
 check("(c) stop() clears getPort()", sup.getPort() === null);
 check("(c) stop() clears getPid()", sup.getPid() === null);
+// TIMING-GUARD-SAFE: fully-awaited-completion — this loop's OWN exit condition (`childReallyExited`) is
+// set by a SECOND listener on the exact same `'exit'` event the production `onDeath` listener also
+// consumes; EventEmitter fires same-event listeners synchronously, in registration order, with no
+// macrotask between them — so by the time this flag reads `true`, `onDeath` (registered first, via
+// `wireDeathHandling`) has ALREADY run to completion for this exact death, including whatever (or
+// nothing) it would have logged. The negative check right after reads that already-settled fact, not an
+// incidental, unrelated check the window scan happened to pull in.
+for (let i = 0; i < 100 && !childReallyExited; i++) await sleep(50);
+check("(c) precondition: the stopped child's own real OS exit was actually observed", childReallyExited === true);
+check("(c) a plain stop() never logs 'superseded by a newer spawn' (nothing superseded it)",
+  !stopWarnings.lines.some((l) => l.includes("superseded by a newer spawn")));
+stopWarnings.restore();
 await sleep(600); // longer than the fast backoff schedule — prove NO further restart happens post-stop
 const callsAfterStop = readCalls().length;
 await sleep(300);
@@ -827,6 +861,67 @@ await new Promise((resolve) => hungServer.close(resolve));
     stuckTimeoutSup.getPort() === null);
   stuckTimeoutSup.stop();
   delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS;
+}
+
+// ===================== (bfce0891-1) onDeath identity guard: a superseded child's belated death must not
+// ===================== clobber a newer, already-live child =========================================
+// Repro from the card: stop() kills child A but does not detach A's listeners; start() then spawns child
+// B before A's real, async 'exit'/'error' is ever observed by Node. The manual trigger via the read-only
+// getChildForTest() seam (A's own already-registered 'exit' listener, fired directly, well after B is
+// already live and tracked) is meant to force this deterministically — but on a fast host, A's OWN real
+// async exit can independently race ahead of it and land during the second start()'s own awaits, which
+// (pre-fix) reproduces the IDENTICAL defect on its own: measured on THIS host, the pre-fix RED run below
+// failed on "exactly 2 real spawns"/"no bogus third child" via that real race, before the manual trigger
+// even ran — not a weaker proof, the same bug via either path. Not as airtight a repro as a fully
+// synthetic one, same caveat as scenario (19) in codescape-health-probe.mjs.
+{
+  const identityHomeDir = path.join(tmpHome, "stale-child-identity-home");
+  const identitySup = new CodescapeSupervisor({
+    homeDir: identityHomeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    ingestTimeoutMs: 15_000,
+  });
+  await identitySup.start(["/fake/repo/stale-identity"]);
+  for (let i = 0; i < 100 && identitySup.getPort() === null; i++) await sleep(50);
+  check("(bfce0891-1) precondition: child A's port was observed before the wait above gave up", identitySup.getPort() !== null);
+  const childA = identitySup.getChildForTest();
+  const pidA = identitySup.getPid();
+  check("(bfce0891-1) child A spawned for real", childA !== null && typeof pidA === "number");
+
+  identitySup.stop();
+  check("(bfce0891-1) stop() clears tracked state", identitySup.getPort() === null && identitySup.getPid() === null);
+
+  await identitySup.start(["/fake/repo/stale-identity"]); // spawns child B
+  for (let i = 0; i < 100 && identitySup.getPort() === null; i++) await sleep(50);
+  check("(bfce0891-1) precondition: child B's port was observed before the wait above gave up", identitySup.getPort() !== null);
+  const pidB = identitySup.getPid();
+  const portB = identitySup.getPort();
+  check("(bfce0891-1) start() after stop() spawns a genuinely new child B", pidB !== null && pidB !== pidA);
+  // THE PRIMARY DISCRIMINATOR: on buggy code this can already read 3 here (a bogus respawn triggered by
+  // A's real exit racing ahead, during the awaits inside the start() call just above) — see the header
+  // comment. This is the fact the card itself names ("B is left running UNTRACKED, child C spawned").
+  check("(bfce0891-1) exactly 2 real spawns so far (A, B) — no bogus respawn snuck in already", identitySup.getSpawnCount() === 2);
+
+  // THE MANUAL TRIGGER: fire A's own already-registered 'exit' listener directly — simulating its real,
+  // belated death arriving now, after B is already live and tracked. A no-op on already-broken state
+  // (see header comment); the decisive assertions are the ones right below, read AFTER this line either way.
+  childA.emit("exit", 0, null);
+
+  check("(bfce0891-1) the live child's tracked pid is still B's", identitySup.getPid() === pidB);
+  check("(bfce0891-1) the live child's tracked port is still B's", identitySup.getPort() === portB);
+  check("(bfce0891-1) still exactly 2 real spawns — never a bogus third child", identitySup.getSpawnCount() === 2);
+
+  // Regression check: B's OWN real death must still restart normally — the identity guard must not break
+  // the ordinary death path.
+  const spawnCountBeforeRealKill = identitySup.getSpawnCount();
+  process.kill(pidB);
+  for (let i = 0; i < 100 && identitySup.getSpawnCount() === spawnCountBeforeRealKill; i++) await sleep(50);
+  check("(bfce0891-1) precondition: the spawn count actually advanced before the wait above gave up", identitySup.getSpawnCount() !== spawnCountBeforeRealKill);
+  check("(bfce0891-1) B's own real death still triggers a normal restart",
+    identitySup.getSpawnCount() === spawnCountBeforeRealKill + 1 && identitySup.getPid() !== pidB && identitySup.getPid() !== null);
+
+  identitySup.stop();
 }
 
 // ===================== cleanup =====================

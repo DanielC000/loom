@@ -96,6 +96,14 @@ const DEFAULT_TOOLS_PROBE_TIMEOUT_MS = 5_000;
  */
 const DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD = 3;
 /**
+ * Card bfce0891: how many {@link DEFAULT_HEALTH_PROBE_INTERVAL_MS} ticks a shared kill latch
+ * ({@link CodescapeSupervisor.childKillPid}) may stay held before {@link CodescapeSupervisor.maybeEscalateStuckKill}
+ * escalates to SIGKILL (POSIX only — see that method's own doc for why Windows has nothing to escalate).
+ * Chosen as a policy default, not derived: at the 30s default interval this is ~90s of silence before
+ * escalating, on top of whatever already elapsed before the original kill was issued.
+ */
+const DEFAULT_KILL_ESCALATION_PROBE_TICKS = 3;
+/**
  * Bound (ms) for reading the INSTALLED codescape binary's own build id (a `--version`-style call) —
  * card 90550a97's build-id drift detection. Short, mirroring the health-probe timeout: this is a cheap
  * local process spawn, never a network call, so a healthy install answers fast.
@@ -256,6 +264,12 @@ export interface CodescapeSupervisorOpts {
    * Defaults to a no-op.
    */
   onMemoryRecycleSuspended?: (detail: { pid: number; measuredBytes: number; ceilingBytes: number; metric: string; consecutiveUnproductiveRecycles: number }) => void;
+  /**
+   * Card bfce0891: how many `healthProbeIntervalMs` ticks a kill latch may stay held (POSIX only — see
+   * {@link CodescapeSupervisor.maybeEscalateStuckKill}) before escalating to SIGKILL. Test seam: override
+   * {@link DEFAULT_KILL_ESCALATION_PROBE_TICKS} so a test doesn't need to wait out real probe intervals.
+   */
+  killEscalationProbeTicks?: number;
 }
 
 export interface CodescapeRequestResult {
@@ -693,6 +707,7 @@ export class CodescapeSupervisor {
   private readonly driftStabilityMs: number;
   private readonly toolsProbeTimeoutMs: number;
   private readonly portReportTimeoutMs: number;
+  private readonly killEscalationProbeTicks: number;
   private readonly memorySampler: MemorySampler;
   private readonly memorySampleTimeoutMs: number;
   private readonly memorySampleTickInterval: number;
@@ -902,6 +917,58 @@ export class CodescapeSupervisor {
    */
   private childKillPid: number | null = null;
   /**
+   * Card bfce0891: `Date.now()` when {@link childKillPid} was most recently latched — the clock
+   * {@link maybeEscalateStuckKill} ages against. `null` whenever {@link childKillPid} is `null` (same
+   * lifetime, reset together everywhere: `issueChildKill`, `onDeath`, {@link stop}/{@link start}).
+   */
+  private childKillIssuedAt: number | null = null;
+  /**
+   * Card bfce0891: true once {@link maybeEscalateStuckKill} has sent the one-shot SIGKILL for the
+   * CURRENT {@link childKillPid} latch. Gates the escalation to exactly once per latch — reset together
+   * with {@link childKillPid}.
+   */
+  private childKillEscalated = false;
+  /** Card bfce0891: `Date.now()` when the one-shot SIGKILL above was sent — the clock the "still alive
+   *  after SIGKILL" warning ages against. `null` until {@link childKillEscalated} is set. */
+  private childKillEscalatedAt: number | null = null;
+  /**
+   * Card bfce0891: true once the one-shot "still alive after SIGKILL — supervision blind for this
+   * child" warning has fired for the CURRENT latch. `maybeEscalateStuckKill` never sends a second
+   * SIGKILL and never clears the latch on its own — this flag is the only thing standing between one
+   * loud log line and a silent black-out (an uninterruptible/zombie child is a real possibility SIGKILL
+   * cannot be assumed to fix).
+   */
+  private childKillZombieWarned = false;
+  /**
+   * Card bfce0891: true only for the synchronous duration of a `child.kill(...)` call issued by
+   * {@link sendSignal} — lets the `'error'` listener wired in {@link wireDeathHandling} tell "this
+   * 'error' is a synchronous side effect of MY OWN in-flight kill() call" (per Node's real
+   * `ChildProcess.prototype.kill` contract: a failure other than "already dead" emits `'error'`
+   * SYNCHRONOUSLY, before `kill()` even returns) apart from a genuine, independent async process error.
+   * Never left `true` across a turn — always reset in {@link sendSignal}'s own `finally`.
+   */
+  private issuingChildKill = false;
+  /**
+   * Card bfce0891: side channel set by the `'error'` listener ONLY while {@link issuingChildKill} is
+   * `true` (or by {@link sendSignal}'s own `catch`, for the EINVAL/ENOSYS synchronous-throw case) —
+   * read immediately after `child.kill()` returns inside {@link sendSignal} to tell a genuine delivery
+   * failure ("almost certainly EPERM" — nothing is coming, release the latch) apart from the silent
+   * `false` Node returns for an already-dead pid (ESRCH — the latch must stay held; the real exit is
+   * still pending). Reset at the start of every {@link sendSignal} call.
+   */
+  private childKillSignalFailed = false;
+  /**
+   * Card bfce0891 CR follow-up: dedupe key for the kill-signal-failure `console.error` in
+   * {@link wireDeathHandling}'s `'error'` listener — a PERSISTENTLY-failing pid (one that gets issued a
+   * new kill on every subsequent tick, since each genuine failure releases the latch) would otherwise log
+   * once per tick forever. Logs again only when the (pid, reason) pair actually CHANGES — a different pid,
+   * or the same pid failing for a different reason. `null`/`null` until the first failure; reset in
+   * `onDeath` (a new pid's own failures should log fresh) and {@link stop}/{@link start}.
+   */
+  private lastKillSignalFailurePid: number | null = null;
+  /** Paired with {@link lastKillSignalFailurePid} — see that field's own doc. */
+  private lastKillSignalFailureReason: string | null = null;
+  /**
    * Test seam: count of {@link probeHealth} invocations that ran to full completion (a tick skipped by the
    * `probeInFlight` guard does NOT count). A REAL subprocess spawn now sits inside every successful probe
    * (`checkBuildDrift` -> `readInstalledBuild`), so the number of probes that complete in any given
@@ -968,6 +1035,7 @@ export class CodescapeSupervisor {
     this.driftStabilityMs = opts?.driftStabilityMs ?? DEFAULT_DRIFT_STABILITY_MS;
     this.toolsProbeTimeoutMs = opts?.toolsProbeTimeoutMs ?? DEFAULT_TOOLS_PROBE_TIMEOUT_MS;
     this.portReportTimeoutMs = opts?.portReportTimeoutMs ?? DEFAULT_PORT_REPORT_TIMEOUT_MS;
+    this.killEscalationProbeTicks = opts?.killEscalationProbeTicks ?? DEFAULT_KILL_ESCALATION_PROBE_TICKS;
     this.memorySampler = opts?.memorySampler ?? sampleProcessMemoryBytes;
     this.memorySampleTimeoutMs = opts?.memorySampleTimeoutMs ?? DEFAULT_MEMORY_SAMPLE_TIMEOUT_MS;
     this.memorySampleTickInterval = opts?.memorySampleTickInterval ?? DEFAULT_MEMORY_SAMPLE_TICK_INTERVAL;
@@ -1001,6 +1069,16 @@ export class CodescapeSupervisor {
   /** The live child's PID, or null when not running. Diagnostic / test seam. */
   getPid(): number | null {
     return this.child?.pid ?? null;
+  }
+
+  /**
+   * Card bfce0891: the live child's own `ChildProcess` object (or `null`), read-only — same style as
+   * {@link getPid}, one level less abstracted. Test seam ONLY: lets a test drive a REAL, already-wired
+   * `'exit'`/`'error'` listener deterministically (e.g. `sup.getChildForTest()!.emit("exit", 0, null)`)
+   * instead of racing real OS process timing to construct a late-death scenario.
+   */
+  getChildForTest(): ChildProcess | null {
+    return this.child;
   }
 
   /** True iff a kill has already been issued for the CURRENT child's pid — see {@link childKillPid}. */
@@ -1185,6 +1263,12 @@ export class CodescapeSupervisor {
       this.memoryRecycleSuspended = false;
       this.memoryRecycleSuspendedAtCeilingMb = null;
       this.childKillPid = null;
+      this.childKillIssuedAt = null;
+      this.childKillEscalated = false;
+      this.childKillEscalatedAt = null;
+      this.childKillZombieWarned = false;
+      this.lastKillSignalFailurePid = null;
+      this.lastKillSignalFailureReason = null;
       this.spawnServe();
       this.startHealthMonitor();
       // Card 4e0df6ce: `this.port` is no longer necessarily known synchronously at this point (a capable
@@ -1248,6 +1332,12 @@ export class CodescapeSupervisor {
     this.memoryRecycleSuspended = false;
     this.memoryRecycleSuspendedAtCeilingMb = null;
     this.childKillPid = null;
+    this.childKillIssuedAt = null;
+    this.childKillEscalated = false;
+    this.childKillEscalatedAt = null;
+    this.childKillZombieWarned = false;
+    this.lastKillSignalFailurePid = null;
+    this.lastKillSignalFailureReason = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -1481,12 +1571,28 @@ export class CodescapeSupervisor {
    * {@link spawnServeExplicit} and {@link spawnServeSelfReporting} (once a report has confirmed the port).
    * `settled` guards against 'error' and 'exit' BOTH firing for the same death (Node's docs warn this can
    * happen) — without it a double-fire would double-schedule a restart / double-decrement state.
+   *
+   * @decision df32be98 — `onDeath` is ALSO guarded on `this.child === child`, closing a stop()+start()
+   * race where a superseded child's belated death could clobber a newer one. Never "fix" this by
+   * detaching `stop()`'s listeners instead — Node throws on an `'error'` with no listener attached.
    */
   private wireDeathHandling(child: ChildProcess, chunks: Buffer[]): void {
     let settled = false;
     const onDeath = (reason: string): void => {
       if (settled) return;
       settled = true;
+      if (this.child !== child) {
+        if (this.child !== null) {
+          // Stale — this child was already superseded by a DIFFERENT newer spawn (stop()+start()) before
+          // its real death was ever observed. Never touch the CURRENT child's state; whichever child is
+          // live now already has its own wireDeathHandling watching it.
+          console.warn(`[codescape] stale serve child ${reason} (already superseded by a newer spawn) — ignoring`);
+        }
+        // this.child === null: an ordinary stop() already cleared tracked state before this child's
+        // real, async death arrived — nothing superseded it, nothing to react to either. Silent by
+        // design: this fires on EVERY stop(), so logging it would spam every daemon shutdown.
+        return;
+      }
       // Evaluate "did THIS run last long enough to count as healthy" against the timestamp THIS spawn
       // set above, BEFORE clearing it — scheduleRestart no longer reads this.spawnedAt itself (that was
       // the staleness trap: a failure path that never reached the assignment above left the PRIOR run's
@@ -1495,29 +1601,123 @@ export class CodescapeSupervisor {
       this.child = null;
       this.alive = false;
       this.spawnedAt = null;
-      this.childKillPid = null; // the exit is now observed — clear the shared kill latch (see issueChildKill)
+      // The exit is now observed — clear the shared kill latch and its escalation bookkeeping (see
+      // issueChildKill / maybeEscalateStuckKill).
+      this.childKillPid = null;
+      this.childKillIssuedAt = null;
+      this.childKillEscalated = false;
+      this.childKillEscalatedAt = null;
+      this.childKillZombieWarned = false;
+      this.lastKillSignalFailurePid = null;
+      this.lastKillSignalFailureReason = null;
       if (this.stopped) return; // an explicit stop() — not a death, no restart
       const tail = Buffer.concat(chunks).toString("utf-8").trim().slice(-OUTPUT_TAIL_BYTES);
       console.warn(`[codescape] serve ${reason} — scheduling restart${tail ? `\n${tail}` : ""}`);
       this.scheduleRestart(ranHealthy);
     };
-    child.on("error", (err) => onDeath(`process error: ${err.message}`));
+    child.on("error", (err) => {
+      if (this.issuingChildKill) {
+        // Card bfce0891: per Node's real ChildProcess.prototype.kill contract, a kill failure OTHER than
+        // "already dead" (ESRCH) emits 'error' SYNCHRONOUSLY, inside the kill() call we are currently
+        // issuing (see sendSignal) — this is an echo of OUR OWN kill attempt failing to be delivered,
+        // never evidence the process actually died. Report it loudly but do NOT run onDeath: the process
+        // may well still be fully alive.
+        this.childKillSignalFailed = true;
+        const pid = child.pid ?? null;
+        if (pid !== this.lastKillSignalFailurePid || err.message !== this.lastKillSignalFailureReason) {
+          this.lastKillSignalFailurePid = pid;
+          this.lastKillSignalFailureReason = err.message;
+          console.error(`[codescape] kill() for serve pid ${pid ?? "?"} failed to deliver a signal (${err.message}) — the process may still be running; NOT treating this as a death`);
+        }
+        return;
+      }
+      onDeath(`process error: ${err.message}`);
+    });
     child.on("exit", (code, signal) => onDeath(`exited (code ${code ?? "null"}, signal ${signal ?? "null"})`));
+  }
+
+  /**
+   * Send `signal` (default SIGTERM) to `child`, suppressing {@link wireDeathHandling}'s reaction to a
+   * synchronous kill-failure `'error'` (see {@link issuingChildKill}) for the duration of the call.
+   * Returns whether the signal was actually delivered (`child.kill()`'s own real return value).
+   * @decision df32be98 — the ONE place `issueChildKill`/`maybeEscalateStuckKill` route their `kill()`
+   * through, applying the suppression to both. `stop()`'s own direct kill and the self-reporting spawn's
+   * abandon-on-timeout kill deliberately bypass it — see those call sites for why neither needs it.
+   */
+  private sendSignal(child: ChildProcess, signal?: NodeJS.Signals): boolean {
+    this.childKillSignalFailed = false;
+    this.issuingChildKill = true;
+    let delivered = false;
+    try {
+      delivered = signal ? child.kill(signal) : child.kill();
+    } catch {
+      // An unknown/unsupported signal name (EINVAL/ENOSYS) throws synchronously instead of emitting
+      // 'error' — same "nothing is in flight" conclusion as the EPERM-style emit case below.
+      delivered = false;
+      this.childKillSignalFailed = true;
+    } finally {
+      this.issuingChildKill = false;
+    }
+    return delivered;
   }
 
   /**
    * The ONE choke point all three "this child needs to die" sites — {@link checkMemoryCeiling}'s
    * memory-ceiling kill, {@link probeHealth}'s wedge kill, and {@link checkBuildDrift}'s drift-restart
-   * kill — route through. Refuses a second kill for a pid already latched (see {@link childKillPid});
-   * the caller's own post-kill bookkeeping (recycle callback, failure-count reset, logging) should only
-   * run when this returns `true`.
-   * @decision df32be98 — never issue a second kill() on a child pid before its exit is observed.
+   * kill — route through. Refuses a second kill for a pid already latched (see {@link childKillPid}).
+   * Each caller's own recycle-callback/logging bookkeeping runs UNCONDITIONALLY before this is even
+   * called, never gated on its return value — only the actual signal delivery is controlled here.
+   * @decision df32be98 — never issue a second kill() on a child pid before its exit is observed. A kill
+   * that was never actually DELIVERED (a genuine, non-ESRCH failure) releases the latch immediately
+   * instead — nothing is "in flight" to wait for, and nothing else would ever clear it otherwise.
    */
   private issueChildKill(child: ChildProcess, pid: number): boolean {
     if (this.childKillPid === pid) return false;
     this.childKillPid = pid;
-    try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ }
-    return true;
+    this.childKillIssuedAt = Date.now();
+    this.childKillEscalated = false;
+    this.childKillEscalatedAt = null;
+    this.childKillZombieWarned = false;
+    const delivered = this.sendSignal(child);
+    if (!delivered && this.childKillSignalFailed && this.childKillPid === pid) {
+      this.childKillPid = null;
+      this.childKillIssuedAt = null;
+      this.childKillEscalated = false;
+      this.childKillEscalatedAt = null;
+      this.childKillZombieWarned = false;
+    }
+    return delivered;
+  }
+
+  /**
+   * Escalate a latch ({@link childKillPid}) held too long by a child that traps/ignores a delivered
+   * SIGTERM — POSIX only; Windows `child.kill()` is unconditionally `TerminateProcess`, untrappable, so
+   * there is nothing to escalate. Called from {@link probeHealth}'s `isChildKillLatched()` branch, so it
+   * runs every health-probe tick the latch stays held.
+   *
+   * @decision df32be98 — one-shot in BOTH directions: at most ONE SIGKILL per latch, and at most ONE
+   * further "still alive after SIGKILL" warning afterward — never a second SIGKILL, never a latch clear.
+   * Upgrades the SAME still-open kill decision after many full probe intervals; never a second one.
+   */
+  private maybeEscalateStuckKill(): void {
+    if (process.platform === "win32") return; // TerminateProcess can't be trapped — nothing to escalate
+    if (this.childKillIssuedAt == null) return; // defensive; should not happen while latched
+    const pid = this.childKillPid;
+    const child = this.child;
+    if (!child || pid == null || child.pid !== pid) return; // identity sanity check
+    const now = Date.now();
+    if (!this.childKillEscalated) {
+      if (now - this.childKillIssuedAt < this.healthProbeIntervalMs * this.killEscalationProbeTicks) return;
+      this.childKillEscalated = true;
+      this.childKillEscalatedAt = now;
+      console.error(`[codescape] serve pid ${pid} survived a delivered kill signal for >= ${this.killEscalationProbeTicks} probe intervals — escalating to SIGKILL`);
+      this.sendSignal(child, "SIGKILL");
+      return;
+    }
+    if (this.childKillZombieWarned || this.childKillEscalatedAt == null) return;
+    if (now - this.childKillEscalatedAt < this.healthProbeIntervalMs * this.killEscalationProbeTicks) return;
+    this.childKillZombieWarned = true;
+    console.error(`[codescape] serve pid ${pid} still alive after SIGKILL — supervision blind for this child (no further kills will be attempted)`);
   }
 
   /**
@@ -1703,7 +1903,14 @@ export class CodescapeSupervisor {
     this.probeInFlight = true;
     try {
       if (await this.checkMemoryCeiling()) return; // recycled this tick — child is being torn down, skip the HTTP round-trip
-      if (this.isChildKillLatched()) return; // a kill is already in flight for this child (memory-ceiling, wedge, or a prior tick's drift-restart kill) — its exit just isn't observed yet; don't treat the dying child's non-answer as fresh wedge evidence, don't probe it, and don't re-evaluate build drift against it either
+      if (this.isChildKillLatched()) {
+        // a kill is already in flight for this child (memory-ceiling, wedge, or a prior tick's
+        // drift-restart kill) — its exit just isn't observed yet; don't treat the dying child's
+        // non-answer as fresh wedge evidence, don't probe it, and don't re-evaluate build drift against
+        // it either. Card bfce0891: a latch held too long gets escalated to SIGKILL — see maybeEscalateStuckKill.
+        this.maybeEscalateStuckKill();
+        return;
+      }
       const res = await this.request("GET", "/graph/health", undefined, this.healthProbeTimeoutMs);
       // stop() may have raced this in-flight probe (its fetch was already underway when stop() ran) —
       // abandon silently rather than act on a dead instance (no stray warn/kill after stop()).
