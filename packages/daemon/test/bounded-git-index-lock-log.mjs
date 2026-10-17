@@ -22,11 +22,24 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 const { killableCanonicalRaw, summarizeGitArgsForLog } = await import("../dist/git/bounded.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// Card 6460053d: onTreeDeathSettled is NOT guaranteed to fire on every exit path (bounded.ts's own
+// rawViaDirectSpawn doc: a reparented descendant can hold the pipe open so "close" never fires at all,
+// and its "error" handler settles without ever touching onTreeDeathSettled either) — so this backstop is
+// a real fix, not just a regression guard. Races the real confirm against a generous budget; on expiry,
+// the caller fails a named check and continues rather than hanging.
+async function awaitTreeDeathConfirmedOrTimeout(promise, budgetMs) {
+  let timedOut = false;
+  const timer = new Promise((resolve) => { setTimeout(() => { timedOut = true; resolve(); }, budgetMs); });
+  await Promise.race([promise, timer]);
+  return !timedOut;
+}
+const TREE_DEATH_CONFIRM_BUDGET_MS = ambientScaledBudget(10_000);
 const GIT_ID = "-c user.email=bgill@loom -c user.name=bgill";
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const repo = path.join(os.tmpdir(), `loom-bgill-repo-${sfx}`);
@@ -72,13 +85,22 @@ try {
   const cap1 = captureConsole();
   let threw = null;
   const startedAt = Date.now();
+  // Card 6460053d: withTimeoutKillingChild's giveUpTimer can settle the outer await before the real
+  // kill-confirm (and its log) has run — await onTreeDeathSettled (deferred one macrotask) first.
+  let resolveConfirmed;
+  const treeDeathConfirmedP = new Promise((resolve) => { resolveConfirmed = resolve; });
+  const onTreeDeathSettled = () => { setTimeout(resolveConfirmed, 0); };
   try {
-    await killableCanonicalRaw(repo, ["commit", "-m", SECRET_MESSAGE], KILL_TIMEOUT_MS, "git commit (test, index-lock-log)");
+    await killableCanonicalRaw(repo, ["commit", "-m", SECRET_MESSAGE], KILL_TIMEOUT_MS, "git commit (test, index-lock-log)", undefined, undefined, onTreeDeathSettled);
   } catch (e) {
     threw = e;
   }
-  cap1.restore();
   const elapsedMs = Date.now() - startedAt;
+  // Bounded: onTreeDeathSettled is not guaranteed to fire on every exit path (see the comment above) —
+  // without a bound, a never-fired callback would hang this file instead of failing a named check.
+  const confirmed = await awaitTreeDeathConfirmedOrTimeout(treeDeathConfirmedP, TREE_DEATH_CONFIRM_BUDGET_MS);
+  check("(killed) the real kill-confirm callback fired within budget (backstop for bounded.ts's documented reparented-descendant residual)", confirmed);
+  cap1.restore();
   check("(killed) the call actually rejected (the kill fired)", threw !== null);
   check("(killed) settled well under the hook's own 5000ms natural duration (genuinely killed, not a natural finish)", elapsedMs < 4500);
   check("(killed) settled well past the 1500ms kill-trigger (a confirmed kill, not an instant unrelated failure)", elapsedMs >= KILL_TIMEOUT_MS);
@@ -106,13 +128,19 @@ try {
   const cap1b = captureConsole();
   let threw1b = null;
   const startedAt1b = Date.now();
+  // Same card 6460053d fix as the scenario above — see its comment for the mechanism.
+  let resolveConfirmed1b;
+  const treeDeathConfirmedP1b = new Promise((resolve) => { resolveConfirmed1b = resolve; });
+  const onTreeDeathSettled1b = () => { setTimeout(resolveConfirmed1b, 0); };
   try {
-    await killableCanonicalRaw(repo, ["-C", repo, "commit", "-m", SECRET_MESSAGE_2], KILL_TIMEOUT_MS, "git commit (test, -C prefix)");
+    await killableCanonicalRaw(repo, ["-C", repo, "commit", "-m", SECRET_MESSAGE_2], KILL_TIMEOUT_MS, "git commit (test, -C prefix)", undefined, undefined, onTreeDeathSettled1b);
   } catch (e) {
     threw1b = e;
   }
-  cap1b.restore();
   const elapsedMs1b = Date.now() - startedAt1b;
+  const confirmed1b = await awaitTreeDeathConfirmedOrTimeout(treeDeathConfirmedP1b, TREE_DEATH_CONFIRM_BUDGET_MS);
+  check("(-C prefix, killed) the real kill-confirm callback fired within budget (backstop for bounded.ts's documented reparented-descendant residual)", confirmed1b);
+  cap1b.restore();
   check("(-C prefix, killed) the call actually rejected (the kill fired)", threw1b !== null);
   check("(-C prefix, killed) settled well under the hook's own 5000ms natural duration", elapsedMs1b < 4500);
   check("(-C prefix, killed) settled well past the 1500ms kill-trigger", elapsedMs1b >= KILL_TIMEOUT_MS);
