@@ -79,6 +79,9 @@ const EXPECTED_KEYS = [
   "contextTelemetry",
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
   "unconfirmedDeliveryMs",
+  // Card 8882e2ca: kickoffConfirmPending — non-null only while this worker's turn-1 kickoff is
+  // unconfirmed AND still inside its size-aware plausible-confirm window.
+  "kickoffConfirmPending",
   // Card d8eaa381: pendingQueueDepth (FIFO send-queue depth) + currentTurnBusyForMs (ms since the
   // current turn went busy) — see pty/host.ts's getPendingQueueDepth/getCurrentTurnBusyForMs.
   "pendingQueueDepth", "currentTurnBusyForMs",

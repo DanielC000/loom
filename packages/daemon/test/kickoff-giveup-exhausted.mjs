@@ -262,7 +262,7 @@ try {
   // (S11) needs to know the EXACT root label `framePossibleDuplicate` embeds in its tag — that label is
   // `rootMsgId.slice(0,8)` ONLY when it looks hex-ish, else a content hash (see the function's own doc) —
   // so this imports the REAL function rather than assuming a test-chosen rootMsgId's shape.
-  const { possibleDuplicateRootLabel } = await import("../dist/pty/host.js");
+  const { possibleDuplicateRootLabel, kickoffConfirmWindowMs } = await import("../dist/pty/host.js");
 
   /** Writes a real transcript JSONL to the (sandboxed) `~/.claude/projects/...` path `readTranscript`
    *  resolves — mirrors companion-transcript-read.mjs's own `writeLiveTranscript` fixture helper. */
@@ -287,11 +287,22 @@ try {
    *  `hasFirstTurnStarted` (default false, per-session settable) lets (S7)/(S8) below drive
    *  `handleKickoffGiveUpExhausted`'s new discriminator check directly, without needing a real pty. */
   class PtyStub {
-    constructor() { this.live = new Set(); this.busy = new Set(); this.sent = []; this.firstTurnStarted = new Set(); }
+    constructor() {
+      this.live = new Set(); this.busy = new Set(); this.sent = []; this.firstTurnStarted = new Set();
+      // Card 8882e2ca: withinKickoffConfirmWindow's two reads — unset (undefined/null) on either means
+      // "unmeasurable", which resolves to the SAME terminal outcome as "genuinely past the window" (see
+      // that function's own doc) — most (S1)-(S14) scenarios below deliberately exercise THAT path, same
+      // as before this card. (S15)/(S16) set these explicitly to exercise genuine size/elapsed expiry.
+      this.liveStartedAtMap = new Map(); this.composerDirtyLenMap = new Map();
+    }
     setLive(id, on = true) { if (on) this.live.add(id); else this.live.delete(id); }
     setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
     setFirstTurnStarted(id, on = true) { if (on) this.firstTurnStarted.add(id); else this.firstTurnStarted.delete(id); }
     hasFirstTurnStarted(id) { return this.firstTurnStarted.has(id); }
+    setLiveStartedAt(id, ms) { this.liveStartedAtMap.set(id, ms); }
+    liveStartedAt(id) { return this.liveStartedAtMap.has(id) ? this.liveStartedAtMap.get(id) : null; }
+    setComposerDirtyLen(id, n) { this.composerDirtyLenMap.set(id, n); }
+    getComposerDirtyLen(id) { return this.composerDirtyLenMap.has(id) ? this.composerDirtyLenMap.get(id) : undefined; }
     // Card 3f09f9ce: position 11 also accepts the real enqueueStdin's options-object tail overload
     // (production's `enqueueDurableMessage` migrated to it) — discriminate by shape, same as the real impl.
     // Card 7772176d: `sent` entries now also carry the tail's `onGiveUpExhausted` (when present) — (S12)
@@ -604,6 +615,79 @@ try {
       check("(S14) NEGATIVE CONTROL: its own event is NOT marked suppressed", parkedEvt?.detail?.noticeSuppressed !== true);
     }
 
+    // (S15) Card 8882e2ca: a LARGE kickoff (above the same size threshold kickoffConfirmWindowMs scales
+    // from) at the terminal PARK branch gets the DISTINCT, non-terminal [loom:kickoff-confirm-pending]
+    // notice instead of [loom:worker-spawn-broken] — the exact mechanism this card's own investigation
+    // found firing ~250s before a real ~69K-char kickoff's own measured confirm tail. The durable "parked"
+    // event (needed for handleGiveUpConfirmed's own retraction) is still recorded, unchanged.
+    {
+      const mgr = `kge-mgr15-${sfx}`, wkr = `kge-wkr15-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge15-${sfx}` });
+      const pty = new PtyStub();
+      pty.setLive(mgr);
+      const LARGE_KICKOFF = "x".repeat(69_000);
+      // Card 8882e2ca: withinKickoffConfirmWindow needs BOTH reads measured to exercise genuine
+      // size/elapsed expiry (not the "unmeasurable" shortcut) — ~97s ago mirrors this card's own
+      // measured real-world PARK timing for a kickoff this size (well under its ~420s window).
+      pty.setLiveStartedAt(wkr, Date.now() - 97_000);
+      pty.setComposerDirtyLen(wkr, LARGE_KICKOFF.length);
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+      const rootMsgId = `root-s15-${sfx}`;
+      check("(S15) sanity: this kickoff size genuinely earns a non-zero plausible-confirm window",
+        kickoffConfirmWindowMs(LARGE_KICKOFF.length) > 0);
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s15-${sfx}`, rootMsgId, LARGE_KICKOFF, TERMINAL_CHAIN_DEPTH);
+
+      const toMgr = pty.sent.filter((s) => s.id === mgr).map((s) => s.text);
+      // Anchored on startsWith, not a bare substring (mirrors (S8)'s own comment above): the softer
+      // notice's own text MENTIONS "[loom:worker-spawn-broken]" mid-sentence as a future possibility
+      // (the escalation-once-the-window-passes clause), so a bare .includes() would wrongly fail here.
+      check("(S15) THE FIX: a large kickoff draws the distinct [loom:kickoff-confirm-pending] notice, not the terminal one",
+        toMgr.some((t) => t.startsWith("[loom:kickoff-confirm-pending]")) && !toMgr.some((t) => t.startsWith("[loom:worker-spawn-broken]")));
+      check("(S15) exactly one notice sent, naming the worker + kickoff size",
+        toMgr.length === 1 && toMgr[0].includes(wkr) && toMgr[0].includes(`${LARGE_KICKOFF.length} chars`));
+      check("(S15) does NOT instruct worker_message/worker_merge yet",
+        /do NOT worker_message or worker_merge/.test(toMgr[0]));
+      const parkedEvt15 = db.listEventsForWorker(wkr).find((e) =>
+        e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId && e.detail?.outcome === "parked");
+      check("(S15) the durable 'parked' event is STILL recorded, unchanged — the retraction machinery still has something to find",
+        !!parkedEvt15 && parkedEvt15.detail?.noticeSuppressed !== true);
+    }
+
+    // (S16) THE CONTROL (S15) NEEDS: the EXACT SAME flow, driven with an ORDINARY-sized kickoff (this
+    // file's own `kickoff-s14-...`-shaped literals), must still produce the UNCHANGED, byte-identical
+    // terminal [loom:worker-spawn-broken] wording — proving (S15)'s new branch is gated on kickoff SIZE
+    // alone, not a regression that silences the terminal notice generally. (S1)/(S8)/(S13)/(S14) above
+    // already assert this shape; this one additionally pins exact byte-for-byte equality against the
+    // original production wording so a future edit to either branch can't silently blur them together.
+    {
+      const mgr = `kge-mgr16-${sfx}`, wkr = `kge-wkr16-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge16-${sfx}` });
+      const pty = new PtyStub();
+      pty.setLive(mgr);
+      const SMALL_KICKOFF = `kickoff-s16-${sfx}`;
+      // Card 8882e2ca: ~70s ago mirrors a REALISTIC small-kickoff PARK elapsed time (past the 60s flat
+      // floor, since composerDirtyLen never set here = size 0 = window stays exactly the flat 60s) —
+      // genuinely exercises expiry via elapsed time, not the "unmeasurable" shortcut (composerDirtyLen
+      // deliberately left unset, same as production before any give-up has touched this session).
+      pty.setLiveStartedAt(wkr, Date.now() - 70_000);
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+      const rootMsgId = `root-s16-${sfx}`;
+      check("(S16) sanity: this kickoff size earns ZERO plausible-confirm window (the byte-identical case)",
+        kickoffConfirmWindowMs(SMALL_KICKOFF.length) === 0);
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s16-${sfx}`, rootMsgId, SMALL_KICKOFF, TERMINAL_CHAIN_DEPTH);
+
+      const toMgr = pty.sent.filter((s) => s.id === mgr).map((s) => s.text);
+      const expected = `[loom:worker-spawn-broken] worker ${wkr} (task tk-kge16-${sfx})'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including 1 automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. `;
+      check("(S16) CONTROL: an ordinary-sized kickoff's terminal notice is BYTE-IDENTICAL to pre-card production wording (same prefix)",
+        toMgr.length === 1 && toMgr[0].startsWith(expected));
+      check("(S16) CONTROL: never mentions [loom:kickoff-confirm-pending]",
+        !toMgr[0].includes("[loom:kickoff-confirm-pending]"));
+    }
+
     db.close();
   }
 }
@@ -612,6 +696,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands). Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion (chainDepth at the terminal limit) still records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10). Card 7772176d: the FIRST exhaustion (chainDepth 0, the real production entry point) now RE-MINTS instead of parking immediately — no manager notice, a held re-mint dispatched to the worker itself carrying the possible-duplicate tag (S11) — and only the re-mint's OWN subsequent exhaustion produces the terminal [loom:worker-spawn-broken] park+notify, unchanged in shape, naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge (S12), scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session. Card ba9225f0 (DoD-6): this park site now reuses 085d9422's moot-suppression shape — two independently-parking chains sharing one rootMsgId produce exactly ONE notice, the second's own parked event tagged noticeSuppressed:true/duplicate-parked (S13), while a single genuinely-lost kickoff is still reported, unsuppressed (S14)."
+  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands). Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion (chainDepth at the terminal limit) still records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10). Card 7772176d: the FIRST exhaustion (chainDepth 0, the real production entry point) now RE-MINTS instead of parking immediately — no manager notice, a held re-mint dispatched to the worker itself carrying the possible-duplicate tag (S11) — and only the re-mint's OWN subsequent exhaustion produces the terminal [loom:worker-spawn-broken] park+notify, unchanged in shape, naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge (S12), scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session. Card ba9225f0 (DoD-6): this park site now reuses 085d9422's moot-suppression shape — two independently-parking chains sharing one rootMsgId produce exactly ONE notice, the second's own parked event tagged noticeSuppressed:true/duplicate-parked (S13), while a single genuinely-lost kickoff is still reported, unsuppressed (S14). Card 8882e2ca: a kickoff above the size-aware plausible-confirm-window threshold now draws the distinct, non-terminal [loom:kickoff-confirm-pending] notice instead, with the durable parked event unchanged (S15); an ordinary-sized kickoff's terminal notice stays byte-for-byte identical to pre-card production wording (S16)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

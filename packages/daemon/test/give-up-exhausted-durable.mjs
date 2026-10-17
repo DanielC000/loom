@@ -501,6 +501,90 @@ try {
       pty.sent.filter((s) => s.id === mgr2).length === mgr2SentBefore);
   }
 
+  // ===== (9b) Card 8882e2ca: a confirming hook can land AFTER the manager already stopped this worker — =====
+  // ===== a real, observed race (a specimen in this card's own investigation landed ~487ms after the stop). =====
+  // ===== handleGiveUpConfirmed must say so explicitly instead of reading as an ordinary confirmation. This =====
+  // ===== drives the SAME PARK setup as (9) above, but appends a `worker_retired` event (the real marker =====
+  // ===== `retireWorkerSession`/`stopWorker` appends) BEFORE calling handleGiveUpConfirmed — simulating the =====
+  // ===== stop having already happened by the time this late confirmation is processed. =====
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `gue-stop-mgr-${sfx}`, wkr = `gue-stop-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    pty.setBusy(mgr, false);
+
+    sessions.messageWorker(mgr, wkr, "LATE_CONFIRM_AFTER_STOP");
+    for (let i = 0; i <= REMINT_LIMIT; i++) pty.giveUpOn(wkr); // exhaust all the way to a genuine PARK
+    const parkedEvt = gaveUpEventsFor(wkr).find((e) => e.detail?.outcome === "parked");
+    check("(9b) setup: the chain reached a genuine PARK", !!parkedEvt);
+    const rootMsgId = parkedEvt.detail.rootMsgId;
+
+    // The stop (worker_stop -> retireWorkerSession) already happened by the time this confirmation lands —
+    // appending the SAME durable marker `retireWorkerSession` appends, directly, since this stub has no
+    // real stopWorker to drive (that method's own side effects are out of scope for this notice's wording).
+    db.appendEvent({
+      id: crypto.randomUUID(), ts: new Date().toISOString(), managerSessionId: mgr, workerSessionId: wkr,
+      taskId: null, kind: "worker_retired", detail: { reason: "worker_stop", cancelledWakes: 0 },
+    });
+
+    const mgrSentBefore9b = pty.sent.filter((s) => s.id === mgr).length;
+    sessions.handleGiveUpConfirmed(wkr, rootMsgId, 487);
+
+    const confirmedNote9b = pty.sent.filter((s) => s.id === mgr).map((s) => s.text).find((t) => t.startsWith("[loom:redelivery-confirmed]"));
+    check("(9b) THE FIX: a confirmed-after-park event is STILL recorded (the audit trail is unaffected)",
+      gaveUpEventsFor(wkr, rootMsgId).some((e) => e.detail?.outcome === "confirmed-after-park" && e.detail?.latencyMs === 487));
+    check("(9b) exactly one new notice (not a flood, same as the live-session case)",
+      pty.sent.filter((s) => s.id === mgr).length === mgrSentBefore9b + 1);
+    check("(9b) THE FIX: the notice explicitly says this worker has SINCE BEEN STOPPED",
+      !!confirmedNote9b && /SINCE BEEN STOPPED/.test(confirmedNote9b));
+    check("(9b) does NOT read as an ordinary confirmation — the live-session hedge text ('Loom's own retry may have landed') is ABSENT",
+      !!confirmedNote9b && !confirmedNote9b.includes("Loom's own retry may have landed"));
+    console.log(`\n--- (9b) [loom:redelivery-confirmed] notice for an ALREADY-STOPPED worker — POSITIVE CONTROL ---\n${confirmedNote9b}\n`);
+  }
+
+  // ===== (9c) Code Review f3fa9002 Minor 4: EPOCH-aware, not "a worker_retired event exists ANYWHERE in =====
+  // ===== history". A worker stopped, then RESUMED (lifting the retirement via worker_retirement_lifted, =====
+  // ===== card 4ee527d1's own mechanism) before this late confirmation lands must read as an ORDINARY =====
+  // ===== confirmation again — a bare `events.some(worker_retired)` check (what (9b) replaced) would stay =====
+  // ===== true FOREVER past this resume and wrongly keep claiming "SINCE BEEN STOPPED". =====
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `gue-resumed-mgr-${sfx}`, wkr = `gue-resumed-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    pty.setBusy(mgr, false);
+
+    sessions.messageWorker(mgr, wkr, "LATE_CONFIRM_AFTER_RESUME");
+    for (let i = 0; i <= REMINT_LIMIT; i++) pty.giveUpOn(wkr);
+    const parkedEvt9c = gaveUpEventsFor(wkr).find((e) => e.detail?.outcome === "parked");
+    check("(9c) setup: the chain reached a genuine PARK", !!parkedEvt9c);
+    const rootMsgId9c = parkedEvt9c.detail.rootMsgId;
+
+    // Stopped, THEN resumed — the SAME two durable markers `resume()`'s own `allowSuperseded` branch
+    // appends (card 4ee527d1): worker_retired followed by a LATER worker_retirement_lifted.
+    db.appendEvent({
+      id: crypto.randomUUID(), ts: new Date().toISOString(), managerSessionId: mgr, workerSessionId: wkr,
+      taskId: null, kind: "worker_retired", detail: { reason: "worker_stop", cancelledWakes: 0 },
+    });
+    db.appendEvent({
+      id: crypto.randomUUID(), ts: new Date().toISOString(), managerSessionId: mgr, workerSessionId: wkr,
+      taskId: null, kind: "worker_retirement_lifted", detail: {},
+    });
+
+    sessions.handleGiveUpConfirmed(wkr, rootMsgId9c, 123);
+
+    const confirmedNote9c = pty.sent.filter((s) => s.id === mgr).map((s) => s.text).find((t) => t.startsWith("[loom:redelivery-confirmed]"));
+    check("(9c) THE FIX: a RESUMED (retirement-lifted) worker reads as an ORDINARY confirmation — no 'SINCE BEEN STOPPED'",
+      !!confirmedNote9c && !confirmedNote9c.includes("SINCE BEEN STOPPED"));
+    check("(9c) the live-session hedge text IS present (byte-identical to the never-stopped case)",
+      !!confirmedNote9c && confirmedNote9c.includes("Loom's own retry may have landed"));
+  }
+
   // ===== (10) Card 597903fc: `[loom:crash-recovered]` (SessionService.recoverCrashOrphanedWorkers) now =====
   // ===== dispatches through the SAME durable mechanism as every other settle nudge, via the new =====
   // ===== `enqueueDurableNudge` helper — a give-up-exhausted crash-recovery notice is RE-MINTED (or =====
@@ -626,6 +710,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a give-up-exhausted durable message (both the original agent-message population AND the settle-nudge population that used to have zero durability) is RE-MINTED under an auditable, rootMsgId-linked chain rather than silently dropped, bounded re-minting PARKS (never loops forever) with the outcome durably recorded and surfaced to a live sender, a healthy delivery with no give-up is never spuriously reminted, and (card d09d58e7) a worker-report nudge's reportEventId survives an in-session give-up re-mint through handleGiveUpExhausted."
+  ? "\n✅ ALL PASS — a give-up-exhausted durable message (both the original agent-message population AND the settle-nudge population that used to have zero durability) is RE-MINTED under an auditable, rootMsgId-linked chain rather than silently dropped, bounded re-minting PARKS (never loops forever) with the outcome durably recorded and surfaced to a live sender, a healthy delivery with no give-up is never spuriously reminted, and (card d09d58e7) a worker-report nudge's reportEventId survives an in-session give-up re-mint through handleGiveUpExhausted. Card 8882e2ca (9b): a late confirmation landing on a worker already stopped (a worker_retired marker present) gets an explicitly different [loom:redelivery-confirmed] wording naming the stop, never the ordinary live-session hedge text. (9c): that check is EPOCH-aware, not sticky-forever — a worker stopped then RESUMED (worker_retirement_lifted) reads as an ordinary confirmation again."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

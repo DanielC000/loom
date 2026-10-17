@@ -23,7 +23,7 @@ import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdic
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, giveUpHoldExtraMs, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, giveUpHoldExtraMs, withinKickoffConfirmWindow, kickoffConfirmWindowMs, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
 import { removeClaudeConfigEntryForWorktree } from "../pty/claude-config.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -1774,17 +1774,13 @@ function buildNeverCompletedTurnMsg(w: Session): string {
     `${confirmationLatencyProportionalityClause()} Re-check LIVE first: worker_status({workerSessionId:"${w.id}"}) for a fresh busy/turnSeq read — free, no risk. Only if it's STILL busy:false with turnSeq:0 after that re-check should you pull worker_transcript ${w.id} to see what it's actually doing, and only worker_message it or worker_stop it once that confirms it's genuinely stuck, not just caught between busy-flag edges.`;
 }
 
-/** @decision 738f2109 — set just above the MEASURED p90 confirmation latency (n=177: p50=8.5s, p90=45.9s,
- *  p95=342s, p99=675s, max=970s; do not lower without re-checking that tail). Deliberately NO env override:
- *  `Number(process.env.X) || default` would silently coerce `0` — the escape hatch an operator would want. */
-const BROKEN_SPAWN_HOLDOFF_MS = 60_000;
-
-/** @decision 738f2109 — measured from `pty.liveStartedAt` (the live PROCESS start), never `w.lastActivity`
- *  (resets on every busy-flip, so a give-up/retry chain would never elapse it) or `w.createdAt` (stale
- *  across a resume). Unmeasurable (hermetic PtyStub) defaults to PAST the holdoff — never suppress. */
-function pastBrokenSpawnHoldoff(pty: PtyHost, workerSessionId: string): boolean {
-  const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(workerSessionId) : null;
-  return startedAt === null ? true : Date.now() - startedAt >= BROKEN_SPAWN_HOLDOFF_MS;
+/** @decision 738f2109 — `BROKEN_SPAWN_HOLDOFF_MS` lives in pty/host.ts now (card 8882e2ca, Code Review
+ *  f3fa9002) so `withinKickoffConfirmWindow` can compute the full floor+extra window in one place.
+ *  @decision 8882e2ca — delegates to that ONE shared predicate rather than re-deriving the size/elapsed
+ *  read itself; `withinKickoffConfirmWindow === null` covers unmeasurable (never suppress), turn-1
+ *  already completed, AND genuinely past the window — all three collapse to "past the holdoff" here. */
+function pastBrokenSpawnHoldoff(pty: PtyHost, w: Pick<Session, "id" | "turnSeq">): boolean {
+  return withinKickoffConfirmWindow(pty, w.id, w.turnSeq) === null;
 }
 
 /**
@@ -3008,6 +3004,10 @@ export class SessionService {
    * NOT prefix-resolved; a genuine retry replays the identical taskId string) / `merge:${workerSessionId}`.
    */
   private readonly pendingOps = new PendingOpRegistry();
+  /** @decision 8882e2ca — one-shot escalation timers (Code Review f3fa9002, Major 1): fires
+   *  `notifyManagerOfIdleWorker` exactly when a kickoff's plausible-confirm window ends, for both
+   *  tasked and taskless workers. See `armKickoffConfirmRecheck`/`clearKickoffConfirmRecheckTimer`. */
+  private readonly kickoffConfirmRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * HOST-LOAD guard (card 301d8c01): caps how many daemon-executed heavy gate runs (the merge-confirm
    * gate + the scoped-deploy gate — both spawn a human-set build/test command via `runGateSequential`)
@@ -9572,6 +9572,9 @@ export class SessionService {
       managerSessionId: worker?.parentSessionId ?? "", workerSessionId, taskId: worker?.taskId ?? null,
       kind: "worker_retired", detail: { reason, cancelledWakes },
     });
+    // @decision 8882e2ca — the SINGLE chokepoint every deliberate retirement (worker_stop, auto-retire,
+    // merge_confirm) already routes through; never fire the one-shot escalation into a retired worker.
+    this.clearKickoffConfirmRecheckTimer(workerSessionId);
   }
   /** @decision 4ee527d1 — a human/Lead deliberately stopping a WORKER (REST `/stop`, `stopSession`) IS a
    *  retirement too; a no-op for any non-worker target. Public: REST `/stop` (gateway/server.ts) calls
@@ -9593,9 +9596,13 @@ export class SessionService {
    *  this call worth recording, even when the main pty was never actually alive) and report honestly:
    *  a stale 'live' row with nothing actually running is reconciled to 'exited' right here — which is
    *  also what releases `liveSessionIdForTask`'s mutex for a phantom that predates this fix. */
-  async stopWorker(managerSessionId: string, workerSessionId: string, mode: StopMode): Promise<{ stopped: boolean; reason?: string }> {
+  async stopWorker(managerSessionId: string, workerSessionId: string, mode: StopMode): Promise<{ stopped: boolean; reason?: string; kickoffConfirmPendingWarning?: string }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    // @decision 8882e2ca — ADVISORY ONLY, read BEFORE the stop below changes anything live; never
+    // refuses the stop. Catches the exact race this card's investigation specimen hit: a turn-1
+    // kickoff's engine confirmation landing a few hundred ms AFTER this very call.
+    const kickoffConfirmPendingWarning = this.describeKickoffConfirmPendingForStop(worker);
     const wasAlive = this.pty.isAlive(workerSessionId);
     if (wasAlive) {
       this.pty.stop(workerSessionId, mode);
@@ -9608,7 +9615,22 @@ export class SessionService {
     });
     this.retireWorkerSession(workerSessionId, "worker_stop");
     await this.cancelWorkerGateThenSweep(worker);
-    return wasAlive ? { stopped: true } : { stopped: false, reason: "no live pty for this session" };
+    return {
+      ...(wasAlive ? { stopped: true } : { stopped: false, reason: "no live pty for this session" }),
+      ...(kickoffConfirmPendingWarning ? { kickoffConfirmPendingWarning } : {}),
+    };
+  }
+
+  /** @decision 8882e2ca — delegates to the shared predicate PLUS an extra filter: non-null ONLY when
+   *  the kickoff's own size earned an EXTENDED window (`kickoffConfirmWindowMs(composerDirtyLen) > 0`)
+   *  — an ordinary-sized kickoff reads null throughout (mirrors worker_list's own field, same reason). */
+  private describeKickoffConfirmPendingForStop(worker: Session): string | null {
+    const pending = withinKickoffConfirmWindow(this.pty, worker.id, worker.turnSeq);
+    if (!pending || kickoffConfirmWindowMs(pending.composerDirtyLen) <= 0) return null;
+    return `this worker's turn-1 kickoff (${pending.composerDirtyLen} chars) had not yet confirmed and was still inside its ` +
+      `plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s for a kickoff this size) when you stopped it — ` +
+      `a real confirmation can still land after the stop (watch for [loom:redelivery-confirmed]); this is advisory ` +
+      `only and did not block the stop.`;
   }
 
   /**
@@ -10462,8 +10484,49 @@ export class SessionService {
     // n=177, the ba6b65dc specimen, and why); instead the notice's CLAIM is made proportionate via
     // `confirmationLatencyProportionalityClause`, shared with `buildBrokenSpawnMsg` (the OTHER
     // [loom:worker-spawn-broken] sender, card 738f2109) so both state the same derived numbers.
-    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${confirmationLatencyProportionalityClause()} ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript — that is the decisive check: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Do NOT treat worker_list as an equivalent check: a worker that already retired cleanly (e.g. its work merged) can show NO row there at all, which reads identically to "the kickoff never ran" — an absent row is uninformative here either way, not confirmation of anything. If this worker has a bound task, tasks_get's merged/mergedSha field is a second, cheap signal (a merged task means the work already shipped, regardless of what worker_list shows). Only if worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
+    // @decision 8882e2ca — delegates to the ONE shared predicate (never a divergent size-only read that
+    // could contradict pastBrokenSpawnHoldoff's own verdict); terminal wording unchanged otherwise.
+    const pending = withinKickoffConfirmWindow(this.pty, sessionId, w.turnSeq);
+    const msg = pending
+      ? `[loom:kickoff-confirm-pending] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff (${pending.composerDirtyLen} chars) has not yet been confirmed delivered, but a kickoff this size is still within its plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s) — this is NOT YET treated as broken. ${giveUpConfirmationHedge("the kickoff")} worker_list/worker_status's kickoffConfirmPending field reflects this same window; it clears once this worker's engine confirms the turn. If the window genuinely passes with still no confirmation, Loom will try to escalate to a [loom:worker-spawn-broken] notice on its own via a one-shot IN-MEMORY check timed to the window's end — but that check is lost across a daemon restart (a separate, not-yet-built improvement would re-arm it on boot), so if a restart happens before the window ends, check back yourself rather than assuming the escalation will still fire. VERIFY FIRST via worker_transcript before acting on this notice alone — do NOT worker_message or worker_merge it yet.`
+      : `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${confirmationLatencyProportionalityClause()} ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript — that is the decisive check: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Do NOT treat worker_list as an equivalent check: a worker that already retired cleanly (e.g. its work merged) can show NO row there at all, which reads identically to "the kickoff never ran" — an absent row is uninformative here either way, not confirmation of anything. If this worker has a bound task, tasks_get's merged/mergedSha field is a second, cheap signal (a merged task means the work already shipped, regardless of what worker_list shows). Only if worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
     this.enqueueSystemNudge(w.parentSessionId, msg, { kind: "warning", taskId: w.taskId ?? null });
+    // @decision 8882e2ca — Major 1: arm the one-shot escalation EXACTLY when this window ends (never
+    // earlier, never left to an unrelated periodic cadence that skips taskless workers entirely).
+    if (pending) this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs);
+  }
+
+  /** @decision 8882e2ca — arms the one-shot escalation timer; see `kickoffConfirmRecheckTimers`' own
+   *  doc. Clears any PRIOR timer for this session first — never two outstanding at once. The fired
+   *  callback re-checks live state itself (see its own comments) rather than trusting the clears alone. */
+  private armKickoffConfirmRecheck(sessionId: string, delayMs: number): void {
+    this.clearKickoffConfirmRecheckTimer(sessionId);
+    const timer = setTimeout(() => {
+      this.kickoffConfirmRecheckTimers.delete(sessionId);
+      // Defensive, on top of the explicit clears at every resolving site: never fire into a session
+      // that was stopped/retired/exited since this was armed.
+      const w = this.db.getSession(sessionId);
+      if (!w || w.archivedAt) return;
+      // @decision 8882e2ca — a turn can start/complete WITHOUT handleGiveUpConfirmed ever firing (a
+      // mismatch/fusion echo, an unresolved ambiguous batch, a manager message, a human Enter) — stand
+      // down, the kickoff resolved by some other route.
+      const hasFirstTurnStarted = typeof this.pty.hasFirstTurnStarted === "function" && this.pty.hasFirstTurnStarted(sessionId);
+      if (hasFirstTurnStarted || w.busy || (w.turnSeq ?? 0) > 0) return;
+      // @decision 8882e2ca — re-check the predicate FRESH at fire time (composerDirtyLen can grow via
+      // a re-mint, or this can fire a hair early); if it STILL reads pending, RE-ARM for the remaining
+      // time rather than silently dropping the ONLY coverage a taskless worker has.
+      const stillPending = withinKickoffConfirmWindow(this.pty, sessionId, w.turnSeq);
+      if (stillPending) { this.armKickoffConfirmRecheck(sessionId, stillPending.windowMs - stillPending.sinceMs); return; }
+      try { this.notifyManagerOfIdleWorker(sessionId); } catch { /* best-effort */ }
+    }, Math.max(0, delayMs));
+    this.kickoffConfirmRecheckTimers.set(sessionId, timer);
+  }
+
+  /** @decision 8882e2ca — clear at every resolving site: a confirm, the busy re-engage edge (ANY way a
+   *  turn starts), stop-family, recycle, and exit. The fired callback also re-checks live state itself. */
+  private clearKickoffConfirmRecheckTimer(sessionId: string): void {
+    const timer = this.kickoffConfirmRecheckTimers.get(sessionId);
+    if (timer) { clearTimeout(timer); this.kickoffConfirmRecheckTimers.delete(sessionId); }
   }
 
   /**
@@ -10990,6 +11053,9 @@ export class SessionService {
     const events = this.db.listEventsForWorker(sessionId);
     const gaveUp = events.find((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === logicalId && e.detail?.outcome === "parked");
     if (!gaveUp) return; // never parked (still mid-chain, or no give-up history here for this chain) — nothing to retract
+    // @decision 8882e2ca — a genuine confirm resolves the kickoff; never leave the one-shot escalation
+    // armed past this point (it would otherwise fire a stale "still pending" check moments later).
+    this.clearKickoffConfirmRecheckTimer(sessionId);
     const sender = gaveUp.managerSessionId;
     const gaveUpTaskId = gaveUp.taskId ?? null;
     this.db.appendEvent({
@@ -10998,17 +11064,22 @@ export class SessionService {
     });
     const senderSession = this.db.getSession(sender);
     if (!senderSession) return;
-    const note =
-      `[loom:redelivery-confirmed] the message you sent to ${sessionId.slice(0, 8)} (root ${logicalId.slice(0, 8)}), ` +
-      `which was PARKED earlier, has now been CONFIRMED delivered: the engine proved a turn ran with matching content ` +
-      `~${Math.round(latencyMs / 1000)}s after Loom wrote it. ⚠️ This confirms the TURN RAN — it does NOT establish WHY. ` +
-      `The only evidence behind this notice is a content match on what the engine reports it received, which proves ` +
-      `WHAT text landed and WHEN, not WHO or WHAT submitted it. Loom's own retry may have landed late, a human may ` +
-      `have submitted it manually (e.g. pressed Enter on a stuck composer), YOU may have called worker_flush on this ` +
-      `session (its own submit-only Enter press goes through the exact same content-match signal), OR a ` +
-      `worker_message/worker_redirect YOU sent afterward may be what actually freed it — this notice cannot tell any ` +
-      `of the four apart, including your own subsequent action. If none of these match what you expect, treat it as ` +
-      `a possible f91c8634 specimen.`;
+    // @decision 8882e2ca — a confirming hook can land AFTER worker_stop (an observed race); EPOCH-aware
+    // via `isWorkerRetirementActive`, never a bare "worker_retired happened once" check (would stay true
+    // forever past a later resume that LIFTS the retirement).
+    const workerStoppedSince = this.db.isWorkerRetirementActive(sessionId);
+    const note = workerStoppedSince
+      ? `[loom:redelivery-confirmed] the message you sent to ${sessionId.slice(0, 8)} (root ${logicalId.slice(0, 8)}) has now been CONFIRMED delivered — BUT this worker session has SINCE BEEN STOPPED: the engine proved a turn ran with matching content ~${Math.round(latencyMs / 1000)}s after Loom wrote it, and that confirmation is landing on a session that is no longer live. ⚠️ This confirms the TURN RAN on a session you (or Loom) already ended — it does NOT establish whether any resulting work survived the stop, or whether the task still needs re-dispatching. The only evidence behind this notice is a content match on what the engine reported before the stop; it cannot tell you whether the stop interrupted that turn mid-way or landed after it had already finished. Check worker_transcript/git log on the stopped worker's branch before re-dispatching — it may have already produced something worth keeping.`
+      : `[loom:redelivery-confirmed] the message you sent to ${sessionId.slice(0, 8)} (root ${logicalId.slice(0, 8)}), ` +
+        `which was PARKED earlier, has now been CONFIRMED delivered: the engine proved a turn ran with matching content ` +
+        `~${Math.round(latencyMs / 1000)}s after Loom wrote it. ⚠️ This confirms the TURN RAN — it does NOT establish WHY. ` +
+        `The only evidence behind this notice is a content match on what the engine reports it received, which proves ` +
+        `WHAT text landed and WHEN, not WHO or WHAT submitted it. Loom's own retry may have landed late, a human may ` +
+        `have submitted it manually (e.g. pressed Enter on a stuck composer), YOU may have called worker_flush on this ` +
+        `session (its own submit-only Enter press goes through the exact same content-match signal), OR a ` +
+        `worker_message/worker_redirect YOU sent afterward may be what actually freed it — this notice cannot tell any ` +
+        `of the four apart, including your own subsequent action. If none of these match what you expect, treat it as ` +
+        `a possible f91c8634 specimen.`;
     try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId: gaveUpTaskId, kind: "warning" }); } catch { /* best-effort — the confirmed-after-park audit event above still stands regardless */ }
   }
 
@@ -13224,7 +13295,7 @@ export class SessionService {
     if (!task || task.columnKey !== activeKey) return { kind: "not-stranded" }; // reported/merged, or no active lane
 
     if (!w.engineSessionId) {
-      return pastBrokenSpawnHoldoff(this.pty, workerSessionId) ? { kind: "broken-spawn" } : { kind: "not-stranded" };
+      return pastBrokenSpawnHoldoff(this.pty, w) ? { kind: "broken-spawn" } : { kind: "not-stranded" };
     }
 
     // @decision 2281009d — engineSessionId alone isn't proof a turn ran; OR in hasFirstTurnStarted,
@@ -13238,7 +13309,7 @@ export class SessionService {
       // all be true for a perfectly healthy spawn still inside its normal confirmation window — don't
       // assert "broken" until real time has passed. Falls through to `not-stranded` rather than fabricating
       // a new kind: the caller already treats that as "no signal yet, nothing to do" (see its own gate).
-      if (pastBrokenSpawnHoldoff(this.pty, workerSessionId)) return { kind: "broken-spawn" };
+      if (pastBrokenSpawnHoldoff(this.pty, w)) return { kind: "broken-spawn" };
       return { kind: "not-stranded" };
     }
 
@@ -13327,7 +13398,7 @@ export class SessionService {
         // re-check exists for a taskless worker, but a genuinely-stuck spawn keeps producing fresh
         // busy(false) edges of its own (each give-up-recovery cycle) — once real elapsed time clears the
         // holdoff, the NEXT such edge fires this correctly; nothing is silently dropped forever.
-        if (pastBrokenSpawnHoldoff(this.pty, workerSessionId)) {
+        if (pastBrokenSpawnHoldoff(this.pty, w)) {
           try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
         }
         return;
@@ -13343,7 +13414,7 @@ export class SessionService {
         !everReported &&
         readTranscript(w.cwd, w.engineSessionId, w.harness).length === 0
       ) {
-        if (pastBrokenSpawnHoldoff(this.pty, workerSessionId)) {
+        if (pastBrokenSpawnHoldoff(this.pty, w)) {
           try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
         }
         return;
@@ -13409,6 +13480,10 @@ export class SessionService {
     // Mirrors notifyManagerOfIdleWorker's role gate (card df48366b) — a role-less child can now have a
     // nudge enqueued for it, so its re-engage edge must be able to purge a now-stale one too.
     if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) return;
+    // @decision 8882e2ca — this busy(false→true) edge IS a turn starting; the ONE clean, existing site
+    // that covers every way a turn can start (not just the content-matched confirm path) — see
+    // armKickoffConfirmRecheck's own doc for why that single path isn't enough on its own.
+    this.clearKickoffConfirmRecheckTimer(workerSessionId);
     try { this.pty.purgeQueuedWorkerIdleNudges(w.parentSessionId, workerSessionId); } catch { /* manager not live */ }
   }
 
@@ -13578,6 +13653,9 @@ export class SessionService {
       // spontaneous false exit) while the OS process survives, skipping the OS-level verify entirely.
       const predecessorPid = this.pty.getPid(workerSessionId);
       const predecessorOwner = this.pty.captureLiveRef(workerSessionId);
+      // @decision 8882e2ca — the predecessor is never worker_retired-marked (card 4ee527d1's own "Do
+      // not"), so this is its ONLY clear site; never fire the one-shot escalation into it post-recycle.
+      this.clearKickoffConfirmRecheckTimer(workerSessionId);
       this.pty.stop(workerSessionId, "hard");
       for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
         await new Promise((r) => setTimeout(r, 100));
@@ -16210,6 +16288,10 @@ export class SessionService {
    *  archived; the row stays visible+resumable and files an orphaned-fleet event+banner instead.
    */
   archiveOnExit(session: Session): void {
+    // @decision 8882e2ca — this session's own pty process has exited either way below; never fire the
+    // one-shot escalation into a session whose process is gone (harmless no-op for a non-worker, which
+    // never has an entry here).
+    this.clearKickoffConfirmRecheckTimer(session.id);
     if (session.role === "manager" || session.role === "platform") {
       const liveWorkers = this.db.listWorkers(session.id).filter((w) => w.processState === "live");
       if (liveWorkers.length > 0) {

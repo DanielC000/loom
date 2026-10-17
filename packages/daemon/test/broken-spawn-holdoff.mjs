@@ -70,16 +70,21 @@ try {
     const enqueued = [];
     const firstTurnStarted = new Set();
     const liveStartedAt = new Map(); // sessionId -> epoch ms the fake pty process "started"
+    // Card 8882e2ca: configurable per-session, defaulting to `undefined` (unset) for every scenario that
+    // doesn't touch it — preserves (A)-(D)'s byte-identical-to-before-this-card behavior, since an unset
+    // composerDirtyLen resolves to size 0 -> kickoffConfirmWindowMs(0) -> zero extra on top of the flat
+    // BROKEN_SPAWN_HOLDOFF_MS floor (see pastBrokenSpawnHoldoff's own updated doc).
+    const composerDirtyLen = new Map();
     const pty = {
       isAlive: () => true,
       enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; },
       getPendingEntries: () => [],
       hasFirstTurnStarted: (id) => firstTurnStarted.has(id),
-      getComposerDirtyLen: () => undefined,
+      getComposerDirtyLen: (id) => composerDirtyLen.has(id) ? composerDirtyLen.get(id) : undefined,
       liveStartedAt: (id) => liveStartedAt.has(id) ? liveStartedAt.get(id) : null,
     };
     const sessions = new SessionService(db, pty, new OrchestrationControl());
-    return { db, projId, agentId, enqueued, firstTurnStarted, liveStartedAt, sessions };
+    return { db, projId, agentId, enqueued, firstTurnStarted, liveStartedAt, composerDirtyLen, sessions };
   }
   function seedManager(e, id) {
     e.db.insertSession({
@@ -177,6 +182,40 @@ try {
       e.sessions.isWorkerGenuinelyStranded("wkr-d2") === true);
   }
 
+  // ============ (E)/(F) Card 8882e2ca: a LARGE composerDirtyLen widens the holdoff by kickoffConfirmWindowMs
+  // ============ — the exact mechanism that used to fire the terminal [loom:worker-spawn-broken] notice at
+  // ============ ~73s (well past the flat 60s) for a real ~69K-char turn-1 kickoff, far short of its own
+  // ============ measured ~340s confirm tail. (E) proves a worker inside the WIDENED window (past 60s but
+  // ============ well under the size-aware window) draws NO notice; (F) proves the SAME worker, once past the
+  // ============ now-widened window, STILL draws the notice — a timing gate, not a permanent suppression.
+  {
+    const e = makeEnv();
+    seedManager(e, "mgr-ef");
+    seedTask(e, "tk-ef-a"); seedTask(e, "tk-ef-b");
+    seedWorker(e, "wkr-ef-a", "mgr-ef", "tk-ef-a", { engineSessionId: `eng-ef-a-${sfx}` });
+    seedWorker(e, "wkr-ef-b", "mgr-ef", "tk-ef-b", { engineSessionId: `eng-ef-b-${sfx}` });
+    const LARGE_KICKOFF_CHARS = 69_000; // realistic real-world size (card fd4704bc's own specimens)
+    e.composerDirtyLen.set("wkr-ef-a", LARGE_KICKOFF_CHARS);
+    e.composerDirtyLen.set("wkr-ef-b", LARGE_KICKOFF_CHARS);
+    // (E): 70s elapsed — past the flat 60s floor (would have fired pre-card), but nowhere near the
+    // size-aware window for 69K chars (floor 60s + capped extra 360s = 420s total).
+    e.liveStartedAt.set("wkr-ef-a", Date.now() - 70_000);
+    // (F): 421s elapsed — past even the widened 420s window for this size.
+    e.liveStartedAt.set("wkr-ef-b", Date.now() - 421_000);
+
+    e.sessions.notifyManagerOfIdleWorker("wkr-ef-a");
+    e.sessions.notifyManagerOfIdleWorker("wkr-ef-b");
+
+    const brokenA = e.enqueued.filter((x) => x.id === "mgr-ef" && x.text.includes("wkr-ef-a") && x.text.includes("[loom:worker-spawn-broken]"));
+    const brokenB = e.enqueued.filter((x) => x.id === "mgr-ef" && x.text.includes("wkr-ef-b") && x.text.includes("[loom:worker-spawn-broken]"));
+    check("(E) a 69K-char kickoff at 70s (past the OLD flat 60s, inside the NEW size-aware window): NO notice yet",
+      brokenA.length === 0);
+    check("(E) and no other nudge fires either (genuinely silent, not just re-routed)",
+      e.enqueued.filter((x) => x.id === "mgr-ef" && x.text.includes("wkr-ef-a")).length === 0);
+    check("(F) the IDENTICAL 69K-char signature, once past the widened ~420s window, STILL fires",
+      brokenB.length === 1);
+  }
+
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
@@ -188,6 +227,9 @@ console.log(failures === 0
     "signature that used to fire on the very first busy(false) edge, ~5-7s after a fresh kickoff, now " +
     "waits out the holdoff instead. Positive controls (B/C1/C2/D) prove this is a TIMING gate, not a " +
     "silent regression: the identical broken signature, just older, still fires every one of the three " +
-    "gated sites and isWorkerGenuinelyStranded flips true once past it."
+    "gated sites and isWorkerGenuinelyStranded flips true once past it. Card 8882e2ca (E/F): the holdoff " +
+    "is now topped up by a size-aware extra read off composerDirtyLen — an ordinary/unset kickoff (A-D) " +
+    "stays byte-identical to the flat 60s, while a 69K-char kickoff gets a widened ~420s window (no " +
+    "notice at 70s, past the old flat floor; the notice still fires once genuinely past the new window)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

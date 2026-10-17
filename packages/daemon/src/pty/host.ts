@@ -761,6 +761,43 @@ export function giveUpHoldExtraMs(textLength: number): number {
 }
 
 /**
+ * @decision 8882e2ca — the PLAUSIBLE-CONFIRM WINDOW for a turn-1 kickoff: EXTRA time a caller adds on
+ * top of its own flat floor before announcing a kickoff broken. Never fold this into GIVE_UP_HOLD_MS or
+ * any requeue/remint count — it governs ANNOUNCEMENT only, never the delivery ladder's own timing.
+ */
+const KICKOFF_CONFIRM_WINDOW_SCALE_BYTES_PER_MS = Number(process.env.LOOM_KICKOFF_CONFIRM_WINDOW_SCALE_BYTES_PER_MS) || 0.1;
+const KICKOFF_CONFIRM_WINDOW_MAX_MS = Number(process.env.LOOM_KICKOFF_CONFIRM_WINDOW_MAX_MS) || 360_000;
+export function kickoffConfirmWindowMs(textLength: number): number {
+  return scaledExtraMs(textLength, GIVE_UP_HOLD_SCALE_ABOVE_CHARS, KICKOFF_CONFIRM_WINDOW_SCALE_BYTES_PER_MS, KICKOFF_CONFIRM_WINDOW_MAX_MS);
+}
+
+/** @decision 738f2109 — set above the measured p90 confirmation latency; no env override (an untested
+ *  `||`-default escape hatch is worse than none). Moved here (from sessions/service.ts) by card 8882e2ca
+ *  so `withinKickoffConfirmWindow`, below, can compute the full floor+extra window in ONE place. */
+export const BROKEN_SPAWN_HOLDOFF_MS = 60_000;
+
+/**
+ * @decision 8882e2ca — THE one shared predicate for "is this kickoff still within its plausible-confirm
+ * window" (Code Review f3fa9002, Majors 2/3) — every caller must consult THIS, never re-derive the
+ * size/elapsed-time read on its own. Full reasoning in the decision record for this id.
+ */
+export function withinKickoffConfirmWindow(
+  pty: PtyHost, sessionId: string, turnSeq: number | null | undefined,
+): { composerDirtyLen: number; windowMs: number; sinceMs: number } | null {
+  if ((turnSeq ?? 0) !== 0) return null;
+  // @decision 8882e2ca — `turnSeq===0` means "no COMPLETED turn", not "kickoff unconfirmed" — a worker
+  // deep in a long, healthy first turn also reads turnSeq:0; add the real discriminator too.
+  if (typeof pty.hasFirstTurnStarted === "function" && pty.hasFirstTurnStarted(sessionId)) return null;
+  const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(sessionId) : null;
+  if (startedAt === null) return null;
+  const composerDirtyLen = typeof pty.getComposerDirtyLen === "function" ? (pty.getComposerDirtyLen(sessionId) ?? 0) : 0;
+  const windowMs = BROKEN_SPAWN_HOLDOFF_MS + kickoffConfirmWindowMs(composerDirtyLen);
+  const sinceMs = Date.now() - startedAt;
+  if (sinceMs >= windowMs) return null;
+  return { composerDirtyLen, windowMs, sinceMs };
+}
+
+/**
  * Card 2521bf51: bound on `Live.humanSubmitHeldUntil` — how long `drainPending` will hold a queued
  * programmatic turn after a genuine human Enter-submit, waiting for claude's own `UserPromptSubmit`/
  * `Stop` hook to confirm the turn actually started (see that field's own doc for the race this closes).
@@ -10882,7 +10919,10 @@ export class PtyHost {
   purgeQueuedWorkerIdleNudges(managerSessionId: string, workerSessionId: string): QueuedMessage[] {
     const live = this.findAnyLive(managerSessionId);
     if (!live?.alive) return [];
-    const prefixes = [`[loom:worker-idle] worker ${workerSessionId} `, `[loom:worker-spawn-broken] worker ${workerSessionId}`];
+    // Card 8882e2ca (Minor 5): the softer, non-terminal pending notice is purged on the SAME worker
+    // re-engage edge as its terminal sibling — a STALE queued "still pending" read is just as wrong as a
+    // stale "broken" one once the worker is confirmed to have moved on.
+    const prefixes = [`[loom:worker-idle] worker ${workerSessionId} `, `[loom:worker-spawn-broken] worker ${workerSessionId}`, `[loom:kickoff-confirm-pending] worker ${workerSessionId}`];
     const removed: QueuedMessage[] = [];
     for (let i = live.pending.length - 1; i >= 0; i--) {
       const m = live.pending[i]!;
