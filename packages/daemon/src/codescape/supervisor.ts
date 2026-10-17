@@ -892,9 +892,12 @@ export class CodescapeSupervisor {
    *  `PATCH` is the sanctioned way to recover from the backstop). `null` while not suspended. */
   private memoryRecycleSuspendedAtCeilingMb: number | null = null;
   /**
-   * The pid a kill has already been issued for, via either {@link checkMemoryCeiling} or
-   * {@link probeHealth}'s wedge kill (both routed through {@link issueChildKill}). `null` = no kill in
-   * flight. Cleared in `onDeath` once the exit is observed; reset on {@link stop}/{@link start}.
+   * The pid a kill has already been issued for, via ANY of this class's three "this child needs to die"
+   * sites — {@link checkMemoryCeiling}, {@link probeHealth}'s wedge kill, and {@link checkBuildDrift}'s
+   * drift-restart kill (all routed through {@link issueChildKill}). `null` = no kill in flight. Cleared
+   * in `onDeath` once the exit is observed; reset on {@link stop}/{@link start}. `stop()`'s own direct
+   * `this.child.kill()` is legitimately separate — it resets this latch and nulls `child` itself, so
+   * there is no "already dying" state left for a second call to collide with.
    * @decision df32be98 — never issue a second kill() on a child pid before its exit is observed.
    */
   private childKillPid: number | null = null;
@@ -1503,10 +1506,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * The ONE choke point both kill sites — {@link checkMemoryCeiling}'s memory-ceiling kill and
-   * {@link probeHealth}'s wedge kill — route through. Refuses a second kill for a pid already latched
-   * (see {@link childKillPid}); the caller's own post-kill bookkeeping (recycle callback, failure-count
-   * reset, logging) should only run when this returns `true`.
+   * The ONE choke point all three "this child needs to die" sites — {@link checkMemoryCeiling}'s
+   * memory-ceiling kill, {@link probeHealth}'s wedge kill, and {@link checkBuildDrift}'s drift-restart
+   * kill — route through. Refuses a second kill for a pid already latched (see {@link childKillPid});
+   * the caller's own post-kill bookkeeping (recycle callback, failure-count reset, logging) should only
+   * run when this returns `true`.
    * @decision df32be98 — never issue a second kill() on a child pid before its exit is observed.
    */
   private issueChildKill(child: ChildProcess, pid: number): boolean {
@@ -1603,8 +1607,9 @@ export class CodescapeSupervisor {
     // Nit (CR follow-up): a real OS pid is always a safe positive integer — validate it rather than
     // trust it blindly, since `pid` is substituted directly into the win32 sampler's shell command.
     if (pid == null || !Number.isSafeInteger(pid) || pid <= 0) return false;
-    // A kill (this site OR probeHealth's wedge kill, both routed through issueChildKill) is already in
-    // flight for this exact pid — its exit hasn't been observed yet; see childKillPid's own doc.
+    // A kill (this site, probeHealth's wedge kill, or checkBuildDrift's drift-restart kill — all routed
+    // through issueChildKill) is already in flight for this exact pid — its exit hasn't been observed
+    // yet; see childKillPid's own doc.
     if (this.childKillPid === pid) return false;
     // Finding 3 (CR follow-up): captured BEFORE the await — `this.child` can change WHILE the sample is
     // in flight (a concurrent wedge-kill, a build-drift kill, an explicit stop()+start()). A kill below
@@ -1698,7 +1703,7 @@ export class CodescapeSupervisor {
     this.probeInFlight = true;
     try {
       if (await this.checkMemoryCeiling()) return; // recycled this tick — child is being torn down, skip the HTTP round-trip
-      if (this.isChildKillLatched()) return; // a kill is already in flight for this child (memory-ceiling or wedge) — its exit just isn't observed yet; don't treat the dying child's non-answer as fresh wedge evidence, and don't probe a child we already know we're tearing down
+      if (this.isChildKillLatched()) return; // a kill is already in flight for this child (memory-ceiling, wedge, or a prior tick's drift-restart kill) — its exit just isn't observed yet; don't treat the dying child's non-answer as fresh wedge evidence, don't probe it, and don't re-evaluate build drift against it either
       const res = await this.request("GET", "/graph/health", undefined, this.healthProbeTimeoutMs);
       // stop() may have raced this in-flight probe (its fetch was already underway when stop() ran) —
       // abandon silently rather than act on a dead instance (no stray warn/kill after stop()).
@@ -1960,7 +1965,8 @@ export class CodescapeSupervisor {
     this.driftCandidateBuild = null;
     this.driftCandidateFirstSeenAt = null;
     const child = this.child;
-    if (child) { try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ } }
+    const pid = this.getPid();
+    if (child && pid != null) this.issueChildKill(child, pid);
   }
 
   /**

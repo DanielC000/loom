@@ -23,6 +23,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (19) card df32be98: the shared kill latch (childKillPid) stops the wedge-kill site from firing a
 //        SECOND kill against the same still-dying child — deterministically, via the
 //        runOneHealthProbeForTest seam — while a genuinely new pid still wedge-kills normally.
+//   (20) card df32be98 CR follow-up: the SAME shared latch, set by the THIRD kill site
+//        (checkBuildDrift's drift-restart kill), is also respected by a DIRECT cross-site call into the
+//        memory-ceiling site on the same pid — proving the latch is genuinely shared, not per-site.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codescape-health-probe.mjs
 import fs from "node:fs";
@@ -1950,9 +1953,13 @@ for (const kind of ["PASS", "diagnostic"]) {
 // ===================== (19) card df32be98: the shared kill latch stops the wedge kill's double-fire =====================
 // Scenario (1) above reproduces a WANTED wedge-kill by racing a REAL timer against REAL OS exit timing.
 // This proves the SAME shared latch (childKillPid, see supervisor.ts's issueChildKill) that fixed
-// checkMemoryCeiling's double-recycle also covers THIS, separate kill site — deterministically, via the
+// checkMemoryCeiling's double-recycle also covers THIS, separate kill site — via the
 // runOneHealthProbeForTest seam: two DIRECT calls back-to-back, no sleep, well before the first kill's
-// real OS exit has any realistic chance to be observed by wireDeathHandling.
+// real OS exit has any realistic chance to be observed by wireDeathHandling. NOT as airtight a repro as
+// scenario (8)'s, though: each call here does a REAL HTTP round-trip bounded by healthProbeTimeoutMs, so
+// on an exceptionally fast host the real exit could in principle land inside that window even on
+// bug-present code, giving a false GREEN on the second assertion below. Measured reliable on THIS host
+// (confirmed RED via the surgical negative control — see the card's own report), not proven unconditional.
 {
   const homeDir = path.join(tmpHome, "wedge-double-kill-latch-home");
   const wedgeFile = path.join(tmpHome, "wedge-double-kill-latch-flag");
@@ -2002,6 +2009,74 @@ for (const kind of ["PASS", "diagnostic"]) {
   delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
 }
 
+// ===================== (20) card df32be98 CR follow-up: the shared latch also covers the THIRD kill site =====================
+// (checkBuildDrift's drift-restart kill), cross-site: a drift kill latches the pid, then a DIRECT call
+// into the memory-ceiling site (a different kill site entirely, same supervisor instance, same pid) must
+// see the same latch and refuse to fire a second kill. driftStabilityMs:0 makes the drift kill itself
+// deterministic (no real wall-clock wait — satisfied the instant a second tick observes the SAME
+// candidate build), same spirit as (19)'s healthProbeFailureThreshold:1.
+{
+  const homeDir = path.join(tmpHome, "drift-memory-cross-latch-home");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-old"; // the running serve never picks up a new build in this test
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-new";
+
+  let memorySamplerCalls = 0;
+  // Starts comfortably under ceiling (isolates ticks (1)-(2) to the drift kill alone); flipped to an
+  // OVER-ceiling reading right before the cross-site call below, so that call is a REAL discriminator —
+  // without the latch it would see 200MB > 100MB and attempt a second kill, not merely "happen to read
+  // low anyway" (a flaw in an earlier draft of this scenario: an always-under-ceiling stub made
+  // `firedByMemoryCheck === false` pass on BOTH fixed and broken code, proving nothing).
+  let overCeilingNow = false;
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    memorySampler: async () => { memorySamplerCalls++; return { ok: true, bytes: overCeilingNow ? 200 * 1024 * 1024 : 10 * 1024 * 1024 }; },
+    getMemoryCeilingMb: () => 100,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: 10 * 60_000, // long enough the real timer never fires — every tick here is driven directly
+    healthProbeTimeoutMs: 40,
+    healthProbeWedgeKillEnabled: false, // isolate the drift path — scenarios (1)-(4)/(19) already own the wedge path
+    driftStabilityMs: 0, // the stability window is satisfied the instant a SECOND tick observes the same candidate — no real wait needed
+    // Sample on EVERY checkMemoryCeiling call (never skip via the cadence), so the cross-site assertion
+    // below ("the sampler was never even called") tests the LATCH specifically — not a tick-cadence skip
+    // that would have suppressed sampling anyway, independent of this card's fix.
+    memorySampleTickInterval: 1,
+  });
+  await sup.start(["/fake/repo/drift-memory-cross-latch"]);
+  await waitForCompletedCondition(() => sup.getPort() !== null, () => sup.getCompletedProbeTickCount());
+  const pidBefore = sup.getPid();
+  check("(20) initial serve spawned and port-confirmed", sup.getSpawnCount() === 1 && typeof pidBefore === "number");
+
+  const warnings = captureWarnings();
+  await sup.runOneHealthProbeForTest(); // first sighting of the drift — defers, does NOT kill yet
+  check("(20) the first direct probe only defers — no kill yet",
+    warnings.lines.some((l) => l.includes("deferring restart")) && !warnings.lines.some((l) => l.includes("killing for restart")));
+
+  await sup.runOneHealthProbeForTest(); // SAME candidate observed again -> driftStabilityMs:0 is already satisfied -> fires the drift-restart kill
+  check("(20) the second direct probe fires the drift-restart kill",
+    warnings.lines.filter((l) => l.includes("killing for restart")).length === 1);
+  check("(20) the still-dying child's pid is unchanged immediately after the drift kill — its exit is not yet observed",
+    sup.getPid() === pidBefore);
+  const samplerCallsBeforeCrossCheck = memorySamplerCalls;
+
+  // THE CROSS-SITE REPRO: flip the SAME still-dying pid to report OVER ceiling, then call DIRECTLY into
+  // the memory-ceiling site — a different kill site entirely. Without the shared latch this pid would
+  // genuinely qualify for a memory-ceiling kill (200MB > 100MB) and fire a real second kill; the latch
+  // must refuse it instead, and must refuse it BEFORE even sampling (checkMemoryCeiling's own
+  // early-return, ahead of the sampler call) — so the sampler call count must not move either.
+  overCeilingNow = true;
+  const firedByMemoryCheck = await sup.runOneMemoryCeilingCheckForTest();
+  check("(20) the memory-ceiling site refuses to fire for a pid the drift kill already latched",
+    firedByMemoryCheck === false);
+  check("(20) the memory sampler was never even called — the latch is checked before sampling",
+    memorySamplerCalls === samplerCallsBeforeCrossCheck);
+  warnings.restore();
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -2023,6 +2098,6 @@ const suppressionNote = () => {
   return parts.length > 0 ? ` (${parts.join("; ")} — FAIL lines above are never capped.)` : "";
 };
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe (19 scenarios + control): wedge detection/restart, give-up terminality, sub-threshold non-restart, zero-project arming, build-drift detection/dedup/burst-collapse/give-up, drift-check-state distinguishability, sustained-500 non-wedge, unbounded-cadence rate ceiling, getDriftDetail()'s served_status-facing remaining-window/UNRESOLVED messages actually firing and staying silent when there's nothing to report, the shared kill-latch's double-wedge-kill suppression (deterministic, pid-scoped), and (card 5112d392 DoD-2) this file's own PASS-output and forwarded-diagnostic volume are both capped and positive-controlled. See this file's own scenario-header comments for the full per-scenario DoD."
+  ? "\n✅ ALL PASS — Codescape supervisor health probe (20 scenarios + control): wedge detection/restart, give-up terminality, sub-threshold non-restart, zero-project arming, build-drift detection/dedup/burst-collapse/give-up, drift-check-state distinguishability, sustained-500 non-wedge, unbounded-cadence rate ceiling, getDriftDetail()'s served_status-facing remaining-window/UNRESOLVED messages actually firing and staying silent when there's nothing to report, the shared kill-latch's double-wedge-kill suppression (pid-scoped; measured reliable on this host, not a proven-unconditional repro — see scenario (19)'s own header) and its cross-site sharing with the drift-restart kill (that cross-site assertion IS gap-free — no real I/O between kill and re-check), and (card 5112d392 DoD-2) this file's own PASS-output and forwarded-diagnostic volume are both capped and positive-controlled. See this file's own scenario-header comments for the full per-scenario DoD."
   : `\n❌ ${failures} FAILURE(S).${suppressionNote()}`);
 process.exit(failures === 0 ? 0 : 1);
