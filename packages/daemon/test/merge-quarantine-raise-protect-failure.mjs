@@ -2840,7 +2840,19 @@ try {
   check("*** THE FIX (29fe2372-isolate-b), layer (b) alone discriminates *** the foreign token physically on disk is NOT destroyed",
     (contentIfExists(somePath) ?? "").includes("isob-foreign-token"));
 
+  // Card f2cc5f18 — layer (b) above only defers the loss: A's LAST token (isob-tA1) reaches the FULL
+  // clear, which used to call sweepOrphanLatchFileIfUnreferenced UNCONDITIONALLY (content-blind) once
+  // nothing in memory references `someFile` anymore, permanently destroying "isob-foreign-token" with no
+  // durable record anywhere. THE FIX: that sweep is now content-aware too (orphanSweepSafeToDelete).
   freshIsoB.clearMergeQuarantineByToken(x, "isob-tA1");
+  check("*** THE FIX (f2cc5f18), the FULL clear's own sweep is ALSO content-aware *** the foreign token still SURVIVES after A's last token is lifted too",
+    (contentIfExists(somePath) ?? "").includes("isob-foreign-token"));
+
+  // Cleanup: `someFile` now durably survives (by design, per the fix above) — unlike the pre-fix
+  // behavior this scenario used to rely on, where the full clear's own sweep deleted it as a side
+  // effect. Remove it directly so it does not leak into, and pollute the boot-time orphan scan of, a
+  // LATER scenario sharing this same MERGE_QUARANTINE_DIR (same reason as the 8a79dd31 cleanups below).
+  fs.rmSync(somePath, { force: true });
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════

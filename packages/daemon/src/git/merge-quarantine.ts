@@ -3024,7 +3024,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // removed every in-memory trace of this pending entry — see `tombstoneIfNotSurviving`'s own doc.
       tombstoneIfNotSurviving([token]);
       sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile);
-      for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
+      // @decision 8db913e2 (Follow-up f2cc5f18) — `pending.entry.tokens` captured via the `pending` const
+      // bound above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
+      for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile, pending.entry.tokens);
       continue;
     }
     const updated: MergeQuarantineEntry = { ...pending.entry, tokens: remaining };
@@ -3267,6 +3269,50 @@ function unlinkLatchFileConfirmed(filename: string): boolean {
 }
 
 /**
+ * `safe: true` iff `orphanFile`'s on-disk content holds no token this clear doesn't already account for.
+ * DELIBERATELY diverges from {@link markedFinalFullyCoveredByClear}'s polarity on a read/parse failure:
+ * that helper guards a `keptUnreadableLatchFiles`-marked file that might be a real foreign occupant's
+ * precious content, so "cannot prove" there must mean keep. An orphan file reaching this check was never
+ * marked that way — it is either genuinely corrupt debris PASS 2 defensively fanned into every registered
+ * repo "in case it's theirs" (no `repoPath` can ever be parsed back out of it, so there is nothing real to
+ * lose by deleting it), or a real, readable, FOREIGN record this process never raised and does not own.
+ * Only the second case is gated on `candidateTokens`; the first stays trivially safe to delete, exactly as
+ * before this check existed — tests (J)/(Z1)/(Z1-route) in merge-quarantine-clear-by-path.mjs depend on
+ * corrupt, fully-unreferenced debris still being swept, and would regress under the other helper's polarity.
+ *
+ * A record carrying every field PASS 1 requires to arm it as a REAL quarantine (`repoPath`/`branch`/
+ * `reason`, all strings — the same strict check PASS 1/1b/safety-tmp recovery use) is never trivially
+ * safe to delete just because it currently holds ZERO tokens: `protectOccupantContentBeforeDelete`'s own
+ * `rawTokens.length === 0` branch persists this exact shape with a placeholder rather than discarding it,
+ * and {@link reenterMergeQuarantinesAtBootImpl}'s own PASS 1 would arm it as a real, enforced quarantine
+ * on the very next boot — deleting it here would be fail-OPEN on a genuine, legacy-shaped quarantine.
+ *
+ * `parsedRepoPath` (set whenever the content parses with a string `repoPath`, regardless of `safe`) lets
+ * a caller that KEEPS the file report WHO it's keeping it for, instead of a silent/unattributed keep.
+ *
+ * @decision 8db913e2 (Follow-up f2cc5f18) — see the decision record.
+ */
+function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]): { safe: boolean; parsedRepoPath?: string } {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, orphanFile), "utf8");
+  } catch (e) {
+    // ENOENT: nothing to lose. Any other failure (EACCES/EBUSY/...): cannot prove — keep.
+    return { safe: (e as NodeJS.ErrnoException).code === "ENOENT" };
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return { safe: true }; } // genuinely corrupt debris — nothing real to lose
+  if (!isReadableLatchRecord(parsed)) return { safe: true }; // e.g. the bare literal `null` — same "nothing real" case
+  const parsedRepoPath = typeof parsed.repoPath === "string" ? parsed.repoPath : undefined;
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
+  const armableByPass1 = parsedRepoPath !== undefined && typeof parsed.branch === "string" && typeof parsed.reason === "string";
+  if (armableByPass1 && onDiskTokens.length === 0) return { safe: false, parsedRepoPath }; // genuine, legacy-shaped, PASS 1 would re-arm it — never delete
+  const accountedFor = new Set(candidateTokens);
+  const safe = onDiskTokens.every((t) => accountedFor.has(t) || clearedTokens.has(t));
+  return { safe, parsedRepoPath };
+}
+
+/**
  * Delete `filename` (a basename under {@link MERGE_QUARANTINE_DIR}) from disk IFF it is not NEEDED by any
  * remaining entry — ACTIVE or PENDING. "Needed" is checked two ways: (1) some surviving entry's own
  * `orphanLatchFiles` still lists `filename` (the ordinary orphan-reference case), or (2) `filename` is
@@ -3275,7 +3321,9 @@ function unlinkLatchFileConfirmed(filename: string): boolean {
  * `activeQuarantines`/`pendingUnresolvedQuarantines`, so "remaining" genuinely excludes them — never
  * before. Use this for a TRUE orphan-reference file (one NOT being removed as part of clearing the entry
  * that names it); for an entry's OWN file, use {@link sweepOwnLatchFileUnlessOwnedElsewhere} instead —
- * see that function's own doc for why the two must never be conflated.
+ * see that function's own doc for why the two must never be conflated. `candidateTokens` must be every
+ * token the CALLER's own clear is lifting right now, captured before any mutation — see {@link
+ * orphanSweepSafeToDelete}.
  *
  * @decision 6237bef6 — shared by every orphan-latch sweep (active-entry clear AND every pending-entry
  * clear) so "still referenced" always means the same thing. See the decision record for the gap this
@@ -3284,8 +3332,12 @@ function unlinkLatchFileConfirmed(filename: string): boolean {
  * @decision 9cabd143 — never drop check (2): a filename's deterministic hash can be legitimately
  * reclaimed by its own rightful repo after being fanned out as someone else's orphan reference. See the
  * decision record for the fail-open repro this closes.
+ *
+ * @decision 8db913e2 (Follow-up f2cc5f18) — before this, deletion here never read the file's own content
+ * at all: an unreferenced orphan holding a real, FOREIGN token nothing in memory currently owns was
+ * destroyed unconditionally. See the decision record.
  */
-function sweepOrphanLatchFileIfUnreferenced(filename: string): { kept: boolean; referencingRepoPaths: string[] } {
+function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: string[]): { kept: boolean; referencingRepoPaths: string[] } {
   // @decision 63e49ee2 (round 3) — a read-failure-kept file has no identity to attribute; keep it with
   // no referencing repoPath, never gated on `orphanLatchFiles`/`physicalOwnerRepoPaths` alone.
   if (keptUnreadableLatchFiles.has(filename)) return { kept: true, referencingRepoPaths: [] };
@@ -3298,6 +3350,15 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string): { kept: boolean; 
   }
   for (const rp of physicalOwnerRepoPaths(filename)) referencingRepoPaths.add(rp);
   if (referencingRepoPaths.size > 0) return { kept: true, referencingRepoPaths: [...referencingRepoPaths] };
+  const safety = orphanSweepSafeToDelete(filename, candidateTokens);
+  if (!safety.safe) {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] keeping orphan latch ${filename} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for${safety.parsedRepoPath ? ` (its own parsed content names repoPath '${safety.parsedRepoPath}')` : ""}; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.`);
+    // @decision 8db913e2 (Follow-up f2cc5f18, Code Review 745c3736) — a caller must be able to SEE this
+    // keep, never a silent `{kept:true, referencingRepoPaths:[]}` indistinguishable from "nothing to
+    // report" — name the parsed foreign repoPath when the content gave us one.
+    return { kept: true, referencingRepoPaths: safety.parsedRepoPath ? [safety.parsedRepoPath] : [] };
+  }
   unlinkLatchFile(filename);
   return { kept: false, referencingRepoPaths: [] };
 }
@@ -3630,7 +3691,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
       else anyKeptUnattributed = true;
     }
   }
-  for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
+  // @decision 8db913e2 (Follow-up f2cc5f18) — `candidateTokens` (captured at this function's own top,
+  // before any deletes) already holds every token THIS clear is lifting — `tombstoneIfNotSurviving`
+  // below hasn't run yet, so the GLOBAL `clearedTokens` tombstone set does not yet include them either.
+  for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile, candidateTokens);
   // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
@@ -3800,7 +3864,9 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
         else anyKeptUnattributed = true;
       }
     }
-    for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
+    // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
+    // pending entry's own tokens, captured as each is processed above, before `tombstoneIfNotSurviving`.
+    for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile, pendingCandidateTokens);
     tombstoneIfNotSurviving(pendingCandidateTokens, pendingTouchedBasenames);
   }
   if (!wasQuarantined) {
@@ -4314,7 +4380,9 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       const ownSweep = sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile);
       if (ownSweep.kept) for (const rp of ownSweep.referencingRepoPaths) keptRepoPaths.add(rp);
     }
-    for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile);
+    // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
+    // pending entry's own tokens, captured as each is processed above, before `tombstoneIfNotSurviving`.
+    for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile, pendingCandidateTokens);
     tombstoneIfNotSurviving(pendingCandidateTokens, pendingTouchedBasenames);
     // Belt-and-suspenders: sweep this id's own final (if any) and any remaining tmp residue directly, in
     // case something under this exact id sits on disk but was never captured as an in-memory pending
@@ -4326,7 +4394,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     const idJsonIsMatchedSourceFile = matchedPending.some((p) => p.sourceFile === `${id}.json`);
     const finalSweep = idJsonIsMatchedSourceFile
       ? sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`)
-      : sweepOrphanLatchFileIfUnreferenced(`${id}.json`);
+      // @decision 8db913e2 (Follow-up f2cc5f18) — same `pendingCandidateTokens`, still in scope.
+      : sweepOrphanLatchFileIfUnreferenced(`${id}.json`, pendingCandidateTokens);
     if (finalSweep.kept) for (const rp of finalSweep.referencingRepoPaths) keptRepoPaths.add(rp);
     // @decision be79f4d5 — ownership-checked (never the unconditional sibling): a DIFFERENT, surviving
     // pending/active entry can own a `.tmp-<pid>` residue sharing THIS exact hash prefix (e.g. its own
@@ -4356,14 +4425,20 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // residue) with no repoPath to delegate to. Routed through the shared helper (card 9cabd143 — see this
   // function's own doc), never a bare unlink: `<id>.json` can still be a SURVIVING entry's own reference
   // or physical latch even when nothing in-memory matches `id` itself.
-  const ownSweep = sweepOrphanLatchFileIfUnreferenced(`${id}.json`);
+  // @decision 8db913e2 (Follow-up f2cc5f18) — no in-memory entry matches `id` at all, so nothing is
+  // being lifted here: `[]` is correct, never a guess — a real foreign token found on disk is kept.
+  const ownSweep = sweepOrphanLatchFileIfUnreferenced(`${id}.json`, []);
   // @decision be79f4d5 — the tmp-residue twin of the `.json` sweep just above: ownership-checked, never
   // an unconditional-by-hash delete.
   const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id);
   const keptRepoPaths = new Set<string>([...ownSweep.referencingRepoPaths, ...tmpSweep.referencingRepoPaths]);
+  // @decision 8db913e2 (Follow-up f2cc5f18) — a KEPT sweep with no attributable repoPath must still
+  // surface as `latchKept`, mirroring `clearMergeQuarantineByKey`'s own `anyKeptUnattributed`.
+  const anyKeptUnattributed = (ownSweep.kept && ownSweep.referencingRepoPaths.length === 0) || (tmpSweep.kept && tmpSweep.referencingRepoPaths.length === 0);
   return {
     ok: true, wasQuarantined: false, liftedRepoPaths: [],
-    ...(keptRepoPaths.size > 0 ? { latchKept: true, referencingRepoPaths: [...keptRepoPaths] } : {}),
+    ...(keptRepoPaths.size > 0 ? { latchKept: true, referencingRepoPaths: [...keptRepoPaths] }
+      : anyKeptUnattributed ? { latchKept: true, referencingRepoPaths: [] } : {}),
   };
 }
 
