@@ -32,6 +32,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 // Card 5112d392 DoD-2: this file alone was measured (gen 192, gate `c1499a5e`) to have consumed the
 // ENTIRE `outputTail` of a shared gate run (a bounded `OUTPUT_TAIL_BYTES`=4096-byte ring — see
@@ -91,6 +92,13 @@ const check = (label, cond) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Card 6edd4bf9: mirrors codescape-memory-ceiling.mjs's identical constant — a FIXED stallTimeoutMs
+// default is itself a guessed budget for how long a real subprocess/HTTP round-trip between ticks can
+// take, exactly the anti-pattern this file's own waitForCompletedCondition exists to avoid one layer up
+// (see its doc below). Scale it by this process's measured ambient contention instead of widening a
+// fixed number that a worse load spike could still blow through.
+const STALL_TIMEOUT_MS = ambientScaledBudget(8000, 3);
+
 // Card cc43c74d: waits for `cond()` WITHOUT a guessed total-duration budget — a fixed iteration cap
 // (e.g. 200*50ms) can expire while the awaited event (here, a drift restart gated on WALL-CLOCK time via
 // supervisor.ts's own `driftStabilityMs` check) is still legitimately in progress under full-suite
@@ -108,7 +116,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // runner's per-file timeout in that case. This is deliberate, not an oversight: a slow, loud hang beats a
 // fast false FAIL on a healthy-but-contended system, which is the defect this helper replaces. Do not
 // read "has a stallTimeoutMs" as "is bounded against its own condition never becoming true" — it isn't.
-async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stallTimeoutMs = 8000 } = {}) {
+async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stallTimeoutMs = STALL_TIMEOUT_MS } = {}) {
   let lastTicks = tickCounter();
   let lastProgressAt = Date.now();
   while (!cond()) {
@@ -130,7 +138,7 @@ async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stall
 // fixed-wait-witness-guard.mjs), this polls until `getCount()` has stopped changing for `settleTicks`
 // consecutive COMPLETED probe ticks — a real, observable unit of progress, same discipline as
 // `waitForCompletedCondition` itself, never a guessed duration.
-async function waitForStableCount(getCount, tickCounter, { settleTicks = 2, pollMs = 25, stallTimeoutMs = 8000 } = {}) {
+async function waitForStableCount(getCount, tickCounter, { settleTicks = 2, pollMs = 25, stallTimeoutMs = STALL_TIMEOUT_MS } = {}) {
   let lastCount = getCount();
   let lastTicks = tickCounter();
   let stableSinceTicks = lastTicks;
@@ -187,7 +195,9 @@ function instrumentProbeTicks(sup) {
   };
   return snaps;
 }
-async function waitForTickReachingAttempts(sup, minAttempts, { pollMs = 25, stallTimeoutMs = 8000 } = {}) {
+// Card 6edd4bf9: same fixed-stall defect as waitForCompletedCondition/waitForStableCount above — scaled
+// identically (this is the helper scenario (13) itself uses).
+async function waitForTickReachingAttempts(sup, minAttempts, { pollMs = 25, stallTimeoutMs = STALL_TIMEOUT_MS } = {}) {
   const snaps = instrumentProbeTicks(sup);
   let lastTicks = sup.getCompletedProbeTickCount();
   let lastProgressAt = Date.now();
@@ -1108,6 +1118,9 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
     versionProbeTimeoutMs: 2000,
+    // Card 6edd4bf9: this scenario's own subject is drift-restart budget exhaustion, not health-probe
+    // wedge detection — same disarm as (5)/(5b)/(20) (decision bab0e772's sanctioned pattern).
+    healthProbeWedgeKillEnabled: false,
     // Card 9e6f984d: short test-only stability window (see scenario (5)'s identical seam) — each drift
     // below must still sit stable before it fires, just not for the real ~10-15min default.
     driftStabilityMs: 500,
@@ -1354,6 +1367,17 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     // Card 8bc899ce: versionProbeRetryDelayMs is unaffected by the above — it only paces the gap BETWEEN
     // attempts, never raced against a real spawn.
     versionProbeRetryDelayMs: 50, // this card's new retry-backoff test seam
+    // Card 6edd4bf9: this scenario's own subject is version-probe retry convergence, not health-probe
+    // wedge detection — same disarm as (5)/(5b)/(20) (decision bab0e772's sanctioned pattern). This does
+    // NOT make "(13) the tick that retried into success did not restart serve" vacuous: FAKE_CODESCAPE_
+    // HEALTH_BUILD ("build-running") genuinely differs from FAKE_CODESCAPE_INSTALLED_BUILD
+    // ("build-installed"), so checkBuildDrift DOES see a live drift candidate every tick — the check
+    // still proves that candidate doesn't restart serve. It only never reaches the default
+    // DEFAULT_DRIFT_STABILITY_MS (15 real minutes, unset here) within this scenario's own few-second
+    // runtime, so the drift path was never going to fire on its own either way; disarming wedge-kill
+    // removes the ONE restart source that otherwise could have fired here under host load for a reason
+    // unrelated to either path.
+    healthProbeWedgeKillEnabled: false,
   });
   const warnings = captureWarnings();
   await sup.start(["/fake/repo/version-retry-success"]);

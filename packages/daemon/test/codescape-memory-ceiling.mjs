@@ -154,6 +154,9 @@ const MB = 1024 * 1024;
     healthyRunMs: 60_000,
     healthProbeIntervalMs: 60,
     healthProbeTimeoutMs: 40,
+    // Card 6edd4bf9: this scenario's own subject is the memory-ceiling recycle path, not health-probe
+    // wedge detection — same disarm as (5)/(7) below (decision bab0e772's sanctioned pattern).
+    healthProbeWedgeKillEnabled: false,
     memorySampleTickInterval: 1, // sample every tick — this scenario is about the recycle, not the cadence
     getMemoryCeilingMb: () => 100, // 100MB ceiling
     memorySampler: async (pid) => {
@@ -424,6 +427,11 @@ const MB = 1024 * 1024;
   // trips — 4 total spawns, 3 total recycles, and the 4th child is left running despite being over ceiling.
   await checkWait("(7) wait for 4 total spawns (initial + 3 unproductive respawns) succeeded", () => sup.getSpawnCount() >= 4, () => sup.getHealthProbeTickCount());
   check("(7) exactly 3 recycles fired before the backstop tripped", recycleCalls.length === 3);
+  // Card 6edd4bf9: spawnCount>=4 is a PROXY — it goes true the instant the 4th (re-armed-child) respawn
+  // is created, but the backstop itself only actually trips on THAT child's own first memory sample,
+  // which runs on the supervisor's independently-phased healthProbeTimer tick, not synchronously with
+  // the respawn. Waiting on spawnCount alone races that tick; wait for the trip's own state directly.
+  await checkWait("(7) wait for the backstop to actually trip", () => sup.getMemoryRecycleSuspended() === true, () => sup.getHealthProbeTickCount());
   check("(7) the backstop tripped exactly once", suspendCalls.length === 1);
   check("(7) the suspend detail carries the consecutive count + the same measured/ceiling shape as a recycle detail",
     suspendCalls[0]?.consecutiveUnproductiveRecycles === 3 && suspendCalls[0]?.measuredBytes === 300 * MB && suspendCalls[0]?.ceilingBytes === 100 * MB);
