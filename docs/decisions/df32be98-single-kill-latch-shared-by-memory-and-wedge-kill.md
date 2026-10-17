@@ -20,13 +20,37 @@ exit, whenever it arrives, still only triggers `scheduleRestart` once) — but a
 against an already-signaled, not-yet-reaped child, and a doubled `code_graph_memory_recycled` durable
 audit event (`index.ts`'s `onMemoryCeilingRecycle` wiring) for one real recycle.
 
-pid-reuse hazard: `ChildProcess.kill()` dispatches by raw pid (`process.kill(this.pid, signal)`
-internally; on win32 the no-signal-arg path goes through `TerminateProcess` by pid), not via an OS handle
-exclusively bound to that object. Node's own docs warn that calling `kill()` on a process that has
-already exited can signal a DIFFERENT process if the OS has since reused that pid. The dangerous window
-is exactly between the real OS-level death (possibly already reaped at the OS level) and the parent's
-event loop actually firing `'exit'` — which can lag under host contention. A second `kill()` issued
-inside that window is therefore a real, documented pid-reuse risk, not merely redundant signaling.
+mechanism, corrected (card `0bb82dd2`, flagged by CR `b05bf612`): this paragraph originally claimed
+`ChildProcess.kill()` dispatches by raw pid (`process.kill(this.pid, signal)` internally) and that a
+second `kill()` issued during the observation lag is therefore a real pid-reuse risk. That is wrong.
+Verified against Node 22.16.0's real internal source (`node --expose-internals`, module
+`internal/child_process`, `lib/internal/child_process.js` in the Node source tree):
+`ChildProcess.prototype.kill` does `if (this._handle) { const err = this._handle.kill(signal); ... }` —
+it dispatches through `this._handle`, the libuv `Process` handle created at spawn
+(`this._handle = new Process()`, bound to this one child only) — never through the top-level
+`process.kill(pid, signal)` function, and never by a bare pid lookup. That handle's own `onexit` callback
+(invoked once libuv's exit watcher actually observes the real OS death) runs `this._handle.close();
+this._handle = null;` SYNCHRONOUSLY, in the very same tick that emits `'exit'` — there is no lag between
+the handle going null and the `'exit'` event; the only lag is between the real OS death and libuv's own
+exit watcher noticing it. So there are exactly two cases for a second `kill()` call, and neither can reach
+a reused pid: either `_handle` is still non-null, meaning Node's own exit watcher — the sole reaper of
+this child in a single-process app, nothing else competes to `waitpid`/close the handle first — has not
+yet observed the death, so the pid cannot yet have been released for reuse; or `_handle` is already null,
+in which case `kill()`'s own `if (this._handle)` guard is false and it returns `false` without dispatching
+anything, to any pid. The same closes on win32: the handle wraps an open `HANDLE` to the specific process
+object, which cannot be silently reassigned to a different process while open, and is closed in that same
+`onexit` callback. Node's own documented kill()-on-a-reused-pid warning is real, but it describes the
+top-level `process.kill(pid, signal)` function (no handle, a bare pid lookup every call) — not
+`ChildProcess.prototype.kill`, which has one.
+
+The latch still earns its place on other grounds, independent of pid reuse: it collapses what would
+otherwise be a doubled `code_graph_memory_recycled` audit event and a doubled `onMemoryCeilingRecycleFn`
+call for one real recycle (`checkMemoryCeiling`'s early-return skips the whole flow, not just the `kill()`
+call, once latched); it avoids stacking a redundant signal onto a child that is already dying but not yet
+reaped (harmless by the mechanism above, but still a wasted syscall and a confusing duplicate log line);
+and it keeps `consecutiveHealthFailures` bookkeeping single across independently-deciding call sites (see
+"Deliberate choice" below) instead of re-counting a dying, already-latched child's non-answer as fresh
+wedge evidence.
 
 CR follow-up (manager directive): the SAME hazard shape exists, independently, at `probeHealth`'s own
 wedge-kill site (`consecutiveHealthFailures >= healthProbeFailureThreshold`) — a second, pre-existing
@@ -218,8 +242,9 @@ margin via `FLUSH_VAULTS_STEP_BUDGET_MARGIN_MS`, untouched by this card) remains
 backstop regardless of any bug in the new code.
 
 **`stopKillEscalationSupported` test seam.** Production defaults this to `process.platform !== "win32"`
-— the same reasoning `maybeEscalateStuckKill` already uses. ⚠️ CORRECTED (CR `b05bf612`): this is NOT
-the pid-reuse hazard this record's Narrative section documents — `ChildProcess.kill()` signals through
+— the same reasoning `maybeEscalateStuckKill` already uses. ⚠️ CORRECTED (CR `b05bf612`; the Narrative
+above was corrected to match by card `0bb82dd2`): this is the same handle-based mechanism, not a
+pid-reuse hazard at all — `ChildProcess.kill()` signals through
 Node's own internal libuv process handle (held open by the `ChildProcess` object itself), which no-ops
 once the process has already been reaped, and a Windows `HANDLE` cannot be reused for an unrelated
 process while it's still open; a second call is simply redundant, never dangerous, by that mechanism. The
