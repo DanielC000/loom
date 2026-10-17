@@ -739,8 +739,20 @@ try {
     const counts9 = db.countGateEvents({ projectId: P.projId });
     check("(9) countGateEvents tallies this under byOutcome.error (never byOutcome.reject)", counts9.byOutcome.error === 1 && !counts9.byOutcome.reject);
     check("(9) countGateEvents tallies this under byGateType.distImporterCheck (never byGateType.worker)", counts9.byGateType.distImporterCheck === 1 && !counts9.byGateType.worker);
-    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(9) the mechanism-failure nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
-    check("(9) the nudge names the synthetic build failure and reads distinctly from a real test red", nudge.text.includes("synthetic build failure") && nudge.text.includes("could not run") && !nudge.text.includes("FAILED:"));
+    // Card ddc680d5 — FAILURE-TIME DIAGNOSTICS ONLY, never a weakening of the assertion below: this
+    // scenario went RED once (1/6 serial runs, `-u LOOM_DEV`) under real full-gate load with no printed
+    // evidence of WHY (the harness normally prints only PASS/FAIL plus a label). Print the actual
+    // observed nudge text (or an explicit "no nudge observed" note) ONLY on failure; stay silent on pass.
+    let nudge;
+    try {
+      nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(9) the mechanism-failure nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
+    } catch (err) {
+      console.error(`[ddc680d5-diagnostic] (9) no nudge observed within ${SCENARIO_EVENT_WAIT_MS}ms`);
+      throw err;
+    }
+    const nudge9Ok = nudge.text.includes("synthetic build failure") && nudge.text.includes("could not run") && !nudge.text.includes("FAILED:");
+    if (!nudge9Ok) console.error(`[ddc680d5-diagnostic] (9) observed nudge text: ${JSON.stringify(nudge.text)}`);
+    check("(9) the nudge names the synthetic build failure and reads distinctly from a real test red", nudge9Ok);
     check("(9) CLEANUP (worktree): no extra worktree dir survives even though the build itself failed", onlyKnownWorktreeDirsLeft(P.projId, [w.taskId]));
     const survivors9 = await survivorBranches(P.repo, w.branch);
     check(`(9) CLEANUP (branch): no check branch survives even though the build itself failed (found: ${survivors9.join(", ") || "none"})`, survivors9.length === 0);
