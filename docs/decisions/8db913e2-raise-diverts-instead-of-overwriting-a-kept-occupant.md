@@ -4516,6 +4516,11 @@ resolvedKey (and every OTHER matched entry's) was silently dropped whenever it d
 `unionQuarantineEntries`") — this is a structural omission of the resolvedKey/resolvedKeys fields from
 the hand-rolled union, not a narrower edge case of an existing adjudication rule.
 
+**Sibling defect, fixed separately (card `00fd29d7`):** `mergeTokenIntoPendingEntries` — the `!verified`
+twin of this same hand-rolled merge, reached from `enterMergeQuarantine`'s own pending-merge branch
+instead of the `existing`/write-fault paths this function serves — had the IDENTICAL structural omission.
+See "Follow-up 00fd29d7" below for its own repro and fix.
+
 ### Confirmed real, reproduced with ZERO out-of-band mutation to establish the premise
 
 A production sequence, no triple fault needed (unlike the MEMORY-ONLY-KEY GUARD above, an ORDINARY
@@ -4640,3 +4645,79 @@ resolvedKeys:[Y,Z,W]` record, and all three of Y/Z/W's own real repos stay block
   informative keys across the matched entries — boot's own secondary-key arming will silently union them
   together before `divertRaiseEntry` ever runs, collapsing the intended input count. Use disjoint keys,
   or assert distinctness explicitly (see Test 2 above).
+
+## Follow-up 00fd29d7 — `mergeTokenIntoPendingEntries` had the IDENTICAL drop, made durable by a later partial clear (FIXED)
+
+Found and reproduced by Code Review `3555435b` (card `d524d1c4`'s own follow-up), against the compiled
+dist, with zero out-of-band fault injection. `mergeTokenIntoPendingEntries` — the `!verified` twin of
+`divertRaiseEntry`'s own merge branch above, reached from `enterMergeQuarantine`'s pending-merge branch
+whenever the raising `repoPath` is itself still unresolvable (never via the `existing`/write-fault paths
+`divertRaiseEntry` serves) — built `merged` as `{...base.entry, tokens, orphanLatchFiles,
+contributorRepoPaths, provenanceUnknown, provenanceTracked}`: the SAME structural omission of
+resolvedKey/resolvedKeys, dropping every non-base matched entry's own informative key(s) unconditionally.
+
+Unlike the `divertRaiseEntry` shape, a single raise is enough to reach this: `enterMergeQuarantine`'s own
+`!verified` branch routes straight into `mergeTokenIntoPendingEntries` whenever one or more pending
+entries already match the raising repoPath's own identity — no dual-arm, no write fault, no `existing`
+lookup involved at all.
+
+### Why the drop becomes DURABLE, not just a one-boot miss
+
+A dropped key here is worse than `divertRaiseEntry`'s own (pre-fix) drop in one respect: a LATER partial
+clear of one of the merged entry's own tokens (`clearMergeQuarantineByToken` → `clearTokenFromPendingIndices`
+→ `rewriteOrphanLatchFilesAfterPartialClear`) durably REWRITES every OTHER matched entry's own folded
+`orphanLatchFiles` member with the SAME (already key-less) merged content — so even a sibling pending
+record whose own original on-disk bytes still named the dropped key gets physically overwritten, and the
+key is gone from every surviving copy, not just the merged one. A reboot after that partial clear
+unblocks the dropped key's own real repo even though the token that actually owned it was never cleared.
+
+### The fix — the SAME shared helper `unionInformativeResolvedKeys`, extracted from the `divertRaiseEntry` fix above
+
+Rather than re-deriving a second, parallel ALWAYS-UNION-WHEN-INFORMATIVE implementation, `divertRaiseEntry`'s
+own computation above was extracted into one shared helper (`unionInformativeResolvedKeys`, in
+`merge-quarantine.ts`) and both hand-rolled merge branches now call it — `divertRaiseEntry` unchanged in
+behavior (refactor only), `mergeTokenIntoPendingEntries` newly correct. Same rule, same exclusions that do
+NOT apply (`explicitResolvedKeyRule`, `excludeLiftedResolvedKey(s)` — see the helper's own doc comment and
+the "Follow-up d524d1c4" section above for why neither premise ever arises on either of these two paths):
+no input to `mergeTokenIntoPendingEntries` is known-stale (every matched pending entry is matched purely
+by `directPathIdentity` against the SAME still-unresolvable raise, exactly like `divertRaiseEntry`'s own
+matched set — current knowledge of one identity, never a disk re-read of a possibly-superseded copy), and
+this function never touches `final` either (its own doc comment: it never arms `activeQuarantines` at a
+canonical key at all), so `excludeLiftedResolvedKey(s)`'s premise (a protective copy about to be
+superseded by THIS SAME operation's own fresh write to `final`) never arises here either.
+
+### Tests
+
+Committed in `merge-quarantine-raise-protect-failure.mjs` (`*** CARD 00fd29d7 ***`-tagged): d7 =
+`r7/gone-subdir7` is genuinely unresolvable; M1 (no key, enteredAt 1000) and M2 (resolvedKeys=[Z7],
+enteredAt 2000) are two independent pending-divert records for d7's own identity. A fresh raise on d7 (via
+`enterMergeQuarantine`, still unresolvable) is confirmed to route into `mergeTokenIntoPendingEntries`
+(never `divertRaiseEntry`); the merged record (at M1's own sourceFile) is asserted to carry Z7 forward.
+`clearMergeQuarantineByToken` then clears M1's own token (a PARTIAL clear — two tokens remain outstanding),
+confirmed to durably rewrite M2's own folded orphan file with the SAME reduced content (the mechanism this
+card's own durability hazard depends on) — both copies are asserted to still carry Z7 after the clear. A
+fresh boot-module reimport + `reenterMergeQuarantinesAtBoot` then confirms Z7's own real repo stays blocked
+after a reboot, even though the token that actually owns Z7 (`m2-token`) was never cleared.
+
+Proven RED on the pre-fix source and GREEN after via `negative-control` (reverted
+`packages/daemon/src/git/merge-quarantine.ts` to `HEAD`, built, ran the test): exactly the three
+`*** CARD 00fd29d7 ***`-tagged assertions fail pre-fix (3 FAILURE(S), nothing else), pass post-fix, tree
+restored clean. All 42 `merge-quarantine*.mjs` files run serially, exit 0 — including the
+`050a4428`/`4b06875f`/`d2582692`-tagged scenarios and the `divertRaiseEntry`-side `d524d1c4` scenarios
+(Follow-up above), confirming the refactor left that function's own behavior unchanged. The touched test
+file re-run under both `env -u LOOM_DEV -u LOOM_SUPERVISED` and `LOOM_DEV=1` — identical, since
+`merge-quarantine.ts` reads neither.
+
+### Do not
+
+- Do not re-derive a second, parallel resolvedKey/resolvedKeys union for `mergeTokenIntoPendingEntries` —
+  call `unionInformativeResolvedKeys` (the same helper `divertRaiseEntry` now calls too), or the two
+  hand-rolled merge branches drift apart again exactly the way this card's own bug diverged from the
+  `divertRaiseEntry` fix in the first place.
+- Do not assume a single matched pending entry is enough to prove this fix — the drop is invisible with
+  only one matched entry (`base`'s own fields were never the ones either bug dropped); use at least two
+  matched entries carrying DISJOINT informative keys (see the `d524d1c4` matrix scenario's own "Do not" on
+  overlapping keys above — the same boot-time secondary-key-arming collapse applies here too).
+- Do not skip the partial-clear step when verifying this fix — a repro that only checks the merged
+  record's own immediate write (never the DURABLE drop a later `rewriteOrphanLatchFilesAfterPartialClear`
+  can cause) proves a narrower claim than the one this card's own title makes.

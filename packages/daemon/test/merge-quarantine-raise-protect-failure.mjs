@@ -5048,6 +5048,78 @@ try {
   check("(d524d1c4 agree) resolvedKeys still carries Y6 too (informativeKeysFor is a union, never scalar-xor-array)",
     (mergedAfter6.resolvedKeys ?? []).includes(Y6));
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 00fd29d7, MERGETOKENINTOPENDINGENTRIES DROPS A SIBLING'S RESOLVEDKEYS, MADE DURABLE BY A LATER
+  // PARTIAL CLEAR — mergeTokenIntoPendingEntries (the `!verified` twin of divertRaiseEntry's own merge
+  // branch, d524d1c4) built `merged` as `{...base.entry, tokens, orphanLatchFiles, contributorRepoPaths,
+  // provenanceUnknown, provenanceTracked}` — NEVER reading resolvedKey/resolvedKeys from ANY matched
+  // entry at all. d7 = r7/gone-subdir7 is genuinely unresolvable (r7 exists, the subdir does not); M1 (no
+  // key, enteredAt 1000) and M2 (resolvedKeys=[Z7], enteredAt 2000) are two independent pending-divert
+  // records for d7's own identity. A fresh raise on d7 (still unresolvable) takes enterMergeQuarantine's
+  // own `!verified` branch straight into mergeTokenIntoPendingEntries (never divertRaiseEntry — that
+  // branch is reached only via the `existing`/`verified` write-fault paths) — pre-fix, the merged record
+  // (written at M1's own sourceFile, M1 being the earliest-enteredAt `base`) drops Z7 entirely. A later
+  // PARTIAL clear of M1's own token then makes the drop DURABLE: rewriteOrphanLatchFilesAfterPartialClear
+  // overwrites M2's own folded orphan file with the SAME key-less merged content — so a reboot afterward
+  // unblocks Z7's own real repo even though m2-token was never cleared.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r7 = makeToplevelRepo("00fd29d7-r7");
+  const d7 = path.join(r7, "gone-subdir7");
+  const zRepo7 = makeToplevelRepo("00fd29d7-Z7");
+  const Z7 = canonicalRepoLockKey(zRepo7);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // M1 — no key at all, earliest enteredAt (becomes `base`, keeps its own sourceFile as the merge target).
+  const m1Path7 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m1Path7, JSON.stringify({
+    repoPath: d7, branch: "00fd29d7-m1-branch", reason: "00fd29d7 M1: no key",
+    enteredAt: 1000, tokens: ["00fd29d7-m1-token"],
+  }, null, 2) + "\n");
+  // M2 — resolvedKeys=[Z7], later enteredAt (becomes `others`, folded into the merged entry's orphanLatchFiles).
+  const m2Path7 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m2Path7, JSON.stringify({
+    repoPath: d7, branch: "00fd29d7-m2-branch", reason: "00fd29d7 M2: resolvedKeys=[Z7]",
+    enteredAt: 2000, tokens: ["00fd29d7-m2-token"], resolvedKeys: [Z7],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("(00fd29d7 precondition) Z7's own real repo is blocked right after boot (from M2's own file)", assertRepoNotQuarantined(zRepo7).ok === false);
+  check("(00fd29d7 precondition) M1 and M2 remain genuinely distinct pending entries for d7's identity after boot", (() => {
+    const d7Entries = listActiveMergeQuarantines().filter((e) => e.repoPath === d7);
+    const hasM1Alone = d7Entries.some((e) => e.tokens.length === 1 && e.tokens[0] === "00fd29d7-m1-token");
+    const hasM2Alone = d7Entries.some((e) => e.tokens.length === 1 && e.tokens[0] === "00fd29d7-m2-token");
+    return hasM1Alone && hasM2Alone;
+  })());
+
+  const r7Token = enterMergeQuarantine(d7, "r7-branch", "00fd29d7: a fresh raise on d7, still unresolvable — routes into mergeTokenIntoPendingEntries");
+  check("(00fd29d7) the raise's own token persists in-process", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(r7Token));
+
+  const mergedAfter7 = JSON.parse(fs.readFileSync(m1Path7, "utf8"));
+  check("*** CARD 00fd29d7 *** mergeTokenIntoPendingEntries' own merged record carries M2's own resolvedKeys (Z7) forward, never dropped just because `base` (M1) had none",
+    (mergedAfter7.resolvedKeys ?? []).includes(Z7));
+  check("(00fd29d7) M2's own sourceFile was folded into the merged entry's orphanLatchFiles, never left dangling",
+    (mergedAfter7.orphanLatchFiles ?? []).includes(path.basename(m2Path7)));
+  check("(sanity) Z7 is still blocked right after the merge (in-process)", assertRepoNotQuarantined(zRepo7).ok === false);
+
+  // The partial clear that makes a pre-fix drop DURABLE: clearing M1's own token leaves the raise's own
+  // token (and M2's own) still outstanding — NOT the last token — so this is the partial-clear branch of
+  // clearTokenFromPendingIndices, which durably rewrites M1's own sourceFile AND (via
+  // rewriteOrphanLatchFilesAfterPartialClear) folds the SAME reduced content into M2's own orphan file.
+  clearMergeQuarantineByToken(d7, "00fd29d7-m1-token");
+  const m1After7 = JSON.parse(fs.readFileSync(m1Path7, "utf8"));
+  check("(00fd29d7) M1's own token is genuinely gone after the partial clear", !(m1After7.tokens ?? []).includes("00fd29d7-m1-token"));
+  const m2After7 = JSON.parse(fs.readFileSync(m2Path7, "utf8"));
+  check("(00fd29d7 precondition) the partial clear actually rewrote M2's own orphan file with the SAME reduced content (never left stale) — the mechanism this card's own durability hazard depends on",
+    JSON.stringify((m2After7.tokens ?? []).slice().sort()) === JSON.stringify((m1After7.tokens ?? []).slice().sort()));
+  check("*** CARD 00fd29d7 *** the partially-cleared record (both M1's own file AND M2's own rewritten orphan copy) STILL carries Z7 forward after the clear",
+    (m1After7.resolvedKeys ?? []).includes(Z7) && (m2After7.resolvedKeys ?? []).includes(Z7));
+
+  const fresh00fd = await freshBootModule();
+  fresh00fd.reenterMergeQuarantinesAtBoot([]);
+  check("*** CARD 00fd29d7 (reboot) *** Z7's own real repo STAYS BLOCKED after a reboot, even though m2-token was never cleared — the fix's own union survives both the partial clear and the reboot",
+    fresh00fd.assertRepoNotQuarantined(zRepo7).ok === false);
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }

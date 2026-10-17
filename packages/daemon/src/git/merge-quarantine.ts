@@ -193,6 +193,29 @@ function secondaryKeysToAttempt(entry: MergeQuarantineEntry, anchorKey: string):
   return informativeKeysFor(entry).filter((k) => k !== anchorKey);
 }
 
+/** ALWAYS-UNION-WHEN-INFORMATIVE: `resolvedKeys` is the deduplicated union of every informative key
+ *  ({@link informativeKeysFor}) across ALL of `all` (fed through {@link unionResolvedKeysRetaining} for
+ *  cap/eviction consistency with every other accumulating call site); the scalar `resolvedKey` is kept
+ *  only when every input that carries one agrees (all defined scalars `===`), else left `undefined` with
+ *  every key still surviving in `resolvedKeys`. Shared by every hand-rolled merge branch that combines
+ *  several CURRENT-knowledge entries about the SAME identity (never a known-stale one — each call site's
+ *  own doc comment states why that premise holds there). Deliberately NOT `explicitResolvedKeyRule` (its
+ *  symmetric-difference exclusion assumes one side is known-stale) and NOT `excludeLiftedResolvedKey(s)`
+ *  (that exists only when a protective copy read from `final` is about to be superseded by THIS SAME
+ *  operation's own fresh write to `final`) — neither premise applies to a hand-rolled union of several
+ *  already-current records.
+ *
+ *  @decision 8db913e2 (Follow-up d524d1c4) — see the decision record's own "Follow-up d524d1c4" section
+ *  for the full rationale. Extracted (card 00fd29d7) so {@link divertRaiseEntry} and
+ *  {@link mergeTokenIntoPendingEntries} share ONE implementation instead of two that can drift. */
+function unionInformativeResolvedKeys(all: MergeQuarantineEntry[], label: string): { resolvedKey: string | undefined; resolvedKeys: string[] | undefined } {
+  const resolvedKeysRaw = unionResolvedKeysRetaining(undefined, all.flatMap((e) => informativeKeysFor(e)), label);
+  const resolvedKeys = resolvedKeysRaw.length > 0 ? resolvedKeysRaw : undefined;
+  const scalarsPresent = all.map((e) => e.resolvedKey).filter((k): k is string => k !== undefined);
+  const resolvedKey = scalarsPresent.length > 0 && scalarsPresent.every((k) => k === scalarsPresent[0]) ? scalarsPresent[0] : undefined;
+  return { resolvedKey, resolvedKeys };
+}
+
 /** The two literal `branch` strings this module writes into every GENERIC placeholder entry it mints
  *  itself (never a real raise) — centralized so every call site shares the exact text, and so
  *  {@link isPlaceholderEntryShape} can recognize a LEGACY placeholder final/tmp written before the
@@ -2209,10 +2232,15 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   const provenanceUnknown = matched.some((p) => p.entry.provenanceUnknown) ? true : undefined;
   // @decision db0a9db0 (round 2) — same cross-matched OR for the precision-guard field.
   const provenanceTracked = matched.some((p) => p.entry.provenanceTracked) ? true : undefined;
+  // @decision 8db913e2 (Follow-up 00fd29d7) — union EVERY informative resolvedKey/resolvedKeys across all
+  // matched entries, never spread only `base.entry`'s own (the SAME fail-open d524d1c4 fixed in
+  // divertRaiseEntry) — see the shared helper's own doc.
+  const { resolvedKey, resolvedKeys } = unionInformativeResolvedKeys(matched.map((p) => p.entry), `mergeTokenIntoPendingEntries(${base.entry.repoPath})`);
   const merged: MergeQuarantineEntry = {
     ...base.entry, tokens, orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
     contributorRepoPaths: contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
     provenanceUnknown, provenanceTracked,
+    resolvedKey, resolvedKeys,
   };
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
   // @decision 8db913e2 (Follow-up 0dc514dc) — a DIFFERENT surviving pending entry can structurally depend on this EXACT
@@ -2555,10 +2583,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   // @decision 8db913e2 — union EVERY informative resolvedKey/resolvedKeys across all of `all`, never
   // spread only `base.entry`'s own (a real post-reboot fail-open). Not `explicitResolvedKeyRule`, not
   // `excludeLiftedResolvedKey(s)` — see the decision record's own "Follow-up d524d1c4" for why neither applies here.
-  const resolvedKeysRaw = unionResolvedKeysRetaining(undefined, all.flatMap((e) => informativeKeysFor(e)), `divertRaiseEntry(${base.entry.repoPath})`);
-  const resolvedKeys = resolvedKeysRaw.length > 0 ? resolvedKeysRaw : undefined;
-  const scalarsPresent = all.map((e) => e.resolvedKey).filter((k): k is string => k !== undefined);
-  const resolvedKey = scalarsPresent.length > 0 && scalarsPresent.every((k) => k === scalarsPresent[0]) ? scalarsPresent[0] : undefined;
+  const { resolvedKey, resolvedKeys } = unionInformativeResolvedKeys(all, `divertRaiseEntry(${base.entry.repoPath})`);
   const merged: MergeQuarantineEntry = {
     ...base.entry, tokens,
     orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
