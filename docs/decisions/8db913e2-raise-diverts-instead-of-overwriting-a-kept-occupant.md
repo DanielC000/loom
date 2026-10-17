@@ -1978,6 +1978,10 @@ Both proven RED on `b49ab498` (Round 1's own commit) and GREEN after, via `scrip
 --ref b49ab498`. All 33 `merge-quarantine*.mjs` files re-verified individually, each exit 0. All static
 guards (`pnpm --filter @loom/daemon guards`) re-verified green (30/30).
 
+**Card `a9174861`:** neither the `keptUnreadableLatchFiles.has(orphanFile)` skip above NOR the M2 stamp
+below (see that section) had a test isolating it from its own other layers — `merge-quarantine-round2-pins.mjs`
+adds both, each proven RED by a single-line mutation of the exact fixed line and GREEN after restore.
+
 ### M2 — the raiser's own divert record silently lost its pre-existing field set
 
 Round 1's `raiserUnion` (built from `extra` + `ownGroup`) carried no `resolvedKey`, no `armedKeys` entry
