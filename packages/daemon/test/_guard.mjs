@@ -287,18 +287,8 @@ function isTestCreatedHome(resolved) {
 // Arm the Db prod-guard for THIS process (and inherited by spawned daemons) the moment we're imported.
 process.env.LOOM_TEST = "1";
 
-// @decision d5432aff — win32 ModuleAnalysisCache-into-cwd residue: when a test sandboxes USERPROFILE/HOME
-// to a bare temp dir (the near-universal pattern in this suite), `[Environment]::GetFolderPath(
-// "LocalApplicationData")` silently resolves to "" — verified: it's a folder-EXISTENCE check against
-// `%USERPROFILE%\AppData\Local`, not an env-var-presence one (`$env:LOCALAPPDATA` itself stays correct).
-// PowerShell's own module-analysis-cache feature then falls back to a path relative to CWD, leaving an
-// untracked `Microsoft/Windows/PowerShell/ModuleAnalysisCache` in the worktree. Setting this documented
-// override env var once, here, redirects every powershell.exe child ANY production spawn site or test
-// spawns (none of the ~10 production call sites pass an explicit `env`, so all inherit `process.env`) to
-// a path outside cwd — covering every spawn site without editing any of them or the ~300 sandboxing test
-// files. Only when UNSET: `scripts/test-daemon.mjs` already injects a per-child value into a
-// harness-spawned child's own env before this file is ever imported there, and this must never clobber
-// that — this is the fallback for a direct `node test/x.mjs` run, which never sees that injection at all.
+// @decision d5432aff — redirect PowerShell's module-analysis cache out of cwd under a sandboxed
+// USERPROFILE; never clobber a runner-injected value. See docs/decisions/d5432aff-*.md.
 let psModuleCacheDir = null;
 if (process.platform === "win32" && !process.env.PSModuleAnalysisCachePath) {
   psModuleCacheDir = path.join(os.tmpdir(), `loom-test-ps-cache-${process.pid}`);
@@ -331,10 +321,7 @@ if (process.platform === "win32" && !process.env.PSModuleAnalysisCachePath) {
 // no pass/fail branch) — matching that established convention here avoids a new, surprising asymmetry
 // where this ONE derived path survives a failure and nothing else does.
 process.on("exit", () => {
-  // @decision d5432aff — best-effort: remove the per-process PSModuleAnalysisCachePath dir THIS file
-  // created above (never one injected by scripts/test-daemon.mjs, which owns its own per-child tmpdir
-  // cleanup via `tmpRoots` already) so os.tmpdir() doesn't accumulate one empty-or-small dir per
-  // standalone `node test/x.mjs` run.
+  // @decision d5432aff — best-effort cleanup of the dir THIS file (never test-daemon.mjs) created above.
   if (psModuleCacheDir) cleanupPathSync(psModuleCacheDir);
 
   const home = process.env.LOOM_HOME;
