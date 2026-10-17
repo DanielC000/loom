@@ -1510,7 +1510,18 @@ async function runOne(name, lane) {
     // per-file flag. Each of those files ALSO sets it explicitly (defense-in-depth for `node test/X.mjs`
     // run directly, outside this harness, which never sees this env block at all) — see
     // first-run-suppress-guard.mjs, which enforces the explicit per-file side of this.
-    env: { ...process.env, LOOM_HOME: home, LOOM_REAL_HOME: LOOM_HOME, LOOM_PORT: String(port), LOOM_TEST: "1", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1" },
+
+    // Card d5432aff: PSModuleAnalysisCachePath, win32-only, only when not already ambient-set — closes
+    // the ~14% of test files that never import test/_guard.mjs (which sets the same var as a fallback
+    // for a direct `node test/x.mjs` run, see that file's own doc). Scoped to a subdir of THIS child's
+    // own per-test `home` tmpdir — already pushed onto `tmpRoots` and removed at the end of the run below,
+    // so this needs no separate cleanup of its own.
+    env: {
+      ...process.env, LOOM_HOME: home, LOOM_REAL_HOME: LOOM_HOME, LOOM_PORT: String(port), LOOM_TEST: "1", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1",
+      ...(process.platform === "win32" && !process.env.PSModuleAnalysisCachePath
+        ? { PSModuleAnalysisCachePath: path.join(home, "ps-module-analysis-cache", "ModuleAnalysisCache") }
+        : {}),
+    },
   });
   const endTs = Date.now();
 

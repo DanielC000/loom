@@ -5107,6 +5107,13 @@ export const CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS = [
   // (not merely a comment) has nothing else re-verifying it before a reduced gate could otherwise skip
   // straight past the regression this test exists to catch (Code Review of fc53ea74's own first landing).
   "packages/daemon/test/test-daemon-port-allocation.mjs",
+  // Card d5432aff: comment-stripped raw-read of real packages/daemon/scripts/test-daemon.mjs SOURCE,
+  // asserting `runOne`'s own per-child `env` object carries the win32-only PSModuleAnalysisCachePath
+  // wiring (closes the ~14% of test files that never import test/_guard.mjs, which carries the same
+  // var as its own fallback). Same membership ground as its siblings above: a plain `.mjs` script has
+  // no compile/emit step for the reduced/emit-compare path to reason about on its own, so a comment-only
+  // edit to that env object could in principle flip this presence-only check.
+  "packages/daemon/test/ps-module-analysis-cache-cwd-guard.mjs",
 ];
 
 /** @decision fd0d34da — a coarse, PATH-FREE classification of WHY `notApplicable:true`, safe to leave
