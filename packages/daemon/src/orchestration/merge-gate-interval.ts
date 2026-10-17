@@ -75,12 +75,20 @@ export function statusOf(state: MergeGateState, orch: { mergeGate: "on" | "off";
   return { ...agentViewOf(state, orch, repoKey, pending), lastPassAt: state.lastPassAt, lastFailure: state.lastFailure, recent: state.recent };
 }
 
-/** One-line manager-facing text for a landing ("ungated 3/5" / "the periodic gated landing"). Never a pass claim. */
-export function counterNote(state: MergeGateState, orch: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }, opts: { gatedLanding: boolean; periodic: boolean }): string | undefined {
+/** One-line manager-facing text for a landing ("ungated 3/5" / "the periodic gated landing"). Never a pass claim.
+ *  `gatedLanding` is whether this landing's cadence DECISION said to gate (i.e. `!gateDisabled`) — that alone
+ *  does NOT mean a gate actually ran or passed: an inert docs-only diff (card db9b0130) can skip the gate even
+ *  on a landing that was due, so `inertSkip` (true whenever NO real gate ran and none was reused — see
+ *  `confirmWorkerMerge`'s own `inertSkip` local) disambiguates the two outcomes within a gated-and-periodic
+ *  landing. A REUSED verdict is a real pass for this purpose (`inertSkip` stays false for it). */
+export function counterNote(state: MergeGateState, orch: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }, opts: { gatedLanding: boolean; periodic: boolean; inertSkip?: boolean }): string | undefined {
   const { cadence, interval } = resolveMergeGateCadence(orch);
   if (cadence === "every") return undefined;
   const of = interval ? `/${interval}` : "";
-  if (opts.gatedLanding && opts.periodic) return `this was the periodic gated landing (gate green ⇒ ungated counter reset to ${state.ungatedSinceLastPass}${of})`;
+  if (opts.gatedLanding && opts.periodic) {
+    if (opts.inertSkip) return `inert docs-only diff — gate SKIPPED (not a pass); the periodic gated landing is still owed by the next non-inert landing (ungated ${state.ungatedSinceLastPass}${of})`;
+    return `this was the periodic gated landing (gate green ⇒ ungated counter reset to ${state.ungatedSinceLastPass}${of})`;
+  }
   if (opts.gatedLanding) return undefined;
   return `ungated ${state.ungatedSinceLastPass}${of} since the last passing gate${state.gateOwed ? " (a gate is OWED — the next landing runs it)" : ""}`;
 }

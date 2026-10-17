@@ -19639,7 +19639,7 @@ export class SessionService {
     const soloTipGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId: owner, workerSessionId, taskId, branch, landedTip: expectedTipForLanding(landingPin) ?? merge.landedTip, landedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
     const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, expectedBranchTip: soloTipGuard.expectedBranchTip, onBranchRetained: soloTipGuard.onBranchRetained, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}) });
     // Card 6f13746c: the counter line for the merge result / [loom:merge-done] (read AFTER the landing was recorded, at the squash above).
-    const mergeGateNote = this.mergeGateNoteFor(project.id, { gatedLanding: !gateDisabled, periodic: mergeGateDecision.cadence !== "every" }, worker.repoKey ?? "primary");
+    const mergeGateNote = this.mergeGateNoteFor(project.id, { gatedLanding: !gateDisabled, periodic: mergeGateDecision.cadence !== "every", inertSkip }, worker.repoKey ?? "primary");
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
     // `packages/daemon/assets/skills/<name>/**` reaches ZERO agents right now — `skills/inject.ts` mirrors
     // sessions from the STORE, never `assets/` (see CLAUDE.md's "Caveat" section) — so surface that here,
@@ -22146,7 +22146,7 @@ export class SessionService {
       this.db.putMergeGateState(projectId, applyGateFail(this.db.getMergeGateState(projectId, f.repoKey), { at: new Date().toISOString(), opId: f.opId, toSha, periodic: f.periodic, ...(f.branchTip !== undefined ? { branchTip: f.branchTip } : {}), ...(f.branch !== undefined ? { branch: f.branch } : {}), ...(f.candidates ? { candidates: f.candidates } : {}) }), f.repoKey);
     } catch (err) { console.warn(`[merge-gate] failed to record a gate failure (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
   }
-  private mergeGateNoteFor(projectId: string, opts: { gatedLanding: boolean; periodic: boolean }, repoKey = "primary"): string | undefined {
+  private mergeGateNoteFor(projectId: string, opts: { gatedLanding: boolean; periodic: boolean; inertSkip?: boolean }, repoKey = "primary"): string | undefined {
     const o = this.mergeGateOrch(projectId);
     return o ? counterNote(this.db.getMergeGateState(projectId, repoKey), o, opts) : undefined;
   }

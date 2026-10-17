@@ -20,6 +20,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) cadence `every` (gate ON): a FAILING gate is recorded in `recent`/`lastFailure` but does NOT owe.
 //   (G) cadence `never`: an ungated landing is skipReason "gate-disabled" and STILL counts; gate-next (any cadence)
 //       makes the next landing gated, and a pass clears it.
+//   (T) INERT SKIP WHILE DUE (card 62e107fa): a docs-only diff on a landing that WAS due (nextLandingGated:true)
+//       skips via the inert-diff path (db9b0130, no gate ever runs); the note says SKIPPED/not-a-pass/still-owed,
+//       never "reset to N/N" on an unchanged counter, and the next landing stays due.
 //   (P) PIN: an interval-SKIP landing (gateRan:false) is pinned to the tip the "land ungated" decision was acted on — a worker commit
 //       landing after that but before mergeBranch's lock is REFUSED in-lock (gateTipMoved, nothing squashed, counter not advanced, never
 //       cached: the re-call lands the new tip ungated and counts once).
@@ -101,6 +104,16 @@ const tip = (repo, branch) => execSync(`git rev-parse ${branch}`, { cwd: repo })
   const av = M.agentViewOf(st({ ungatedSinceLastPass: 3 }), off3);
   check("(U) agentViewOf: nextLandingGated computed for a single branch (3+1>3 ⇒ true), key set exact (incl. repoKey)", av.nextLandingGated === true && av.repoKey === "primary" && JSON.stringify(Object.keys(av).sort()) === JSON.stringify(["cadence", "gateOwed", "interval", "nextLandingGated", "repoKey", "ungatedSinceLastPass"]));
   check("(U) counterNote: never for cadence every; 'ungated 2/3' for an ungated interval landing", M.counterNote(st(), on, { gatedLanding: true, periodic: false }) === undefined && /ungated 0\/3/.test(M.counterNote(st(), off3, { gatedLanding: false, periodic: false })));
+  // Card 62e107fa: counterNote has THREE shapes for a gated-and-periodic landing, keyed on `inertSkip` —
+  // not just two (pass vs ungated) keyed on `gatedLanding` alone. A landing can be DUE (gatedLanding:true)
+  // and still have no gate run at all (the inert-docs-only-diff skip, card db9b0130).
+  check("(U) counterNote: gatedLanding+periodic+inertSkip ⇒ SKIPPED wording, never a pass claim, still shows the unchanged counter",
+    (() => { const n = M.counterNote(st({ ungatedSinceLastPass: 2 }), off3, { gatedLanding: true, periodic: true, inertSkip: true });
+      return typeof n === "string" && /SKIPPED/.test(n) && /not a pass/.test(n) && /still owed/.test(n) && /2\/3/.test(n) && !/gate green/.test(n); })());
+  check("(U) counterNote: gatedLanding+periodic+NO inertSkip ⇒ the real pass wording, reporting the counter AS-IS (the caller is expected to have already reset it)",
+    (() => { const n = M.counterNote(st({ ungatedSinceLastPass: 0 }), off3, { gatedLanding: true, periodic: true, inertSkip: false }); return typeof n === "string" && /gate green/.test(n) && /reset to 0\/3/.test(n); })());
+  check("(U) counterNote: inertSkip defaults to false when omitted (back-compat with a caller that never passes it)",
+    M.counterNote(st({ ungatedSinceLastPass: 0 }), off3, { gatedLanding: true, periodic: true }) === M.counterNote(st({ ungatedSinceLastPass: 0 }), off3, { gatedLanding: true, periodic: true, inertSkip: false }));
 }
 
 // ============ fixtures ============
@@ -205,6 +218,10 @@ try {
     const v3 = await confirm(ctx.sessions, P.mgrId, ws[2].workerId);
     check("(S3) landing 3 is the periodic GATED landing: gate called once, merged, gateRan:true, no skip", v3.merged === true && ctx.gate.calls === 1 && v3.gateRan === true && v3.skipped === undefined && v3.skipReason === undefined);
     check("(S3) note names the periodic gated landing", /periodic gated landing/.test(v3.mergeGateNote ?? ""));
+    // Card 62e107fa DoD-2: a REAL periodic pass must report the ACTUAL post-reset counter value (0/2),
+    // never the pre-reset figure — the recorder (line 216 above, via `recordMergeGateOutcome`) already
+    // reset the durable state to 0 before this note was composed from a fresh read of it.
+    check("(S3) note reports the ACTUAL post-reset counter (0/2), not the pre-reset figure", /reset to 0\/2/.test(v3.mergeGateNote ?? "") && !/reset to 2\/2/.test(v3.mergeGateNote ?? ""));
     check("(S3) decide ONCE, recorder ONCE (a pass)", ctx.spy.decide === 1 && ctx.spy.record === 1 && ctx.spy.recorded[0] === "pass");
     const s3 = db.getMergeGateState(P.projId);
     check("(S3) a GREEN gated landing resets: ungated 0, lastPassSha = main HEAD, one ring row (pass)", s3.ungatedSinceLastPass === 0 && s3.lastPassSha === head(P.repo) && s3.recent.length === 1 && s3.recent[0].result === "pass");
@@ -286,6 +303,33 @@ try {
     reset(ctx);
     const v2 = await confirm(ctx.sessions, P.mgrId, w2.workerId);
     check("(G) the next landing runs the gate (owed), passes, clears owed, resets the counter", ctx.gate.calls === 1 && v2.gateRan === true && (() => { const s = db.getMergeGateState(P.projId); return !s.gateOwed && s.ungatedSinceLastPass === 0; })());
+  }
+
+  // ── (T) INERT SKIP WHILE THE PERIODIC GATE IS DUE — card 62e107fa: a docs-only diff on a landing that
+  //        WAS due (nextLandingGated:true) skips via the inert-diff path (db9b0130) with no gate ever
+  //        running. The note must say so plainly — never claim a gate ran or passed, never a
+  //        self-contradicting "reset to N/N" on an unchanged counter — and the obligation must carry
+  //        forward to the next non-inert landing. ──────────────────────────────────────────────────────
+  {
+    const P = mk("t"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
+    // Pre-set the counter so THIS landing is due (2 + 0 + 1 > 2) — mirrors the live incident's 15/15.
+    db.putMergeGateState(P.projId, { ...db.getMergeGateState(P.projId), ungatedSinceLastPass: 2 });
+    const w = await addWorker(db, P, "t1", { "docs/note.md": "docs-only change\n" });
+    check("(T) precondition: the landing is due (nextLandingGated:true) before it lands", ctx.sessions.mergeGateAgentView(P.projId).nextLandingGated === true);
+
+    const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
+    // `skipReason` on the returned result is scoped to the two cadence-skip reasons ("gate-disabled" /
+    // "gate-interval" — see its own type at the top of this file's own source) and is deliberately
+    // ABSENT here: this landing was NOT `gateDisabled` (the cadence decision said to gate), so only
+    // `skipped:true` is set — the inert-diff reason lives in `v.warning`/`v.mergeGateNote`, not this field.
+    check("(T) the docs-only diff is inertly SKIPPED, not run: merged, gateRan:false, skipped:true with no cadence skipReason, gate never called", v.merged === true && v.gateRan === false && v.skipped === true && v.skipReason === undefined && ctx.gate.calls === 0);
+    check("(T) the counter is UNCHANGED (still 2/2) — an inert skip is never counted, due or not", db.getMergeGateState(P.projId).ungatedSinceLastPass === 2);
+    check("(T) the note does NOT claim a gate ran or passed", !/gate green/.test(v.mergeGateNote ?? ""));
+    check("(T) the note says the gate was SKIPPED (not a pass) and is still owed, with the honest unchanged figure (2/2)", /SKIPPED/.test(v.mergeGateNote ?? "") && /not a pass/.test(v.mergeGateNote ?? "") && /still owed/.test(v.mergeGateNote ?? "") && /2\/2/.test(v.mergeGateNote ?? ""));
+    check("(T) the next landing is STILL due (nextLandingGated:true) — the obligation carries forward to the next non-inert landing", ctx.sessions.mergeGateAgentView(P.projId).nextLandingGated === true);
   }
 
   // ── (P) the skip landing is pinned (card 01777ceb's pin, on the gate-interval sibling) ────────────────
