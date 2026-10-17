@@ -98,8 +98,9 @@ two consumers specifically, not a change to the predicate's own floor+extra comp
 
 **Minors:** `handleGiveUpConfirmed`'s stopped-session wording check, `pastBrokenSpawnHoldoff`'s own
 verdicts, and the terminal-vs-pending notice choice are otherwise unaffected by this round. The softer
-notice's own escalation claim is now hedged: the one-shot check is in-memory only and is lost across a
-daemon restart (a separate, not-yet-built follow-up would re-arm it on boot — do not build that here).
+notice's own escalation claim used to be hedged here (the one-shot check was in-memory only and lost
+across a daemon restart) — card `b03e636c` (see Follow-up, below) now re-arms it at boot, so the hedge
+was reverted out of the notice text.
 
 ## Do not
 
@@ -129,3 +130,51 @@ daemon restart (a separate, not-yet-built follow-up would re-arm it on boot — 
   re-check is a second, defensive layer on top.
 - Do not go back to a bare "`worker_retired` event exists in history" check for the stopped-session
   wording — it would stay true forever past a later resume; use `isWorkerRetirementActive`.
+
+## Follow-up (card `b03e636c`)
+
+Closes the in-memory/restart residual this record's Round 2 flagged: `armKickoffConfirmRecheck`'s
+one-shot timer is re-armed at boot-reconcile for a TASKLESS worker whose kickoff reached terminal PARK
+just before an unrelated restart. Mechanism, in `sessions/service.ts` unless noted:
+
+- `handleKickoffGiveUpExhausted`'s `session_message_gave_up` events (both `outcome:"reminted"` and
+  `outcome:"parked"`) now carry an additive `detail.origin:"kickoff"` — the discriminator that tells
+  this chain apart from an ordinary message's identically-shaped give-up event (`handleGiveUpExhausted`
+  never sets it). A PRE-UPGRADE parked event has no marker and gets no re-arm — that is today's
+  (pre-this-card) behavior, left as-is rather than backfilled.
+- A new durable event, `kickoff_confirm_escalated` (`detail:{rootMsgId, source:"timer"|"boot"}`), is
+  appended whenever the "broken" escalation actually fires — from the original timer
+  (`armKickoffConfirmRecheck`'s callback, via `recordKickoffConfirmEscalated`) or the new boot path.
+  Before this card, that escalation was a bare `pty.enqueueStdin` with no durable record of having
+  fired at all; this is also what lets boot-reconcile skip a root that was already escalated, by this
+  boot, an earlier boot, or the live timer, rather than re-sending the same notice on every subsequent
+  restart.
+- `resumeFleetOnBoot`'s worker branch calls the new `escalateParkedKickoffAtBoot` BEFORE composing any
+  continuation nudge, for a taskless (`taskId === null`) worker whose PERSISTED `turnSeq` is still 0 with
+  an unresolved, kickoff-origin parked chain. This ordering is load-bearing, not cosmetic: the
+  continuation nudge below it (or even a replayed pending entry) can itself start the worker's first
+  turn once the resumed pty drains, flipping `turnSeq`/`hasFirstTurnStarted` true — which would
+  permanently stand down the ordinary fire-time safety check every other consumer of this escalation
+  relies on, even though the ORIGINAL kickoff never landed. A worker this fires for gets the escalation
+  IN PLACE OF the normal continuation nudge, never alongside it — it never received its kickoff, so
+  there is nothing for it to "continue."
+- The boot escalation deliberately does NOT go through `notifyManagerOfIdleWorker`/
+  `pastBrokenSpawnHoldoff` — both key their holdoff off the LIVE pty's `liveStartedAt`, which a fresh
+  resume just reset to "now," so calling them here would almost always read as "not past the holdoff
+  yet" and silently suppress the notice. The pre-restart give-up ladder already proved the kickoff dead
+  with more confidence than that live heuristic supplies. It reuses the exact terminal wording instead,
+  factored out as `buildKickoffNeverConfirmedBrokenMsg` and shared with
+  `handleKickoffGiveUpExhausted`'s own immediate-park branch, so the two can never read as a divergent
+  second notice for the same fact.
+- Tasked workers are excluded (`taskId !== null` → no re-arm): `tickIdleWorkers` (idle-watcher.ts)
+  re-registers fresh every boot, independent of the lost in-memory timer, and already catches a
+  never-started tasked worker on its own periodic cadence — re-arming here too would risk a genuine
+  double notice with no coordination between the two mechanisms.
+- **Known residual, deliberately out of scope here:** `recoverCrashOrphanedWorkers` (the OTHER,
+  mutually-exclusive boot-reconcile path, taken on a genuine crash with no captured `RestartIntent`) is
+  untouched. Its own candidate derivation (`deriveCrashOrphanedWorkers`,
+  `orchestration/crash-orphaned-workers.ts`) structurally excludes every taskless worker
+  (`!w.taskId → continue`, the same filter `tickIdleWorkers` uses) — so a taskless worker is never
+  resumed live on that path at all, and there is nothing for it to re-arm. If a future card ever widens
+  crash recovery to resume taskless workers too, it will need its own call to
+  `escalateParkedKickoffAtBoot` at that path's own worker-resume site.

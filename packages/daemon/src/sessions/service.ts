@@ -1774,6 +1774,13 @@ function buildNeverCompletedTurnMsg(w: Session): string {
     `${confirmationLatencyProportionalityClause()} Re-check LIVE first: worker_status({workerSessionId:"${w.id}"}) for a fresh busy/turnSeq read — free, no risk. Only if it's STILL busy:false with turnSeq:0 after that re-check should you pull worker_transcript ${w.id} to see what it's actually doing, and only worker_message it or worker_stop it once that confirms it's genuinely stuck, not just caught between busy-flag edges.`;
 }
 
+/** @decision b03e636c — shared by `handleKickoffGiveUpExhausted`'s immediate-park branch and the
+ *  boot-time escalation (`escalateParkedKickoffAtBoot`) so neither reads as a second, divergently-worded
+ *  notice for the same underlying fact. */
+function buildKickoffNeverConfirmedBrokenMsg(w: Pick<Session, "id" | "taskId">): string {
+  return `[loom:worker-spawn-broken] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${confirmationLatencyProportionalityClause()} ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript — that is the decisive check: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Do NOT treat worker_list as an equivalent check: a worker that already retired cleanly (e.g. its work merged) can show NO row there at all, which reads identically to "the kickoff never ran" — an absent row is uninformative here either way, not confirmation of anything. If this worker has a bound task, tasks_get's merged/mergedSha field is a second, cheap signal (a merged task means the work already shipped, regardless of what worker_list shows). Only if worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
+}
+
 /** @decision 738f2109 — `BROKEN_SPAWN_HOLDOFF_MS` lives in pty/host.ts now (card 8882e2ca, Code Review
  *  f3fa9002) so `withinKickoffConfirmWindow` can compute the full floor+extra window in one place.
  *  @decision 8882e2ca — delegates to that ONE shared predicate rather than re-deriving the size/elapsed
@@ -1782,6 +1789,11 @@ function buildNeverCompletedTurnMsg(w: Session): string {
 function pastBrokenSpawnHoldoff(pty: PtyHost, w: Pick<Session, "id" | "turnSeq">): boolean {
   return withinKickoffConfirmWindow(pty, w.id, w.turnSeq) === null;
 }
+
+/** Code Review ad92070b (on card b03e636c) — what `notifyManagerOfIdleWorker` actually sent, so a
+ *  caller (the kickoff-confirm timer) can record an escalation marker ONLY on a real "broken-spawn"
+ *  send, never on a silent no-op or a differently-worded notice. */
+type IdleWorkerNotifyOutcome = "broken-spawn" | "never-completed" | "sent-other" | "none";
 
 /**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
@@ -6700,6 +6712,19 @@ export class SessionService {
         // classification, so it is never suppressed by the no-op/idle/no-nudge branches below).
         const draftNote = e.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
         if (e.role === "worker") {
+          // @decision b03e636c — decide the kickoff-confirm boot escalation FIRST, before any
+          // continuation nudge below — see `escalateParkedKickoffAtBoot`'s own doc for why the
+          // ordering is load-bearing. Escalates IN PLACE OF the normal nudge, never alongside it.
+          //
+          // Code Review ad92070b: `hasQueuedPending` reads the INTENT snapshot directly (never
+          // post-replay DB/pty state) — queued direction about to be replayed onto this worker is
+          // itself a discriminator against escalating a healthy worker; see that method's own doc.
+          //
+          // Code Review 397ff972: `e.busy` is the CAPTURED busy-at-capture flag (RestartResumeEntry,
+          // restart.ts:79) — a worker mid-turn when the restart hit is a second, independent healthy-
+          // worker signal alongside the persisted `w.busy` escalateParkedKickoffAtBoot reads itself.
+          const hasQueuedPending = (intent.pending?.[e.sessionId] ?? []).length > 0;
+          if (this.escalateParkedKickoffAtBoot(e.sessionId, e.hadUnsentDraft === true, hasQueuedPending, e.busy === true)) continue;
           // Card db05e657 (MAJOR 2 review fix): this daemon_restart path is the OTHER, mutually-exclusive
           // boot-resume branch (index.ts picks EXACTLY ONE of resumeFleetOnBoot / recoverCrashOrphanedWorkers
           // per boot) — until this fix it never consulted report state at all, so a `blocked` worker got this
@@ -10474,7 +10499,10 @@ export class SessionService {
       console.warn(`[give-up] ${sessionId} turn-1 kickoff (root ${rootMsgId}) exhausted its in-session requeue budget with no confirming hook ever arriving — re-minted as ${remintMsgId} (attempt ${chainDepth + 1}/${GIVE_UP_REMINT_LIMIT}) instead of parking immediately`);
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(), managerSessionId: w.parentSessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
-        kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "reminted", remintedAs: remintMsgId },
+        // @decision b03e636c — `origin:"kickoff"` discriminates this chain from an ordinary message's
+        // identically-shaped `session_message_gave_up` event (`handleGiveUpExhausted` never sets it) —
+        // see `escalateParkedKickoffAtBoot`'s own doc for why boot-reconcile needs this to tell the two apart.
+        kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "reminted", remintedAs: remintMsgId, origin: "kickoff" },
       });
       return;
     }
@@ -10492,7 +10520,8 @@ export class SessionService {
     const mootReason = this.suppressMootParkNotice(sessionId, w.parentSessionId, rootMsgId);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: w.parentSessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
-      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked", ...(mootReason ? { noticeSuppressed: true, noticeSuppressedReason: mootReason } : {}) },
+      // @decision b03e636c — origin:"kickoff", see the reminted branch's own note above.
+      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked", origin: "kickoff", ...(mootReason ? { noticeSuppressed: true, noticeSuppressedReason: mootReason } : {}) },
     });
     if (mootReason) {
       // eslint-disable-next-line no-console
@@ -10508,18 +10537,46 @@ export class SessionService {
     // could contradict pastBrokenSpawnHoldoff's own verdict); terminal wording unchanged otherwise.
     const pending = withinKickoffConfirmWindow(this.pty, sessionId, w.turnSeq);
     const msg = pending
-      ? `[loom:kickoff-confirm-pending] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff (${pending.composerDirtyLen} chars) has not yet been confirmed delivered, but a kickoff this size is still within its plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s) — this is NOT YET treated as broken. ${giveUpConfirmationHedge("the kickoff")} worker_list/worker_status's kickoffConfirmPending field reflects this same window; it clears once this worker's engine confirms the turn. If the window genuinely passes with still no confirmation, Loom will try to escalate to a [loom:worker-spawn-broken] notice on its own via a one-shot IN-MEMORY check timed to the window's end — but that check is lost across a daemon restart (a separate, not-yet-built improvement would re-arm it on boot), so if a restart happens before the window ends, check back yourself rather than assuming the escalation will still fire. VERIFY FIRST via worker_transcript before acting on this notice alone — do NOT worker_message or worker_merge it yet.`
-      : `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${confirmationLatencyProportionalityClause()} ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript — that is the decisive check: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Do NOT treat worker_list as an equivalent check: a worker that already retired cleanly (e.g. its work merged) can show NO row there at all, which reads identically to "the kickoff never ran" — an absent row is uninformative here either way, not confirmation of anything. If this worker has a bound task, tasks_get's merged/mergedSha field is a second, cheap signal (a merged task means the work already shipped, regardless of what worker_list shows). Only if worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
+      ? `[loom:kickoff-confirm-pending] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff (${pending.composerDirtyLen} chars) has not yet been confirmed delivered, but a kickoff this size is still within its plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s) — this is NOT YET treated as broken. ${giveUpConfirmationHedge("the kickoff")} worker_list/worker_status's kickoffConfirmPending field reflects this same window; it clears once this worker's engine confirms the turn. If the window genuinely passes with still no confirmation, Loom will escalate to a [loom:worker-spawn-broken] notice on its own via a one-shot timed check — this now survives a daemon restart too (card b03e636c re-arms it at boot-reconcile from the durable record of this park). VERIFY FIRST via worker_transcript before acting on this notice alone — do NOT worker_message or worker_merge it yet.`
+      : buildKickoffNeverConfirmedBrokenMsg(w);
     this.enqueueSystemNudge(w.parentSessionId, msg, { kind: "warning", taskId: w.taskId ?? null });
-    // @decision 8882e2ca — Major 1: arm the one-shot escalation EXACTLY when this window ends (never
-    // earlier, never left to an unrelated periodic cadence that skips taskless workers entirely).
-    if (pending) this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs);
+    if (pending) {
+      // @decision 8882e2ca — Major 1: arm the one-shot escalation EXACTLY when this window ends (never
+      // earlier, never left to an unrelated periodic cadence that skips taskless workers entirely).
+      this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs, rootMsgId);
+    } else {
+      // Code Review ad92070b (BLOCKING): this branch sends the TERMINAL notice immediately (the window
+      // had already elapsed by park time) but, before this fix, never recorded
+      // `kickoff_confirm_escalated` — a later restart would then re-send the SAME notice via
+      // `escalateParkedKickoffAtBoot` (which finds the parked chain unresolved) while ALSO suppressing
+      // that worker's normal continuation nudge. For an ordinary-sized kickoff (no extended window) this
+      // is the COMMONEST park branch, not an edge case.
+      // Code Review 397ff972: `source:"immediate"` (not "park") — distinguishes WHICH of the two
+      // terminal-notice-sending sites fired, since both are "park" states; see this record's own doc.
+      this.recordKickoffConfirmEscalated(sessionId, w.parentSessionId, w.taskId ?? null, rootMsgId, "immediate");
+    }
+  }
+
+  /** @decision b03e636c — the durable record `escalateParkedKickoffAtBoot` consults to never re-send
+   *  the same notice, from ANY escalation site (the immediate-park branch, the timer, or boot).
+   *  Best-effort: a DB hiccup here must never skip the notice it accompanies. */
+  private recordKickoffConfirmEscalated(sessionId: string, parentSessionId: string, taskId: string | null, rootMsgId: string, source: "immediate" | "timer" | "boot"): void {
+    try {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: parentSessionId, workerSessionId: sessionId,
+        taskId, kind: "kickoff_confirm_escalated", detail: { rootMsgId, source },
+      });
+    } catch (e) {
+      console.warn(`[give-up] appendEvent(kickoff_confirm_escalated) failed for ${sessionId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+    }
   }
 
   /** @decision 8882e2ca — arms the one-shot escalation timer; see `kickoffConfirmRecheckTimers`' own
    *  doc. Clears any PRIOR timer for this session first — never two outstanding at once. The fired
-   *  callback re-checks live state itself (see its own comments) rather than trusting the clears alone. */
-  private armKickoffConfirmRecheck(sessionId: string, delayMs: number): void {
+   *  callback re-checks live state itself (see its own comments) rather than trusting the clears alone.
+   *  @decision b03e636c — `rootMsgId` threaded through so the fired callback can audit itself via
+   *  `recordKickoffConfirmEscalated`; see that method's own doc. */
+  private armKickoffConfirmRecheck(sessionId: string, delayMs: number, rootMsgId: string): void {
     this.clearKickoffConfirmRecheckTimer(sessionId);
     const timer = setTimeout(() => {
       this.kickoffConfirmRecheckTimers.delete(sessionId);
@@ -10536,8 +10593,14 @@ export class SessionService {
       // a re-mint, or this can fire a hair early); if it STILL reads pending, RE-ARM for the remaining
       // time rather than silently dropping the ONLY coverage a taskless worker has.
       const stillPending = withinKickoffConfirmWindow(this.pty, sessionId, w.turnSeq);
-      if (stillPending) { this.armKickoffConfirmRecheck(sessionId, stillPending.windowMs - stillPending.sinceMs); return; }
-      try { this.notifyManagerOfIdleWorker(sessionId); } catch { /* best-effort */ }
+      if (stillPending) { this.armKickoffConfirmRecheck(sessionId, stillPending.windowMs - stillPending.sinceMs, rootMsgId); return; }
+      // Code Review ad92070b (BLOCKING): record the marker ONLY once `notifyManagerOfIdleWorker` says
+      // it actually sent a broken-spawn notice — this classifier can also no-op entirely (e.g. direction
+      // queued, about to drain) or send a DIFFERENT wording; recording unconditionally here would mark a
+      // root "escalated" when nothing was ever sent, permanently disabling a later, genuine escalation.
+      let outcome: IdleWorkerNotifyOutcome | undefined;
+      try { outcome = this.notifyManagerOfIdleWorker(sessionId); } catch { /* best-effort */ }
+      if (outcome === "broken-spawn" && w.parentSessionId) this.recordKickoffConfirmEscalated(sessionId, w.parentSessionId, w.taskId ?? null, rootMsgId, "timer");
     }, Math.max(0, delayMs));
     this.kickoffConfirmRecheckTimers.set(sessionId, timer);
   }
@@ -10547,6 +10610,85 @@ export class SessionService {
   private clearKickoffConfirmRecheckTimer(sessionId: string): void {
     const timer = this.kickoffConfirmRecheckTimers.get(sessionId);
     if (timer) { clearTimeout(timer); this.kickoffConfirmRecheckTimers.delete(sessionId); }
+  }
+
+  /**
+   * @decision b03e636c — re-arms `armKickoffConfirmRecheck`'s escalation at boot-reconcile for a
+   * TASKLESS worker (a TASKED one already gets `tickIdleWorkers`' periodic coverage) whose kickoff
+   * reached terminal PARK just before an otherwise-unrelated restart dropped the in-memory timer.
+   *
+   * Called from `resumeFleetOnBoot`'s worker branch BEFORE it composes ANY continuation nudge for this
+   * entry — deliberately, not after. `resumeFleetOnBoot`'s own continuation nudge (or even a replayed
+   * pending entry) can itself start the worker's first turn once the resumed pty drains, which flips
+   * `turnSeq`/`hasFirstTurnStarted` true — and the ordinary fire-time safety check every OTHER consumer
+   * of this escalation relies on (`armKickoffConfirmRecheck`'s own callback) would then permanently
+   * stand down, even though the ORIGINAL kickoff never landed and the worker that "started a turn" is
+   * actually context-free. Deciding here, from the PERSISTED pre-resume row, closes that race.
+   *
+   * Deliberately bypasses `notifyManagerOfIdleWorker`/`pastBrokenSpawnHoldoff`: both key their holdoff
+   * off the LIVE pty's `liveStartedAt`, which THIS resume just reset to "now" — calling them here would
+   * almost always read as "not past the holdoff yet" and silently suppress the notice. The pre-restart
+   * give-up ladder already proved this kickoff dead with more confidence than that live heuristic
+   * supplies; no new holdoff wait is needed or wanted.
+   *
+   * Code Review ad92070b (BLOCKING): `turnSeq` only counts COMPLETED turns (see its own field doc,
+   * pty/host.ts) — a kickoff that DID land, whose confirming hook simply never arrived, reads
+   * `turnSeq:0` for the ENTIRE DURATION of its (possibly long) first turn, exactly like a genuinely
+   * dead one. A restart mid that turn would otherwise escalate "broken" AND suppress the continuation
+   * nudge the worker needs to resume it — stranding a HEALTHY worker forever. Five discriminators, the
+   * SAME ones the live siblings already use (`handleKickoffGiveUpExhausted`'s own immediate-park check;
+   * `notifyManagerOfIdleWorker`'s taskless branch) or a direct restart-capture signal, stand down
+   * before any of the chain-lookup logic below even runs — ordered cheapest-first, the disk-reading
+   * transcript check LAST (Code Review 397ff972):
+   *   (a) the PERSISTED `w.busy` — still mid-turn as of the last write before this restart;
+   *   (b) `hasBusyAtCapture` — the RestartResumeEntry's OWN captured busy flag (restart.ts:79), a
+   *       second, independent busy signal (reproduced by CR 397ff972: a resume entry with
+   *       `busy:true` still got wrongly escalated without this check);
+   *   (c) queued pending direction from the restart intent — `resumeFleetOnBoot`'s own replay is about
+   *       to start a turn moments from now, which would itself resolve the "never confirmed" question;
+   *   (d) ANY `worker_report` ever recorded — the worker has engaged at least once;
+   *   (e) a non-empty on-disk engine transcript — a turn genuinely ran.
+   *
+   * Returns true iff it escalated (the caller must skip the normal continuation nudge for this entry) —
+   * false for any of the above five, a tasked worker (`tickIdleWorkers` already covers it; never
+   * double-escalate), a worker whose PERSISTED `turnSeq` is already >0, a chain with no
+   * `origin:"kickoff"` marker (a pre-upgrade parked event, or a generic message's own park — see that
+   * field's own doc, out of scope either way), a chain whose park notice was itself SUPPRESSED as moot
+   * (`detail.noticeSuppressed:true` — the live path already decided this specific notice shouldn't go
+   * out, e.g. superseded by a newer directive; boot must never resurrect it, Code Review 397ff972), an
+   * already-resolved chain (`confirmed-after-park`), or one already escalated
+   * (`kickoff_confirm_escalated` durably recorded, from the immediate-park send, the original timer,
+   * this boot, or an earlier boot) — never a second notice for the same root.
+   */
+  private escalateParkedKickoffAtBoot(sessionId: string, hadUnsentDraft: boolean, hasQueuedPending: boolean, hasBusyAtCapture: boolean): boolean {
+    const w = this.db.getSession(sessionId);
+    if (!w || w.taskId || !w.parentSessionId) return false;
+    if ((w.turnSeq ?? 0) > 0) return false;
+    if (w.busy) return false;
+    if (hasBusyAtCapture) return false;
+    if (hasQueuedPending) return false;
+    const events = this.db.listEventsForWorker(sessionId);
+    if (events.some((e) => e.kind === "worker_report")) return false;
+    if (w.engineSessionId && readTranscript(w.cwd, w.engineSessionId, w.harness).length > 0) return false;
+    const parkedKickoff = events.find((e) =>
+      e.kind === "session_message_gave_up" && e.detail?.outcome === "parked" && e.detail?.origin === "kickoff");
+    if (!parkedKickoff) return false;
+    if (parkedKickoff.detail?.noticeSuppressed === true) return false;
+    const rootMsgId = parkedKickoff.detail?.rootMsgId as string | undefined;
+    if (!rootMsgId) return false;
+    const resolved = events.some((e) =>
+      e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId && e.detail?.outcome === "confirmed-after-park");
+    if (resolved) return false;
+    const alreadyEscalated = events.some((e) => e.kind === "kickoff_confirm_escalated" && e.detail?.rootMsgId === rootMsgId);
+    if (alreadyEscalated) return false;
+    this.recordKickoffConfirmEscalated(sessionId, w.parentSessionId, w.taskId ?? null, rootMsgId, "boot");
+    // Code Review ad92070b: third person — this notice's recipient is the MANAGER, not the worker that
+    // lost the draft; DRAFT_LOSS_NOTE is written second-person ("you had...") for the opposite audience.
+    const draftClause = hadUnsentDraft
+      ? ` Also: worker ${sessionId} had an unsent composer draft at the moment of this restart — never submitted, so it is not part of its resumed history. This was likely its own attempt to confirm the kickoff.`
+      : "";
+    this.enqueueSystemNudge(w.parentSessionId, buildKickoffNeverConfirmedBrokenMsg(w) + draftClause, { kind: "warning", taskId: null });
+    return true;
   }
 
   /**
@@ -13404,13 +13546,18 @@ export class SessionService {
    * @decision df48366b — a taskless worker still needs broken-spawn + silent-finish coverage with no
    *  board state, and a role-less child (role:null) gets the SAME nudge path as role='worker' — neither
    *  may silently fall through with zero signal to its manager.
+   *
+   * Code Review ad92070b (on card b03e636c): returns what it ACTUALLY sent, `"broken-spawn"` iff a real
+   * `[loom:worker-spawn-broken]` notice went out; every other callsite ignores the return value
+   * unchanged (TS permits discarding a non-void return against a `=> void` callback type), so this is
+   * purely additive — `armKickoffConfirmRecheck`'s fired callback is the one new consumer.
    */
-  notifyManagerOfIdleWorker(workerSessionId: string): void {
+  notifyManagerOfIdleWorker(workerSessionId: string): IdleWorkerNotifyOutcome {
     const w = this.db.getSession(workerSessionId);
-    if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) return;
+    if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) return "none";
 
     if (!w.taskId) {
-      if (this.pty.getPendingEntries(workerSessionId).length > 0) return; // direction queued, about to drain
+      if (this.pty.getPendingEntries(workerSessionId).length > 0) return "none"; // direction queued, about to drain
       if (!w.engineSessionId) {
         // Same busy(false)-edge race classifyIdleWorker's broken-spawn branches guard against (see
         // BROKEN_SPAWN_HOLDOFF_MS's own doc) — this taskless path bypasses that classifier entirely (its
@@ -13420,8 +13567,9 @@ export class SessionService {
         // holdoff, the NEXT such edge fires this correctly; nothing is silently dropped forever.
         if (pastBrokenSpawnHoldoff(this.pty, w)) {
           try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
+          return "broken-spawn";
         }
-        return;
+        return "none";
       }
       // Has it EVER called worker_report? Checked before the DISCRIMINATOR-A read below (cheapest-and-
       // most-decisive-first, mirrors classifyIdleWorker's own ordering at ~9301-9311) — a worker that has
@@ -13436,20 +13584,21 @@ export class SessionService {
       ) {
         if (pastBrokenSpawnHoldoff(this.pty, w)) {
           try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
+          return "broken-spawn";
         }
-        return;
+        return "none";
       }
-      if (everReported) return; // already reported at least once — nothing to nudge about
+      if (everReported) return "none"; // already reported at least once — nothing to nudge about
       // @decision 6651bf24 — a started-but-turnSeq-0 taskless worker (neverCompletedTurn) is reworded,
       //  never asserted as a completion — see buildNeverCompletedTurnMsg's own doc for why.
       if ((w.turnSeq ?? 0) === 0) {
         try { this.pty.enqueueStdin(w.parentSessionId, buildNeverCompletedTurnMsg(w)); } catch { /* manager not live */ }
-        return;
+        return "never-completed";
       }
       // Genuinely completed >=1 turn and never reported — the ORIGINAL silent-finish signal, unchanged.
       const silentFinishMsg = `[loom:worker-idle] worker ${workerSessionId} finished a turn and is idle but has never called worker_report (taskless — no board card to check). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_message it or worker_stop it once reviewed.`;
       try { this.pty.enqueueStdin(w.parentSessionId, silentFinishMsg); } catch { /* manager not live */ }
-      return; // nothing else to classify without a task
+      return "sent-other"; // nothing else to classify without a task
     }
 
     const cls = this.classifyIdleWorker(workerSessionId);
@@ -13457,11 +13606,11 @@ export class SessionService {
     // "not disprovable" — suppress the nudge ENTIRELY (never even enqueued), exactly like not-stranded,
     // so a gate-running worker costs its manager zero turns while the gate is legitimately still going.
     // Only parked-gate-stale (below) escalates.
-    if (cls.kind === "not-evaluable" || cls.kind === "not-stranded" || cls.kind === "parked-gate") return;
+    if (cls.kind === "not-evaluable" || cls.kind === "not-stranded" || cls.kind === "parked-gate") return "none";
 
     if (cls.kind === "broken-spawn") {
       try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
-      return;
+      return "broken-spawn";
     }
 
     // @decision 8f36be30 — the stranded fallthrough reports OBSERVED turnSeq/lastActivity only, never
@@ -13488,6 +13637,7 @@ export class SessionService {
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle while its merge gate ${cls.opId}${cls.gatePhase ? ` (${cls.gatePhase})` : ""} runs on its own branch — no action needed; it will settle on its own and you'll get a [loom:merge-done]/[loom:merge-failed] nudge when it does. Only step in if you want to check on it: gate_status(${cls.opId}) / gate_queue, or worker_transcript ${workerSessionId}.`
       : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). Observed (single point-in-time read): turnSeq=${w.turnSeq ?? 0}, ~${Math.round((Date.now() - Date.parse(w.lastActivity)) / 60_000)} min since last activity — check these against how long this worker's turns normally take before treating either as decisive. It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (${zeroCommitMergeHazardNote()}), or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
+    return "sent-other";
   }
 
   /**

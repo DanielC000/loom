@@ -1385,6 +1385,19 @@ export type OrchestrationEventKind =
   //  this event too. A re-mint resets budget/increments chainDepth, never re-runs the same loop. A
   //  "parked" event with no later "confirmed-after-park" is NOT proof the message never landed.
   | "session_message_gave_up"
+  // Card b03e636c: the kickoff-confirm "broken" escalation actually fired — from any of THREE sites,
+  // named by `detail.source`: `"immediate"` (`handleKickoffGiveUpExhausted`'s own immediate-park
+  // branch, sent synchronously at park time when the plausible-confirm window has already elapsed),
+  // `"timer"` (the in-memory `armKickoffConfirmRecheck` one-shot timer, fired later for a park still
+  // inside its window), or `"boot"` (the boot-reconcile path, `resumeFleetOnBoot`'s
+  // `escalateParkedKickoffAtBoot`) — keyed by `detail.rootMsgId` (the SAME chain id a
+  // `session_message_gave_up` event carries). Filed so a LATER boot (this restart or a subsequent one)
+  // can tell "already escalated" apart from "still pending" and never re-send the same notice for the
+  // same root — before this card, `notifyManagerOfIdleWorker` dispatched via a bare `pty.enqueueStdin`
+  // with no durable record of having fired at all. (Card 397ff972: renamed from `"park"` to
+  // `"immediate"` — both the immediate-park branch and the boot path are states OF a park, so the
+  // original name didn't distinguish which site actually fired.)
+  | "kickoff_confirm_escalated"
   // ── Companion proactive heartbeat (CompanionHeartbeatWatcher, card 9488951e) ───────────────────────
   // A daemon-driven proactive turn was injected into the long-lived companion session: the watcher's
   // cadence came due and the session was LIVE + not rate-limit-parked, so a framed `[loom:heartbeat]`
@@ -2012,7 +2025,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   session_died: true, session_resume_attempt: true, session_recovered: true,
   session_recovery_abandoned: true, worker_report_undelivered: true, worker_exited_without_report: true,
   manager_exited_with_live_workers: true, session_message_queued: true, session_message_delivered: true,
-  session_message_gave_up: true, companion_heartbeat_fired: true, companion_heartbeat_deferred: true,
+  session_message_gave_up: true, kickoff_confirm_escalated: true, companion_heartbeat_fired: true, companion_heartbeat_deferred: true,
   companion_reminder_fired: true, companion_reminder_deferred: true, companion_zero_reply_detected: true,
   set_worker_mode: true,
   flush_worker_composer: true, poll_fired: true, poll_fire_failed: true, poll_baseline_seeded: true,
