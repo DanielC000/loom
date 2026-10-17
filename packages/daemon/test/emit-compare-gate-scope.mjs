@@ -46,6 +46,7 @@ import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce, pollUntil } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecgs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -289,9 +290,14 @@ try {
     let confirm2Settled = false;
     const p2 = sessions.confirmWorkerMerge(L2.mgrId, L2.workerId).then((r) => { confirm2Settled = true; return r; });
 
+    // Card d1dbf2fd: ambient-overshoot-calibrated (see _wait.mjs) — a full gate's own log (dist-importer
+    // advisory run, 426 files, 4-5 live workers) showed this exact wait failing with "L2 genuinely reached
+    // the semaphore's CAP-queue wait before L1 released" false at a bare 10000ms. Same shape as the
+    // reclassify sibling's (M)/(N)/(O) cap-queue-admission waits (card 7b9bafb7): a margin of 3 on top of
+    // the capped ambient-overshoot factor.
     const queued = await pollUntil(
       () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === L2.projId),
-      { timeoutMs: 10000 },
+      { timeoutMs: ambientScaledBudget(10000, 3) },
     );
     check("(L) L2 genuinely reached the semaphore's CAP-queue wait before L1 released", queued);
 
