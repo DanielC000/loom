@@ -435,6 +435,11 @@ function hashKey(key) {
   const realEntry = activeMergeQuarantineFor(d3);
   check("(I3 precondition) d3 is genuinely dual-armed at both synthetic keys", (realEntry?.armedKeys?.length ?? 0) === 2
     && (realEntry?.armedKeys ?? []).includes(keyNoFile) && (realEntry?.armedKeys ?? []).includes(keyHasFile));
+  // Card 78fccd3f, item 3: pin the NATURAL (insertion) order itself, not just membership — a future change
+  // to boot's own arm order could otherwise make this precondition pass without actually exercising (I3)'s
+  // own sort (the thing this fixture exists to isolate).
+  check("(I3 precondition) armedKeys' own NATURAL order has the no-file key FIRST, before any sort runs",
+    (realEntry?.armedKeys ?? [])[0] === keyNoFile);
   const idsI3 = quarantineLatchFileIdsFor(realEntry);
   check("(I3) THE SORT: the on-disk (has-file) id is returned FIRST despite natural insertion order", idsI3[0] === hashHasFile && idsI3[1] === hashNoFile);
 

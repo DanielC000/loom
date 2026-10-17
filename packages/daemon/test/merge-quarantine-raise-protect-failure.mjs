@@ -45,7 +45,7 @@ const {
   clearMergeQuarantineReporting, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot,
   listActiveMergeQuarantines, MERGE_QUARANTINE_DIR, enterMergeQuarantine, clearMergeQuarantineByToken,
   clearMergeQuarantineByRecordedPath, clearMergeQuarantineLatchFile, quarantineLatchFileIdsFor,
-  clearMergeQuarantine, assertRepoNotQuarantined,
+  clearMergeQuarantine, assertRepoNotQuarantined, ownedKeysIncluding,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -5417,6 +5417,92 @@ try {
   fresh152.clearMergeQuarantineByToken(zRepoC, uToken152);
   check("*** CARD 3152ec90 (U's own token still clears it) *** Zc unblocked after clearing U's real token post-reboot",
     fresh152.assertRepoNotQuarantined(zRepoC).ok === true);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 78fccd3f, item 1 — `enterMergeQuarantine`'s existing-branch raise built `liftedKeys` as a bare,
+  // UNFILTERED `[key, ...entry.armedKeys]`, re-including a stale armedKeys member `entryStillOwnsKey`
+  // would reject (the over-include direction `3152ec90` already fixed for `keysToLift`). `liftedKeys`
+  // feeds ONLY `excludeLiftedResolvedKey(s)`, so over-inclusion there is FAIL-OPEN. An honest repro
+  // attempt (worker_report, this card) found no constructible scenario where this site's own protect
+  // call reaches a REAL on-disk foreign occupant to exercise the exclusion on — narrowing-only here,
+  // fail-open NOT reproduced. THE FIX: this site now calls the new shared `ownedKeysIncluding(key, entry)`
+  // helper (mirrors `keysToLift`'s own filter), tested DIRECTLY below (the end-to-end protective-copy
+  // path can't discriminate filtered from unfiltered here, since nothing is ever written either way).
+  //
+  // `deleteMergeQuarantineLatchByKey`'s own former DEFAULT (used when no override narrows it) was a
+  // SEPARATE, genuinely reproduced CRITICAL regression — CR of this commit: its one caller
+  // (`clearMergeQuarantineByKey`'s own primary `keysToLift` loop) deletes every lifted key from
+  // `activeQuarantines` BEFORE calling it, so re-deriving `liftedKeys` from `entry.armedKeys` against
+  // that ALREADY-EMPTIED map made `entryStillOwnsKey` reject every other key, re-blocking an
+  // already-cleared repo after a reboot. Fixed by passing `keysToLift` (computed before the deletes) as
+  // an explicit override and REMOVING the default entirely — see
+  // `78fccd3f-dual-arm-clear-route-resurrection` in merge-quarantine-runtime-union-provenance.mjs.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r10 = makeToplevelRepo("78fccd3f-r10");
+  const d10 = path.join(r10, "gone-subdir10");
+  const zRepo10 = makeToplevelRepo("78fccd3f-Z");
+  const wRepo10 = makeToplevelRepo("78fccd3f-W");
+  const Z10 = canonicalRepoLockKey(zRepo10);
+  const W10 = canonicalRepoLockKey(wRepo10);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const m1Path10 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m1Path10, JSON.stringify({
+    repoPath: d10, branch: "78fccd3f-m1-branch", reason: "78fccd3f M1: no key",
+    enteredAt: 1000, tokens: ["78fccd3f-m1-token"],
+  }, null, 2) + "\n");
+  const m2Path10 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m2Path10, JSON.stringify({
+    repoPath: d10, branch: "78fccd3f-m2-branch", reason: "78fccd3f M2: resolvedKeys=[Z]",
+    enteredAt: 2000, tokens: ["78fccd3f-m2-token"], resolvedKeys: [Z10],
+  }, null, 2) + "\n");
+  const m3Path10 = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m3Path10, JSON.stringify({
+    repoPath: d10, branch: "78fccd3f-m3-branch", reason: "78fccd3f M3: resolvedKeys=[W]",
+    enteredAt: 3000, tokens: ["78fccd3f-m3-token"], resolvedKeys: [W10],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+
+  // Free Z10 and let an unrelated raise U reuse it — Z10 is now STALE relative to d10's own eventual twin.
+  clearMergeQuarantine(zRepo10);
+  const u10Token = enterMergeQuarantine(zRepo10, "78fccd3f-U-branch", "78fccd3f: unrelated raise U reusing freed Z10");
+  check("(78fccd3f precondition) Z10 is now owned by U, not d10", assertRepoNotQuarantined(zRepo10).ok === false);
+
+  // d10 raise merges M1+M2+M3 -> entry armedKeys=[Z10(stale), W10(owned)].
+  const d10RaiseToken = enterMergeQuarantine(d10, "78fccd3f-d10-raise-branch", "78fccd3f: d10 raise merging M1/M2/M3 twins");
+  const entry10 = activeMergeQuarantineFor(d10);
+  check("(78fccd3f precondition) d10's merged entry armedKeys includes both Z10 (stale) and W10 (owned)",
+    (entry10?.armedKeys ?? []).includes(Z10) && (entry10?.armedKeys ?? []).includes(W10));
+  check("(78fccd3f precondition) Z10 is genuinely stale relative to d10's own entry (entryStillOwnsKey's own premise)",
+    activeMergeQuarantineFor(zRepo10) !== entry10);
+
+  // *** CARD 78fccd3f *** THE HELPER ITSELF: W10 (still owned) survives; Z10 (stale) is excluded — even
+  // though entry10.armedKeys itself still names both.
+  const owned10 = ownedKeysIncluding(W10, entry10);
+  check("*** CARD 78fccd3f *** ownedKeysIncluding(W10, entry) excludes the stale Z10 member",
+    !owned10.includes(Z10));
+  check("*** CARD 78fccd3f *** ownedKeysIncluding(W10, entry) still includes W10 itself",
+    owned10.includes(W10));
+  check("*** CARD 78fccd3f *** ownedKeysIncluding(W10, entry) returns EXACTLY [W10] here — nothing else",
+    owned10.length === 1 && owned10[0] === W10);
+  // Degrade case: an undefined entry is just [key], never a crash.
+  check("*** CARD 78fccd3f *** ownedKeysIncluding(key, undefined) degrades to [key]",
+    JSON.stringify(ownedKeysIncluding(W10, undefined)) === JSON.stringify([W10]));
+
+  // Sanity: a entry's OWN currently-genuinely-owned secondary key is kept (this is NOT over-narrowing).
+  check("(78fccd3f sanity) W10 itself is still blocked (never touched by the checks above)",
+    assertRepoNotQuarantined(wRepo10).ok === false);
+  check("(78fccd3f sanity) U's own Z10 arm is untouched by the checks above",
+    assertRepoNotQuarantined(zRepo10).ok === false);
+
+  // Clean up this scenario's own outstanding tokens so later serial runs of this file see a clean slate.
+  clearMergeQuarantineByToken(zRepo10, u10Token);
+  clearMergeQuarantineByToken(d10, "78fccd3f-m1-token");
+  clearMergeQuarantineByToken(d10, "78fccd3f-m2-token");
+  clearMergeQuarantineByToken(d10, "78fccd3f-m3-token");
+  clearMergeQuarantineByToken(d10, d10RaiseToken);
   }
 } finally {
   for (const d of tmpDirs) {

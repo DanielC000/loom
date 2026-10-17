@@ -1715,12 +1715,11 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
  * claimant ({@link survivingSharedClaimRepoPaths}) that kept `final` on disk (empty if none) — a check
  * that never yields to `provenCoverage`. See the decision record.
  */
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath?: string, clearedEntry?: MergeQuarantineEntry, clearIdentity?: string, liftedKeysOverride?: ReadonlySet<string>): string[] {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string | undefined, liftedKeys: ReadonlySet<string>): string[] {
   const final = quarantinePathForKey(key);
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — every key THIS clear is itself touching, never
-  // `key` alone; `liftedKeysOverride` lets a per-iteration caller narrow it to keys ACTUALLY lifted,
-  // never the full `armedKeys` list — see the decision record.
-  const liftedKeys: ReadonlySet<string> = liftedKeysOverride ?? new Set([key, ...(clearedEntry?.armedKeys ?? [])]);
+  // `key` alone — the caller computes it (via `ownedKeysIncluding`/`keysToLift`) and must pass it
+  // explicitly; see the decision record's Follow-up 78fccd3f for why there is deliberately no default.
   // @decision 8db913e2 (Follow-up 0dc514dc) — ONLY when neither protect call below would read `final` at all (both
   // `clearingRepoPath`/`clearedEntry` absent) — a new read here otherwise steals an injected-failure
   // slot several tests key to a specific read NUMBER. See the decision record's Follow-up.
@@ -2692,9 +2691,9 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // slots to this rebuilt object, not just `key` (round 2 finding 2).
     const armedKeysForEntry = existing.armedKeys?.length ? existing.armedKeys : [key];
     const finalForKey = quarantinePathForKey(key);
-    // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — every key THIS raise's own write touches:
-    // `armedKeysForEntry` already IS that set (computed just above). See the decision record.
-    const liftedKeys: ReadonlySet<string> = new Set(armedKeysForEntry);
+    // @decision 8db913e2 (Follow-up 78fccd3f) — `liftedKeys` is `ownedKeysIncluding`, NEVER the raw
+    // `armedKeysForEntry` — the write loop below already re-gates each secondary key itself. See record.
+    const liftedKeys: ReadonlySet<string> = new Set(ownedKeysIncluding(key, existing));
     // @decision e0192ffb — protect a foreign, unincorporated occupant's sole physical copy at `key`'s own
     // final before this branch's two writes (both skip the degraded-occupant guard for `key` itself); must
     // run before `siblingIndices` is collected below. See the decision record.
@@ -3480,6 +3479,27 @@ function entryStillOwnsKey(key: string, entry: MergeQuarantineEntry): boolean {
 }
 
 /**
+ * `key` itself (unconditionally — the caller already freshly matched it) plus every OTHER member of
+ * `entry`'s own `armedKeys`, gated through {@link entryStillOwnsKey} — the SAME shape
+ * `clearMergeQuarantineByKey`'s own `keysToLift` computes INLINE (not via this helper — that computation
+ * runs BEFORE `keysToLift`'s own deletes, while this helper's one caller runs before any mutation too;
+ * see this file's own Follow-up 78fccd3f for why they stayed two separate computations). `undefined` for
+ * `entry` degrades to `[key]` alone.
+ *
+ * Serves `enterMergeQuarantine`'s existing-branch raise, feeding its own `liftedKeys` set into
+ * `excludeLiftedResolvedKey(s)` — never hand-roll a second, unfiltered `[key, ...entry.armedKeys]` at a
+ * new call site: over-including a key there is FAIL-OPEN (it wrongly strips a resolvedKey from a
+ * protective copy that should survive).
+ *
+ * @decision 8db913e2 (Follow-up 78fccd3f) — extracted because the raise path built this UNFILTERED,
+ * re-including a stale `armedKeys` member the entry no longer owns. See the decision record.
+ */
+export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | undefined): string[] {
+  if (!entry) return [key];
+  return [key, ...(entry.armedKeys ?? []).filter((k) => k !== key && entryStillOwnsKey(k, entry))];
+}
+
+/**
  * KEY-ADDRESSED core — empties the WHOLE outstanding-token set at once (round 7, M1) for the entry
  * currently armed at `key`: lifts every map slot it's armed under, deletes each one's physical latch,
  * sweeps a PENDING entry sharing `identityRepoPath`'s own identity, and deletes any now-unreferenced
@@ -3542,8 +3562,13 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // @decision d163aef5 (round 4) — neither protect pass below gates on resolvability anymore (round 3's
   // own gate let a RESOLVABLE eviction winner's clear destroy a foreign file at one of its OTHER armed
   // keys); the PRIMARY ownership check and the token-overlap BACKSTOP both run for every key, every clear.
+  //
+  // @decision 8db913e2 (Follow-up 78fccd3f, CR CRITICAL) — pass `keysToLift` (computed BEFORE the
+  // deletes above) as the override: re-deriving it AFTER those deletes makes every other key look
+  // un-owned, wrongly keeping a sibling's resolvedKey and re-blocking an already-cleared repo on reboot.
+  const liftedKeysForClear = new Set(keysToLift);
   for (const k of keysToLift) {
-    for (const rp of deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity)) keptReferencingRepoPaths.add(rp);
+    for (const rp of deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, liftedKeysForClear)) keptReferencingRepoPaths.add(rp);
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   const sourceFilesToSweep: string[] = [];

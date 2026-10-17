@@ -122,6 +122,10 @@ const SCENARIOS = [
   // rather than a real boot fixture, because card 1e739f4a's own masking tmp-promotion self-stamp makes
   // this reachable shape unobservable through a real boot today.
   "48bda567-no-fire-both-sides-informative-and-different",
+  // CR of card 78fccd3f, CRITICAL — the CLEAR route of PROBE B's own fixture (see that scenario's own
+  // comment for why a raise, not a clear, was used there): deleteMergeQuarantineLatchByKey's own
+  // liftedKeys was being recomputed AFTER keysToLift's own deletes already ran.
+  "78fccd3f-dual-arm-clear-route-resurrection",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -1116,6 +1120,74 @@ try {
     check("(precondition) the protective copy carries X's own token", !!xProtectiveFile?.parsed.tokens?.includes("x-token"));
     check("*** PROBE B *** the protective copy should NOT carry resolvedKey=Ky — Ky is Y's OWN other armed key, the very entry this protect call is protecting X FROM — today it WRONGLY does",
       xProtectiveFile?.parsed.resolvedKey !== ky);
+  } else if (scenarioName === "78fccd3f-dual-arm-clear-route-resurrection") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CR of card 78fccd3f, CRITICAL (reproduced) — the SAME dual-arm fixture as PROBE B above, but via
+    // `clearMergeQuarantine(y)` instead of a raise on W. `clearMergeQuarantineByKey`'s own `keysToLift`
+    // loop deletes every key Y is armed under FIRST (`activeQuarantines.delete`), then calls
+    // `deleteMergeQuarantineLatchByKey` once per lifted key with no override — so `ownedKeysIncluding`
+    // re-evaluates `entryStillOwnsKey` against the ALREADY-EMPTIED map and collapses `liftedKeys` to the
+    // one key being processed, re-including Ky in X's protective copy even though Ky is one of the two
+    // keys THIS SAME clear just lifted. THE FIX: `clearMergeQuarantineByKey` now passes `keysToLift`
+    // itself (computed BEFORE the deletes) as the override.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-mqrup-78f-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# 78fccd3f-dual-arm-clear-route-resurrection\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+    const kyHash = hashForKey(ky);
+
+    const x = path.join(os.tmpdir(), `loom-mqrup-78f-x-never-exists-${freshSfx()}`);
+    const w = path.join(os.tmpdir(), `loom-mqrup-78f-w-${freshSfx()}`);
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# 78fccd3f-dual-arm-clear-route-resurrection (w)\n");
+    execSync(`git init -q && git config user.email mqrup@loom && git config user.name mqrup`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const k2 = canonicalRepoLockKey(w);
+    const k2Hash = hashForKey(k2);
+    if (k2Hash === kyHash) throw new Error("78fccd3f-dual-arm-clear-route-resurrection: k2 collided with ky — re-run");
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `${kyHash}.json`);
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y dual-armed via a legacy stale resolvedKey=K2",
+      enteredAt: Date.now() - 60_000, tokens: ["y-token"], resolvedKey: k2,
+    }, null, 2) + "\n");
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${k2Hash}.json`);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded, physically at K2, resolvedKey points back at Y's own OTHER armed key",
+      enteredAt: Date.now() - 30_000, tokens: ["x-token"], resolvedKey: ky,
+    }, null, 2) + "\n");
+
+    // Deliberately NOT registering y/w — same reason as PROBE B: reach d163aef5's own collision path.
+    reenterMergeQuarantinesAtBoot([]);
+
+    check("(precondition) Y's own armedKeys includes BOTH Ky and K2", (() => {
+      const yEntry = listActiveMergeQuarantines().find((e) => e.repoPath === y);
+      const keys = new Set(yEntry?.armedKeys ?? []);
+      return keys.has(ky) && keys.has(k2);
+    })());
+    check("(precondition) X's own physical file is untouched before the clear", fs.readFileSync(xFile, "utf8").includes("x-token"));
+
+    clearMergeQuarantine(y);
+
+    check("mid-window: Y is unblocked right after its own clear", assertRepoNotQuarantined(y).ok === true);
+
+    const xProtectiveFile = fs.readdirSync(MERGE_QUARANTINE_DIR)
+      .map((f) => ({ f, parsed: (() => { try { return JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")); } catch { return undefined; } })() }))
+      .find((e) => e.parsed?.repoPath === x);
+    check("(precondition) a protective copy for X was minted", !!xProtectiveFile);
+    check("*** CARD 78fccd3f *** the protective copy does NOT carry resolvedKey=Ky — Ky is one of the TWO keys Y's OWN clear just lifted, not a key this clear left untouched",
+      xProtectiveFile?.parsed.resolvedKey !== ky);
+
+    const reboot1 = await rebootSim();
+    reboot1.reenterMergeQuarantinesAtBoot([]);
+    check("*** CARD 78fccd3f (reboot) *** Y stays unblocked after a reboot — no wrongly-carried resolvedKey resurrects it", reboot1.assertRepoNotQuarantined(y).ok === true);
+    check("X is still enforced after the reboot (its own token was never cleared)", !!reboot1.activeMergeQuarantineFor(x));
   } else if (scenarioName === "4b06875f-post-union-filter-clear-sticks") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // PROBE D — manager's own Round-2 design-checkpoint scenario (card 4b06875f): Finding 2's residual,

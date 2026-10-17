@@ -4901,9 +4901,51 @@ key before it could coincide) or is pre-empted by `clearMergeQuarantineByKey`'s 
 keys are ever touched in the first place. Fixed anyway, filter-only (narrowing, fail-closed direction),
 with no dedicated repro and no new committed fail-open scenario.
 
+This same filter ALSO narrows an existing-but-empty slot out of `touchedFinalBasenames`/the unreferenced-orphan
+sweep (Follow-up 78fccd3f, item 2) — fail-closed (a final that still held this entry's content there would
+survive and re-arm at the next boot instead of being swept); no path producing that state was found either.
+
 Pinned by `*** CARD 3152ec90 ***` in `merge-quarantine-raise-protect-failure.mjs` (right after the
 `3d27c045` scenario): the key assertion is that U's own entry, read via `listActiveMergeQuarantines()`
 immediately after the clear and BEFORE any query of its own repo, still carries `armedKeys` including the
 stale key — proving the slot was never touched, not merely rescued. Negative-control (`--ref main`): RED
 on the new assertions only, GREEN after, tree restored clean. All 42 `merge-quarantine*.mjs` files run
 serially, exit 0, under both `env -u LOOM_DEV -u LOOM_SUPERVISED` and `LOOM_DEV=1`.
+
+## Follow-up 78fccd3f
+
+Code Review `c399729b` of `3152ec90` found `deleteMergeQuarantineLatchByKey`'s own DEFAULT `liftedKeys`
+and `enterMergeQuarantine`'s existing-branch raise both built `liftedKeys` UNFILTERED — the same
+over-include direction `3152ec90` fixed for `keysToLift` itself. `liftedKeys` feeds only
+`excludeLiftedResolvedKey(s)`, so a stale `armedKeys` member surviving there is FAIL-OPEN (it can wrongly
+strip a resolvedKey from a protective copy that should have survived).
+
+**Raise path — narrowing-only, fail-open NOT reproduced.** An honest repro attempt (hermetic, in-process,
+reusing `3152ec90`'s own twin-plus-stale-key fixture) found no constructible scenario where this site's
+own protect call reaches a REAL on-disk foreign occupant to exercise the exclusion on: a boot-graduated
+twin's secondary armed key never gets a physical final written at all, and this module's own overlapping
+write-side guards (`d163aef5`, `e0192ffb`/`82032b5c`) prevent foreign content from durably coexisting at a
+key a stale-but-still-armed twin's OTHER key occupies. THE FIX: this site now calls a new shared helper,
+`ownedKeysIncluding(key, entry)` — `key` unconditionally plus every OTHER `armedKeys` member gated through
+`entryStillOwnsKey`. Tested directly, via `*** CARD 78fccd3f ***` in `merge-quarantine-raise-protect-
+failure.mjs` (the end-to-end protective-copy path can't discriminate filtered from unfiltered here).
+Surgical negative control (drop the filter, rebuild): RED on exactly those two assertions; restoring
+byte-identical (`cmp`-verified) turned it GREEN.
+
+**Clear path — a genuinely reproduced CRITICAL, found by a second Code Review (of `a57f1e26`), FIXED.**
+`deleteMergeQuarantineLatchByKey`'s former DEFAULT had exactly ONE caller — `clearMergeQuarantineByKey`'s
+own primary `keysToLift` loop — which deletes every key in `keysToLift` from `activeQuarantines` BEFORE
+that loop runs. Re-deriving `liftedKeys` from `entry.armedKeys` against that ALREADY-EMPTIED map made
+`entryStillOwnsKey` reject every other key, collapsing `liftedKeys` to the one key in hand and wrongly
+keeping a sibling key's own resolvedKey in a protective copy — a reboot then re-blocked an already-cleared
+repo. THE FIX: `clearMergeQuarantineByKey` now passes `keysToLift` (computed BEFORE the deletes) as an
+explicit override. With all 4 callers now passing one explicitly, the default was REMOVED entirely —
+`liftedKeys` is a required parameter, so it can never again be lazily re-evaluated against a map a caller
+already mutated.
+
+Pinned by `78fccd3f-dual-arm-clear-route-resurrection` in `merge-quarantine-runtime-union-provenance.mjs`
+(the clear-route sibling of that file's own `4b06875f-dual-arm-clear-resurrection` PROBE B). Checked out
+`a57f1e26`'s own `merge-quarantine.ts` alone (tsbuildinfo cleared, rebuilt): RED on exactly the 2 expected
+assertions; restored byte-identical (`cmp`-verified), rebuilt: GREEN. All 42 `merge-quarantine*.mjs` files
+run serially, exit 0, under both `env -u LOOM_DEV -u LOOM_SUPERVISED` and `LOOM_DEV=1`. Item 3 (same card):
+`merge-quarantine-clear-by-path.mjs`'s I3 precondition also asserts `armedKeys[0] === keyNoFile`.
