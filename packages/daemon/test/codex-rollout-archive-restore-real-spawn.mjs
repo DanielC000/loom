@@ -62,6 +62,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 import { waitUntil } from "./_wait.mjs";
 import { hermeticPort, listenHermetic } from "./_hermetic-port.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
+import { CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS, evaluateCodexGracefulStopExit } from "./_codex-graceful-stop.mjs";
 
 if (process.env.LOOM_RUN_CODEX_RESTORE_REAL_SPAWN !== "1") {
   console.log("WARN  SKIP  codex-rollout-archive-restore-real-spawn.mjs — opt-in only (one-time real-spawn proof, already recorded in docs/decisions/5172fe3a-codex-rollout-archiver-cannot-race-a-restore.md); set LOOM_RUN_CODEX_RESTORE_REAL_SPAWN=1 to run it deliberately.");
@@ -154,15 +155,14 @@ const events = {
 };
 const host = new PtyHost(events);
 
-// Card 22d995ca-style declared accommodation (mirrors codex-transcript-real-spawn.mjs's own
-// reportGracefulStopExitCode): the real stopCodex graceful-stop flake (card 176bdb0c, measured 2/13
-// trials) is a KNOWN, UNFIXED, DISCLOSED defect — never this file's concern to fix or hide.
-function reportGracefulStopExitCode(label, code, codexStopDiag) {
-  if (code === 0) {
-    check(`${label}: the real codex process exited with code 0 after a graceful stop`, true);
-  } else {
-    console.log(`WARN  ⚠️  ACCOMMODATION (card 176bdb0c): ${label} exited with code ${code} (not 0) after an INTENDED graceful stop — the KNOWN, LIVE, UNFIXED flake measured at 2/13 ≈ 15.4%. Not failing the gate on this observation. codexStopDiag: ${JSON.stringify(codexStopDiag)}`);
-  }
+// Card a35e2bd8: the real stopCodex graceful-stop flake (card 176bdb0c, measured 2/13 trials) is a KNOWN,
+// UNFIXED, DISCLOSED defect — never this file's concern to fix or hide. The decision logic + WARN text now
+// live in the SHARED `_codex-graceful-stop.mjs` helper (see its own header for the full history); this
+// thin wrapper only adds this file's own per-call `label` (it has two stop() call sites below).
+function reportGracefulStopExitCode(label, exited, intended, code, elapsedMs, codexStopDiag) {
+  const result = evaluateCodexGracefulStopExit({ exited, intended, code, elapsedMs, codexStopDiag });
+  if (result.warn) console.log(result.warn);
+  check(`${label}: ${result.reason}`, result.pass);
 }
 
 // ═══ PHASE 1: create a real conversation, one tiny turn ═══════════════════════════════════════════════
@@ -262,13 +262,15 @@ if (!capturedEngineId) {
 }
 
 console.log(`[info] stopping the initial conversation (engine id ${capturedEngineId}) before archiving its rollout`);
+const initialStopStartedAt = Date.now();
 host.stop(SESSION_ID, "graceful");
 try {
-  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop (initial)`, timeoutMs: 8000 });
-  reportGracefulStopExitCode("initial stop", exitedSessions.get(SESSION_ID)?.code, exitedSessions.get(SESSION_ID)?.codexStopDiag);
+  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop (initial)`, timeoutMs: CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS });
+  const exit = exitedSessions.get(SESSION_ID);
+  reportGracefulStopExitCode("initial stop", true, exit?.intended, exit?.code, Date.now() - initialStopStartedAt, exit?.codexStopDiag);
 } catch (err) {
-  console.log(`FAIL  ${err.message}`);
-  failures++;
+  console.log(`[info] ${err.message}`);
+  reportGracefulStopExitCode("initial stop", false);
   try { host.stop(SESSION_ID, "hard"); } catch { /* best-effort */ }
 }
 exitedSessions.delete(SESSION_ID); // so phase 2's own onExit check below cannot read this stale entry
@@ -348,13 +350,15 @@ try {
     `--- raw captured pty output (resume) ---\n${rawBuf2.slice(-4000)}`);
 
   console.log("[info] stopping the resumed conversation");
+  const resumedStopStartedAt = Date.now();
   host.stop(SESSION_ID, "graceful");
   try {
-    await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop (resumed)`, timeoutMs: 8000 });
-    reportGracefulStopExitCode("resumed-session stop", exitedSessions.get(SESSION_ID)?.code, exitedSessions.get(SESSION_ID)?.codexStopDiag);
+    await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop (resumed)`, timeoutMs: CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS });
+    const exit = exitedSessions.get(SESSION_ID);
+    reportGracefulStopExitCode("resumed-session stop", true, exit?.intended, exit?.code, Date.now() - resumedStopStartedAt, exit?.codexStopDiag);
   } catch (err) {
-    console.log(`FAIL  ${err.message}`);
-    failures++;
+    console.log(`[info] ${err.message}`);
+    reportGracefulStopExitCode("resumed-session stop", false);
     try { host.stop(SESSION_ID, "hard"); } catch { /* best-effort */ }
   }
 

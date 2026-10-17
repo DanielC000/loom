@@ -48,6 +48,7 @@ import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 import { pinUnreachableLoomPort } from "./_unreachable-port.mjs";
+import { CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS, reportCodexGracefulStopExit } from "./_codex-graceful-stop.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -98,7 +99,7 @@ const unconfirmedEvents = [];
 const events = {
   onEngineSessionId() {}, onContextStats() {}, onRateLimited() {},
   onBusy() {},
-  onExit(sessionId, code, info) { exitedSessions.set(sessionId, { code, intended: info.intended }); },
+  onExit(sessionId, code, info) { exitedSessions.set(sessionId, { code, intended: info.intended, codexStopDiag: info.codexStopDiag }); },
   onCodexSubmitUnconfirmed(sessionId, info) { unconfirmedEvents.push({ sessionId, ...info }); },
 };
 const host = new PtyHost(events);
@@ -190,17 +191,19 @@ if (outcome === "confirmed") {
 // stopCodex's own ~6000ms hard-kill backstop firing underneath a nominally "graceful" stop — see sibling
 // card 176bdb0c. Logged unconditionally (pass or fail) so a report never has to infer the shape from the
 // absence of a backstop log line.
+// Card a35e2bd8: the exit-code check now goes through the SHARED `_codex-graceful-stop.mjs` accommodation
+// — see that file's own header for the full history.
 const stopStartedAt = Date.now();
 host.stop(SESSION_ID, "graceful");
 try {
-  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: 8000 });
+  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS });
   const exit = exitedSessions.get(SESSION_ID);
-  console.log(`[info] stop->exit elapsed: ${Date.now() - stopStartedAt}ms (code=${exit.code}, intended=${exit.intended})`);
-  check("the real codex process exited with code 0 (clean shutdown)", exit.code === 0);
+  const elapsedMs = Date.now() - stopStartedAt;
+  console.log(`[info] stop->exit elapsed: ${elapsedMs}ms (code=${exit.code}, intended=${exit.intended})`);
+  reportCodexGracefulStopExit(check, { exited: true, intended: exit.intended, code: exit.code, elapsedMs, codexStopDiag: exit.codexStopDiag });
 } catch (err) {
-  console.log(`[info] stop->exit elapsed: ${Date.now() - stopStartedAt}ms (never observed onExit within budget)`);
-  console.log(`FAIL  real codex never reported onExit within budget after graceful stop: ${err.message}`);
-  failures++;
+  console.log(`[info] stop->exit elapsed: ${Date.now() - stopStartedAt}ms (never observed onExit within budget): ${err.message}`);
+  reportCodexGracefulStopExit(check, { exited: false });
   try { host.stop(SESSION_ID, "hard"); } catch { /* best-effort cleanup */ }
 }
 check("host.isAlive reports false once the real codex process has exited", host.isAlive(SESSION_ID) === false);

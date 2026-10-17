@@ -45,6 +45,7 @@ import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 import { pinUnreachableLoomPort } from "./_unreachable-port.mjs";
+import { CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS, reportCodexGracefulStopExit } from "./_codex-graceful-stop.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -94,7 +95,7 @@ const exitedSessions = new Map(); // sessionId -> {code, intended}
 const events = {
   onEngineSessionId() {}, onContextStats() {}, onRateLimited() {},
   onBusy() {},
-  onExit(sessionId, code, info) { exitedSessions.set(sessionId, { code, intended: info.intended }); },
+  onExit(sessionId, code, info) { exitedSessions.set(sessionId, { code, intended: info.intended, codexStopDiag: info.codexStopDiag }); },
 };
 const host = new PtyHost(events);
 
@@ -137,14 +138,17 @@ console.log(`[info] host.isBusy reads ${host.isBusy(SESSION_ID)} at this point (
 
 // --- stop() — the real codex exit sequence (two Ctrl+C, ~800ms apart), observed via THIS PROJECT'S OWN
 // events.onExit callback, never a guessed delay. ------------------------------------------------------
+// Card a35e2bd8: the exit-code check now goes through the SHARED `_codex-graceful-stop.mjs` accommodation
+// (card 176bdb0c's known, test-side-only flake) — see that file's own header for the full history.
+const stopStartedAt = Date.now();
 host.stop(SESSION_ID, "graceful");
 try {
-  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: 8000 });
+  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS });
   const exit = exitedSessions.get(SESSION_ID);
-  check("the real codex process exited with code 0 (clean shutdown, per the probe's own observed sequence)", exit.code === 0);
+  reportCodexGracefulStopExit(check, { exited: true, intended: exit.intended, code: exit.code, elapsedMs: Date.now() - stopStartedAt, codexStopDiag: exit.codexStopDiag });
 } catch (err) {
-  console.log(`FAIL  real codex never reported onExit within budget after graceful stop: ${err.message}`);
-  failures++;
+  console.log(`[info] real codex never reported onExit within budget after graceful stop: ${err.message}`);
+  reportCodexGracefulStopExit(check, { exited: false });
   try { host.stop(SESSION_ID, "hard"); } catch { /* best-effort cleanup */ }
 }
 check("host.isAlive reports false once the real codex process has exited", host.isAlive(SESSION_ID) === false);

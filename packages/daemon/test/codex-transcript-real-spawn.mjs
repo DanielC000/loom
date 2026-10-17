@@ -42,6 +42,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 import { waitUntil } from "./_wait.mjs";
 import { hermeticPort, listenHermetic } from "./_hermetic-port.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
+import { CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS, reportCodexGracefulStopExit } from "./_codex-graceful-stop.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -278,51 +279,22 @@ if (persistedRow) {
 
 // --- stop() — the real codex exit sequence, observed via THIS PROJECT'S OWN events.onExit. --------------
 //
-// ⚠️⚠️ DECLARED TEST-SIDE ACCOMMODATION (card 176bdb0c, stopgap landed by card 2efd4bd7) — NOT a fix.
-// `stopCodex`'s INTENDED graceful stop (packages/daemon/src/pty/host.ts) intermittently exits non-zero —
-// measured 2/13 valid trials ≈ 15.4% (176bdb0c DoD-1, both raw exit code 1: one fast-path ~1.9s shape
-// pointing at codex's own shutdown semantics for that state, one ~6.1s shape where Loom's own hard-kill
-// backstop fired). Observed live across 5 real merge gates on unrelated (codex-untouched) branches,
-// rejecting one merge outright. The defect is LIVE and UNFIXED — the real fix lives in pty/host.ts, which
-// is one-at-a-time and held by a different lane. Per 176bdb0c's DoD-2, production's stopCodex is NEVER
-// widened to accept this as success — this accommodation stays entirely on the test side.
-//
-// So: the exit code is still OBSERVED and REPORTED (never silently dropped), but a non-zero code no longer
-// fails this gate-blocking assertion. This is scoped to exactly this one check — every other assertion in
-// this file (engine-session-id capture, both readTranscript calls, engineTranscriptExists,
-// resolveTranscriptFile, the persisted DB row's engineSessionId + harness, the worker_transcript call) is
-// untouched and still fails the gate if it ever breaks. A hang/never-exits case (the waitUntil timeout
-// below) is a DIFFERENT failure mode than this — it still fails loud; only a completed, non-zero exit is
-// downgraded to non-blocking.
-//
-// Card 22d995ca: the line below leads with `WARN  ` (two spaces — the SAME convention `check()` already
-// uses for its own `PASS  `/`FAIL  ` prefix) so scripts/test-daemon.mjs's own declared-warning scan (see
-// the `WARN_LINE_RE`/`declaredWarnings` block near the end of that file) can find it and surface it in the
-// runner's own aggregate output even when this file's overall exit is 0 — the defect that card fixes: this
-// accommodation used to print a warning that survived NOWHERE once the file it lived in started passing.
-//
-// Removable once the real stopCodex fix lands on 176bdb0c and this reports clean for a sustained period —
-// see that card for the live defect status.
-// Card ba60e802 (DoD-2): print `codexStopDiag` on the WARN line below — it's already received on `onExit`'s
-// own `info` (pty/host.ts:6486) but was previously discarded. Card ee58ec79 is parked waiting for a
-// sighting carrying this payload, and it could never arrive: a PASSING gate keeps only PASS lines + the
-// WARNINGS block, discarding per-file stdout, while this accommodation exists precisely to stop the FAIL
-// that would otherwise dump it. The WARNINGS block IS retained on a passing gate, so printing it here
-// arms a trigger that was otherwise unreachable. Print-only — no assertion here changes.
-function reportGracefulStopExitCode(code, codexStopDiag) {
-  if (code === 0) {
-    check("the real codex process exited with code 0 after a graceful stop", true);
-  } else {
-    console.log(`WARN  ⚠️  ACCOMMODATION (card 176bdb0c): the real codex process exited with code ${code} (not 0) after an INTENDED graceful stop. This is the KNOWN, LIVE, UNFIXED flake measured at 2/13 ≈ 15.4% — NOT failing the gate on this observation. If you are reading this, please note the observed code and the stop→exit elapsed time on card 176bdb0c; the real stopCodex fix is still pending in pty/host.ts. codexStopDiag: ${JSON.stringify(codexStopDiag)}`);
-  }
-}
+// Card a35e2bd8: the declared test-side accommodation (card 176bdb0c, stopgap landed by card 2efd4bd7) is
+// now a SHARED helper (`_codex-graceful-stop.mjs`) used by every real-codex-spawn file's graceful-stop
+// check — see that file's own header for the full defect history, the three observed shapes, and why
+// production's stopCodex is never widened to accept this as success. This is scoped to exactly this one
+// check — every other assertion in this file (engine-session-id capture, both readTranscript calls,
+// engineTranscriptExists, resolveTranscriptFile, the persisted DB row's engineSessionId + harness, the
+// worker_transcript call) is untouched and still fails the gate if it ever breaks.
+const stopStartedAt = Date.now();
 host.stop(SESSION_ID, "graceful");
 try {
-  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: 8000 });
-  reportGracefulStopExitCode(exitedSessions.get(SESSION_ID)?.code, exitedSessions.get(SESSION_ID)?.codexStopDiag);
+  await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS });
+  const exit = exitedSessions.get(SESSION_ID);
+  reportCodexGracefulStopExit(check, { exited: true, intended: exit?.intended, code: exit?.code, elapsedMs: Date.now() - stopStartedAt, codexStopDiag: exit?.codexStopDiag });
 } catch (err) {
-  console.log(`FAIL  ${err.message}`);
-  failures++;
+  console.log(`[info] real codex never reported onExit within budget after graceful stop: ${err.message}`);
+  reportCodexGracefulStopExit(check, { exited: false });
   try { host.stop(SESSION_ID, "hard"); } catch { /* best-effort */ }
 }
 
