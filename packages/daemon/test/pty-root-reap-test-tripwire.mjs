@@ -271,43 +271,62 @@ try {
       process.platform !== "win32" || (typeof capturedCreationTime === "number" && capturedCreationTime > 0));
 
     if (process.platform === "win32") {
-      // (B4a) the occupant's own creationTime AGREES with the real captured value -> proven own root -> walk.
-      {
-        const killedPids = [];
-        reapOrphanedDescendants(liveRootPid, null, {
-          enumerate: async () => [
-            { pid: liveRootPid, ppid: process.pid, creationTime: capturedCreationTime },
-            { pid: SENTINEL_PID, ppid: liveRootPid, creationTime: capturedCreationTime + 1000 },
-          ],
-          kill: (pid) => { killedPids.push(pid); },
-        });
-        await waitUntil(
-          () => capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}:`)),
-          { timeoutMs: 8_000, label: "(B4a) agreeing-occupant sweep completion log" },
-        );
-        check("(B4a) a creationTime-PROVEN own root is NOT aborted",
-          !capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)));
-        check("(B4a) the walk genuinely proceeded — the fabricated child WAS recorded as swept",
-          killedPids.includes(SENTINEL_PID));
-      }
+      // @decision 914c9363 — never let the guard's own real OS enumeration run here (it can ETIMEDOUT
+      // under gate load); fabricate it instead, installed after the capture above settles and scoped to
+      // only the two calls below. See docs/decisions/914c9363-b4-guard-enumeration-fabricated-not-real.md.
+      const requireHere = createRequire(import.meta.url);
+      const cp = requireHere("node:child_process");
+      const originalExecFileSync = cp.execFileSync;
+      const DOTNET_UNIX_EPOCH_TICKS = 621_355_968_000_000_000;
+      const toTicks = (ms) => ms * 10_000 + DOTNET_UNIX_EPOCH_TICKS;
+      // One "pid,ppid,ticks" line, matching enumerateLivePidPpidRowsForTestGuard's real win32 parse
+      // format exactly (parseOrphanSweepLine / WIN32_SWEEP_FOREACH_BODY): ppid=process.pid proves
+      // ancestry to this test process, and ticks round-trips to the EXACT real captured creationTime
+      // (an integer ms*10_000 offset — no agreement-check slop introduced by the round trip).
+      cp.execFileSync = () => `${liveRootPid},${process.pid},${toTicks(capturedCreationTime)}\n`;
+      syncBuiltinESMExports();
+      try {
+        // (B4a) the occupant's own creationTime AGREES with the real captured value -> proven own root -> walk.
+        {
+          const killedPids = [];
+          reapOrphanedDescendants(liveRootPid, null, {
+            enumerate: async () => [
+              { pid: liveRootPid, ppid: process.pid, creationTime: capturedCreationTime },
+              { pid: SENTINEL_PID, ppid: liveRootPid, creationTime: capturedCreationTime + 1000 },
+            ],
+            kill: (pid) => { killedPids.push(pid); },
+          });
+          await waitUntil(
+            () => capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}:`)),
+            { timeoutMs: 8_000, label: "(B4a) agreeing-occupant sweep completion log" },
+          );
+          check("(B4a) a creationTime-PROVEN own root is NOT aborted",
+            !capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)));
+          check("(B4a) the walk genuinely proceeded — the fabricated child WAS recorded as swept",
+            killedPids.includes(SENTINEL_PID));
+        }
 
-      // (B4b) the occupant's own creationTime DISAGREES with the real captured value -> still aborts.
-      {
-        const killedPids = [];
-        reapOrphanedDescendants(liveRootPid, null, {
-          enumerate: async () => [
-            { pid: liveRootPid, ppid: process.pid, creationTime: capturedCreationTime + 10_000 },
-            { pid: SENTINEL_PID, ppid: liveRootPid, creationTime: capturedCreationTime + 11_000 },
-          ],
-          kill: (pid) => { killedPids.push(pid); },
-        });
-        await waitUntil(
-          () => capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)),
-          { timeoutMs: 8_000, label: "(B4b) mismatched-occupant abort log" },
-        );
-        check("(B4b) a mismatched creationTime still ABORTS the whole walk",
-          capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)));
-        check("(B4b) nothing was (attempted to be) swept when aborted", killedPids.length === 0);
+        // (B4b) the occupant's own creationTime DISAGREES with the real captured value -> still aborts.
+        {
+          const killedPids = [];
+          reapOrphanedDescendants(liveRootPid, null, {
+            enumerate: async () => [
+              { pid: liveRootPid, ppid: process.pid, creationTime: capturedCreationTime + 10_000 },
+              { pid: SENTINEL_PID, ppid: liveRootPid, creationTime: capturedCreationTime + 11_000 },
+            ],
+            kill: (pid) => { killedPids.push(pid); },
+          });
+          await waitUntil(
+            () => capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)),
+            { timeoutMs: 8_000, label: "(B4b) mismatched-occupant abort log" },
+          );
+          check("(B4b) a mismatched creationTime still ABORTS the whole walk",
+            capturedLines.some((l) => l.includes(`[pty-reap] root=${liveRootPid}: ABORTED`)));
+          check("(B4b) nothing was (attempted to be) swept when aborted", killedPids.length === 0);
+        }
+      } finally {
+        cp.execFileSync = originalExecFileSync;
+        syncBuiltinESMExports();
       }
     } else {
       console.log("WARN  SKIP  (B4) live-root-abort->walk transition — win32-only (no POSIX creationTime data); process.platform !== 'win32' here.");
