@@ -30,6 +30,7 @@ import pty from "node-pty";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 import { mcpAuthStub } from "./_mcp-auth.mjs";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -180,7 +181,11 @@ function findFreshRolloutFiles() {
   return found;
 }
 
-const deadline = Date.now() + 25000;
+// Card 421d10fd: was a flat 25000ms manual-poll budget, same host-contention exposure as the
+// boot-ready wait in codex-prompt-ascii-fold-real-spawn.mjs. Scale via the shared ambient calibration.
+const MCP_HANDSHAKE_TIMEOUT_MS = ambientScaledBudget(25_000, 3);
+console.log(`[calib] mcp-handshake budget ${MCP_HANDSHAKE_TIMEOUT_MS}ms`);
+const deadline = Date.now() + MCP_HANDSHAKE_TIMEOUT_MS;
 while (Date.now() < deadline) {
   if (inboundLog.some((l) => l.includes("method=tools/list")) || buf.includes("context left")) break;
   await new Promise((r) => setTimeout(r, 250));

@@ -42,7 +42,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 import { pinUnreachableLoomPort } from "./_unreachable-port.mjs";
 
@@ -104,10 +104,14 @@ const unsubscribe = host.subscribe(SESSION_ID, {
 });
 
 // --- Boot + trust-dialog + ready — mirrors every sibling real-spawn file's own discipline exactly. -----
+// Card 421d10fd: was a flat 20000ms budget on a real codex boot, vulnerable to general host contention.
+// Scale via the shared ambient-overshoot calibration instead of a bigger fixed guess.
+const BOOT_READY_TIMEOUT_MS = ambientScaledBudget(20_000, 3);
+console.log(`[calib] boot-ready budget ${BOOT_READY_TIMEOUT_MS}ms`);
 try {
   await waitUntil(() => host.isCodexBootReady(SESSION_ID) && !host.isBusy(SESSION_ID), {
     label: `${SESSION_ID} real codex reaches full boot readiness AND settles idle`,
-    timeoutMs: 20000,
+    timeoutMs: BOOT_READY_TIMEOUT_MS,
   });
 } catch (err) {
   console.log(`FAIL  real codex never reached an idle, boot-ready state within budget: ${err.message}`);
@@ -135,10 +139,13 @@ const enq = host.enqueueStdin(SESSION_ID, PROMPT, "system", undefined, undefined
 check("enqueueStdin delivered the one real turn immediately (session was idle post-boot)", enq.delivered === true);
 
 // --- Wait for the real turn to complete (idle again), then check what codex ACTUALLY WROTE. ------------
+// Card 421d10fd: was a flat 60000ms budget — the same host-contention exposure as the boot-ready wait.
+const TURN_IDLE_TIMEOUT_MS = ambientScaledBudget(60_000, 3);
+console.log(`[calib] turn-idle budget ${TURN_IDLE_TIMEOUT_MS}ms`);
 try {
   await waitUntil(() => host.isBusy(SESSION_ID) === false, {
     label: `${SESSION_ID} the real turn completes and codex goes idle again`,
-    timeoutMs: 60000,
+    timeoutMs: TURN_IDLE_TIMEOUT_MS,
   });
 } catch (err) {
   console.log(`FAIL  the real turn never went idle within budget: ${err.message}`);
@@ -151,13 +158,22 @@ try {
 // specimen with its dropping-class codepoints simply ABSENT (not replaced), so this comparison would FAIL
 // — a genuine RED-before-GREEN-after signal, not merely a check that engages without discriminating. ----
 const outputPath = path.join(scratchCwd, OUTPUT_FILENAME);
-let outputExists = fs.existsSync(outputPath);
-if (!outputExists) {
-  try {
-    await waitUntil(() => fs.existsSync(outputPath), { label: `${OUTPUT_FILENAME} appears in the real codex cwd`, timeoutMs: 10000 });
-    outputExists = true;
-  } catch { /* still checked, and reported, below */ }
-}
+// Card 421d10fd: settle-read — a bare existsSync raced a mid-write truncation. Wait for a stable size
+// across two polls, never for content === EXPECTED_CONTENT (that would mask a real truncation).
+const OUTPUT_FILE_TIMEOUT_MS = ambientScaledBudget(10_000, 3);
+console.log(`[calib] output-file budget ${OUTPUT_FILE_TIMEOUT_MS}ms`);
+let lastSize = -1;
+let outputExists = false;
+try {
+  await waitUntil(() => {
+    if (!fs.existsSync(outputPath)) return false;
+    const size = fs.statSync(outputPath).size;
+    const stable = size === lastSize;
+    lastSize = size;
+    return stable;
+  }, { label: `${OUTPUT_FILENAME} appears in the real codex cwd and its size settles`, timeoutMs: OUTPUT_FILE_TIMEOUT_MS, intervalMs: 250 });
+  outputExists = true;
+} catch { /* still checked, and reported, below */ }
 check(`codex actually created ${OUTPUT_FILENAME} in its cwd (demonstrable action on the delivered text, not just a reply)`, outputExists);
 
 if (outputExists) {
