@@ -3507,7 +3507,13 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // Lift EVERY key this entry is armed under (its own tracked set), never reference equality — a union or
   // an orphan merge REBUILDS the entry object, so a map slot holding an OLDER build of the "same" logical
   // entry is no longer `===` the one `key` resolves to (round 2 finding 2).
-  const keysToLift = entry?.armedKeys?.length ? entry.armedKeys : [key];
+  //
+  // @decision 3152ec90 — gate every OTHER `armedKeys` member through `entryStillOwnsKey` (never `key`
+  // itself, already freshly matched) — an unconditional lift here deletes an unrelated raise's own live
+  // map slot once a boot-diverted twin's `armedKeys` goes stale. See the decision record.
+  const keysToLift = entry?.armedKeys?.length
+    ? [key, ...entry.armedKeys.filter((k) => k !== key && entryStillOwnsKey(k, entry))]
+    : [key];
   // @decision 8db913e2 (round 4) — every physical final this clear's own write path touches, for the
   // `tombstoneIfNotSurviving` call at the end — see that function's own doc, part (b).
   const touchedFinalBasenames = keysToLift.map((k) => path.basename(quarantinePathForKey(k)));
@@ -3686,13 +3692,17 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   // @decision 8db913e2 (Follow-up 4b06875f, Round 3, CR be296830 finding 1) — every key this phase's own
   // matched-active clears will unconditionally lift, collected HERE (before any clear runs) so the
   // matchedPending loop below can union it into its own liftedKeysOverride — see the decision record.
+  //
+  // @decision 3152ec90 — gated through `entryStillOwnsKey` (never `key` itself) — same reason as
+  // `clearMergeQuarantineByKey`'s own `keysToLift`. See the decision record.
   const activeLiftedKeys = new Set<string>();
   for (const [key, entry] of activeQuarantines) {
     if (directPathIdentity(entry.repoPath) !== identity) continue;
     if (seen.has(entry)) continue; // same logical entry armed under >1 key (armedKeys) — clear it once
     seen.add(entry);
     matched.push({ key, repoPath: entry.repoPath });
-    for (const k of entry.armedKeys?.length ? entry.armedKeys : [key]) activeLiftedKeys.add(k);
+    activeLiftedKeys.add(key);
+    for (const k of entry.armedKeys ?? []) { if (entryStillOwnsKey(k, entry)) activeLiftedKeys.add(k); }
   }
   const keptReferencingRepoPaths = new Set<string>();
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at the matchedPending loop's own
@@ -4061,8 +4071,12 @@ function pendingLatchIdFor(sourceFile: string): string {
  * none with a file at all — see the decision record.
  */
 export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[] {
-  if (entry.armedKeys?.length) {
-    const ids = [...new Set(entry.armedKeys.map(quarantineHashForKey))];
+  // @decision 3152ec90 — gate every member through `entryStillOwnsKey` first — a stale `armedKeys`
+  // member would otherwise hand out a FOREIGN entry's own latch id as if it belonged to `entry`.
+  // See the decision record.
+  const ownedArmedKeys = entry.armedKeys?.filter((k) => entryStillOwnsKey(k, entry)) ?? [];
+  if (ownedArmedKeys.length) {
+    const ids = [...new Set(ownedArmedKeys.map(quarantineHashForKey))];
     return ids.sort((a, b) => {
       const aExists = fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${a}.json`));
       const bExists = fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${b}.json`));

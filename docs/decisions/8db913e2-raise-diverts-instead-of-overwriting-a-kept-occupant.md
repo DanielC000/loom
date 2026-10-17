@@ -4866,3 +4866,44 @@ Pinned by `*** CARD bfc9356e ***` in `merge-quarantine-raise-protect-failure.mjs
 `d524d1c4` scenario): partial clear stays active + ambiguous (asserted against the real refusal text,
 confirmed to carry both the "unconfirmed-kill" and "ambiguous"/"collide" wording `721c1123` described),
 full clear resolves cleanly.
+
+## Follow-up 3152ec90
+
+Code Review `7c48d35c` of `3d27c045`: `clearMergeQuarantineByKey`'s own `keysToLift` (`merge-
+quarantine.ts:3500`, formerly `3510-3514`) deletes every member of `entry.armedKeys` from
+`activeQuarantines` unconditionally — never gated by `entryStillOwnsKey` (`:3475`) the way its own
+pending-sibling loop two screens down already is. Once a boot-diverted twin's `armedKeys` goes stale
+(the freed key gets reused by an unrelated, later raise U), clearing the stale entry deletes U's own live
+map slot.
+
+**Reproduced, and confirmed NOT fail-open.** The safety net: `deleteMergeQuarantineLatchByKey`'s own
+per-key protect call (`:1739`, `protectUnincorporatedOccupantBeforeDelete` → `protectOccupantContentBeforeDelete`
+at `:2068`) reads the physical content at the stale key, recognizes it belongs to a different identity
+(U), and durably copies it aside into a pending-divert record before unlinking the original — `activeMergeQuarantineFor`'s
+own lazy-graduation tail then re-arms U on the very next query, in-process and (since the divert is
+durable) across a reboot. This is a DELIBERATE invariant (built across `4900c365`/`d2582692`/`d163aef5`/
+`63e49ee2` for a different purpose — a write must never destroy a foreign occupant's only durable copy)
+but an INCIDENTAL rescue for this bug: it runs beside the unconditional in-memory delete over the same
+stale `keysToLift`, not because of it. A SEPARATE, independent guard closes the staleness window across
+a reboot: `d163aef5`'s boot-time rule ("never union a degraded entry into a verified sibling's slot")
+means a twin's own stale key, once genuinely reused by a verified occupant, is never re-armed into
+`armedKeys` after a restart — confirmed empirically (reboot between the free and the reuse never lets
+the staleness form at all).
+
+**THE FIX:** `keysToLift`'s non-`key` members are now filtered through `entryStillOwnsKey` — U's own slot
+is never touched, not merely rescued. The same filter was applied to two more unconditional-`armedKeys`
+reads the card named: `quarantineLatchFileIdsFor` (`:4073`, a stale member would hand out U's own latch
+id as d9's), and `clearMergeQuarantineByRecordedPath`'s `activeLiftedKeys` (`:3698`). For `activeLiftedKeys`,
+an honest attempt to reproduce a concrete fail-open (a stale member causing `excludeLiftedResolvedKey` to
+wrongly strip an unrelated occupant's own `resolvedKey`) did not succeed — every constructible collision
+either never forms (the write-side divert machinery already relocates foreign content away from a shared
+key before it could coincide) or is pre-empted by `clearMergeQuarantineByKey`'s own fix narrowing which
+keys are ever touched in the first place. Fixed anyway, filter-only (narrowing, fail-closed direction),
+with no dedicated repro and no new committed fail-open scenario.
+
+Pinned by `*** CARD 3152ec90 ***` in `merge-quarantine-raise-protect-failure.mjs` (right after the
+`3d27c045` scenario): the key assertion is that U's own entry, read via `listActiveMergeQuarantines()`
+immediately after the clear and BEFORE any query of its own repo, still carries `armedKeys` including the
+stale key — proving the slot was never touched, not merely rescued. Negative-control (`--ref main`): RED
+on the new assertions only, GREEN after, tree restored clean. All 42 `merge-quarantine*.mjs` files run
+serially, exit 0, under both `env -u LOOM_DEV -u LOOM_SUPERVISED` and `LOOM_DEV=1`.

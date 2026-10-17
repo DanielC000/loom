@@ -403,12 +403,24 @@ function hashKey(key) {
 // (I2)'s own result). This isolates the sort's OWN contract directly: armedKeys whose NATURAL (insertion)
 // order has the NO-FILE key first and the HAS-FILE key second — the shape PASS 1's original (now-removed)
 // degraded-dual-arm used to produce, and the one the round-3 sort (card c0be9bf9) exists for.
+//
+// @decision 3152ec90 — a bare, hand-constructed entry object (never actually armed anywhere) is no longer
+// a valid fixture here: quarantineLatchFileIdsFor now gates every armedKeys member through
+// entryStillOwnsKey, so an unarmed synthetic object reports ZERO ids regardless of what it claims. Arm
+// BOTH synthetic keys for real via a single pending latch's own `resolvedKeys` (PASS 1's genuine degraded
+// dual-arm, never a constructed object) — natural insertion order is still [no-file, has-file], and this
+// is now a genuinely-armed entry the entryStillOwnsKey gate itself approves of. See the decision record.
 {
   const keyNoFile = `/synthetic/sort-check/no-file-${sfx}`;
   const keyHasFile = `/synthetic/sort-check/has-file-${sfx}`;
   const hashNoFile = hashKey(keyNoFile);
   const hashHasFile = hashKey(keyHasFile);
+  const d3 = `/synthetic/sort-check/unresolvable-repo-${sfx}`;
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // repoPath is deliberately a DIFFERENT, foreign-looking identity (never d3 itself — PASS1 treats a
+  // final `.json` whose own repoPath IS d3 as a second raise for d3, breaking the dual-arm this fixture
+  // needs). Booting below ALSO gives this unresolvable identity its own independent pending entry (see
+  // the cleanup note further down) — cleared separately, after d3's own cleanup.
   fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashHasFile}.json`), JSON.stringify({
     repoPath: "/unused/sort-check-fixture", branch: "b", reason: "fixture file for the sort check only",
     enteredAt: Date.now(), tokens: ["unused"],
@@ -416,13 +428,25 @@ function hashKey(key) {
   check("(I3 precondition) the has-file hash's own file exists", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${hashHasFile}.json`)));
   check("(I3 precondition) the no-file hash's own file does NOT exist", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${hashNoFile}.json`)));
 
-  const constructedEntry = {
-    repoPath: "/unused/sort-check-entry", branch: "b", reason: "r", enteredAt: Date.now(), tokens: ["t"],
-    armedKeys: [keyNoFile, keyHasFile], // NATURAL insertion order: no-file FIRST, has-file SECOND
-  };
-  const idsI3 = quarantineLatchFileIdsFor(constructedEntry);
+  const pendingId3 = hashKey(`pending-for-i3-${sfx}`);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${pendingId3}.json`), JSON.stringify({
+    repoPath: d3, branch: "b3", reason: "r", enteredAt: Date.now(), tokens: ["t3"],
+    resolvedKeys: [keyNoFile, keyHasFile], // NATURAL insertion order: no-file FIRST, has-file SECOND
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  const realEntry = activeMergeQuarantineFor(d3);
+  check("(I3 precondition) d3 is genuinely dual-armed at both synthetic keys", (realEntry?.armedKeys?.length ?? 0) === 2
+    && (realEntry?.armedKeys ?? []).includes(keyNoFile) && (realEntry?.armedKeys ?? []).includes(keyHasFile));
+  const idsI3 = quarantineLatchFileIdsFor(realEntry);
   check("(I3) THE SORT: the on-disk (has-file) id is returned FIRST despite natural insertion order", idsI3[0] === hashHasFile && idsI3[1] === hashNoFile);
 
+  clearMergeQuarantineByRecordedPath(d3);
+  // The fixture file's OWN repoPath ("/unused/sort-check-fixture") is itself unresolvable, so booting
+  // above ALSO gave it its own independent pending entry (same sourceFile basename as d3's own keyHasFile
+  // final) — d3's clear just above protects-and-rehomes its content (foreignPending in
+  // deleteMergeQuarantineLatchByKey) rather than touching it, since it's a genuinely different identity.
+  // Clear that identity too, or it leaks into every later section's own listActiveMergeQuarantines() count.
+  clearMergeQuarantineByRecordedPath("/unused/sort-check-fixture");
   try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, `${hashHasFile}.json`)); } catch { /* best-effort */ }
 }
 

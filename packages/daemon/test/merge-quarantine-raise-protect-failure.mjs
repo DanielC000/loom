@@ -5320,6 +5320,104 @@ try {
   check("*** CARD 3d27c045 (reboot) *** W9's own real repo is NOT re-blocked after a reboot — nothing durable survives naming an already-cleared token",
     fresh3d27c045.assertRepoNotQuarantined(wRepo9).ok === true);
   }
+
+  // CARD 3152ec90, CLEARMERGEQUARANTINEBYKEY'S OWN keysToLift LIFTS AN UNRELATED RAISE'S LIVE MAP SLOT —
+  // Code Review 7c48d35c of this card's own 3d27c045 fix: `clearMergeQuarantineByKey`'s `keysToLift`
+  // (merge-quarantine.ts) deletes EVERY key in `entry.armedKeys` from `activeQuarantines` unconditionally,
+  // never gated by `entryStillOwnsKey` the way its own pending-sibling loop two screens down already is.
+  // Once a boot-diverted twin's OWN armedKeys goes stale (the freed key gets reused by a totally
+  // unrelated, later raise U), clearing the STALE entry's tokens deletes U's own live map slot — U is
+  // NOT fail-open (deleteMergeQuarantineLatchByKey's own protect-before-delete chokepoint re-homes U's
+  // content into a pending-divert record, and activeMergeQuarantineFor's lazy-graduation re-arms it on
+  // the very next query — a deliberate but INCIDENTAL rescue, not designed for this bug), but the map
+  // slot itself is destroyed and rebuilt for no reason. THE FIX: `keysToLift`'s non-`key` members are now
+  // filtered through `entryStillOwnsKey` first, mirroring the existing pending-sibling gate; U's own slot
+  // is never touched at all. The SAME gate is also applied to `quarantineLatchFileIdsFor` (a stale
+  // armedKeys member would otherwise hand out U's own latch id as if it belonged to d9) and to
+  // `clearMergeQuarantineByRecordedPath`'s own `activeLiftedKeys` (its own exclusion-set union feeding
+  // `excludeLiftedResolvedKey` downstream) — see the decision record's own "Follow-up 3152ec90" for why
+  // the latter was NOT independently reproduced as fail-open, and was fixed anyway (narrowing only).
+  {
+  const r9c = makeToplevelRepo("3152ec90-r9");
+  const d9c = path.join(r9c, "gone-subdir9c");
+  const zRepoC = makeToplevelRepo("3152ec90-Z");
+  const wRepoC = makeToplevelRepo("3152ec90-W");
+  const Zc = canonicalRepoLockKey(zRepoC);
+  const Wc = canonicalRepoLockKey(wRepoC);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const m1PathC = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m1PathC, JSON.stringify({
+    repoPath: d9c, branch: "3152ec90-m1-branch", reason: "3152ec90 M1: no key",
+    enteredAt: 1000, tokens: ["3152ec90-m1-token"],
+  }, null, 2) + "\n");
+  const m2PathC = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m2PathC, JSON.stringify({
+    repoPath: d9c, branch: "3152ec90-m2-branch", reason: "3152ec90 M2: resolvedKeys=[Z]",
+    enteredAt: 2000, tokens: ["3152ec90-m2-token"], resolvedKeys: [Zc],
+  }, null, 2) + "\n");
+  const m3PathC = path.join(MERGE_QUARANTINE_DIR, `pending-${randomUUID().replace(/-/g, "").slice(0, 24)}.json`);
+  fs.writeFileSync(m3PathC, JSON.stringify({
+    repoPath: d9c, branch: "3152ec90-m3-branch", reason: "3152ec90 M3: resolvedKeys=[W]",
+    enteredAt: 3000, tokens: ["3152ec90-m3-token"], resolvedKeys: [Wc],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("(3152ec90 precondition) Zc's own real repo is blocked right after boot (M2's own twin arm)", assertRepoNotQuarantined(zRepoC).ok === false);
+
+  // Step 2: clearMergeQuarantine(zRepoC) lifts Z's twin arm (M2's own); M2's pending record survives
+  // (clearMergeQuarantine is addressed by zRepoC's OWN identity, never d9c's) with its stale armedKeys=[Z].
+  clearMergeQuarantine(zRepoC);
+  check("(3152ec90 step 2) Zc is NOT quarantined right after its own clear", assertRepoNotQuarantined(zRepoC).ok === true);
+
+  // Step 3: an unrelated raise U on zRepoC arms Z (reusing the freed key).
+  const uToken152 = enterMergeQuarantine(zRepoC, "3152ec90-U-branch", "3152ec90: unrelated raise U on zRepoC reusing the freed key Z");
+  check("(3152ec90 step 3) Zc IS quarantined by U right after U's raise", assertRepoNotQuarantined(zRepoC).ok === false);
+
+  // Step 4: a d9c raise merges the twins (M1+M2+M3) via mergeTokenIntoPendingEntries, giving
+  // armedKeys=[Z,W] with Z stale (U now genuinely owns Z, not d9c).
+  const raiseToken152 = enterMergeQuarantine(d9c, "3152ec90-d9-raise-branch", "3152ec90: d9c raise merging M1/M2/M3 twins");
+  const d9cMerged = activeMergeQuarantineFor(d9c);
+  check("(3152ec90 step 4) d9c's merged entry carries armedKeys [Z,W] (Z stale)", (d9cMerged?.armedKeys ?? []).includes(Zc) && (d9cMerged?.armedKeys ?? []).includes(Wc));
+
+  // *** CARD 3152ec90 (quarantineLatchFileIdsFor) *** the listing for d9c must never name U's own latch
+  // id — U's own id (from its OWN, correctly-owned entry) must not appear among d9c's ids.
+  const uOwnId152 = quarantineLatchFileIdsFor(activeMergeQuarantineFor(zRepoC))[0];
+  check("*** CARD 3152ec90 (quarantineLatchFileIdsFor) *** d9c's own listed ids do NOT name U's own latch id",
+    !quarantineLatchFileIdsFor(d9cMerged).includes(uOwnId152));
+
+  // Step 5: clear EVERY d9c token (m1, m2, m3, raise) — the LAST clear hits clearMergeQuarantineByKey
+  // with entry.armedKeys=[Z,W]; pre-fix, the unconditional delete wiped U's live map slot at Z.
+  clearMergeQuarantineByToken(d9c, "3152ec90-m1-token");
+  clearMergeQuarantineByToken(d9c, "3152ec90-m2-token");
+  clearMergeQuarantineByToken(d9c, "3152ec90-m3-token");
+  clearMergeQuarantineByToken(d9c, raiseToken152);
+
+  check("(3152ec90 step 5) d9c itself is fully cleared", assertRepoNotQuarantined(d9c).ok === true);
+
+  // *** CARD 3152ec90 (THE KEY ASSERTION) *** immediately after the clear, BEFORE any query of zRepoC
+  // (which would trigger activeMergeQuarantineFor's own lazy-graduation re-arm and mask the defect), U's
+  // own entry (found by its token) must STILL carry armedKeys including Z — i.e. the fix means U's own
+  // map slot was never touched at all, not merely that it gets rescued afterward.
+  const uRaw152 = listActiveMergeQuarantines().find((e) => e.tokens.includes(uToken152));
+  check("*** CARD 3152ec90 (THE FIX) *** U's own entry still carries armedKeys including Z immediately after the clear, untouched",
+    !!uRaw152 && (uRaw152.armedKeys ?? []).includes(Zc));
+  // And the dir-state corollary: U's own final `<hash>.json` is still in place, never renamed to a
+  // pending-divert name — the protect-and-rehome dance never fires at all once Z is never touched.
+  check("*** CARD 3152ec90 (THE FIX, dir state) *** U's own final latch file is still in place, never diverted to pending-*",
+    fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${uOwnId152}.json`)));
+
+  check("(3152ec90, sanity) Zc (U) is still blocked in-process — U's own token is still outstanding",
+    assertRepoNotQuarantined(zRepoC).ok === false);
+
+  const fresh152 = await freshBootModule();
+  fresh152.reenterMergeQuarantinesAtBoot([]);
+  check("(3152ec90, reboot) Zc (U) is still blocked after a reboot", fresh152.assertRepoNotQuarantined(zRepoC).ok === false);
+  check("(3152ec90, reboot) d9c stays clear after reboot (not resurrected)", fresh152.assertRepoNotQuarantined(d9c).ok === true);
+
+  fresh152.clearMergeQuarantineByToken(zRepoC, uToken152);
+  check("*** CARD 3152ec90 (U's own token still clears it) *** Zc unblocked after clearing U's real token post-reboot",
+    fresh152.assertRepoNotQuarantined(zRepoC).ok === true);
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
