@@ -4867,6 +4867,97 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD bfc9356e — A PARTIAL clearMergeQuarantineByToken ON A DUAL-TRACKED TWIN LEAVES THE UNION
+  // CORRECTLY ACTIVE AND AMBIGUOUS; A FULL CLEAR (every contributor's own token) RESOLVES IT CLEANLY.
+  // Investigate-first finding: the SAME d524d1c4 fixture shape leaves the active entry a UNION of THREE
+  // outstanding tokens by the time its own merge-branch divert runs (d6's own original, an independent
+  // raiser y6's own token folded in as a contributor, and r6's own fresh re-raise token). Worker
+  // 721c1123 called clearMergeQuarantineByToken(d6, "<d6's original token>") expecting a full reset and
+  // instead saw the latch file persist (content rewritten, NOT removed — correct: 2 tokens remained) plus
+  // assertRepoNotQuarantined's own pre-existing ambiguous-collision refusal (unrelated to the clear call
+  // itself — the union already had >1 contributor before any clear ever ran). Verdict: correct
+  // fail-closed behaviour, not a bug. See docs/decisions/8db913e2-*.md, "Follow-up bfc9356e".
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r6 = makeToplevelRepo("bfc9356e-r6");
+  const K6 = canonicalRepoLockKey(r6);
+  const K6hash = createHash("sha256").update(K6).digest("hex").slice(0, 24);
+  const w6 = makeToplevelRepo("bfc9356e-w6");
+  const Kw6 = canonicalRepoLockKey(w6);
+  if (createHash("sha256").update(Kw6).digest("hex").slice(0, 24) === K6hash) throw new Error("bfc9356e: Kw6 collided with K6 — re-run");
+  const d6 = path.join(r6, "gone-subdir6");
+
+  const K6FinalPath = path.join(MERGE_QUARANTINE_DIR, `${K6hash}.json`);
+  fs.writeFileSync(K6FinalPath, JSON.stringify({
+    repoPath: d6, branch: "d6-branch", reason: "d6 dual-armed: own physical slot K6, legacy resolvedKey=Kw6",
+    enteredAt: Date.now(), tokens: ["d6-token-orig"], resolvedKey: Kw6,
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("*** CARD bfc9356e *** (precondition) d6 is dual-armed at BOTH K6 and Kw6", (() => {
+    const keys = new Set(activeMergeQuarantineFor(r6)?.armedKeys ?? []);
+    return keys.has(K6) && keys.has(Kw6);
+  })());
+
+  const y6 = makeToplevelRepo("bfc9356e-y6");
+  const Ky6 = canonicalRepoLockKey(y6);
+  const Ky6hash = createHash("sha256").update(Ky6).digest("hex").slice(0, 24);
+  if (Ky6hash === K6hash || Ky6hash === createHash("sha256").update(Kw6).digest("hex").slice(0, 24)) throw new Error("bfc9356e: Ky6 collided — re-run");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${Ky6hash}.json`), JSON.stringify({
+    repoPath: d6, branch: "d6-branch-2", reason: "d6 degraded-occupying a SECOND, unrelated key, ordinary content, no resolvedKey",
+    enteredAt: Date.now(), tokens: ["d6-token-step2"],
+  }, null, 2) + "\n");
+  const y6Token = enterMergeQuarantine(y6, "y6-branch", "y6 raises fresh; d6 is found degraded-occupying y6's own key, no injection");
+  check("*** CARD bfc9356e *** (precondition) y6's own raise proceeded", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(y6Token));
+
+  const d6PendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d6));
+  check("*** CARD bfc9356e *** (precondition) a protective pending copy for d6 was durably minted", fs.existsSync(d6PendingPath));
+
+  const injectRead6 = injectPersistentReadFailure(K6FinalPath);
+  let r6Token;
+  try {
+    r6Token = enterMergeQuarantine(r6, "r6-branch", "r6 raises again into d6's dual-armed existing entry; final unreadable, ORDINARY single fault");
+  } finally {
+    injectRead6.restore();
+  }
+  check("*** CARD bfc9356e *** (precondition) r6's own raise still persists IN-PROCESS despite the divert", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(r6Token));
+
+  const d6Entry = activeMergeQuarantineFor(r6);
+  check("*** CARD bfc9356e *** (precondition) the union now holds all THREE outstanding tokens", (() => {
+    const tokens = new Set(d6Entry?.tokens ?? []);
+    return tokens.has("d6-token-orig") && tokens.has("d6-token-step2") && tokens.has(r6Token) && tokens.size === 3;
+  })());
+
+  // ---- THE ACTUAL CALL UNDER INVESTIGATION: a PARTIAL by-token clear of d6's ORIGINAL token ----
+  clearMergeQuarantineByToken(d6, "d6-token-orig");
+
+  const afterPartial = activeMergeQuarantineFor(r6);
+  check("*** CARD bfc9356e *** partial clear: the entry stays ACTIVE (not fully lifted)", !!afterPartial);
+  check("*** CARD bfc9356e *** partial clear: exactly 2 tokens remain outstanding (d6-token-step2 + r6's own)", (afterPartial?.tokens ?? []).length === 2);
+  check("*** CARD bfc9356e *** partial clear: K6's own final file still exists (correctly NOT removed — other tokens remain)", fs.existsSync(K6FinalPath));
+  check("*** CARD bfc9356e *** partial clear: K6's own final file content no longer lists the cleared token", !(JSON.parse(fs.readFileSync(K6FinalPath, "utf8")).tokens ?? []).includes("d6-token-orig"));
+
+  const w6Blocked = assertRepoNotQuarantined(w6);
+  const r6Blocked = assertRepoNotQuarantined(r6);
+  check("*** CARD bfc9356e *** partial clear: w6 (Kw6's own real repo) STAYS BLOCKED", w6Blocked.ok === false);
+  check("*** CARD bfc9356e *** partial clear: r6 STAYS BLOCKED", r6Blocked.ok === false);
+  // This IS the refusal 721c1123 originally described as an "unconfirmed-kill identity collision" — the
+  // reason text embeds both an "unconfirmed-kill" clause (the outstanding-quarantine wording) and an
+  // ambiguous/"collide" clause naming the other folded-in contributor identity; not a different refusal.
+  check("*** CARD bfc9356e *** partial clear: the refusal reason is the 'unconfirmed-kill identity collision' 721c1123 described",
+    w6Blocked.ok === false && /unconfirmed-kill/.test(w6Blocked.reason) && /ambiguous/.test(w6Blocked.reason) && /collide/.test(w6Blocked.reason));
+
+  // ---- FULL CLEAR: every genuinely-outstanding contributor's own token ----
+  for (const t of afterPartial?.tokens ?? []) {
+    clearMergeQuarantineByToken(d6, t);
+  }
+  check("*** CARD bfc9356e *** full clear: the entry is fully lifted", activeMergeQuarantineFor(r6) === undefined);
+  check("*** CARD bfc9356e *** full clear: K6's own final file is gone", !fs.existsSync(K6FinalPath));
+  check("*** CARD bfc9356e *** full clear: d6's own pending-divert twin is gone too", !fs.existsSync(d6PendingPath));
+  check("*** CARD bfc9356e *** full clear: w6 is NOW unblocked", assertRepoNotQuarantined(w6).ok === true);
+  check("*** CARD bfc9356e *** full clear: r6 is NOW unblocked", assertRepoNotQuarantined(r6).ok === true);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // CARD d524d1c4, NO-KEY-DROPPED MATRIX — 3 matched pending entries (varying scalar/array shapes) plus
   // the incoming raise, DISAGREEING scalars. Exercises divertRaiseEntry's merge branch with
   // indices.length === 3 (never just 1, unlike the scenario above) by seeding three independent,
