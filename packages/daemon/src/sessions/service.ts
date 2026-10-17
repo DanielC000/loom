@@ -2694,6 +2694,16 @@ export class SessionService {
    *  in every existing test constructor ⇒ `mergeMainIntoWorktree`'s own default, byte-identical to before
    *  this seam existed. */
   private readonly unionMergeGitFactory?: BoundedGitDeps["gitFactory"];
+  /** TEST SEAM (card 31f8467c), SAME shape as {@link batchFfGitFactory}/{@link soloMergeGitFactory}/
+   *  {@link unionMergeGitFactory}: git factory threaded ONLY into the already-landed detection calls
+   *  {@link SessionService.tipAcrossLandedCheck}/{@link SessionService.pinnedTipForLandedSquash} make —
+   *  i.e. `resolveGitRef`/`branchExistsInRepo`/`readLandedTipTrailer` (git/worktrees.ts) — so a hermetic
+   *  test can drive a REAL `confirmWorkerMergeTracked`/`mergeBatchTracked` re-call's own already-landed
+   *  lookup through a FAKE failure, without touching any other git surface (the batch assembly's own
+   *  `batchFfGitFactory` cannot reach this path — see the investigation note on card 31f8467c for why).
+   *  `undefined` in every existing test constructor ⇒ each call's own default (real `canonicalGit`),
+   *  byte-identical to before this seam existed. */
+  private readonly alreadyLandedGitFactory?: BoundedGitDeps["gitFactory"];
   /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
    *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
    *  copy that could drift from {@link SPAWN_OP_RETAIN_MS} on a future change to either. Rounds to the
@@ -3138,6 +3148,9 @@ export class SessionService {
       soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
       /** TEST SEAM (card 8c3d6c04): git factory for the solo pre-squash union-merge — see the field's own doc. */
       unionMergeGitFactory?: BoundedGitDeps["gitFactory"];
+      /** TEST SEAM (card 31f8467c): git factory for the already-landed detection calls only
+       *  (tipAcrossLandedCheck/pinnedTipForLandedSquash) — see the field's own doc. */
+      alreadyLandedGitFactory?: BoundedGitDeps["gitFactory"];
       /** TEST SEAM (card cee17efe): the dist-importer check's own build step — see {@link distImporterCheckBuild}'s own doc. */
       distImporterCheckBuild?: (worktreePath: string, cancelSignal?: AbortSignal) => Promise<{ ok: boolean; reason?: string }>;
       /** TEST SEAM (card cee17efe, round-3 ruling 3): the dist-importer check's own worktree cut — see {@link distImporterCheckCreateWorktree}'s own doc. */
@@ -3172,6 +3185,7 @@ export class SessionService {
     this.batchFfGitFactory = opts?.batchFfGitFactory;
     this.soloMergeGitFactory = opts?.soloMergeGitFactory;
     this.unionMergeGitFactory = opts?.unionMergeGitFactory;
+    this.alreadyLandedGitFactory = opts?.alreadyLandedGitFactory;
     this.heldProbeGitFactory = opts?.heldProbeGitFactory;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
@@ -20079,12 +20093,12 @@ export class SessionService {
    * (trusted only when the same on both reads) as its legacy fallback.
    */
   private async tipAcrossLandedCheck<T>(repoPath: string, branch: string, check: () => Promise<T>): Promise<{ result: T; landedTip?: string; branchGone?: boolean }> {
-    const before = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+    const before = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     const result = await check();
-    const after = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+    const after = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     const stable = before && before === after ? before : undefined; // the legacy fallback: a tip read that did not move across the lookup
     if (typeof result === "string" && result) return { result, ...(await this.pinnedTipForLandedSquash(repoPath, branch, result, stable)) };
-    if (!before && !after && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs }))) return { result, branchGone: true };
+    if (!before && !after && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }))) return { result, branchGone: true };
     return { result, ...(stable ? { landedTip: stable } : {}) };
   }
   /**
@@ -20094,9 +20108,9 @@ export class SessionService {
    * (landed before this card) is stuck with. No tip at all fails closed at the caller (the sentinel).
    */
   private async pinnedTipForLandedSquash(repoPath: string, branch: string, squashSha: string | null | undefined, legacyTip?: string): Promise<{ landedTip?: string; branchGone?: boolean }> {
-    const live = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
-    if (!live && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs }))) return { branchGone: true };
-    const trailerTip = squashSha ? await readLandedTipTrailer(repoPath, squashSha, { timeoutMs: this.gitOpMs }) : null;
+    const live = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
+    if (!live && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }))) return { branchGone: true };
+    const trailerTip = squashSha ? await readLandedTipTrailer(repoPath, squashSha, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }) : null;
     if (trailerTip) return { landedTip: trailerTip };
     return legacyTip ? { landedTip: legacyTip } : {};
   }
