@@ -116,7 +116,127 @@ const noReap = async () => ({ killedPids: [] });
 // Treat 120_000ms as a load-tolerant bound for ordinary slowness, chosen with no verified headroom over
 // the worst case actually observed (that worst case already exceeded this constant) — not as a number
 // proven to cover every future stall.
+//
+// Card c684d00d recurred the SAME >240s non-resolution, this time inside a real full gate (gateCap=2/
+// concurrentGates=2, another project's gate also admitted — genuine host contention, not a synthetic
+// same-file concurrent-copy repro). A code-level bound audit of the real chain this wait depends on
+// (admission -> createWorktree -> the stubbed --only-file= call) found no single unbounded step, but
+// `killableCanonicalRaw`'s kill-grace doubling (git/bounded.ts: `withTimeoutKillingChild`'s `killGraceMs`
+// defaults to the SAME `ms` passed in) means each lock-serialized git call's REAL ceiling is 2x its
+// nominal one: prune/branch-list 15s->30s each, `worktree add` 60s (WORKTREE_ADD_TIMEOUT_MS)->120s. The
+// SEQUENTIAL SUM of those "individually safe" sub-ceilings — 15,000(toplevel-guard)+15,000(rev-parse-HEAD)
+// +30,000(prune)+30,000(branch-list)+120,000(worktree-add) = 210,000ms, plus up to 30,000ms more for an
+// add-failure cleanup (`git worktree remove -f -f`, same doubling) — lands right at this wait's own
+// 240,000ms (2x budget) grace ceiling almost exactly.
+//
+// This card added FAILURE-TIME DIAGNOSTICS (never a budget raise): `createWorktree`'s new optional
+// `gitDeps.onPhase` seam (git/worktrees.ts) fires at the start of each named sub-step (toplevel-guard /
+// rev-parse-HEAD / prune / branch-list / worktree-add / add-failure-cleanup), plus a TERMINAL mark on
+// every exit — "done" on a successful return, or "threw:<ErrorClass>:<message>" on ANY throw path (the
+// whole cut body runs inside one try/catch for exactly this). (14)/(20) record the phase history via
+// `distImporterCheckOnPhase` (sessions/service.ts) and, on a give-up, print it plus the check's own
+// `worker_gate`/`distImporterCheckOnly` events (the mechanism-failure `reason` text) and any captured
+// console line matching a bounded-git timeout/kill message (`withPhaseDiagnosticsOnFailure` above).
+//
+// ⛔ CORRECTED READING (CR f2998211, round 2 of this card): round 1 read "last in-flight phase:
+// add-failure-cleanup" (seen twice, on (14) and (20)) as "the cleanup itself doesn't settle within its
+// own ~30s kill-grace ceiling" — WRONG, because round 1 had no TERMINAL phase marker, so a step that had
+// already finished and been followed by an un-marked `throw` looked indistinguishable from that same step
+// still being in flight. The evidence actually favours a much more mundane cause: the cleanup is bounded
+// and would log a `console.warn` on its own timeout (none was ever captured); the `worktree add` failure
+// itself happens almost instantly (~200ms in); and `runOneDistImporterCheck` (sessions/service.ts) turns
+// that cut failure into a `{kind:"mechanism-failure", reason:"could not cut the isolated check worktree
+// (<addErr>)"}` outcome that NEVER sets `ctx.gate.lastDistCall`/`buildState.entered` — so (14)/(20) were
+// simply waiting their whole ~240s budget for an event that could never arrive, while the real outcome
+// had already been decided in well under a second. The terminal-phase fix above closes the ambiguity
+// (a throw now always ends the phase history with "threw:…", never a bare step name), and (14)/(20) now
+// FAIL FAST the moment a mechanism-failure event for their own check appears
+// (`waitForRealConditionOrMechanismFailure`), naming the real `reason` text, instead of burning the full
+// budget. Proven via a surgical control: a fake `gitFactory` forcing a real `git worktree add` failure
+// through the REAL `createWorktree` (via the `distImporterCheckCreateWorktree` seam) showed the phase
+// history ending `worktree-add -> add-failure-cleanup -> threw:Error:fatal: '<path>' already exists`, the
+// event dump naming the same reason text, and the wait failing in ~0ms instead of ~240s; reverted
+// byte-identical afterward.
+//
+// The underlying `git worktree add` failure itself (why it fails at all under this host's contention,
+// rather than succeeding) is still NOT root-caused — that remains a sharper, reproducible lead for a
+// follow-up card now that the diagnostic reliably names the real cause, not something this card fixes.
 const DIST_IMPORTER_REAL_GIT_OP_WAIT_MS = 120_000;
+
+// Card c684d00d — FAILURE-TIME DIAGNOSTICS ONLY, never an assertion of their own. The bound audit on
+// this card (see this file's own header above) found the real `createWorktree(` chain this wait depends
+// on has no single unbounded step — but each of its sequential sub-steps' nominal timeout is really 2x
+// itself once `killableCanonicalRaw`'s kill-grace doubling is counted (git/worktrees.ts/git/bounded.ts),
+// and the SUM of those "individually safe" sub-ceilings lands right at this wait's own 240s (2x budget)
+// grace ceiling. So when (14)/(20) give up, print WHICH named sub-step (createWorktree's own `onPhase`
+// callback: toplevel-guard / rev-parse-HEAD / prune / branch-list / worktree-add / add-failure-cleanup /
+// done) was last observed starting, how long ago, and any captured console line shaped like one of
+// git/bounded.ts's own timeout/kill/kill-unconfirmed messages — so a THIRD occurrence names the stalled
+// step instead of repeating "unreproduced, no log". `BOUNDED_GIT_TIMEOUT_LOG_RE` mirrors withTimeout's
+// `exceeded <ms>ms (hung git child?)` and withTimeoutKillingChild's `exceeded <ms>ms (git child killed)` /
+// `… giving up (hung git child?)` message shapes verbatim (bounded.ts); it is a FILTER on captured
+// console output for the diagnostic dump only, never something asserted on.
+const BOUNDED_GIT_TIMEOUT_LOG_RE = /(exceeded \d+ms|giving up \(hung git child\?\)|git child killed|hung git child\?)/i;
+
+/** Card c684d00d — runs `fn` with console.log/console.warn TEED (captured AND still printed, never
+ *  silenced) and, on ANY throw out of `fn` (a real failure — never swallowed or weakened), dumps
+ *  `phaseHistory` (the createWorktree `onPhase` entries recorded so far — since CR f2998211, a
+ *  `"threw:<ErrorClass>:<message>"` entry is now the TERMINAL one on every throw path out of
+ *  createWorktree, so "last phase" no longer reads a completed-and-threw step as a hang), any captured
+ *  console line matching {@link BOUNDED_GIT_TIMEOUT_LOG_RE}, and (CR f2998211 item 2 — when `opts.db`/
+ *  `opts.mgrId` are given) this check's own `worker_gate`/`distImporterCheckOnly` events — the mechanism-
+ *  failure `reason` text is the one thing that actually names a root cause, not just a phase name — then
+ *  rethrows the ORIGINAL error unchanged. Pure diagnostics: the scenario fails exactly as it would have
+ *  without this wrapper. */
+async function withPhaseDiagnosticsOnFailure(label, phaseHistory, fn, opts = {}) {
+  const { db, mgrId } = opts;
+  const consoleLines = [];
+  const realLog = console.log, realWarn = console.warn;
+  console.log = (...a) => { consoleLines.push(a.map(String).join(" ")); realLog(...a); };
+  console.warn = (...a) => { consoleLines.push(a.map(String).join(" ")); realWarn(...a); };
+  try {
+    return await fn();
+  } catch (err) {
+    const history = phaseHistory.map((p) => `${p.phase}@${p.atMs}ms`).join(" -> ") || "(none — createWorktree never fired a single phase marker)";
+    const last = phaseHistory[phaseHistory.length - 1];
+    const matched = consoleLines.filter((l) => BOUNDED_GIT_TIMEOUT_LOG_RE.test(l));
+    const events = db && mgrId ? db.listEvents(mgrId).filter((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true) : [];
+    console.error(`[c684d00d-diagnostic] ${label} gave up. Phase history (${phaseHistory.length} entries): ${history}`);
+    if (last) {
+      const threwNote = last.phase.startsWith("threw:") ? " — createWorktree had ALREADY SETTLED (threw) by then; this is NOT evidence of a hang in an earlier step" : "";
+      console.error(`[c684d00d-diagnostic] ${label} last phase: "${last.phase}" (at ${last.atMs}ms into createWorktree)${threwNote}`);
+    }
+    console.error(`[c684d00d-diagnostic] ${label} matching bounded-git timeout/kill console lines (${matched.length}): ${matched.join(" | ") || "(none captured)"}`);
+    console.error(`[c684d00d-diagnostic] ${label} this check's own worker_gate/distImporterCheckOnly events (${events.length}): ${events.map((e) => JSON.stringify({ mechanismLike: e.detail.mechanismLike, reason: e.detail.reason, cancelled: e.detail.cancelled, passed: e.detail.passed, timedOut: e.detail.timedOut })).join(" | ") || "(none recorded)"}`);
+    throw err;
+  } finally {
+    console.log = realLog; console.warn = realWarn;
+  }
+}
+
+/** Card c684d00d (CR f2998211 item 3) — races `realCondition` against this check's OWN mechanism-failure
+ *  outcome (a `worker_gate` event with `distImporterCheckOnly:true` + `mechanismLike:true`), polling both
+ *  on the SAME cadence as `waitUntil`. If the mechanism-failure appears first, this throws IMMEDIATELY
+ *  (never waiting out the full `timeoutMs` + grace window) with the real failure `reason` text — the
+ *  check still FAILS, exactly as before, just sooner and naming the actual cause instead of a bare
+ *  "didn't resolve in 240s". If `realCondition` becomes true first, resolves normally like a plain
+ *  `waitUntil`. If NEITHER happens, falls through to `waitUntil`'s own ABSENT/ARRIVED-LATE reporting,
+ *  unchanged. */
+async function waitForRealConditionOrMechanismFailure(label, realCondition, db, mgrId, timeoutMs) {
+  const FAIL_FAST = Symbol("c684d00d-mechanism-failure");
+  let failEvent = null;
+  const predicate = () => {
+    if (realCondition()) return true;
+    const ev = db.listEvents(mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true && e.detail?.mechanismLike === true);
+    if (ev) { failEvent = ev; return FAIL_FAST; }
+    return false;
+  };
+  const result = await waitUntil(predicate, { label, timeoutMs });
+  if (result === FAIL_FAST) {
+    throw new Error(`[c684d00d] ${label} — the dist-importer check mechanism-failed before this condition could ever fire. reason: ${failEvent.detail.reason ?? "(no reason recorded)"}`);
+  }
+  return result;
+}
 
 // Card 47e70868 (promoted to the shared `ambientScaledBudget` helper by card 7b9bafb7 — see `_wait.mjs`
 // for the probe + cap mechanics): scale the host-load-sensitive SEMAPHORE-ADMISSION wait budgets below by
@@ -735,7 +855,11 @@ try {
   {
     const P = mk("runningcancel"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
-    const ctx = mkService(db);
+    // Card c684d00d — record createWorktree's own phase history for this scenario's real cut, so a
+    // give-up on the wait just below can name which sub-step was in flight (see
+    // withPhaseDiagnosticsOnFailure's own doc, and this file's header, for why).
+    const phaseHistory14 = [];
+    const ctx = mkService(db, { distImporterCheckOnPhase: (phase, atMs) => { phaseHistory14.push({ phase, atMs }); } });
     await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
     const hold = deferred();
     ctx.gate.distHold = hold.promise;
@@ -751,7 +875,10 @@ try {
     // Card de66fe8e: this wait is gated on the real `createWorktree(` call for the isolated check
     // worktree (see DIST_IMPORTER_REAL_GIT_OP_WAIT_MS's own comment above) — widened from 10_000ms after
     // a genuine, measured failure under real host contention; see that constant's comment for the numbers.
-    await waitUntil(() => ctx.gate.lastDistCall !== null, { label: "(14) [setup] the check's own run has genuinely reached the real --only-file= gate call (held on distHold)", timeoutMs: DIST_IMPORTER_REAL_GIT_OP_WAIT_MS });
+    await withPhaseDiagnosticsOnFailure("(14)", phaseHistory14, () =>
+      waitForRealConditionOrMechanismFailure("(14) [setup] the check's own run has genuinely reached the real --only-file= gate call (held on distHold)",
+        () => ctx.gate.lastDistCall !== null, db, P.mgrId, DIST_IMPORTER_REAL_GIT_OP_WAIT_MS),
+      { db, mgrId: P.mgrId });
     const runningEntry = await waitUntil(() => ctx.sessions.gateSemaphore.snapshot().entries.find((e) => e.distImporterCheckOnly === true && e.phase === "running"),
       { label: "(14) [setup] the check's own run is genuinely RUNNING (admitted, held at --only-file=)", timeoutMs: 10_000 });
     check("(14) [setup] the running entry carries distImporterCheckOnly:true", !!runningEntry && runningEntry.distImporterCheckOnly === true);
@@ -905,7 +1032,11 @@ try {
     const db = new Db(); dbs.push(db);
     const buildHold = deferred();
     const buildState = { entered: false };
-    const ctx = mkService(db, { distImporterCheckBuild: async () => { buildState.entered = true; await buildHold.promise; return { ok: true }; } });
+    // Card c684d00d — same phase-history recording as (14): createWorktree's own cut runs for real
+    // BEFORE the (stubbed) build step this scenario waits on, so a slow/stalled cut delays reaching
+    // `buildState.entered` too; record it so a give-up below can name the in-flight sub-step.
+    const phaseHistory20 = [];
+    const ctx = mkService(db, { distImporterCheckBuild: async () => { buildState.entered = true; await buildHold.promise; return { ok: true }; }, distImporterCheckOnPhase: (phase, atMs) => { phaseHistory20.push({ phase, atMs }); } });
     await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 2 });
     const w = await addWorker(db, P, { "packages/daemon/src/foo.ts": "export const FOO = 20;\n" });
     const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
@@ -913,7 +1044,10 @@ try {
     // Card de66fe8e: this is the exact wait that reproduced a real, measured failure (>60s, never
     // resolved) under genuine host contention on 2026-10-12 — see DIST_IMPORTER_REAL_GIT_OP_WAIT_MS's
     // own comment above for the numbers and why 10_000ms was too tight.
-    await waitUntil(() => buildState.entered === true, { label: "(20) [setup] the build step has genuinely been entered (held on buildHold)", timeoutMs: DIST_IMPORTER_REAL_GIT_OP_WAIT_MS });
+    await withPhaseDiagnosticsOnFailure("(20)", phaseHistory20, () =>
+      waitForRealConditionOrMechanismFailure("(20) [setup] the build step has genuinely been entered (held on buildHold)",
+        () => buildState.entered === true, db, P.mgrId, DIST_IMPORTER_REAL_GIT_OP_WAIT_MS),
+      { db, mgrId: P.mgrId });
     const runningEntry = await waitUntil(() => ctx.sessions.gateSemaphore.snapshot().entries.find((e) => e.distImporterCheckOnly === true && e.phase === "running"),
       { label: "(20) [setup] the check's own run is genuinely RUNNING (admitted, held inside the build step)", timeoutMs: 10_000 });
     check("(20) [setup] the running entry carries distImporterCheckOnly:true", !!runningEntry && runningEntry.distImporterCheckOnly === true);
@@ -1075,9 +1209,20 @@ try {
   {
     const P = mk("detpathsurvive"); makeRepo(P.repo);
     const db = new Db(); dbs.push(db);
+    // Card c684d00d — same phase-history recording as (14)/(20), for diagnostic parity: the stub below
+    // still calls the REAL createWorktree (createWorktreeDirect), so onPhase fires for it too. NOT paired
+    // with waitForRealConditionOrMechanismFailure below — unlike (14)/(20), this scenario's OWN
+    // mechanism-failure event (asserted at op25.verdict==="error", BEFORE the wait below even starts) is
+    // a known, intentional, already-checked part of this test's setup, not a silently-unobserved one;
+    // racing the LATER wait against "a mechanism-failure event exists" would fire on the FIRST poll every
+    // time (that event is already in the DB) and make this scenario fail immediately, every run — the
+    // opposite of what this wait is actually for (observing a DELIBERATELY-still-running BACKGROUND real
+    // cut eventually land on disk). See this card's decision record for the full reasoning.
+    const phaseHistory25 = [];
     const ctx = mkService(db, {
       distImporterCheckProvisionTimeoutMs: 2_000,
       distImporterCheckRemoveWorktree: async () => ({ removed: false, wedged: false, aborted: false }),
+      distImporterCheckOnPhase: (phase, atMs) => { phaseHistory25.push({ phase, atMs }); },
       distImporterCheckCreateWorktree: async (...args) => {
         const real = await createWorktreeDirect(...args); // lands for REAL, fully, before any delay starts
         // TIMING-GUARD-SAFE: scripted-duration-margin — this IS the mocked subject's own scripted
@@ -1108,7 +1253,9 @@ try {
     // finished landing the worktree+branch on disk by the time we reach here; under genuine host
     // contention (the same real git-op slowness DIST_IMPORTER_REAL_GIT_OP_WAIT_MS's comment measures) it
     // may still be in flight, so poll for it rather than asserting it synchronously.
-    await waitUntil(() => fs.existsSync(checkWtPath), { label: "(25) [setup] the backgrounded real cut has landed on disk", timeoutMs: DIST_IMPORTER_REAL_GIT_OP_WAIT_MS });
+    await withPhaseDiagnosticsOnFailure("(25)", phaseHistory25, () =>
+      waitUntil(() => fs.existsSync(checkWtPath), { label: "(25) [setup] the backgrounded real cut has landed on disk", timeoutMs: DIST_IMPORTER_REAL_GIT_OP_WAIT_MS }),
+      { db, mgrId: P.mgrId });
     check("(25) [setup] the REAL cut landed on disk anyway, and the stubbed removal left it there (still genuinely checked out)", fs.existsSync(checkWtPath));
     check("(25) the branch SURVIVES: the deterministic-path's own expectedBranch delete was guarded (git still has it checked out)",
       listLoomBranches(P.repo).includes(checkBranch));

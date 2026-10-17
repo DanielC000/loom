@@ -175,6 +175,19 @@ export interface BoundedGitDeps {
    * are bounded independently without paying either real-world duration.
    */
   addWorktreeTimeoutMs?: number;
+  /**
+   * @decision c684d00d — a start-only phase diagnostic can misread "step finished, something later
+   * threw" as "this step is hung"; the terminal mark on every exit below is what closes that gap.
+   *
+   * DIAGNOSTIC-ONLY seam: fired at the START of each named sub-step on {@link createWorktree}'s
+   * fresh-cut path ("toplevel-guard", "rev-parse-HEAD", "prune", "branch-list", "worktree-add",
+   * "add-failure-cleanup"), plus a TERMINAL mark on every exit — "done" on success, or
+   * `"threw:<ErrorClass>:<message>"` on any throw (the whole cut body is wrapped in one try/catch for
+   * exactly this). `atMs` is elapsed time since this `createWorktree` call began. Absent ⇒
+   * byte-identical: no extra git call, no timeout/ordering change. Wrapped in try/catch at the call
+   * site — a throwing observer must never break a worktree cut.
+   */
+  onPhase?: (phase: string, atMs: number) => void;
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -979,6 +992,24 @@ export async function createWorktree(
    */
   gitDeps: BoundedGitDeps = {},
 ): Promise<WorktreeInfo> {
+  // Card c684d00d — diagnostic-only phase marker (see BoundedGitDeps.onPhase's own doc). `atMs` is
+  // elapsed time since THIS call began, not wall-clock — never let a throwing observer break the cut.
+  const createWorktreeStartedAt = Date.now();
+  const firePhase = (phase: string): void => {
+    if (!gitDeps.onPhase) return;
+    try { gitDeps.onPhase(phase, Date.now() - createWorktreeStartedAt); } catch { /* observer must never break a worktree cut */ }
+  };
+  // @decision c684d00d — every throw path below must emit ONE terminal phase (never hand-add a firePhase
+  // before each throw site instead of this wrap) — see the decision record for why a start-only marker
+  // misreads a completed-then-threw step as a hang.
+  try {
+    return await doCut();
+  } catch (err) {
+    firePhase(`threw:${err instanceof Error ? `${err.constructor.name}:${err.message.slice(0, 160)}` : String(err).slice(0, 160)}`);
+    throw err;
+  }
+
+  async function doCut(): Promise<WorktreeInfo> {
   // QUARANTINE CHECK — kept here (round 6: not deleted as a "copy-pasted assert the lock now covers")
   // because the REUSE path below (`recutStaleReusedBranch`/`resolveStaleBase` when `worktreePath` already
   // exists) never calls `withCanonicalIndexLock` at all — it mutates the WORKTREE's own index via `git
@@ -1005,6 +1036,7 @@ export async function createWorktree(
   // session-start half (refusing any fresh session whose RESOLVED role is "manager" against a project
   // that resolves here) is a separate guard, `refuseManagerIntoReservedHome` (sessions/service.ts).
   if (isLoomHomeOrAncestor(repoPath)) throw new Error(OPERATIONAL_HOME_GIT_WRITE_ERROR);
+  firePhase("toplevel-guard");
   try {
     const toplevel = (await withTimeout(
       headGit.raw(["rev-parse", "--show-toplevel"]), headTimeoutMs, "git rev-parse --show-toplevel (operational-home guard)",
@@ -1052,6 +1084,7 @@ export async function createWorktree(
   // BOUNDED (card c801d688): a hung rev-parse now throws within the bound instead of stalling the spawn
   // forever — this call has no local catch, so the throw propagates to createWorktree's own caller
   // exactly as an unbounded failure already did, just with a ceiling on how long that takes.
+  firePhase("rev-parse-HEAD");
   const mainSha = (await withTimeout(headGit.raw(["rev-parse", "HEAD"]), headTimeoutMs, "git rev-parse HEAD")).trim();
   if (fs.existsSync(worktreePath) && !worktreeHasGitLink(worktreePath)) {
     // @decision a5d9c458 — never reuse/recut a dir with no `.git` link as if it were a retained
@@ -1091,6 +1124,7 @@ export async function createWorktree(
     // Without this, a worktree reused after a reclaim would silently ship with no (or partial) deps and
     // nothing to trigger installing them.
     if (forwarded || !hasIntactNodeModules(worktreePath)) await provisionWorktreeDeps(worktreePath, deps);
+    firePhase("done");
     return {
       worktreePath, branch, mainSha, forkedFromReviewed: false, // reuse path — forkFrom was never consulted
       ...(discardedOnRecut ? { discardedOnRecut } : {}),
@@ -1117,9 +1151,12 @@ export async function createWorktree(
   // @decision 62c4953a — deliberately NO `checkIndexLock`: a held lock must never block a worker/review
   // spawn (`worktree prune`/`branch --list`/`worktree add` all work fine with one present, real git 2.47).
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
+    firePhase("prune");
     await boundedLockedRaw(["worktree", "prune"], "git worktree prune"); // drop any stale admin record for a since-deleted dir
+    firePhase("branch-list");
     const exists = (await boundedLockedRaw(["branch", "--list", branch], "git branch --list")).trim() !== "";
     try {
+      firePhase("worktree-add");
       await boundedLockedRaw(exists
         ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
         : forkFrom
@@ -1150,6 +1187,7 @@ export async function createWorktree(
       if (addErr instanceof RepoQuarantinedError) throw addErr;
       const isPath2GiveUp = /giving up \(hung git child\?\)/.test((addErr as Error).message ?? "");
       if (!isPath2GiveUp) {
+        firePhase("add-failure-cleanup");
         await boundedLockedRaw(["worktree", "remove", worktreePath, "-f", "-f"], "git worktree remove -f -f (add-failure cleanup)")
           .catch((cleanupErr: unknown) => {
             const cleanupMsg = (cleanupErr as Error).message;
@@ -1193,9 +1231,11 @@ export async function createWorktree(
   // forkFrom given); a reattach (branchExists true) never consulted forkFrom at all. See
   // WorktreeInfo.forkedFromReviewed's own doc for why a caller must gate reviewBaseSha stamping on this.
   const forkedFromReviewed = !branchExists && !!forkFrom;
+  firePhase("done");
   return staleBase
     ? { worktreePath, branch, mainSha, staleBase, forkedFromReviewed }
     : { worktreePath, branch, mainSha, forkedFromReviewed };
+  } // end doCut
 }
 
 /**

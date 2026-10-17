@@ -2721,6 +2721,12 @@ export class SessionService {
    *  drive a deterministic cut FAILURE (a mechanism failure before any build/scan) without faking a real
    *  git error. `undefined` in production ⇒ the real {@link createWorktree}, byte-identical. */
   private readonly distImporterCheckCreateWorktree: typeof createWorktree | undefined;
+  /** Card c684d00d — TEST SEAM for the check's own worktree-cut phase diagnostics: threaded onto the real
+   *  {@link createWorktree} call's `gitDeps.onPhase` (see that field's own doc in `git/worktrees.ts`) so a
+   *  hermetic test can record a phase history for the check's own real cut without faking the whole
+   *  function via {@link distImporterCheckCreateWorktree}. `undefined` in production ⇒ no `onPhase` is
+   *  passed, byte-identical to before this card. */
+  private readonly distImporterCheckOnPhase: BoundedGitDeps["onPhase"] | undefined;
   /** Card cee17efe (round-3 ruling 3) — TEST SEAM for the check's own direct-importer scan: lets a
    *  hermetic test drive a deterministic scan FAILURE without corrupting a real fixture repo.
    *  `undefined` in production ⇒ the real {@link computeDirectDistImporterRunSet}, byte-identical. */
@@ -3124,6 +3130,8 @@ export class SessionService {
       distImporterCheckBuild?: (worktreePath: string, cancelSignal?: AbortSignal) => Promise<{ ok: boolean; reason?: string }>;
       /** TEST SEAM (card cee17efe, round-3 ruling 3): the dist-importer check's own worktree cut — see {@link distImporterCheckCreateWorktree}'s own doc. */
       distImporterCheckCreateWorktree?: typeof createWorktree;
+      /** TEST SEAM (card c684d00d): the dist-importer check's own worktree-cut phase diagnostics — see {@link distImporterCheckOnPhase}'s own doc. */
+      distImporterCheckOnPhase?: BoundedGitDeps["onPhase"];
       /** TEST SEAM (card cee17efe, round-3 ruling 3): the dist-importer check's own direct-importer scan — see {@link distImporterCheckComputeRunSet}'s own doc. */
       distImporterCheckComputeRunSet?: typeof computeDirectDistImporterRunSet;
       /** TEST SEAM (card cee17efe, round-4 ruling 1a): the dist-importer check's own worktree removal — see {@link distImporterCheckRemoveWorktree}'s own doc. */
@@ -3164,6 +3172,7 @@ export class SessionService {
     this.codescape = opts?.codescape;
     this.distImporterCheckBuild = opts?.distImporterCheckBuild;
     this.distImporterCheckCreateWorktree = opts?.distImporterCheckCreateWorktree;
+    this.distImporterCheckOnPhase = opts?.distImporterCheckOnPhase;
     this.distImporterCheckComputeRunSet = opts?.distImporterCheckComputeRunSet;
     this.distImporterCheckRemoveWorktree = opts?.distImporterCheckRemoveWorktree;
     this.distImporterCheckListCheckedOutBranches = opts?.distImporterCheckListCheckedOutBranches;
@@ -22302,7 +22311,8 @@ export class SessionService {
           let info: Awaited<ReturnType<typeof createWorktree>>;
           try {
             info = await withTimeout(
-              cutWorktree(repoPath, projectId, `dist-importer-check-${opId}`, {}, repoKey, landedSha),
+              cutWorktree(repoPath, projectId, `dist-importer-check-${opId}`, {}, repoKey, landedSha,
+                this.distImporterCheckOnPhase ? { onPhase: this.distImporterCheckOnPhase } : {}),
               this.distImporterCheckProvisionTimeoutMs ?? DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS, "dist-importer-check: create worktree",
             );
           } catch (err) {
