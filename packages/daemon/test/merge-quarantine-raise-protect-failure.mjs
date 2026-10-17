@@ -45,7 +45,7 @@ const {
   clearMergeQuarantineReporting, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot,
   listActiveMergeQuarantines, MERGE_QUARANTINE_DIR, enterMergeQuarantine, clearMergeQuarantineByToken,
   clearMergeQuarantineByRecordedPath, clearMergeQuarantineLatchFile, quarantineLatchFileIdsFor,
-  clearMergeQuarantine,
+  clearMergeQuarantine, assertRepoNotQuarantined,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -4655,6 +4655,130 @@ try {
   freshE.clearMergeQuarantineByToken(d, "4b06875f-rd-tok-d");
   freshE.clearMergeQuarantineByToken(d, "4b06875f-rd-tok-old");
   freshE.clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 050a4428, MEMORY-ONLY-KEY GUARD — a genuinely reachable production TRIPLE FAULT (an
+  // existing-branch divert of a dual-armed entry whose own pending-divert write AND safety-tmp fallback
+  // BOTH fail) leaves a surviving `pendingUnresolvedQuarantines` entry that is MEMORY-ONLY — disk never
+  // had its content at all, so this is NOT a stale-vs-disk disagreement, it is the SOLE durable-ish copy.
+  // `resolvedKey` is not decorative: per 4b06875f/883e29bc it IS the post-reboot enforcement for a
+  // dual-armed twin's own secondary key. A later, same-identity `protectOccupantContentBeforeDelete`
+  // call whose OWN freshly-read content carries no resolvedKey of its own (so the FIRST, disk-reconciled
+  // union has no informative keys at all) must still let the SECOND union carry this memory-only key
+  // forward — rejecting it purely because the disk side is empty would be a NEW fail-open, not a fix.
+  //
+  // STEP 1 (establish the triple fault): d3 is dual-armed [K3 (its own degraded, walked-up physical
+  // slot — a never-existing subdirectory of r3), Kw3 (a genuinely distinct real repo's key, via d3's own
+  // legacy `resolvedKey` field)] after boot. r3 raises into d3's already-armed `existing` slot at K3;
+  // `final`'s own read is injected to fail persistently, forcing `mustDivert`; BOTH the divert's own
+  // primary pending-divert write and its safety-tmp fallback are injected to fail too (the genuine
+  // triple fault — `quarantineHashFor(d3)` degrades to K3 itself, since d3's nearest real ancestor is
+  // r3, so the safety-tmp's own target collides with `final`'s own hash, matching the real production
+  // mechanics exactly, not a contrived shape).
+  //
+  // STEP 2 (exercise the SECOND union): completely independently, y3 raises fresh. BEFORE that raise,
+  // d3's OWN identity is planted, with ordinary, successfully-readable, NO-resolvedKey content, at y3's
+  // own write target (`Ky3hash.json`) — simulating d3 later being found degraded-occupying a SECOND,
+  // unrelated key, with nothing special about this one. y3's own raise reaches
+  // `protectDegradedOccupantBeforeDelete` -> `protectOccupantContentBeforeDelete` for d3 (genuinely
+  // foreign to y3, genuinely unresolvable) with NO injection active at all — the read succeeds, toPersist
+  // carries no resolvedKey (nothing to exclude, genuinely never had one), so the FIRST (disk-reconciled)
+  // union's own informative-key set is empty by construction. `reconcilePendingDivertTarget` then reads
+  // d3's own deterministic pending-divert filename fresh from disk — ENOENT, confirming step 1's own
+  // triple fault never reached disk — and the SECOND union against the step-1 memory-only entry is the
+  // ONLY place Kw3 can come from.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r3 = makeToplevelRepo("050a-mem-only-r3");
+  const K3 = canonicalRepoLockKey(r3);
+  const K3hash = createHash("sha256").update(K3).digest("hex").slice(0, 24);
+  const w3 = makeToplevelRepo("050a-mem-only-w3");
+  const Kw3 = canonicalRepoLockKey(w3);
+  if (createHash("sha256").update(Kw3).digest("hex").slice(0, 24) === K3hash) throw new Error("050a4428-mem-only: Kw3 collided with K3 — re-run");
+  const d3 = path.join(r3, "gone-subdir");
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const K3FinalPath = path.join(MERGE_QUARANTINE_DIR, `${K3hash}.json`);
+  fs.writeFileSync(K3FinalPath, JSON.stringify({
+    repoPath: d3, branch: "d3-branch", reason: "d3 dual-armed: own physical slot K3, legacy resolvedKey=Kw3",
+    enteredAt: Date.now(), tokens: ["d3-token-orig"], resolvedKey: Kw3,
+  }, null, 2) + "\n");
+  // Deliberately NOT registering r3/w3 — must reach d163aef5's own collision-resolution path.
+  reenterMergeQuarantinesAtBoot([]);
+  check("(050a-mem-only precondition) d3 is `existing` at r3's own key K3", activeMergeQuarantineFor(r3)?.repoPath === d3);
+  check("(050a-mem-only precondition) d3 is dual-armed at BOTH K3 and Kw3", (() => {
+    const keys = new Set(activeMergeQuarantineFor(r3)?.armedKeys ?? []);
+    return keys.has(K3) && keys.has(Kw3);
+  })());
+  check("(050a-mem-only precondition) w3 is already blocked too, via d3's own dual-arm", activeMergeQuarantineFor(w3)?.repoPath === d3);
+
+  const d3PendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d3));
+  const injectRead = injectPersistentReadFailure(K3FinalPath);
+  const injectWritePending = injectOpenSyncFailureForPrefix(d3PendingPath);
+  const injectWriteSafety = injectOpenSyncFailureForPrefix(K3FinalPath);
+  let r3Token;
+  try {
+    r3Token = enterMergeQuarantine(r3, "r3-branch", "r3 raises into d3's dual-armed existing entry; final unreadable, BOTH divert writes fail (triple fault)");
+  } finally {
+    injectWriteSafety.restore();
+    injectWritePending.restore();
+    injectRead.restore();
+  }
+  check("(050a-mem-only) the read failure was actually attempted", injectRead.count() >= 1);
+  check("(050a-mem-only) the primary pending-divert write failure was actually attempted", injectWritePending.count() >= 1);
+  check("(050a-mem-only) the safety-tmp fallback write failure was ALSO actually attempted (the genuine triple fault)", injectWriteSafety.count() >= 1);
+  check("*** STEP 1 *** d3's own pending-divert file was NEVER actually written to disk", !fs.existsSync(d3PendingPath));
+  check("*** STEP 1 *** no safety-tmp residue for d3/K3 was written either", fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.startsWith(`${K3hash}.json.tmp-safety-`)).length === 0);
+  check("*** STEP 1 *** r3's own raise still persists IN-PROCESS despite the triple fault (e1cb7d33)", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(r3Token));
+  // (sanity, NOT hazard-discriminating on its own) — w3 is still blocked here, but ONLY because
+  // `activeQuarantines` was never evicted from step 1's own boot-time dual-arm, and K3's own ORIGINAL
+  // physical file (never touched by the divert) STILL independently carries resolvedKey=Kw3 too — this
+  // passes identically whether or not the SECOND union (the thing under test) carries Kw3 forward. The
+  // real proof is the protective copy's own resolvedKey (below) and the POST-REBOOT check once K3's own
+  // redundant copy is gone.
+  check("(sanity) w3 is still blocked right after the triple fault", assertRepoNotQuarantined(w3).ok === false);
+
+  // STEP 2 — independent raiser y3; d3 is found degraded-occupying y3's OWN write target, with ordinary,
+  // successfully-readable, no-resolvedKey content. No injection active.
+  const y3 = makeToplevelRepo("050a-mem-only-y3");
+  const Ky3 = canonicalRepoLockKey(y3);
+  const Ky3hash = createHash("sha256").update(Ky3).digest("hex").slice(0, 24);
+  if (Ky3hash === K3hash || Ky3hash === createHash("sha256").update(Kw3).digest("hex").slice(0, 24)) throw new Error("050a4428-mem-only: Ky3 collided — re-run");
+  const Ky3FinalPath = path.join(MERGE_QUARANTINE_DIR, `${Ky3hash}.json`);
+  fs.writeFileSync(Ky3FinalPath, JSON.stringify({
+    repoPath: d3, branch: "d3-branch-2", reason: "d3 degraded-occupying a SECOND, unrelated key, ordinary content, no resolvedKey",
+    enteredAt: Date.now(), tokens: ["d3-token-step2"],
+  }, null, 2) + "\n");
+
+  const y3Token = enterMergeQuarantine(y3, "y3-branch", "y3 raises fresh; d3 is found degraded-occupying y3's own key, no injection");
+  check("(050a-mem-only step 2 precondition) y3's own raise proceeded (protect succeeded, no divert needed)", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(y3Token));
+
+  const d3ProtectiveFile = fs.readdirSync(MERGE_QUARANTINE_DIR)
+    .map((f) => ({ f, parsed: (() => { try { return JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")); } catch { return undefined; } })() }))
+    .find((e) => e.parsed?.repoPath === d3 && (e.parsed?.tokens ?? []).includes("d3-token-step2"));
+  check("(050a-mem-only step 2 precondition) a protective copy for d3 was durably minted this time", !!d3ProtectiveFile);
+  check("*** CARD 050a4428 *** d3's protective copy carries Kw3 — the memory-only key from step 1's triple fault, carried forward by the SECOND union, NEVER rejected just because the first union had no opinion",
+    d3ProtectiveFile?.parsed.resolvedKey === Kw3);
+  // (sanity, NOT hazard-discriminating on its own — same caveat as STEP 1's own immediate check above)
+  check("(sanity) w3 is still blocked immediately after step 2", assertRepoNotQuarantined(w3).ok === false);
+
+  // Remove K3's own ORIGINAL physical file now — it is a genuinely redundant, independent source of
+  // Kw3 that step 1's own divert never touched (the divert, by design, never writes to `final`); nothing
+  // about this card's own mechanism depends on it surviving, and leaving it in place would let it alone
+  // re-arm Kw3 at the next boot regardless of what the pending-divert file carries, masking the very
+  // thing this reboot check exists to prove. This is NOT the rejected "manufacture the premise
+  // out-of-band" technique (an `fs.rmSync` standing in for an unreachable stale-vs-disk disagreement) —
+  // the triple-fault premise above is already fully, genuinely established by real production code; this
+  // step only removes an unrelated confound so the reboot check actually isolates the mechanism under
+  // test, the SAME way `rebootSim`-style fixtures throughout this module scope what each boot sees.
+  fs.rmSync(K3FinalPath);
+  check("(precondition) K3's own original file is genuinely gone before the reboot", !fs.existsSync(K3FinalPath));
+
+  const freshMemOnly = await freshBootModule();
+  freshMemOnly.reenterMergeQuarantinesAtBoot([]);
+  check("*** CARD 050a4428 (reboot) *** w3 (Kw3's own real repo) STAYS BLOCKED after a reboot, with K3's own redundant copy gone — the SECOND union's own write genuinely carried Kw3 forward and persisted it",
+    freshMemOnly.assertRepoNotQuarantined(w3).ok === false);
   }
 } finally {
   for (const d of tmpDirs) {
