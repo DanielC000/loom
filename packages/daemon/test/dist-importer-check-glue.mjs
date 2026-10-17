@@ -259,6 +259,18 @@ async function waitForRealConditionOrMechanismFailure(label, realCondition, db, 
 const SEMAPHORE_ADMISSION_WAIT_MS = ambientScaledBudget(10_000, 3);
 console.log(`[calib] semaphore-admission bound ${SEMAPHORE_ADMISSION_WAIT_MS}ms`);
 
+// Card ad67ae98 — scale the SCENARIO-LEVEL event/nudge/pending-gate-op-settled wait budgets below by this
+// process's measured ambient overshoot, same rationale as SEMAPHORE_ADMISSION_WAIT_MS above: these calls
+// observe the SAME real git cut+build+cleanup pipeline (createWorktree/removeWorktree/deleteBranch, even
+// though the build/harness steps themselves are stubbed), and a bare, un-scaled 5_000ms default had no
+// margin left once real ambient load pushed that pipeline's wall time past a few seconds. Investigated in
+// card ad67ae98: 15 clean serial runs (10 under `env -u LOOM_DEV -u LOOM_SUPERVISED`, 5 under LOOM_DEV=1)
+// post-83e0573a reproduced NONE of the previously-reported per-scenario flakes — attribution to 83e0573a
+// vs. lower ambient load vs. disk recovery is UNVERIFIED — but the bare 5_000ms default genuinely carried
+// zero ambient margin either way, exactly like SEMAPHORE_ADMISSION_WAIT_MS's own pre-fix history.
+const SCENARIO_EVENT_WAIT_MS = ambientScaledBudget(5_000, 3);
+console.log(`[calib] scenario-event bound ${SCENARIO_EVENT_WAIT_MS}ms`);
+
 // Negative control (card 47e70868 DoD): prove the wait mechanism powering both the calibrated budget
 // above and every other `waitUntil` call in this file still FAILS when the awaited condition never
 // becomes true — never run against the full scaled `SEMAPHORE_ADMISSION_WAIT_MS` itself (which can
@@ -507,7 +519,7 @@ try {
     check("(1) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     check("(1) kickDistImporterCheck fired exactly once", ctx.spy.kicks.length === 1);
     await settleAllKicks(ctx.spy);
-    const ev = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(1) distImporterCheckOnly event" });
+    const ev = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(1) distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(1) the event names the landed sha, the touched module, and PASSED", ev.detail.landedSha && ev.detail.touchedDistPaths.some((p) => p.endsWith("foo.js")) && ev.detail.passed === true);
     check("(1) exactly one nudge was pushed, naming the module and PASS", ctx.spy.nudges.length === 1 && ctx.spy.nudges[0].text.includes("foo") && ctx.spy.nudges[0].text.includes("passed"));
     check("(1) CLEANUP (worktree): no extra worktree dir survives beyond the real worker's own", onlyKnownWorktreeDirsLeft(P.projId, [w.taskId]));
@@ -567,10 +579,10 @@ try {
     const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
     check("(4) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
-    const ev = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true && e.detail?.landedSha), { label: "(4) capped-run event" });
+    const ev = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true && e.detail?.landedSha), { label: "(4) capped-run event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(4) NEVER skipped: a real distImporterCheckOnly event WAS recorded (it reached gate admission)", !!ev);
     check("(4) exactly cap=2 of the 3 matched files ran", ev.detail.ranSize === 2 && ev.detail.matchedSize === 3);
-    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(4) capped-run nudge" });
+    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(4) capped-run nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(4) the nudge says 'ran 2 of 3' and names the cap", nudge.text.includes("ran 2 of 3") && nudge.text.includes("cap 60% of corpus"));
     check("(4) the nudge still reads as an ordinary pass (never a skip)", nudge.text.includes("passed") && !nudge.text.includes("skipped"));
   }
@@ -588,7 +600,7 @@ try {
     const stateRightAfterLanding = { ...db.getMergeGateState(P.projId) };
     check("(5) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
-    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(5) red-run nudge" });
+    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(5) red-run nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(5) the nudge names the failing file", nudge.text.includes("importer-a.mjs"));
     check("(5) the nudge says a red here is a CANDIDATE, not a verdict, and to re-run on main first", nudge.text.includes("candidate, not a verdict") && nudge.text.toLowerCase().includes("re-run"));
     const stateAfterCheck = db.getMergeGateState(P.projId);
@@ -623,7 +635,7 @@ try {
     hold.resolve({});
     await settleAllKicks(ctx.spy);
     const events = () => db.listEvents(P.mgrId).filter((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true);
-    await waitUntil(() => events().length >= 2, { label: "(6) both runs settled (the original + ONE follow-up)" });
+    await waitUntil(() => events().length >= 2, { label: "(6) both runs settled (the original + ONE follow-up)", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(6) EXACTLY TWO runs total (the original + ONE follow-up — never a run per landing, never two concurrent)", events().length === 2);
     const followUp = events().find((e) => e.detail.touchedDistPaths.some((p) => p.endsWith("bar.js")));
     check("(6) the follow-up run's own touched-module set covers landing 2's module (bar.js)", !!followUp);
@@ -697,7 +709,7 @@ try {
     check("(8) landing 2 ALSO merged ungated", v2.merged === true);
     await settleAllKicks(ctx.spy);
     const ev2 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true),
-      { label: "(8) landing 2's OWN run genuinely fired — the queue did not stick running:true forever after landing 1's throw" });
+      { label: "(8) landing 2's OWN run genuinely fired — the queue did not stick running:true forever after landing 1's throw", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(8) landing 2's run genuinely executed and passed", ev2.detail.passed === true);
   }
 
@@ -712,12 +724,12 @@ try {
     const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
     check("(9) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
-    const op = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"), { label: "(9) the check's own pending-gate-op settled" });
+    const op = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"), { label: "(9) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(9) the pending-gate-op settled as 'error' (a mechanism failure, never a fail/pass verdict)", op.verdict === "error");
     // LEAD round-3 ruling 2: a mechanism failure now records its OWN distImporterCheckOnly event too (so
     // gate_history/countGateEvents can see it) — mechanismLike:true, never a passed:true/false verdict,
     // so it's never confused with a real gate pass/fail.
-    const ev9 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(9) the mechanism-failure's OWN distImporterCheckOnly event" });
+    const ev9 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(9) the mechanism-failure's OWN distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(9) the event is mechanismLike, never a passed pass/fail verdict", ev9.detail.mechanismLike === true && ev9.detail.passed === undefined);
     // LEAD round-4 ruling 1(b): the REAL gate_history/countGateEvents projection — not just the raw event
     // detail above — must also show this as "error"/gateRan:false, never "reject".
@@ -727,7 +739,7 @@ try {
     const counts9 = db.countGateEvents({ projectId: P.projId });
     check("(9) countGateEvents tallies this under byOutcome.error (never byOutcome.reject)", counts9.byOutcome.error === 1 && !counts9.byOutcome.reject);
     check("(9) countGateEvents tallies this under byGateType.distImporterCheck (never byGateType.worker)", counts9.byGateType.distImporterCheck === 1 && !counts9.byGateType.worker);
-    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(9) the mechanism-failure nudge" });
+    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(9) the mechanism-failure nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(9) the nudge names the synthetic build failure and reads distinctly from a real test red", nudge.text.includes("synthetic build failure") && nudge.text.includes("could not run") && !nudge.text.includes("FAILED:"));
     check("(9) CLEANUP (worktree): no extra worktree dir survives even though the build itself failed", onlyKnownWorktreeDirsLeft(P.projId, [w.taskId]));
     const survivors9 = await survivorBranches(P.repo, w.branch);
@@ -746,9 +758,9 @@ try {
     const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
     check("(10) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
-    const op = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"), { label: "(10) the check's own pending-gate-op settled" });
+    const op = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"), { label: "(10) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(10) the pending-gate-op settled as 'error' (never 'fail') — a harness-not-executed exit is a mechanism failure", op.verdict === "error");
-    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(10) the mechanism-failure nudge" });
+    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(10) the mechanism-failure nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(10) the nudge names the harness-not-executed mechanism, never a real red", nudge.text.includes("not actually executed") && !nudge.text.includes("FAILED:"));
   }
 
@@ -764,9 +776,9 @@ try {
     const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
     check("(11) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
-    const op = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"), { label: "(11) the check's own pending-gate-op settled" });
+    const op = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"), { label: "(11) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(11) the pending-gate-op settled as 'error' (never 'fail') — no identifiable failing test is a mechanism failure", op.verdict === "error");
-    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(11) the mechanism-failure nudge" });
+    const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(11) the mechanism-failure nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(11) the nudge never claims an '(unnamed)' failing file — it reads as a harness/usage error instead", !nudge.text.includes("(unnamed)") && nudge.text.includes("no identifiable failing test"));
   }
 
@@ -826,7 +838,7 @@ try {
       async () => { await holderHold; return "holder"; },
     );
     pHolder.catch(() => {});
-    await waitUntil(() => ctx.sessions.gateSemaphore.snapshot().active === 1, { label: "(13) [setup] the holder op saturates the cap" });
+    await waitUntil(() => ctx.sessions.gateSemaphore.snapshot().active === 1, { label: "(13) [setup] the holder op saturates the cap", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     const w = await addWorker(db, P, { "packages/daemon/src/foo.ts": "export const FOO = 13;\n" });
     const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
     check("(13) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
@@ -839,12 +851,12 @@ try {
     await pHolder.catch(() => {});
     await settleAllKicks(ctx.spy);
     const op13 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(13) the check's own pending-gate-op settled" });
+      { label: "(13) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     db.setPlatformConfig({ maxConcurrentGates: 2 }); // restore — this is a GLOBAL platform row shared by every later scenario's own Db() instance; leaving it at 1 here would silently narrow every scenario that follows
     check("(13) the pending-gate-op settled as 'cancelled' (never 'error'/'reject')", op13.verdict === "cancelled");
-    const ev13 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(13) the cancel's OWN distImporterCheckOnly event" });
+    const ev13 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(13) the cancel's OWN distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(13) the event carries cancelled:true", ev13.detail.cancelled === true);
-    const nudge13 = await waitUntil(() => ctx.spy.nudges[0], { label: "(13) the cancelled nudge" });
+    const nudge13 = await waitUntil(() => ctx.spy.nudges[0], { label: "(13) the cancelled nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(13) the nudge reads as cancelled and touches nothing further", nudge13.text.includes("cancelled") && nudge13.text.includes("nothing further to do"));
     check("(13) NO worktree was ever cut — a withdrawn QUEUED op never admits, so createWorktree is never called", onlyKnownWorktreeDirsLeft(P.projId, [w.taskId]));
   }
@@ -886,9 +898,9 @@ try {
     check("(14) the running-cancel call itself succeeded", aborted === true);
     await settleAllKicks(ctx.spy);
     const op14 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(14) the check's own pending-gate-op settled" });
+      { label: "(14) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(14) the pending-gate-op settled as 'cancelled' (never 'error'/'reject' — the mechanismLike misclassification this ruling fixes)", op14.verdict === "cancelled");
-    const ev14 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(14) the cancel's OWN distImporterCheckOnly event" });
+    const ev14 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(14) the cancel's OWN distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(14) the event carries cancelled:true (never mechanismLike:true)", ev14.detail.cancelled === true && !ev14.detail.mechanismLike);
     // LEAD round-4 ruling 1(b)/3: gate_history must show outcome:'cancelled' AND gateRan:true — the gate
     // process genuinely spawned (this cancel landed INSIDE the real --only-file= run), unlike (9)/(16)/(17).
@@ -897,7 +909,7 @@ try {
     check("(14) gate_history projects gateRan:true (the gate process genuinely spawned before this cancel landed)", hist14?.gateRan === true);
     const counts14 = db.countGateEvents({ projectId: P.projId });
     check("(14) countGateEvents tallies this under byOutcome.cancelled", counts14.byOutcome.cancelled === 1);
-    const nudge14 = await waitUntil(() => ctx.spy.nudges[0], { label: "(14) the cancelled nudge" });
+    const nudge14 = await waitUntil(() => ctx.spy.nudges[0], { label: "(14) the cancelled nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(14) the nudge reads as cancelled, never as a harness/usage-error mechanism failure", nudge14.text.includes("cancelled") && !nudge14.text.includes("harness"));
     check("(14) CLEANUP (worktree): no extra worktree dir survives a RUNNING cancel", onlyKnownWorktreeDirsLeft(P.projId, [w.taskId]));
     const survivors14 = await survivorBranches(P.repo, w.branch);
@@ -917,11 +929,11 @@ try {
     check("(15) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
     const op15 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(15) the check's own pending-gate-op settled" });
+      { label: "(15) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(15) the pending-gate-op settled as 'fail' (a genuine timeout is a real outcome, never 'error')", op15.verdict === "fail");
-    const ev15 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(15) the timeout's OWN distImporterCheckOnly event" });
+    const ev15 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(15) the timeout's OWN distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(15) the event carries timedOut:true and mechanismLike:false", ev15.detail.timedOut === true && ev15.detail.mechanismLike === false);
-    const nudge15 = await waitUntil(() => ctx.spy.nudges[0], { label: "(15) the timeout nudge" });
+    const nudge15 = await waitUntil(() => ctx.spy.nudges[0], { label: "(15) the timeout nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(15) the nudge names it a TIMEOUT, never a harness/usage error or an '(unnamed)' placeholder", nudge15.text.includes("TIMED OUT") && !nudge15.text.includes("harness") && !nudge15.text.includes("(unnamed)"));
   }
 
@@ -937,14 +949,14 @@ try {
     check("(16) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
     const op16 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(16) the check's own pending-gate-op settled" });
+      { label: "(16) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(16) the pending-gate-op settled as 'error' (a cut failure is a mechanism failure, never a fail/pass verdict)", op16.verdict === "error");
-    const ev16 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(16) the cut-fail's OWN distImporterCheckOnly event" });
+    const ev16 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(16) the cut-fail's OWN distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(16) the event carries mechanismLike:true", ev16.detail.mechanismLike === true);
     const hist16 = gateHistoryRowFor(db, P.projId, op16.opId);
     check("(16) gate_history projects this row as outcome:'error' (never 'reject')", hist16?.outcome === "error");
     check("(16) gate_history projects gateRan:false (a cut failure never spawns a real gate process)", hist16?.gateRan === false);
-    const nudge16 = await waitUntil(() => ctx.spy.nudges[0], { label: "(16) the mechanism-failure nudge" });
+    const nudge16 = await waitUntil(() => ctx.spy.nudges[0], { label: "(16) the mechanism-failure nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(16) the nudge names the synthetic cut failure, distinct from a real test red", nudge16.text.includes("synthetic cut failure") && nudge16.text.includes("could not run") && !nudge16.text.includes("FAILED:"));
     check("(16) CLEANUP (worktree): nothing was ever cut, so cleanup is a true no-op", onlyKnownWorktreeDirsLeft(P.projId, [w.taskId]));
     const survivors16 = await survivorBranches(P.repo, w.branch);
@@ -963,14 +975,14 @@ try {
     check("(17) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
     const op17 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(17) the check's own pending-gate-op settled" });
+      { label: "(17) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(17) the pending-gate-op settled as 'error' (a scan failure is a mechanism failure, never a fail/pass verdict)", op17.verdict === "error");
-    const ev17 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(17) the scan-fail's OWN distImporterCheckOnly event" });
+    const ev17 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(17) the scan-fail's OWN distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(17) the event carries mechanismLike:true", ev17.detail.mechanismLike === true);
     const hist17 = gateHistoryRowFor(db, P.projId, op17.opId);
     check("(17) gate_history projects this row as outcome:'error' (never 'reject')", hist17?.outcome === "error");
     check("(17) gate_history projects gateRan:false (a scan failure never spawns a real gate process)", hist17?.gateRan === false);
-    const nudge17 = await waitUntil(() => ctx.spy.nudges[0], { label: "(17) the mechanism-failure nudge" });
+    const nudge17 = await waitUntil(() => ctx.spy.nudges[0], { label: "(17) the mechanism-failure nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(17) the nudge names the synthetic scan failure, distinct from a real test red", nudge17.text.includes("synthetic scan failure") && nudge17.text.includes("could not run") && !nudge17.text.includes("FAILED:"));
     check("(17) CLEANUP (worktree): the real cut IS removed even though the scan itself failed", onlyKnownWorktreeDirsLeft(P.projId, [w.taskId]));
     const survivors17 = await survivorBranches(P.repo, w.branch);
@@ -1056,9 +1068,9 @@ try {
     buildHold.resolve({});
     await settleAllKicks(ctx.spy);
     const op20 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(20) the check's own pending-gate-op settled" });
+      { label: "(20) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(20) the pending-gate-op settled as 'cancelled' (the MID-PHASE branch, never 'error'/'reject')", op20.verdict === "cancelled");
-    const ev20 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(20) the mid-phase cancel's OWN distImporterCheckOnly event" });
+    const ev20 = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true), { label: "(20) the mid-phase cancel's OWN distImporterCheckOnly event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(20) the event carries cancelled:true and gateSpawned:false (the gate call was never reached)", ev20.detail.cancelled === true && ev20.detail.gateSpawned === false);
     const hist20 = gateHistoryRowFor(db, P.projId, op20.opId);
     check("(20) gate_history projects this row as outcome:'cancelled' with gateRan:false", hist20?.outcome === "cancelled" && hist20?.gateRan === false);
@@ -1087,7 +1099,7 @@ try {
     check("(21) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
     const op21 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(21) the check's own pending-gate-op settled" });
+      { label: "(21) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(21) recordWorktreeWedgeAttempt was called exactly once (the in-run cleanup path)", wedgeAttemptCalls === 1);
     check("(21) armWedgeSweep was called (the background wedge-retry sweep is armed)", armWedgeSweepCalls >= 1);
     // CLEANUP (test isolation, not production behavior): `distImporterCheckRemoveWorktree` is stubbed
@@ -1150,7 +1162,7 @@ try {
     check("(23) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
     const op23 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(23) the check's own pending-gate-op settled" });
+      { label: "(23) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(23) the check itself still passed (the stub only affects worktree removal, not the gate)", op23?.verdict === "pass");
     const checkTaskId = `dist-importer-check-${op23.opId}`;
     const checkWtPath = path.join(WORKTREES_DIR, P.projId, taskKey(checkTaskId));
@@ -1183,7 +1195,7 @@ try {
     check("(24) landing merged ungated (gate-interval)", v.merged === true && v.skipReason === "gate-interval");
     await settleAllKicks(ctx.spy);
     const op24 = await waitUntil(() => db.listPendingGateOps().find((o) => o.projectId === P.projId && o.key.startsWith("dist-importer-check:") && o.state === "settled"),
-      { label: "(24) the check's own pending-gate-op settled" });
+      { label: "(24) the check's own pending-gate-op settled", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(24) the check itself still passed (the stub only affects the branch-delete guard's own read)", op24?.verdict === "pass");
     const checkTaskId = `dist-importer-check-${op24.opId}`;
     const checkWtPath = path.join(WORKTREES_DIR, P.projId, taskKey(checkTaskId));
