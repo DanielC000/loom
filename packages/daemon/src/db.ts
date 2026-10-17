@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { DB_PATH, DAEMON_TEST_DIR } from "./paths.js";
 import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
+import { worktreeIdentityKey } from "./git/worktrees.js";
 import { parseMainlineWatermark, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX } from "./git/mainline-watch.js";
 // `secretEnvelopeByteLength` (card 82b22817) is the ONE deliberate exception to this file never touching
 // crypto: it derives a SIZE from the ciphertext's own structure, never decrypts, never sees plaintext —
@@ -1723,6 +1724,39 @@ export interface WedgedWorktreeEntry {
   attempts: number;
   reason: string;
   needsHuman: boolean;
+}
+
+/**
+ * Group `entries` by {@link worktreeIdentityKey} and fold any group with more than one member into ONE
+ * fail-closed view — a singleton group passes through unchanged. card 1243e342 (CR 601ab6c2): a pre-fix
+ * daemon could already have written two raw-keyed entries for the SAME dir under differently-spelled
+ * paths; a caller must never see an unparked duplicate alone while a sibling duplicate is parked.
+ * `needsHuman` is the OR across the group (one park parks the whole identity); `attempts` is the MAX
+ * (never under-report); `firstWedgedAt`, and the returned `worktreePath`/`repoPath`/`reason`, come from
+ * the EARLIEST entry (consistent provenance); `lastAttemptAt` is the LATEST (most informative recency).
+ * The ONE shared fold every `Db` wedge-tracking read AND write routes through — see
+ * `docs/decisions/40b63f1c-boot-reconcile-worktree-protection-keyed-on-path-not-row.md`'s Round 3.
+ */
+function collapseWedgedByIdentity(entries: WedgedWorktreeEntry[]): WedgedWorktreeEntry[] {
+  const groups = new Map<string, WedgedWorktreeEntry[]>();
+  for (const e of entries) {
+    const key = worktreeIdentityKey(e.worktreePath);
+    const g = groups.get(key);
+    if (g) g.push(e); else groups.set(key, [e]);
+  }
+  const out: WedgedWorktreeEntry[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) { out.push(group[0]!); continue; } // length just checked above
+    const earliest = group.reduce((a, b) => (a.firstWedgedAt <= b.firstWedgedAt ? a : b));
+    const latestAttempt = group.reduce((a, b) => (a.lastAttemptAt >= b.lastAttemptAt ? a : b));
+    out.push({
+      ...earliest,
+      needsHuman: group.some((e) => e.needsHuman),
+      attempts: Math.max(...group.map((e) => e.attempts)),
+      lastAttemptAt: latestAttempt.lastAttemptAt,
+    });
+  }
+  return out;
 }
 
 /**
@@ -4320,8 +4354,11 @@ export class Db {
   }
 
   // --- wedged-worktree tracking (task dea6728e; app_meta JSON array) — SLOW retry, not permanent skip ---
-  /** Every currently-tracked wedged worktree dir. Corrupt/missing blob → empty (never throws). */
-  listWedgedWorktrees(): WedgedWorktreeEntry[] {
+  /** The RAW, UNCOLLAPSED stored array (parsed + shape-validated, never folded). Every WRITE method
+   *  below filters/replaces against THIS — never the public, collapsed {@link listWedgedWorktrees} — so
+   *  a write can actually remove every duplicate raw row sharing an identity, not just the one it
+   *  matched. Corrupt/missing blob → empty (never throws). */
+  private rawWedgedWorktrees(): WedgedWorktreeEntry[] {
     const raw = this.getMeta(WORKTREE_WEDGED_KEY);
     if (!raw) return [];
     try {
@@ -4337,9 +4374,24 @@ export class Db {
     } catch { /* corrupt blob ⇒ empty (like getPlatformConfig) */ }
     return [];
   }
-  /** The tracked entry for `worktreePath`, or undefined if it isn't (currently) wedged. */
+  /** Every currently-tracked wedged worktree dir, COLLAPSED to one entry per real directory via the
+   *  shared {@link collapseWedgedByIdentity} fold — see its own doc for the fail-closed field rules, and
+   *  `docs/decisions/40b63f1c-boot-reconcile-worktree-protection-keyed-on-path-not-row.md`'s Round 3 for
+   *  why this must be unconditional (the background sweep's own arm/disarm logic and boot-reconcile's
+   *  own reporting read this list directly, with no gate of their own). */
+  listWedgedWorktrees(): WedgedWorktreeEntry[] {
+    return collapseWedgedByIdentity(this.rawWedgedWorktrees());
+  }
+  /** The tracked entry for `worktreePath`, or undefined if it isn't (currently) wedged.
+   *
+   * @decision 40b63f1c — wedge lookups are identity-keyed, never raw `===` (card 1243e342): a cross-boot
+   * casing drift can alias `worktreePath` to a differently-spelled stored entry for the same dir. The
+   * stored field itself stays the original raw string — only this comparison is normalized. */
   getWedgedWorktree(worktreePath: string): WedgedWorktreeEntry | undefined {
-    return this.listWedgedWorktrees().find((e) => e.worktreePath === worktreePath);
+    const key = worktreeIdentityKey(worktreePath);
+    // listWedgedWorktrees() is already collapsed (at most one entry per identity) — plain first-match is
+    // correct by construction here; there is no separate collapse logic left to drift from it.
+    return this.listWedgedWorktrees().find((e) => worktreeIdentityKey(e.worktreePath) === key);
   }
   /**
    * Record ONE more failed (killed/timed-out) removal attempt against `worktreePath` — upsert: a first
@@ -4348,30 +4400,42 @@ export class Db {
    * caller can measure how long it's been wedged). Returns the updated entry so the caller can decide
    * (using its own give-up thresholds) whether to call {@link markWorktreeNeedsHuman}. Pure bookkeeping —
    * this method itself never decides give-up; that policy lives in SessionService.
+   *
+   * @decision 40b63f1c — "existing" is the COLLAPSED view (card 1243e342), never raw first-match, so a
+   * write against a legacy identity-duplicate pair normalizes it fail-closed instead of erasing a park;
+   * the write still replaces every RAW row sharing this identity, via `rawWedgedWorktrees()`.
    */
   recordWorktreeWedgeAttempt(worktreePath: string, repoPath: string, reason: string): WedgedWorktreeEntry {
     const now = new Date().toISOString();
-    const list = this.listWedgedWorktrees();
-    const existing = list.find((e) => e.worktreePath === worktreePath);
+    const key = worktreeIdentityKey(worktreePath);
+    const raw = this.rawWedgedWorktrees();
+    const existing = this.getWedgedWorktree(worktreePath);
     const updated: WedgedWorktreeEntry = existing
       ? { ...existing, repoPath, lastAttemptAt: now, attempts: existing.attempts + 1, reason }
       : { worktreePath, repoPath, firstWedgedAt: now, lastAttemptAt: now, attempts: 1, reason, needsHuman: false };
-    this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify([...list.filter((e) => e.worktreePath !== worktreePath), updated]));
+    this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify([...raw.filter((e) => worktreeIdentityKey(e.worktreePath) !== key), updated]));
     return updated;
   }
   /** Flip `worktreePath` to `needsHuman:true` (the long give-up bound was crossed) — auto-retry stops for
-   *  it from here on; a no-op if it isn't currently tracked. */
+   *  it from here on; a no-op if it isn't currently tracked.
+   *
+   * @decision 40b63f1c — same COLLAPSED-view rule as `recordWorktreeWedgeAttempt` (card 1243e342).
+   * Always persists once `entry` exists, even if already `needsHuman:true` — a legacy duplicate pair
+   * gets physically de-duplicated the first time any write touches it, not left split forever. */
   markWorktreeNeedsHuman(worktreePath: string): void {
-    const list = this.listWedgedWorktrees();
-    const entry = list.find((e) => e.worktreePath === worktreePath);
-    if (!entry || entry.needsHuman) return;
-    this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify([...list.filter((e) => e.worktreePath !== worktreePath), { ...entry, needsHuman: true }]));
+    const key = worktreeIdentityKey(worktreePath);
+    const raw = this.rawWedgedWorktrees();
+    const entry = this.getWedgedWorktree(worktreePath);
+    if (!entry) return;
+    this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify([...raw.filter((e) => worktreeIdentityKey(e.worktreePath) !== key), { ...entry, needsHuman: true }]));
   }
   /** Drop `worktreePath` from wedged tracking (a no-op if it wasn't tracked) — called once a removal
-   *  actually succeeds, at any point (first try, a slow retry, or out-of-band). */
+   *  actually succeeds, at any point (first try, a slow retry, or out-of-band). Identity-keyed against
+   *  the RAW array, so it drops every duplicate raw row sharing this identity, not just one. */
   clearWedgedWorktree(worktreePath: string): void {
-    const before = this.listWedgedWorktrees();
-    const after = before.filter((e) => e.worktreePath !== worktreePath);
+    const key = worktreeIdentityKey(worktreePath);
+    const before = this.rawWedgedWorktrees();
+    const after = before.filter((e) => worktreeIdentityKey(e.worktreePath) !== key);
     if (after.length === before.length) return; // wasn't tracked ⇒ nothing to clear
     this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify(after));
   }

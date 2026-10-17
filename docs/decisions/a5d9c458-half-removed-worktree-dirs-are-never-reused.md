@@ -182,13 +182,17 @@ caller still decides its own failure policy by checking the returned `{ok, stale
   immediately before `removeWorktree`.
 - Do not let `reclaimWedgedWorktreePathForSpawn`'s rename-aside failure fall through to `createWorktree`
   silently — refuse the spawn (throw) rather than letting it reuse/recut a dir whose state is now unknown.
-- Do not normalize (`normForCompare`) the `db.getWedgedWorktree`/`recordWorktreeWedgeAttempt` lookup
-  inside `reclaimWedgedWorktreePathForSpawn` as a "safety" change — exact-string match is correct there:
-  `worktreePath` and every `WedgedWorktreeEntry.worktreePath` ever recorded for it are both the output of
-  the SAME `resolveWorktreePath(projectId, taskId, repoKey)` call given the SAME inputs, so they match
-  byte-for-byte. ("By construction" overstates this: it holds because `resolveWorktreePath`/`taskKey`
-  happen to be pure functions of their inputs today, not because the type system guarantees it — if that
-  formula ever stops being a pure deterministic function of exactly those inputs, re-verify this bullet.)
+- ⛔ SUPERSEDED (card `1243e342`, CR `3709d686`) — this bullet's "exact-string match is correct there"
+  claim does NOT hold: a cross-boot `WORKTREES_DIR` casing drift (an env-level change across daemon
+  restarts) falsifies "the same inputs ⇒ byte-identical output" even though `resolveWorktreePath`/
+  `taskKey` are pure functions of `(projectId, taskId, repoKey)` — `WORKTREES_DIR` is itself an ambient
+  input the formula closes over, not one of the three named args. `db.getWedgedWorktree`/
+  `recordWorktreeWedgeAttempt`/`markWorktreeNeedsHuman`/`clearWedgedWorktree` are now identity-keyed
+  (`worktreeIdentityKey`, both comparison sides, never the stored field or an fs/git call) — see the
+  Follow-up under `docs/decisions/40b63f1c-boot-reconcile-worktree-protection-keyed-on-path-not-row.md`
+  for the full mechanism, the two drift sources, and why the consequence of a miss was bounded rather than
+  a repeat of this card's own P1 class. Do NOT revert `reclaimWedgedWorktreePathForSpawn`'s wedge lookup
+  (or db.ts's own methods) back to raw `===` on the strength of this bullet's original text.
 - Do not delete the `.stale-<ts>` dirs this fix (and round 1) leave behind by hand as a one-off cleanup —
   they are SAFE to delete (confirmed by this card: they're an inert, orphaned rename target with no git
   linkage and no tracking entry pointing at them), but nothing auto-reaps them yet; surfacing them for

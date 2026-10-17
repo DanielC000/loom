@@ -24587,7 +24587,8 @@ export class SessionService {
       released = true;
       this.claimedWorktreePaths.delete(normPath);
     };
-    // @decision a5d9c458 — exact-string lookup is safe here: see the decision record for why.
+    // @decision 40b63f1c — wedge lookups are identity-keyed inside db.ts (card 1243e342), never raw
+    // `===`; this call is unaffected either way, it just passes `worktreePath` straight through.
     if (!this.db.getWedgedWorktree(worktreePath)) return { worktreePath, release };
     if (fs.existsSync(worktreePath)) {
       // @decision ceeb188b — never rename this dir aside without checking for a live nested worktree

@@ -74,6 +74,64 @@ const now = new Date().toISOString();
   db.close();
 }
 
+// --- (unit-alias) card 1243e342 — the wedge store's comparisons are identity-keyed (worktreeIdentityKey),
+// never raw `===`, so a differently-spelled alias of the SAME dir (a repoKey re-case, or a cross-boot
+// WORKTREES_DIR casing drift) still finds/upserts/clears the one entry it names. Pure string-level checks
+// — none of these methods touch the filesystem, so no real directory is needed. `aliasSpelling` mirrors
+// worktree-path-identity-alias.mjs's own helper exactly (uppercase + forward slashes), so the mismatch
+// shape here is the SAME one that card exercises for boot-reconcile's structures.
+{
+  const aliasSpelling = (p) => p.toUpperCase().replace(/\\/g, "/");
+  const db = new Db();
+  const pX = path.join(os.tmpdir(), `loom-wwr-alias-X-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  const pXAlias = aliasSpelling(pX);
+  check("(unit-alias setup) the alias is a genuinely different string", pXAlias !== pX);
+  const isWin32 = process.platform === "win32";
+
+  // Platform polarity (manager-requested check 2): confirm which way normForCompare actually behaves
+  // on THIS platform before relying on it below — never assume, read the live behaviour.
+  if (isWin32) {
+    check("(unit-alias polarity) win32: normForCompare case-folds, so the alias normalizes to the SAME key",
+      normForCompare(pXAlias) === normForCompare(pX));
+  } else {
+    check("(unit-alias polarity) non-win32: normForCompare is case-PRESERVING, so the alias normalizes to a DIFFERENT key (no false match on a case-sensitive FS)",
+      normForCompare(pXAlias) !== normForCompare(pX));
+  }
+
+  const e1 = db.recordWorktreeWedgeAttempt(pX, "/repo/alias", "first sighting, raw spelling");
+  check("(unit-alias) first sighting at the raw spelling creates attempts:1", e1.attempts === 1);
+
+  const e2 = db.recordWorktreeWedgeAttempt(pXAlias, "/repo/alias", "second attempt, ALIASED spelling");
+  if (isWin32) {
+    check("(unit-alias) win32: a second attempt at the ALIAS spelling UPSERTS the same entry (still exactly 1 entry total)", db.listWedgedWorktrees().length === 1);
+    check("(unit-alias) win32: the upsert bumps attempts to 2", e2.attempts === 2);
+    check("(unit-alias) win32: the stored worktreePath stays the FIRST-written RAW spelling, never the alias", e2.worktreePath === pX);
+    check("(unit-alias) win32: a lookup BY THE ALIAS finds the same entry", db.getWedgedWorktree(pXAlias)?.attempts === 2);
+
+    db.markWorktreeNeedsHuman(pXAlias);
+    check("(unit-alias) win32: markWorktreeNeedsHuman via the ALIAS flips the SAME (raw-keyed) entry", db.getWedgedWorktree(pX)?.needsHuman === true);
+
+    db.clearWedgedWorktree(pXAlias);
+    check("(unit-alias) win32: clearWedgedWorktree via the ALIAS clears the SAME entry (lookup by either spelling now undefined)",
+      db.getWedgedWorktree(pX) === undefined && db.getWedgedWorktree(pXAlias) === undefined);
+  } else {
+    check("(unit-alias) non-win32: a second attempt at the ALIAS spelling is a genuinely DIFFERENT dir — TWO entries, not one", db.listWedgedWorktrees().length === 2);
+    check("(unit-alias) non-win32: the alias's own entry starts fresh at attempts:1 (not an upsert onto the raw entry)", e2.attempts === 1);
+    db.clearWedgedWorktree(pX);
+    db.clearWedgedWorktree(pXAlias);
+  }
+
+  // Negative control (manager-requested check 3, DB-level half): a genuinely UNRELATED path (not an
+  // alias of pX at all) must never match either spelling, on either platform.
+  const pUnrelated = path.join(os.tmpdir(), `loom-wwr-alias-unrelated-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  db.recordWorktreeWedgeAttempt(pUnrelated, "/repo/unrelated", "control");
+  check("(unit-alias control) an unrelated path's entry is untouched by any of the alias lookups above", db.getWedgedWorktree(pUnrelated)?.attempts === 1);
+  check("(unit-alias control) the raw/alias pair never matches the unrelated path", db.getWedgedWorktree(pUnrelated)?.worktreePath === pUnrelated);
+  db.clearWedgedWorktree(pUnrelated);
+  check("(unit-alias control) wedge store is clean again", db.listWedgedWorktrees().length === 0);
+  db.close();
+}
+
 function seed(db, p) {
   db.insertProject({ id: p.projId, name: "WWR", repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
@@ -144,6 +202,188 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
   db.close();
   fs.rmSync(W.repo, { recursive: true, force: true });
+}
+
+// --- (unit-alias legacy-duplicate) CR 601ab6c2 (round 2 of 3709d686) on card 1243e342 — a pre-fix
+//     daemon could already have written TWO raw-keyed entries for the SAME dir under different
+//     spellings. Both READS (listWedgedWorktrees/getWedgedWorktree) AND WRITES
+//     (recordWorktreeWedgeAttempt/markWorktreeNeedsHuman) must collapse them fail-closed through the
+//     ONE shared collapseWedgedByIdentity fold — a PARKED (needsHuman) duplicate must park the whole
+//     identity, and a write must never silently erase that park by upserting onto the unparked sibling.
+//     Seeded by writing the RAW app_meta blob directly (the literal "worktree_wedged" key —
+//     WORKTREE_WEDGED_KEY isn't exported — mirroring db.ts's own module constant), since
+//     recordWorktreeWedgeAttempt itself can no longer produce this shape once collapsed. The EARLIEST
+//     entry is always seeded SECOND in the array below, so "earliest" and "first in the array" are
+//     genuinely distinguishable (a collapse that just took index 0 would fail every check here). ---
+// Hoisted to module scope (card 1243e342 CR 3a2b7d1d) — used by both the win32-only block below AND the
+// ungated posix-safe block that follows it, so it must outlive the win32 `if`'s own scope.
+const rawBlob = (db) => JSON.parse(db.getMeta("worktree_wedged") ?? "[]");
+
+if (process.platform === "win32") {
+  const aliasSpelling = (p) => p.toUpperCase().replace(/\\/g, "/");
+
+  // --- (legacy-duplicate) read-collapse + sweep-skip + sweep-disarm (CR items 1's read half, 2, 4a) ---
+  {
+    const db = new Db();
+    const LD = { projId: `wwr-ld-proj-${sfx}`, agentId: `wwr-ld-top-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-legacydup-${sfx}`) };
+    initRepo(LD.repo);
+    LD.worktreePath = leftoverDir("legacydup", sfx);
+    const LDAlias = aliasSpelling(LD.worktreePath);
+    check("(legacy-duplicate setup) the alias is a genuinely different string naming the same real dir",
+      LDAlias !== LD.worktreePath && fs.existsSync(LDAlias) && fs.statSync(LDAlias).isDirectory());
+
+    const entryEarliest = { worktreePath: LD.worktreePath, repoPath: LD.repo, firstWedgedAt: "2026-01-01T00:00:00.000Z", lastAttemptAt: "2026-01-01T00:00:00.000Z", attempts: 1, reason: "legacy, earliest — not parked", needsHuman: false };
+    const entryLater = { worktreePath: LDAlias, repoPath: LD.repo, firstWedgedAt: "2026-01-02T00:00:00.000Z", lastAttemptAt: "2026-01-03T00:00:00.000Z", attempts: 3, reason: "legacy, later — PARKED", needsHuman: true };
+    // entryLater seeded FIRST in the array; entryEarliest (chronologically first) seeded SECOND.
+    db.setMeta("worktree_wedged", JSON.stringify([entryLater, entryEarliest]));
+    check("(legacy-duplicate setup) both raw duplicate entries are present in storage", rawBlob(db).length === 2);
+
+    for (const [label, lookupPath] of [["raw spelling", LD.worktreePath], ["alias spelling", LDAlias]]) {
+      const collapsed = db.getWedgedWorktree(lookupPath);
+      check(`(legacy-duplicate) lookup via the ${label} collapses needsHuman to TRUE (OR across duplicates — the parked one wins)`, collapsed?.needsHuman === true);
+      check(`(legacy-duplicate) lookup via the ${label} collapses attempts to the MAX (3, not entryEarliest's 1)`, collapsed?.attempts === 3);
+      check(`(legacy-duplicate) lookup via the ${label} collapses firstWedgedAt to the EARLIEST (not the one seeded first in the array)`, collapsed?.firstWedgedAt === entryEarliest.firstWedgedAt);
+      check(`(legacy-duplicate) lookup via the ${label} returns the EARLIEST entry's own raw worktreePath (not the array's first element)`, collapsed?.worktreePath === LD.worktreePath);
+      check(`(legacy-duplicate) lookup via the ${label} collapses lastAttemptAt to the LATEST (entryLater's)`, collapsed?.lastAttemptAt === entryLater.lastAttemptAt);
+    }
+    check("(legacy-duplicate) listWedgedWorktrees() itself is collapsed too — exactly ONE entry for this identity", db.listWedgedWorktrees().filter((e) => e.worktreePath === LD.worktreePath || e.worktreePath === LDAlias).length === 1);
+
+    // The converse case the CR cares about: the sweep's own pending list is now built from the COLLAPSED
+    // listWedgedWorktrees(), so this identity's needsHuman:true (OR'd) excludes it from `pending`
+    // entirely — gcWorktreeDir is never even called, let alone reaching reap. RED-PROOF: with only the
+    // listWedgedWorktrees-collapse hunk reverted, `pending` would still include the raw unparked entry
+    // (its own needsHuman:false survives the filter), so item 4c's assertion below would fail even though
+    // removeDir itself still wouldn't run (gcWorktreeDir's OWN getWedgedWorktree gate still catches it).
+    let removeDirCallsForLD = 0;
+    const sessionsLD = new SessionService(db, {}, new OrchestrationControl(), {
+      removeDir: async (target, ms) => { if (target === LD.worktreePath) removeDirCallsForLD++; return killableRemoveDir(target, ms); },
+    });
+    await sessionsLD.sweepWedgedWorktreesOnce();
+    check("(legacy-duplicate) the sweep NEVER attempted removal — the collapsed needsHuman:true blocked it before reap", removeDirCallsForLD === 0);
+    check("(legacy-duplicate) the real dir SURVIVED the sweep tick untouched", fs.existsSync(LD.worktreePath));
+    // (sweep-disarm, CR item 2/4c): pending must be EMPTY after the tick, or the background timer would
+    // never disarm for a mixed pair even though nothing is actually being retried against it.
+    check("(legacy-duplicate sweep-disarm) pending is empty after the sweep tick — the background timer can disarm",
+      db.listWedgedWorktrees().filter((e) => !e.needsHuman).length === 0);
+
+    db.close();
+    fs.rmSync(LD.worktreePath, { recursive: true, force: true });
+    fs.rmSync(LD.repo, { recursive: true, force: true });
+  }
+
+  // --- (legacy-duplicate write-side) CR item 1's write half, 4b — recordWorktreeWedgeAttempt against a
+  //     legacy pair must normalize it fail-closed (never upsert onto the unparked sibling and erase the
+  //     park), AND physically collapse raw storage down to ONE entry as a side effect. ---
+  {
+    const db = new Db();
+    const wEarliest = path.join(os.tmpdir(), `loom-wwr-ld-write-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+    const wLater = aliasSpelling(wEarliest);
+    const earliest = { worktreePath: wEarliest, repoPath: "/repo/ld-write", firstWedgedAt: "2026-01-01T00:00:00.000Z", lastAttemptAt: "2026-01-01T00:00:00.000Z", attempts: 1, reason: "legacy, earliest — not parked", needsHuman: false };
+    const later = { worktreePath: wLater, repoPath: "/repo/ld-write", firstWedgedAt: "2026-01-02T00:00:00.000Z", lastAttemptAt: "2026-01-03T00:00:00.000Z", attempts: 3, reason: "legacy, later — PARKED", needsHuman: true };
+    // CR 3a2b7d1d item 3a: an UNRELATED entry, seeded alongside the legacy pair, must survive the write
+    // byte-unchanged — proves the identity-keyed filter/replace doesn't touch anything outside the pair.
+    const unrelated = { worktreePath: path.join(os.tmpdir(), `loom-wwr-ld-write-unrelated-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`), repoPath: "/repo/unrelated", firstWedgedAt: "2026-01-05T00:00:00.000Z", lastAttemptAt: "2026-01-05T00:00:00.000Z", attempts: 2, reason: "unrelated control", needsHuman: false };
+    db.setMeta("worktree_wedged", JSON.stringify([earliest, later, unrelated])); // UNPARKED (earliest) FIRST in the array — the shape that lets a raw first-match bug erase the park
+
+    const updated = db.recordWorktreeWedgeAttempt(wEarliest, "/repo/ld-write", "a fresh attempt against the earliest spelling");
+    check("(legacy-duplicate write-side) recordWorktreeWedgeAttempt against a legacy pair does NOT erase the park", updated.needsHuman === true);
+    check("(legacy-duplicate write-side) attempts bumps from the COLLAPSED max (3), not the matched entry's own (1) — gives 4", updated.attempts === 4);
+    check("(legacy-duplicate write-side) firstWedgedAt stays the EARLIEST", updated.firstWedgedAt === earliest.firstWedgedAt);
+    check("(legacy-duplicate write-side) the write physically collapsed raw storage to exactly the pair's ONE entry plus the unrelated one (2 total)", rawBlob(db).length === 2);
+    check("(legacy-duplicate write-side control) the UNRELATED entry survives the write byte-unchanged",
+      JSON.stringify(db.getWedgedWorktree(unrelated.worktreePath)) === JSON.stringify(unrelated));
+
+    db.close();
+  }
+
+  // --- (legacy-duplicate clear) CR 3a2b7d1d item 3b — clearWedgedWorktree against a legacy pair must
+  //     drop BOTH raw rows, not just the one matching whichever spelling it was called with. ---
+  {
+    const db = new Db();
+    const cEarliest = path.join(os.tmpdir(), `loom-wwr-ld-clear-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+    const cLater = aliasSpelling(cEarliest);
+    const earliest = { worktreePath: cEarliest, repoPath: "/repo/ld-clear", firstWedgedAt: "2026-01-01T00:00:00.000Z", lastAttemptAt: "2026-01-01T00:00:00.000Z", attempts: 1, reason: "legacy, earliest — not parked", needsHuman: false };
+    const later = { worktreePath: cLater, repoPath: "/repo/ld-clear", firstWedgedAt: "2026-01-02T00:00:00.000Z", lastAttemptAt: "2026-01-03T00:00:00.000Z", attempts: 3, reason: "legacy, later — PARKED", needsHuman: true };
+    db.setMeta("worktree_wedged", JSON.stringify([later, earliest]));
+    check("(legacy-duplicate clear setup) both raw duplicate entries are present", rawBlob(db).length === 2);
+
+    db.clearWedgedWorktree(cEarliest); // called via the EARLIEST (raw) spelling
+    check("(legacy-duplicate clear) BOTH raw rows are dropped, not just the one matching the called spelling", rawBlob(db).length === 0);
+    check("(legacy-duplicate clear) a lookup via either spelling is now undefined", db.getWedgedWorktree(cEarliest) === undefined && db.getWedgedWorktree(cLater) === undefined);
+
+    db.close();
+  }
+
+  // --- (legacy-duplicate markNeedsHuman write-side) CR item 1's write half, 4b — markWorktreeNeedsHuman,
+  //     called via the UNPARKED duplicate's own spelling while the PARKED one sits first in the array,
+  //     must still collapse-persist (never early-return without touching storage just because the
+  //     COLLAPSED view already reads needsHuman:true). ---
+  {
+    const db = new Db();
+    const mEarliest = path.join(os.tmpdir(), `loom-wwr-ld-mark-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+    const mLater = aliasSpelling(mEarliest);
+    const earliest = { worktreePath: mEarliest, repoPath: "/repo/ld-mark", firstWedgedAt: "2026-01-01T00:00:00.000Z", lastAttemptAt: "2026-01-01T00:00:00.000Z", attempts: 1, reason: "legacy, earliest — not parked", needsHuman: false };
+    const later = { worktreePath: mLater, repoPath: "/repo/ld-mark", firstWedgedAt: "2026-01-02T00:00:00.000Z", lastAttemptAt: "2026-01-03T00:00:00.000Z", attempts: 3, reason: "legacy, later — PARKED", needsHuman: true };
+    db.setMeta("worktree_wedged", JSON.stringify([later, earliest])); // PARKED entry FIRST in the array
+
+    db.markWorktreeNeedsHuman(mEarliest); // called via the UNPARKED duplicate's own raw spelling
+    const persistedM = db.getWedgedWorktree(mEarliest);
+    check("(legacy-duplicate markNeedsHuman) the collapse-persisted entry is needsHuman:true", persistedM?.needsHuman === true);
+    check("(legacy-duplicate markNeedsHuman) the call physically collapsed raw storage to exactly ONE entry, not left split", rawBlob(db).length === 1);
+    // CR 3a2b7d1d item 2: `needsHuman` alone doesn't discriminate WHICH raw entry's OTHER fields the
+    // persisted row carries — a raw first-match derivation (the exact regression this pins) would find
+    // `later` first (its own needsHuman is already true, so that path looks identical on the check
+    // above) and persist LATER's firstWedgedAt/worktreePath, not the earliest entry's.
+    check("(legacy-duplicate markNeedsHuman) the persisted row carries the EARLIEST entry's firstWedgedAt, not the one seeded first in the array", persistedM?.firstWedgedAt === earliest.firstWedgedAt);
+    check("(legacy-duplicate markNeedsHuman) the persisted row carries the EARLIEST entry's own raw worktreePath", persistedM?.worktreePath === mEarliest);
+
+    db.close();
+  }
+} else {
+  console.log(`SKIP  worktree-wedge-retry.mjs (unit-alias legacy-duplicate) and its write-side/sweep-disarm siblings — win32-only (case-insensitive-filesystem path aliasing); this host is '${process.platform}'. The platform-agnostic collapse mechanism itself is covered below by (unit-alias legacy-duplicate posix-safe).`);
+}
+
+// --- (unit-alias legacy-duplicate posix-safe) CR 601ab6c2 item 4d — an UNGATED variant proving the
+//     SAME identity-collapse fires on every platform, not just win32's case-insensitive filesystem,
+//     using a LEXICAL alias normForCompare collapses everywhere: a trailing path separator, which
+//     path.resolve() (what normForCompare calls, on every platform) always normalizes away regardless
+//     of OS. Confirmed directly against normForCompare before relying on it (not assumed). ---
+{
+  const db = new Db();
+  const pBase = path.join(os.tmpdir(), `loom-wwr-ld-posix-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  const pTrailingSlash = pBase + path.sep;
+  check("(legacy-duplicate posix-safe setup) the trailing-separator alias is a genuinely different string",
+    pTrailingSlash !== pBase);
+  check("(legacy-duplicate posix-safe setup) normForCompare normalizes the alias to the SAME key as the base, on THIS platform",
+    normForCompare(pTrailingSlash) === normForCompare(pBase));
+
+  const earliest = { worktreePath: pBase, repoPath: "/repo/ld-posix", firstWedgedAt: "2026-01-01T00:00:00.000Z", lastAttemptAt: "2026-01-01T00:00:00.000Z", attempts: 1, reason: "legacy, earliest — not parked", needsHuman: false };
+  const later = { worktreePath: pTrailingSlash, repoPath: "/repo/ld-posix", firstWedgedAt: "2026-01-02T00:00:00.000Z", lastAttemptAt: "2026-01-03T00:00:00.000Z", attempts: 3, reason: "legacy, later — PARKED", needsHuman: true };
+  db.setMeta("worktree_wedged", JSON.stringify([later, earliest])); // later (PARKED) seeded FIRST — distinguishes "earliest" from "first in the array" for the READ checks below.
+
+  const collapsed = db.getWedgedWorktree(pBase);
+  check("(legacy-duplicate posix-safe) collapses needsHuman to TRUE on every platform", collapsed?.needsHuman === true);
+  check("(legacy-duplicate posix-safe) collapses attempts to the MAX (3)", collapsed?.attempts === 3);
+  check("(legacy-duplicate posix-safe) collapses firstWedgedAt to the EARLIEST", collapsed?.firstWedgedAt === earliest.firstWedgedAt);
+
+  db.close();
+
+  // Separate seed, UNPARKED (earliest) FIRST this time — the shape that actually discriminates the
+  // WRITE-side collapse (a raw first-match bug would find the unparked entry first here and erase the
+  // park; with [later, earliest] above it would accidentally find the parked one first and pass vacuously).
+  const db2 = new Db();
+  const pBase2 = path.join(os.tmpdir(), `loom-wwr-ld-posix-w-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  const pTrailingSlash2 = pBase2 + path.sep;
+  const earliest2 = { worktreePath: pBase2, repoPath: "/repo/ld-posix-w", firstWedgedAt: "2026-01-01T00:00:00.000Z", lastAttemptAt: "2026-01-01T00:00:00.000Z", attempts: 1, reason: "legacy, earliest — not parked", needsHuman: false };
+  const later2 = { worktreePath: pTrailingSlash2, repoPath: "/repo/ld-posix-w", firstWedgedAt: "2026-01-02T00:00:00.000Z", lastAttemptAt: "2026-01-03T00:00:00.000Z", attempts: 3, reason: "legacy, later — PARKED", needsHuman: true };
+  db2.setMeta("worktree_wedged", JSON.stringify([earliest2, later2])); // UNPARKED (earliest) FIRST
+
+  const updated = db2.recordWorktreeWedgeAttempt(pBase2, "/repo/ld-posix-w", "a fresh attempt");
+  check("(legacy-duplicate posix-safe write-side) the write does not erase the park", updated.needsHuman === true);
+  check("(legacy-duplicate posix-safe write-side) attempts bumps from the collapsed max (3) to 4", updated.attempts === 4);
+  check("(legacy-duplicate posix-safe write-side) raw storage collapsed to exactly ONE entry, on every platform", rawBlob(db2).length === 1);
+
+  db2.close();
 }
 
 // --- (reclaim) card a5d9c458 — a wedge entry whose PATH has since been RE-CLAIMED by a LIVE session

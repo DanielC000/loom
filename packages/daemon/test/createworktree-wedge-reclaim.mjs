@@ -53,6 +53,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // (I-resolve) the refusal is NOT permanent — once the nested worktree is removed (simulating it being
 //     merged/stopped), the SAME wedge-tracked path reclaims and respawns normally.
 //
+// Card 1243e342 addition (win32-only — a case-insensitive-filesystem mechanism, same posture as
+// worktree-path-identity-alias.mjs's own win32-gated sections):
+// (L) a wedge entry recorded under a DIFFERENTLY-SPELLED ALIAS of the target path (simulating a repoKey
+//     re-case or a cross-boot WORKTREES_DIR casing drift between the original wedge and this respawn)
+//     must still be found, renamed aside, and cleared by reclaimWedgedWorktreePathForSpawn's own
+//     identity-keyed lookup — exactly like (B) above, but with the DB entry seeded under the alias
+//     instead of the raw spelling reclaim will compute.
+// (L-control) an UNRELATED, genuinely different wedge-tracked path must be left untouched by (L)'s reclaim call.
+//
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/createworktree-wedge-reclaim.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -494,12 +503,64 @@ try {
   try { execSync("git worktree prune", { cwd: repoK2 }); } catch { /* ignore */ }
   fs.rmSync(repoK2, { recursive: true, force: true });
   dbK.close();
+
+  // ============================================================================================
+  // (L) card 1243e342 — reclaimWedgedWorktreePathForSpawn's lookup must find a wedge entry recorded
+  //     under a differently-spelled ALIAS of the real path (simulating a repoKey re-case or a cross-boot
+  //     WORKTREES_DIR casing drift), not just a byte-identical one. win32-only: the alias is only the
+  //     SAME directory on a case-insensitive filesystem — same posture as
+  //     worktree-path-identity-alias.mjs's own win32-gated sections.
+  // ============================================================================================
+  if (process.platform === "win32") {
+    const aliasSpelling = (p) => p.toUpperCase().replace(/\\/g, "/");
+    const taskL = "reclaim-alias-llll-9999";
+    const pathL = resolveWorktreePath(PROJ, taskL);
+    fs.mkdirSync(pathL, { recursive: true });
+    fs.writeFileSync(path.join(pathL, "old-orphan.txt"), "stale wedged content under an aliased spelling\n");
+
+    const pathLAlias = aliasSpelling(pathL);
+    check("(L setup) the alias is a genuinely different string", pathLAlias !== pathL);
+    check("(L setup) the alias resolves to the SAME dir on disk (sanity: win32 case-insensitive FS)", fs.existsSync(pathLAlias) && fs.statSync(pathLAlias).isDirectory());
+
+    const dbL = new Db();
+    // Seeded under the ALIAS spelling — simulating an EARLIER removal attempt (possibly an earlier
+    // daemon boot, or an earlier repoKey casing) that recorded the wedge under a different spelling than
+    // THIS respawn's fresh resolveWorktreePath call will compute.
+    dbL.recordWorktreeWedgeAttempt(pathLAlias, repo, "simulated wedge recorded under an aliased spelling");
+    check("(L setup) the ALIAS spelling is tracked as wedged", dbL.getWedgedWorktree(pathLAlias) !== undefined);
+    check("(L setup) the lookup via the REAL (raw) spelling ALSO finds it — identity-keyed, not raw-keyed", dbL.getWedgedWorktree(pathL) !== undefined);
+
+    // (L-control) an unrelated, genuinely different wedge-tracked path, seeded alongside — must survive
+    // (L)'s own reclaim call against pathL untouched.
+    const pathUnrelated = path.join(path.dirname(pathL), "reclaim-alias-unrelated-0000");
+    dbL.recordWorktreeWedgeAttempt(pathUnrelated, repo, "control: unrelated path");
+
+    const sessionsL = new SessionService(dbL, {}, new OrchestrationControl(), {});
+    sessionsL.reclaimWedgedWorktreePathForSpawn(PROJ, taskL);
+    check("(L) the old dir is GONE from the original path (renamed aside, not deleted in place)", !fs.existsSync(pathL));
+    check("(L) the wedge-tracking entry was DROPPED (lookup via either spelling now undefined)",
+      dbL.getWedgedWorktree(pathL) === undefined && dbL.getWedgedWorktree(pathLAlias) === undefined);
+    const asideL = findStaleAside(pathL);
+    check("(L) the old content survives, renamed aside", asideL !== null && fs.readFileSync(path.join(asideL, "old-orphan.txt"), "utf8") === "stale wedged content under an aliased spelling\n");
+    check("(L-control) the UNRELATED entry is untouched by (L)'s reclaim call", dbL.getWedgedWorktree(pathUnrelated) !== undefined);
+
+    const resultL = await createWorktree(repo, PROJ, taskL);
+    check("(L) createWorktree now cuts a GENUINELY FRESH worktree at the original path", resultL.worktreePath === pathL && fs.existsSync(path.join(pathL, ".git")));
+    check("(L) a LATER sweep tick has nothing stale left to trip over this path", dbL.getWedgedWorktree(pathL) === undefined);
+
+    if (asideL) fs.rmSync(asideL, { recursive: true, force: true });
+    execSync(`git worktree remove --force "${pathL}"`, { cwd: repo });
+    dbL.clearWedgedWorktree(pathUnrelated);
+    dbL.close();
+  } else {
+    console.log(`SKIP  createworktree-wedge-reclaim.mjs section (L)/(L-control) — win32-only (case-insensitive-filesystem path aliasing); this host is '${process.platform}'. The cross-platform polarity (identity-keyed on win32, never on a case-sensitive FS) is checked in worktree-wedge-retry.mjs's own (unit-alias) block.`);
+  }
 } finally {
   try { execSync("git worktree prune", { cwd: repo }); } catch { /* ignore */ }
   fs.rmSync(repo, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createWorktree never reuses/recuts a dir with no .git link (set aside, never deleted, then fresh-cut); SessionService.reclaimWedgedWorktreePathForSpawn clears a stale wedge-tracking entry (and sets aside whatever still sits there, even a dir that still has a .git link) BEFORE createWorktree can claim the same deterministic path; an ordinary, never-wedged spawn is unaffected; a 'starting' claimant protects a path exactly like a 'live' one; a rename-aside failure on EITHER side REFUSES outright (throws) instead of silently proceeding against unknown content, keeping the wedge entry intact on reclaim's own failure; a respawn's reclaim racing in WHILE a removal is still settling against the exact same path (including removeWorktree's own clean-reject retry delay) is REFUSED outright, never left to recreate a fresh worktree out from under an in-flight removal; and (card ceeb188b) reclaimWedgedWorktreePathForSpawn refuses to rename aside a wedge-tracked path that holds a REAL, live nested secondary-repo worktree (leaving its data + git registration + the wedge entry intact), the pre-fix bug returns when the shared backstop flag is disabled, and the refusal self-resolves once the nested worktree is removed."
+  ? "\n✅ ALL PASS — createWorktree never reuses/recuts a dir with no .git link (set aside, never deleted, then fresh-cut); SessionService.reclaimWedgedWorktreePathForSpawn clears a stale wedge-tracking entry (and sets aside whatever still sits there, even a dir that still has a .git link) BEFORE createWorktree can claim the same deterministic path; an ordinary, never-wedged spawn is unaffected; a 'starting' claimant protects a path exactly like a 'live' one; a rename-aside failure on EITHER side REFUSES outright (throws) instead of silently proceeding against unknown content, keeping the wedge entry intact on reclaim's own failure; a respawn's reclaim racing in WHILE a removal is still settling against the exact same path (including removeWorktree's own clean-reject retry delay) is REFUSED outright, never left to recreate a fresh worktree out from under an in-flight removal; and (card ceeb188b) reclaimWedgedWorktreePathForSpawn refuses to rename aside a wedge-tracked path that holds a REAL, live nested secondary-repo worktree (leaving its data + git registration + the wedge entry intact), the pre-fix bug returns when the shared backstop flag is disabled, and the refusal self-resolves once the nested worktree is removed; and (card 1243e342, win32) reclaimWedgedWorktreePathForSpawn's lookup is identity-keyed, not raw-keyed — a wedge entry recorded under a differently-spelled alias of the real path is still found, renamed aside, and cleared, while an unrelated path's own entry stays untouched."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
