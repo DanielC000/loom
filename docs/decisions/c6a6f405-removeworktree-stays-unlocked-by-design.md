@@ -22,6 +22,37 @@ BOUNDED: every git call goes through the same `boundedDiffGit` + `withTimeout` c
 
 `workerDiff` shows a meaningful diff across a worker's entire lifecycle instead of an empty result or a 500, and every one of its git calls fails within a bounded window rather than hanging.
 
+## Follow-up (card 83e0573a) — a narrower lock, for a DIFFERENT race this record never analyzed
+
+The original analysis above is about ONE race: git's own `locked`/`initializing` admin marker stops a
+concurrent `prune` from touching an IN-FLIGHT `add`'s own half-created entry. It never considered a
+SECOND, unrelated race: `removeWorktree`'s own `git worktree prune` (always its last step) deletes the
+ENTIRE `$GIT_DIR/worktrees` CONTAINER directory when the entry it just dropped was the last one left
+(git's `delete_worktrees_dir_if_empty`, confirmed empirically on the installed git 2.47.0.windows.2) — and
+a concurrently-running `createWorktree` add, for a DIFFERENT worktree on the SAME repo, can be mid-
+`mkdir(.git/worktrees/<its-own-id>)` at that exact moment, which then fails with `fatal: could not create
+directory of '.git/worktrees/<id>': No such file or directory` (or a sibling shape, a `commondir` read
+failure) once the container it needed has been deleted out from under it. The `locked`/`initializing`
+marker this record's safety reasoning relies on protects the in-flight add's OWN entry from being pruned;
+it says nothing about the SHARED container a completely different removal can delete. See
+`docs/decisions/83e0573a-worktree-add-container-race.md` for the full investigation, the deterministic
+repro, and the reentrancy audit that cleared adding a lock here.
+
+`removeWorktree` now takes `withCanonicalIndexLock` around ONLY its git-metadata steps (`unlock`+
+`prune`) — never around the filesystem-level directory removal above, which stays unlocked exactly as
+this record originally judged, for the ORIGINAL reason (an fs.rm that can wedge must never hold a lock
+other spawns/merges/removals on the same repo would then queue behind indefinitely).
+
+### Follow-up "Do not" (card 83e0573a)
+
+- Do not move the filesystem-level directory removal (`removeDir`/`killableRemoveDir`) INSIDE the new
+  lock — that reopens the exact hazard the earlier worktree-GC P0 (`bd9fc808`) and the wedge-retry
+  sweep's own slow-cadence design both exist to avoid: a wedged `fs.rm` would hold the canonical lock
+  indefinitely and wedge every other spawn/merge/removal on the same repo, not just this one removal.
+- Do not read this Follow-up as superseding the ORIGINAL "judged safe" reasoning above — it is still
+  correct for the race it analyzed; it was simply never extended to cover the shared-container-deletion
+  race this Follow-up fixes.
+
 ## `enterMergeDangerWindow`'s doc corrected, not the window widened (item 3, unrelated decision, same card id, `git/merge-danger-window.ts`)
 
 `enterMergeDangerWindow`'s own doc used to claim it ran "right before its first mutating git call in this attempt" — false as written (a reviewer NITPICK, item 3 on this card): `mergeBranchLocked`'s residue-clear `git reset --merge HEAD` (card `9e77050f`/[[06b5c47f-resetorskip-skips-rather-than-mixed-resets-on-pre-existing-unstaged-dirt]], see also [[2eddf573-squash-merge-is-idempotent-and-refuses-on-ambiguous-dirty-state]]) can run earlier still, when stale in-progress-merge residue survives from an interrupted attempt — a real mutating call outside this window and outside the durable latch.

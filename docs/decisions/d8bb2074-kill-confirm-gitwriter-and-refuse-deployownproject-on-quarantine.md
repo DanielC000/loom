@@ -38,9 +38,15 @@ a later caller to race; only a mutating call needed kill-confirmation.
 - `deleteBranch`/`deleteBranches` (`git/worktrees.ts`) — single, hook-free ref writes (`update-ref -d` /
   `branch -D`) with no shared index to leave staged residue in; the existing entry `assertRepoNotQuarantined`
   check (round 6's writer coverage table) is the whole story for this path.
-- `removeWorktree`'s `worktree unlock`/`worktree prune` (`git/worktrees.ts`) — admin-metadata-only, no
-  hooks; this function relies on its CALLER's own entry check (`gcWorktreeDir`), per `c6a6f405`'s own
-  "stays unlocked by design" ruling (not re-litigated here).
+- ~~`removeWorktree`'s `worktree unlock`/`worktree prune` — relies on its caller's entry check, per
+  `c6a6f405`'s "stays unlocked by design" ruling.~~ **CLOSED by `@decision 83e0573a`:** both calls now run
+  inside `withCanonicalIndexLock` and route through `killableCanonicalRaw`, the same kill-confirmed helper
+  `createWorktree`'s own locked `prune` uses — a DIFFERENT race (a concurrent add's own mkdir racing this
+  function's `prune` deleting the shared `.git/worktrees` container) forced the lock; kill-confirmation
+  came along with it, closing this residual as a side effect rather than its own goal. See that record for
+  the caveat this doesn't give: a kill-confirmed WAIT still only bounds how long the wait can take, not
+  whether the child is confirmed dead on every exit path (an unconfirmed-kill give-up is swallowed, same
+  as before).
 
 **2 — `deployOwnProject` ran the human-configured `deployCommand` against a quarantined canonical repo.**
 `buildDaemon` (`orchestration/restart.ts`) already refuses for exactly this reason (`bde5d1fe` item 4), but

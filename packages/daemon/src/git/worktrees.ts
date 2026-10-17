@@ -1602,9 +1602,13 @@ export function worktreeRemovalRefusal(
  * Remove a worker's worktree and prune the admin record. Branch deletion (after merge) is
  * #16's concern, not here.
  *
- * @decision c6a6f405 — deliberately UNLOCKED (not an oversight): do not wrap this in withCanonicalIndexLock
- * reflexively — the lock is NOT re-entrant, and a caller that already holds it would deadlock. Judged safe
- * because git's own locked/initializing marker makes a concurrent prune skip an in-flight add.
+ * @decision c6a6f405 — the FILESYSTEM removal below stays deliberately UNLOCKED: wrapping the whole
+ * function in withCanonicalIndexLock reflexively "to be safe" risks holding it across an fs.rm that can
+ * wedge, and the lock is not re-entrant, so an already-locked caller would deadlock.
+ *
+ * @decision 83e0573a — the git-metadata steps (unlock+prune) below now DO take that lock, narrowly: an
+ * unlocked `prune` can delete the shared `.git/worktrees` container out from under a concurrent,
+ * different `createWorktree` add's own mkdir of its own entry.
  *
  * @decision 79b8d8a9 — the directory goes first through the killable filesystem removal (never git's own recursive delete,
  * which follows a junction planted inside the tree — see e21cfd5f); a KILLED (wedged) attempt is never retried here, only a
@@ -1624,7 +1628,7 @@ export async function removeWorktree(
     console.warn(`[worktree] REFUSED to remove ${worktreePath} — ${refusal}. Nothing was touched.`);
     return { removed: false, wedged: false, aborted: false };
   }
-  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
   let removed = true;
   let wedged = false;
@@ -1665,22 +1669,41 @@ export async function removeWorktree(
     // eslint-disable-next-line no-console
     console.warn(`[worktree] could not remove dir ${worktreePath} (${wedged ? "genuinely wedged — caller retries it slowly" : "left on disk for a later GC"})`);
   }
-  if (removed) {
-    // The dir is gone, so `prune` alone would leave a LOCKED record (a killed-mid-checkout marker) behind: unlock first, best-effort
-    // (a not-locked worktree makes this exit non-zero, which is fine). Never `worktree remove` here — it recurses through junctions.
-    //
-    // @decision d8bb2074 — `unlock`/`prune` deliberately NOT kill-confirmed: admin-metadata-only, no
-    // hooks, no shared index; this function itself relies on its CALLER's own quarantine check
-    // (gcWorktreeDir's entry check — round 6's writer coverage table) rather than re-checking here.
-    try {
-      await withTimeout(git.raw(["worktree", "unlock", worktreePath]), timeoutMs, "git worktree unlock");
-    } catch { /* not locked, or already unregistered */ }
-  }
+  // The dir is gone (if `removed`), so `prune` alone would leave a LOCKED record (a killed-mid-checkout
+  // marker) behind: unlock first, best-effort (a not-locked worktree makes this exit non-zero, which is
+  // fine). Never `worktree remove` here — it recurses through junctions.
+  //
+  // @decision 83e0573a — `unlock`+`prune` now run INSIDE `withCanonicalIndexLock`, kill-confirmed via
+  // `killableCanonicalRaw` (same as `createWorktree`'s own locked `prune`) — closes a race where an
+  // unlocked `prune` deletes the shared `.git/worktrees` container under a concurrent add's own mkdir.
+  //
+  // "Kill-confirmed" bounds the WAIT, not the outcome: an unconfirmed-kill give-up is swallowed below
+  // like any other prune failure, releasing this lock while that child may still be alive — strictly
+  // better than main's prior unlocked bare `withTimeout`, never a confirmed-dead guarantee.
+  //
+  // @decision d8bb2074 — this closes that card's own named-but-not-closed residual (these two calls used
+  // to be exempt from kill-confirmation) as a side effect of the lock above, not its own goal.
   try {
-    await withTimeout(git.raw(["worktree", "prune"]), timeoutMs, "git worktree prune");
+    await withCanonicalIndexLock(repoPath, async () => {
+      if (removed) {
+        try {
+          await killableCanonicalRaw(repoPath, ["worktree", "unlock", worktreePath], timeoutMs, "git worktree unlock", deps.gitFactory);
+        } catch { /* not locked, or already unregistered */ }
+      }
+      try {
+        await killableCanonicalRaw(repoPath, ["worktree", "prune"], timeoutMs, "git worktree prune", deps.gitFactory);
+      } catch {
+        // A hung/failed prune must NOT throw past removeWorktree (which would re-introduce the boot hang
+        // via finalizeMerge / Pass B). A stale admin record is harmless — createWorktree prunes on reuse.
+      }
+    });
   } catch {
-    // A hung/failed prune must NOT throw past removeWorktree (which would re-introduce the boot hang
-    // via finalizeMerge / Pass B). A stale admin record is harmless — createWorktree prunes on reuse.
+    // A quarantine (or any other lock-acquisition-time throw — e.g. RepoQuarantinedError from
+    // withCanonicalIndexLock's own entry check) must not throw past removeWorktree either, same
+    // best-effort contract the unlock/prune calls themselves already have. Net effect on a quarantined
+    // repo: unlock+prune are SKIPPED entirely (the callback never runs) while the filesystem removal
+    // above still ran — same "fs removed, admin record left stale" shape createWorktree's own reuse
+    // path already tolerates.
   }
   return { removed, wedged, aborted };
 }
