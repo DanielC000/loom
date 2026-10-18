@@ -259,9 +259,9 @@ const COMPOSER_ACCUM_WINDOW = 8;
  *  truncation. INSERTION direction carries no such risk — left unbounded (see below). */
 const OFFSET_OMISSION_MAX_TAIL_CHARS = 2;
 
-/** @decision d1ac9fed — a POSITIVE allow-list: a new/unlisted arm defaults to LOUD. Never add
- *  `fallback-replay-awaiting-resolution`, a duplicate-check-asking `confirmed-*` arm, or
- *  `fallback-unrecognized` (its own narrower split lives in `UNRECOGNIZED_UNACCOUNTED_MAX_CHARS`'s doc). */
+/** @decision d1ac9fed — a POSITIVE allow-list: a new/unlisted arm defaults to LOUD. Never add either
+ *  replay-awaiting-resolution arm (bare or e59880fe's wrap-framing sibling), a duplicate-check-asking
+ *  `confirmed-*` arm, or `fallback-unrecognized` (its own split lives in that const's own doc). */
 export const RECORD_ONLY_MISMATCH_ARMS: ReadonlySet<string> = new Set([
   "confirmed-ansi-strip",
   "fallback-benign-offset-insertion",
@@ -611,6 +611,34 @@ function findRecognizedPastedContentWrapOfPriorWrite(
     }
   }
   return null;
+}
+
+/** Card e59880fe — the pasted-content wrap framing bytes found wrapping an otherwise-UNMATCHED substring
+ *  match (`findRecognizedSubstring`'s own `leadingRemainder`/`trailingRemainder`), around an EARLIER
+ *  generation's own recorded write. Deliberately NOT `PASTED_CONTENT_WRAP_RE`'s own shape — that pattern
+ *  requires a leading `\n\n` and a trailing `\n` at the absolute start/end of `reported` (Loom's own
+ *  blank-line padding around a FRESH bracket-paste of the CURRENT generation). This is the engine's bare
+ *  tag framing alone, with nothing else before/after it — verified against real production specimens
+ *  (session 425a4365, gens 50/53/54, 2026-10-16) where `PASTED_CONTENT_WRAP_RE` itself declined with
+ *  `reason=regex-no-match` on the exact same `reported` string, and where the independently-measured
+ *  `leadingRemainderLen`/`trailingRemainderLen` (27/28 for a 4-char id) are exactly 2/1 chars short of
+ *  that regex's own 29/29 overhead — the `\n\n`→`\n` and `\n`→`` deltas, not a coincidence.
+ *  @decision dc92f4b6 — fires at the SAME severity as a bare replay, never confirmed-benign: a wrap of an
+ *  unrelated earlier generation does not establish THIS generation's own content arrived (dc92f4b6's own
+ *  Code Review CRITICAL finding applies here unchanged). */
+const PASTED_CONTENT_WRAP_REMAINDER_PREFIX_RE = /^<pasted_content id="([0-9a-zA-Z]+)">\n$/;
+const PASTED_CONTENT_WRAP_REMAINDER_SUFFIX_RE = /^\n<\/pasted_content id="([0-9a-zA-Z]+)">$/;
+
+/** Card e59880fe — true only when BOTH remainders match their own anchored regex above AND carry the
+ *  SAME backreferenced id; never a substring/partial match on either side (same discipline as
+ *  `PASTED_CONTENT_WRAP_RE`'s own siblings). Returns the wrap's id LENGTH (never the id itself — same
+ *  disclosure posture as every other near-miss diagnostic in this file) so the caller can record it
+ *  without re-matching. */
+function matchPastedContentWrapFramingOfRemainder(leadingRemainder: string, trailingRemainder: string): { idLen: number } | null {
+  const lm = PASTED_CONTENT_WRAP_REMAINDER_PREFIX_RE.exec(leadingRemainder);
+  const tm = PASTED_CONTENT_WRAP_REMAINDER_SUFFIX_RE.exec(trailingRemainder);
+  if (lm === null || tm === null || lm[1] !== tm[1]) return null;
+  return { idLen: lm[1]!.length };
 }
 
 /** Card b1cc4f01 (owner ruling, card 16c93a50 / request 0eb43216): a coarse, disclosure-safe
@@ -3324,7 +3352,10 @@ interface Live {
   // @decision b7158b99 — does NOT establish a loss; a later fusion may recover it.
   // @decision d0952a73 — explainedBenign threads the session notice's own verdict, never discards it.
   // @decision e1ac691b — one of FOUR sibling candidates surfaced together, chronologically; see that record.
-  lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number; explainedBenign: "wrapper-deficit" | "ansi-strip" | "wrapper-aware-fusion" | null } | null;
+  // Card e59880fe — `wrapped`/`wrapIdLen` discriminate HOW this replay was recognized (a bare
+  // byte-for-byte match vs. the engine's own pasted-content wrap framing around an earlier generation's
+  // write) — severity/recovery semantics are IDENTICAL either way; `wrapIdLen` is null unless wrapped.
+  lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number; explainedBenign: "wrapper-deficit" | "ansi-strip" | "wrapper-aware-fusion" | null; wrapped: boolean; wrapIdLen: number | null } | null;
   // @decision f5f6515a — accepts ANY confirmed span, no upper bound; the contract is DUPLICATION, not loss
   // (the fused span's last entry is always this turn's own write — never restate this as an "established
   // loss").
@@ -9219,6 +9250,23 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-unmatched-remainder] ${sessionId} gen=${live.submitGeneration} recognizedGen=${unmatchedRecognized.gen} matchedLen=${unmatchedRecognized.matchedLen} reportedLen=${reported.length} leadingRemainderLen=${unmatchedRecognized.leadingRemainder.length} trailingRemainderLen=${unmatchedRecognized.trailingRemainder.length} leadingRemainder=${excerpt(unmatchedRecognized.leadingRemainder)} trailingRemainder=${excerpt(unmatchedRecognized.trailingRemainder)} — card d005f55b DoD-3: otherwise-unmatched, but reported CONTAINS generation ${unmatchedRecognized.gen}'s own recorded write as a substring; the remainder(s) above are NOT accounted for. No mechanism or confirmation is claimed by this alone.`);
               }
+              // Card e59880fe: reuses `unmatchedRecognized` as already computed above — does NOT
+              // re-query `live.recentWrittenTurns` (nothing mutates that ring between its computation
+              // above and this check; see `matchPastedContentWrapFramingOfRemainder`'s own doc for the
+              // severity posture, wired below at the SAME severity as a bare `replayedEntry`).
+              const pastedContentWrapRemainderFraming = unmatchedRecognized
+                ? matchPastedContentWrapFramingOfRemainder(unmatchedRecognized.leadingRemainder, unmatchedRecognized.trailingRemainder)
+                : null;
+              const wrappedReplayOfPriorWrite = pastedContentWrapRemainderFraming !== null ? unmatchedRecognized : null;
+              const isWrappedImmediatePrior = wrappedReplayOfPriorWrite !== null && priorEntry !== undefined && wrappedReplayOfPriorWrite.gen === priorEntry.gen;
+              // @decision 87d2dc95 — same "lag-by-one chain" reasoning as `replayedEntry`'s own marking
+              // above: proves `wrappedReplayOfPriorWrite.gen`'s content DID reach the engine (wrapped,
+              // late) — mark it resolved now, unconditional on which arm this mismatch ultimately becomes.
+              if (wrappedReplayOfPriorWrite) live.mismatchResolvedGens.add(wrappedReplayOfPriorWrite.gen);
+              if (wrappedReplayOfPriorWrite) {
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-pasted-content-wrap-remainder-replay] ${sessionId} gen=${live.submitGeneration} recognizedGen=${wrappedReplayOfPriorWrite.gen} matchedLen=${wrappedReplayOfPriorWrite.matchedLen} reportedLen=${reported.length} wrapIdLen=${pastedContentWrapRemainderFraming!.idLen} — the otherwise-unmatched remainder around generation ${wrappedReplayOfPriorWrite.gen}'s own recognized write is EXACTLY the engine's pasted-content wrap tag framing (id-backreferenced). Card e59880fe: NOT confirmed benign — reclassified from UNRECOGNIZED to a NAMED, WRAPPED replay of generation ${wrappedReplayOfPriorWrite.gen}, same severity as a bare replay (dc92f4b6's own Code Review finding: a wrap of an unrelated earlier generation does not by itself establish THIS generation's own content arrived).`);
+              }
               // @decision 41950a38 — checked FIRST: a CLI-generated task-notification never byte-matches
               // anything Loom itself wrote, so this only enriches the wording rather than suppressing the
               // "possible LOSS" framing that follows.
@@ -9228,6 +9276,14 @@ export class PtyHost {
                 ? isImmediatePrior
                   ? `The submitted content exactly matches what this session itself wrote for the IMMEDIATELY PRECEDING generation (gen=${replayedEntry.gen}) — the shape every measured occurrence of this class of mismatch has shown so far. If that generation's own turn already ran, this is likely a DUPLICATE re-delivery of it, not new content — check the message sent just before this one.`
                   : `The submitted content exactly matches what this session itself wrote for an EARLIER generation (gen=${replayedEntry.gen}, not the immediately preceding one) — if that generation's own turn already ran, this may be a DUPLICATE re-delivery of it, not new content. This is an unusual shape: every measured occurrence of this class of mismatch so far replayed only the immediately preceding generation.`
+                // Card e59880fe: the wrap-framing-aware sibling of the `replayedEntry` branch above — the
+                // submitted content, once the engine's own pasted-content wrap tag framing is stripped,
+                // exactly matches an earlier generation's own recorded write. Deliberately does NOT reuse
+                // the "every measured occurrence of this class of mismatch" claim above — that is a
+                // measured regularity about the BARE-replay population specifically, unverified for this
+                // wrapped population (n=3, none immediately preceding).
+                : wrappedReplayOfPriorWrite
+                  ? `The submitted content, once the engine's own pasted-content wrap tag framing is stripped, exactly matches what this session itself wrote for generation ${wrappedReplayOfPriorWrite.gen}${isWrappedImmediatePrior ? " (the immediately preceding generation)" : " (not the immediately preceding one)"} — the engine appears to be echoing that earlier write back late, wrapped in its own paste-composer framing. If generation ${wrappedReplayOfPriorWrite.gen}'s own turn already ran, this may be a DUPLICATE re-delivery of it, not new content — check the message sent for that generation.`
                 // @decision d005f55b — DoD-3: a WEAKER, additive recognition; names what WAS recognized
                 // instead of reading as a plain "matched nothing".
                 : unmatchedRecognized
@@ -9446,13 +9502,22 @@ export class PtyHost {
                 // require `replayedEntry === undefined`, always false on this branch. `null` — no independent classifier
                 // fired — leaves this exactly as loud as before the field existed: an unexplained replay
                 // still reads as an unresolved possible/established loss on every consumer of this field.
-                if (replayedEntry !== undefined) {
+                // Card e59880fe — widened to ALSO fire for `wrappedReplayOfPriorWrite` (never both at
+                // once: that candidate only exists when `replayedEntry === undefined`), populating the
+                // SAME `lastMismatchReplay` pull surface rather than a new top-level field — `wrapped`/
+                // `wrapIdLen` are the only new fields; every existing field keeps its exact meaning.
+                if (replayedEntry !== undefined || wrappedReplayOfPriorWrite !== null) {
                   const explainedBenign: "wrapper-deficit" | "ansi-strip" | "wrapper-aware-fusion" | null =
                     confirmedWrapperDeficit ? "wrapper-deficit"
                     : confirmedAnsiStripDeficit ? "ansi-strip"
                     : confirmedWrapperAwareFusion ? "wrapper-aware-fusion"
                     : null;
-                  live.lastMismatchReplay = { gen: live.submitGeneration, replayedGen: replayedEntry.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now(), explainedBenign };
+                  const replayedGen = replayedEntry !== undefined ? replayedEntry.gen : wrappedReplayOfPriorWrite!.gen;
+                  live.lastMismatchReplay = {
+                    gen: live.submitGeneration, replayedGen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now(), explainedBenign,
+                    wrapped: wrappedReplayOfPriorWrite !== null,
+                    wrapIdLen: wrappedReplayOfPriorWrite !== null ? pastedContentWrapRemainderFraming!.idLen : null,
+                  };
                 }
                 // @decision 68459420 — DoD-2: split the two claims and address each to the party
                 // that can act on it, rather than asking the RECIPIENT to verify a loss only the
@@ -9481,6 +9546,11 @@ export class PtyHost {
                 // naming of the earlier generation is strictly more useful and must not be discarded).
                 const lossClause = replayedEntry !== undefined
                   ? `The submitted content is a REPLAY of an earlier generation — the text Loom intended for THIS turn did not reach you as its own turn. This is NOT an established loss: the composer may still hold it, and a LATER generation's own submission may fuse it back in whole (if that happens you will see a SEPARATE, later notice saying plainly that nothing was lost) — whether that happens is unknowable until that later generation, if any, actually occurs. You cannot verify this yourself either way: you only ever see what arrived, never what was intended for you. Do not ask anyone to re-send yet — wait one generation and re-check before treating this as a confirmed loss. If you are a Loom-driven session, say so in your next report up.`
+                  // Card e59880fe — the wrap-framing-aware sibling of the branch above, SAME severity and
+                  // guidance verbatim: a wrap of an unrelated earlier generation does not establish THIS
+                  // generation's own content arrived (dc92f4b6's own Code Review CRITICAL finding).
+                  : wrappedReplayOfPriorWrite
+                    ? `The submitted content is a REPLAY of an earlier generation, wrapped in the engine's own pasted-content framing — the text Loom intended for THIS turn did not reach you as its own turn. This is NOT an established loss: the composer may still hold it, and a LATER generation's own submission may fuse it back in whole (if that happens you will see a SEPARATE, later notice saying plainly that nothing was lost) — whether that happens is unknowable until that later generation, if any, actually occurs. You cannot verify this yourself either way: you only ever see what arrived, never what was intended for you. Do not ask anyone to re-send yet — wait one generation and re-check before treating this as a confirmed loss. If you are a Loom-driven session, say so in your next report up.`
                   // Card 00b5066e DoD-1/DoD-6: `reported` fully CONTAINS this turn's own `intended` text,
                   // unchanged, with extra chars only preceding/following it — nothing of THIS turn's own
                   // content is missing. Worded as NOT A LOSS (matching this file's own convention for the
@@ -9511,7 +9581,7 @@ export class PtyHost {
                 // `recentWrittenTurns` will have rotated past this generation by the time any
                 // reader asks, so `intended`, still in scope here, is the only place this content
                 // still exists once detection has passed.
-                const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion && !confirmedPastedContentWrapOfPriorWrite;
+                const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion && !confirmedPastedContentWrapOfPriorWrite && !wrappedReplayOfPriorWrite;
                 if (isUnmatchableMismatch) {
                   live.lastMismatchUnmatched = { gen: live.submitGeneration, intendedLen: intended.length, intendedText: intended, detectedAt: Date.now() };
                 }
@@ -9614,7 +9684,12 @@ export class PtyHost {
                 // silently drifts from the notice text's own branch structure.
                 const isRecognizedReplayAwaitingResolution = replayedEntry !== undefined
                   && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion && !confirmedPastedContentWrapOfPriorWrite;
-                if (isRecognizedReplayAwaitingResolution) {
+                // Card e59880fe — the wrap-framing-aware sibling of the arming condition above, same
+                // exclusion list; `wrappedReplayOfPriorWrite !== null` already implies `replayedEntry ===
+                // undefined`, so the two conditions are mutually exclusive by construction.
+                const isWrappedReplayAwaitingResolution = wrappedReplayOfPriorWrite !== null
+                  && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion && !confirmedPastedContentWrapOfPriorWrite;
+                if (isRecognizedReplayAwaitingResolution || isWrappedReplayAwaitingResolution) {
                   // Schedule the follow-up: after `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (see that constant's
                   // own sizing doc), `checkPromptMismatchUnresolved` re-checks whether THIS gen has since been
                   // marked resolved (a later fusion naming it in `Live.mismatchResolvedGens` — see that
@@ -9627,9 +9702,10 @@ export class PtyHost {
                   const pendingReportedHash = sigReported.hash;
                   const pendingIntendedLen = intended.length;
                   // @decision c23e2869 — carry WHICH earlier generation this mismatch replayed into
-                  // the durable event too, not just that a replay happened.
-                  const pendingRecognizedGen = replayedEntry.gen;
-                  const pendingMatchedLen = replayedEntry.text.length;
+                  // the durable event too, not just that a replay happened. Card e59880fe: the SAME two
+                  // fields, sourced from whichever of the two mutually-exclusive candidates fired.
+                  const pendingRecognizedGen = replayedEntry !== undefined ? replayedEntry.gen : wrappedReplayOfPriorWrite!.gen;
+                  const pendingMatchedLen = replayedEntry !== undefined ? replayedEntry.text.length : wrappedReplayOfPriorWrite!.matchedLen;
                   // @decision a419a7e6 — bounded HEAD slice of THIS generation's own intended text,
                   // genuinely the best available evidence for this branch (always a whole-string
                   // replay, never a remainder).
@@ -9731,6 +9807,7 @@ export class PtyHost {
                   : confirmedPastedContentWrapOfPriorWrite ? "confirmed-pasted-content-wrap-replay"
                   : isTrulyUnrecognizedDivergence ? "fallback-unrecognized"
                   : isRecognizedReplayAwaitingResolution ? "fallback-replay-awaiting-resolution"
+                  : isWrappedReplayAwaitingResolution ? "fallback-wrapped-replay-awaiting-resolution"
                   : (isOffsetInsertion && !unmatchedRecognized) ? "fallback-benign-offset-insertion"
                   : (isOffsetOmission && !unmatchedRecognized) ? "fallback-benign-offset-omission"
                   : "unclassified";

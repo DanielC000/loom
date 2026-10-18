@@ -172,8 +172,71 @@ indefinitely across many re-mint hops or a busy ring.
   original, untagged entry still sitting in the bounded `live.recentWrittenTurns` ring; past that, it
   fails CLOSED (falls through to the loud path), never open.
 
+## e59880fe — the wrap-framing-aware sibling, without the current-gen tag requirement
+
+Card e59880fe: a Loom lead observed a RUN of `[loom:prompt-mismatch] … UNRECOGNIZED` notices (gens 50/53/54
+on session 425a4365, 2026-10-16) where `reported` was EXACTLY an earlier generation's own recorded write
+wrapped in the engine's pasted-content tag — but, unlike this record's own fix above, the CURRENT
+generation's own intended text carried NO possible-duplicate tag at all (an ordinary new message, not a
+re-mint). `findRecognizedPastedContentWrapOfPriorWrite`'s own `strippedCurrent === currentIntendedText`
+short-circuit (nothing to strip) means it structurally never engages for this shape — by design, not a
+bug — so these fell through to the loud `fallback-unrecognized` path and compounded (the notice itself
+became a later generation's own write, later echoed stale and wrapped in turn).
+
+**The byte shape is also NOT this record's own `PASTED_CONTENT_WRAP_RE`** (verified via
+`[prompt-mismatch-pasted-content-wrap-excess-declined] reason=regex-no-match` logged for the SAME
+`reported` string, and independently via the measured remainder lengths: 27/28 for a 4-char id, exactly
+2/1 chars short of that regex's own 29/29 `\n\n…\n`/`…\n` overhead). It is the engine's bare tag framing
+alone — `<pasted_content id="X">\n` … `\n</pasted_content id="X">` — with nothing else before/after.
+`matchPastedContentWrapFramingOfRemainder` (host.ts) tests exactly this shape against
+`findRecognizedSubstring`'s own already-computed `leadingRemainder`/`trailingRemainder` — never a new,
+independent scan of `live.recentWrittenTurns` — requiring BOTH anchored regexes to match AND carry the
+SAME backreferenced id; never a substring/partial match on either side.
+
+**Severity: the SAME Code Review CRITICAL finding above applies unchanged, and the fix does NOT repeat
+the round-1 mistake.** A wrap of an unrelated earlier generation does not establish that THIS generation's
+own content arrived — classifying this shape as `confirmed-*`-benign would silently mask a genuine,
+unrelated loss on the current generation, exactly as the round-1 cut of THIS card's own fix once did.
+`wrappedReplayOfPriorWrite` is therefore wired at the SAME severity as a bare `replayedEntry` match, never
+as confirmed-benign: a new arm, `fallback-wrapped-replay-awaiting-resolution`, mirrors
+`fallback-replay-awaiting-resolution` exactly — same exclusion list, same `checkPromptMismatchUnresolved`
+follow-up timer, same `live.mismatchResolvedGens` marking (unconditional, at detection time, regardless of
+which arm the mismatch ultimately becomes) — and is explicitly NOT added to `RECORD_ONLY_MISMATCH_ARMS`
+(same reasoning as that arm's own exclusion: this is still loss-possible and must stay loud). Reclassifying
+away from `fallback-unrecognized` is what stops both the `onPromptMismatchUnmatched` per-event escalation
+push and the `UNRECOGNIZED_MISMATCH_RATE_THRESHOLD` counter for this shape specifically — directly
+addressing the card's own "compounds the noise" complaint, without touching the escalation mechanism.
+
+**Surfaced via the EXISTING `lastMismatchReplay` pull surface, not a new field.** `wrapped`/`wrapIdLen` are
+the only additions — `wrapIdLen` is the wrap tag's id LENGTH (never the id itself, matching every other
+near-miss diagnostic's disclosure posture in this file); severity/recovery semantics are identical whether
+`wrapped` is `true` or `false`. `worker_list`/`worker_status`'s own tool-description text for
+`lastMismatchReplay` was updated in the same change (contract change ⇒ docs in the same change).
+
+### Do not (e59880fe addendum)
+
+- Do not relax `findRecognizedPastedContentWrapOfPriorWrite`'s own content-identity requirement (the fix
+  above) to cover this shape instead of adding a sibling detector — the two are deliberately separate:
+  this one has no current-gen-tag precondition at all, and conflating them risks losing track of which
+  safety argument governs which code path.
+- Do not classify a `matchPastedContentWrapFramingOfRemainder` match as `confirmed-*`/benign — see
+  "Severity" above; this is the Code Review CRITICAL finding from round 1 of this record, recurring for a
+  structurally different detector that happens to look similar.
+- Do not add `fallback-wrapped-replay-awaiting-resolution` to `RECORD_ONLY_MISMATCH_ARMS` — same posture as
+  `fallback-replay-awaiting-resolution` itself (see the `d1ac9fed` record's own "Do not" section): it is
+  still loss-possible for the CURRENT generation and must stay loud.
+- Do not word the "every measured occurrence of this class of mismatch" regularity claim (the bare-replay
+  branch's own wording) onto this wrapped population — that claim is about the BARE-replay population
+  specifically; the wrapped population (n=3 at this writing, none immediately preceding) has not earned it.
+- Do not widen `matchPastedContentWrapFramingOfRemainder` to a substring/partial match on either remainder,
+  or drop the backreferenced-id equality check — same discipline as this record's own round-1/round-2
+  findings above, for the same reason (an unrelated-but-similar-shaped wrap must not confirm).
+
 ## Source
 
 Inline comments in `packages/daemon/src/pty/host.ts`: `findRecognizedPastedContentWrapOfPriorWrite`'s own
 doc comment, the `pastedContentWrapOfPriorWrite`/`confirmedPastedContentWrapOfPriorWrite` computation
 inside `deliverHook`'s `UserPromptSubmit` case, and the `mismatchArm`/`mismatchText` branches it feeds.
+For the e59880fe addendum: `matchPastedContentWrapFramingOfRemainder`'s own doc comment, the
+`wrappedReplayOfPriorWrite`/`isWrappedReplayAwaitingResolution` computation in the SAME `UserPromptSubmit`
+case, and `mcp/orchestration.ts`'s `lastMismatchReplay` tool-description text.
