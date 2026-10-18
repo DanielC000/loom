@@ -7,8 +7,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `mergeGateInterval`, so it is the plain re-call shape, for ONE candidate, leaving the other candidate's
 // own lookup untouched.
 //
-// (B) resolveGitRef TIMEOUT for candidate a only: same shape via the timeout path (withTimeout's own
-//     rejection, not a direct throw) — proves both failure modes degrade identically; b stays untouched.
+// (B) resolveGitRef TIMEOUT for candidate a only: a GENUINE async hang, settled only by a real timer —
+//     distinct from (A)'s synchronous throw, which rejects on the same microtask it's thrown (no timer
+//     involved at all). b stays untouched.
 //
 // FINDING THIS PINS (investigation note, card 31f8467c): a resolveGitRef failure (throw OR timeout) during
 // the SOLO fallback's own already-landed lookup does NOT produce `fallback[].started:false` — it produces
@@ -19,18 +20,38 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // finalized cleanly" — those are different facts, and this file is the regression pin for that gap (the
 // TIMEOUT failure mode; see the sibling -throw.mjs for the THROW failure mode of the same finding).
 //
-// NOTE (card 715ad688): `gitOpMs:1500` below is a REAL wall-clock wait, not an instant/fake one: this
-// fault returns a never-resolving promise, so `withTimeout` (git/bounded.ts) races a genuine
-// `setTimeout(1500)` against it for each of the 3 matching resolveGitRef calls the already-landed lookup
-// makes (tipAcrossLandedCheck's before/after + pinnedTipForLandedSquash's live read) — measured ≈4.5s of
-// deterministic waiting per run. Do NOT shrink this constant to recover that time: `gitOpMs` is
-// session-wide and also bounds this SAME session's real, unfaulted git calls (`branch --list`/`log -1`
-// below), which were measured up to ~438ms on a mildly contended host during the 715ad688 investigation —
-// a smaller value trades a few deterministic seconds for a brand-new load-sensitive spurious-timeout
-// failure, the exact class the parent epic (24608d33) exists to remove. If a future change wants to
-// recover this wait, it would need a budget scoped to ONLY the faulted calls via this seam (not a
-// production change) — described as a possible follow-up in 715ad688's own worker_report, not
-// implemented here.
+// NOTE (card 3a34fc76, closing the gap 715ad688 left open — investigated under a blocked checkpoint, see
+// that card's body for the full Q&A): the fault below is wrapped in the REAL, exported `withTimeout`
+// (git/bounded.js) at a short, test-chosen ms (~200ms), imported the same way `canonicalGit` already is.
+// This keeps (B) a genuine hang settled only by a real timer-based rejection, mechanically distinct from
+// (A)'s instant throw — but it is NOT the session's own outer `withTimeout` instance (the one
+// resolveGitRef/branchExistsInRepo/readLandedTipTrailer construct themselves, at `this.gitOpMs`) that
+// fires; that outer instance's own setTimeout gets cleared early once the inner one rejects first.
+// Investigated and confirmed this makes NO behavioral difference reaching any consumer: `withTimeout`
+// itself (git/bounded.ts:44-52) is a pure race with no side effects beyond settling (no kill path, no
+// error classification, no timeout-streak bookkeeping) regardless of which side wins, and all three read
+// functions this seam feeds — resolveGitRef (git/worktrees.ts:412-421), branchExistsInRepo
+// (git/worktrees.ts:1316-1324), readLandedTipTrailer (git/worktrees.ts:3888-3896) — wrap their own
+// `withTimeout` call in a bare `catch { return <fixed fallback>; }` that discards the rejection's
+// identity entirely; no caller ever branches on error content, only on the null/true/null return value.
+// So the timer INSTANCE is irrelevant to every consumer; only "a real timer-based rejection happened" is
+// ever observable, and that property survives unchanged.
+//
+// `gitOpMs` is now passed as `undefined` (not 1500) for the faulted re-call below, so the production
+// default (`GIT_OP_TIMEOUT_MS`, 15_000ms — git/worktrees.ts:120) applies to every REAL git call this
+// session makes. This matters for more than `branch --list`/`log -1`: `finishSoloAlreadyLanded`'s own
+// `check()` closure calls `findLandedSquashCommit(..., { timeoutMs: this.gitOpMs })` (service.ts:20089)
+// WITHOUT threading `alreadyLandedGitFactory` through — a real, un-intercepted `git log --grep` history
+// walk (git/worktrees.ts:6567-6570) sharing this SAME session-wide budget. On ANY failure, including a
+// timeout, it degrades to `catch { return null; }` (git/worktrees.ts:6614-6616), which makes
+// `finishSoloAlreadyLanded` return null (service.ts:20090-20091) and fall through to attempting a REAL
+// solo merge for that candidate instead of the already-landed shortcut — never reaching the fail-closed
+// retain sentinel this file's checks assert on. A too-tight shared `gitOpMs` therefore doesn't just slow
+// this file down under load; it can silently change WHICH CODE PATH the real re-call takes, which is the
+// best-supported explanation for the previously observed 68s outlier and the real `git cherry-pick`
+// confirmed-killed at the old 1500ms budget (cherry-pick only runs on this fallback-to-real-merge path —
+// never on the already-landed shortcut). Do NOT re-tighten `gitOpMs` for "determinism" — it is the exact
+// opposite: a tight shared budget is what made this file's pass/fail outcome depend on host load.
 //
 // SPLIT (card 715ad688): the original combined file (A)+(B)+(C) ran ~49-56s solo-in-suite but was
 // SIGTERM-killed at the 120,000ms blanket ceiling under a real 966-file loaded gate (op 8a918209) —
@@ -58,7 +79,8 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
-const { canonicalGit } = await import("../dist/git/bounded.js");
+const { canonicalGit, withTimeout } = await import("../dist/git/bounded.js");
+const TEST_FAULT_MS = 200; // short, test-chosen ms — see header NOTE (card 3a34fc76) for why this is safe
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -144,11 +166,14 @@ try {
     const alreadyLandedGitFactory = (repoPath, timeoutMs) => {
       const real = canonicalGit(repoPath, timeoutMs);
       return { raw: async (args) => {
-        if (args[0] === "rev-parse" && args[1] === "--verify" && String(args[2] ?? "").includes(a.branch)) return new Promise(() => {}); // never resolves — withTimeout rejects
+        // never resolves on its own — wrapped in the REAL, exported withTimeout at a short, test-chosen
+        // ms so it still rejects via a genuine timer-based mechanism (see header NOTE, card 3a34fc76),
+        // independent of the session's own (now generous) gitOpMs below.
+        if (args[0] === "rev-parse" && args[1] === "--verify" && String(args[2] ?? "").includes(a.branch)) return withTimeout(new Promise(() => {}), TEST_FAULT_MS, "test-fault resolveGitRef");
         return real.raw(args);
       } };
     };
-    const ctx2 = mkService(db, alreadyLandedGitFactory, 1500);
+    const ctx2 = mkService(db, alreadyLandedGitFactory, undefined);
     ctx2.sessions.finishAlreadyMerged = o;
     const r2 = await settle(ctx2.sessions.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
     const fb = r2.value?.value?.fallback ?? [];
