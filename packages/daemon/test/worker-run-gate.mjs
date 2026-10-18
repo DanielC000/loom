@@ -49,9 +49,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // started, so both sides now share the same clock and the original discriminator no longer holds for
 // THIS pair of helpers. (Blocks (L)/(L2) below do a genuinely different, still-untouched thing — a
 // LOWER-bound assertion on the production `durationMs` value via a direct performance.now() delta, not a
-// poll loop at all — and stay exactly as they were.) Same timeoutMs/intervalMs defaults and
-// throw-on-timeout contract preserved; no call site here ever used the return value.
-async function waitUntilGatePhase(sessions, sessionId, phase, label, timeoutMs = 10000, intervalMs = 20) {
+// poll loop at all — and stay exactly as they were.) Same intervalMs default and throw-on-timeout
+// contract preserved; no call site here ever used the return value.
+//
+// Card 73e40c1b: the flat 10000ms default blew under real fleet load — confirmWorkerMerge's real git prep
+// (stranded-check + union-merge, both run BEFORE gateSemaphore.runExclusive — see confirmWorkerMerge's own
+// body) has no fixed ceiling, so a budget sized for an idle host has no margin on a busy one. This is
+// still the SAME safety-net backstop described above (never decides an assertion), so widening it via
+// `ambientScaledBudget` — scaled to THIS process's own measured ambient contention, same mechanism (B)'s
+// OVERLAP_TIMEOUT_MS already uses below — is safe for every call site, including the two ((A) gate / (J)
+// gate1) that have no real git prep at all: an idle host still gets the bare 10000ms. Evaluated as a
+// default-parameter expression so each call reads the SAME memoized-per-process factor `(B)` already
+// relies on (see _wait.mjs's own module-level memoization doc), never a blind bump of the literal 10000.
+async function waitUntilGatePhase(sessions, sessionId, phase, label, timeoutMs = ambientScaledBudget(10000), intervalMs = 20) {
   return sharedWaitUntil(() => {
     const entry = sessions.snapshotGates().gates.find((g) => g.sessionId === sessionId);
     return entry?.phase === phase;
@@ -357,7 +367,10 @@ try {
     // callback turn as the `onSettledAfterPending` push below it, so by the time this observes the entry
     // gone, the (sole legitimate) push has already happened. Counting only AFTER that structural terminal
     // state is reached is sound, unlike counting the instant the first push lands.
-    await sharedWaitUntil(() => registry.peek("gate:manual-test") === undefined, { timeoutMs: 10000, intervalMs: 20, label: "(E) settle callback" });
+    // Card 73e40c1b: flat 10000ms → ambientScaledBudget(10000) — same safety-net-only reasoning as
+    // waitUntilGatePhase's own default above; this never decides the assertion, only how long a broken
+    // run stalls before failing loudly.
+    await sharedWaitUntil(() => registry.peek("gate:manual-test") === undefined, { timeoutMs: ambientScaledBudget(10000), intervalMs: 20, label: "(E) settle callback" });
     check("(E) the terminal settle callback eventually fired", enqueued.length === 1 && enqueued[0][0] === short.op.opId);
   }
 
@@ -614,7 +627,9 @@ try {
     // with it — the OLD wait below (polling that state) raced this gap and flaked in-suite under real
     // host contention: see memory `worker-run-gate-scenario-k-async-nudge-race` for the full mechanism
     // and the deterministic repro. Poll for the nudge's actual arrival instead.
-    await sharedWaitUntil(() => enqueued.some(isGateFailedMsg), { timeoutMs: 10000, intervalMs: 20, label: "(K) gate-failed nudge delivery" });
+    // Card 73e40c1b: flat 10000ms → ambientScaledBudget(10000) — same safety-net-only reasoning as
+    // waitUntilGatePhase's own default above.
+    await sharedWaitUntil(() => enqueued.some(isGateFailedMsg), { timeoutMs: ambientScaledBudget(10000), intervalMs: 20, label: "(K) gate-failed nudge delivery" });
 
     // EXACTLY-ONE — PRESERVED, not weakened, via a different (stronger, deterministic) argument than the
     // old state-based wait implicitly relied on:
