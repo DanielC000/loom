@@ -7611,6 +7611,9 @@ export class SessionService {
       // redriveUndeliveredMessagesForRecipient, both funnel through this method) would land UNTAGGED even
       // after DoD-1's persistence fix, since nothing here ever read the persisted field back out.
       const reportEventId = typeof e.detail?.reportEventId === "string" ? e.detail.reportEventId : undefined;
+      // @decision a5987cf3 — carry this VERBATIM from the persisted record; never re-derive it live here.
+      // Legacy rows missing the key default to `false`, unchanged from this path's pre-card behavior.
+      const joinedOntoParkedRoot = e.detail?.joinedOntoParkedRoot === true;
       // Card bcaeab8d: Path D is the one redelivery route that could NEVER carry the possible-duplicate
       // banner — unlike B/C (gated on giveUpGen/chainDepth, a reliable in-process signal of "this exact
       // attempt already failed to confirm once"), a redrive has NO such signal available across a daemon
@@ -7638,7 +7641,7 @@ export class SessionService {
         // DURABLE `resolveQueuedMessage` call above keeps `sender` raw for attribution, unaffected.
         }, route, kind, undefined, undefined, undefined, sender, {
           giveUpHeldUntil,
-          onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind, reportEventId),
+          onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind, reportEventId, joinedOntoParkedRoot),
           logicalId: rootMsgId, // card 4a0af485 CR follow-up #6 — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
           reportEventId, // card d09d58e7 — restore the tag onto the re-enqueued entry itself so `purgeQueuedByReportEventIds` can match a redriven copy exactly like a fresh one
         },
@@ -10161,9 +10164,11 @@ export class SessionService {
     // re-granted the bypass on every re-mint retry, CR round 3 MAJOR, measured 4x writes) and only
     // applies once the matched chain has actually PARKED (ruling: "onto a PARKED root") — merely requeued gets no bypass.
     const bypassOwnershipGateOnce = autoJoinedId != null && this.isRootParked(recipientId, autoJoinedId);
-    // @decision a5987cf3 — ONLY for the duplicate-parked override below; OR'd with `ctx.joinedOntoParkedRoot`
-    // so it survives a re-mint of this chain, unlike the one-shot `bypassOwnershipGateOnce` just above.
-    const joinedOntoParkedRoot = ctx.joinedOntoParkedRoot === true || bypassOwnershipGateOnce;
+    // @decision a5987cf3 — ONLY for the duplicate-parked override below, OR'd with `ctx.joinedOntoParkedRoot`
+    // so it survives a re-mint. An explicit `ctx.resendOf` naming an ALREADY-parked root is ALSO exempt
+    // here, but never folds into `bypassOwnershipGateOnce` — resendOf carries no content-match guarantee.
+    const resendOfParked = ctx.resendOf != null && this.isRootParked(recipientId, ctx.resendOf);
+    const joinedOntoParkedRoot = ctx.joinedOntoParkedRoot === true || bypassOwnershipGateOnce || resendOfParked;
     const rootMsgId = ctx.rootMsgId ?? ctx.resendOf ?? autoJoinedId ?? msgId; // self-root only when nothing above applies
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
@@ -10214,7 +10219,10 @@ export class SessionService {
           id: randomUUID(), ts: new Date().toISOString(),
           managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
           kind: "session_message_queued",
-          detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil, route: ctx.route, reportEventId: ctx.reportEventId },
+          // @decision a5987cf3 — `joinedOntoParkedRoot` joins the persisted redrive field list; never
+          // omit it or a restart/recycle mid-give-up drops the flag and wrongly suppresses the resend's
+          // own eventual park as a moot duplicate of the root's earlier one.
+          detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil, route: ctx.route, reportEventId: ctx.reportEventId, joinedOntoParkedRoot },
         });
       } catch (e) {
         // Append the cause's own message — every existing catch site that logs `(e as Error).message`
@@ -11411,9 +11419,12 @@ export class SessionService {
       // should preserve the remaining give-up budget, not consume a unit of it just for surviving a recycle.
       const chainDepth = typeof rec.detail?.chainDepth === "number" ? rec.detail.chainDepth : undefined;
       const oldMsgId = typeof rec.detail?.msgId === "string" ? rec.detail.msgId : undefined;
+      // @decision a5987cf3 — carry this VERBATIM, same read-back discipline as kind/rootMsgId/chainDepth
+      // above; never re-derive it live. A legacy (pre-card) record defaults to `false`, unchanged.
+      const joinedOntoParkedRoot = rec.detail?.joinedOntoParkedRoot === true;
       let reminted: (EnqueueResult & { msgId: string }) | undefined;
       try {
-        reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null, reportEventId, kind, rootMsgId, chainDepth });
+        reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null, reportEventId, kind, rootMsgId, chainDepth, joinedOntoParkedRoot });
       } catch (e) {
         console.error(`[recycle] re-minting a carried durable message (msgId=${oldMsgId ?? "unknown"}) onto successor ${successorId.slice(0, 8)} failed — leaving the OLD record on ${oldId.slice(0, 8)} unresolved and re-arming it there instead:`, (e as Error).message);
         if (!oldMsgId) { failedRefs.push(`unknown-durable-record:${rec.id}`); continue; }
@@ -11434,7 +11445,7 @@ export class SessionService {
             (reason?: string) => this.resolveQueuedMessage(oldMsgId, { recipientId: oldId, reason, sender }),
             route, kindForRearm, undefined, undefined, undefined, sender,
             {
-              onGiveUpExhausted: () => this.handleGiveUpExhausted(oldId, text, oldMsgId, rootMsgIdForRearm, chainDepthForRearm, sender, rec.taskId ?? null, kindForRearm, reportEventId),
+              onGiveUpExhausted: () => this.handleGiveUpExhausted(oldId, text, oldMsgId, rootMsgIdForRearm, chainDepthForRearm, sender, rec.taskId ?? null, kindForRearm, reportEventId, joinedOntoParkedRoot),
               logicalId: rootMsgIdForRearm,
               reportEventId,
             },

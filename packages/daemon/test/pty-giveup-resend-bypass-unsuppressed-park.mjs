@@ -14,11 +14,12 @@
 // be suppressed as "duplicate-parked" of the root's EARLIER park (CR round 2, MAJOR finding).
 //
 // THE FIX: `QueuedMessage.bypassOwnershipGateOnce` (set exactly once, at dispatch, only for a dispatch that
-// itself auto-joined via `hasAmbiguousMatch` — sessions/service.ts's `isAutoJoinedResend`) lets THIS write
-// skip the ownership-mismatch check and take the ordinary full clear+repaste branch instead, same as a
+// itself auto-joined via `hasAmbiguousMatch` — sessions/service.ts's `bypassOwnershipGateOnce`) lets THIS
+// write skip the ownership-mismatch check and take the ordinary full clear+repaste branch instead, same as a
 // fresh lineage's own first attempt. And `handleGiveUpExhausted`'s own PARKED branch now overrides
-// `suppressMootParkNotice`'s "duplicate-parked" verdict for that SAME dispatch's chain — a second failure
-// after a deliberate resend is genuinely new information, not a repeat of the first.
+// `suppressMootParkNotice`'s "duplicate-parked" verdict for that SAME dispatch's chain (via
+// `joinedOntoParkedRoot`, card a5987cf3 — renamed from the original `isAutoJoinedResend`) — a second
+// failure after a deliberate resend is genuinely new information, not a repeat of the first.
 //
 // Two scenarios:
 //   (1) THE HAPPY PATH: park A -> owner B takes the composer -> resend A's text -> the bypass lets it
