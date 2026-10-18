@@ -98,6 +98,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gst-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+// Card a3c7afac: shrink the merge-gate retry's real settle sleep (default 5000ms) for this whole file —
+// test-side only, mirrors every other fixture in this suite exercising the SAME retry (e.g.
+// batch-guard-release-on-throw.mjs). The sleep is pure dead time none of this file's blocks assert
+// against (no block here checks elapsed time against it), so shrinking it doesn't touch what any of
+// them prove — only how long the real transient-kill-retry block (below) takes to get there.
+process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -311,7 +317,10 @@ async function settleMergeEitherPath(sessions, r, label) {
   }
   check(`(${label}) precondition: the async pending path hands back a real opId to track`, typeof r.op?.opId === "string" && r.op.opId.length > 0);
   const opId = r.op.opId;
-  await waitUntil(() => (sessions.gateStatus(opId).state === "settled" ? true : undefined), { timeoutMs: 20_000, label: `${label}: async merge op to settle` });
+  // Card a3c7afac: margin 3, not 2 — this settle is a REAL git/subprocess merge (worktree stamps,
+  // reflogs, the squash itself), unlike the pure in-process "antipoll" wait below (margin 2); mirrors
+  // the same margin-3 convention used suite-wide for this exact shape of wait.
+  await waitUntil(() => (sessions.gateStatus(opId).state === "settled" ? true : undefined), { timeoutMs: ambientScaledBudget(20_000, 3), label: `${label}: async merge op to settle` });
   console.log(`[settle-path] (${label}) async — confirmWorkerMergeTracked exceeded SYNC_ATTACH_BUDGET_MS (card e082bf4d — CPU contention), degraded to {status:"pending"}; inline-only checks skipped for this run, every other assertion still runs at full strictness`);
   return { opId, value: undefined, viaAsync: true };
 }
