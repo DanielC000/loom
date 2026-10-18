@@ -157,8 +157,11 @@ try {
     // (the real, measured production shape — arm=fallback-unrecognized, pushed to the manager).
     check("1: RED-PROOF — NO LONGER classified as unmatchable (getLastMismatchUnmatched stays null)",
       host.getLastMismatchUnmatched(sid) === null);
-    check("1: the plain partial-recognition fallback does NOT also fire for the same mismatch",
-      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-remainder] ")).length === 0);
+    // `[prompt-mismatch-unmatched-remainder]` is logged unconditionally as soon as `unmatchedRecognized`
+    // is found (diagnostic-only, before this fix's own check even runs) — this fix REUSES that same
+    // result rather than re-querying, so the diagnostic line co-occurring is expected, not a defect.
+    check("1: the plain partial-recognition diagnostic ALSO fires (enrichment, reused by this fix, never suppressed)",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-remainder] ") && /recognizedGen=1\b/.test(l)).length === 1);
 
     // Severity: this is NOT confirmed-benign — populates the SAME `lastMismatchReplay` pull surface a
     // bare replay uses, discriminated only by `wrapped`/`wrapIdLen`.
