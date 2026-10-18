@@ -694,12 +694,49 @@ try {
     check("51: NEGATIVE CONTROL — and it DOES arm its own follow-up timer, exactly like any ordinary mismatch (proves this is a startsWith prefix test, not includes())",
       host.live.get(sid).pendingMismatchUnresolvedTimers.size === timersBefore50 + 1);
   }
+
+  // ===== PART 9 — card e59880fe (manager review round 2): the WRAPPED sibling arm
+  // (`isWrappedReplayAwaitingResolution`) must arm the SAME follow-up timer the bare-replay arm does, keyed
+  // to the CURRENT generation (the one whose own content is not yet independently confirmed), never the
+  // matched PRIOR generation (already resolved at detection time). gen=1 writes ordinary content, never
+  // confirmed; gen=2 is an ORDINARY new message (no tag at all); the engine reports back gen=1's own
+  // recorded write wrapped in the engine's bare pasted-content tag framing (the exact 27/28, 4-char-id
+  // shape — not `PASTED_CONTENT_WRAP_RE`'s own double-newline shape). =====
+  {
+    const sid = newSession("WrappedReplayArmsFollowUp"); SIDS.push(sid);
+    const gen1Text = "[loom:worker-report] worker WWWW — generation 1's own real report";
+    const gen2Text = "an ordinary new message, no tag of any kind";
+
+    host.enqueueStdin(sid, gen1Text); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // clears busy without confirming gen=1
+
+    host.enqueueStdin(sid, gen2Text); // gen=2, now written and current
+    const reported = `<pasted_content id="pcwr">\n${gen1Text}\n</pasted_content id="pcwr">`; // bare tag framing, single newline each side
+    const live9 = host.live.get(sid);
+    const timersBefore9 = live9.pendingMismatchUnresolvedTimers.size;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+
+    check("52: sanity — this is the wrapped-replay shape (lastMismatchReplay fires for gen=2, wrapped:true)",
+      host.getLastMismatchReplay(sid)?.gen === 2 && host.getLastMismatchReplay(sid)?.replayedGen === 1 && host.getLastMismatchReplay(sid)?.wrapped === true);
+    check("53: the follow-up timer IS armed, exactly one more than before (same mechanism as a bare replay)",
+      live9.pendingMismatchUnresolvedTimers.size === timersBefore9 + 1);
+
+    // Never resolve gen=2 — poll for the REAL positive event, the same RED-proof shape as PART 1.
+    const fired9 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("54: onPromptMismatchUnresolved fires once the window elapses with nothing to resolve it", fired9);
+    const evs9 = unresolvedEvents.filter((e) => e.sessionId === sid);
+    check("55: fires EXACTLY once", evs9.length === 1);
+    check("56: names the CURRENT generation (2) — the one not yet independently confirmed, never the matched PRIOR generation (1, already resolved at detection time)",
+      evs9[0]?.info.gen === 2 && evs9[0]?.info.gen !== 1);
+    check("57: carries the recognized PRIOR generation (recognizedGen=1) and its matched length, same as the bare-replay arm's own PART 1",
+      evs9[0]?.info.recognizedGen === 1 && evs9[0]?.info.matchedLen === gen1Text.length);
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card f9b1ea00's own gap is closed: a recognized-replay `[loom:prompt-mismatch]` that never resolves within the (env-configurable) PROMPT_MISMATCH_RESOLVE_WINDOW_MS now fires PtyHostEvents.onPromptMismatchUnresolved exactly once, naming the original detection's own gen/hashes/length (PART 1 — previously this emitted nothing at all, ever); a mismatch that DOES resolve via a later CONFIRMED composer-accumulation fusion produces NO follow-up signal (PART 2, the mandatory other-direction positive control per DoD-3 — a check firing on both is the exact false-alarm regression card 854d1632 v3 caught); a stale follow-up timer left over from a PREVIOUS spawn of the same sessionId is CLEARED before a resume/recycle/restart overwrites the map entry, so it can never fire against — or be coincidentally satisfied by — an unrelated later incarnation's own state (PART 3, Code Review HIGH, mirroring readyFallbackTimer's own established fix, card c469d54e); and a wrapper-deficit or ANSI-strip-deficit mismatch — both benign, both `replayedEntry !== undefined` by construction, both structurally UNRESOLVABLE since only a CONFIRMED fusion (which requires `replayedEntry === undefined`) can mark a gen resolved — now arms NO follow-up timer at all, where the original cut would have armed one that could never resolve and failed loud 10 minutes after Loom said nothing was lost (PART 4, Code Review CRITICAL, the arming condition moved to match exactly the notice text's own `lossClause` replay branch); and a deliberate stop/crash also clears pending timers even though a claude session's own Live entry survives its own exit with alive:false rather than being deleted, so a stale timer can never fire a false 'please resend' nudge at a session that no longer exists (PART 5, Code Review MAJOR, mirroring readyFallbackTimer's own onExit clear); and card 87d2dc95's own lag-by-one replay chain is closed on BOTH axes — a mid-chain gen is retroactively resolved the instant a LATER generation's own detection recognizes its write (no false 'established loss' alarm), a notice's own lagged confirmation mints NO further notice and arms NO further timer (the self-sustaining loop cannot iterate a second time), and a genuinely terminal, never-recognized-again generation STILL alarms, exactly once, bounding the whole chain's alarm count to ONE rather than one-per-link (PART 7); and, per manager review, the SAME loop-breaker also exempts a generation whose own intended text is the OTHER notice family — `[loom:prompt-mismatch-unresolved]` (sessions/service.ts) — closing a reachability gap the original single-tag guard left open, while a negative control proves this stays a `startsWith` prefix test, never `.includes()`: a real message that merely QUOTES a notice tag mid-string is NOT exempted and still arms its own follow-up timer normally (PART 8). Card 280309d9: `checkPromptMismatchUnresolved`'s widened (9th, `writtenAt`) positional signature is exercised, and asserted on, by PART 6's own direct calls — both an explicit value carried through verbatim and an omitted arg resolving to a real `null` via the method's own default parameter, never a silently-dropped `undefined`."
+  ? "\n✅ ALL PASS — card f9b1ea00's own gap is closed: a recognized-replay `[loom:prompt-mismatch]` that never resolves within the (env-configurable) PROMPT_MISMATCH_RESOLVE_WINDOW_MS now fires PtyHostEvents.onPromptMismatchUnresolved exactly once, naming the original detection's own gen/hashes/length (PART 1 — previously this emitted nothing at all, ever); a mismatch that DOES resolve via a later CONFIRMED composer-accumulation fusion produces NO follow-up signal (PART 2, the mandatory other-direction positive control per DoD-3 — a check firing on both is the exact false-alarm regression card 854d1632 v3 caught); a stale follow-up timer left over from a PREVIOUS spawn of the same sessionId is CLEARED before a resume/recycle/restart overwrites the map entry, so it can never fire against — or be coincidentally satisfied by — an unrelated later incarnation's own state (PART 3, Code Review HIGH, mirroring readyFallbackTimer's own established fix, card c469d54e); and a wrapper-deficit or ANSI-strip-deficit mismatch — both benign, both `replayedEntry !== undefined` by construction, both structurally UNRESOLVABLE since only a CONFIRMED fusion (which requires `replayedEntry === undefined`) can mark a gen resolved — now arms NO follow-up timer at all, where the original cut would have armed one that could never resolve and failed loud 10 minutes after Loom said nothing was lost (PART 4, Code Review CRITICAL, the arming condition moved to match exactly the notice text's own `lossClause` replay branch); and a deliberate stop/crash also clears pending timers even though a claude session's own Live entry survives its own exit with alive:false rather than being deleted, so a stale timer can never fire a false 'please resend' nudge at a session that no longer exists (PART 5, Code Review MAJOR, mirroring readyFallbackTimer's own onExit clear); and card 87d2dc95's own lag-by-one replay chain is closed on BOTH axes — a mid-chain gen is retroactively resolved the instant a LATER generation's own detection recognizes its write (no false 'established loss' alarm), a notice's own lagged confirmation mints NO further notice and arms NO further timer (the self-sustaining loop cannot iterate a second time), and a genuinely terminal, never-recognized-again generation STILL alarms, exactly once, bounding the whole chain's alarm count to ONE rather than one-per-link (PART 7); and, per manager review, the SAME loop-breaker also exempts a generation whose own intended text is the OTHER notice family — `[loom:prompt-mismatch-unresolved]` (sessions/service.ts) — closing a reachability gap the original single-tag guard left open, while a negative control proves this stays a `startsWith` prefix test, never `.includes()`: a real message that merely QUOTES a notice tag mid-string is NOT exempted and still arms its own follow-up timer normally (PART 8). Card 280309d9: `checkPromptMismatchUnresolved`'s widened (9th, `writtenAt`) positional signature is exercised, and asserted on, by PART 6's own direct calls — both an explicit value carried through verbatim and an omitted arg resolving to a real `null` via the method's own default parameter, never a silently-dropped `undefined`. And (card e59880fe, manager review round 2) the WRAPPED sibling arm (`isWrappedReplayAwaitingResolution`) arms the SAME follow-up timer as a bare replay, keyed to the CURRENT generation — never the matched PRIOR one, already resolved at detection time — and fires the identical `onPromptMismatchUnresolved` event, naming the recognized prior generation and its matched length (PART 9)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
