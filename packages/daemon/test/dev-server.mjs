@@ -114,6 +114,16 @@ const waitUntil = async (predicate, timeoutMs = 5000, stepMs = 50) => {
 // Its liveness is externally observable via both process.kill(pid,0) and the heartbeat file's mtime
 // advancing — two independent signals a mis-scoped or no-op kill would fail to reproduce.
 const HEARTBEAT_WRITE_INTERVAL_MS = 100; // the fixture's own write cadence, baked into heartbeatSrc below
+
+// Card d303ebda: the observe window for (b)'s and (n)'s heartbeat-freeze assertions below (4 use-sites —
+// see card 79c1522a's own audit comment at (b) for why these are "same constant, same mechanism") is
+// scaled by this process's own measured ambient-contention overshoot rather than a bare fixed 500ms (5
+// write intervals). A longer window only makes the never-assertion STRONGER — more time to catch a real
+// violation — so widening it under load can never mask one; the actual risk this guards against is the
+// MANDATORY `positiveControl` (a real but genuinely scheduling-starved sibling process) failing to be
+// observed within too tight a window, exactly the failure shape reported on card 9c06fab1. Margin 3
+// matches this suite's existing precedent (see the `ambientScaledBudget(5000, 3)` call below).
+const HEARTBEAT_OBSERVE_WINDOW_MS = ambientScaledBudget(HEARTBEAT_WRITE_INTERVAL_MS * 5, 3);
 const heartbeatSrc = "const f=process.argv[2];setInterval(()=>{try{require('fs').writeFileSync(f,String(Date.now()))}catch{}},100);";
 const fixtureDir = mkdtempManaged("loom-dev-server-fixture-");
 const heartbeatScript = path.join(fixtureDir, "heartbeat.cjs");
@@ -212,14 +222,14 @@ try {
   const heartbeatStillFrozen = await assertNeverWithControl({
     label: "(b) fixture's heartbeat file stops advancing after stop()",
     check: () => mtimeOf(heartbeatOut) !== heartbeatMtimeAfterKill,
-    windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5, // several write intervals' worth — derived, not guessed
+    windowMs: HEARTBEAT_OBSERVE_WINDOW_MS, // ambient-scaled; several write intervals' worth at baseline — derived, not guessed
     positiveControl: async () => {
       // Prove the SAME sampling mechanism CAN observe advancement: the control process (never stopped)
       // is still writing its own heartbeat on the identical cadence — sample IT and confirm "advanced".
       const controlBaseline = mtimeOf(controlOut);
       return observeOnce({
         check: () => mtimeOf(controlOut) !== controlBaseline,
-        windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5,
+        windowMs: HEARTBEAT_OBSERVE_WINDOW_MS,
       });
     },
   });
@@ -339,18 +349,33 @@ try {
   // number, playing the two roles the real `pnpm web` log conflates (the daemon's port is both a real,
   // live thing on the host AND the value a naive extraction would wrongly record).
   // Card 06deedb7: this section's own `LOOM_DEV_SERVER_PORT_TIMEOUT_MS` used to be shortened to "5000"
-  // purely for test speed, unlike sections (g)/(h)/(j)/(l)/(m) which share that same shortcut for a
-  // fixture that binds near-instantly. `waitForBinding` (the helper's own internal wait this env var
-  // bounds) already polls a REAL signal — the child's own startup banner landing in its captured log —
-  // at a fixed interval; it was never a blind/synthetic sleep. But a REAL child process here (spawned via
-  // an extra supervisor hop, plus a forced EADDRINUSE retry against the decoy) genuinely can take longer
-  // than 5s to spawn, bind, and get its banner flushed to disk under host contention — measured: a merge
-  // gate specimen (`b35627c6`) saw this section's whole `(f)` block cascade-fail from `recordedPort`
-  // staying null because detection never completed inside that window, not from any defect in the
-  // port-freed wait downstream. Dropping the override lets this section use the SAME ceiling
-  // (`waitForBinding`'s own 15000ms default) real `pnpm web`/`vite` users get — a deadlock-breaker ceiling,
-  // not a target for tuning back down — and the outer `spawnSync` timeout is widened past it so the outer
-  // kill can never race the inner wait's own deadline.
+  // purely for test speed. `waitForBinding` (the helper's own internal wait this env var bounds) already
+  // polls a REAL signal — the child's own startup banner landing in its captured log — at a fixed
+  // interval; it was never a blind/synthetic sleep. But a REAL child process here (spawned via an extra
+  // supervisor hop, plus a forced EADDRINUSE retry against the decoy) genuinely can take longer than 5s
+  // to spawn, bind, and get its banner flushed to disk under host contention — measured: a merge gate
+  // specimen (`b35627c6`) saw this section's whole `(f)` block cascade-fail from `recordedPort` staying
+  // null because detection never completed inside that window, not from any defect in the port-freed wait
+  // downstream. Dropping the override lets this section use the SAME ceiling (`waitForBinding`'s own
+  // 15000ms default) real `pnpm web`/`vite` users get — a deadlock-breaker ceiling, not a target for
+  // tuning back down — and the outer `spawnSync` timeout is widened past it so the outer kill can never
+  // race the inner wait's own deadline.
+  //
+  // CORRECTION (card d303ebda): this comment used to claim sections (g)/(h)/(j)/(l)/(m) could keep the
+  // "5000" shortcut safely because their fixtures "bind near-instantly" (no extra supervisor hop, no
+  // forced retry). That claim did NOT hold: card 9c06fab1 reported exactly this mechanism flaking those
+  // same five sections intermittently under real host load (~71% CPU; the failing set moved between
+  // runs). d303ebda confirmed the mechanism by reading the code (it did not itself reproduce a failure —
+  // this host's own ambient-overshoot self-calibration measured only ~1.0-1.2x that day, too low to trip
+  // either budget) and, separately, deterministically reproduced it in-process with a fixture that binds
+  // ~6s after being spawned (no host load involved): under the old "5000" override, `start` gave up with
+  // `portDetectionFailed:true` at the 5s mark; with no override (the real 15000ms default), the same
+  // fixture's `Bound:` line was detected correctly once it actually bound. "Binds near-instantly" was
+  // never the right reason to trust a shortened override — the BIND itself being fast says nothing about
+  // the surrounding spawn + log-flush + 100ms-poll latency under contention, the same chain this section's
+  // own fix already named. Those five sections now carry the IDENTICAL fix as this one: no
+  // `LOOM_DEV_SERVER_PORT_TIMEOUT_MS` override (the real 15000ms default), outer `spawnSync` timeout
+  // widened to 20_000 past it.
   const startResult = spawnSync(
     process.execPath,
     [HELPER, "start", portWorkDir, "--", process.execPath, portFixtureScript, String(decoyPort), portSentinelFile, String(decoyPort)],
@@ -442,7 +467,7 @@ try {
   const startResult = spawnSync(
     process.execPath,
     [HELPER, "start", anyIfaceWorkDir, "--", process.execPath, anyIfaceScript],
-    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+    { encoding: "utf8", timeout: 20_000, env: process.env },
   );
   check("(g) start (0.0.0.0 bind) exits 0", startResult.status === 0);
   const anyIfaceStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
@@ -512,7 +537,7 @@ try {
     const startResult = spawnSync(
       process.execPath,
       [HELPER, "start", ipv6WorkDir, "--", process.execPath, ipv6OnlyScript],
-      { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+      { encoding: "utf8", timeout: 20_000, env: process.env },
     );
     check("(h) start (IPv6-loopback-only bind) exits 0", startResult.status === 0);
     const ipv6StartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
@@ -638,7 +663,7 @@ try {
   const startResult = spawnSync(
     process.execPath,
     [HELPER, "start", staleRaceWorkDir, "--", process.execPath, staleRaceFixtureScript, staleRaceSentinelFile],
-    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+    { encoding: "utf8", timeout: 20_000, env: process.env },
   );
   check("(j) start (stale-log race control) exits 0", startResult.status === 0);
   const staleRaceStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
@@ -857,7 +882,7 @@ try {
   const startResult = spawnSync(
     process.execPath,
     [HELPER, "start", allCapsWorkDir, "--", process.execPath, allCapsScript],
-    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+    { encoding: "utf8", timeout: 20_000, env: process.env },
   );
   check("(l) start (all-caps-framework-name banner) exits 0", startResult.status === 0);
   const allCapsStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
@@ -938,7 +963,7 @@ if (process.platform !== "win32") {
       const startResult = spawnSync(
         process.execPath,
         [HELPER, "start", eaccesStepWorkDir, "--", process.execPath, eaccesStepScript, String(reservedPort), eaccesStepSentinelFile],
-        { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+        { encoding: "utf8", timeout: 20_000, env: process.env },
       );
       check("(m) start (forced onto a genuinely EACCES-reserved port) exits 0", startResult.status === 0);
       const eaccesStepMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
@@ -1147,12 +1172,12 @@ try {
   const heartbeatStillFrozen = await assertNeverWithControl({
     label: "(n) dev-server's heartbeat file stops advancing after the crash-fixture's exit hook ran",
     check: () => mtimeOf(crashHeartbeatOut) !== heartbeatMtimeAfterCrash,
-    windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5,
+    windowMs: HEARTBEAT_OBSERVE_WINDOW_MS,
     positiveControl: async () => {
       const controlBaseline = mtimeOf(crashControlOut);
       return observeOnce({
         check: () => mtimeOf(crashControlOut) !== controlBaseline,
-        windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5,
+        windowMs: HEARTBEAT_OBSERVE_WINDOW_MS,
       });
     },
   });
