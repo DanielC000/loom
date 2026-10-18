@@ -7615,7 +7615,7 @@ function isTransientSpawnErrorCode(e: unknown): boolean {
 
 export async function mergeMainIntoWorktree(
   repoPath: string, worktreePath: string, deps: BoundedGitDeps = {}, owedBase?: string, branch?: string,
-): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; dirtyWorktree?: boolean }> {
+): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; dirtyWorktree?: boolean; worktreeMissing?: boolean }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   // @decision 7e5b23e7 — only the two mutating merge calls below use this floor; every other git call in
   // this function (the cheap reads above/below, and computeOwedLanding's own merge-tree probes) keeps the
@@ -7623,7 +7623,15 @@ export async function mergeMainIntoWorktree(
   const mergeTimeoutMs = Math.max(timeoutMs, deps.unionMergeTimeoutFloorMs ?? UNION_MERGE_TIMEOUT_FLOOR_MS);
   const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
   const repoGit = makeGit(repoPath, timeoutMs);
-  const wtGit = makeGit(worktreePath, timeoutMs);
+  // @decision c30952c1 — a missing worktree makes this constructor THROW SYNCHRONOUSLY (simple-git's own
+  //  `GitConstructError`); every caller of this function assumes a `{ok:false,...}` result, never a thrown
+  //  exception, so this must be caught here and turned into one, not left to propagate uncaught.
+  let wtGit: ReturnType<typeof makeGit>;
+  try {
+    wtGit = makeGit(worktreePath, timeoutMs);
+  } catch (e) {
+    return { ok: false, worktreeMissing: true, reason: `the worktree no longer exists: ${(e as Error).message}` };
+  }
 
   let mainSha: string;
   try {
