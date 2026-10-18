@@ -17,7 +17,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}-${process.pid}`);
@@ -223,10 +223,21 @@ try {
     let active = 0, maxActive = 0, calls = 0;
     let resolveBothEntered;
     const bothEntered = new Promise((res) => { resolveBothEntered = res; });
-    const OVERLAP_TIMEOUT_MS = 8000; // safety net only — see comment above; never widen this to "fix" a flake
-    const bothEnteredOrTimeout = Promise.race([bothEntered, sleep(OVERLAP_TIMEOUT_MS)]);
+    // Card 4c1bfd91: constructing `bothEnteredOrTimeout` here (before either call even starts) let the
+    // timer run out the clock on `confirmWorkerMerge`'s real git prep (stranded-check, union-merge) —
+    // under load that prep alone can exceed 8s, so the first fake gate would release and shed its slot
+    // before the second was ever admitted, and maxActive never reached 2. The timer must bound only the
+    // OVERLAP window between the first and second call actually entering the fake gate, never the real
+    // prep work that happens before either of them gets there — so it's constructed lazily, on the first
+    // genuine entry, not at race-setup time. `ambientScaledBudget` ALSO scales the 8s base against this
+    // process's OWN measured ambient contention (never a blind widen of the flat constant — a genuinely
+    // idle host still gets 8s) — belt-and-suspenders for the residual case where the overlap window
+    // itself (not just the pre-entry prep) stretches past 8s under extreme host load.
+    const OVERLAP_TIMEOUT_MS = ambientScaledBudget(8000); // safety net only — see comment above; never widen the BASE to "fix" a flake
+    let bothEnteredOrTimeout;
     const fakeGate = async () => {
       calls++; active++; maxActive = Math.max(maxActive, active);
+      if (calls === 1) bothEnteredOrTimeout = Promise.race([bothEntered, sleep(OVERLAP_TIMEOUT_MS)]);
       if (calls === 2) resolveBothEntered();
       await bothEnteredOrTimeout; // block until the OTHER call has genuinely entered too (or the safety net fires)
       active--;
