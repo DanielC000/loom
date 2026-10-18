@@ -74,6 +74,15 @@ process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
 // clean baseline; the positive spawn below re-adds LOOM_OBSIDIAN_AUTOSTART via its own sessionEnv only.
 delete process.env.LOOM_OBSIDIAN_AUTOSTART;
 delete process.env.LOOM_OBSIDIAN_PREFLIGHT;
+// Card 49d1ee38: same trap, a different var. Since card 5eace211 EVERY Loom-spawned session (including
+// this worker's own shell, if this file is run from one) carries LOOM_PROJECT_WORK_DIR in its OWN ambient
+// env — and buildSpawnEnv's base is a plain copy of `process.env`, so that ambient value would otherwise
+// silently leak into the no-projectId spawn's child env below, breaking the negative control at line ~149
+// ("LOOM_PROJECT_WORK_DIR is absent... when opts.projectId is not set") for the wrong reason: inherited
+// host/session state, not this test's own scenario. Strip it before any spawn so the no-projectId case is
+// exercised on a clean baseline; the project-id-carrying spawn further down proves the var still reaches
+// the child when it's actually supposed to.
+delete process.env.LOOM_PROJECT_WORK_DIR;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { sessionScratchDir, projectWorkDir, PROJECTS_WORK_ROOT, ENSURE_OBSIDIAN_SCRIPT } = await import("../dist/paths.js");

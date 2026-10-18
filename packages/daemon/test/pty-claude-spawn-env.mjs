@@ -41,6 +41,15 @@ process.env.LOOM_HOME = tmpHome;
 // `tmpHome` above instead, which the cleanup below (and this spawn's own ensureProjectWorkDir mkdir) can
 // then safely mutate.
 delete process.env.LOOM_PROJECT_WORK_ROOT;
+// Card 49d1ee38: a DIFFERENT var, same trap class. Since card 5eace211 EVERY Loom-spawned session
+// (including this worker's own shell, if this file is run from one) carries LOOM_PROJECT_WORK_DIR in its
+// OWN ambient env — and buildSpawnEnv's base is a plain copy of `process.env`, so that ambient value would
+// otherwise silently leak into the no-projectId spawn's child env below, breaking the negative control at
+// line ~111 ("LOOM_PROJECT_WORK_DIR is absent... when opts.projectId is not set") for the wrong reason:
+// inherited host/session state, not this test's own scenario. Strip it before any spawn so the
+// no-projectId case is exercised on a clean baseline; the project-id-carrying spawn above already proves
+// the var still reaches the child when it's actually supposed to.
+delete process.env.LOOM_PROJECT_WORK_DIR;
 requireHermeticEnv(); // confirms LOOM_HOME (and, now, LOOM_PROJECT_WORK_ROOT if still ambient) are isolated
 const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
