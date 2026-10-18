@@ -24,6 +24,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 import { execSync } from "node:child_process";
 
 let failures = 0;
@@ -216,15 +217,13 @@ try {
   // multi-file tree with ORDINARY (non-pathological) content greps in well under a second.
   //
   // FILE COUNT vs LINE COUNT (pool-load flake fix, card test-harden-pool-flakes): keep the TOTAL probe
-  // count fixed at 15000 (so a real per-line-crossing regression still blows well past GREP_TOTAL_BUDGET_MS
-  // — see below) but spread it over FEWER, LARGER files (60 files x 250 lines, not 300 x 50). The healthy
-  // per-file-crossing path's wall-clock cost under host contention is dominated by fs.readFileSync calls +
-  // vm crossings — both scale with FILE COUNT, not probe count — so 5x fewer files buys real headroom
-  // against ambient scheduler/IO contention without weakening the regression signal one bit (a regressed
-  // per-line design still pays the SAME 15000 x ~0.3ms crossing tax regardless of file count). Confirmed
-  // by repro: at 300 files the healthy path measured 4029ms under a loaded pool — 29ms OVER the 4000ms
-  // budget, flipping `timedOut` true on otherwise-correct code (observed via a synthetic 16-way-concurrency
-  // + CPU-burn stress harness mirroring the real gate's pool-8 contention).
+  // count fixed at 15000 (so a real per-line-crossing regression still produces a vm-crossing count far
+  // past PERF_FILES — see below) but spread it over FEWER, LARGER files (60 files x 250 lines, not 300 x
+  // 50). The healthy per-file-crossing path's wall-clock cost under host contention is dominated by
+  // fs.readFileSync calls + vm crossings — both scale with FILE COUNT, not probe count — so 5x fewer files
+  // still buys real wall-clock headroom against ambient scheduler/IO contention (useful for the outer sanity
+  // ceiling below) without weakening the regression signal one bit (a regressed per-line design still pays
+  // the SAME 15000 x ~0.3ms crossing tax regardless of file count).
   const perfDir = path.join(repo, "src", "perf");
   fs.mkdirSync(perfDir, { recursive: true });
   const PERF_FILES = 60;
@@ -233,20 +232,48 @@ try {
     const lines = Array.from({ length: PERF_LINES_PER_FILE }, (_, i) => `const line_${f}_${i} = "just an ordinary line of source text";`);
     fs.writeFileSync(path.join(perfDir, `file${f}.ts`), lines.join("\n") + "\n");
   }
-  // MONOTONIC performance.now() (not Date.now()), so a wall-clock backward/forward step under load can't
-  // skew elapsed. The PRIMARY regression guard here is FUNCTIONAL, not wall-clock: a regression back to a
-  // per-line vm crossing (instead of the intended once-per-file crossing) would make this 15000-probe scan
-  // slow enough to blow repo-read.ts's own GREP_TOTAL_BUDGET_MS (4000ms) partway through, which flips
-  // `timedOut` to true — that's the SAME clock/budget the product code enforces on itself, so it isn't
-  // sensitive to ambient test-load noise the way an arbitrary test-invented wall-clock threshold is (a bare
-  // "<1s" assertion flaked under concurrent daemon+test load — observed ~4010ms on a healthy, non-regressed
-  // run; card 3e5a8dc6). The wall-clock check below is kept only as a generous outer sanity ceiling (3x
-  // GREP_TOTAL_BUDGET_MS + slack) to catch a genuine hang, not to assert "fast".
+  // REGRESSION GUARD (card 30c69538 — revised off a load-sensitive wall-clock proxy that false-failed twice
+  // under real gate contention on 2026-10-18, op 3467ff9c and batch b768662a, despite the 300->60-file
+  // margin card 3e5a8dc6 already bought). `timedOut` is production's own real wall-clock safety valve
+  // (repo-read.ts's GREP_TOTAL_BUDGET_MS, a plain Date.now() check BETWEEN files) — it legitimately engages
+  // under genuine host contention REGARDLESS of whether the code is correct, so "timedOut flipped true"
+  // never actually distinguished "slow because of a per-line-tax regression" from "slow because the gate's
+  // host happened to be busy right now". It is logged below purely as an OBSERVATION; it is never asserted
+  // on.
+  //
+  // The real regression guard instead COUNTS WORK, not TIME: `vm.runInContext` is monkeypatched for the
+  // duration of this one call to count its own invocations. repo-read.ts accesses it as a live property
+  // (`vm.runInContext(...)`, never a cached destructure) and this whole test runs in-process against the
+  // SAME dist/ module instance (InMemoryTransport, no HTTP, no child process), so the patched count is a
+  // direct measurement of the real call site, not a proxy for it. `glob` scopes the walk to just this
+  // fixture's own files, so under the correct once-per-FILE design `vmCalls` is bounded in [1, PERF_FILES]
+  // no matter how slow the host is: the TOTAL budget check runs BETWEEN files, never mid-file, so even a
+  // fully contended run that bails out early still completes at least one whole file's vm crossing first
+  // (>=1 — a non-vacuity floor proving the count mechanism saw real activity), and the per-file design can
+  // never exceed PERF_FILES crossings no matter how much wall-clock time it's given (<=PERF_FILES). A
+  // regression back to a once-per-LINE crossing blows straight through that upper bound on the FIRST file
+  // alone (PERF_LINES_PER_FILE = 250 crossings, already far over PERF_FILES = 60) — well before contention
+  // or the total budget even enter the picture, so this is immune to the ambient test-load noise that
+  // doomed the old wall-clock proxy.
   const perfT0 = performance.now();
-  const perfRes = await call("repo_grep", { projectId: "pOrd", pattern: "NOTHING_MATCHES_THIS", maxResults: 200 });
+  let vmCalls = 0;
+  const origRunInContext = vm.runInContext;
+  vm.runInContext = function patchedRunInContext(...args) { vmCalls++; return origRunInContext.apply(this, args); };
+  let perfRes;
+  try {
+    perfRes = await call("repo_grep", { projectId: "pOrd", pattern: "NOTHING_MATCHES_THIS", maxResults: 200, glob: "src/perf/*.ts" });
+  } finally {
+    vm.runInContext = origRunInContext; // restore immediately — nothing after this point should stay patched
+  }
   const perfMs = performance.now() - perfT0;
-  check("(b3) repo_grep: the perf-tree scan legitimately found nothing — FUNCTIONAL per-line-tax regression guard (not silently timed out against GREP_TOTAL_BUDGET_MS)", perfRes.timedOut !== true);
-  check(`(b3) repo_grep: a ${PERF_FILES}-file / ${PERF_FILES * PERF_LINES_PER_FILE}-line non-pathological tree greps within a generous sanity ceiling (${Math.round(perfMs)}ms < 13500ms)`, perfMs < 13500);
+  console.log(`      (observation) repo_grep perf-tree scan: timedOut=${perfRes.timedOut} vmCalls=${vmCalls} — timedOut is production's own real wall-clock safety valve and legitimately engages under host contention; it is NOT the regression signal here (see the vmCalls checks below)`);
+  check("(b3) repo_grep: the perf-tree scan legitimately found nothing", !perfRes.matches || perfRes.matches.length === 0);
+  check(`(b3) repo_grep: the scan actually ran (vmCalls=${vmCalls} >= 1 — non-vacuity floor proving the count mechanism observed real work)`, vmCalls >= 1);
+  check(`(b3) repo_grep: FUNCTIONAL per-line-tax regression guard — at most ONE vm crossing PER FILE scanned, never per LINE (vmCalls=${vmCalls} <= ${PERF_FILES}; a per-line-crossing regression blows this bound on file 0 alone, at ${PERF_LINES_PER_FILE} crossings)`, vmCalls <= PERF_FILES);
+  // Kept only as a generous OUTER sanity ceiling (3x GREP_TOTAL_BUDGET_MS + slack) to catch a genuine hang —
+  // never the regression signal (that's the vmCalls checks above). MONOTONIC performance.now() (not
+  // Date.now()): a wall-clock backward/forward step under load can't skew the elapsed measurement.
+  check(`(b3) repo_grep: a ${PERF_FILES}-file / ${PERF_FILES * PERF_LINES_PER_FILE}-line non-pathological tree greps within a generous outer sanity ceiling (${Math.round(perfMs)}ms < 13500ms)`, perfMs < 13500);
   fs.rmSync(perfDir, { recursive: true, force: true });
 
   // CONFINEMENT: a `..` traversal and an absolute path both escape the project root and are REFUSED.
