@@ -17,6 +17,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (5) `deleteProjectWorkDir` removes the whole dir, best-effort (never throws on a dir that doesn't
 //       exist), ASYNC (card 5eace211 Code Review MAJOR), and REFUSES a non-UUID-shaped or traversal-
 //       shaped projectId outright (leaving whatever's there untouched).
+//   (5c) manager code-review follow-up (card 2c9f0854 round 2, item 2) — `deleteProjectWorkDir`'s
+//       injectable `rm` test seam: a fake that rejects once then delegates to the real `rm` proves the
+//       warn-on-failure/no-warn-on-success split across two calls, and a fake that always rejects proves
+//       exactly one warn and NEVER a throw.
 //   (6) `LOOM_PROJECT_WORK_ROOT` overrides the default root — proven via a real child process (the root
 //       is a module-level `const`, computed once at import time, so the override must be set BEFORE
 //       paths.js is ever imported in that process).
@@ -171,6 +175,52 @@ try {
   await deleteProjectWorkDir(traversalId);
   check("(5b) a traversal-shaped id is REFUSED — the escape target survives untouched", fs.existsSync(escapeTargetDir) && fs.existsSync(path.join(escapeTargetDir, "canary.bin")));
 
+  // ── (5c) deleteProjectWorkDir's injectable `rm` seam — manager code-review follow-up item 2 ────────
+  // `deleteProjectWorkDir` now delegates retrying to `fs.promises.rm`'s OWN `maxRetries`/`retryDelay`
+  // (never a hand-rolled loop) and accepts an optional `rm` override as its SECOND, test-only parameter.
+  const realRm = fs.promises.rm.bind(fs.promises);
+  const warned = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => warned.push(a.join(" "));
+  try {
+    // "rm rejects then succeeds" — a SHARED-STATE fake: its first call rejects (no real removal, as a
+    // transient EBUSY never would), its second call delegates to the REAL rm (as Node's own internal
+    // retry eventually succeeding would). Two separate deleteProjectWorkDir calls against this ONE fake
+    // exercise both branches: the call where rm genuinely failed warns; the call where it genuinely
+    // succeeded does not, and the directory is actually removed.
+    const idC = "cccccccc-3333-4333-8333-333333333333";
+    ensureProjectWorkDir(idC, "Gamma Project");
+    fs.writeFileSync(path.join(projectWorkDir(idC), "c.bin"), Buffer.alloc(100, 3));
+    let flakyCalls = 0;
+    const flakyThenRealRm = async (p, opts) => {
+      flakyCalls++;
+      if (flakyCalls === 1) throw new Error("FAKE EBUSY (first attempt)");
+      return realRm(p, opts);
+    };
+    warned.length = 0;
+    await deleteProjectWorkDir(idC, flakyThenRealRm);
+    check("(5c) rm REJECTS on the first call — exactly one warn, dir still exists (that call never removed anything)",
+      warned.length === 1 && fs.existsSync(projectWorkDir(idC)));
+    await deleteProjectWorkDir(idC, flakyThenRealRm);
+    check("(5c) rm SUCCEEDS on the second call — dir removed, NO additional warn",
+      warned.length === 1 && !fs.existsSync(projectWorkDir(idC)));
+    check("(5c) the fake was actually called twice (both branches genuinely exercised, not vacuously)", flakyCalls === 2);
+
+    // "rm always rejects" — never throws out of deleteProjectWorkDir, logs exactly one warn per call.
+    const idD = "dddddddd-4444-4444-8444-444444444444";
+    ensureProjectWorkDir(idD, "Delta Project");
+    const alwaysRejectRm = async () => { throw new Error("FAKE ALWAYS BUSY"); };
+    warned.length = 0;
+    let threwD = false;
+    try { await deleteProjectWorkDir(idD, alwaysRejectRm); } catch { threwD = true; }
+    check("(5c) rm ALWAYS rejects — deleteProjectWorkDir does NOT throw", threwD === false);
+    check("(5c) ...and logs EXACTLY one warn (never zero, never more than one per call)", warned.length === 1);
+    check("(5c) ...and the dir survives untouched (a failed rm must not partially remove/corrupt it)",
+      fs.existsSync(projectWorkDir(idD)));
+  } finally {
+    console.warn = origWarn;
+  }
+
   // ── (6) LOOM_PROJECT_WORK_ROOT override — proven via a real child process ─────────────────────────
   const overrideHome = path.join(os.tmpdir(), `loom-pwd-override-home-${Date.now()}-${randomUUID()}`);
   const overrideRoot = path.join(os.tmpdir(), `loom-pwd-override-root-${Date.now()}-${randomUUID()}`);
@@ -200,6 +250,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PROJECTS_WORK_ROOT is a sibling of LOOM_HOME (never nested), projectWorkDir is a pure id-keyed join, projectWorkDirEnv is pure (no disk I/O), ensureProjectWorkDir creates the dir and refreshes its marker non-destructively (a rename reaches it, a no-name call never nulls an existing one), a local ground-truth sum counts real bytes scoped correctly, deleteProjectWorkDir removes scoped and best-effort (async) while REFUSING a non-UUID-shaped or traversal-shaped id outright (leaving a real canary untouched), and LOOM_PROJECT_WORK_ROOT overrides the default root in a real child process."
+  ? "\n✅ ALL PASS — PROJECTS_WORK_ROOT is a sibling of LOOM_HOME (never nested), projectWorkDir is a pure id-keyed join, projectWorkDirEnv is pure (no disk I/O), ensureProjectWorkDir creates the dir and refreshes its marker non-destructively (a rename reaches it, a no-name call never nulls an existing one), a local ground-truth sum counts real bytes scoped correctly, deleteProjectWorkDir removes scoped and best-effort (async) while REFUSING a non-UUID-shaped or traversal-shaped id outright (leaving a real canary untouched) and, via its injectable rm seam, warns exactly once on a genuine failure (never zero, never duplicated on a later success) and never throws even when rm always rejects, and LOOM_PROJECT_WORK_ROOT overrides the default root in a real child process."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

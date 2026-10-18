@@ -231,6 +231,20 @@ export async function measureDirBytesBoundedAsync(
   return { bytes, truncated };
 }
 
+// Card 2c9f0854 (round 3, item 4c; manager follow-up item 2) — a transient, fast-rejecting failure (e.g.
+// a Windows EBUSY on a still-briefly-locked file) is retried via `fs.promises.rm`'s OWN `maxRetries`/
+// `retryDelay` options (Node's own implementation already retries exactly the EBUSY/EMFILE/ENFILE/
+// ENOTEMPTY/EPERM error classes this is for, linearly backing off by `retryDelay` per retry) — never a
+// hand-rolled attempt loop. This is NOT the `bd9fc808` hazard
+// (docs/decisions/bd9fc808-killable-child-process-removal-replaces-threadpool-rm.md): that incident came
+// from a JS-side TIMEOUT abandoning a WEDGED (never-settling) `fs.promises.rm` call and starting a NEW one
+// on top of it, leaking a libuv threadpool slot per abandoned attempt — there is no timeout/abandon logic
+// here at all, in either Node's internal retry or this function: a genuinely wedged call still just hangs
+// on this one single `await` forever, exactly as an un-retried call always has, since `maxRetries` only
+// ever fires AFTER a given attempt has actually SETTLED (rejected), never alongside one still pending.
+const DELETE_PROJECT_WORK_DIR_MAX_RETRIES = 2; // Node's own semantics: retries AFTER the first failure, so up to 3 total attempts
+const DELETE_PROJECT_WORK_DIR_RETRY_DELAY_MS = 250;
+
 /**
  * PERMANENTLY remove one project's work dir (card 5eace211) — the irreversible counterpart to
  * `ensureProjectWorkDir`, mirroring `deleteProjectArchives`'s own best-effort contract (`gateway/
@@ -241,8 +255,14 @@ export async function measureDirBytesBoundedAsync(
  * @decision 5eace211 — ASYNC (`fs.promises.rm`), never `fs.rmSync` here: a sync recursive removal of a
  * real build/cache population blocks the WHOLE daemon's event loop for as long as the walk takes, the
  * same class of cost Decision 5 already fixed for measurement — do not revert this to a sync call.
+ *
+ * @param rm TEST SEAM ONLY — defaults to the real `fs.promises.rm`; a test injects a fake to exercise the
+ *   reject/resolve branches below without real transient filesystem flakiness.
  */
-export async function deleteProjectWorkDir(projectId: string): Promise<void> {
+export async function deleteProjectWorkDir(
+  projectId: string,
+  rm: typeof fs.promises.rm = fs.promises.rm,
+): Promise<void> {
   const dir = projectWorkDir(projectId);
   const rel = path.relative(PROJECTS_WORK_ROOT, dir);
   const isSingleSegmentUnderRoot = rel.length > 0 && rel === path.basename(rel) && !rel.startsWith("..");
@@ -253,8 +273,21 @@ export async function deleteProjectWorkDir(projectId: string): Promise<void> {
     return;
   }
   try {
-    await fs.promises.rm(dir, { recursive: true, force: true });
-  } catch { /* best-effort — a permanent delete must not fail because this cleanup did */ }
+    await rm(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: DELETE_PROJECT_WORK_DIR_MAX_RETRIES,
+      retryDelay: DELETE_PROJECT_WORK_DIR_RETRY_DELAY_MS,
+    });
+  } catch (err) {
+    // Best-effort — a permanent delete must not fail because this cleanup did — but a Windows EBUSY
+    // (locked file) surviving every retry can orphan a partial tree, which is worth a loud signal rather
+    // than silent swallowing.
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[paths] deleteProjectWorkDir FAILED for ${dir}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /**

@@ -49,6 +49,18 @@ export function __resetProjectsWorkRootUsageCacheForTest(): void {
 }
 
 /**
+ * TEST SEAM ONLY — directly set the cache to an arbitrary value (e.g. an artificially stale
+ * `computedAt`, to test {@link kickProjectsWorkRootUsageRefresh}'s {@link MIN_REFRESH_INTERVAL_MS} floor
+ * without waiting 5 real minutes). Card 2c9f0854 (round 3, item 4a) — since an OVERRIDE call to
+ * {@link refreshProjectsWorkRootUsage} deliberately never writes to the shared cache (see that
+ * function's own doc below), this is the only way a test can put a specific value into
+ * `getCachedProjectsWorkRootUsage()`'s read surface without a real walk.
+ */
+export function __setProjectsWorkRootUsageCacheForTest(value: ProjectsWorkRootUsage): void {
+  cached = value;
+}
+
+/**
  * Recompute the cache, scoped to real known project ids only (see this module's own doc). Dedupes: a
  * refresh already in flight is returned to a concurrent caller instead of starting a second one. Never
  * throws — a per-project measurement failure just contributes 0 for that project (best-effort, same
@@ -59,13 +71,20 @@ export function __resetProjectsWorkRootUsageCacheForTest(): void {
  * above. A direct caller (a test) can pass a tiny `{maxEntries:1}` or a near-zero `warnBytes` to exercise
  * `truncated:true`/`overCeiling:true` cheaply, without writing a pathological amount of real data; a real
  * production caller (the kick below) never passes either, so its behavior is byte-identical to before.
+ *
+ * @decision 2c9f0854 — do not let an override call join the shared in-flight dedupe or write to
+ * `cached` — only the exact-default-bounds (production) call may touch either.
  */
 export async function refreshProjectsWorkRootUsage(
   db: Db,
-  bounds: { maxEntries: number; maxMs: number } = { maxEntries: PER_PROJECT_MAX_ENTRIES, maxMs: PER_PROJECT_MAX_MS },
-  warnBytes: number = PROJECT_WORK_DIR_WARN_BYTES,
+  bounds?: { maxEntries: number; maxMs: number },
+  warnBytes?: number,
 ): Promise<ProjectsWorkRootUsage> {
-  if (refreshInFlight) return refreshInFlight;
+  const isDefaultCall = bounds === undefined && warnBytes === undefined;
+  const effectiveBounds = bounds ?? { maxEntries: PER_PROJECT_MAX_ENTRIES, maxMs: PER_PROJECT_MAX_MS };
+  const effectiveWarnBytes = warnBytes ?? PROJECT_WORK_DIR_WARN_BYTES;
+
+  if (isDefaultCall && refreshInFlight) return refreshInFlight;
   const run = (async (): Promise<ProjectsWorkRootUsage> => {
     let knownIds: string[];
     try {
@@ -81,14 +100,16 @@ export async function refreshProjectsWorkRootUsage(
       let exists = false;
       try { exists = fs.existsSync(dir); } catch { /* treat as absent */ }
       if (!exists) continue;
-      const { bytes, truncated } = await measureDirBytesBoundedAsync(dir, bounds);
+      const { bytes, truncated } = await measureDirBytesBoundedAsync(dir, effectiveBounds);
       total += bytes;
       if (truncated) anyTruncated = true;
-      if (bytes > warnBytes) anyOverCeiling = true;
+      if (bytes > effectiveWarnBytes) anyOverCeiling = true;
     }
-    cached = { bytes: total, truncated: anyTruncated, overCeiling: anyOverCeiling, computedAt: new Date().toISOString() };
-    return cached;
+    const result: ProjectsWorkRootUsage = { bytes: total, truncated: anyTruncated, overCeiling: anyOverCeiling, computedAt: new Date().toISOString() };
+    if (isDefaultCall) cached = result;
+    return result;
   })();
+  if (!isDefaultCall) return run;
   refreshInFlight = run;
   try {
     return await run;

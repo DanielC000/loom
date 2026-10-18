@@ -108,6 +108,16 @@ entire contents regardless of what's actually a Loom-owned project dir would mak
 directory's size (or a slow network mount, or a directory the human never meant scanned at all) silently
 become Loom's own reported number.
 
+Code Review MINOR 3 — `served_status` is read on every poll, not just human-triggered, so without a floor
+every single read would re-kick a fresh recursive walk the instant the prior one settled: real,
+repeated work for a figure that is, by design, only ever WARN-grade and never needs to be fresher than a
+few minutes. `kickProjectsWorkRootUsageRefresh` (`sessions/project-work-dir-usage.ts`) therefore skips
+firing a new background walk entirely when the cache's `computedAt` is already younger than
+`MIN_REFRESH_INTERVAL_MS` (5 minutes) — a cheap, synchronous no-op, not merely a dedupe against an
+in-flight walk. This floor applies ONLY to the fire-and-forget kick; a caller that explicitly `await`s
+`refreshProjectsWorkRootUsage` itself (a test wanting a guaranteed-fresh figure) always gets a real walk
+regardless of how recent `computedAt` is.
+
 ## Decision 6 — the ceiling is per-project, not root-wide, and raised to a value that isn't permanently tripped
 
 The original `PROJECTS_WORK_ROOT_WARN_BYTES` (2 GiB) summed ALL projects' work dirs against one shared

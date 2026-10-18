@@ -310,6 +310,37 @@ export function assertUnderOsTmpdir(label, p) {
   }
 }
 
+/**
+ * Card 2c9f0854 (Code Review of 5eace211, round 3, item 1) — mirrors `paths.ts`'s OWN derivation of
+ * `PROJECTS_WORK_ROOT` from `LOOM_HOME` EXACTLY (`path.dirname`/`path.basename` on the RAW, unresolved
+ * `LOOM_HOME` value — see `paths.ts` ~:109: `path.join(path.dirname(LOOM_HOME), \`${basename}-projects\`)`),
+ * so `requireHermeticEnv` can tell "this override equals what THIS test's own LOOM_HOME would derive
+ * anyway" apart from "this is some OTHER throwaway root that merely happens to also live under the OS
+ * temp dir" — e.g. a human's isolated-daemon-for-UI-review recipe (CLAUDE.md's own recipe), which has its
+ * own genuine LOOM_HOME and its own derived `-projects` sibling, ALSO under the OS temp dir.
+ * `assertUnderOsTmpdir`/`isTestCreatedHome` alone cannot distinguish these two cases — both pass "is
+ * under tmp" — which is exactly the gap this closes.
+ * @param {string} home  the raw (unresolved) LOOM_HOME value
+ */
+function deriveDefaultProjectsWorkRoot(home) {
+  return path.join(path.dirname(home), `${path.basename(home)}-projects`);
+}
+
+// Card 2c9f0854 — a test that genuinely needs `LOOM_PROJECT_WORK_ROOT` to be something OTHER than this
+// test's own derived default (e.g. exercising the override mechanism itself) registers that EXACT value
+// here, BEFORE calling `requireHermeticEnv()`. This is the ONLY way `requireHermeticEnv` can tell "a
+// value this test deliberately owns" apart from "an ambient value this test merely inherited" — both
+// arrive identically as a `process.env.LOOM_PROJECT_WORK_ROOT` string, so there is no way to recover
+// provenance from the value alone; a caller has to say so. Pinning never WIDENS what's accepted beyond
+// the existing tmp-dir-containment proof — `assertUnderOsTmpdir` still runs on the pinned value itself —
+// it only adds a second path TO that same proof, alongside "matches this test's own derived default".
+let pinnedProjectWorkRootOverride = null;
+export function pinProjectWorkRootOverrideForTest(value) {
+  const resolved = path.resolve(value);
+  assertUnderOsTmpdir("LOOM_PROJECT_WORK_ROOT (pinned)", resolved);
+  pinnedProjectWorkRootOverride = resolved;
+}
+
 // Arm the Db prod-guard for THIS process (and inherited by spawned daemons) the moment we're imported.
 process.env.LOOM_TEST = "1";
 
@@ -411,21 +442,34 @@ export function requireHermeticEnv({ port = false } = {}) {
 
   // Card 5eace211 (Code Review, CRITICAL) — `LOOM_PROJECT_WORK_ROOT` is a human-set override pointing at
   // the REAL shared root every project's caches/build output live under (Decision 2). Unset is always
-  // fine (paths.ts derives a sibling of the temp LOOM_HOME instead); SET is only fine when it already
-  // points INSIDE the OS temp dir (a test that deliberately pinned it to its OWN throwaway root). An
-  // ambient value pointing anywhere else is exactly the shape a human's real override takes, and a test
-  // that went on to mutate `PROJECTS_WORK_ROOT` under that value would be mutating the real one — abort
-  // instead of letting that happen silently.
+  // fine (paths.ts derives a sibling of the temp LOOM_HOME instead).
+  //
+  // Card 2c9f0854 (round 3, item 1) — a bare "is it under the OS temp dir" check (the original shape of
+  // this block) is NOT enough: an ambient override that itself lives under the OS temp dir (e.g. a
+  // human's own isolated-daemon-for-UI-review recipe, with its own genuine LOOM_HOME and derived
+  // `-projects` sibling) would PASS that check and still be the WRONG root for THIS test — a pin-less
+  // test would then silently walk/mutate that other throwaway root instead of its own. SET is only fine
+  // when it equals EXACTLY WHAT THIS TEST'S OWN LOOM_HOME would derive by default (so the override is
+  // inert — identical to not having set it at all), or when this test explicitly registered that exact
+  // value via `pinProjectWorkRootOverrideForTest` above. Anything else — including a value that merely
+  // passes the OLD tmp-dir-containment check — is refused.
   const projectWorkRoot = process.env.LOOM_PROJECT_WORK_ROOT;
   if (projectWorkRoot) {
-    try {
-      assertUnderOsTmpdir("LOOM_PROJECT_WORK_ROOT", projectWorkRoot);
-    } catch {
+    const resolvedOverride = path.resolve(projectWorkRoot);
+    const expectedDefault = home ? path.resolve(deriveDefaultProjectsWorkRoot(home)) : null;
+    const matchesDefault = expectedDefault != null && normalizeForCompare(resolvedOverride) === normalizeForCompare(expectedDefault);
+    const matchesPin = pinnedProjectWorkRootOverride != null
+      && normalizeForCompare(resolvedOverride) === normalizeForCompare(pinnedProjectWorkRootOverride);
+    if (!matchesDefault && !matchesPin) {
       problems.push(
-        `LOOM_PROJECT_WORK_ROOT is set to a non-temp-dir path (${path.resolve(projectWorkRoot)}) — this ` +
-          `looks like a human-set override of the REAL shared project work-dir root, not a test fixture. ` +
-          `Clear it (delete process.env.LOOM_PROJECT_WORK_ROOT) or point it at a dir under ${OS_TMPDIR} ` +
-          `before importing dist/paths.js.`,
+        `LOOM_PROJECT_WORK_ROOT (${resolvedOverride}) does not match this test's own derived root ` +
+          `(${expectedDefault ?? "<unknown — LOOM_HOME unset>"}) and was not registered via ` +
+          `pinProjectWorkRootOverrideForTest() — this looks like an AMBIENT value this test merely ` +
+          `inherited (e.g. another throwaway LOOM_HOME's own -projects sibling, which can also live ` +
+          `under the OS temp dir and would otherwise pass a bare tmp-dir-containment check), not one it ` +
+          `deliberately owns. Clear it (delete process.env.LOOM_PROJECT_WORK_ROOT), or if this test ` +
+          `genuinely needs a distinct root, call pinProjectWorkRootOverrideForTest(value) before ` +
+          `requireHermeticEnv() — before importing dist/paths.js either way.`,
       );
     }
   }

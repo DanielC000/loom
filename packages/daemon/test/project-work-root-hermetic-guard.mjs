@@ -24,17 +24,56 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) assertUnderOsTmpdir (the shared primitive both (a) and (b) above are built on) — pure unit checks:
 //       throws for a path outside the OS temp dir, does NOT throw for one genuinely inside it.
 //
+// Card 2c9f0854 (Code Review of 5eace211, round 3) adds three more scenarios, closing two real gaps (A)
+// through (C) above left open:
+//   (D) THE GAP (B) COULD NOT PROBE: (B)'s own ambient value sits OUTSIDE the OS temp dir, so it only
+//       proves the OLD bare tmp-dir-containment check. A pin-less test inheriting an ambient
+//       `LOOM_PROJECT_WORK_ROOT` that itself lives INSIDE the OS temp dir (e.g. a human's own
+//       isolated-daemon-for-UI-review recipe, with its own genuine LOOM_HOME and derived `-projects`
+//       sibling) used to PASS that check and silently walk/mutate the WRONG (but real) throwaway root.
+//       Proves `requireHermeticEnv` now refuses this shape too — it must match THIS test's own derived
+//       default, not merely "be under tmp".
+//   (E) "ONE THE TEST SET EXPLICITLY": a test that deliberately registers its own non-default
+//       `LOOM_PROJECT_WORK_ROOT` via `pinProjectWorkRootOverrideForTest` before calling
+//       `requireHermeticEnv` is NOT refused — pinning is the one sanctioned escape from (D)'s stricter
+//       check.
+//   (F) item 2 — scenario (A) above only proves the FIX PATTERN works in an INLINE COPY; it never reads
+//       the REAL test files that are supposed to carry it, so a real file's pin could be deleted entirely
+//       and (A) would stay green. This scans the REAL files in this directory that actually touch
+//       `PROJECTS_WORK_ROOT` content and asserts each one pins/clears `LOOM_PROJECT_WORK_ROOT` before its
+//       own FIRST import of ANY `dist/` module — with a positive control proving the scan can actually
+//       fail (a mutated copy with the pin stripped out). A manager code-review follow-up round (2c9f0854
+//       round 2, item 1) then found the original regexes false-pass on four synthetic shapes: a
+//       commented-out pin, a STATIC import (ESM hoists it regardless of textual position), an EARLIER
+//       import of some other `dist/` module that itself transitively freezes `PROJECTS_WORK_ROOT`, and a
+//       member with no matching import at all (the old code fail-OPENed on that). (F0) below is the
+//       synthetic-input self-test suite for all four, each shown RED against a frozen copy of the old
+//       logic before the real scan (F) runs the fixed version against the real files.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/project-work-root-hermetic-guard.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const { assertUnderOsTmpdir } = await import("./_guard.mjs");
+
+// Card 2c9f0854 (round 3, item 3) — every mkdtempSync'd probe home this file creates is tracked here and
+// removed in the single shared `finally` block below. The original file leaked probeHomeA/probeHomeB
+// (created, never removed); every NEW probe dir this round adds registers itself the same way instead of
+// repeating that mistake.
+const probeHomesToClean = [];
+function mkProbeHome(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  probeHomesToClean.push(dir);
+  return dir;
+}
 
 // CLAUDE.md gotcha: a bare drive-letter path in a dynamic import() throws ERR_UNSUPPORTED_ESM_URL_SCHEME
 // on Windows — pass the file:// URL itself (never fileURLToPath'd) into every probe script's import.
@@ -51,7 +90,7 @@ fs.writeFileSync(canaryFile, CANARY_CONTENT);
 
 try {
   // ===================== (A) the fixed pattern — canary survives via the PIN =====================
-  const probeHomeA = fs.mkdtempSync(path.join(os.tmpdir(), "loom-canary-probe-home-a-"));
+  const probeHomeA = mkProbeHome("loom-canary-probe-home-a-");
   const probeIdA = randomUUID();
   const scriptA =
     `process.env.LOOM_HOME = ${JSON.stringify(probeHomeA)};` +
@@ -85,7 +124,7 @@ try {
   // distinct from `canaryRoot` precisely so this scenario tests the GUARD, not the (already-proven-safe)
   // temp-dir case (A) already covers.
   const outsideTempForGuard = path.join(os.homedir(), "loom-canary-guard-probe-b-does-not-exist");
-  const probeHomeB = fs.mkdtempSync(path.join(os.tmpdir(), "loom-canary-probe-home-b-"));
+  const probeHomeB = mkProbeHome("loom-canary-probe-home-b-");
   const scriptB =
     `process.env.LOOM_HOME = ${JSON.stringify(probeHomeB)};` +
     // Deliberately NO `delete process.env.LOOM_PROJECT_WORK_ROOT` here — this is the OLD, unfixed shape
@@ -118,16 +157,222 @@ try {
   let threwC1 = false;
   try { assertUnderOsTmpdir("test-label", outsideTemp); } catch { threwC1 = true; }
   check("(C) assertUnderOsTmpdir THROWS for a path genuinely outside the OS temp dir", threwC1 === true);
-  const insideTemp = fs.mkdtempSync(path.join(os.tmpdir(), "loom-canary-inside-"));
+  const insideTemp = mkProbeHome("loom-canary-inside-");
   let threwC2 = false;
   try { assertUnderOsTmpdir("test-label", insideTemp); } catch { threwC2 = true; }
   check("(C) assertUnderOsTmpdir does NOT throw for a path genuinely inside the OS temp dir", threwC2 === false);
-  fs.rmSync(insideTemp, { recursive: true, force: true });
+
+  // ===================== (D) the gap (B) could not probe: an ambient override UNDER the OS temp dir,
+  // ===================== but NOT matching this probe's own derived default =====================
+  // Card 2c9f0854 — (B)'s own ambient value sits OUTSIDE the OS temp dir (deliberately, per its own
+  // comment). This simulates the REAL gap the review found: a different throwaway home's own genuine
+  // `-projects` sibling (e.g. CLAUDE.md's own isolated-daemon-for-UI-review recipe) ALSO lives under the
+  // OS temp dir, so the OLD bare tmp-dir-containment check would have accepted it. `otherHomeD` stands in
+  // for that OTHER throwaway home; its OWN derived default is what a pin-less probeHomeD test must now
+  // be refused for inheriting.
+  const probeHomeD = mkProbeHome("loom-canary-probe-home-d-");
+  const otherHomeD = mkProbeHome("loom-canary-other-home-d-");
+  const otherHomeDProjectsSibling = path.join(path.dirname(otherHomeD), `${path.basename(otherHomeD)}-projects`);
+  const scriptD =
+    `process.env.LOOM_HOME = ${JSON.stringify(probeHomeD)};` +
+    // Deliberately NO delete of LOOM_PROJECT_WORK_ROOT here — a pin-less test inheriting the ambient
+    // value, exactly the shape the review found was NOT refused.
+    `const { requireHermeticEnv } = await import(${JSON.stringify(guardUrl)});` +
+    `requireHermeticEnv();` +
+    `process.stdout.write("UNREACHABLE — requireHermeticEnv should have aborted this process already");`;
+  let threwD = null;
+  try {
+    execFileSync(process.execPath, ["--input-type=module", "-e", scriptD], {
+      env: { ...process.env, LOOM_PROJECT_WORK_ROOT: otherHomeDProjectsSibling },
+      encoding: "utf8",
+    });
+  } catch (e) {
+    threwD = e;
+  }
+  check("(D) precondition — otherHomeDProjectsSibling IS genuinely under the OS temp dir (the shape (B) could not probe)",
+    (() => { try { assertUnderOsTmpdir("x", otherHomeDProjectsSibling); return true; } catch { return false; } })());
+  check("(D) THE NEW CHECK FIRES: requireHermeticEnv aborts (exit 99) for an ambient, un-pinned, UNDER-TMP override that doesn't match this test's own derived root",
+    threwD !== null && threwD.status === 99);
+  check("(D) the abort's own stderr names LOOM_PROJECT_WORK_ROOT",
+    /LOOM_PROJECT_WORK_ROOT/.test(threwD?.stderr ?? ""));
+  check("(D) the probe NEVER reached its own stdout write",
+    !(threwD?.stdout ?? "").includes("UNREACHABLE"));
+
+  // ===================== (E) "one the test set explicitly" — pinning is accepted =====================
+  // Card 2c9f0854 — the ONE sanctioned escape from (D)'s stricter check: a test that genuinely needs a
+  // non-default root registers it via `pinProjectWorkRootOverrideForTest` first.
+  const probeHomeE = mkProbeHome("loom-canary-probe-home-e-");
+  const customOverrideE = mkProbeHome("loom-canary-custom-override-e-");
+  const scriptE =
+    `process.env.LOOM_HOME = ${JSON.stringify(probeHomeE)};` +
+    `const { requireHermeticEnv, pinProjectWorkRootOverrideForTest } = await import(${JSON.stringify(guardUrl)});` +
+    `pinProjectWorkRootOverrideForTest(${JSON.stringify(customOverrideE)});` +
+    `requireHermeticEnv();` +
+    `const { PROJECTS_WORK_ROOT } = await import(${JSON.stringify(pathsUrl)});` +
+    `process.stdout.write(PROJECTS_WORK_ROOT);`;
+  const outE = execFileSync(process.execPath, ["--input-type=module", "-e", scriptE], {
+    env: { ...process.env, LOOM_PROJECT_WORK_ROOT: customOverrideE },
+    encoding: "utf8",
+  });
+  check("(E) a PINNED non-default override is NOT refused — requireHermeticEnv returns normally",
+    outE.trim() === customOverrideE);
+  check("(E) that resolved root genuinely differs from probeHomeE's own derived default (proving the PIN, not the default, won)",
+    outE.trim() !== path.join(path.dirname(probeHomeE), `${path.basename(probeHomeE)}-projects`));
+
+  // ===================== (F) item 2 — scan the REAL files for the pin, not an inline copy =====================
+  // Card 2c9f0854 — scenario (A) above only proves the FIX PATTERN works in an inline copy; it never
+  // reads the real files in this directory, so a real file's pin could be deleted entirely and (A) would
+  // stay green regardless. This scans the actual source of every real test file known to touch
+  // `PROJECTS_WORK_ROOT` content and asserts each one pins/clears `LOOM_PROJECT_WORK_ROOT` before its own
+  // import of `dist/paths.js`/`dist/pty/host.js`.
+  //
+  // MEMBERSHIP, documented (CLAUDE.md warns against a folk filename-grep recipe standing in for a real
+  // rule): two signals, deliberately kept separate so each is auditable on its own terms.
+  //   (1) AUTOMATIC, generalizing: any `.mjs` file directly under this test dir (excluding `_`-prefixed
+  //       fixtures/probes, which the suite's own runner never executes directly — scripts/test-daemon.mjs
+  //       skips any path segment starting with `_`) whose source calls `ensureProjectWorkDir(`,
+  //       `deleteProjectWorkDir(`, or `refreshProjectsWorkRootUsage(` — the three real functions that
+  //       touch `PROJECTS_WORK_ROOT` content on disk. A NEW file added later that calls one of these is
+  //       caught automatically, with no list to update.
+  //   (2) HAND-CURATED, NOT exhaustive: `pty-claude-spawn-env.mjs`/`pty-codex-spawn-env.mjs` reach
+  //       `ensureProjectWorkDir` only INDIRECTLY — via a REAL (unstubbed) `PtyHost.spawn()`/
+  //       `createCodexPty()` call with `projectId` set, which internally calls it — a shape a text scan
+  //       cannot reliably distinguish from the many OTHER real-spawn tests that pass a `projectId` for
+  //       unrelated reasons (DB row fields, a deny-path test expecting the spawn to be REFUSED before it
+  //       ever reaches that call, etc.) without false-flagging most of them. These two are verified by
+  //       direct reading, not grep. KNOWN GAP, left open rather than silently absorbed into this scan's
+  //       scope: `transcript-root-deny-chokepoint.mjs` ALSO reaches `ensureProjectWorkDir` indirectly this
+  //       same way and is NOT pinned — a real, pre-existing, out-of-scope-for-this-card finding, reported
+  //       separately rather than fixed here.
+  const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+  const SELF_FILE = path.basename(fileURLToPath(import.meta.url));
+  const MUTATOR_CALL_RE = /\b(?:ensureProjectWorkDir|deleteProjectWorkDir|refreshProjectsWorkRootUsage)\(/;
+  const PIN_RE = /delete\s+process\.env\.LOOM_PROJECT_WORK_ROOT\b|pinProjectWorkRootOverrideForTest\s*\(/;
+  const INDIRECT_CREATEPTY_MEMBERS = ["pty-claude-spawn-env.mjs", "pty-codex-spawn-env.mjs"];
+
+  // Manager code-review follow-up (card 2c9f0854 round 2, item 1) — the reviewer ran the ORIGINAL
+  // regexes above on synthetic inputs and found four real false-passes. `oldSourceHasPinBeforeImport`
+  // below is a FROZEN copy of the pre-this-round logic, kept ONLY so the (a)-(d) self-tests can
+  // demonstrate each one was a genuine false pass before, not merely assert the new behavior in
+  // isolation.
+  const OLD_RELEVANT_IMPORT_RE = /import\(\s*["'][^"']*dist\/(?:paths|pty\/host)\.js["']\s*\)|from\s*["'][^"']*dist\/(?:paths|pty\/host)\.js["']/;
+  function oldSourceHasPinBeforeImport(src) {
+    const importMatch = OLD_RELEVANT_IMPORT_RE.exec(src);
+    if (!importMatch) return { hasImport: false, ok: true }; // (d) fail-OPEN on no match at all
+    const before = src.slice(0, importMatch.index); // (a) never comment-stripped; (b) static form untouched
+    return { hasImport: true, ok: PIN_RE.test(before) };
+  }
+
+  // THE FIX, covering all four:
+  //   (a) PIN_RE now runs against COMMENT-STRIPPED text (via the shared `stripComments`, `./_strip-
+  //       comments.mjs`) — a commented-out `// delete process.env.LOOM_PROJECT_WORK_ROOT;` must never
+  //       count as a real pin.
+  //   (b) a STATIC `import ... from "../dist/...";` is REJECTED UNCONDITIONALLY, regardless of its
+  //       textual position relative to a pin line — ESM hoists every static import above all other
+  //       top-level code in the SAME module (including an earlier-looking `delete
+  //       process.env.LOOM_PROJECT_WORK_ROOT;`), so no position could ever make this form safe. The old
+  //       regex's `from "..."` alternative existed only to ANCHOR on a static import's position; it never
+  //       rejected the form itself.
+  //   (c) the anchor is the FIRST import of ANY `dist/` module, not just `dist/paths.js`/`dist/pty/
+  //       host.js` — `dist/db.js` (and others) itself imports `paths.js` at module load, which freezes
+  //       `PROJECTS_WORK_ROOT` (an `export const ... = process.env.LOOM_PROJECT_WORK_ROOT || ...`
+  //       top-level read) the moment `db.js` loads, not merely when `dist/paths.js` is later imported
+  //       directly.
+  //   (d) a member with NO matching dist import at all is a VIOLATION, never "ok" — the old
+  //       `{hasImport:false, ok:true}` FAIL-OPEN silently passed a member this scan simply failed to
+  //       recognize at all, which is exactly the case where the scan being broken for this file and the
+  //       file being genuinely safe are indistinguishable — treat that ambiguity as unsafe.
+  const DYNAMIC_DIST_IMPORT_RE = /import\s*\(\s*["'][^"']*\/dist\/[^"']+\.(?:[cm]?js)["']\s*\)/;
+  const STATIC_DIST_IMPORT_RE = /^[ \t]*import\b[^;]*\bfrom\s*["'][^"']*\/dist\/[^"']+\.(?:[cm]?js)["']/m;
+  const ANY_DIST_IMPORT_RE = new RegExp(`(${DYNAMIC_DIST_IMPORT_RE.source})|(${STATIC_DIST_IMPORT_RE.source})`, "m");
+
+  /** Pure on a source STRING — reused for real files, the positive-control mutated copy, and the
+   *  synthetic-input self-tests for (a)-(d) below. */
+  function sourceHasPinBeforeImport(src) {
+    const match = ANY_DIST_IMPORT_RE.exec(src);
+    if (!match) return { hasImport: false, ok: false }; // (d)
+    if (match[2] !== undefined) return { hasImport: true, ok: false, reason: "static-import" }; // (b)
+    const before = stripComments(src.slice(0, match.index)); // (a) + (c) (match.index is the FIRST dist import of any kind)
+    return { hasImport: true, ok: PIN_RE.test(before) };
+  }
+
+  // ===================== (F0) synthetic-input self-tests for (a)-(d) — each RED on the OLD logic =====
+  const SYNTH_A_COMMENTED_PIN =
+    '// Card X — the pin below is commented OUT, so it must NOT count as a real pin\n' +
+    '// delete process.env.LOOM_PROJECT_WORK_ROOT;\n' +
+    'const { ensureProjectWorkDir } = await import("../dist/paths.js");\n';
+  check("(F0a) OLD logic false-passes a COMMENTED-OUT pin (demonstrates the real bug)",
+    oldSourceHasPinBeforeImport(SYNTH_A_COMMENTED_PIN).ok === true);
+  check("(F0a) NEW logic correctly REJECTS a commented-out pin",
+    sourceHasPinBeforeImport(SYNTH_A_COMMENTED_PIN).ok === false);
+
+  const SYNTH_B_STATIC_IMPORT =
+    'delete process.env.LOOM_PROJECT_WORK_ROOT;\n' + // textually BEFORE the import — but hoisting wins
+    'import { ensureProjectWorkDir } from "../dist/paths.js";\n';
+  check("(F0b) OLD logic false-passes a STATIC import merely because the pin sits textually before it (ESM hoisting makes this unsafe)",
+    oldSourceHasPinBeforeImport(SYNTH_B_STATIC_IMPORT).ok === true);
+  check("(F0b) NEW logic correctly REJECTS a static import unconditionally",
+    sourceHasPinBeforeImport(SYNTH_B_STATIC_IMPORT).ok === false);
+
+  const SYNTH_C_EARLIER_DIST_IMPORT =
+    'const { Db } = await import("../dist/db.js");\n' + // transitively freezes PROJECTS_WORK_ROOT first
+    'delete process.env.LOOM_PROJECT_WORK_ROOT;\n' + // too late
+    'const { ensureProjectWorkDir } = await import("../dist/paths.js");\n';
+  check("(F0c) OLD logic false-passes because it only anchors on dist/paths.js, missing the EARLIER dist/db.js import",
+    oldSourceHasPinBeforeImport(SYNTH_C_EARLIER_DIST_IMPORT).ok === true);
+  check("(F0c) NEW logic correctly REJECTS — anchored on the FIRST dist import of ANY kind",
+    sourceHasPinBeforeImport(SYNTH_C_EARLIER_DIST_IMPORT).ok === false);
+
+  const SYNTH_D_NO_IMPORT_AT_ALL =
+    'delete process.env.LOOM_PROJECT_WORK_ROOT;\n' +
+    'console.log("this synthetic file never imports anything from dist/ at all");\n';
+  check("(F0d) OLD logic FAIL-OPENs (silently passes) a member with no matching import found at all",
+    oldSourceHasPinBeforeImport(SYNTH_D_NO_IMPORT_AT_ALL).ok === true);
+  check("(F0d) NEW logic correctly treats a no-import-found member as a VIOLATION, not ok",
+    sourceHasPinBeforeImport(SYNTH_D_NO_IMPORT_AT_ALL).ok === false);
+
+  // SELF_FILE is excluded from the directory scan — this file (the scanner) builds CHILD-process script
+  // strings that embed the mutator function NAMES as literal text (e.g. inside `scriptA` above), which
+  // would otherwise make it match MUTATOR_CALL_RE despite never calling any of them in its own top-level
+  // code. It is not a member needing the guard; it IS the guard.
+  const dirEntries = fs.readdirSync(TEST_DIR, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith(".mjs") && !e.name.startsWith("_") && e.name !== SELF_FILE)
+    .map((e) => e.name);
+  const autoMembers = dirEntries.filter((name) => MUTATOR_CALL_RE.test(fs.readFileSync(path.join(TEST_DIR, name), "utf8")));
+  const members = [...new Set([...autoMembers, ...INDIRECT_CREATEPTY_MEMBERS])].sort();
+
+  check("(F) precondition — the scan found a non-trivial, expected-shape member set (not vacuously empty/broken)",
+    members.length >= 7 && INDIRECT_CREATEPTY_MEMBERS.every((m) => members.includes(m)));
+
+  const violations = members.filter((name) => {
+    const full = path.join(TEST_DIR, name);
+    if (!fs.existsSync(full)) return true; // a hand-curated member that no longer exists is itself a violation
+    return !sourceHasPinBeforeImport(fs.readFileSync(full, "utf8")).ok;
+  });
+  check(`(F) every real member file pins/clears LOOM_PROJECT_WORK_ROOT before its own FIRST dist/ import of any kind, which must itself be a dynamic (never static) import (members: ${members.join(", ")})`,
+    violations.length === 0);
+
+  // Positive control (card 2c9f0854 — "it must flag a real file whose pin you remove"): take ONE real
+  // member's ACTUAL current source, strip its pin line out in memory (never touching the real file on
+  // disk), and confirm the SAME check function now reports a violation for that mutated copy — proving
+  // this scan is capable of failing, not vacuously green by construction.
+  const positiveControlMember = "project-work-dir.mjs";
+  const positiveControlSrc = fs.readFileSync(path.join(TEST_DIR, positiveControlMember), "utf8");
+  check("(F) positive-control precondition — the chosen member's REAL source currently has a pin before the import (so stripping it is a genuine mutation)",
+    sourceHasPinBeforeImport(positiveControlSrc).ok === true);
+  const mutatedSrc = positiveControlSrc.replace(/delete\s+process\.env\.LOOM_PROJECT_WORK_ROOT;\r?\n/, "");
+  check("(F) positive-control mutation actually removed the pin line (the replace matched something)",
+    mutatedSrc.length < positiveControlSrc.length);
+  check("(F) POSITIVE CONTROL: the scan correctly FLAGS the mutated copy (pin stripped) as a violation",
+    sourceHasPinBeforeImport(mutatedSrc).ok === false);
 } finally {
+  for (const dir of probeHomesToClean) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
   fs.rmSync(canaryRoot, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a real canary file standing in for a human's real PROJECTS_WORK_ROOT survives BOTH the fixed pattern's explicit pin (a real ensureProjectWorkDir+deleteProjectWorkDir round trip resolves its OWN sibling-of-LOOM_HOME root, never the ambient canary) AND, independently, requireHermeticEnv's own backstop refusal when a (simulated, pre-fix) test forgets to pin at all — proving both defense-in-depth layers are genuinely load-bearing, not just present in code. assertUnderOsTmpdir, the shared primitive underneath both, throws/doesn't-throw correctly in isolation too."
+  ? "\n✅ ALL PASS — a real canary file standing in for a human's real PROJECTS_WORK_ROOT survives BOTH the fixed pattern's explicit pin (a real ensureProjectWorkDir+deleteProjectWorkDir round trip resolves its OWN sibling-of-LOOM_HOME root, never the ambient canary) AND, independently, requireHermeticEnv's own backstop refusal when a (simulated, pre-fix) test forgets to pin at all — proving both defense-in-depth layers are genuinely load-bearing, not just present in code. assertUnderOsTmpdir, the shared primitive underneath both, throws/doesn't-throw correctly in isolation too. (D)/(E) additionally prove the stricter under-tmp-but-wrong-root case is now refused, and that an explicit pin is still accepted; (F0) proves the hardened scan correctly rejects a commented-out pin, a static import, an earlier non-paths/pty-host dist import, and a no-import-at-all member — each shown as a real false-pass on a frozen copy of the old scan logic first; (F) then proves the hardened scan passes every REAL file (not just an inline copy), with a positive control."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
