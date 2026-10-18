@@ -227,6 +227,25 @@ released unconditionally). `pty-giveup-coalesced-batch-bypass-every.mjs` pins ro
 `bypassOwnershipGateOnce` `.every` discipline (host.ts ~11577) with the one shape no prior test
 constructed — a 2-member batch with only ONE member flagged — RED if `.every` regresses to `.some`.
 
+**PARTIALLY SUPERSEDED by Round 6 below**: round 5's own shipped placement — nesting the release loop
+inside the `composerDirtyLenClearedByGen`-gated reset block — turned out to be a second, independent gate
+on top of the content match this round's own fix introduced, not a deliberate requirement.
+
+## Round 6 (Code Review round 5 Minor, card `a0735d53`) — the release was still gated on an unrelated condition
+
+Round 5's own release loop was placed INSIDE `if (live.composerDirtyLenClearedByGen ===
+live.submitGeneration)` — a gate answering a different question (did THIS hook's own generation's
+clear-prefix land) than the one the release depends on (did the purge call prove a content match). Fixed
+by hoisting the release unconditional on `contentMatchedLogicalIds` alone. Full fix rationale, the
+known-pre-existing single-stale-entry coincidental-match limitation (out of scope here, carded separately
+by the owner), and the test evidence (including the surgical revert/rebuild/restore negative control)
+live in that card's own record — see `docs/decisions/a0735d53-giveup-lineages-release-ungated-from-clearprefix-gate.md`.
+
+## Do not (round 6 additions)
+
+- Do not re-gate the `giveUpLineages` release on `composerDirtyLenClearedByGen` (or any other condition
+  tied to THIS hook's own generation's clear-prefix landing) — see card `a0735d53`'s own record.
+
 ## Do not (round 5 additions)
 
 - Do not gate a `giveUpLineages` release on the ABSENCE of a raw mismatch (`hook.prompt !== live.lastPrompt`)

@@ -74,6 +74,14 @@ async function waitForBusyFalseAfter(sid, sinceLen, label) {
     { timeoutMs: 10_000, label });
 }
 
+// Builds the engine's own paste-composer wrap exactly as `PASTED_CONTENT_WRAP_RE` requires it (host.ts):
+// `\n\n<pasted_content id="ID">\n<inner>\n</pasted_content id="ID">\n` — same helper
+// pty-giveup-lineage-release-content-match.mjs uses. Card a0735d53: MINOR 4b's confirming hook now sends
+// this wrapped shape (a real engine echo), not a bare prompt — the bare match this test used to send is
+// dead in production (844ca34e round 5's own measurement: a real echo essentially never byte-matches
+// unwrapped).
+const pastedContentWrap = (id, inner) => `\n\n<pasted_content id="${id}">\n${inner}\n</pasted_content id="${id}">\n`;
+
 try {
   // ============================== MINOR 4a: giveUpLineages is a true LRU =================================
   {
@@ -129,11 +137,11 @@ try {
 
     // Drive a genuine decisive confirm directly (mirrors pty-composerlen-else-no-clear-stamp.mjs's own
     // direct-call pattern) — isolates this exact resolution mechanism from hook/timing plumbing.
-    // Card 844ca34e round 5: the release now gates on a POSITIVE content match (reusing
+    // Card 844ca34e round 5: the release gates on a POSITIVE content match (reusing
     // purgeConfirmedGiveUpRequeue's own normalized machinery), so this hook must carry Z's own `prompt`
-    // echo (every real UserPromptSubmit does — a bare hook with no prompt field at all, as this test used
-    // to send, can never content-resolve anything and would leave the mark un-released).
-    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: TEXT_Z });
+    // echo. Card a0735d53: sent as a WRAPPED echo (the engine's real shape) rather than the bare TEXT_Z
+    // this test used to send — a bare match is dead in production (844ca34e round 5's own measurement).
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: pastedContentWrap("m4b", TEXT_Z) });
 
     check("(MINOR4b) THE FIX, THE ASSERTION THAT GOES RED WITHOUT IT: once Z's composer ownership is "
       + "DECISIVELY confirmed clean, its logicalId is REMOVED from giveUpLineages — a resolved chain's "

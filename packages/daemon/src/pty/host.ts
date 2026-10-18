@@ -2935,8 +2935,9 @@ interface Live {
   // retry even though the fix's whole point is that cycle writes zero body bytes.
   composerBodyWrittenForGen: number | null;
   // @decision 844ca34e — every `logicalId` whose lineage has given up at least once; a candidate for
-  // Enter-only (gated by `composerOwnerLineage` below), never for a SECOND physical re-paste. Never
-  // unmarked for this `Live`'s lifetime.
+  // Enter-only (gated by `composerOwnerLineage` below), never for a SECOND physical re-paste while marked.
+  // @decision a0735d53 (844ca34e round 5) — released ONLY on a positive content match, not for the rest
+  // of this `Live`'s lifetime; a released lineage that reappears is unmarked and CAN re-paste.
   giveUpLineages: Set<string>;
   // @decision 844ca34e (round 2) — the logicalId(s) that last PHYSICALLY wrote the composer's body;
   // null when unknown. A marked lineage may trust Enter-only ONLY when this exactly matches its own
@@ -9046,11 +9047,14 @@ export class PtyHost {
         // widening would suppress the CONFIRMED-gen log (a named measurement corpus) for ordinary confirms.
         const hadNoAmbiguityBeforeThisHook = live.ambiguousDispatches.size === 0;
         const reportedPromptForPurge = typeof hook.prompt === "string" ? hook.prompt : undefined;
-        // @decision 844ca34e (round 5) — moved AHEAD of the composerDirtyLenClearedByGen block below
-        // (value-equivalent either way — see that block's own note); `contentMatchedLogicalIds` is what
-        // the giveUpLineages release just below now gates on.
+        // @decision 844ca34e (round 5) — moved AHEAD of the composerDirtyLenClearedByGen block below;
+        // `contentMatchedLogicalIds` is what the giveUpLineages release just below now reads.
         const purgeResult = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge); // card 441499ee/09e655d5/4a0af485 — see the method doc; UserPromptSubmit purges without advancing the queue
         const resolvedByContentMatch = purgeResult.resolved;
+        // @decision a0735d53 — never re-gate this release on composerDirtyLenClearedByGen; a positive
+        // content match is independent proof of delivery, orthogonal to this hook's own generation's
+        // clear-prefix landing.
+        for (const id of purgeResult.contentMatchedLogicalIds) live.giveUpLineages.delete(id);
         // @decision 3ce3fa39 — GATED reset: only when this hook's submitGeneration matches
         // composerDirtyLenClearedByGen — an unrelated hook can flip enterConfirmed without
         // proving THIS generation's clear-prefix landed (first-hand confirmed in production).
@@ -9064,10 +9068,6 @@ export class PtyHost {
           live.composerDirtyMarkedGens.clear();
           // @decision 844ca34e (round 2) — the composer is now PROVEN empty; no lineage owns it until
           // the next write sets this again.
-          // @decision 844ca34e (round 5) — release ONLY the logicalIds the purge call above just proved
-          // delivered BY POSITIVE CONTENT MATCH (reusing that normalized machinery, never a second, raw
-          // comparison) — see this decision's own record for why the round 4 raw comparison was dead code.
-          for (const id of purgeResult.contentMatchedLogicalIds) live.giveUpLineages.delete(id);
           live.composerOwnerLineage = null;
         }
         // @decision b4b9b707 — SECURITY INVARIANT: pendingRawOwnerSubmit can only originate from writeStdin
@@ -12450,9 +12450,11 @@ export class PtyHost {
       this.archiveAmbiguousDispatch(live, m.logicalId);
       live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, memberSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
       this.capAmbiguousDispatches(live);
-      // @decision 844ca34e — mark unconditionally, for EVERY origin member, kept or exhausted: this
-      // lineage has now given up at least once, so no future attempt (same-msgId redelivery OR a
-      // cross-turn re-mint sharing this logicalId) may ever take the backspace+repaste branch again.
+      // @decision 844ca34e — mark unconditionally, for EVERY origin member, kept or exhausted: no future
+      // attempt sharing this logicalId may take the backspace+repaste branch again WHILE marked.
+      //
+      // @decision a0735d53 (844ca34e round 5) — released on a positive content match (`giveUpLineages`'s
+      // own doc); a lineage that reappears after release CAN re-paste.
       // @decision 844ca34e (round 3) — now LRU: delete-then-add moves a re-touched id to the
       // most-recently-used end, so eviction below drops the genuinely LEAST-recently-touched id
       // (mirrors a9e4240f's identical fix for `ambiguousDispatches`).
