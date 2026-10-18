@@ -17,7 +17,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (reconciled) a boot-Pass-A2-style merge_done (detail.reconciled:true, newer) on A and on D does NOT release either
 // The hold scan makes NO git call at all, so a transient git failure (a locked ref, a timeout) has nothing to fail open through; (gone)
 // is the observable proof that git state is not consulted.
-// The hand-deleted-branch, release-control and finalizeMerge CAS-skip cases live in batch-merge-retain-hold-release.mjs (split to keep runtime down).
+// The hand-deleted-branch case lives in batch-merge-retain-hold-release.mjs; the release-control case in
+// batch-merge-retain-hold-release-synthetic-retain.mjs; the finalizeMerge CAS-skip case in
+// batch-merge-retain-hold-release-cas-skip.mjs (further split by card 03b4f491 to keep runtime down).
 // Run: 1) pnpm build, 2) node packages/daemon/test/batch-merge-retain-hold.mjs
 import fs from "node:fs";
 import os from "node:os";
