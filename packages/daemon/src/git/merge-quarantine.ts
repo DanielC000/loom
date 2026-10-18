@@ -66,18 +66,23 @@ export interface MergeQuarantineEntry {
    *  @decision 54054c01 (Code Review round 2) — see the decision record for the R3 repro this closes. */
   armedKeys?: string[];
   /** PERSISTED (unlike `armedKeys`) — the distinct `repoPath`(s) of every OTHER raiser whose own token
-   *  got folded into this entry's `tokens` set at RUNTIME, via {@link enterMergeQuarantine}'s own
-   *  `existing` branch, when the raising repoPath's identity differed from the entry's own `repoPath`.
-   *  Lets clear-by-id fail closed instead of guessing which identity a bare id refers to, closing the
-   *  residual {@link canonicalSiblingsFor} always had (it only ever scans
+   *  got folded into this entry's `tokens` set at RUNTIME, via EITHER of two origin sites: {@link
+   *  enterMergeQuarantine}'s own `existing` branch (a fresh raise appended into an already-armed entry),
+   *  or {@link consumeMatchedPendingsIntoArmedEntry}'s own cross-tier-sibling union (a lazy-graduation
+   *  query, or a raise's own sibling-absorb/pending-merge branch, where the raiser itself can end up the
+   *  LOSING identity). Either way, only when the raising/losing repoPath's identity differed from the
+   *  entry's own winning `repoPath`. Lets clear-by-id fail closed instead of guessing which identity a
+   *  bare id refers to, closing the residual {@link canonicalSiblingsFor} always had (it only ever scans
    *  `pendingUnresolvedQuarantines`, never a sibling absorbed directly into an ACTIVE entry this way).
+   *  Every other site that copies/rebuilds an entry (`unionQuarantineEntries`,
+   *  `mergeTokenIntoPendingEntries`, `protectDegradedOccupantBeforeDelete`'s own JSON whitelist, every
+   *  boot-time parse) must carry whatever is already here FORWARD, but never originate a new entry here
+   *  itself — and it is still NEVER inferred from a BOOT-TIME union (`armQuarantineKey`/
+   *  `unionQuarantineEntries`'s own identity-differing merges), which stays card `398f476c`'s own, larger
+   *  identity-model-redesign scope.
    *
-   *  Deliberately narrow: populated ONLY by that one runtime-union call site, never inferred from a
-   *  BOOT-TIME union (`armQuarantineKey`/`unionQuarantineEntries`'s own identity-differing merges) — that
-   *  shape is card `398f476c`'s own, larger identity-model-redesign scope, not this field's job. Every
-   *  other site that copies/rebuilds an entry (`unionQuarantineEntries`, `mergeTokenIntoPendingEntries`,
-   *  `protectDegradedOccupantBeforeDelete`'s own JSON whitelist, every boot-time parse) must carry
-   *  whatever is already here FORWARD, but never originate a new entry here itself.
+   *  @decision 82032b5c (Round 6) — widened from `enterMergeQuarantine`'s `existing` branch ALONE to
+   *  also cover `consumeMatchedPendingsIntoArmedEntry`'s own runtime union — see that round's own section.
    *
    *  @decision 82032b5c — do not drop this field at any copy/rebuild site; a dropped field silently
    *  re-opens the clear-by-id hard-delete this exists to refuse. */
@@ -1501,6 +1506,14 @@ function consumeMatchedPendingsIntoArmedEntry(
   const first = matched[0] as PendingUnresolvedQuarantine;
   let unioned = matched.slice(1).reduce((acc, p) => unionQuarantineEntries(acc, p.entry), first.entry);
   if (extra) unioned = unionQuarantineEntries(unioned, extra);
+  // @decision 82032b5c (round 6, Follow-up b5c94cbe) — stamp every LOSING identity into
+  // contributorRepoPaths here too (additive only, computed after both reduces above, against the FINAL
+  // winner) — never refuses clear-by-id's own masked-hard-delete recurrence at this site otherwise.
+  const contributingRepoPaths = extra ? [...matched.map((p) => p.entry.repoPath), extra.repoPath] : matched.map((p) => p.entry.repoPath);
+  const losingRepoPaths = contributingRepoPaths.filter((p) => directPathIdentity(p) !== directPathIdentity(unioned.repoPath));
+  if (losingRepoPaths.length > 0) {
+    unioned = { ...unioned, contributorRepoPaths: [...new Set([...(unioned.contributorRepoPaths ?? []), ...losingRepoPaths])] };
+  }
   const sourceFiles = matched.map((p) => p.sourceFile);
   const strippedOrphanLatchFiles = unioned.orphanLatchFiles?.filter((f) => !sourceFiles.includes(f));
   const armedKeys = [...new Set([...(unioned.armedKeys ?? []), key])];

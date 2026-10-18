@@ -87,6 +87,9 @@ copy under the other identity's name.
 - Do not infer `contributorRepoPaths` anywhere except `enterMergeQuarantine`'s own `existing` branch — in
   particular, never from a BOOT-TIME union (`armQuarantineKey`/`unionQuarantineEntries`'s own
   identity-differing merges). That shape is `398f476c`'s own, larger scope; this field's job is narrow.
+  **NARROWED by round 6 (below):** this now also covers `consumeMatchedPendingsIntoArmedEntry`'s own
+  RUNTIME cross-tier-sibling union — a second, non-boot-time call site this bullet did not originally
+  name. `armQuarantineKey`'s own BOOT-TIME union remains untouched and out of scope (still `398f476c`).
 - Do not drop `contributorRepoPaths` at any copy/rebuild site — a dropped field silently re-opens the
   clear-by-id hard-delete this exists to refuse, invisibly, since nothing else signals the loss.
 - Do not attempt to split a union's token set back into two independently-queryable identities at
@@ -378,6 +381,135 @@ same way, in place, above.
 - Do not claim a test "asserts X anywhere" when it drove only ONE of several render sites that could
   carry X — name the specific site(s) actually exercised, or the next reader inherits a false sense of
   completeness (exactly how this round's MAJOR went unnoticed through three prior rounds' own re-CRs).
+
+## Round 6 (board card `b5c94cbe`, from card `6c04633d`'s worker + CR `2a32633c`) — the SAME field, a SECOND runtime union site
+
+Round 1's own narrowing ("this field's job is narrow... never from a boot-time union") left a gap it did
+not name: `consumeMatchedPendingsIntoArmedEntry`'s own cross-tier-sibling union calls
+`unionQuarantineEntries` to fold two genuinely different identities together, at RUNTIME, never at boot
+— a shape `9a55fb90`'s own round-2 note had already anticipated ("a sibling unioned into the active entry
+at runtime... See 'known residual' below before relying on this for a NEW runtime union path") without
+being acted on until this card.
+
+**THREE call sites reach this one shared function, and the fix (below) applies uniformly to all three —
+the test (see "Verification" below) exercises TWO of them directly, by name:**
+1. `activeMergeQuarantineFor`'s own lazy-graduation tail (a QUERY graduates two pending siblings at
+   once) — **exercised by the test's SCENARIOS 1-3.**
+2. `enterMergeQuarantine`'s own `existing`-branch sibling-absorb call (`consumeMatchedPendingsIntoArmedEntry(siblingIndices,
+   key, entry, true)`, ~:2738 — a RAISE on an already-armed key additionally absorbs a cross-tier
+   sibling) — **not directly exercised by a dedicated scenario; covered only incidentally by the
+   pre-existing `merge-quarantine-cross-tier-sibling-absorb.mjs` corpus, which this card re-ran green but
+   did not extend.**
+3. `enterMergeQuarantine`'s own pending-merge branch (`consumeMatchedPendingsIntoArmedEntry(allPendingIndices,
+   key, fresh, true)`, ~:2831 — a fresh RAISE, with NO pending entry of its own, additionally absorbs a
+   cross-tier sibling via `extra:fresh`) — **exercised by the test's SCENARIO 4:** the raiser itself can
+   be the LOSING identity here, since `fresh.enteredAt` is always `Date.now()` and an older pending
+   sibling's own identity wins `unionQuarantineEntries`' tie-break.
+
+**The shape (sites 1 and 3):** toplevel repo R; two pending entries, D = R/d-sub (newer) and S = R/s-sub
+(older). Site 1: a QUERY through D's own identity graduates both via `collectCrossTierSiblingIndices` +
+`consumeMatchedPendingsIntoArmedEntry` into ONE armed entry — `unionQuarantineEntries`' own tie-break
+(older wins) keeps S's identity as the entry's `repoPath`; D's own identity was nowhere recorded. Site 3:
+S is already pending; D instead RAISES (`enterMergeQuarantine(dSub, ...)`, never queried first) — the
+SAME union happens inside the raise's own pending-merge branch, with D (the raiser) as `fresh`/`extra`,
+and D (the raiser itself) loses the tie-break to S (older) exactly the same way.
+
+**MEASURED, before any fix (both in-process and across a reboot):**
+- `clearMergeQuarantineByRecordedPath(D)` reports `wasQuarantined:false` while D stays enforced — a
+  fail-closed MISREPORT (the originally-reported card `b5c94cbe` defect), not a safety hole by itself.
+- `clearMergeQuarantineLatchFile(<the union's own bare id>)` — addressed by id alone, naming NEITHER
+  identity — reports `ok:true` and SILENTLY LIFTS D too, with zero ambiguity warning. This is the SAME
+  "masked hard delete" shape round 1 of this card fixed for `enterMergeQuarantine`'s own branch,
+  reproduced here at the second, runtime cross-tier-sibling-union call site round 1 never covered. This
+  is the UNSAFE, over-unblock direction — the decisive measurement for choosing a fix here over a
+  characterization-only close.
+- `clearMergeQuarantineByRecordedPath(S)` (the winning identity's own stored path) lifts D too — but this
+  is the ALREADY-ACCEPTED, documented residual from round 1's own DoD narrowing ("clear-by-path is
+  UNCHANGED... lifts the WHOLE entry... including every contributor's own folded-in token"), not a new
+  defect: clearing by the entry's own stored identity was always expected to lift everything folded in.
+
+**The fix:** `consumeMatchedPendingsIntoArmedEntry` now stamps every LOSING identity (every matched
+pending entry's own `repoPath`, plus `extra`'s own `repoPath` when passed, that differs in
+`directPathIdentity` from the FINAL `unioned.repoPath`) into `contributorRepoPaths` — computed strictly
+AFTER both `unionQuarantineEntries` reduces complete (never against an intermediate accumulator), additive
+only (Set-union with whatever `unionQuarantineEntries` already carried forward from either side's own
+pre-existing field per this card's own round-1 rule), before `armed` is built and before any write. The
+"unreadable"/raise-divert cross-identity-partition branch (card `6c04633d`'s own fix) is untouched — it
+builds its own `raiserUnion`/`foreignGroups` directly from `matched`/`extra`, never from `unioned`/`armed`.
+
+**Clear-by-path's ACTION stays UNCHANGED (round 3's own Lead ruling still stands)** — this card does NOT
+make `clearMergeQuarantineByRecordedPath` consult `contributorRepoPaths`. `clearMergeQuarantineByRecordedPath(D)`
+still reports `wasQuarantined:false` (unchanged misreport, deliberately not fixed here — the full fix
+needs `398f476c`'s own token-split redesign); `clearMergeQuarantineByRecordedPath(S)` still lifts D too
+(unchanged, accepted). Only the existing `ambiguousIdentitiesFor`-based machinery
+(`clearMergeQuarantineLatchFile`'s active-match refusal, `assertRepoNotQuarantined`'s refusal text) is
+newly reached for this second union site, since both already consult `contributorRepoPaths` and both
+already route their text through `remediationTextFor` — no new refusal-text site was added.
+
+**`detectUnknownProvenance` itself does not newly fire its `contributorRepoPaths` short-circuit here —
+CORRECTED.** `consumeMatchedPendingsIntoArmedEntry`'s own `armed` object always stamps
+`provenanceTracked: true` (`@decision 500e307a`), and `detectUnknownProvenance` checks `entry.provenanceTracked`
+(line ~556) and returns `false` BEFORE it ever reaches the `contributorRepoPaths` check (line ~560) — so
+for every entry this fix's union ever touches, it is the `provenanceTracked` check, not the
+`contributorRepoPaths` one, that short-circuits detection. The net classification (not stray) is still
+correct and intended either way. Verified: the full `db0a9db0`-covering corpus (`merge-quarantine-unknown-provenance.mjs`,
+`merge-quarantine-unknown-provenance-array-only-150aed7b.mjs`, `merge-quarantine-runtime-provenance-stamp.mjs`,
+`merge-quarantine-runtime-union-provenance.mjs`) stays green, unaffected — none of those scenarios reach
+`consumeMatchedPendingsIntoArmedEntry`'s cross-identity path, so none of their own fixtures could have
+their `provenanceUnknown` classification flipped by this change; this is a scope statement, not a claim
+the heuristic was driven down a shared code path by this card's own tests.
+
+## Do not (round 6 additions)
+
+- Do not read "clear-by-path(S) also lifts D" as the same defect class as "clear-by-id silently lifts D"
+  — they measure differently. The latter is the UNSAFE masked-hard-delete shape (an id naming neither
+  identity, previously succeeding with no warning) this round closes; the former is round 1's own
+  ALREADY-ACCEPTED, documented residual (clearing by the entry's own stored identity was always expected
+  to lift everything folded in) and is explicitly NOT touched here.
+- Do not stamp `contributorRepoPaths` from an intermediate `unionQuarantineEntries` accumulator — only
+  the FINAL `unioned.repoPath`, after every reduce (`matched.slice(1).reduce(...)` AND the `extra` union)
+  has completed, is the genuine winner; a still-older matched entry or `extra` can still overturn an
+  earlier accumulator value.
+- Do not touch the "unreadable"/raise-divert branch's own identity-partition logic (card `6c04633d`) to
+  "also" stamp `contributorRepoPaths` there — it already keeps each identity separately queryable by
+  construction (never unions across identities at all), so there is nothing for this field to attribute.
+- Do not widen this round's fix to make `clearMergeQuarantineByRecordedPath` consult
+  `contributorRepoPaths` — round 3's own Lead ruling on this exact question stands unchanged; that
+  remains `398f476c`'s own token-split scope.
+- Do not trust a bare "D is still active" check as proof a field survived a reboot — once only ONE
+  physical latch file remains, a fresh module's own query answers from the PARSED entry directly (no
+  union to re-run), so this generic liveness check passes identically whether or not the field in
+  question actually round-tripped through the write/parse. Drive something whose OWN answer depends on
+  the specific field (here, a second clear-by-id) instead.
+
+Verification: `packages/daemon/test/merge-quarantine-lazy-graduation-contributor-attribution-b5c94cbe.mjs`
+(4 scenarios — SCENARIO 1: the fix itself (SITE A, a query); SCENARIO 2: the closed masked-hard-delete
+via clear-by-id (SITE A), checked in-process AND via a SECOND clear-by-id against the freshly re-parsed
+entry after a reboot (the actual persistence-sensitive check — see "the reboot-check gap" below);
+SCENARIO 3: clear-by-path's two unchanged halves (SITE A); SCENARIO 4: the SAME fix at the THIRD call
+site, `enterMergeQuarantine`'s own pending-merge raise branch (SITE B, ~:2831), where the RAISER itself
+is the losing identity. `enterMergeQuarantine`'s own `existing`-branch sibling-absorb (~:2738) is the one
+call site this file does not drive directly — covered only incidentally by the pre-existing
+`merge-quarantine-cross-tier-sibling-absorb.mjs` corpus (re-run green, not extended).
+
+**The reboot-check gap (CR finding, Minor 2) and its own surgical control:** the ORIGINAL round-6 landing's
+own "AFTER REBOOT" check only asserted `activeMergeQuarantineFor(D)` stayed truthy — which holds
+regardless of whether `contributorRepoPaths` round-tripped through the JSON parse, since the ARMED
+entry answers for D by canonical key either way. Strengthened to drive a SECOND `clearMergeQuarantineLatchFile`
+against the fresh module's own re-parsed entry (genuinely sensitive to the parse, since nothing is left
+to re-union on that second boot). Proven via a surgical dist mutation: all 5 `contributorRepoPaths`
+JSON-parse sites in the compiled `dist/git/merge-quarantine.js` were programmatically replaced with
+`contributorRepoPaths: undefined,` (backed up first, restored via `cmp` showing byte-identical after) —
+under that mutation, exactly the two NEW persistence checks went RED, every other check (including
+SCENARIO 1/4's own in-memory-stamp checks, which don't depend on a reboot) stayed GREEN, isolating
+precisely what the strengthened check now depends on.
+
+RED→GREEN proven via `git checkout HEAD -- merge-quarantine.ts` (reverting only this round's own diff),
+rebuild, re-run (5 checks RED: the fix check and all four clear-by-id checks; clear-by-path's 5
+"UNCHANGED" checks stayed GREEN on both sides, isolating the fix's own effect), then the patch was
+re-applied and the build/tests re-confirmed GREEN. Full `merge-quarantine*.mjs` corpus (45 files, this
+one included) re-run serially, one file at a time, in BOTH `env -u LOOM_DEV -u LOOM_SUPERVISED` and
+`LOOM_DEV=1` — all green in both states.
 
 ## Verification
 
