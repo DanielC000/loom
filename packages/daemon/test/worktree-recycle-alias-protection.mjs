@@ -51,9 +51,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // fast-forward's own terminal event, fired after X's own `merge_landing_started`) rather than a crash —
 // a DECIDED outcome, mirroring P's own shape (merge_cancelled), never attempted attribution or escalated.
 // The real event-write mechanics (mergeBatchTracked, forfeited/branchDiverted/ff-quarantined/unverified)
-// are covered end-to-end by merge-landing-aborted-batch-refusal.mjs; this fixture is the cheaper, focused
-// proof that `resolveStaleGenerationOwnLanding`'s lifecycle QUERY actually picks the new kind up as
-// `latest` and its predicate already treats it as decided — see docs/decisions/b4080777-*.md.
+// are covered end-to-end by merge-landing-aborted-batch-refusal.mjs (card a2717148 split the
+// mayHaveLanded-excluded shapes — unverified / unconfirmed-kill quarantine / post-ff sha-mismatched
+// branchDiverted — out to the sibling merge-landing-aborted-batch-refusal-mayhavelanded.mjs); this
+// fixture is the cheaper, focused proof that `resolveStaleGenerationOwnLanding`'s lifecycle QUERY
+// actually picks the new kind up as `latest` and its predicate already treats it as decided — see
+// docs/decisions/b4080777-*.md.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
