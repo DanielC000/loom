@@ -1130,6 +1130,11 @@ try {
       // did before this field existed, still an unresolved possible/established loss to every consumer.
       check("7d: card d0952a73 — a genuinely UNEXPLAINED replay reports explainedBenign:null (stays loud)",
         replay?.explainedBenign === null);
+      // Card e59880fe — a BARE byte-for-byte replay (this scenario) is the OPPOSITE discriminator from the
+      // wrap-framing-aware sibling: `wrapped` must read false and `wrapIdLen` null, never a stale/leaked
+      // value from some other code path.
+      check("7d: card e59880fe — a bare replay reports wrapped:false, wrapIdLen:null",
+        replay?.wrapped === false && replay?.wrapIdLen === null);
     }
   }
 
