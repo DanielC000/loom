@@ -5398,22 +5398,68 @@ function reenterMergeQuarantinesAtBootImpl(
       // deferredCorruptTmps' FULL fallback cascade (hashToRepo, unresolvedClaimantsByHash,
       // ancestorHashToRepo, then orphanFilenames), not just the first tier.
       const hash = f.slice(0, f.indexOf(".json.tmp-safety-"));
-      const pushPlaceholder = (matchedRepo: string) => {
+      // @decision 4783df46 (card f118b475) — a walked-up LEGACY match still arms at `key`, never diverts
+      // (divert only delays the same false positive via lazy graduation). The ancestor-only tier further
+      // below is UNCHANGED (f5c42043) — always a pure pending-divert.
+      const resolveAndArm = (matchedRepo: string) => {
+        if (!isRepoPathCurrentlyResolvable(matchedRepo)) {
+          const placeholder: MergeQuarantineEntry = {
+            repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
+            reason: `boot found a CORRUPT/unreadable SAFETY-TMP residue (${f}) matching this repo's hash, while ${matchedRepo} did not currently resolve — fail-closed rather than risk discarding a real quarantine, but not armed under any walked-up key`,
+            enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+          };
+          pendingUnresolvedQuarantines.push({ entry: placeholder, sourceFile: f });
+          return;
+        }
+        const key = canonicalRepoLockKey(matchedRepo);
+        const verified = legacyMatchStillResolvesToHash(key, hash);
+        if (!verified) {
+          // eslint-disable-next-line no-console
+          console.warn(`[merge-quarantine] boot-time SAFETY-TMP residue ${f} is CORRUPT/unreadable and matches registered repo ${matchedRepo}'s own LEGACY (direct-path) identity, but ${matchedRepo}'s current canonical key ${key} no longer hashes to this file (walked up, or a pre-7673d096 subdir binding) — fail-closed by arming ${key} anyway rather than risk discarding a real quarantine, but this is NOT a verified match for whatever currently owns ${key}; marking provenanceUnknown.`);
+        }
         const placeholder: MergeQuarantineEntry = {
           repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
-          reason: `boot found a CORRUPT/unreadable SAFETY-TMP residue (${f}) matching this repo's hash — fail-closed rather than risk discarding a real quarantine`,
+          reason: verified
+            ? `boot found a CORRUPT/unreadable SAFETY-TMP residue (${f}) matching this repo's hash — fail-closed rather than risk discarding a real quarantine`
+            : `boot found a CORRUPT/unreadable SAFETY-TMP residue (${f}) matched only by a legacy (direct-path) identity — ${matchedRepo}'s own direct-path identity matches this file's hash, but its current canonical key no longer does (walked up, or a pre-7673d096 subdir binding); fail-closed by arming its current key (${key}) anyway, but this is NOT a verified match for whatever currently owns it`,
           enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+          provenanceUnknown: verified ? undefined : true,
         };
-        pendingUnresolvedQuarantines.push({ entry: placeholder, sourceFile: f });
+        // @decision d163aef5 — `matchedRepo` is resolvable (gated above), so this placeholder's own
+        // primary arm is tautological too — never diverts `entry`, only ever evicts an illegitimate
+        // degraded prior.
+        armCurrentKeyUnlessDegradedCollision(key, placeholder);
+        // @decision 97cff6db — track this key for the shared end-of-boot write/unlink pass below (never
+        // a new inline write, 882d6cff). Keyed by `f`: multiple claimants sharing one `f` would keep
+        // only the last resolvable one — unreachable today (unresolvable by construction) unless one turns resolvable mid-boot.
+        safetyTmpRecoveryByFile.set(f, key);
+        // @decision 97cff6db (round 3, finding E; card f118b475) — mirrors the clean-parse branch above:
+        // a degraded-occupied key's own file is some OTHER entry's exclusive backing, so give `f` its
+        // OWN self-referencing pending entry — or clearing that occupant durably unblocks `matchedRepo`.
+        if (degradedOccupiedKeys.has(key)) {
+          pendingUnresolvedQuarantines.push({
+            entry: { ...placeholder, orphanLatchFiles: [...new Set([...(placeholder.orphanLatchFiles ?? []), f])] },
+            sourceFile: f,
+          });
+        }
       };
       const matchedRepo = hashToRepo.get(hash);
       const claimants = matchedRepo ? undefined : unresolvedClaimantsByHash.get(hash);
       if (matchedRepo) {
-        pushPlaceholder(matchedRepo);
+        resolveAndArm(matchedRepo);
       } else if (claimants && claimants.length > 0) {
-        for (const claimant of claimants) pushPlaceholder(claimant);
+        for (const claimant of claimants) resolveAndArm(claimant);
       } else if ((ancestorHashToRepo().get(hash)?.length ?? 0) > 0) {
-        for (const claimant of ancestorHashToRepo().get(hash)!) pushPlaceholder(claimant);
+        // @decision f5c42043 — an ancestor-walk-only match is never proof of ownership: divert to
+        // pending for EACH claimant, never arm/write at this hash for any of them. UNCHANGED by f118b475.
+        for (const claimant of ancestorHashToRepo().get(hash)!) {
+          const placeholder: MergeQuarantineEntry = {
+            repoPath: claimant, branch: PLACEHOLDER_BRANCH_CORRUPT,
+            reason: `boot found a CORRUPT/unreadable SAFETY-TMP residue (${f}) whose hash matches an ANCESTOR-walk key for registered repo ${claimant} — never a verified identity for ${claimant} itself, so it is NOT armed/written at any key`,
+            enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+          };
+          pendingUnresolvedQuarantines.push({ entry: placeholder, sourceFile: f });
+        }
       } else {
         // No registered repo matches this corrupt safety-tmp's hash at any tier — join the ordinary
         // orphan sweep so PASS 2 gives every registered repo a reference, enabling a human clear route.
@@ -5925,7 +5971,17 @@ function reenterMergeQuarantinesAtBootImpl(
     const unionEntry = byRepoKey.get(key);
     if (!unionEntry) continue; // diverted to pending instead (unresolvable) — nothing to recover here
     if (bootWriteLatch(key, unionEntry)) {
-      try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort — harmless leftover beside a good final */ }
+      // @decision 4783df46 (card f118b475) — route through the same protected delete + fold-on-failure
+      // the json/tmp sibling sites use (load-bearing per that record's own CR), not a bare best-effort
+      // unlink — a genuine non-ENOENT failure must fold `f` into orphanLatchFiles or lose it silently.
+      if (!deleteSourceLatchIfSuperseded(f, unionEntry, key)) {
+        const folded: MergeQuarantineEntry = { ...unionEntry, orphanLatchFiles: [...new Set([...(unionEntry.orphanLatchFiles ?? []), f])] };
+        replaceEntryEverywhere(byRepoKey, unionEntry, folded);
+        if (!bootWriteLatch(key, folded)) {
+          // eslint-disable-next-line no-console
+          console.error(`[merge-quarantine] could not re-persist ${folded.repoPath} after its own superseded SAFETY-TMP residue (${f}) failed to unlink — it stays on disk, UNTRACKED by this entry's own bookkeeping in THIS process; a restart may re-arm/recover it.`);
+        }
+      }
     } else {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] recovered a SAFETY-TMP residue for ${unionEntry.repoPath} but could NOT durably re-persist its union — the residue is left IN PLACE so the next boot can retry.`);
