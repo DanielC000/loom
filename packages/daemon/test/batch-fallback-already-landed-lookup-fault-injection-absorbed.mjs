@@ -7,24 +7,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `mergeGateInterval`, so it is the plain re-call shape, for ONE candidate, leaving the other candidate's
 // own lookup untouched.
 //
-// FINDING THIS PINS (investigation note, card 31f8467c): a resolveGitRef failure (throw OR timeout) during
-// the SOLO fallback's own already-landed lookup does NOT produce `fallback[].started:false` — it produces
-// the ALREADY-DESIGNED fail-closed retain (cc9bce38: "an unreadable/unstable tip fails CLOSED via the
-// sentinel" — branch+worktree KEPT, no task move, a `merge_branch_retained` event with `source:"solo"`),
-// while `fallback[].started` stays `true` (the solo confirm WAS attempted and DID complete — just
-// conservatively, without finalizing). `started` only means "the confirm call was invoked", never "it
-// finalized cleanly" — those are different facts, and this file is the regression pin for that gap. A
-// readLandedTipTrailer failure, by contrast, is silently absorbed (it fails safe to `null`, and the
-// caller's own `legacyTip` fallback — the stable before/after read — covers it): no visible behavior
-// change at all. branchExistsInRepo's own call is UNREACHABLE in this fixture shape (see its own
-// `!live` guard, pinnedTipForLandedSquash) because resolveGitRef's "live" read succeeds whenever its own
-// fault is not ALSO injected — so this file does not separately pin that call; see the investigation
-// note's own trial log for its empirical (also unreached) confirmation.
+// (C) readLandedTipTrailer THROW for candidate a's own LANDED SHA ONLY (resolved via a direct, read-only
+//     findLandedSquashCommit probe before the fault is installed — persistent, not one-shot): silently
+//     absorbed — a finalizes normally too, byte-identical outcome to the unfaulted control (started:true,
+//     terminal, no retain event). See the scope note below for exactly what this does and does not prove.
 //
-// Scenario (C)'s own honest scope (Code Review c584521b on afa5940f): a BATCH-FF landing's own tip
+// This file's own honest scope (Code Review c584521b on afa5940f): a BATCH-FF landing's own tip
 // commit never carries a `Loom-Landed-Tip:` trailer (only a SOLO squash writes it — worktrees.ts ~8737),
 // so in THIS fixture `readLandedTipTrailer`'s unfaulted call already returns `null` (no trailer present) —
-// identical to what the fault-induced catch-to-null ALSO returns. Scenario (C) therefore pins ONLY "a
+// identical to what the fault-induced catch-to-null ALSO returns. This scenario therefore pins ONLY "a
 // trailer-read failure is absorbed (fails safe to null, same as a genuine absence)" — it does NOT, and
 // cannot without a real solo-squash fixture (a materially bigger build, skipped per that review's own
 // explicit allowance), show a present trailer's value being DISCARDED in favor of `legacyTip`. The
@@ -32,17 +23,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // this scenario CAN fail is a one-time manual verification, reported in the commit/PR, not part of this
 // file — a committed test must never itself patch `dist/`.
 //
-// Scenarios:
-//   (A) resolveGitRef THROW for candidate a only: a's confirm retains (merge_branch_retained, source:solo,
-//       task NOT terminal) but still reports started:true; b finalizes normally (started:true, terminal).
-//   (B) resolveGitRef TIMEOUT for candidate a only: same shape via the timeout path (withTimeout's own
-//       rejection, not a direct throw) — proves both failure modes degrade identically; b stays untouched.
-//   (C) readLandedTipTrailer THROW for candidate a's own LANDED SHA ONLY (resolved via a direct, read-only
-//       findLandedSquashCommit probe before the fault is installed — persistent, not one-shot): silently
-//       absorbed — a finalizes normally too, byte-identical outcome to the unfaulted control (started:true,
-//       terminal, no retain event). See the scope note above for exactly what this does and does not prove.
+// SPLIT (card 715ad688): the original combined file (A)+(B)+(C) ran ~49-56s solo-in-suite but was
+// SIGTERM-killed at the 120,000ms blanket ceiling under a real 966-file loaded gate (op 8a918209) —
+// LOAD-SENSITIVE, not deterministic (6/6 green in solo trials never cleared it under load). This file
+// keeps ONLY scenario (C) (readLandedTipTrailer THROW, absorbed); (A) (resolveGitRef THROW) moved verbatim
+// to batch-fallback-already-landed-lookup-fault-injection-throw.mjs, (B) (resolveGitRef TIMEOUT) moved
+// verbatim to batch-fallback-already-landed-lookup-fault-injection-timeout.mjs. Mirrors card 45d6e631's
+// split of batch-fallback-already-landed-skips-gate.mjs — see project memory
+// `batch-fallback-already-landed-skips-gate-rides-the-120s-ceiling`.
 //
-// Run: pnpm build, then node test/batch-fallback-already-landed-lookup-fault-injection.mjs
+// Decision record: docs/decisions/31f8467c-*.md (if present) — see that card and 715ad688 for the fuller
+// investigation narrative; not restated here.  Run: pnpm build, then
+// node test/batch-fallback-already-landed-lookup-fault-injection-absorbed.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -51,7 +43,7 @@ import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
-useOwnLoomHome("loom-bgrot-faultlookup-");
+useOwnLoomHome("loom-bgrot-absorbed-");
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -137,46 +129,6 @@ async function landedFixture(label) {
 }
 
 try {
-  // (A) resolveGitRef THROW for candidate a only.
-  {
-    const { P, db, a, b, o } = await landedFixture("rgt");
-    const alreadyLandedGitFactory = (repoPath, timeoutMs) => {
-      const real = canonicalGit(repoPath, timeoutMs);
-      return { raw: async (args) => {
-        if (args[0] === "rev-parse" && args[1] === "--verify" && String(args[2] ?? "").includes(a.branch)) throw new Error("INJECTED FAULT (throw) resolveGitRef");
-        return real.raw(args);
-      } };
-    };
-    const ctx2 = mkService(db, alreadyLandedGitFactory, 1500);
-    ctx2.sessions.finishAlreadyMerged = o;
-    const r2 = await settle(ctx2.sessions.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
-    const fb = r2.value?.value?.fallback ?? [];
-    check("(A) both candidates still report started:true (the confirm WAS attempted, just degraded)", fb.length === 2 && fb.every((f) => f.started === true));
-    check("(A) a's branch is RETAINED (merge_branch_retained, source:solo) — the fail-closed sentinel for an unreadable tip", eventsOf(db, "merge_branch_retained", a.workerId).some((e) => e.detail?.source === "solo"));
-    check("(A) a's task did NOT reach a terminal lane (retained, not finalized)", db.getTask(a.taskId)?.columnKey === "in_progress");
-    check("(A) b's branch was NOT retained and its task DID reach a terminal lane (untouched by a's fault)", eventsOf(db, "merge_branch_retained", b.workerId).length === 0 && db.getTask(b.taskId)?.columnKey !== "in_progress");
-  }
-
-  // (B) resolveGitRef TIMEOUT for candidate a only — same shape via a different failure mode.
-  {
-    const { P, db, a, b, o } = await landedFixture("rgm");
-    const alreadyLandedGitFactory = (repoPath, timeoutMs) => {
-      const real = canonicalGit(repoPath, timeoutMs);
-      return { raw: async (args) => {
-        if (args[0] === "rev-parse" && args[1] === "--verify" && String(args[2] ?? "").includes(a.branch)) return new Promise(() => {}); // never resolves — withTimeout rejects
-        return real.raw(args);
-      } };
-    };
-    const ctx2 = mkService(db, alreadyLandedGitFactory, 1500);
-    ctx2.sessions.finishAlreadyMerged = o;
-    const r2 = await settle(ctx2.sessions.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
-    const fb = r2.value?.value?.fallback ?? [];
-    check("(B) both candidates still report started:true under a TIMEOUT fault too", fb.length === 2 && fb.every((f) => f.started === true));
-    check("(B) a's branch is RETAINED under the timeout fault too (same fail-closed sentinel)", eventsOf(db, "merge_branch_retained", a.workerId).some((e) => e.detail?.source === "solo"));
-    check("(B) a's task did NOT reach a terminal lane", db.getTask(a.taskId)?.columnKey === "in_progress");
-    check("(B) b's branch was NOT retained and its task DID reach a terminal lane (untouched by a's fault)", eventsOf(db, "merge_branch_retained", b.workerId).length === 0 && db.getTask(b.taskId)?.columnKey !== "in_progress");
-  }
-
   // (C) readLandedTipTrailer THROW, scoped EXACTLY to candidate a's own landed sha, PERSISTENT (every
   // matching call is faulted, not just the first) — silently absorbed, no behavior change at all.
   {
@@ -212,6 +164,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an already-landed-lookup git failure fails CLOSED (retain, started:true), never started:false; a readLandedTipTrailer failure is silently absorbed. See card 31f8467c for the still-open question this leaves (started:false's real cause lies elsewhere)."
+  ? "\n✅ ALL PASS — a readLandedTipTrailer failure is silently absorbed (fails safe to null), no behavior change. See batch-fallback-already-landed-lookup-fault-injection-throw.mjs and -timeout.mjs for the resolveGitRef failure modes, which fail CLOSED instead. See card 31f8467c for the still-open question this leaves (started:false's real cause lies elsewhere)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
