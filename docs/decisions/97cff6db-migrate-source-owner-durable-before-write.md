@@ -461,6 +461,160 @@ after every revert/restore cycle, tree confirmed byte-identical after restoring 
 `merge-quarantine*.mjs` files (including this one) re-run SERIALLY (never a parallel batch, to avoid
 competing with a concurrent gate investigation on the host) — all PASS, `exit=0` for every file.
 
+## Follow-up 38032559 — two more sites needed the same degraded-occupied self-reference, found via
+INVESTIGATE-FIRST against f118b475's own CR fix (`resolveAndArm`'s self-reference, round 3 finding E's
+own clean-parse mirror)
+
+Card 38032559, from f118b475's own CR round, suspected a twin gap: `deferredCorruptTmps`' own resolution
+loop (the `.json.tmp-<pid>` corrupt-residue twin of `deferredCorruptJsons`) arms a "no real sibling data"
+placeholder via `armCurrentKeyUnlessDegradedCollision` + union with NO self-reference of its own, unlike
+`resolveAndArm` (the SAFETY-TMP catch branch) and the clean-parse branch. INVESTIGATE-FIRST reproduced
+this EXACTLY as suspected, but only under a more specific precondition than the card's own framing
+implied — and found a SECOND, sibling bug of the same class, reachable under the plainer, more likely
+real-world shape, that the card never named.
+
+**Finding 1 (the card's own named site) — confirmed, reachable ONLY when the degraded occupant's own
+latch is ITSELF placeholder-shaped.** `deferredCorruptTmps`' resolution loop (the `for (const { f,
+matchedRepo } of deferredCorruptTmps)` loop) gates on `existing && !isPlaceholderEntryShape(existing)`
+before taking its "no real sibling data" branch — when the degraded occupant X's own latch at the
+colliding key parses CLEANLY as REAL (non-placeholder) content, this check is true and the corrupt tmp
+instead folds into `tmpsToUnlinkByKey` (see Finding 1b below), never reaching the named branch at all.
+The named branch is reachable only when `existing` is ITSELF placeholder-shaped (e.g. a prior boot's own
+fail-closed arm, re-parsed cleanly on a LATER boot while still carrying `placeholder:true`/
+`PLACEHOLDER_BRANCH_CORRUPT`). Repro: X's own latch at `sha(Ksub)` is a placeholder with `resolvedKey:
+Ksub`; a corrupt ordinary tmp `sha(Ksub).json.tmp-<pid>-<hex>` shares the same hash. Boot arms the fresh
+corrupt-tmp placeholder, unions it into X (X's non-placeholder-vs-placeholder tie-break keeps neither
+side's data preferentially — both are placeholders here, so age decides, but the UNION mechanics are
+identical to the real-data case) with no self-reference; `bootWriteLatch` correctly refuses the write
+(`degradedOccupiedKeys.has(key)`), leaving the tmp residue on disk this boot — but an ordinary clear of
+the UNRELATED X then lets `sweepTmpResidueForHashIfUnreferenced` treat the residue as unreferenced and
+delete it, durably over-unblocking `sub` across a reboot.
+
+**Fix:** mirror `resolveAndArm`'s own self-reference exactly — right after arming/unioning (`const armed
+= armCurrentKeyUnlessDegradedCollision(key, entry); byRepoKey.set(key, armed);`), `if
+(degradedOccupiedKeys.has(key))`, push a pending reference built from the PRE-union `entry` (never
+`armed`), self-referencing `f` in its own `orphanLatchFiles`.
+
+**Finding 1b (NOT named by the card, same bug class, reachable under the PLAINER shape) — a degraded
+occupant's own REAL (non-placeholder) data.** When `existing` is real, the corrupt tmp folds into
+`tmpsToUnlinkByKey` via the "existing real sibling" branch instead — and Phase 2's own degraded-occupied
+fold (the `for (const [key, tmps] of tmpsToUnlinkByKey)` loop's own `degradedOccupiedKeys.has(key)`
+branch) had the ACTUAL bug: `pendingUnresolvedQuarantines.push({ entry: originalEntryBySource.get(
+sourceFile) ?? occupant, sourceFile })`. For a corrupt tmp, `originalEntryBySource` was NEVER set for its
+basename (only the clean-parse branch ever calls `.set()` on it), so this always fell back to `occupant`
+— the SHARED union object, i.e. X's own entry — which this record's own pre-existing "Do not" list
+already prohibits ("do not use the shared union object...as the `.entry` for a colliding sibling's own
+NEW `pendingUnresolvedQuarantines` entry"). Since the pushed entry WAS X's own object (same reference,
+same identity), clearing X also swept this "protective" reference (its identity matched X's), and the
+residue was then read as unreferenced and deleted — same durable over-unblock as Finding 1, reached via a
+different site, reachable under the plainer, more likely setup (no placeholder-shaped prior boot needed).
+
+**Fix (per Lead ruling):** when the deferredCorruptTmps loop's "existing real sibling" branch folds a
+corrupt tmp into `tmpsToUnlinkByKey`, it now ALSO records a STANDALONE synthetic placeholder for that
+tmp's basename in `originalEntryBySource` — built exactly like the "no real sibling data" branch builds
+its own placeholder (`repoPath: matchedRepo`, the CLAIMANT, never `existing`/the shared occupant; same
+`legacyMatchStillResolvesToHash`-gated reason/`provenanceUnknown` handling). Phase 2's own `
+originalEntryBySource.get(sourceFile) ?? occupant` then takes the correct, non-colliding path and never
+falls back to the shared union object. Phase 2 ALSO now bakes `sourceFile` into the pushed entry's own
+`orphanLatchFiles` (round 5's own rule, previously missing at this ONE site) — a bare pending `sourceFile`
+field alone is never enough; `sweepTmpResidueForHashIfUnreferenced` reads only `orphanLatchFiles`.
+**Identity non-collision (Lead's own requested confirmation):** the standalone placeholder's `repoPath`
+is `matchedRepo` — always a currently-RESOLVABLE, genuinely distinct identity from any unresolvable
+degraded occupant it could collide with (gated at the top of the resolution loop) — so
+`directPathIdentity(matchedRepo) !== directPathIdentity(X.repoPath)` holds structurally, never by luck.
+**Ordering (Lead's own requested confirmation):** `originalEntryBySource` is written inside the
+`deferredCorruptTmps` resolution loop, which runs strictly BEFORE Phase 2 (the migrate-pass/tmp-promotion
+write phases sit between them, never touching this map); nothing anywhere in this function ever calls
+`.delete()`/`.clear()` on `originalEntryBySource` — it is write-once-per-basename, read-many, for the
+entire duration of one boot call.
+
+**Item 2 — `bootWriteLatch`'s own CHECK ORDER let the generic "UNANTICIPATED" refusal win a race it
+should never have been in, for what is really an EXPECTED degraded refusal.** Confirmed reachable on
+main (`d2ba5215`, i.e. already present through f118b475's own landing) using the ORIGINAL reviewer repro
+(`repro-degraded.mjs`, the SAFETY-TMP degraded-occupied shape `resolveAndArm` handles): the end-of-boot
+safety-tmp recovery write-back's own `allBootWriteTargets` registration — `for (const [, key] of
+safetyTmpRecoveryByFile) { const e = byRepoKey.get(key); if (e && isRepoPathCurrentlyResolvable(
+e.repoPath)) allBootWriteTargets.add(...); }` — reads `e.repoPath`, and `e` here is the UNION of X
+(unresolvable, wins the tie-break as the non-placeholder/older side) and `sub`'s own recovered,
+genuinely-resolvable safety-tmp content; `e.repoPath` is X's, not `sub`'s, so the registration is
+SKIPPED despite `sub`'s own data being exactly as at-risk as every other registration in this phase.
+`bootWriteLatch`'s own FIRST check at the time (`!allBootWriteTargets.has(targetBasename)`) then fired
+before its LATER, correctly-worded `degradedOccupiedKeys` check ever got a chance to — the write was
+still correctly refused either way (no data-safety regression: `resolveAndArm`'s own self-reference
+already protects the content), but the log named the wrong reason ("a bug in the at-risk computation")
+for a refusal that is actually expected and correct.
+
+⚠️ **Two framings from this record's own FIRST draft of this item were WRONG and are retracted — caught
+by Code Review, not by the original worker.** (1) "Every sibling registration in this phase registers
+unconditionally-when-resolvable on the CONTRIBUTOR's own path, never the union's" is FALSE: the
+`tmpsToUnlinkByKey` registration loop (~L5487, right beside the `migratedSourcesByKey` one) reads
+`e.repoPath` too — the SAME `byRepoKey.get(key)` shape, which COULD be a union — it simply never observes
+a union in practice because it `continue`s past any `degradedOccupiedKeys` member FIRST, before that read
+ever runs. (2) A first-draft fix that dropped the resolvability gate at this ONE registration site to
+"mirror the sibling posture" was itself FALSE under that name: the `migratedSourcesByKey`/
+`tmpsToUnlinkByKey` loops' real posture is SKIP-DEGRADED-KEYS-OUTRIGHT (never reaching the resolvability
+read at all for a degraded key), not "read it anyway, just unconditionally" — a materially different
+mechanism this record's own first draft conflated with the one it was patching.
+
+**The fix (CR-redesigned; replaces the first draft above) — reorder `bootWriteLatch`'s OWN checks,
+touch nothing upstream of it.** The `degradedOccupiedKeys.has(targetKey)` check is UNCONDITIONAL — it
+depends only on `targetKey`, never on whether that key's basename happens to be registered in
+`allBootWriteTargets` — so moving it to run FIRST, ahead of the `allBootWriteTargets` check, fixes the
+wording at EVERY site that could ever reach this chokepoint for a degraded-occupied key, present or
+future, without widening or otherwise touching Phase 0's own registration/collision-filter inputs (the
+first draft's `allBootWriteTargets` widening was harmless in practice, but it WAS a real, unnecessary
+change to those inputs — e.g. the migrate-source collision filter at ~L5519-5527 reads
+`allBootWriteTargets.has(f)` too). This mirrors `ef651188` (round 2, nit 4)'s own precedent exactly: that
+fix moved this SAME check ahead of the pending-backstop check, for the identical reason (a degraded
+target's own legitimate exclusion from Phase 0's registration must not be misread as a bug by a more
+generic check running first). The registration site that exposed this (safetyTmpRecoveryByFile's own
+loop) is therefore left BYTE-UNCHANGED from before this card — its own narrower gate was never the real
+defect; the defect was always which check `bootWriteLatch` consulted FIRST.
+
+### Verification (Follow-up 38032559)
+
+`test/merge-quarantine-migrate-source-owner-durable.mjs` gained four scenarios:
+`followup38032559-finding1-placeholder-occupant-no-sibling-data`,
+`followup38032559-finding1-placeholder-occupant-x-newer-order` (97cff6db's own "run every reparametrizable
+degraded scenario under BOTH age orders" rule — see that scenario's own comment for why this order
+actually flips which identity `clearMergeQuarantine(x)` can even find, and asserts the TRUE, measured
+behavior rather than the "no-op" a first-draft comment incorrectly guessed),
+`followup38032559-finding1b-real-occupant-existing-sibling-fold`, and a regression PIN (confirmed SAFE,
+not a fix) for the card's own explicit "also check `deferredCorruptJsons`" ask,
+`followup38032559-deferredcorruptjsons-sibling-regression-pin` (its own "(boot1)" check asserts on SUB
+specifically — an entry whose `repoPath` is `sub` or whose `orphanLatchFiles` carries the corrupt final's
+own basename — never on X's token, which the first draft used by mistake). Finding 1/1b's own "(boot1)"
+checks are relabeled to say exactly what they assert (a pending reference self-referencing the residue),
+not a generic "sub is quarantined" gloss. `test/merge-quarantine-legacy-match-walked-up-4783df46.mjs`'s
+own pre-existing `safety-tmp-degraded-occupied-key-self-references` scenario (the EXACT shape the original
+reviewer's repro exercises) gained two new assertions pinning item 2's fix by TEXT: the generic
+`UNANTICIPATED` refusal does not fire, and the correctly-worded degraded-occupied refusal fires instead —
+these must (and do) go RED again if `bootWriteLatch`'s check order is reverted to the old (allBootWriteTargets-
+first) sequence, confirmed via this card's own negative-control run.
+
+Two genuinely vacuous first-draft fixtures were caught and fixed BEFORE committing to this write-up (both
+by the same mechanism — an optional tmp-suffix containing non-hex characters, e.g. `f1corrupt0`/`f1bcorrupt`/
+`xtmp`, silently fails `\.json\.tmp-\d+(-[0-9a-f]+)?$` and makes the file INVISIBLE to the tmp-file scan
+entirely, so every downstream assertion passes for the wrong reason): the `deferredCorruptJsons` sibling
+check's own X-via-tmp fixture, and both of Finding 1/1b's own corrupt-tmp residues. All three were
+corrected to a genuinely hex suffix (confirmed via a standalone regex check against the fixture string,
+not assumed) before any assertion was trusted.
+
+**Item 4 — a small wording fix, same CR round:** the "could NOT be durably persisted this boot — it will
+NOT survive another restart until this is fixed" log line, at the `else` branch of finding 1's own
+`bootWriteLatch` call, is now conditional on `degradedOccupiedKeys.has(key)`: for that case specifically,
+finding 1's own self-reference means `f` is left untouched and re-derives the identical enforcement on
+the very next boot, independent of this process's in-memory state — "will NOT survive another restart"
+was simply false there. Every OTHER refusal reason at that site (a genuine write fault) keeps the
+original wording unchanged.
+
+`pnpm --filter @loom/daemon negative-control --file packages/daemon/src/git/merge-quarantine.ts --test
+packages/daemon/test/merge-quarantine-legacy-match-walked-up-4783df46.mjs --test
+packages/daemon/test/merge-quarantine-migrate-source-owner-durable.mjs` (default `--ref HEAD`, i.e.
+`d2ba5215`, the true pre-fix state for all three findings): RED on the revert (both test files reported
+failures), GREEN restored (every scenario in both files, including the pre-existing ones, passes), tree
+confirmed byte-identical after. `pnpm --filter @loom/daemon build` clean throughout.
+
 ## Do not
 
 - Do not name a safety-tmp residue the same way an ordinary torn-write tmp is named — the two MUST be

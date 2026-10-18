@@ -108,6 +108,20 @@ const SCENARIOS = [
   "ef651188-multiboot-clear-in-boot2-order-b",
   "ef651188-multiboot-4boot-stability",
   "ef651188-degraded-divert-pass2-orphan-no-growth",
+  // Card 38032559 (follow-up from f118b475's own CR) — see
+  // docs/decisions/97cff6db-migrate-source-owner-durable-before-write.md's own "Follow-up 38032559"
+  // section. Finding 1: deferredCorruptTmps' resolution loop's own "no real sibling data" placeholder-
+  // arm branch had no degraded-occupied self-reference (reachable only when the degraded occupant's own
+  // latch is ITSELF placeholder-shaped). Finding 1b: a SIBLING bug, same class, reachable under the
+  // plainer shape (a REAL, non-placeholder degraded occupant) via Phase 2's own degraded-occupied fold.
+  "followup38032559-finding1-placeholder-occupant-no-sibling-data",
+  // Reparametrization over the OTHER age order (97cff6db's own "Do not test ONLY the age order where the
+  // degraded occupant is OLDER" rule) — X newer than the freshly-armed corrupt-tmp placeholder.
+  "followup38032559-finding1-placeholder-occupant-x-newer-order",
+  "followup38032559-finding1b-real-occupant-existing-sibling-fold",
+  // Regression pin (card's own DoD item: "also check deferredCorruptJsons for the same gap") — confirmed
+  // SAFE (it already flows through the existing migratedSourcesByKey/Phase-1b protection). Not a fix.
+  "followup38032559-deferredcorruptjsons-sibling-regression-pin",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -2369,6 +2383,217 @@ try {
     );
 
     boot3.clearMergeQuarantine(xHost);
+  } else if (scenarioName === "followup38032559-finding1-placeholder-occupant-no-sibling-data") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 38032559, finding 1 — deferredCorruptTmps' own resolution loop had a "no real sibling data"
+    // placeholder-arm branch (armCurrentKeyUnlessDegradedCollision + union) with NO degraded-occupied
+    // self-reference, unlike its siblings resolveAndArm (the safety-tmp catch branch, fixed by f118b475)
+    // and the clean-parse branch (round 3 finding E). Reachable only when the degraded occupant X's OWN
+    // latch at Ksub is ITSELF placeholder-shaped (parses cleanly, isPlaceholderEntryShape===true) — a
+    // REAL (non-placeholder) X instead takes a DIFFERENT branch entirely (see finding 1b below), because
+    // this loop's own `existing && !isPlaceholderEntryShape(existing)` check diverts real-sibling data
+    // to tmpsToUnlinkByKey instead.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("f38-f1");
+    const ksub = canonicalRepoLockKey(sub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-f38-f1-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: PLACEHOLDER_BRANCH_CORRUPT, reason: "X placeholder degraded-occupies sub's own key",
+      enteredAt: Date.now() - 120_000, tokens: ["token-x-ph"], resolvedKey: ksub, placeholder: true,
+    }, null, 2) + "\n");
+    // NOTE: the optional suffix after `.tmp-<pid>-` must be valid hex only (the ordinary tmp regex is
+    // `\.json\.tmp-\d+(-[0-9a-f]+)?$`) — anything else (e.g. a word fragment) makes the file silently
+    // invisible to the tmp-file scan entirely, which would make every check below pass vacuously.
+    const corruptTmpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json.tmp-999999-f1decade`);
+    fs.writeFileSync(corruptTmpPath, "{ torn");
+
+    // @decision 97cff6db — checked via listActiveMergeQuarantines()/fs.existsSync, NEVER
+    // activeMergeQuarantineFor, before the clear below: that query can itself lazy-graduate a pending
+    // entry (a WRITE side effect), which would contaminate what this scenario means to observe. Mirrors
+    // round3-E's own discipline (its "(this boot)" check reads raw disk content for the same reason).
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const corruptTmpBasename = path.basename(corruptTmpPath);
+    const protectedAfterBoot1 = listActiveMergeQuarantines().some((e) => e.orphanLatchFiles?.includes(corruptTmpBasename));
+    check("(boot1) a pending reference already self-references the corrupt-tmp residue's own basename (the fix's own protection, present from boot1 on)", protectedAfterBoot1);
+    check("(boot1) the corrupt tmp residue survives on disk (bootWriteLatch correctly refused the write)", fs.existsSync(corruptTmpPath));
+
+    clearMergeQuarantine(x); // ordinary clear of the UNRELATED degraded entry X, same process
+    check(
+      "*** THE FIX (finding 1) *** the corrupt tmp residue survives clearing the unrelated X, in-process",
+      fs.existsSync(corruptTmpPath),
+    );
+    check(
+      "*** THE FIX (finding 1) *** a pending reference still self-references the residue after clearing X, in-process",
+      listActiveMergeQuarantines().some((e) => e.orphanLatchFiles?.includes(corruptTmpBasename)),
+    );
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check(
+      "*** THE FIX (finding 1), CONFIRMED *** sub's quarantine SURVIVES a reboot after clearing the unrelated X",
+      !!fresh.activeMergeQuarantineFor(sub),
+    );
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "followup38032559-finding1-placeholder-occupant-x-newer-order") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Reparametrization of finding 1 over the OTHER age order (97cff6db's own "Do not test ONLY the age
+    // order where the degraded occupant is OLDER" rule — card d2ba5215/round 4's G1/G2 were hidden for
+    // three rounds by exactly this gap). X is now NEWER than the freshly-armed corrupt-tmp placeholder,
+    // so unionQuarantineEntries' own tie-break makes the PLACEHOLDER (repoPath=sub, the claimant) the
+    // "older" side that wins the LATER union's resulting identity — NOT X.
+    //
+    // MEASURED (not assumed — a first-draft comment here guessed "clearing X is a no-op" and was WRONG):
+    // `clearMergeQuarantine(x)` still returns `wasQuarantined:true`. PASS 1's own main loop reads X's
+    // `.json` final FIRST (before the corrupt tmp loop even runs) and flushes a STANDALONE pending
+    // snapshot of X's entry (repoPath=x) at that point, when nothing yet occupies Ksub — the LATER union
+    // with the fresh placeholder is a NEW object or `armQuarantineKey`'s own `replaceEntryEverywhere`
+    // call never re-points that already-flushed snapshot (its re-point condition compares
+    // `directPathIdentity(prior.repoPath)` against the UNION's own winning repoPath, sub's now, not x's).
+    // So X's own stale, pre-union snapshot genuinely gets lifted — but it was already logically orphaned
+    // before the clear ran, and lifting it has NO bearing on sub's own protection (sub's active union and
+    // its own self-referencing pending entry never carried X's identity to begin with). The scenario
+    // therefore asserts what's ACTUALLY true: clearing X does something to X's own bookkeeping, and that
+    // something is irrelevant to sub — never "clearing X is a no-op," which this order disproves.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("f38-f1xn");
+    const ksub = canonicalRepoLockKey(sub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-f38-f1xn-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: PLACEHOLDER_BRANCH_CORRUPT, reason: "X placeholder degraded-occupies sub's own key (X-newer variant)",
+      enteredAt: Date.now() + 120_000, tokens: ["token-x-ph-newer"], resolvedKey: ksub, placeholder: true,
+    }, null, 2) + "\n");
+    const corruptTmpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json.tmp-999999-decade01`);
+    fs.writeFileSync(corruptTmpPath, "{ torn");
+
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const corruptTmpBasename = path.basename(corruptTmpPath);
+    const unionEntry = listActiveMergeQuarantines().find((e) => e.orphanLatchFiles?.includes(corruptTmpBasename) || e.repoPath === sub);
+    check("(precondition, X-newer) the union's own winning repoPath is sub's, NOT X's (confirms the age-order flip actually took effect)", unionEntry?.repoPath === sub);
+    check("(boot1, X-newer) a pending reference still self-references the corrupt-tmp residue's own basename", listActiveMergeQuarantines().some((e) => e.orphanLatchFiles?.includes(corruptTmpBasename)));
+    check("(boot1, X-newer) the corrupt tmp residue survives on disk", fs.existsSync(corruptTmpPath));
+
+    const clearResult = clearMergeQuarantine(x);
+    check(
+      "(X-newer) clearing X DOES lift X's own stale, pre-union pending snapshot (wasQuarantined:true) — this is NOT a no-op for X's own bookkeeping, unlike the sub-older parity shapes elsewhere in this file",
+      clearResult?.wasQuarantined === true,
+    );
+    check(
+      "*** PARITY (X-newer) *** sub's own latch file is KEPT regardless (sub still structurally depends on it) — lifting X's own orphaned snapshot never touches sub's protection",
+      clearResult?.latchKept === true,
+    );
+    check("*** PARITY (X-newer) *** the corrupt tmp residue is UNAFFECTED by clearing X's own unrelated bookkeeping, in-process", fs.existsSync(corruptTmpPath));
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check(
+      "*** PARITY (X-newer), CONFIRMED *** sub's quarantine SURVIVES a reboot regardless (the clear above never touched it)",
+      !!fresh.activeMergeQuarantineFor(sub),
+    );
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "followup38032559-finding1b-real-occupant-existing-sibling-fold") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 38032559, finding 1b — a SIBLING bug, same class, reachable under the PLAINER shape where X's
+    // own degraded-occupying data is REAL (non-placeholder). The corrupt tmp then folds into
+    // tmpsToUnlinkByKey via the "existing real sibling" branch — but Phase 2's own degraded-occupied
+    // fold fell back to the SHARED union object (X's own entry) whenever originalEntryBySource had
+    // nothing recorded for the corrupt tmp's basename, which 97cff6db's own "Do not" list prohibits: a
+    // clear of X then swept the "protective" reference too (same identity), losing sub's residue.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("f38-f1b");
+    const ksub = canonicalRepoLockKey(sub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-f38-f1b-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    fs.writeFileSync(xAtKsubPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded-occupies sub's own key (real data)",
+      enteredAt: Date.now() - 120_000, tokens: ["token-x-real"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+    // NOTE: same hex-only-suffix requirement as finding 1's scenario above.
+    const corruptTmpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json.tmp-999999-f1bdecade`);
+    fs.writeFileSync(corruptTmpPath, "{ torn");
+
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const corruptTmpBasename = path.basename(corruptTmpPath);
+    const protectedAfterBoot1 = listActiveMergeQuarantines().some((e) => e.orphanLatchFiles?.includes(corruptTmpBasename));
+    check("(boot1) a pending reference already self-references the corrupt-tmp residue's own basename (the fix's own protection, present from boot1 on)", protectedAfterBoot1);
+    check("(boot1) the corrupt tmp residue survives on disk", fs.existsSync(corruptTmpPath));
+
+    clearMergeQuarantine(x); // same-process clear, same discipline as finding 1 above
+    check(
+      "*** THE FIX (finding 1b) *** the corrupt tmp residue survives clearing the unrelated X, in-process",
+      fs.existsSync(corruptTmpPath),
+    );
+    check(
+      "*** THE FIX (finding 1b) *** a pending reference still self-references the residue after clearing X, in-process",
+      listActiveMergeQuarantines().some((e) => e.orphanLatchFiles?.includes(corruptTmpBasename)),
+    );
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check(
+      "*** THE FIX (finding 1b), CONFIRMED *** sub's quarantine SURVIVES a reboot after clearing the unrelated X",
+      !!fresh.activeMergeQuarantineFor(sub),
+    );
+    fresh.clearMergeQuarantine(sub);
+  } else if (scenarioName === "followup38032559-deferredcorruptjsons-sibling-regression-pin") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 38032559 (DoD item: "also check deferredCorruptJsons for the same gap") — CONFIRMED SAFE:
+    // deferredCorruptJsons' own resolution never checks `existing` at all; it unconditionally defers
+    // into migratedSourcesByKey, which Phase 1b's existing degraded-occupied fold already protects.
+    // Regression PIN, not a fix — this scenario must stay GREEN before AND after findings 1/1b land.
+    // X's degraded data is its own TMP (never the .json final, which the corrupt file occupies instead)
+    // — note the tmp's suffix MUST be valid hex (`\.json\.tmp-\d+(-[0-9a-f]+)?$`), or it is silently
+    // never read as a tmp at all and this scenario would pass vacuously for the wrong reason.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, nested: sub, subdir: teamA } = makeRepoWithNestedRepoAndSubdir("f38-jsib");
+    const ksub = canonicalRepoLockKey(sub);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+    const x = path.join(os.tmpdir(), `loom-mqmsod-f38-jsib-x-never-${freshSfx()}`);
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+    const xAtKsubTmpPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json.tmp-111111-abcdef01`);
+    fs.writeFileSync(xAtKsubTmpPath, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X degraded-occupies sub's own key via a TMP",
+      enteredAt: Date.now() - 120_000, tokens: ["token-x-tmp"], resolvedKey: ksub,
+    }, null, 2) + "\n");
+    const corruptFinalPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ksub)}.json`);
+    fs.writeFileSync(corruptFinalPath, "{ torn");
+
+    reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    const bootEntries = listActiveMergeQuarantines();
+    check(
+      "(non-vacuity check) X's own tmp WAS actually read this boot (shows up unioned, never silently skipped)",
+      bootEntries.some((e) => (e.tokens ?? []).includes("token-x-tmp")),
+    );
+    const corruptFinalBasename = path.basename(corruptFinalPath);
+    check(
+      "(boot1) SUB specifically is quarantined (fail-closed) — an entry whose repoPath IS sub, or whose orphanLatchFiles carries sub's own corrupt final",
+      bootEntries.some((e) => e.repoPath === sub || e.orphanLatchFiles?.includes(corruptFinalBasename)),
+    );
+
+    clearMergeQuarantine(x); // same-process clear, same discipline as findings 1/1b above
+    check(
+      "(regression pin, deferredCorruptJsons sibling) the corrupt .json final survives clearing X, in-process",
+      fs.existsSync(corruptFinalPath),
+    );
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([repo, teamA, sub, x]);
+    check(
+      "(regression pin, deferredCorruptJsons sibling) sub's quarantine SURVIVES a reboot after clearing the unrelated X",
+      !!fresh.activeMergeQuarantineFor(sub),
+    );
+    fresh.clearMergeQuarantine(sub);
   }
 } finally {
   for (const d of tmpDirs) {

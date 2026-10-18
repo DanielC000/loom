@@ -547,8 +547,22 @@ try {
     fs.writeFileSync(residue, "{ torn"); // CORRUPT/unreadable — matches sub's OWN resolvable fresh hash
 
     const boot1 = await rebootSim();
-    boot1.reenterMergeQuarantinesAtBoot([repo, sub, x]);
+    // @decision 97cff6db (Follow-up 38032559, item 2) — this exact scenario is ALSO where the end-of-boot
+    // safety-tmp recovery write-back's own allBootWriteTargets registration used to gate on the UNION's
+    // winning repoPath (X's, unresolvable), under-registering sub's genuinely-resolvable write target and
+    // tripping bootWriteLatch's generic "UNANTICIPATED...bug in the at-risk computation" refusal for what
+    // is really an EXPECTED degraded refusal. Captured here so a regression is caught by TEXT, not just
+    // by the (unaffected either way) blocked/unblocked outcome below.
+    const errText = (() => {
+      const captured = [];
+      const orig = console.error;
+      console.error = (...args) => { captured.push(args.map(String).join(" ")); };
+      try { boot1.reenterMergeQuarantinesAtBoot([repo, sub, x]); } finally { console.error = orig; }
+      return captured.join("\n");
+    })();
     check("(precondition) sub is blocked immediately after boot", boot1.assertRepoNotQuarantined(sub).ok === false);
+    check("*** THE FIX (item 2) *** the generic UNANTICIPATED refusal does NOT fire for this expected degraded refusal", !/UNANTICIPATED/.test(errText));
+    check("*** THE FIX (item 2) *** the CORRECTLY-WORDED degraded-occupied refusal fires instead", /this key is occupied by a DIFFERENT, currently-unresolvable entry's own trusted resolvedKey/.test(errText));
 
     boot1.clearMergeQuarantine(x); // an ordinary clear of the UNRELATED degraded entry X — never sub
     check("*** THE FIX *** sub is STILL blocked (same process) after clearing the unrelated degraded X", boot1.assertRepoNotQuarantined(sub).ok === false);

@@ -5589,6 +5589,14 @@ function reenterMergeQuarantinesAtBootImpl(
    */
   const bootWriteLatch = (targetKey: string, entry: MergeQuarantineEntry): boolean => {
     const targetBasename = path.basename(quarantinePathForKey(targetKey));
+    // @decision 97cff6db (Follow-up 38032559, item 2) — check degradedOccupiedKeys FIRST, ahead of
+    // allBootWriteTargets: this refusal is UNCONDITIONAL, so ordering it first fixes the text at every
+    // site without touching Phase 0's own inputs — mirrors ef651188 (nit 4)'s identical precedent.
+    if (degradedOccupiedKeys.has(targetKey)) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — this key is occupied by a DIFFERENT, currently-unresolvable entry's own trusted resolvedKey; overwriting it would destroy that entry's only backing file. ${entry.repoPath} stays enforced in-memory only for this process.`);
+      return false;
+    }
     if (!allBootWriteTargets.has(targetBasename)) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] refusing an UNANTICIPATED boot write to ${targetBasename} for ${entry.repoPath} — its target was never registered in allBootWriteTargets (a bug in the at-risk computation, not a legitimate write); ${entry.repoPath} stays enforced in-memory only for this process.`);
@@ -5597,14 +5605,6 @@ function reenterMergeQuarantinesAtBootImpl(
     if (blockedWriteTargets.has(targetBasename)) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — a DIFFERENT key's only copy of this exact filename could not be secured this boot; ${entry.repoPath} stays enforced in-memory only for this process.`);
-      return false;
-    }
-    // @decision ef651188 (round 2, nit 4) — check degradedOccupiedKeys BEFORE the pending backstop below:
-    // a degraded-occupied target's own pending reference legitimately keeps this basename (excluded from
-    // Phase 0's protection above), so a refusal here must log the real, more specific reason.
-    if (degradedOccupiedKeys.has(targetKey)) {
-      // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — this key is occupied by a DIFFERENT, currently-unresolvable entry's own trusted resolvedKey; overwriting it would destroy that entry's only backing file. ${entry.repoPath} stays enforced in-memory only for this process.`);
       return false;
     }
     // @decision ef651188 — STRUCTURAL BACKSTOP, not the primary protection: the Phase 0 loop above
@@ -5653,20 +5653,31 @@ function reenterMergeQuarantinesAtBootImpl(
     }
     const key = canonicalRepoLockKey(matchedRepo);
     const existing = byRepoKey.get(key);
+    const hash = f.slice(0, f.indexOf(".json.tmp-"));
+    // @decision 4783df46 — a walked-up LEGACY match still arms at `key` (never diverts); it only gains
+    // `provenanceUnknown` below. See `legacyMatchStillResolvesToHash`'s own doc and the decision record.
+    const verified = legacyMatchStillResolvesToHash(key, hash);
     if (existing && !isPlaceholderEntryShape(existing)) {
       // Real data already covers this key — the corrupt tmp carries nothing recoverable and is not a
       // fail-closed risk. Fold it into the SAME unlink list so it's swept once that key's real union
       // write (below) durably succeeds — bde5d1fe's rule (a sweep follows a superseding write, never
       // precedes or replaces one) — rather than left behind as permanent, unexplained residue.
+      // @decision 97cff6db (Follow-up 38032559, finding 1b) — never leave this residue's own
+      // originalEntryBySource slot unset: Phase 2's degraded fold then falls back to the shared
+      // occupant, whose identity can be a different, unrelated degraded key's own exclusive backing.
+      if (!originalEntryBySource.has(path.basename(tmpPath))) {
+        originalEntryBySource.set(path.basename(tmpPath), {
+          repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
+          reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, with real sibling data already covering the key — this is a standalone protective record for the residue itself, never armed under any key`,
+          enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
+          provenanceUnknown: verified ? undefined : true,
+        });
+      }
       const list = tmpsToUnlinkByKey.get(key) ?? [];
       list.push(tmpPath);
       tmpsToUnlinkByKey.set(key, list);
       continue;
     }
-    const hash = f.slice(0, f.indexOf(".json.tmp-"));
-    // @decision 4783df46 — a walked-up LEGACY match still arms at `key` (never diverts); it only gains
-    // `provenanceUnknown` below. See `legacyMatchStillResolvesToHash`'s own doc and the decision record.
-    const verified = legacyMatchStillResolvesToHash(key, hash);
     if (!verified) {
       // eslint-disable-next-line no-console
       console.warn(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable and matches registered repo ${matchedRepo}'s own LEGACY (direct-path) identity, but ${matchedRepo}'s current canonical key ${key} no longer hashes to this file (walked up, or a pre-7673d096 subdir binding) — fail-closed by arming ${key} anyway rather than risk discarding a real quarantine, but this is NOT a verified match for whatever currently owns ${key}; marking provenanceUnknown.`);
@@ -5683,6 +5694,15 @@ function reenterMergeQuarantinesAtBootImpl(
     // arm is tautological too — never diverts `entry`, only ever evicts an illegitimate degraded prior.
     const armed = armCurrentKeyUnlessDegradedCollision(key, entry);
     byRepoKey.set(key, armed);
+    // @decision 97cff6db (Follow-up 38032559, finding 1) — mirrors resolveAndArm's own self-reference:
+    // give `f` its OWN pending entry, built from the PRE-union `entry`, self-referencing `f` — or
+    // clearing the degraded occupant durably unblocks `matchedRepo`. See the decision record.
+    if (degradedOccupiedKeys.has(key)) {
+      pendingUnresolvedQuarantines.push({
+        entry: { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), f])] },
+        sourceFile: f,
+      });
+    }
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable with no real sibling data recovered for registered repo ${matchedRepo} — quarantining THAT repo rather than risk discarding a real quarantine (bootWriteLatch may still refuse — see its own log line above/below for why).`);
     if (bootWriteLatch(key, armed)) {
@@ -5698,8 +5718,12 @@ function reenterMergeQuarantinesAtBootImpl(
         }
       }
     } else {
+      // @decision 97cff6db (Follow-up 38032559, item 4) — degraded-occupied is NOT the "will not
+      // survive" case: finding 1's self-reference means `f` re-derives enforcement next boot regardless.
       // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] fail-closed quarantine for ${matchedRepo} (matched-corrupt tmp latch ${f}) could NOT be durably persisted this boot — it will NOT survive another restart until this is fixed.`);
+      console.error(degradedOccupiedKeys.has(key)
+        ? `[merge-quarantine] fail-closed quarantine for ${matchedRepo} (matched-corrupt tmp latch ${f}) could NOT be durably written this boot because its key is degraded-occupied — this is EXPECTED and recoverable: ${f} itself (left untouched, self-referenced) re-derives the same enforcement on the next boot without this process's own in-memory state.`
+        : `[merge-quarantine] fail-closed quarantine for ${matchedRepo} (matched-corrupt tmp latch ${f}) could NOT be durably persisted this boot — it will NOT survive another restart until this is fixed.`);
     }
   }
 
@@ -5816,7 +5840,14 @@ function reenterMergeQuarantinesAtBootImpl(
         for (const tmpPath of tmps) {
           const sourceFile = path.basename(tmpPath);
           if (!pendingUnresolvedQuarantines.some((p) => p.sourceFile === sourceFile)) {
-            pendingUnresolvedQuarantines.push({ entry: originalEntryBySource.get(sourceFile) ?? occupant, sourceFile });
+            // @decision 97cff6db (Follow-up 38032559, finding 1b) — round 5's own rule, mirrored here:
+            // self-reference `sourceFile` into orphanLatchFiles too — sweepTmpResidueForHashIfUnreferenced
+            // reads only that field, never a bare pending `sourceFile`.
+            const protectiveEntry = originalEntryBySource.get(sourceFile) ?? occupant;
+            pendingUnresolvedQuarantines.push({
+              entry: { ...protectiveEntry, orphanLatchFiles: [...new Set([...(protectiveEntry.orphanLatchFiles ?? []), sourceFile])] },
+              sourceFile,
+            });
           }
         }
       }
