@@ -9494,14 +9494,10 @@ export class PtyHost {
                   // write-at-detection shape (card f5f6515a) for the same reason.
                   live.lastMismatchPastedContentWrapReplay = { gen: live.submitGeneration, recognizedGen: confirmedPastedContentWrapOfPriorWrite.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
                 }
-                // @decision d0952a73 — the actual `live.lastMismatchReplay` write:
+                // @decision d0952a73 — threads the already-computed `confirmed*` classification into
+                // `explainedBenign` instead of discarding it; `null` leaves this exactly as loud as
+                // before. See the dc92f4b6 record's own "e59880fe" section for WHY each flag is null.
                 //
-                // threads the
-                // already-computed `confirmed*` classification into `explainedBenign` instead of
-                // discarding it; `confirmedFusion`/`confirmedDivergedPrior` excluded since both
-                // require `replayedEntry === undefined`, always false on this branch. `null` — no independent classifier
-                // fired — leaves this exactly as loud as before the field existed: an unexplained replay
-                // still reads as an unresolved possible/established loss on every consumer of this field.
                 // Card e59880fe — widened to ALSO fire for `wrappedReplayOfPriorWrite` (never both at
                 // once: that candidate only exists when `replayedEntry === undefined`), populating the
                 // SAME `lastMismatchReplay` pull surface rather than a new top-level field — `wrapped`/
@@ -9706,9 +9702,9 @@ export class PtyHost {
                   // fields, sourced from whichever of the two mutually-exclusive candidates fired.
                   const pendingRecognizedGen = replayedEntry !== undefined ? replayedEntry.gen : wrappedReplayOfPriorWrite!.gen;
                   const pendingMatchedLen = replayedEntry !== undefined ? replayedEntry.text.length : wrappedReplayOfPriorWrite!.matchedLen;
-                  // @decision a419a7e6 — bounded HEAD slice of THIS generation's own intended text,
-                  // genuinely the best available evidence for this branch (always a whole-string
-                  // replay, never a remainder).
+                  // @decision a419a7e6 — bounded HEAD slice of THIS generation's own `intended` text,
+                  // true for BOTH sibling arms: a bare replay IS a whole-string match (no remainder); the
+                  // wrapped sibling (e59880fe) is remainder-shaped, but that remainder describes `reported`, never `intended`.
                   const pendingMessageExcerpt = intended.slice(0, PROMPT_MISMATCH_EXCERPT_MAX_LEN);
                   // @decision 280309d9 — captured HERE, at classification time, not at the later
                   // `checkPromptMismatchUnresolved` timer fire (whose own `ts` is the GIVE-UP

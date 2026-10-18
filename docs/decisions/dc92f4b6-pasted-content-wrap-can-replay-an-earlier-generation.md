@@ -211,7 +211,36 @@ addressing the card's own "compounds the noise" complaint, without touching the 
 the only additions — `wrapIdLen` is the wrap tag's id LENGTH (never the id itself, matching every other
 near-miss diagnostic's disclosure posture in this file); severity/recovery semantics are identical whether
 `wrapped` is `true` or `false`. `worker_list`/`worker_status`'s own tool-description text for
-`lastMismatchReplay` was updated in the same change (contract change ⇒ docs in the same change).
+`lastMismatchReplay` (including `explainedBenign`, which that text's own shape literal had omitted even
+before this card) was updated in the same change (contract change ⇒ docs in the same change).
+
+**Why each `confirmed*` flag feeding `explainedBenign` is null, and the one pair that is NOT excluded.**
+The write site checks `confirmedFusion`/`confirmedDivergedPrior`/`confirmedWrapperAwareFusion`/
+`confirmedPastedContentWrapOfPriorWrite` — all four are guaranteed null whenever this write fires, but for
+TWO DIFFERENT reasons depending on which sibling arm fired, and conflating them is exactly the mistake an
+earlier draft of the inline comment made. For a BARE replay (`replayedEntry !== undefined`), all four
+require `replayedEntry === undefined` themselves, so they're excluded directly. For the WRAPPED sibling
+(`wrappedReplayOfPriorWrite !== null`), `replayedEntry` is ALSO undefined there (by construction — see
+"The byte shape" above), but that is NOT the operative reason: the real cause is `unmatchedRecognized`'s
+OWN precondition (`!accumulation?.confirmed && !divergedPriorAccumulation && !wrapperAwareFusion &&
+!pastedContentWrapOfPriorWrite`), which `wrappedReplayOfPriorWrite` inherits by construction (it is
+literally `unmatchedRecognized` itself, once the framing predicate also matches). **`confirmedWrapperDeficit`/
+`confirmedAnsiStripDeficit` are excluded by NEITHER precondition** (854d1632 deliberately keeps them
+ungated on `replayedEntry`, and `unmatchedRecognized`'s own gate never checks them either) — so a confirmed
+wrapper- or ANSI-strip-deficit CAN coexist with `wrapped:true` and a non-null `explainedBenign`, on either
+branch. This is not a theoretical nicety: it means a `lastMismatchReplay` row can legitimately read
+`wrapped:true, explainedBenign:"wrapper-deficit"` (or `"ansi-strip"`), and a reader must not assume `wrapped`
+and `explainedBenign` are mutually exclusive discriminators.
+
+**The follow-up timer arms for the wrapped sibling exactly as it does for a bare replay** —
+`isWrappedReplayAwaitingResolution` mirrors `isRecognizedReplayAwaitingResolution`'s own exclusion list,
+and the single `if` that schedules `checkPromptMismatchUnresolved` was widened to `||` the two rather than
+duplicated. Proven in `pty-prompt-mismatch-unresolved.mjs` PART 9: the timer is armed keyed to the CURRENT
+generation (never the matched prior one, already resolved at detection time), and
+`onPromptMismatchUnresolved` fires naming that same current generation plus the recognized prior
+generation and its matched length — surgically proven RED by dropping `|| isWrappedReplayAwaitingResolution`
+from that one `if` (rebuilt, PART 9 failed 5 of its own assertions, every other PART still passed), then
+restored byte-identical and re-verified GREEN.
 
 ### Do not (e59880fe addendum)
 
@@ -231,6 +260,9 @@ near-miss diagnostic's disclosure posture in this file); severity/recovery seman
 - Do not widen `matchPastedContentWrapFramingOfRemainder` to a substring/partial match on either remainder,
   or drop the backreferenced-id equality check — same discipline as this record's own round-1/round-2
   findings above, for the same reason (an unrelated-but-similar-shaped wrap must not confirm).
+- Do not assume `wrapped` and `explainedBenign` are mutually exclusive on `lastMismatchReplay` —
+  `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit` are excluded by neither branch's own precondition,
+  so `wrapped:true` with a non-null `explainedBenign` is a real, reachable combination, not a bug.
 
 ## Source
 
