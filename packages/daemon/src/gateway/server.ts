@@ -9,7 +9,7 @@ import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Tas
 import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
-import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
+import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, deleteProjectWorkDir } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import { buildServedStatus } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -5065,7 +5065,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const live = deps.db.countLiveSessionsInProject(id);
     if (live > 0) return reply.code(400).send({ error: `cannot archive a project with live sessions — stop the fleet first (${live} still live)` });
     deps.db.archiveProject(id);
-    return { ok: true };
+    // Card 5eace211: the project's shared work dir is KEPT on a soft archive (mirrors rows/sessions
+    // staying retained) — `restoreProject` un-archives everything as if nothing happened, and deleting
+    // this dir would break that guarantee. Report its size instead — ASYNC + BOUNDED (never a sync walk
+    // on a request handler), awaited inline since this is a one-off human action, not a hot path.
+    const workDirUsage = await measureDirBytesBoundedAsync(projectWorkDir(id), ARCHIVE_WORK_DIR_MEASURE_BOUNDS);
+    return { ok: true, workDir: { bytes: workDirUsage.bytes, truncated: workDirUsage.truncated } };
   });
 
   // Restore a soft-archived project back to the picker (clear archived_at) — mirrors session restore.
@@ -5087,8 +5092,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (p.reserved) return reply.code(400).send({ error: "cannot delete a reserved/system project (your platform home board)" });
     const live = deps.db.countLiveSessionsInProject(id);
     if (live > 0) return reply.code(400).send({ error: `cannot delete a project with live sessions — stop the fleet first (${live} still live)` });
+    // Card 5eace211: the "no live session" guard above does not, by itself, rule out a still-running gate
+    // (e.g. a daemon-initiated deploy/landing-check op) that may still be reading/writing this project's
+    // shared work dir — check the live GateSemaphore registry explicitly before removing it.
+    if (deps.sessions.hasLiveGateForProject(id)) {
+      return reply.code(400).send({ error: "cannot delete a project with a gate still running or queued for it — wait for it to settle first" });
+    }
     const { sessionIds } = deps.db.deleteProject(id);
     deleteProjectArchives(id); // best-effort: drop the whole LOOM_HOME/archives/<id> snapshot dir
+    // Card 5eace211 Code Review MAJOR: deleteProjectWorkDir is now ASYNC (fs.promises.rm) — the DB delete
+    // and the hasLiveGateForProject check above both stay synchronous and run BEFORE this, so this await
+    // can never block either of those; it only means the response waits for the (best-effort, never-
+    // throwing) removal to actually finish, matching the same "await a real I/O cost for a human-watched,
+    // one-off action" posture the soft-archive route above already uses for its own size measurement.
+    await deleteProjectWorkDir(id);
     return { ok: true, deleted: { project: id, agents: true, sessions: sessionIds.length } };
   });
 

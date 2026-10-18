@@ -47,7 +47,7 @@ const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, buildSpawnArgs, playwrightMcpServer, scratchDirEnv, disallowedToolsForSpawn, PLAYWRIGHT_DISALLOWED_TOOLS, ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS } = await import("../dist/pty/host.js");
 const { MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
-const { sessionScratchDir } = await import("../dist/paths.js");
+const { sessionScratchDir, projectWorkDir, projectWorkDirEnv } = await import("../dist/paths.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -140,6 +140,20 @@ check("(env) plain (non-browser) spawn: LOOM_SCRATCH_DIR IS present (widened —
   scratchDirEnv("s2").LOOM_SCRATCH_DIR === sessionScratchDir("s2"));
 check("(env) NOT gated on any mcp-config shape any more — sessionId alone determines the value",
   JSON.stringify(scratchDirEnv("s1")) === JSON.stringify(scratchOn));
+
+// ===================== (env) LOOM_PROJECT_WORK_DIR — every session's PROJECT work dir pointer (card 5eace211) =====================
+// Mirrors the LOOM_SCRATCH_DIR block above exactly: projectWorkDirEnv is PURE (no disk I/O — the real
+// mkdir/marker-refresh is ensureProjectWorkDir, called separately at the one spawn chokepoint), and the
+// value it returns is scoped to the PROJECT id, never the session id.
+const projEnv = projectWorkDirEnv("project-x");
+check("(env) projectWorkDirEnv: LOOM_PROJECT_WORK_DIR is present and equals projectWorkDir(projectId)",
+  projEnv.LOOM_PROJECT_WORK_DIR === projectWorkDir("project-x"));
+check("(env) projectWorkDirEnv is scoped to PROJECT id, not session id — a different session, same project, gets the SAME dir",
+  JSON.stringify(projectWorkDirEnv("project-x")) === JSON.stringify(projEnv));
+check("(env) a DIFFERENT project id resolves to a DIFFERENT dir",
+  projectWorkDirEnv("project-y").LOOM_PROJECT_WORK_DIR !== projEnv.LOOM_PROJECT_WORK_DIR);
+check("(env) projectWorkDirEnv never creates the dir on disk (pure — mirrors scratchDirEnv's own purity)",
+  !fs.existsSync(projEnv.LOOM_PROJECT_WORK_DIR));
 
 // ===================== --output-dir is ALWAYS scratch, never the vault (card 61ab62e3) =====================
 // buildMcpServers no longer accepts (or consults) a vaultPath — an unrecognized property passed alongside

@@ -34,6 +34,9 @@ export function composeManagerStartupPrompt(
      *  the printed number silently disagreed with `gate_queue`'s live `cap`. See `orchBlock` below for the
      *  fix (point at the live instrument instead of re-resolving/re-syncing a second mirrored copy). */
     orchestration?: { maxConcurrentWorkers: number; gateCommandTimeoutMs: number };
+    /** Card 5eace211: this project's shared, Loom-owned work dir (also `$LOOM_PROJECT_WORK_DIR` in env) —
+     *  optional so every existing caller/test that omits it composes byte-identically to before. */
+    projectWorkDir?: string;
   },
   // Test seam ONLY (card 5e30c4bd) — a real spawn always omits this and gets the live
   // `computeDeployStaleness()` read; a hermetic test injects a fixed result so it can assert BOTH the
@@ -105,9 +108,13 @@ export function composeManagerStartupPrompt(
       `This is NOT a claim that the daemon is stale — only that the check itself failed. See ` +
       `\`served_status\`'s \`deployStaleness\` for detail, or re-check later.`
     : "";
+  const workDirLine = loc.projectWorkDir?.trim()
+    ? `- **Project work dir (shared with workers/gates — survives any one session):** \`${loc.projectWorkDir.trim()}\` (also \`$LOOM_PROJECT_WORK_DIR\`)\n`
+    : "";
   const block =
     "## Where things live (this project's absolute paths)\n" +
     `- **Repo root (your cwd):** \`${loc.repoPath}\`\n` +
+    workDirLine +
     (hasVault && !vaultPathInvalid
       ? `- **Project vault dir:** \`${loc.vaultPath}\`\n- **Resume doc:** \`${resumeDoc}\`\n\n`
       : "\n") +

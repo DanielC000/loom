@@ -179,6 +179,21 @@ try {
   check("(1i) pure: dirtyBlock + discardedBlock can co-exist (survived vs. destroyed are independent signals)", composedDirtyAndDiscarded.includes("reconcile before you start") && composedDirtyAndDiscarded.includes("was DISCARDED"));
   check("(1i) pure: dirty block leads the discarded block", order(composedDirtyAndDiscarded, "reconcile before you start", "was DISCARDED"));
 
+  // ===================== (1j) card 5eace211: projectWorkDir line (10th/LAST param) =====================
+  check("(1j) pure: no projectWorkDir (undefined, 9-arg call) ⇒ byte-identical to the pre-card composition", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, undefined, undefined, undefined, undefined) === composedCwd);
+  check("(1j) pure: no projectWorkDir ⇒ no 'Project work dir' line", !composedCwd.includes("Project work dir"));
+  const composedWorkDir = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, undefined, undefined, undefined, undefined, "/abs/project-work-dir");
+  check("(1j) pure: projectWorkDir set (10th/LAST param) ⇒ 'Project work dir' line present", composedWorkDir.includes("Project work dir"));
+  check("(1j) pure: names the exact path passed", composedWorkDir.includes("/abs/project-work-dir"));
+  check("(1j) pure: names the LOOM_PROJECT_WORK_DIR env var alongside the path", composedWorkDir.includes("$LOOM_PROJECT_WORK_DIR"));
+  check("(1j) pure: worktree location block + brief + dynamic still all present alongside the work-dir line", composedWorkDir.includes("/wt/path") && composedWorkDir.includes("BRIEF") && composedWorkDir.includes("DYNAMIC"));
+  check("(1j) pure: no cwd ⇒ projectWorkDir is ignored too, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/abs/project-work-dir") === "BRIEF\n\n---\n\nDYNAMIC");
+  const composedWorkDirBlank = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, undefined, undefined, undefined, undefined, "   ");
+  check("(1j) pure: whitespace-only projectWorkDir ⇒ treated as omitted (trimmed away), no line rendered", !composedWorkDirBlank.includes("Project work dir"));
+  // projectWorkDir can co-exist with an EARLIER optional block (e.g. discardedOnRecut) — independent signals.
+  const composedWorkDirAndDiscarded = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, undefined, undefined, undefined, discardedInfo, "/abs/project-work-dir");
+  check("(1j) pure: projectWorkDir line + discardedOnRecut block can co-exist", composedWorkDirAndDiscarded.includes("Project work dir") && composedWorkDirAndDiscarded.includes("was DISCARDED"));
+
   // ===================== (2) SPAWN composes the worktree block + brief ahead of the kickoff =====================
   const wA = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "KICKOFF_A" });
   worktrees.push(wA.worktreePath);

@@ -97,6 +97,167 @@ export function sessionScratchDir(sessionId: string): string {
  */
 export const WORKTREES_DIR = path.join(path.dirname(LOOM_HOME), `${path.basename(LOOM_HOME)}-worktrees`);
 /**
+ * Every project's Loom-owned, shared work dir root (replaces the ~110 ad hoc drive-root folders agents
+ * had been creating). Default `<dirname(LOOM_HOME)>/<basename(LOOM_HOME)>-projects` (e.g.
+ * `~/.loom-projects`); overridable via the human-set `LOOM_PROJECT_WORK_ROOT` env var. See
+ * `projectWorkDir` below for the per-project path.
+ *
+ * @decision 5eace211 — never nest this root inside LOOM_HOME (a live-git-repo self-hosting LOOM_HOME
+ * could be mutated by a stray `cd ..`), and never move `LOOM_PROJECT_WORK_ROOT` into
+ * `PlatformConfig`/`resolveConfig` — it is a host filesystem root, human-only by construction.
+ */
+export const PROJECTS_WORK_ROOT = process.env.LOOM_PROJECT_WORK_ROOT || path.join(path.dirname(LOOM_HOME), `${path.basename(LOOM_HOME)}-projects`);
+
+/**
+ * One project's Loom-owned work dir (card 5eace211) — shared by every session/worker/worktree/gate of
+ * that project, for test/build/cache/temp output that should survive a session and be shared across
+ * siblings. Distinct from both {@link sessionScratchDir} (per-SESSION, reaped — never shared) and
+ * {@link WORKTREES_DIR} (a git worktree, one per task, not a shared cache/build home). Keyed on the
+ * project's own id — immutable and rename-safe, unlike its display name — mirroring how `WORKTREES_DIR`
+ * paths are already keyed on `projectId` (`git/worktrees.ts`'s `worktreePath`).
+ */
+export function projectWorkDir(projectId: string): string {
+  return path.join(PROJECTS_WORK_ROOT, projectId);
+}
+
+/**
+ * Human-legible marker written/refreshed inside {@link projectWorkDir} (card 5eace211) so the owner can
+ * tell a hundred id-named dirs apart without a DB lookup. See `ensureProjectWorkDir`.
+ */
+export function projectWorkDirMarkerPath(projectId: string): string {
+  return path.join(projectWorkDir(projectId), ".loom-project.json");
+}
+
+/**
+ * Create (idempotent) a project's work dir and refresh its human-legible marker file. Best-effort — NEVER
+ * throws, same contract as the scratch-dir eager-mkdir at the spawn hot path: a failure here must never
+ * block a spawn. Called at every session spawn (see `pty/host.ts`'s `createPty`/`createCodexPty`) so the
+ * marker stays current across a project rename, not just fresh at creation.
+ *
+ * `projectName` is OPTIONAL and deliberately non-destructive when absent: a caller that only has the id
+ * (e.g. a gate call site, which never needs to touch the marker) still gets the mkdir, but the marker is
+ * left untouched rather than overwritten with a null name — only a caller that actually resolved the
+ * project's name may refresh it.
+ */
+export function ensureProjectWorkDir(projectId: string, projectName?: string): string {
+  const dir = projectWorkDir(projectId);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    if (projectName) {
+      const marker = { id: projectId, name: projectName, updatedAt: new Date().toISOString() };
+      fs.writeFileSync(projectWorkDirMarkerPath(projectId), `${JSON.stringify(marker, null, 2)}\n`);
+    }
+  } catch { /* best-effort; never block spawn */ }
+  return dir;
+}
+
+/**
+ * `LOOM_PROJECT_WORK_DIR` (card 5eace211) — every session/gate's pointer to its PROJECT's shared work
+ * dir. PURE (no disk I/O) — mirrors `pty/host.ts`'s `scratchDirEnv` exactly: the actual mkdir/marker-
+ * refresh is a separate, explicit `ensureProjectWorkDir` call at the one spawn chokepoint that has a
+ * resolvable project name; a gate call site (which never needs the marker) can read this env without
+ * re-touching disk at all.
+ */
+export function projectWorkDirEnv(projectId: string): Record<string, string> {
+  return { LOOM_PROJECT_WORK_DIR: projectWorkDir(projectId) };
+}
+
+/**
+ * WARN-only ceiling, checked PER PROJECT (card 5eace211 Code Review — see Decision 6 in
+ * `docs/decisions/5eace211-project-work-dir-sibling-root.md`): a root-WIDE sum against one shared
+ * ceiling made the warning permanently true on any host with more than a handful of ordinary projects.
+ * 50 GiB is a TUNABLE, not a derived constant — raise or lower it directly if it stops being the right
+ * line; it is the number to defend or shrink going forward.
+ */
+export const PROJECT_WORK_DIR_WARN_BYTES = 50 * 1024 * 1024 * 1024;
+
+/**
+ * Shared bound for a ONE-OFF, human-triggered, single-project measurement (soft archive, all three
+ * surfaces) — generous enough for a real build+cache population, bounded so a pathological directory
+ * can't hang a human-watched REST/MCP response indefinitely.
+ */
+export const ARCHIVE_WORK_DIR_MEASURE_BOUNDS = { maxEntries: 200_000, maxMs: 3_000 };
+
+/**
+ * Total on-disk bytes under `dir`, ASYNC (via `fs.promises`, never blocks the event loop for the walk
+ * itself) and BOUNDED by both an entry-count cap and a wall-clock cap (card 5eace211 Code Review — see
+ * Decision 5 in `docs/decisions/5eace211-project-work-dir-sibling-root.md`). A walk that hits either cap
+ * stops immediately and reports `truncated:true` alongside whatever partial sum it had — the partial
+ * figure is real (every byte counted was genuinely on disk), just possibly incomplete; never silently
+ * presented as a complete total. A symlink/junction is skipped (never followed — pnpm's own `.pnpm` store
+ * uses them, and following one risks double-counting or an infinite cycle). Best-effort: an unreadable
+ * file/dir contributes 0 rather than aborting the walk.
+ */
+export async function measureDirBytesBoundedAsync(
+  dir: string,
+  opts: { maxEntries: number; maxMs: number },
+): Promise<{ bytes: number; truncated: boolean }> {
+  const deadline = Date.now() + opts.maxMs;
+  let bytes = 0;
+  let entries = 0;
+  let truncated = false;
+
+  async function walk(d: string): Promise<void> {
+    if (truncated) return;
+    let list: fs.Dirent[];
+    try {
+      list = await fs.promises.readdir(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of list) {
+      if (truncated) return;
+      if (entries >= opts.maxEntries || Date.now() > deadline) {
+        truncated = true;
+        return;
+      }
+      entries++;
+      if (entry.isSymbolicLink()) continue;
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile()) {
+        try {
+          const st = await fs.promises.stat(full);
+          bytes += st.size;
+        } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  try {
+    await walk(dir);
+  } catch { /* best-effort — the caller gets whatever partial sum was accumulated */ }
+  return { bytes, truncated };
+}
+
+/**
+ * PERMANENTLY remove one project's work dir (card 5eace211) — the irreversible counterpart to
+ * `ensureProjectWorkDir`, mirroring `deleteProjectArchives`'s own best-effort contract (`gateway/
+ * server.ts`): called ONLY from the permanent-delete path, AFTER the caller has confirmed no session or
+ * gate for this project is still live (see `SessionService.hasLiveGateForProject`) — never from the
+ * soft-archive path, which keeps the dir (see that route's own size-report instead).
+ *
+ * @decision 5eace211 — ASYNC (`fs.promises.rm`), never `fs.rmSync` here: a sync recursive removal of a
+ * real build/cache population blocks the WHOLE daemon's event loop for as long as the walk takes, the
+ * same class of cost Decision 5 already fixed for measurement — do not revert this to a sync call.
+ */
+export async function deleteProjectWorkDir(projectId: string): Promise<void> {
+  const dir = projectWorkDir(projectId);
+  const rel = path.relative(PROJECTS_WORK_ROOT, dir);
+  const isSingleSegmentUnderRoot = rel.length > 0 && rel === path.basename(rel) && !rel.startsWith("..");
+  const isUuidShaped = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
+  if (!isSingleSegmentUnderRoot || !isUuidShaped) {
+    // eslint-disable-next-line no-console
+    console.warn(`[paths] deleteProjectWorkDir REFUSED — projectId is not a single UUID-shaped path segment directly under PROJECTS_WORK_ROOT: ${JSON.stringify(projectId)}`);
+    return;
+  }
+  try {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  } catch { /* best-effort — a permanent delete must not fail because this cleanup did */ }
+}
+
+/**
  * Agent Runs (R2): each ephemeral `run` session gets a disposable, read-only snapshot of the project's
  * HEAD as its cwd under `runs/<sessionId>/`. NOT a git worktree (no .git, no branch, no admin record —
  * sidesteps the worktree-GC bug class); hard-deleted on teardown, and the whole tree is swept on boot
@@ -489,7 +650,7 @@ export function resolveCodescapeBin(dbPath?: string): { command: string; args: s
 }
 
 export function ensureDirs(): void {
-  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT, PROJECTS_WORK_ROOT]) fs.mkdirSync(d, { recursive: true });
   ensureLoomHomeGitignore();
 }
 

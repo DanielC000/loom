@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db } from "./db.js";
 import { resolveWebDistDir, WORKTREES_DIR } from "./paths.js";
+import { getCachedProjectsWorkRootUsage, kickProjectsWorkRootUsageRefresh } from "./sessions/project-work-dir-usage.js";
 import { loomVersion } from "./version.js";
 import { computeDeployStaleness, readBuildInfo, type DeployStalenessResult } from "./deploy-staleness.js";
 import { skillStoreStaleness, type SkillStoreStaleness } from "./skills/store.js";
@@ -99,6 +100,21 @@ export interface ServedStatus {
    *  constant to know whether the number above is a problem. */
   scratchRootOverCeiling: boolean;
   /**
+   * Card 5eace211 — the shared `PROJECTS_WORK_ROOT`'s total on-disk footprint (every KNOWN project's
+   * work dir summed), WARN-only, mirroring `scratchRootBytes`'s own design intent (a Lead/manager already
+   * reading this surface is the binding condition, not an evicting cap). UNLIKE `scratchRootBytes`, this
+   * is a CACHED figure — never a fresh walk on this read — refreshed in the background by
+   * `sessions/project-work-dir-usage.ts`; see that module's own doc for why. May be `0`/stale on the very
+   * first read after boot, before the first background refresh has landed.
+   */
+  projectsWorkRootBytes: number;
+  /** True when ANY SINGLE project's own measured bytes exceeds `PROJECT_WORK_DIR_WARN_BYTES` — a
+   *  PER-PROJECT check, not a check on the fleet-wide sum above (card 5eace211 Code Review, Decision 6). */
+  projectsWorkRootOverCeiling: boolean;
+  /** True when the background refresh's walk hit its entry/time cap for at least one project — the
+   *  figure above is a genuine partial sum, not necessarily the complete one. */
+  projectsWorkRootTruncated: boolean;
+  /**
    * Card 1a686bad — the boot sweep's own outcome (see `scratch-gc.ts`'s `ScratchGcSweepOutcome` doc for
    * the full rationale): beside `scratchRootOverCeiling` so a reader can tell "the ceiling fired and the
    * GC is working, nothing currently qualifies" apart from "the ceiling fired and the GC is broken" —
@@ -142,6 +158,15 @@ export function buildServedStatus(db: Db): ServedStatus {
   // polled on an interval, so a real recursive disk walk per call is an acceptable, already-established
   // trade here.
   const scratchRootBytes = measureScratchRootBytes();
+  // Card 5eace211 Code Review: NEVER a fresh walk here — this read is synchronous and the walk must not
+  // block the event loop. Always the last-cached figure (possibly stale, possibly the all-zero initial
+  // value before the first background refresh has ever landed); same degrade-on-partial-stub guard as
+  // staleAside below, since a partial test stub's listAllProjects/listArchivedProjects would otherwise
+  // make the background refresh warn on every call for no reason.
+  const projectsWorkRootUsage = getCachedProjectsWorkRootUsage();
+  if (typeof db.listAllProjects === "function" && typeof db.listArchivedProjects === "function") {
+    kickProjectsWorkRootUsageRefresh(db);
+  }
   // Card ad34efb5 — cheap, bounded, byte-free readdir (never measureDirSize here; see
   // listStaleAsideWorktrees's own doc) even though this whole function is called on every polled read.
   // Degrades to primary-axis-only (never throws) when `db` is a partial test stub missing
@@ -174,6 +199,9 @@ export function buildServedStatus(db: Db): ServedStatus {
     skillAssetsSyncState: deriveSkillAssetsSyncState(storeStaleness, assetsGitStatus),
     scratchRootBytes,
     scratchRootOverCeiling: scratchRootBytes > SCRATCH_ROOT_WARN_BYTES,
+    projectsWorkRootBytes: projectsWorkRootUsage.bytes,
+    projectsWorkRootOverCeiling: projectsWorkRootUsage.overCeiling,
+    projectsWorkRootTruncated: projectsWorkRootUsage.truncated,
     scratchGcSweep: getBootScratchGcSweepOutcome(),
     staleWorktreeLeftovers: {
       count: staleAside.length,

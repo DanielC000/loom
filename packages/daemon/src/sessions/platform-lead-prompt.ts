@@ -100,10 +100,15 @@ export const PLATFORM_LEAD_PROMPT_DEV_ADDENDUM = `DEV ADDENDUM (this self-hostin
  * not at all (see `sessions/service.ts`'s own `resume()` doc: "resume injects nothing"), so there is no
  * duplication risk across a Lead's lifetime.
  */
-export function composePlatformLeadStartupPrompt(startupPrompt: string | undefined, resumeDocPath: string, notes?: string): string {
+export function composePlatformLeadStartupPrompt(startupPrompt: string | undefined, resumeDocPath: string, notes?: string, projectWorkDir?: string): string {
+  const workDirLine = projectWorkDir?.trim()
+    ? `- **Your home project's work dir (also \`$LOOM_PROJECT_WORK_DIR\`):** \`${projectWorkDir.trim()}\`\n`
+    : "";
   const block =
     "## Where things live (your resume doc)\n" +
-    `- **Resume doc:** \`${resumeDocPath}\`\n\n` +
+    `- **Resume doc:** \`${resumeDocPath}\`\n` +
+    workDirLine +
+    "\n" +
     "Read + rewrite your living resume doc at the exact absolute path above, verbatim — do not " +
     "reconstruct it, and never Glob for it (a broad Glob from your home directory hits the search timeout).";
   const withNotes = notes?.trim() ? `${notes.trim()}\n\n${block}` : block;

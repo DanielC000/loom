@@ -142,14 +142,21 @@ export function composeWorkerStartupPrompt(
   repoContext?: WorkerRepoContext,
   reviewOf?: ReviewOfInfo,
   discardedOnRecut?: DiscardedOnRecutInfo,
+  // Card 5eace211, deliberately the LAST parameter (appended, like `discardedOnRecut` above) so every
+  // existing positional call site stays byte-identical: `undefined` omits the line entirely (a project
+  // with no resolvable id, or a test composing this prompt without it, never sets it).
+  projectWorkDir?: string,
 ): string {
   const base = brief?.trim();
   const body = base ? `${base}\n\n---\n\n${dynamicPart}` : dynamicPart;
   const location = cwd?.trim();
   if (!location) return body;
+  const workDirLine = projectWorkDir?.trim()
+    ? `\n- **Project work dir (shared with sibling workers/gates — survives this session):** \`${projectWorkDir.trim()}\` (also \`$LOOM_PROJECT_WORK_DIR\`)`
+    : "";
   const block =
     "## Where you edit (your isolated git worktree)\n" +
-    `- **Your worktree (make ALL edits here, never the main checkout):** \`${location}\`\n\n` +
+    `- **Your worktree (make ALL edits here, never the main checkout):** \`${location}\`${workDirLine}\n\n` +
     "This worktree IS your cwd. If anything else in your context names the main repo path, that's for " +
     "reference, not where you edit — make every change here, on your assigned branch.";
   const refs = referenceRepos?.filter((r) => r.trim());

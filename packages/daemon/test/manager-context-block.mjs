@@ -210,6 +210,18 @@ try {
   check("(3k) points the reader at worker_spawn/worker_list's LIVE capacity instead of this snapshot", /worker_spawn.*success response|worker_list/i.test(withOrch) && /LIVE/.test(withOrch));
   check("(3k) still carries the 'Where things live' header + the agent's own doctrine", withOrch.includes("## Where things live") && withOrch.includes("DOCTRINE_BODY"));
 
+  // ===================== (3m) card 5eace211: projectWorkDir line =====================
+  const noWorkDir = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, NO_STALENESS);
+  check("(3m) projectWorkDir OMITTED ⇒ no 'Project work dir' line at all", !noWorkDir.includes("Project work dir"));
+  check("(3m) projectWorkDir OMITTED ⇒ byte-identical to the pre-card composition", noWorkDir === composed);
+  const withWorkDir = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", projectWorkDir: "/abs/project-work-dir" }, NO_STALENESS);
+  check("(3m) projectWorkDir PASSED ⇒ the 'Project work dir' line renders", withWorkDir.includes("Project work dir"));
+  check("(3m) names the exact path passed", withWorkDir.includes("/abs/project-work-dir"));
+  check("(3m) names the LOOM_PROJECT_WORK_DIR env var alongside the path", withWorkDir.includes("$LOOM_PROJECT_WORK_DIR"));
+  check("(3m) still carries the primary repoPath line + the agent's own doctrine alongside it", withWorkDir.includes("/abs/repo") && withWorkDir.includes("DOCTRINE_BODY"));
+  const blankWorkDir = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", projectWorkDir: "   " }, NO_STALENESS);
+  check("(3m) whitespace-only projectWorkDir ⇒ treated as omitted (trimmed away), no line rendered", !blankWorkDir.includes("Project work dir"));
+
   // ===================== (3c) reference-repos epic Phase 3: referenceRepos block =====================
   const noRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, NO_STALENESS);
   const emptyRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: [] }, NO_STALENESS);

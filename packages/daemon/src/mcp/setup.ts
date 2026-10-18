@@ -9,7 +9,7 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
-import { expandTilde } from "../paths.js";
+import { expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { recordProfileGrantReach, recordAgentProfileRebindReach, grantFieldsOf, setupVisibleGrantReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
@@ -514,7 +514,10 @@ export class SetupMcpRouter {
         const reservedErr = setupMayTouchProjectError(p);
         if (reservedErr) return ok({ error: reservedErr });
         db.archiveProject(projectId);
-        return ok({ archived: true, projectId });
+        // Card 5eace211: the project's shared work dir is KEPT (reversible, mirrors rows/sessions) —
+        // report its size instead of deleting it. ASYNC + BOUNDED (never a sync walk on an MCP handler).
+        const workDirUsage = await measureDirBytesBoundedAsync(projectWorkDir(projectId), ARCHIVE_WORK_DIR_MEASURE_BOUNDS);
+        return ok({ archived: true, projectId, workDir: { bytes: workDirUsage.bytes, truncated: workDirUsage.truncated } });
       },
     );
 

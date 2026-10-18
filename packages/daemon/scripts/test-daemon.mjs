@@ -1518,6 +1518,16 @@ async function runOne(name, lane) {
     // so this needs no separate cleanup of its own.
     env: {
       ...process.env, LOOM_HOME: home, LOOM_REAL_HOME: LOOM_HOME, LOOM_PORT: String(port), LOOM_TEST: "1", LOOM_SUPPRESS_FIRST_RUN_LAUNCH: "1",
+      // Card 5eace211 (Code Review, CRITICAL): mirrors the LOOM_HOME override immediately above —
+      // `...process.env` just inherited this runner process's own AMBIENT `LOOM_PROJECT_WORK_ROOT` (a
+      // human may set this, per Decision 2 in docs/decisions/5eace211-project-work-dir-sibling-root.md,
+      // to point at the REAL shared root every project's caches live under). Without this override, every
+      // spawned test child inherits that real value, and any test that mutates `PROJECTS_WORK_ROOT`
+      // (paths.ts) — cleanup, `ensureProjectWorkDir` — mutates the human's real root instead of its own.
+      // An empty string is falsy to `paths.ts`'s `process.env.LOOM_PROJECT_WORK_ROOT || <derived default>`,
+      // so this forces every child to derive its own root as a sibling of `home` (the per-test temp dir)
+      // — never a per-child value of our own to compute, unlike `LOOM_HOME`/`LOOM_REAL_HOME` above.
+      LOOM_PROJECT_WORK_ROOT: "",
       ...(process.platform === "win32" && !process.env.PSModuleAnalysisCachePath
         ? { PSModuleAnalysisCachePath: path.join(home, "ps-module-analysis-cache", "ModuleAnalysisCache") }
         : {}),

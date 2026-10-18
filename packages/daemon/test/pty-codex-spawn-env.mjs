@@ -23,7 +23,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { requireHermeticEnv, assertUnderOsTmpdir } from "./_guard.mjs"; // arms the Db backstop (LOOM_TEST=1) too
+import { mkdtempManaged, finishAndExit, registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
@@ -40,6 +41,13 @@ if (process.platform !== "win32") {
 const FIXTURE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "env-dump-cli.mjs");
 const tmpHome = mkdtempManaged("loom-codex-spawn-env-");
 process.env.LOOM_HOME = tmpHome;
+// Card 5eace211 (Code Review, CRITICAL): clear any AMBIENT LOOM_PROJECT_WORK_ROOT (a human may set this
+// to point at the REAL shared project-work-dir root — Decision 2) BEFORE importing dist/paths.js, which
+// reads it at module load. Falling through to the default derives PROJECTS_WORK_ROOT as a sibling of
+// `tmpHome` above instead, which the cleanup below (and this spawn's own ensureProjectWorkDir mkdir) can
+// then safely mutate.
+delete process.env.LOOM_PROJECT_WORK_ROOT;
+requireHermeticEnv(); // confirms LOOM_HOME (and, now, LOOM_PROJECT_WORK_ROOT if still ambient) are isolated
 
 // A .cmd wrapper so node-pty (which spawns `bin` directly with an args ARRAY, no shell/interpreter
 // indirection) can launch `node env-dump-cli.mjs` as the substitute "codex" binary — mirrors
@@ -68,7 +76,15 @@ delete process.env.LOOM_OBSIDIAN_AUTOSTART;
 delete process.env.LOOM_OBSIDIAN_PREFLIGHT;
 
 const { PtyHost } = await import("../dist/pty/host.js");
-const { sessionScratchDir, ENSURE_OBSIDIAN_SCRIPT } = await import("../dist/paths.js");
+const { sessionScratchDir, projectWorkDir, PROJECTS_WORK_ROOT, ENSURE_OBSIDIAN_SCRIPT } = await import("../dist/paths.js");
+// Card 5eace211 Code Review item 6 (mirrors pty-claude-spawn-env.mjs's own registration): PROJECTS_WORK_ROOT
+// is a SIBLING of LOOM_HOME (not nested inside tmpHome), so the managed tmpHome cleanup never reaches it —
+// register the whole root up front, or this file's own ensureProjectWorkDir mkdir below leaks a real,
+// now-orphaned sibling directory under the host's real temp root on every run.
+// Card 5eace211 (Code Review, CRITICAL): assert this is GENUINELY a temp-derived root before registering
+// it for recursive removal — defense in depth on top of the delete+requireHermeticEnv above.
+assertUnderOsTmpdir("PROJECTS_WORK_ROOT", PROJECTS_WORK_ROOT);
+registerForCleanup(PROJECTS_WORK_ROOT);
 
 const events = { onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onBusy() {}, onExit() {} };
 const host = new PtyHost(events);
@@ -127,6 +143,11 @@ check("CLAUDE_CODE_ENTRYPOINT (a CLAUDE_CODE_* var) is scrubbed from the real co
 // never set LOOM_OBSIDIAN_AUTOSTART) — proves the obsidian block below only fires when it's meant to ------
 check("[9346ed5b, negative control] LOOM_OBSIDIAN_PREFLIGHT is absent from the real codex child env when LOOM_OBSIDIAN_AUTOSTART is not set", !("LOOM_OBSIDIAN_PREFLIGHT" in spawnedEnv));
 
+// --- negative control (card 5eace211): LOOM_PROJECT_WORK_DIR must be ABSENT when this spawn's own opts
+// carry NO projectId at all (the opts above never set one) — proves the project-work-dir block only
+// fires when a projectId is actually present, mirroring the additive-when-absent credentialEnv shape.
+check("[5eace211, negative control] LOOM_PROJECT_WORK_DIR is absent from the real codex child env when opts.projectId is not set", !("LOOM_PROJECT_WORK_DIR" in spawnedEnv));
+
 // --- Card 9346ed5b: mirror createPty's obsidian-preflight block — buildSpawnEnv (since 8d828fa4) merges
 // opts.sessionEnv, so LOOM_OBSIDIAN_AUTOSTART now reaches a codex spawn's env, but createCodexPty never set
 // the PARTNER path variable createPty's own block sets — leaving the obsidian-preflight skill fragment
@@ -156,6 +177,35 @@ try {
 }
 check("[9346ed5b] LOOM_OBSIDIAN_AUTOSTART=1 reaches the real codex child env (plain sessionEnv passthrough, unrelated to this card's own fix)", spawnedEnvObsidian.LOOM_OBSIDIAN_AUTOSTART === "1");
 check("[9346ed5b fix] LOOM_OBSIDIAN_PREFLIGHT is set to the ensure-obsidian script's absolute path on the real codex child env when autostart is on (mirrors createPty's own block)", spawnedEnvObsidian.LOOM_OBSIDIAN_PREFLIGHT === ENSURE_OBSIDIAN_SCRIPT);
+
+// --- Card 5eace211: LOOM_PROJECT_WORK_DIR wiring — a THIRD, distinct spawn (own sessionId + own output
+// file) whose opts DO carry a projectId, proving end-to-end (on a REAL OS child process, not just the
+// pure projectWorkDirEnv unit test) that createCodexPty threads it through and that ensureProjectWorkDir's
+// mkdir actually happened on disk — mirrors the scratch-dir "was actually created on disk" check above.
+const SESSION_ID_PROJ = "codex-spawn-env-test-proj";
+const PROJECT_ID = "codex-spawn-env-test-project-id";
+const envOutputFileProj = path.join(tmpHome, "spawned-env-proj.json");
+const spawnCwdProj = fs.mkdtempSync(path.join(tmpHome, "cwd-proj-"));
+const optsProj = {
+  ...opts,
+  sessionId: SESSION_ID_PROJ,
+  cwd: spawnCwdProj,
+  projectId: PROJECT_ID,
+  sessionEnv: { ...opts.sessionEnv, FIXTURE_ENV_OUTPUT_FILE: envOutputFileProj },
+};
+const ptyProj = host.createCodexPty(optsProj);
+let spawnedEnvProj;
+try {
+  await waitUntil(() => fs.existsSync(envOutputFileProj), { label: "project-id-variant fixture's env dump file to appear" });
+  spawnedEnvProj = JSON.parse(fs.readFileSync(envOutputFileProj, "utf8"));
+} finally {
+  try { ptyProj.kill(); } catch { /* best-effort */ }
+}
+const expectedWorkDir = projectWorkDir(PROJECT_ID);
+// PROJECTS_WORK_ROOT itself is already registered for cleanup up front (see its own registration above) —
+// no separate per-project registration needed here; removing the root recursively removes this subdir too.
+check("[5eace211] LOOM_PROJECT_WORK_DIR reaches the real codex child env, matching projectWorkDir(projectId)", spawnedEnvProj.LOOM_PROJECT_WORK_DIR === expectedWorkDir);
+check("[5eace211] the project work dir was actually created on disk (ensureProjectWorkDir's mkdir, mirrors createPty's own eager scratch mkdir)", fs.existsSync(expectedWorkDir) && fs.statSync(expectedWorkDir).isDirectory());
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — createCodexPty's real spawn env now carries opts.sessionEnv (proven on a real OS child process, the field the pre-fix bare process.env copy silently dropped) plus buildSpawnEnv's git-safety/LOOM_WORKTREE/Python-encoding vars and the CLAUDECODE/CLAUDE_CODE_* scrub, and scratchDirEnv's LOOM_SCRATCH_DIR (mkdir'd on disk) — all routed through the SAME shared unit createPty already uses, with a sessionEnv override still winning on the codex path exactly as it does on claude's."

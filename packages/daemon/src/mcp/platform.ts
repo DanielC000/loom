@@ -16,7 +16,7 @@ import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, appendQuestionAskedEvent, p
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
-import { expandTilde, PORT, isLoomDev } from "../paths.js";
+import { expandTilde, PORT, isLoomDev, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
 import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
@@ -2841,7 +2841,10 @@ export class PlatformMcpRouter {
         // Guard: never let the Lead archive its own reserved home (or any system project).
         if (p.reserved) return ok({ error: "cannot archive a reserved/system project (your platform home board)" });
         db.archiveProject(projectId);
-        return ok({ archived: true, projectId });
+        // Card 5eace211: the project's shared work dir is KEPT (reversible, mirrors rows/sessions) —
+        // report its size instead of deleting it. ASYNC + BOUNDED (never a sync walk on an MCP handler).
+        const workDirUsage = await measureDirBytesBoundedAsync(projectWorkDir(projectId), ARCHIVE_WORK_DIR_MEASURE_BOUNDS);
+        return ok({ archived: true, projectId, workDir: { bytes: workDirUsage.bytes, truncated: workDirUsage.truncated } });
       },
     );
 

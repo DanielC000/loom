@@ -33,7 +33,7 @@ import { TRANSCRIPT_ROOT_READ_DENY_RULE, otherProjectTranscriptDenyRules } from 
 import { withLoomHomeWriteDenyForSpawn } from "./loom-home-deny.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled, ensureProjectWorkDir, projectWorkDirEnv } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -6135,6 +6135,15 @@ export class PtyHost {
    */
   private readonly resolveCredentialSessionEnv: (projectId: string) => Record<string, string>;
   /**
+   * Card 5eace211: read access to a project's current display NAME, wired in by index.ts at boot (it
+   * holds `db`; PtyHost deliberately does not — mirrors `resolveCredentialSessionEnv`/`getOtherProjects`
+   * above). Called PER-SPAWN at both `createPty`/`createCodexPty` chokepoints to refresh the project work
+   * dir's human-legible marker file (`ensureProjectWorkDir`) — so a rename reaches the marker on the very
+   * next spawn, with no daemon restart. Defaults to `() => undefined` — every existing hermetic test (no
+   * resolver passed) still gets the work dir created, just with its marker never written.
+   */
+  private readonly resolveProjectName: (projectId: string) => string | undefined;
+  /**
    * Card 9d73e537: read access to whether an OTHER session id is CURRENTLY live or starting, wired in by
    * index.ts at boot (it holds `db`; PtyHost deliberately does not — mirrors `getOtherProjects`/
    * `resolveCredentialSessionEnv` above). Threaded into `injectSkills` so it can prune a shared skills
@@ -6156,6 +6165,7 @@ export class PtyHost {
       getPlatformHomePaths?: () => { repoPaths: string[]; vaultPath: string | null };
       decorateStartupPrompt?: (o: { projectId: string; role?: SessionRole; prompt: string }) => string;
       resolveCredentialSessionEnv?: (projectId: string) => Record<string, string>;
+      resolveProjectName?: (projectId: string) => string | undefined;
       isSessionLive?: (sessionId: string) => boolean;
     },
   ) {
@@ -6169,6 +6179,7 @@ export class PtyHost {
     this.getPlatformHomePaths = opts?.getPlatformHomePaths ?? (() => ({ repoPaths: [], vaultPath: null }));
     this.decorateStartupPrompt = opts?.decorateStartupPrompt ?? null;
     this.resolveCredentialSessionEnv = opts?.resolveCredentialSessionEnv ?? (() => ({}));
+    this.resolveProjectName = opts?.resolveProjectName ?? (() => undefined);
     this.isSessionLive = opts?.isSessionLive ?? (() => true);
   }
 
@@ -6747,6 +6758,12 @@ export class PtyHost {
     const scratchDir = sessionScratchDir(opts.sessionId);
     try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }
     Object.assign(env, scratchDirEnv(opts.sessionId));
+    // Card 5eace211: LOOM_PROJECT_WORK_DIR, mirroring the scratch-dir block immediately above — absent
+    // entirely for a spawn with no projectId (a plain session never bound to a project).
+    if (opts.projectId) {
+      ensureProjectWorkDir(opts.projectId, this.resolveProjectName(opts.projectId));
+      Object.assign(env, projectWorkDirEnv(opts.projectId));
+    }
     const capabilityCatalog = this.getCapabilityCatalog();
     // Card 7fa73e2c: `opts.codescapeEnabled`/`repoPath`/`worktreeId`/the codescape-supervisor state/
     // `integrationPaths` are DELIBERATELY NOT passed here, unlike createPty's own buildMcpServers call.
@@ -8669,6 +8686,12 @@ export class PtyHost {
     const scratchDir = sessionScratchDir(opts.sessionId);
     try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }
     Object.assign(env, scratchEnv);
+    // Card 5eace211: LOOM_PROJECT_WORK_DIR, mirroring the scratch-dir block immediately above — absent
+    // entirely for a spawn with no projectId (a plain session never bound to a project).
+    if (opts.projectId) {
+      ensureProjectWorkDir(opts.projectId, this.resolveProjectName(opts.projectId));
+      Object.assign(env, projectWorkDirEnv(opts.projectId));
+    }
 
     // Belt-and-suspenders (agent-tooling P4): redact any capability secret out of the LOGGED argv even
     // though mcpConfigPath should already keep it off `args` itself when present — never log raw secret

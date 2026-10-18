@@ -1101,8 +1101,27 @@ what you checked. Found none? Treat it as live.
    host-wide by-name kill has previously taken down the entire self-hosting daemon, and a killed peer
    process doesn't announce itself as a kill — it reads as an unrelated failure and gets misdiagnosed as
    one; and pass screenshot calls an
-   **ABSOLUTE path under an allowed root** (the per-session scratch dir or the project's vault path) or
+   **ABSOLUTE path under an allowed root** (the per-session scratch dir, the project's vault path, or —
+   when this project sets `LOOM_PROJECT_WORK_DIR` — the shared project work dir) or
    no path at all — never a bare filename, which lands in the repo working tree.
+
+   **Never instruct a worker to create a test/build/cache folder at a drive root or loose in its home
+   directory** — not even "just for this task." When this project has a `LOOM_PROJECT_WORK_DIR` (check
+   your own "Where things live" block, or your `CLAUDE.md`), name it in a kickoff that dispatches a
+   build/cache-heavy task, so the worker doesn't improvise its own ad hoc folder. This is the same
+   standing rule `/worker` doctrine teaches workers directly; it's restated here because a manager's own
+   kickoff wording is often where a worker first gets the idea to do otherwise.
+
+   ⚠️ **Don't tell a worker to share a real BUILD OUTPUT dir (a compiler's `target/`/`build/`/`out/`)
+   bare at the project work dir's top level across branches — that is a DIFFERENT thing from a shared
+   dependency/download cache, and conflating them is a real incident shape:** two concurrent branches
+   pointed at the same bare build-output dir can make one branch's gate silently compile, link against,
+   or run the OTHER branch's binaries, producing a false green or a false red attributed to the wrong
+   branch. When a kickoff names the project work dir for a build-heavy task, say explicitly that build
+   OUTPUT goes in a dir keyed to that worker's own branch/worktree underneath it — only a content-
+   addressed cache (a package download cache, an `sccache`-style compiler-object cache) is safe to point
+   two branches at the SAME bare directory, because every entry there is keyed by what it caches, not by
+   which branch wrote it.
 
    **A WORKER's own stray process — an escaped/detached dev server, a stuck test runner, a zombie left
    behind after a crash — has a dedicated on-demand path: `worker_reap`.** It's daemon-executed and

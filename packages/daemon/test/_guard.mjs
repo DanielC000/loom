@@ -284,6 +284,32 @@ function isTestCreatedHome(resolved) {
   return home !== tmp && home.startsWith(tmp + path.sep);
 }
 
+/**
+ * Card 5eace211 (Code Review, CRITICAL) — the SAME strict-subdirectory-of-OS-tmpdir proof as
+ * {@link isTestCreatedHome} above, generalized to any path a test wants to verify before mutating it —
+ * specifically `PROJECTS_WORK_ROOT` (`paths.ts`), which a human may set via `LOOM_PROJECT_WORK_ROOT` to
+ * point at the REAL shared root every project's caches live under (Decision 2 in
+ * `docs/decisions/5eace211-project-work-dir-sibling-root.md` explicitly recommends this). A test that
+ * resolves `PROJECTS_WORK_ROOT` and then recursively removes it (cleanup) or creates entries under it
+ * (`ensureProjectWorkDir`) MUST first prove the resolved value is this test's OWN temp-derived root, never
+ * an inherited one — this is that proof, exported so every such call site can share ONE implementation
+ * instead of re-deriving the tmpdir-containment check by hand. Throws (never returns false) so a caller
+ * can simply call it right before the dangerous operation and let a violation abort loudly instead of
+ * silently skipping the mutation (which would mask the bug rather than surface it).
+ * @param {string} label  what this path is, for the thrown message (e.g. "PROJECTS_WORK_ROOT")
+ * @param {string} p
+ */
+export function assertUnderOsTmpdir(label, p) {
+  const resolved = path.resolve(p);
+  if (!isTestCreatedHome(resolved)) {
+    throw new Error(
+      `🛑 refusing to touch ${label} (${resolved}) — it is NOT a strict subdirectory of the OS temp dir ` +
+        `(${OS_TMPDIR}), so it cannot be proven to be this test's own throwaway root. This guard exists ` +
+        `specifically to stop a test from mutating a human-set LOOM_PROJECT_WORK_ROOT override.`,
+    );
+  }
+}
+
 // Arm the Db prod-guard for THIS process (and inherited by spawned daemons) the moment we're imported.
 process.env.LOOM_TEST = "1";
 
@@ -336,6 +362,14 @@ process.on("exit", () => {
   // (every project's live worker worktrees on that daemon) deleted unconditionally.
   if (!isTestCreatedHome(resolved)) return;
   cleanupPathSync(`${resolved}-worktrees`);
+  // Card 5eace211 (Code Review MINOR 6) — `PROJECTS_WORK_ROOT` (paths.ts) is ALSO a sibling of LOOM_HOME
+  // (`<dirname>/<basename>-projects`), the exact same shape as `-worktrees` above, and the DEFAULT when
+  // `LOOM_PROJECT_WORK_ROOT` is unset — so any test that calls `ensureProjectWorkDir`/`projectWorkDir`
+  // without an explicit override leaves this sibling behind too, for the identical reason `-worktrees`
+  // used to leak. Same `isTestCreatedHome` proof already gated this cleanup on above, so no separate
+  // guard is needed — a test that explicitly pinned `LOOM_PROJECT_WORK_ROOT` to some OTHER temp dir still
+  // leaves THIS sibling empty/absent, which `cleanupPathSync` already treats as a no-op.
+  cleanupPathSync(`${resolved}-projects`);
 });
 
 // Strip GIT_PAGER/PAGER from the test process env. This USED to be the only defense — card 42544916
@@ -374,6 +408,27 @@ export function requireHermeticEnv({ port = false } = {}) {
   if (!home) problems.push("LOOM_HOME is unset (would default to the real ~/.loom)");
   else if (path.resolve(home) === REAL_LOOM_HOME)
     problems.push(`LOOM_HOME resolves to the real ~/.loom (${path.resolve(home)})`);
+
+  // Card 5eace211 (Code Review, CRITICAL) — `LOOM_PROJECT_WORK_ROOT` is a human-set override pointing at
+  // the REAL shared root every project's caches/build output live under (Decision 2). Unset is always
+  // fine (paths.ts derives a sibling of the temp LOOM_HOME instead); SET is only fine when it already
+  // points INSIDE the OS temp dir (a test that deliberately pinned it to its OWN throwaway root). An
+  // ambient value pointing anywhere else is exactly the shape a human's real override takes, and a test
+  // that went on to mutate `PROJECTS_WORK_ROOT` under that value would be mutating the real one — abort
+  // instead of letting that happen silently.
+  const projectWorkRoot = process.env.LOOM_PROJECT_WORK_ROOT;
+  if (projectWorkRoot) {
+    try {
+      assertUnderOsTmpdir("LOOM_PROJECT_WORK_ROOT", projectWorkRoot);
+    } catch {
+      problems.push(
+        `LOOM_PROJECT_WORK_ROOT is set to a non-temp-dir path (${path.resolve(projectWorkRoot)}) — this ` +
+          `looks like a human-set override of the REAL shared project work-dir root, not a test fixture. ` +
+          `Clear it (delete process.env.LOOM_PROJECT_WORK_ROOT) or point it at a dir under ${OS_TMPDIR} ` +
+          `before importing dist/paths.js.`,
+      );
+    }
+  }
 
   if (port) {
     const p = process.env.LOOM_PORT;

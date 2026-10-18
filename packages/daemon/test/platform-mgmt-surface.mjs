@@ -47,7 +47,13 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { commitAll } from "./_git-commit.mjs";
-requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
+// Card 5eace211 (Code Review, CRITICAL): clear any AMBIENT LOOM_PROJECT_WORK_ROOT (a human may set this
+// to point at the REAL shared project-work-dir root — Decision 2) BEFORE importing dist/paths.js below,
+// which reads it at module load — the "pArch" project_archive assertions' own ensureProjectWorkDir call
+// would otherwise create a real entry under the human's real root instead of this file's own throwaway
+// sibling.
+delete process.env.LOOM_PROJECT_WORK_ROOT;
+requireHermeticEnv(); // confirm LOOM_HOME (and, now, LOOM_PROJECT_WORK_ROOT if still ambient) is isolated
 
 const { Db } = await import("../dist/db.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
@@ -56,6 +62,7 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+const { ensureProjectWorkDir } = await import("../dist/paths.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -454,9 +461,18 @@ try {
   check("project_update: persists to the Db", db.getProject("pOrd")?.name === "Ordinary-2");
   check("project_update: 404 on an unknown project", (await call("project_update", { projectId: "ghost", name: "x" })).error === "project not found");
 
+  // Card 5eace211: give "pArch" a real shared work dir with a real payload BEFORE archiving, so the
+  // archive response's workDir size + the dir's on-disk survival are both genuinely provable.
+  const pArchWorkDir = ensureProjectWorkDir("pArch", "ToArchive");
+  fs.writeFileSync(path.join(pArchWorkDir, "payload.bin"), Buffer.alloc(2048, 5));
   const arch = await call("project_archive", { projectId: "pArch" });
   check("project_archive: archives an ordinary project", arch.archived === true && !arch.error);
   check("project_archive: the archived project leaves the live list", !db.listAllProjects().some((p) => p.id === "pArch"));
+  check("project_archive: response carries workDir.bytes (at least the written payload)",
+    typeof arch.workDir?.bytes === "number" && arch.workDir.bytes >= 2048);
+  check("project_archive: response carries workDir.truncated:false for this small payload", arch.workDir?.truncated === false);
+  check("project_archive: the work dir + its payload are STILL on disk after a soft archive (kept, reversible)",
+    fs.existsSync(pArchWorkDir) && fs.existsSync(path.join(pArchWorkDir, "payload.bin")));
   const archReserved = await call("project_archive", { projectId: "pHome" });
   check("(d) project_archive REFUSES the reserved/system home", typeof archReserved.error === "string" && /reserved/i.test(archReserved.error));
   check("(d) the reserved home is STILL live (not archived)", db.listAllProjects().some((p) => p.id === "pHome"));

@@ -93,6 +93,17 @@ function countOccurrences(haystack, needle) {
   check("(c) the addendum appears EXACTLY once in a SECOND compose of the same raw prompt (no cross-call accumulation)",
     countOccurrences(secondCompose, PLATFORM_LEAD_PROMPT_DEV_ADDENDUM) === 1);
 
+  // ===================== (c2) card 5eace211: projectWorkDir line (4th param) =====================
+  const noWorkDirCompose = composePlatformLeadStartupPrompt(USER_EDITED_PROMPT, RESUME_DOC_PATH);
+  check("(c2) projectWorkDir OMITTED ⇒ no 'work dir' line at all", !noWorkDirCompose.includes("work dir"));
+  const withWorkDirCompose = composePlatformLeadStartupPrompt(USER_EDITED_PROMPT, RESUME_DOC_PATH, undefined, "/abs/platform-work-dir");
+  check("(c2) projectWorkDir PASSED ⇒ the work-dir line renders", withWorkDirCompose.includes("work dir"));
+  check("(c2) names the exact path passed", withWorkDirCompose.includes("/abs/platform-work-dir"));
+  check("(c2) names the LOOM_PROJECT_WORK_DIR env var alongside the path", withWorkDirCompose.includes("$LOOM_PROJECT_WORK_DIR"));
+  check("(c2) still carries the resume-doc line + the user's own prompt", withWorkDirCompose.includes(RESUME_DOC_PATH) && withWorkDirCompose.includes(USER_EDITED_PROMPT));
+  const blankWorkDirCompose = composePlatformLeadStartupPrompt(USER_EDITED_PROMPT, RESUME_DOC_PATH, undefined, "   ");
+  check("(c2) whitespace-only projectWorkDir ⇒ treated as omitted (trimmed away), no line rendered", !blankWorkDirCompose.includes("work dir"));
+
   delete process.env.LOOM_DEV;
 }
 

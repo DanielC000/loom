@@ -106,7 +106,13 @@ process.env.LOOM_ASSET_SKILLS = assetSkillsDir; // BEFORE importing dist — sto
 const storeSkillMd = (name) => path.join(tmpHome, "skills", name, "SKILL.md");
 
 import { requireHermeticEnv } from "./_guard.mjs";
-requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
+// Card 5eace211 (Code Review, CRITICAL): clear any AMBIENT LOOM_PROJECT_WORK_ROOT (a human may set this
+// to point at the REAL shared project-work-dir root — Decision 2) BEFORE importing dist/paths.js below,
+// which reads it at module load — the project_archive (c) assertions' own ensureProjectWorkDir call
+// would otherwise create a real entry under the human's real root instead of this file's own throwaway
+// sibling.
+delete process.env.LOOM_PROJECT_WORK_ROOT;
+requireHermeticEnv(); // confirm LOOM_HOME (and, now, LOOM_PROJECT_WORK_ROOT if still ambient) is isolated
 
 const { Db } = await import("../dist/db.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
@@ -119,7 +125,7 @@ const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { resolveConfig } = await import("@loom/shared");
-const { WORKSPACE_ROOT } = await import("../dist/paths.js");
+const { WORKSPACE_ROOT, ensureProjectWorkDir } = await import("../dist/paths.js");
 const { isGitRepo: isGitRepoReal } = await import("../dist/git/reader.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -415,10 +421,20 @@ try {
   const toArchive = await call("project_create", { name: "Disposable", repoPath: repo });
   check("(c) project_archive: precondition — a fresh non-reserved project exists & is active",
     !!toArchive.id && db.listAllProjects().some((p) => p.id === toArchive.id));
+  // Card 5eace211: before archiving, give this project a real shared work dir with a real payload, so
+  // the archive response's workDir size + the dir's on-disk survival are both genuinely provable, not
+  // vacuously true of an empty/never-created dir.
+  const toArchiveWorkDir = ensureProjectWorkDir(toArchive.id, "Disposable");
+  fs.writeFileSync(path.join(toArchiveWorkDir, "payload.bin"), Buffer.alloc(2048, 3));
   const archived = await call("project_archive", { projectId: toArchive.id });
   check("(c) project_archive: a non-reserved project archives (archived:true)", archived.archived === true && !archived.error);
   check("(c) project_archive: the project is now hidden from the active list", !db.listAllProjects().some((p) => p.id === toArchive.id));
   check("(c) project_archive: the row is retained (soft, reversible)", !!db.getProject(toArchive.id)?.archivedAt);
+  check("(c) project_archive: response carries workDir.bytes (at least the written payload)",
+    typeof archived.workDir?.bytes === "number" && archived.workDir.bytes >= 2048);
+  check("(c) project_archive: response carries workDir.truncated:false for this small payload", archived.workDir?.truncated === false);
+  check("(c) project_archive: the work dir + its payload are STILL on disk after a soft archive (kept, reversible)",
+    fs.existsSync(toArchiveWorkDir) && fs.existsSync(path.join(toArchiveWorkDir, "payload.bin")));
   // REFUSED on a reserved/system home (the operator can never archive its own "Getting Started" home).
   const archiveReserved = await call("project_archive", { projectId: "pHome" });
   check("(c) project_archive: REFUSES a reserved/system home", typeof archiveReserved.error === "string" && !archiveReserved.archived);

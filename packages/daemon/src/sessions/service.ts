@@ -40,7 +40,7 @@ import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR, projectWorkDirEnv, projectWorkDir } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { isDurablyResumable, type RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
 import type { HaltedRecycleEarlyResult } from "./halted-recycle-reconcile.js";
@@ -1544,9 +1544,13 @@ const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY
  *
  *  @decision fc53ea74 — ALSO stamps `LOOM_GATE_CONCURRENT_CAP`, required never optional: an absent cap
  *  on some gate children and present on others leaves `test/_codex-real-spawn-lock.mjs` unable to tell
- *  "no cap info" from "cap is 1", silently under-sizing its own cross-process lock wait budget. */
-function gateOpIdEnvOverride(opId: string, batchSize: number, cap: number, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...base, LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize), LOOM_GATE_CONCURRENT_CAP: String(cap) };
+ *  "no cap info" from "cap is 1", silently under-sizing its own cross-process lock wait budget.
+ *
+ *  @decision 5eace211 — `projectId` is REQUIRED, never optional/defaulted: this is the one chokepoint
+ *  every gate call routes through for `LOOM_PROJECT_WORK_DIR`, so a missing id must fail to compile, not
+ *  silently reach a gate child with the var absent. */
+function gateOpIdEnvOverride(opId: string, batchSize: number, cap: number, projectId: string, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...base, ...projectWorkDirEnv(projectId), LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize), LOOM_GATE_CONCURRENT_CAP: String(cap) };
 }
 
 /** @decision a5d9c458 — the sentinel `findLiveSessionClaimingWorktreePath` returns for an
@@ -3715,7 +3719,7 @@ export class SessionService {
         ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
         : role === "manager"
         ? appendMemoryRecallToStartupPrompt(
-            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
+            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) }),
             codescapeStatus!.text,
           )
         : startupPrompt;
@@ -3857,7 +3861,7 @@ export class SessionService {
         startupPrompt: ((): string | undefined => {
           const scheduled = appendScheduledPrompt(
             appendMemoryRecallToStartupPrompt(
-              composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
+              composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) }),
               codescapeStatus.text,
             ),
             prompt,
@@ -3968,7 +3972,7 @@ export class SessionService {
         codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
         projectId: project.id,
         repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
-        startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath, resumeDocNotes),
+        startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath, resumeDocNotes, projectWorkDir(project.id)),
         role,
         browserTesting,
         documentConversion,
@@ -4617,14 +4621,14 @@ export class SessionService {
       startupPrompt = appendMemoryRecallToStartupPrompt(
         composeManagerStartupPrompt(
           (warmup ? warmup + "\n\n---\n" : "") + notice,
-          { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } },
+          { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) },
         ),
         codescapeStatus.text,
       );
     } else if (role === "platform") {
       const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, lineageRootId(this.db, session));
       const resumeDocNotes = composeResumeDocOperationalNotes(project.vaultPath, leadResumeDocPath);
-      startupPrompt = composePlatformLeadStartupPrompt((warmup ? warmup + "\n\n---\n" : "") + notice, leadResumeDocPath, resumeDocNotes);
+      startupPrompt = composePlatformLeadStartupPrompt((warmup ? warmup + "\n\n---\n" : "") + notice, leadResumeDocPath, resumeDocNotes, projectWorkDir(project.id));
     } else if (role === "assistant") {
       startupPrompt = composeAssistantStartupPrompt((warmup ? warmup + "\n\n---\n" : "") + notice);
     } else {
@@ -5166,7 +5170,7 @@ export class SessionService {
           quarantinedAtAdmission = admittedQuarantineCheck.reason;
           return Promise.resolve({ passed: false, failedStatus: null, failedSignal: null, failedTimedOut: false, steps: [] });
         }
-        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, orchestration.maxConcurrentGates), undefined, undefined, hooks, gateSpillPath(opId));
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, orchestration.maxConcurrentGates, project.id), undefined, undefined, hooks, gateSpillPath(opId));
       },
       "high",
     );
@@ -5191,6 +5195,27 @@ export class SessionService {
     return result.passed
       ? { deployed: true, opId }
       : { deployed: false, reason: quarantinedAtAdmission ?? "deploy command failed", exitCode: result.failedStatus ?? null, outputTail: result.outputTail, opId };
+  }
+
+  /**
+   * Card 5eace211 — is ANY gate (queued, running, OR mid-squash — any gate type) currently live for this
+   * project? Checked by the permanent-delete route (`gateway/server.ts`) BEFORE it removes a project's
+   * shared work dir — the existing "no live session" guard on that route does not, by itself, rule out a
+   * still-running gate (e.g. a daemon-initiated deploy/landing-check op), so this is a separate, explicit
+   * check. Reads TWO live sources: {@link GateSemaphore.snapshot}'s registry (the same one `snapshotGates`
+   * reads) for an admitted-or-queued op, PLUS {@link GateSemaphore.squashOnlySnapshot} for a `merge`-kind
+   * op that already released its cap slot but is still mid-squash (`holdRepoGuardOnExit`, not yet freed by
+   * `endSquash`/`releaseMergeRepoGuard`) — the first source alone goes blind the instant a passing gate
+   * hands off to its own squash phase. KNOWN, DELIBERATELY UNCLOSED residual gaps (the dist-importer-
+   * check's own pre-admission coalescing queue, and a stray child process that outlived its semaphore
+   * entry): see `docs/decisions/5eace211-project-work-dir-sibling-root.md`'s own "known blind spots"
+   * section — do not restate or re-derive that list here.
+   */
+  hasLiveGateForProject(projectId: string): boolean {
+    return (
+      this.gateSemaphore.snapshot().entries.some((e) => e.projectId === projectId) ||
+      this.gateSemaphore.squashOnlySnapshot().some((e) => e.projectId === projectId)
+    );
   }
 
   /**
@@ -8751,7 +8776,7 @@ export class SessionService {
               // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
               // session row above — the same resolution, so the prompt can never disagree with the worktree.
               // A revive drops the agent base brief: the forked conversation already carries it (card dc13bcf1).
-              composeWorkerStartupPrompt(internal?.revive ? undefined : workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut),
+              composeWorkerStartupPrompt(internal?.revive ? undefined : workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut, projectWorkDir(project.id)),
               codescapeStatus.text,
             ),
             workerProjectMemoryFramed,
@@ -14009,7 +14034,7 @@ export class SessionService {
           // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
           startupPrompt: appendMemoryRecallToStartupPrompt(
             appendMemoryRecallToStartupPrompt(
-              composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext),
+              composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext, undefined, undefined, projectWorkDir(project.id)),
               codescapeStatus.text,
             ),
             recycleProjectMemoryFramed,
@@ -15199,7 +15224,7 @@ export class SessionService {
           `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
           `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
           `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
-        { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } },
+        { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) },
       ),
       codescapeStatus.text,
     );
@@ -15619,7 +15644,7 @@ export class SessionService {
     // one, and never another lineage's file.
     const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, lineageRootId(this.db, old));
     const resumeDocNotes = composeResumeDocOperationalNotes(project.vaultPath, leadResumeDocPath);
-    const startupPrompt = composePlatformLeadStartupPrompt(continuation, leadResumeDocPath, resumeDocNotes);
+    const startupPrompt = composePlatformLeadStartupPrompt(continuation, leadResumeDocPath, resumeDocNotes, projectWorkDir(project.id));
 
     const now = new Date().toISOString();
     const fresh: Session = {
@@ -19006,7 +19031,7 @@ export class SessionService {
             // @decision d099087f — same for the round-trip state: a whole-gate re-run on the re-pinned tip is complete evidence for THAT tip
             // (c59165b8's contract); captureGatedTip below re-takes the reflog snapshots at the re-pin. Single-file/resumed links stay sticky.
             gateHeadLeftDuringRun = false; gateHeadReturned = false; gateHeadLeftAt = undefined; gateReflogUnverified = false; anyLinkPreHeadOff = undefined; anyLinkPreUnverified = false;
-            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), false, undefined, hooks, gateSpillFile);
             transientGateSpawned = true;
             if (r.passed) holdRepoGuardOnExit();
             return r;
@@ -19057,7 +19082,7 @@ export class SessionService {
             // DELIBERATELY NO `reunionAtAdmission()` (card b9e07a4a): this runs ONE test file, so re-unioning
             // onto a moved main would let the squash land on a base the other files never ran against; a
             // moved base instead fails closed via `requireCanonicalHead` at squash time.
-            await captureGatedTip(); const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(); const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), false, undefined, hooks, gateSpillFile);
             // Only the LAST link's hold counts (the semaphore resets it per link), so a pass here that a
             // resume then follows is simply superseded — the card 7ad12202 self-deadlock cannot occur.
             if (rr.passed) holdRepoGuardOnExit();
@@ -19088,7 +19113,7 @@ export class SessionService {
                 // Card 3007bb04: this is the ONLY other link that can auto-extend (the retry links pass
                 // `allowExtend:false`), so its extend must feed `futileNow()` too, exactly like attempt 1's.
                 const resumeHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), undefined, undefined, resumeHooks, gateSpillFile);
+                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), undefined, undefined, resumeHooks, gateSpillFile);
                 if (resumed.passed) holdRepoGuardOnExit();
                 return resumed;
               },
@@ -19136,7 +19161,7 @@ export class SessionService {
             // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — an ADDITIONAL
             // observer of the SAME event, never a replacement for the live registry's `entry.extended`.
             const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap), undefined, undefined, mirroredHooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), undefined, undefined, mirroredHooks, gateSpillFile);
             // CARD c24dd48a: a passing gate hands off to this method's own squash phase — keep the per-repo
             // guard held (`beginSquash`/`endSquash` extend then release it). A failing gate never squashes.
             if (r.passed) holdRepoGuardOnExit();
@@ -20863,7 +20888,7 @@ export class SessionService {
                 fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
                   batchRetryStartedAt = startedAt;
                   // Card a16c580b: ONE spill path for the whole batch op (`gateSpillPath(opId)` is pure).
-                  const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates), false, undefined, hooks, gateSpillPath(opId));
+                  const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId), false, undefined, hooks, gateSpillPath(opId));
                   // Only the LAST link's hold counts (the semaphore resets it per link).
                   if (rr.passed) holdRepoGuardOnExit();
                   if (rr.passed && remaining.length > 0) batchPartialPassResult = rr;
@@ -20888,7 +20913,7 @@ export class SessionService {
                     fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
                       batchResumeStartedAt = startedAt;
                       // No re-union; `allowExtend` left at its default (card 7ad12202 [7]).
-                      const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates), undefined, undefined, hooks, gateSpillPath(opId));
+                      const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId), undefined, undefined, hooks, gateSpillPath(opId));
                       if (resumed.passed) holdRepoGuardOnExit();
                       return resumed;
                     },
@@ -20912,7 +20937,7 @@ export class SessionService {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
-                const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates), undefined, undefined, hooks, gateSpillPath(opId));
+                const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) holdRepoGuardOnExit();
                 return gr;
               }, "high", afterAttempt1, async (settled, thrown) => {
@@ -22229,7 +22254,7 @@ export class SessionService {
       try {
         result = await this.gateSemaphore.runExclusive(args.cap, descriptor, async (startedAt, cancelSignal, hooks) => {
           cancelSignalRef = cancelSignal;
-          const r = await runGateSeq(args.command, args.worktreePath, args.timeoutMs, undefined, gateOpIdEnvOverride(opId, 0, args.cap, WORKER_GATE_ENV_OVERRIDE), true, cancelSignal, hooks, gateSpillPath(opId));
+          const r = await runGateSeq(args.command, args.worktreePath, args.timeoutMs, undefined, gateOpIdEnvOverride(opId, 0, args.cap, args.projectId, WORKER_GATE_ENV_OVERRIDE), true, cancelSignal, hooks, gateSpillPath(opId));
           durationMs = Date.now() - startedAt;
           return r;
         }, "low");
@@ -22537,7 +22562,7 @@ export class SessionService {
           const gate = await runGateSeq(
             `pnpm --filter @loom/daemon test:daemon --only-file=${JSON.stringify(onlyFilePath)}`,
             worktreePath, gateTimeoutMs, undefined,
-            gateOpIdEnvOverride(opId, 0, gateCap, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, hooks, gateSpillPath(opId),
+            gateOpIdEnvOverride(opId, 0, gateCap, projectId, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, hooks, gateSpillPath(opId),
           );
           return { kind: "gate", gate, ranSize: runSet.length, matchedSize, corpusSize: runSetResult.corpusSize };
         },
@@ -23643,7 +23668,7 @@ export class SessionService {
                 // comment applies verbatim here) — `hooks.onExtend?.()` still fires so gate_queue/gate_status
                 // keep reading the SAME live signal they always have.
                 const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { workerGateExtended = true; hooks.onExtend?.(); } };
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, gateCap, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks, gateSpillPath(opId));
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, gateCap, project.id, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks, gateSpillPath(opId));
               },
               "low",
             );

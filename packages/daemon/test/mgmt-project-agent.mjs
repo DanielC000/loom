@@ -13,6 +13,9 @@
 //      the on-disk transcript-snapshot dir; deleteAgent removes its sessions (+ that agent's schedules).
 //   F. agent-surface guard: deleteProject/deleteAgent/restoreProject are db methods reached ONLY via the
 //      loopback REST routes above — there is no MCP path (asserted structurally in the worker report).
+//   G. project work dir lifecycle (card 5eace211): a soft archive KEEPS the shared work dir and reports
+//      its size; a permanent delete REFUSES while hasLiveGateForProject(id) is true (dir survives); once
+//      the gate clears, the permanent delete succeeds and the dir is actually removed.
 // Run: 1) build the daemon (turbo builds shared first), 2) node test/mgmt-project-agent.mjs
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -27,12 +30,18 @@ const tmpHome = path.join(os.tmpdir(), `loom-mgmt-${Date.now()}-${process.pid}`)
 fs.mkdirSync(tmpHome, { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 process.env.LOOM_PORT = "45417";
-requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the real ~/.loom
+// Card 5eace211 (Code Review, CRITICAL): clear any AMBIENT LOOM_PROJECT_WORK_ROOT (a human may set this
+// to point at the REAL shared project-work-dir root — Decision 2) BEFORE importing dist/paths.js, which
+// reads it at module load — section G's own ensureProjectWorkDir call below would otherwise create a
+// real entry under the human's real root instead of this file's own throwaway sibling.
+delete process.env.LOOM_PROJECT_WORK_ROOT;
+requireHermeticEnv(); // confirm LOOM_HOME (and, now, LOOM_PROJECT_WORK_ROOT if still ambient) is isolated
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { snapshotTranscript, archivedTranscriptExists, archivedTranscriptPath, encodeProjectDir } =
   await import("../dist/sessions/transcript.js");
+const { ensureProjectWorkDir } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -40,7 +49,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const now = new Date().toISOString();
 const dbFile = path.join(tmpHome, "loom.db");
 const db = new Db(dbFile);
-const stub = {};
+// Card 5eace211: the permanent-delete route's in-flight-gate check reads `deps.sessions
+// .hasLiveGateForProject` — this fixture's `stub` otherwise implements nothing on `sessions`
+// because no OTHER route exercised here needs it; keyed by projectId via `liveGateProjectIds` (empty
+// by default, so every existing check below still sees "no gate running" exactly as before) so section
+// F can toggle it live for ONE specific project without disturbing every other case in this file.
+const liveGateProjectIds = new Set();
+const stub = { hasLiveGateForProject: (id) => liveGateProjectIds.has(id) };
 const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
 
 const mkProject = (id, over = {}) => ({ id, name: id, repoPath: "C:/tmp/loom-mgmt", vaultPath: "C:/tmp/loom-mgmt/vault", config: {}, createdAt: now, archivedAt: null, reserved: false, ...over });
@@ -213,6 +228,40 @@ try {
     !!db.getAgent("aKeep") && !!db.getSession("sKeep") && !!db.getSchedule("schKeep") && !!db.getProject("pAg") && db.listEvents("sKeep").length === 1);
   const delMissing = await app.inject({ method: "DELETE", url: "/api/agents/nope" });
   check("E: delete unknown agent → 404", delMissing.statusCode === 404);
+
+  // ════════ G. project work dir lifecycle (card 5eace211) ════════
+  // (c) a SOFT archive KEEPS the shared work dir (reversible, mirrors rows/sessions staying retained) and
+  // reports its size; (a) a PERMANENT delete REFUSES while a gate is still live for the project (the dir
+  // survives the refusal); (b) once the gate clears, the permanent delete succeeds and the whole dir is
+  // actually removed — `deleteProjectWorkDir`'s own hardening (paths.ts) only acts on a real UUID-shaped
+  // id directly under PROJECTS_WORK_ROOT, so this id must genuinely look like one.
+  const pwdId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  db.insertProject(mkProject(pwdId, { name: "WorkDirLifecycle" }));
+  const workDir = ensureProjectWorkDir(pwdId, "WorkDirLifecycle");
+  fs.writeFileSync(path.join(workDir, "payload.bin"), Buffer.alloc(4096, 7));
+  check("G: precondition — the project's work dir exists on disk with a real payload before any archive/delete",
+    fs.existsSync(workDir) && fs.statSync(path.join(workDir, "payload.bin")).size === 4096);
+
+  const archG = await app.inject({ method: "DELETE", url: `/api/projects/${pwdId}` });
+  check("G(c): soft archive (bare DELETE) → 200", archG.statusCode === 200);
+  const archGBody = JSON.parse(archG.body);
+  check("G(c): soft archive response carries workDir.bytes (at least the written payload)",
+    typeof archGBody.workDir?.bytes === "number" && archGBody.workDir.bytes >= 4096);
+  check("G(c): soft archive response carries workDir.truncated:false for this small payload", archGBody.workDir?.truncated === false);
+  check("G(c): the work dir + its payload are STILL on disk after a soft archive",
+    fs.existsSync(workDir) && fs.existsSync(path.join(workDir, "payload.bin")));
+
+  liveGateProjectIds.add(pwdId);
+  const delBlocked = await app.inject({ method: "DELETE", url: `/api/projects/${pwdId}/permanent` });
+  check("G(a): permanent-delete REFUSES while hasLiveGateForProject(id) is true (400)",
+    delBlocked.statusCode === 400 && /gate still running or queued/.test(JSON.parse(delBlocked.body).error));
+  check("G(a): the project row + its work dir both SURVIVE the refusal", !!db.getProject(pwdId) && fs.existsSync(workDir));
+
+  liveGateProjectIds.delete(pwdId);
+  const delOk = await app.inject({ method: "DELETE", url: `/api/projects/${pwdId}/permanent` });
+  check("G(b): permanent-delete succeeds once the gate clears (200)", delOk.statusCode === 200 && JSON.parse(delOk.body).ok === true);
+  check("G(b): the project row is gone", !db.getProject(pwdId));
+  check("G(b): the work dir is REMOVED from disk (deleteProjectWorkDir, real UUID-shaped id)", !fs.existsSync(workDir));
 } finally {
   await app.close();
   db.close();
@@ -222,6 +271,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project rename/vaultPath; vaultPath:\"\" unbinds on a repo-bound project but is refused on a vault-only one; archive↔restore; reserved guard (archive + permanent); live-session block (project + agent); deleteProject cascades rows + on-disk snapshots; deleteAgent cascades its sessions/schedules only."
+  ? "\n✅ ALL PASS — project rename/vaultPath; vaultPath:\"\" unbinds on a repo-bound project but is refused on a vault-only one; archive↔restore; reserved guard (archive + permanent); live-session block (project + agent); deleteProject cascades rows + on-disk snapshots; deleteAgent cascades its sessions/schedules only; a project's shared work dir survives a soft archive (reported size) and a permanent delete that's blocked while a gate is live, then is actually removed once the gate clears."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

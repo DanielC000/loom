@@ -425,6 +425,32 @@ failures — enable `core.longpaths` if the path is unavoidably deep. A bare POS
 portable on Windows — Git Bash and Node.js resolve it to different real directories — so for any scratch
 file a later Node/Read step will touch, use an absolute path (the session scratch dir), never `/tmp`.
 
+**Never create files or folders at a drive root, or loose in your home directory** — not even a
+"temporary" test/build/cache folder you mean to delete later; that habit is exactly what accumulated
+~110 ad hoc folders at a drive root on one real host. Every session bound to a project gets
+`LOOM_PROJECT_WORK_DIR` in its env (check for it — no need to wait for a kickoff to name it); put a
+dependency/package-download cache, or any other test/build/cache folder that should SURVIVE your session
+and be usable by a sibling worker or a later gate, there instead.
+
+⚠️ **A real BUILD OUTPUT or target dir (a compiler's `target/`/`build/`/`out/`, not a download cache) is
+NOT safe to share bare at the project work dir's top level — put it in a dir keyed to YOUR OWN branch or
+worktree underneath it instead** (e.g. `$LOOM_PROJECT_WORK_DIR/<your-branch-or-worktree-id>/target`).
+Two concurrent branches pointed at the same bare build-output dir can make one branch's gate silently
+compile, link against, or run the OTHER branch's binaries — a real incident gave false GREENS and false
+REDS this way. The content-addressed caches that ARE safe to share bare (a package download cache, an
+`sccache`-style compiler-object cache) are safe for the opposite reason: every entry is keyed by the
+content it caches, so two branches writing the same cache can never see each other's in-progress, branch-
+specific output. Delete your own per-branch build dir once your run no longer needs it — the project work
+dir is shared and persistent, never auto-reaped, unlike your own per-session scratch dir below. A
+throwaway that's yours ALONE still belongs under your per-session scratch dir, never the project work dir
+and never a drive root or your home directory.
+
+ℹ️ **Codex sandbox caveat (unverified, disclosed rather than assumed):** a codex-harness worker's own CLI
+sandbox may deny a write outside its worktree cwd entirely, the same class of restriction that already
+forces codex's own auto-commit path to work around a denied `.git` write — this hasn't been separately
+verified for `LOOM_PROJECT_WORK_DIR` specifically. If a write there is silently refused, treat it like any
+other sandbox-denied write (report it up) rather than assuming the variable itself is broken.
+
 **A shared temp directory is shared with OTHER sessions, not just other platforms.** Write
 verification logs and scratch artifacts under your own session scratch dir (`$LOOM_SCRATCH_DIR` when
 set), never a bare `/tmp` or other host-wide temp path — and never derive a count by globbing one:

@@ -14,6 +14,7 @@ import { sweepDeadSessions, watchClaudeProjects, watchCodexSessions } from "./se
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { composePromptStaleBanner } from "./sessions/prompt-stale-banner.js";
 import { runBootRecoveryPrefix } from "./sessions/boot-backstop.js";
+import { kickProjectsWorkRootUsageRefresh } from "./sessions/project-work-dir-usage.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
@@ -143,6 +144,9 @@ async function main(): Promise<void> {
   declareDaemonProcess();
   const db = new Db();
   dbForShutdown = db; // lets the boot-safe shutdown stub registered above best-effort close it
+  // Card 5eace211: warm the PROJECTS_WORK_ROOT usage cache in the background at boot, so the FIRST
+  // served_status read of the fleet's life is less likely to see the all-zero initial value.
+  kickProjectsWorkRootUsageRefresh(db);
   // Card a09b81a0 (round 2): wire the code-repo-collision guard HERE, immediately after `db` opens and
   // well before `startGatewayListeners`/`companionController.startInitial` below — the old position
   // (just before `startVaultVersioners`) left commitVault/vault_write fail-open for the whole window
@@ -699,6 +703,9 @@ async function main(): Promise<void> {
     // for merging into a spawn's env — read LIVE per-spawn (like every callback above), never boot-bound,
     // so a freshly-answered credential reaches the very next spawn/resume with no daemon restart.
     resolveCredentialSessionEnv: (projectId: string) => resolveCredentialSessionEnv(db, projectId),
+    // Card 5eace211: read LIVE per-spawn (like every callback above) so a project rename reaches the
+    // project work dir's marker file on the very next spawn, with no daemon restart.
+    resolveProjectName: (projectId: string) => db.getProject(projectId)?.name,
     // @decision 9d73e537 — keyed on CURRENT processState (live/starting), never resumability: the
     // resumability-keyed version under-pruned the common exited-but-resumable case, and DB process_state
     // (not PtyHost's own live/liveCodex maps) is the reliable source for a sibling mid-spawn.

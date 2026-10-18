@@ -44,6 +44,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { projectWorkDir } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -90,7 +91,7 @@ try {
     const holds = new Map();
     const calls = [];
     const fakeGate = async (gate, cwd, timeoutMs, _runStep, envOverride) => {
-      calls.push({ cwd, opId: envOverride?.LOOM_GATE_OP_ID });
+      calls.push({ cwd, opId: envOverride?.LOOM_GATE_OP_ID, workDir: envOverride?.LOOM_PROJECT_WORK_DIR });
       await holds.get(cwd).p;
       return { passed: true, steps: [{ step: gate, durationMs: 10, status: 0 }], outputTail: "ok" };
     };
@@ -129,6 +130,10 @@ try {
     const callB = calls.find((c) => c.cwd === B.worktreePath);
     check("(A — THE FIX) A's gate child received A's OWN opId, never B's", callA?.opId === opIdA && callA?.opId !== opIdB);
     check("(A — THE FIX) B's gate child received B's OWN opId, never A's", callB?.opId === opIdB && callB?.opId !== opIdA);
+    // Card 5eace211: LOOM_PROJECT_WORK_DIR reaches the merge gate's env, scoped to EACH project's own id —
+    // never A's path leaking into B's child or vice versa.
+    check("(A — 5eace211) A's gate child received A's OWN project work dir, never B's", callA?.workDir === projectWorkDir(A.projId) && callA?.workDir !== projectWorkDir(B.projId));
+    check("(A — 5eace211) B's gate child received B's OWN project work dir, never A's", callB?.workDir === projectWorkDir(B.projId) && callB?.workDir !== projectWorkDir(A.projId));
   }
 
   // ── (B) RETRIED MERGE, TRANSIENT-KILL — first attempt AND the retry carry the SAME opId ─────────────────
@@ -138,10 +143,12 @@ try {
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const captured = [];
+    const capturedWorkDir = [];
     let attempt = 0;
     const fakeGate = async (gate, cwd, timeoutMs, _runStep, envOverride) => {
       attempt++;
       captured.push(envOverride?.LOOM_GATE_OP_ID);
+      capturedWorkDir.push(envOverride?.LOOM_PROJECT_WORK_DIR);
       if (attempt === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: null, failedSignal: "SIGKILL", failedTimedOut: false, outputTail: "" };
       return { passed: true, steps: [{ step: gate, durationMs: 10, status: 0 }], outputTail: "ok" };
     };
@@ -156,6 +163,7 @@ try {
     check("(B precondition) transient kill retried once then passed — merged:true", confirm.merged === true);
     check("(B precondition) exactly 2 gate calls (first attempt + one retry)", attempt === 2);
     check("(B — THE FIX) BOTH the first attempt AND the retry carried the SAME opId as this op's own", captured.length === 2 && typeof captured[0] === "string" && captured[0] === captured[1] && captured[0] === confirm.opId);
+    check("(B — 5eace211) BOTH the first attempt AND the retry carried the SAME project work dir", capturedWorkDir.length === 2 && capturedWorkDir[0] === capturedWorkDir[1] && capturedWorkDir[0] === projectWorkDir(C.projId));
   }
 
   // ── (C) RETRIED MERGE, SINGLE-FILE (card 344ce950) — same same-opId-across-both-calls proof, the OTHER
@@ -166,10 +174,12 @@ try {
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const captured = [];
+    const capturedWorkDir = [];
     let attempt = 0;
     const fakeGate = async (gate, cwd, timeoutMs, _runStep, envOverride) => {
       attempt++;
       captured.push(envOverride?.LOOM_GATE_OP_ID);
+      capturedWorkDir.push(envOverride?.LOOM_PROJECT_WORK_DIR);
       // Card 0e5b2045: identifyRetriableTestFiles reads failTierTest/failTierTestCount, NOT
       // failingTest/failingTestCount (the two decoupled — an UNCAUGHT-idiom line can now outrank a bare
       // FAIL <name> summary in failingTest; the retry always targets failTierTest instead). Both are set
@@ -193,6 +203,7 @@ try {
     check("(C precondition) single-file retry fired and passed — merged:true, retriedFile set", confirm.merged === true && confirm.retriedFile === "flaky-one");
     check("(C precondition) exactly 2 gate calls (first genuine failure + one single-file retry)", attempt === 2);
     check("(C — THE FIX) BOTH the first attempt AND the single-file retry carried the SAME opId as this op's own", captured.length === 2 && typeof captured[0] === "string" && captured[0] === captured[1] && captured[0] === confirm.opId);
+    check("(C — 5eace211) BOTH the first attempt AND the single-file retry carried the SAME project work dir", capturedWorkDir.length === 2 && capturedWorkDir[0] === capturedWorkDir[1] && capturedWorkDir[0] === projectWorkDir(D.projId));
   }
 
   // ── (D) runWorkerGate — the ONE site that already had SOME override before this card; proves the merge
@@ -218,6 +229,7 @@ try {
     check("(D precondition) settles inline, passed:true", result.settled === true && result.ok === true && result.value.passed === true);
     check("(D — REGRESSION GUARD) LOOM_GATE_TEST_CONCURRENCY is still pinned (the pre-existing override)", capturedEnv?.LOOM_GATE_TEST_CONCURRENCY === "3");
     check("(D — THE FIX) LOOM_GATE_OP_ID is ALSO present now, matching this op's own opId", capturedEnv?.LOOM_GATE_OP_ID === result.value.opId);
+    check("(D — 5eace211) LOOM_PROJECT_WORK_DIR is present, scoped to E's OWN project id", capturedEnv?.LOOM_PROJECT_WORK_DIR === projectWorkDir(E.projId));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
