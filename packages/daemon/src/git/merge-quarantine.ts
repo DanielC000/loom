@@ -2920,27 +2920,38 @@ function anotherLiveEntryOwnsFile(filename: string, updated: MergeQuarantineEntr
 /**
  * `true` iff every REAL token physically present in `orphanFile`'s own on-disk content right now is
  * already accounted for by `updated`'s own write — either still outstanding on `updated.tokens`, or
- * exactly the token THIS SAME partial clear just dropped (`clearedToken`) — so overwriting `orphanFile`
- * with `updated` can never durably destroy a token that belonged to anyone else. Layer (b) of
+ * among the tokens THIS SAME partial clear just dropped (`droppedTokens` — the FULL overlap set this
+ * one call is lifting from `updated`, never just one of several, or a file whose on-disk content still
+ * names an overlap token this call hasn't yet accounted for would be left stale forever, one token at a
+ * time, no matter how many times this is called — see `eedf16f5`) — so overwriting `orphanFile` with
+ * `updated` can never durably destroy a token that belonged to anyone else. Layer (b) of
  * {@link orphanRewriteOwnershipConfirmed}'s fix, mirroring {@link markedFinalFullyCoveredByClear}'s own
- * content-containment pattern (`dd34da46`/`95ea8d3f`) rather than inventing a parallel one. A read
- * failure or corrupt/unparseable JSON can never be proven safe (the caller already skips a genuinely
- * MISSING file via its own `existsSync` check before this is ever reached, so ENOENT/EISDIR need no
- * special-casing here, unlike `markedFinalFullyCoveredByClear`'s own).
+ * content-containment pattern (`dd34da46`/`95ea8d3f`, which takes the same plural `candidateTokens: string[]`
+ * shape) rather than inventing a parallel one. A read failure or corrupt/unparseable JSON can never be
+ * proven safe (the caller already skips a genuinely MISSING file via its own `existsSync` check before
+ * this is ever reached, so ENOENT/EISDIR need no special-casing here, unlike
+ * `markedFinalFullyCoveredByClear`'s own).
  *
  * @decision 8db913e2 (Follow-up 29fe2372) — see the decision record.
  *
  * @decision 8db913e2 (Follow-up 495fd320) — a bare scalar (number/string/boolean, never `null`) now ALSO counts as "cannot
  * prove this" rather than vacuously `true`, a strictly safer tightening. See the decision record.
+ *
+ * @decision eedf16f5 — widened from a single `clearedToken` to the full overlap set this call drops, in
+ * one call instead of one per token. Supersedes `64119847`'s "Do not widen this signature" bullet. See
+ * the decision record.
  */
-function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: MergeQuarantineEntry, clearedToken: string): boolean {
+function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): boolean {
   let raw: string;
   try { raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, orphanFile), "utf8"); } catch { return false; }
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { return false; }
   if (!isReadableLatchRecord(parsed)) return false; // e.g. the bare literal `null`
   const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
-  const accountedFor = new Set([...updated.tokens, clearedToken]);
+  // @decision eedf16f5 — `droppedTokens` (never named `clearedTokens`, the SEPARATE module-level global
+  // tombstone set below) is the FULL overlap set THIS call drops — shadowing that global here would
+  // silently disable its own fallback on the next line. See the decision record.
+  const accountedFor = new Set([...updated.tokens, ...droppedTokens]);
   return onDiskTokens.every((t) => accountedFor.has(t) || clearedTokens.has(t));
 }
 
@@ -2956,7 +2967,8 @@ function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: Merge
  *    identity (including `updated`'s own), that still depends on this file as its own current backing —
  *    SAME IDENTITY IS NOT SAME ENTITY (`d4b25feb`), and layer 1 alone cannot tell them apart;
  * 3. {@link orphanFileTokensAccountedForByUpdate} — the file's own on-disk CONTENT must hold no token
- *    this write doesn't already account for ({@link quarantineFileRepoPathIdentity} resolving to the same
+ *    this write doesn't already account for, against the FULL set this one call is dropping (never just
+ *    one of several — `eedf16f5`) ({@link quarantineFileRepoPathIdentity} resolving to the same
  *    identity is necessary but not sufficient — same identity is not same content, `63e49ee2` round 5).
  * Fail-closed on every branch: a file whose ownership cannot be positively confirmed as `updated`'s own,
  * by ALL three layers, is left untouched rather than risk destroying another entity's only durable copy.
@@ -2969,7 +2981,7 @@ function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: Merge
  * record's own file, silently destroyed by a partial clear of an unrelated record sharing only its
  * identity. See the decision record.
  */
-function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuarantineEntry, clearedToken: string): boolean {
+function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): boolean {
   if (keptUnreadableLatchFiles.has(orphanFile)) return false;
   const updatedIdentity = directPathIdentity(updated.repoPath);
   const structuralOwners = [...physicalOwnerRepoPaths(orphanFile), ...survivingSharedClaimRepoPaths(orphanFile)];
@@ -2977,7 +2989,7 @@ function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuara
   if (anotherLiveEntryOwnsFile(orphanFile, updated)) return false;
   const contentIdentity = quarantineFileRepoPathIdentity(path.join(MERGE_QUARANTINE_DIR, orphanFile));
   if (contentIdentity !== updatedIdentity) return false;
-  return orphanFileTokensAccountedForByUpdate(orphanFile, updated, clearedToken);
+  return orphanFileTokensAccountedForByUpdate(orphanFile, updated, droppedTokens);
 }
 
 /**
@@ -2996,12 +3008,14 @@ function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuara
  *
  * @decision 8db913e2 (Follow-up 29fe2372) — `clearedToken` (the token THIS SAME partial clear just dropped from `updated`) is
  * threaded through to {@link orphanRewriteOwnershipConfirmed}'s own layer (b) — see the decision record.
+ *
+ * @decision eedf16f5 — `droppedTokens` is the FULL set this call drops, passed ONCE, never once per token.
  */
-function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry, skip: Set<string>, clearedToken: string): void {
+function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry, skip: Set<string>, droppedTokens: ReadonlySet<string>): void {
   for (const orphanFile of updated.orphanLatchFiles ?? []) {
     if (skip.has(orphanFile)) continue;
     if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, orphanFile))) continue;
-    if (!orphanRewriteOwnershipConfirmed(orphanFile, updated, clearedToken)) {
+    if (!orphanRewriteOwnershipConfirmed(orphanFile, updated, droppedTokens)) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] keeping ${orphanFile} UNTOUCHED (left stale) after a partial clear of ${updated.repoPath} — its own ownership could not be positively confirmed as this same entity's (a different entity's live latch, an unreadable/unparsable read, a marked-kept basename, or a real on-disk token this write doesn't already account for); fail-closed rather than risk destroying a different entity's only durable copy.`);
       continue;
@@ -3093,7 +3107,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${pending.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
     }
-    rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, token);
+    rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
   }
 }
 
@@ -3188,7 +3202,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
     }
   }
-  rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames, token);
+  rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames, new Set([token]));
 }
 
 /**
@@ -3784,10 +3798,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin at ${p.sourceFile} after this clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with an already-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       }
-      // @decision 64119847 — called once per overlap token, mirroring every other caller's own
-      // per-token contract; a multi-token call can leave a folded orphan file stale, an accepted
-      // fail-CLOSED residual. See the decision record.
-      for (const clearedToken of overlapTokens) rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, clearedToken);
+      // @decision eedf16f5 — called ONCE with the FULL overlap set, never once per token, and only
+      // when non-empty — a twin tied by key/orphan-ref alone, no shared token, makes ZERO calls here,
+      // byte-identical to pre-fix; a non-empty overlap must never be split back into per-token calls.
+      if (overlapTokens.length > 0) rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set(overlapTokens));
       candidateTokens.push(...overlapTokens);
       return true; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched
     }

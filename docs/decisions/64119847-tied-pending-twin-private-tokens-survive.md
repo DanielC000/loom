@@ -51,20 +51,15 @@ distinct tokens can exist), and `subsetOfClearedTokens` (every one of P's own to
   as long as the durable rewrite happens inside the pending-filter loop (before that one call), the
   "durable write before tombstone" ordering the Lead required is satisfied by the EXISTING architecture;
   adding a second call would reintroduce the exact multi-call shape that decision replaced.
-- Do not widen `rewriteOrphanLatchFilesAfterPartialClear`'s signature to accept multiple cleared tokens at
-  once just to serve this card. It is called once per overlap token, mirroring every other caller's own
-  per-token contract. When `overlapTokens.length >= 2`, this DETERMINISTICALLY leaves a folded orphan file
-  stale, every time: each call's own ownership-confirmed check accounts only for `updated.tokens` plus the
-  ONE token passed THAT call, so a file still on-disk-holding the OTHER not-yet-accounted overlap token
-  fails every call's check in turn, never on just some of them — this is an ACCEPTED, pre-existing-shaped,
-  fail-CLOSED residual the helper's own doc already names ("a skipped, left-stale file... can never
-  un-quarantine anyone else as a side effect"), not a new regression. Reachable ONLY via the by-key/human
-  routes (`clearMergeQuarantine`, `clearMergeQuarantineByRecordedPath`, `clearMergeQuarantineLatchFile`'s
-  active-match branch) — these call `clearMergeQuarantineByKey` with WHATEVER full token set the active
-  entry currently holds, which can be 2+. The by-token route (`clearMergeQuarantineByToken` →
-  `clearActiveEntryTokenAtKey`) can NEVER produce this shape: it only delegates to
-  `clearMergeQuarantineByKey` when removing ONE token leaves the entry's own remaining set EMPTY, so
-  `entry` at that delegation point always holds exactly the one token just being removed.
+- **SUPERSEDED by card `eedf16f5` — see `docs/decisions/eedf16f5-rewrite-folded-orphan-latch-once-per-overlap-set.md`.**
+  This bullet originally said: do not widen `rewriteOrphanLatchFilesAfterPartialClear`'s signature to
+  accept multiple cleared tokens at once just to serve THIS card, on the grounds that the per-token loop's
+  resulting stale-orphan-file residual was an ACCEPTED, fail-CLOSED shape. Card `eedf16f5` revisited that
+  acceptance on its own dedicated scope (the residual's own blast radius — reachable via every by-key/
+  human clear route — outgrew "accepted") and widened the signature; see that record for the fix and the
+  safety argument (tokens are process-unique `randomUUID`s, so no untied third record can share an overlap
+  token's exact value). This bullet's original reachability analysis (by-key/human routes can hold 2+
+  tokens; the by-token route never can) is unchanged and is restated there.
 - Do not assume the human route (`clearMergeQuarantineByRecordedPath`) needed a change. It reaches the
   same `clearMergeQuarantineByKey` pending-filter via its own active-match loop, but its SEPARATE, broad,
   unconditional pending sweep (identity-matched, no "tied" check at all) runs right after and drops every
