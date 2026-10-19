@@ -3550,19 +3550,67 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
 }
 
 /** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `entry` itself — either the
- *  exact same object (the ordinary, still-valid case) or a DIFFERENT object that shares its own recorded
- *  identity (a legitimate rebuild — a union, an orphan merge — of the SAME logical entry). `false` for
- *  anything else: nothing occupies `key` at all, or a WHOLLY UNRELATED entry does — e.g. a fresh raise
- *  that reused a key a now-stale `armedKeys` snapshot still names (card 883e29bc round 3 finding 1 — the
- *  ORIGINAL, pending-only shape this predicate closed; card 82032b5c round 3 MINOR A generalized it to
- *  the ACTIVE side too, where a bare per-key `.set()` used to overwrite a genuinely different entry's own
- *  in-memory slot on a partial clear). Lifting/overwriting `key` when this is `false` would destroy an
- *  unrelated repo's own, completely unrelated, genuine quarantine — gate every such write on this. */
+ *  exact same object (the ordinary, still-valid case) or, for a genuine REBUILD of the SAME logical
+ *  entry (a union, an orphan merge, a re-point captured before {@link replaceEntryEverywhere} has synced
+ *  this particular slot yet), a DIFFERENT object (`occupant`) sharing `entry`'s identity whose OWN token
+ *  set is ENTIRELY CONTAINED in `entry`'s — `entry` is the CURRENT truth; `occupant` may be an older,
+ *  smaller snapshot of it, never the other way round. `false` for anything else: nothing occupies `key`
+ *  at all, a WHOLLY UNRELATED entry does, two independent same-identity records with
+ *  overlapping-but-incomparable tokens (neither a subset of the other), or — card `f3c644ca`, a real,
+ *  reproduced, DURABLE over-unblock — a DIFFERENT, INDEPENDENT record that merely shares `entry`'s
+ *  identity with no token lineage at all.
+ *
+ *  @decision d4b25feb — identity alone is NEVER sufficient proof of "same logical entry": one identity
+ *  can legitimately hold two INDEPENDENT records at once (e.g. a stale 883e29bc pending-divert twin whose
+ *  own `armedKeys` still names a key a later, unrelated same-identity raise now genuinely owns).
+ *
+ *  @decision 8db913e2 (Follow-up f3c644ca, round 2 CR) — the direction is `occupant ⊆ entry` ONLY, never
+ *  the reverse: the reverse direction reopened a DIFFERENT over-unblock via the automatic settle-time
+ *  `clearMergeQuarantineByToken`. Never reintroduce it.
+ *
+ *  Round 2 CR found `entry ⊆ occupant` (this predicate's prior, round-1 shape) let a pending twin `P`
+ *  sharing ONE of active `W`'s several outstanding tokens wrongly satisfy `P ⊆ W`, lifting W's ENTIRE map
+ *  slot (and its physical latch) on P's own single-token clear — destroying W's OTHER, still-outstanding
+ *  tokens. `occupant ⊆ entry` has no such hazard and is also the semantically safe direction at every
+ *  WRITE-type caller. Code Review verified every real human/automatic clear route it could construct
+ *  still lifts a genuine rebuild fully (W⊂entry, entry⊂W, overlapping-incomparable, disjoint, equal — each
+ *  × every route, in memory and after reboot) — ONE hand-built exception stays FAIL-CLOSED, never
+ *  fail-open: an entry armed at two keys (`armedKeys:[K,K2]`) whose own `K2` slot was never synced to a
+ *  later, same-identity SUPERSET build sitting there can leave that K2 slot un-lifted by the resolvable
+ *  `clearMergeQuarantine` route specifically (`clearMergeQuarantineByRecordedPath` still clears it); no
+ *  real path to that unsynced state was found — {@link replaceEntryEverywhere} syncs every `===` slot.
+ *
+ *  Tokens are fresh `randomUUID()`s per raise, never reused across independent raises, so two genuinely
+ *  independent records always have DISJOINT token sets (this correctly returns `false` for them). A
+ *  genuinely overlapping-but-incomparable pair (sharing SOME tokens, neither a full subset of the other)
+ *  also returns `false` here — verified (Code Review) to still resolve cleanly through every real clear
+ *  route via OTHER mechanisms, never through this predicate claiming a false ownership. A key a fresh
+ *  raise reused from a now-stale `armedKeys` snapshot (card 883e29bc round 3 finding 1 — the ORIGINAL,
+ *  pending-only shape this predicate closed; card 82032b5c round 3 MINOR A generalized it to the ACTIVE
+ *  side too) is exactly the disjoint-tokens case and still correctly returns `false`. Lifting/overwriting
+ *  `key` when this is `false` would destroy an unrelated repo's own, genuine quarantine — gate every such
+ *  write on this. */
 function entryStillOwnsKey(key: string, entry: MergeQuarantineEntry): boolean {
   const occupant = activeQuarantines.get(key);
   if (!occupant) return false;
   if (occupant === entry) return true;
-  return directPathIdentity(occupant.repoPath) === directPathIdentity(entry.repoPath);
+  if (directPathIdentity(occupant.repoPath) !== directPathIdentity(entry.repoPath)) return false;
+  if (occupant.tokens.length === 0 || entry.tokens.length === 0) return false;
+  return occupant.tokens.every((t) => entry.tokens.includes(t));
+}
+
+/** TEST-ONLY: directly arms `entry` at `key` in the REAL, module-global `activeQuarantines` map itself —
+ *  UNLIKE {@link armQuarantineKeyTestOnly}, which writes into a `byRepoKey` map the CALLER supplies, this
+ *  one has no caller-owned map to isolate into and mutates the live singleton directly. Bypasses every
+ *  real arming invariant, including the "tokens is never empty" guarantee every real construction path
+ *  maintains (every fresh-entry site seeds `tokens` with >=1 element; every on-disk parse falls back to a
+ *  non-empty array; no clear path ever leaves a live zero-token record). Lets a test pin
+ *  {@link entryStillOwnsKey}'s own defensive non-empty-tokens clause against a state no real code path
+ *  can produce. Never imported by `index.ts` — the name's `TestOnly` suffix is load-bearing:
+ *  `no-src-testonly-import-guard.mjs` matches `/TestOnly$/` specifically to catch a future import of
+ *  this exact kind of live-map-mutating seam into production code. */
+export function setActiveQuarantineTestOnly(key: string, entry: MergeQuarantineEntry): void {
+  activeQuarantines.set(key, entry);
 }
 
 /**
