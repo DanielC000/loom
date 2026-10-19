@@ -4424,7 +4424,14 @@ export function buildSpawnEnv(
     // createCodexPty, which runs AFTER this function returns. Without this, a stray inherited value would
     // flow straight through on any path that line doesn't reach (e.g. POSIX claude, where tokenRidesEnv is
     // false and the mint-and-assign line never fires at all).
-    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === MCP_TOKEN_ENV_VAR) continue;
+    // Card 99d9eeb5: same scrub for LOOM_PROJECT_WORK_DIR — the daemon's OWN process env can carry this
+    // (every Loom-spawned session now gets it, card 5eace211, so a daemon launched from inside an agent/
+    // worker/manager shell inherits it too). Defense-in-depth, not a live-bug fix: the only legitimate
+    // source is the explicit, projectId-gated Object.assign in createPty/createCodexPty, which runs AFTER
+    // this function returns and always wins for a real spawn. Scrubbed in THIS loop (the base-copy from
+    // processEnv) rather than after the sessionEnv merge below, so a future deliberate sessionEnv override
+    // would still win — consistent with every other var in this function.
+    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === MCP_TOKEN_ENV_VAR || k === "LOOM_PROJECT_WORK_DIR") continue;
     if (v !== undefined) env[k] = v;
   }
   // Git-safety vars for the unattended worker pty (close the "git blocks the pty" wedge class). Set
