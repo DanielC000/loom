@@ -3028,23 +3028,35 @@ function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry,
  * this same per-entry logic to each, in descending order. See the decision record.
  */
 function clearTokenFromPendingIndices(indices: number[], token: string): void {
+  // @decision 8db913e2 (Follow-up c93e9e7a) — one plan per index (reduce-or-remove plus owned keys),
+  // computed ONCE before any delete, never re-derived against an already-mutated map or a second time
+  // (round 2 CR item 3) — the mutating loop below reuses this exact plan. See the decision record.
+  const planByIdx = new Map<number, { action: "reduce" } | { action: "remove"; ownedArmedKeys: string[] }>();
+  const L = new Set<string>();
+  for (const idx of indices) {
+    const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine;
+    if (pending.entry.tokens.filter((t) => t !== token).length !== 0) { planByIdx.set(idx, { action: "reduce" }); continue; }
+    const ownedArmedKeys = (pending.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, pending.entry));
+    planByIdx.set(idx, { action: "remove", ownedArmedKeys });
+    for (const k of ownedArmedKeys) L.add(k);
+  }
+
   for (const idx of [...indices].sort((a, b) => b - a)) { // descending so earlier (lower) indices stay valid
     const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine;
     const identity = directPathIdentity(pending.entry.repoPath);
-    const remaining = pending.entry.tokens.filter((t) => t !== token);
-    if (remaining.length === 0) {
+    const plan = planByIdx.get(idx)!;
+    if (plan.action === "remove") {
       pendingUnresolvedQuarantines.splice(idx, 1);
       const orphanFilesToSweep = new Set(pending.entry.orphanLatchFiles ?? []);
-      // @decision 8db913e2 (Follow-up 4b06875f, Round 4, CR be296830) — liftedKeys must be the MINIMAL
-      // correct set: over-including a key is FAIL-OPEN (excludeLiftedResolvedKey DROPS a matching
-      // resolvedKey, unblocking a repo), never fail-closed — see the decision record.
-      const ownedArmedKeys = (pending.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, pending.entry));
-      const liftedKeysForEntry = new Set(ownedArmedKeys);
-      for (const k of pending.entry.armedKeys ?? []) {
-        if (!entryStillOwnsKey(k, pending.entry)) continue;
+      // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the pre-pass
+      // above, against the then-still-unmutated map — never recomputed here against a map an earlier
+      // index's own removal in THIS SAME descending loop may have already mutated. A repeated
+      // `deleteMergeQuarantineLatchByKey` on a key an earlier twin already deleted is intentional and
+      // idempotent (its own `fs.unlinkSync` tolerates ENOENT; nothing else re-runs destructively).
+      for (const k of plan.ownedArmedKeys) {
         activeQuarantines.delete(k);
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity, liftedKeysForEntry);
+        deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity, L);
       }
       // @decision 8db913e2 (round 4) — tombstone `token` HERE, after the splice/delete above already
       // removed every in-memory trace of this pending entry — see `tombstoneIfNotSurviving`'s own doc.
@@ -3055,6 +3067,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       for (const orphanFile of orphanFilesToSweep) sweepOrphanLatchFileIfUnreferenced(orphanFile, pending.entry.tokens);
       continue;
     }
+    const remaining = pending.entry.tokens.filter((t) => t !== token);
     const updated: MergeQuarantineEntry = { ...pending.entry, tokens: remaining };
     // @decision d4b25feb (round 3) — re-point EVERY in-memory reference to this entry (883e29bc's own
     // divert can make it the SAME object armed in activeQuarantines) before durably rewriting each owned key.
@@ -3652,7 +3665,7 @@ export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | un
  * `c9114934` it still durably PROTECTS a foreign degraded occupant's content before the unconditional
  * unlink destroys it; see `deleteMergeQuarantineLatchByKey`.
  */
-export function clearMergeQuarantineByKey(key: string, identityRepoPath: string): { wasQuarantined: true; latchKept: true; referencingRepoPaths: string[] } | void {
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys?: ReadonlySet<string>): { wasQuarantined: true; latchKept: true; referencingRepoPaths: string[] } | void {
   const entry = activeQuarantines.get(key);
   // @decision 8db913e2 (round 4) — candidate tokens for the ONE tombstone call at the end of this
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
@@ -3672,6 +3685,49 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // @decision 8db913e2 (round 4) — every physical final this clear's own write path touches, for the
   // `tombstoneIfNotSurviving` call at the end — see that function's own doc, part (b).
   const touchedFinalBasenames = keysToLift.map((k) => path.basename(quarantinePathForKey(k)));
+  // A pending (boot-unverifiable, no-resolvedKey) entry isn't keyed into activeQuarantines at all — see
+  // reenterMergeQuarantinesAtBoot's PASS 1 and activeMergeQuarantineFor's lazy re-resolve. Match it by
+  // DIRECT identity against `identityRepoPath` (never a fresh walking recompute — see this function's own
+  // doc comment) so a clear issued while still unresolvable actually lifts it, and delete its OWN source
+  // file too (round 2 finding 1), or it survives to resurrect the quarantine.
+  const identity = directPathIdentity(identityRepoPath);
+
+  // @decision 8db913e2 (Follow-up c93e9e7a) — compute the full lifted-key union `L` ONCE, before any
+  // delete in this call, never per-entry against a map an earlier tied twin's processing already
+  // mutated. See the decision record's own Follow-up c93e9e7a section for the full design.
+  //
+  // `pendingPlan` caches each tied pending entry's own reduce-or-remove decision and (for a to-be-removed
+  // entry) its pre-delete-snapshot-owned armed keys, keyed by the entry's own stable wrapper object
+  // (`.entry` can be reassigned in place by a reduce — see `replaceEntryEverywhere` — but the wrapper
+  // object itself never is), so the real, mutating filter below reuses the exact same decision rather
+  // than recomputing it. `externalLiftedKeys` lets a caller that delegates here per matched active entry
+  // (`clearMergeQuarantineByRecordedPath`) thread its own, already-complete outer union in.
+  const pendingPlan = new Map<PendingUnresolvedQuarantine, { action: "reduce" } | { action: "remove"; ownedArmedKeys: string[] }>();
+  const L = new Set<string>([...keysToLift, ...(externalLiftedKeys ?? [])]);
+  for (const p of pendingUnresolvedQuarantines) {
+    // Same tie rules as the pre-existing filter below: the same object reference, a shared lifted
+    // key/orphan-file reference (decisions d4b25feb round 2, 1922be3a round 5, 882d6cff multi-claimant),
+    // or a proven token subset.
+    if (directPathIdentity(p.entry.repoPath) !== identity) continue;
+    const subsetOfClearedTokens = !!entry && p.entry.tokens.length > 0 && p.entry.tokens.every((t) => entry.tokens.includes(t));
+    const tiedViaKeyOrOrphanRef = !!entry && (keysToLift.some((k) => p.entry.armedKeys?.includes(k)) || !!entry.orphanLatchFiles?.includes(p.sourceFile));
+    const tiedToThisEntity = !entry || p.entry === entry || tiedViaKeyOrOrphanRef || subsetOfClearedTokens;
+    if (!tiedToThisEntity) continue;
+    // @decision 64119847 — a structural-only tie REDUCES rather than drops when P still holds a token
+    // outside `entry.tokens`; a reduced twin keeps EVERY key it was armed on, so it contributes NOTHING
+    // to `L` — see the decision record.
+    if (entry && tiedViaKeyOrOrphanRef && p.entry !== entry && !subsetOfClearedTokens) {
+      const remainingTokens = p.entry.tokens.filter((t) => !entry.tokens.includes(t));
+      if (remainingTokens.length > 0) { pendingPlan.set(p, { action: "reduce" }); continue; }
+    }
+    // @decision 8db913e2 (Follow-up 4b06875f, Round 4, CR be296830) — ownership gated through
+    // `entryStillOwnsKey`, never the whole `armedKeys` list — over-including is FAIL-OPEN. Read against
+    // the still-unmutated live map; nothing in this function has deleted anything yet at this point.
+    const ownedArmedKeys = (p.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, p.entry));
+    pendingPlan.set(p, { action: "remove", ownedArmedKeys });
+    for (const k of ownedArmedKeys) L.add(k);
+  }
+
   for (const k of keysToLift) activeQuarantines.delete(k);
   // The entry's own physical latch file(s) may live at a DIFFERENT hash than `key`'s — e.g. never migrated
   // because the registered path was unresolvable at boot (PASS 1 never migrates on an unverifiable key).
@@ -3683,12 +3739,6 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // repoPath on disk for the SAME entity; see the decision record for why that must never "protect" it.
   const clearingRepoPath = entry && directPathIdentity(entry.repoPath) !== directPathIdentity(identityRepoPath)
     ? identityRepoPath : undefined;
-  // A pending (boot-unverifiable, no-resolvedKey) entry isn't keyed into activeQuarantines at all — see
-  // reenterMergeQuarantinesAtBoot's PASS 1 and activeMergeQuarantineFor's lazy re-resolve. Match it by
-  // DIRECT identity against `identityRepoPath` (never a fresh walking recompute — see this function's own
-  // doc comment) so a clear issued while still unresolvable actually lifts it, and delete its OWN source
-  // file too (round 2 finding 1), or it survives to resurrect the quarantine.
-  const identity = directPathIdentity(identityRepoPath);
   // @decision f5c42043 — CAPTURE and SURFACE every kept-file's own referencing repoPaths (previously
   // discarded for the deleteMergeQuarantineLatchByKey calls below) instead of a bare unqualified success.
   const keptReferencingRepoPaths = new Set<string>();
@@ -3698,93 +3748,64 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string)
   // own gate let a RESOLVABLE eviction winner's clear destroy a foreign file at one of its OTHER armed
   // keys); the PRIMARY ownership check and the token-overlap BACKSTOP both run for every key, every clear.
   //
-  // @decision 8db913e2 (Follow-up 78fccd3f, CR CRITICAL) — pass `keysToLift` (computed BEFORE the
-  // deletes above) as the override: re-deriving it AFTER those deletes makes every other key look
-  // un-owned, wrongly keeping a sibling's resolvedKey and re-blocking an already-cleared repo on reboot.
-  const liftedKeysForClear = new Set(keysToLift);
+  // @decision 8db913e2 (Follow-up c93e9e7a) — pass `L` (computed above, before any delete in this call)
+  // rather than a `keysToLift`-only set, so a key only a tied pending twin owns is still correctly
+  // recognised as already lifted by this call (round-2 MAJOR 2 — this active loop used to miss it).
   for (const k of keysToLift) {
-    for (const rp of deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, liftedKeysForClear)) keptReferencingRepoPaths.add(rp);
+    for (const rp of deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, L)) keptReferencingRepoPaths.add(rp);
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   const sourceFilesToSweep: string[] = [];
-  // @decision 64119847 — "tied via a shared armed key/orphan-file" is structural, never proof every one
-  // of P's own tokens is being lifted by THIS call; only the trivial twin and a proven token subset are.
-  // See the decision record.
   pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => {
-    if (directPathIdentity(p.entry.repoPath) !== identity) return true;
-    // When an ACTIVE entry really is being cleared (`entry` truthy), a same-identity pending entry is tied
-    // to THIS SAME entity three ways: the same object reference, it shares a key being lifted, or the
-    // active entry's own `orphanLatchFiles` already names its `sourceFile` (97cff6db's own standalone-
-    // tracking-reference shape for a colliding sibling's folded migrate source — never `===` the union,
-    // never armed, but still legitimately part of what this clear sweeps). When `entry` is undefined (a
-    // PURE pending clear, nothing armed anywhere), there is no active entry to confuse it with — keep the
-    // pre-existing, unconditional identity sweep (card 882d6cff's own multi-claimant design needs it).
-    //
-    // @decision d4b25feb (round 2) — outside those cases, a same-identity pending entry is a wholly
-    // INDEPENDENT later raise (this card's own new shape) and must survive this clear untouched.
-    //
-    // @decision 1922be3a (round 5) — ALSO tied: a non-empty SUBSET of `entry`'s own tokens (the
-    // 1922be3a-round-4 duplicate this key/id clear route must now reach too). A genuine d4b25feb later
-    // raise always carries a fresh token `entry` lacks, so it never matches this and still survives.
-    const subsetOfClearedTokens = !!entry && p.entry.tokens.length > 0 && p.entry.tokens.every((t) => entry.tokens.includes(t));
-    const tiedViaKeyOrOrphanRef = !!entry && (keysToLift.some((k) => p.entry.armedKeys?.includes(k)) || !!entry.orphanLatchFiles?.includes(p.sourceFile));
-    const tiedToThisEntity = !entry || p.entry === entry || tiedViaKeyOrOrphanRef || subsetOfClearedTokens;
-    if (!tiedToThisEntity) return true;
+    const plan = pendingPlan.get(p);
+    if (!plan) return true;
 
-    // @decision 64119847 — a structural-only tie reduces rather than drops when P still holds a token
-    // outside `entry.tokens` (mirrors clearTokenFromPendingIndices's own non-empty-remaining shape); P
-    // keeps EVERY key it was armed on, untouched — see the decision record for why.
-    if (entry && tiedViaKeyOrOrphanRef && p.entry !== entry && !subsetOfClearedTokens) {
-      const remainingTokens = p.entry.tokens.filter((t) => !entry.tokens.includes(t));
-      if (remainingTokens.length > 0) {
-        const overlapTokens = p.entry.tokens.filter((t) => entry.tokens.includes(t));
-        const updated: MergeQuarantineEntry = { ...p.entry, tokens: remainingTokens };
-        // @decision d4b25feb (round 3) — re-point every in-memory reference BEFORE any durable write.
-        // @decision 64119847 — `p` IS `arr[idx]`; this call's own in-place `p.entry = newEntry` mutation
-        // is what makes the kept slot reflect `updated` — see the decision record, never a reassignment.
-        replaceEntryEverywhere(activeQuarantines, p.entry, updated);
-        // @decision 64119847 — mirrors clearTokenFromPendingIndices's own durable-rewrite shape; only
-        // `overlapTokens` feeds `candidateTokens` (never the full set), so this write always precedes this
-        // function's one deferred tombstone call. See the decision record for the ordering argument.
-        const writtenBasenames = new Set<string>([p.sourceFile]);
-        for (const k of p.entry.armedKeys ?? []) {
-          if (activeQuarantines.get(k) !== updated) continue;
-          writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
-          if (!writeMergeQuarantineLatch(updated, false, k)) {
-            // eslint-disable-next-line no-console
-            console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin's armed copy at key ${k} after this clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union an already-cleared token back in.`);
-          }
-        }
-        if (!writePendingDivertFile(p.sourceFile, updated)) {
+    if (plan.action === "reduce") {
+      const overlapTokens = p.entry.tokens.filter((t) => entry!.tokens.includes(t));
+      const remainingTokens = p.entry.tokens.filter((t) => !entry!.tokens.includes(t));
+      const updated: MergeQuarantineEntry = { ...p.entry, tokens: remainingTokens };
+      // @decision d4b25feb (round 3) — re-point every in-memory reference BEFORE any durable write.
+      // @decision 64119847 — `p` IS `arr[idx]`; this call's own in-place `p.entry = newEntry` mutation
+      // is what makes the kept slot reflect `updated` — see the decision record, never a reassignment.
+      replaceEntryEverywhere(activeQuarantines, p.entry, updated);
+      // @decision 64119847 — mirrors clearTokenFromPendingIndices's own durable-rewrite shape; only
+      // `overlapTokens` feeds `candidateTokens` (never the full set), so this write always precedes this
+      // function's one deferred tombstone call. See the decision record for the ordering argument.
+      const writtenBasenames = new Set<string>([p.sourceFile]);
+      for (const k of p.entry.armedKeys ?? []) {
+        if (activeQuarantines.get(k) !== updated) continue;
+        writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
+        if (!writeMergeQuarantineLatch(updated, false, k)) {
           // eslint-disable-next-line no-console
-          console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin at ${p.sourceFile} after this clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with an already-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
+          console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin's armed copy at key ${k} after this clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union an already-cleared token back in.`);
         }
-        // @decision 64119847 — called once per overlap token, mirroring every other caller's own
-        // per-token contract; a multi-token call can leave a folded orphan file stale, an accepted
-        // fail-CLOSED residual. See the decision record.
-        for (const clearedToken of overlapTokens) rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, clearedToken);
-        candidateTokens.push(...overlapTokens);
-        return true; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched
       }
+      if (!writePendingDivertFile(p.sourceFile, updated)) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin at ${p.sourceFile} after this clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with an already-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
+      }
+      // @decision 64119847 — called once per overlap token, mirroring every other caller's own
+      // per-token contract; a multi-token call can leave a folded orphan file stale, an accepted
+      // fail-CLOSED residual. See the decision record.
+      for (const clearedToken of overlapTokens) rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, clearedToken);
+      candidateTokens.push(...overlapTokens);
+      return true; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched
     }
 
     candidateTokens.push(...p.entry.tokens);
     for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
-    // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too, but
-    // ONLY when it still genuinely occupies that key (entryStillOwnsKey, checked FRESH per key below for
-    // the ACT decision) — a stale snapshot can otherwise name a key a wholly unrelated later raise reused.
-    //
-    // @decision 8db913e2 (Follow-up 4b06875f, Round 4, CR be296830) — liftedKeys is keysToLift unioned
-    // with `ownedArmedKeys` (entryStillOwnsKey-FILTERED, never the whole armedKeys list) — over-including
-    // a key is FAIL-OPEN (excludeLiftedResolvedKey DROPS a matching resolvedKey), never fail-closed.
-    const ownedArmedKeys = (p.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, p.entry));
-    const liftedKeysForEntry = new Set([...keysToLift, ...ownedArmedKeys]);
-    for (const k of p.entry.armedKeys ?? []) {
-      if (!entryStillOwnsKey(k, p.entry)) continue;
+    // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too.
+    // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the PRE-PASS above,
+    // against the then-still-unmutated map — never recomputed here against a map an EARLIER tied twin's
+    // own processing (in THIS SAME filter) may have already mutated.
+
+    // A repeated deleteMergeQuarantineLatchByKey call on a key an earlier twin already deleted is
+    // intentional and idempotent here: its own unlink tolerates ENOENT.
+    for (const k of plan.ownedArmedKeys) {
       activeQuarantines.delete(k);
       touchedFinalBasenames.push(path.basename(quarantinePathForKey(k)));
       // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-      for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, liftedKeysForEntry)) keptReferencingRepoPaths.add(rp);
+      for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L)) keptReferencingRepoPaths.add(rp);
     }
     sourceFilesToSweep.push(p.sourceFile);
     return false;
@@ -3909,6 +3930,17 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     activeLiftedKeys.add(key);
     for (const k of entry.armedKeys ?? []) { if (entryStillOwnsKey(k, entry)) activeLiftedKeys.add(k); }
   }
+  // @decision 8db913e2 (Follow-up c93e9e7a) — the full lifted-key union `L`, computed ONCE before any
+  // delegated clear — this function's own pending sweep is unconditional, so every identity-matched
+  // pending entry's owned keys belong in it from the start. See the decision record's own section.
+  const pendingOwnedArmedKeys = new Map<PendingUnresolvedQuarantine, string[]>();
+  const L = new Set<string>(activeLiftedKeys);
+  for (const p of pendingUnresolvedQuarantines) {
+    if (directPathIdentity(p.entry.repoPath) !== identity) continue;
+    const ownedArmedKeys = (p.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, p.entry));
+    pendingOwnedArmedKeys.set(p, ownedArmedKeys);
+    for (const k of ownedArmedKeys) L.add(k);
+  }
   const keptReferencingRepoPaths = new Set<string>();
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at the matchedPending loop's own
   // sweepOwnLatchFileUnlessOwnedElsewhere call below: an unconfirmed EPERM/EBUSY unlink (or a
@@ -3918,7 +3950,7 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   if (matched.length > 0) {
     wasQuarantined = true;
     for (const m of matched) {
-      const result = clearMergeQuarantineByKey(m.key, m.repoPath);
+      const result = clearMergeQuarantineByKey(m.key, m.repoPath, L);
       if (result?.latchKept) {
         if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
         else anyKeptUnattributed = true;
@@ -3952,20 +3984,14 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     for (const p of matchedPending) {
       pendingCandidateTokens.push(...p.entry.tokens);
       for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
-      // @decision 883e29bc — mirror clearMergeQuarantineByKey's own armedKeys lift, gated the same way
-      // via entryStillOwnsKey for the ACT decision — a key here can belong to someone else entirely by now.
-      //
-      // @decision 8db913e2 (Follow-up 4b06875f, Round 4, CR be296830) — liftedKeys is activeLiftedKeys
-      // unioned with `ownedArmedKeys` (entryStillOwnsKey-FILTERED, never the whole armedKeys list) —
-      // over-including a key is FAIL-OPEN (excludeLiftedResolvedKey DROPS a matching resolvedKey).
-      const ownedArmedKeys = (p.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, p.entry));
-      const liftedKeysForEntry = new Set([...activeLiftedKeys, ...ownedArmedKeys]);
-      for (const k of p.entry.armedKeys ?? []) {
-        if (!entryStillOwnsKey(k, p.entry)) continue;
+      // @decision 8db913e2 (Follow-up c93e9e7a) — reuse `pendingOwnedArmedKeys`'s own pre-delegation
+      // snapshot value, never a live recompute (a sibling delegated clear, or an earlier entry in THIS
+      // loop, may have already mutated `activeQuarantines`). `L` is the complete, precomputed union.
+      for (const k of pendingOwnedArmedKeys.get(p) ?? []) {
         activeQuarantines.delete(k);
         pendingTouchedBasenames.push(path.basename(quarantinePathForKey(k)));
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, liftedKeysForEntry)) keptReferencingRepoPaths.add(rp);
+        for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L)) keptReferencingRepoPaths.add(rp);
       }
       pendingTouchedBasenames.push(p.sourceFile);
       // @decision 883e29bc (round 4) — never a bare unlink: `p` is already removed from
