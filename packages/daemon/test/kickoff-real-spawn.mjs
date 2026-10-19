@@ -42,7 +42,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 
 const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const FIXTURE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-claude-cli.mjs");
@@ -153,7 +153,24 @@ const FIXTURE_READY_TIMEOUT_MS = Math.max(15000, READY_FALLBACK_MS);
 // guessing a bigger round number or matching the one observed value (18764ms) — see this card's own DoD-4
 // fence against exactly that move. Still comfortably clear of the absolute backstop below (2x this formula
 // at role-sweep kickoff size), preserving that as the real hang detector.
-const HEARTBEAT_STALL_MS = GIVE_UP_HOLD_MS + KICKOFF_PRE_DELIVERY_FLOOR_MS;
+//
+// Card 75f6bdcf: this formula alone (no ambient margin) still tripped under real host load — three
+// separate sightings ([late-ready], [worker], [large 10000]), all under measured ~91-100% host CPU with
+// several other real claude-driven processes live. INVESTIGATED AND REJECTED as part of the fix: scaling
+// this budget by kickoff size (via host.ts's `giveUpHoldExtraMs`, which pads a real give-up hold for a
+// large submitted text). That would be the wrong mechanism — the fixture's FIXTURE_ALIVE `setInterval`
+// (fake-claude-cli.mjs) is never paused or cleared by anything (no `clearInterval` in that file, checked),
+// and `harness.text()`/`waitForStallAware` below observe RAW, unfiltered pty output (no heartbeat-specific
+// filtering anywhere in the chain, checked against `PtyHost.subscribe`'s `onData`), so heartbeats keep
+// arriving every FIXTURE_HEARTBEAT_MS throughout any real production give-up hold regardless of kickoff
+// size — a hold can never by itself produce a silent window, so a kickoff-size term here has no mechanism
+// behind it. The actual cause is CHILD-PROCESS starvation (the real fixture OS process itself not getting
+// scheduled long enough to emit even its own heartbeat) — an ambient host-contention axis, not a
+// kickoff-size axis. Fixed by scaling with `ambientScaledBudget` (`_wait.mjs`) at this suite's established
+// margin (3x — see e.g. codex-prompt-ascii-fold-real-spawn.mjs's `BOOT_READY_TIMEOUT_MS`, codescape-health-
+// probe.mjs's `STALL_TIMEOUT_MS`), which self-calibrates to real ambient contention at run time instead of
+// guessing a bigger fixed number.
+const HEARTBEAT_STALL_MS = ambientScaledBudget(GIVE_UP_HOLD_MS + KICKOFF_PRE_DELIVERY_FLOOR_MS, 3);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Card d73bfc00: the FIXTURE_READY wait above was the one wait in this file 25e2a6fe/fa7fc12a never
@@ -169,10 +186,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // this file no longer has a single wait left that treats mere elapsed time as evidence of a hang.
 //
 // Poll for `matchPattern` in the harness's accumulated pty text. Fails only on a genuine STALL (no new
-// output of any kind — heartbeat included — for `HEARTBEAT_STALL_MS`) rather than on total elapsed time,
+// output of any kind — heartbeat included — for `stallBudgetMs`) rather than on total elapsed time,
 // or if `absoluteCeilingMs` is exceeded despite continued liveness (a backstop against a child that
 // heartbeats forever without ever actually reaching `matchPattern` — a real bug, not jitter).
-async function waitForStallAware(matchPattern, label, description, sessionId, absoluteCeilingMs) {
+// `stallBudgetMs` is an explicit parameter (card 75f6bdcf, not a closure-captured module constant) so each
+// call site states its own budget plainly — today both call sites below pass the same `HEARTBEAT_STALL_MS`,
+// but a future call site needing a different one no longer has to fight a shared global to get it.
+async function waitForStallAware(matchPattern, label, description, sessionId, stallBudgetMs, absoluteCeilingMs) {
   const t0 = Date.now();
   let lastText = harness.text(sessionId);
   let lastActivityAt = t0;
@@ -182,8 +202,8 @@ async function waitForStallAware(matchPattern, label, description, sessionId, ab
     if (text.length !== lastText.length) { lastText = text; lastActivityAt = Date.now(); }
     const now = Date.now();
     const idleMs = now - lastActivityAt;
-    if (idleMs > HEARTBEAT_STALL_MS) {
-      throw new Error(`${label} ${description} — STALLED: no new output (heartbeat included) for ${idleMs}ms (budget ${HEARTBEAT_STALL_MS}ms), ${now - t0}ms total elapsed`);
+    if (idleMs > stallBudgetMs) {
+      throw new Error(`${label} ${description} — STALLED: no new output (heartbeat included) for ${idleMs}ms (budget ${stallBudgetMs}ms), ${now - t0}ms total elapsed`);
     }
     if (now - t0 > absoluteCeilingMs) {
       throw new Error(`${label} ${description} — exceeded absolute backstop ${absoluteCeilingMs}ms despite continued liveness (heartbeats kept arriving but ${description} never completed)`);
@@ -191,11 +211,14 @@ async function waitForStallAware(matchPattern, label, description, sessionId, ab
     await sleep(10);
   }
 }
-// FIXTURE_READY's absolute backstop: reuses the SAME "2x the old flat-ceiling formula" convention the
-// delivery wait already established below (deliveryAbsoluteCeilingMs), applied to FIXTURE_READY_TIMEOUT_MS
-// unchanged (still derived from READY_FALLBACK_MS — see its own doc above) rather than inventing a new
-// number — this is a WAIT-MECHANISM change (elapsed-time gate -> stall gate), not a budget widening.
-const READY_ABSOLUTE_CEILING_MS = 2 * FIXTURE_READY_TIMEOUT_MS;
+// FIXTURE_READY's absolute backstop: reuses the SAME "2x the stall formula" convention the delivery wait
+// already established below (deliveryAbsoluteCeilingMs). Card 75f6bdcf: re-derived from the NEW (ambient-
+// scaled) HEARTBEAT_STALL_MS rather than left as the old FIXTURE_READY_TIMEOUT_MS-only formula — that old
+// formula could sit BELOW the new, larger stall budget under real contention, which would mean the ceiling
+// backstop could never fire before the stall check already had (defeating the "ceiling must sit above its
+// own stall" invariant). `Math.max` keeps the pre-existing FIXTURE_READY_TIMEOUT_MS-based floor too, so this
+// can only ever grow the backstop, never shrink it below what it already guaranteed.
+const READY_ABSOLUTE_CEILING_MS = 2 * Math.max(HEARTBEAT_STALL_MS, FIXTURE_READY_TIMEOUT_MS);
 
 const claudeMd = fs.readFileSync(path.join(REPO_ROOT, "CLAUDE.md"), "utf8");
 // The canonical, TRACKED source (packages/daemon/assets/skills/**), not the gitignored .claude/skills
@@ -321,7 +344,7 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
   // rejection carries a real measured number instead of just a bare timeout message.
   const readyWaitStartedAt = performance.now();
   try {
-    await waitForStallAware(/FIXTURE_READY/, label, "real fixture process signals FIXTURE_READY", sessionId, READY_ABSOLUTE_CEILING_MS);
+    await waitForStallAware(/FIXTURE_READY/, label, "real fixture process signals FIXTURE_READY", sessionId, HEARTBEAT_STALL_MS, READY_ABSOLUTE_CEILING_MS);
   } finally {
     console.log(`   [measured ${label}] spawn()→FIXTURE_READY: ${Math.round(performance.now() - readyWaitStartedAt)}ms (stall budget ${HEARTBEAT_STALL_MS}ms, absolute backstop ${READY_ABSOLUTE_CEILING_MS}ms)`);
   }
@@ -338,10 +361,13 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
   // Absolute backstop only (see the stall-aware doc above) — kept proportional to the OLD fixed-ceiling
   // formula (2x) purely so the large-payload sections (10KB/40KB) still get commensurately more room
   // before the backstop can ever fire; the STALL check above is what actually gates ordinary jitter.
-  const deliveryAbsoluteCeilingMs = 2 * (KICKOFF_PRE_DELIVERY_FLOOR_MS + Math.max(15000, kickoff.length * 2));
+  // Card 75f6bdcf: `Math.max` against the new (ambient-scaled) HEARTBEAT_STALL_MS for the same reason as
+  // READY_ABSOLUTE_CEILING_MS above — this payload-size-scaled formula alone could sit below the new,
+  // larger stall budget for a small-to-medium kickoff, and the ceiling must never sit below its own stall.
+  const deliveryAbsoluteCeilingMs = 2 * Math.max(HEARTBEAT_STALL_MS, KICKOFF_PRE_DELIVERY_FLOOR_MS + Math.max(15000, kickoff.length * 2));
   const deliveryWaitStartedAt = performance.now();
   try {
-    await waitForStallAware(/FIXTURE_RECEIVED/, label, "real fixture reports FIXTURE_RECEIVED", sessionId, deliveryAbsoluteCeilingMs);
+    await waitForStallAware(/FIXTURE_RECEIVED/, label, "real fixture reports FIXTURE_RECEIVED", sessionId, HEARTBEAT_STALL_MS, deliveryAbsoluteCeilingMs);
   } finally {
     console.log(`   [measured ${label}] SessionStart→FIXTURE_RECEIVED: ${Math.round(performance.now() - deliveryWaitStartedAt)}ms (stall budget ${HEARTBEAT_STALL_MS}ms, absolute backstop ${deliveryAbsoluteCeilingMs}ms, kickoff ${kickoff.length} chars)`);
   }

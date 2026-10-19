@@ -36,6 +36,12 @@
 //    (2.6-4.4x this fixture's own typical delivery time, observed on an otherwise-idle solo host with
 //    nothing else in the suite running) tripped that flat deadline. The heartbeat gives the harness a
 //    liveness signal to poll instead of guessing a bigger fixed number (see doc in kickoff-real-spawn.mjs).
+//  - Card 75f6bdcf: FIXTURE_HEARTBEAT_PAUSE_MS (env, default 0 — additive, every other caller of this
+//    fixture leaves it unset and sees byte-identical behavior) delays the FIRST heartbeat tick by that many
+//    ms, deterministically simulating the real failure mode a loaded host can produce (the child process
+//    itself not getting scheduled long enough to emit even its own heartbeat) WITHOUT any synthetic host
+//    load — used to prove the harness's stall-aware wait budget RED under the old flat formula and GREEN
+//    under the new ambient-scaled one, for the same silent-window duration either way.
 import fs from "node:fs";
 import crypto from "node:crypto";
 
@@ -124,6 +130,7 @@ if (process.stdin.isTTY) process.stdin.setRawMode(true);
 const readyDelayMs = Number(process.env.FIXTURE_READY_DELAY_MS) || 0;
 const debounceMs = Number(process.env.FIXTURE_DEBOUNCE_MS) || 300;
 const heartbeatMs = Number(process.env.FIXTURE_HEARTBEAT_MS) || 500;
+const heartbeatPauseMs = Number(process.env.FIXTURE_HEARTBEAT_PAUSE_MS) || 0;
 
 setTimeout(() => {
   process.stdout.write("FIXTURE_READY\n");
@@ -131,10 +138,16 @@ setTimeout(() => {
 
 // Independent of the ready delay / debounce timers above — ticks for as long as this real process's own
 // event loop is genuinely alive, which is exactly the property the harness needs to distinguish "real but
-// slow" from "hung/crashed" (see the header doc).
-setInterval(() => {
-  process.stdout.write("FIXTURE_ALIVE\n");
-}, heartbeatMs);
+// slow" from "hung/crashed" (see the header doc). Card 75f6bdcf: delaying the FIRST tick by
+// FIXTURE_HEARTBEAT_PAUSE_MS (default 0, so unset callers are unaffected) deterministically reproduces a
+// real silent window of that exact duration — the heartbeat is the only RECURRING output this fixture
+// ever emits unprompted, so once FIXTURE_READY has already fired (or with readyDelayMs itself held past
+// the pause), pausing it genuinely leaves the pty silent for the whole pause duration.
+setTimeout(() => {
+  setInterval(() => {
+    process.stdout.write("FIXTURE_ALIVE\n");
+  }, heartbeatMs);
+}, heartbeatPauseMs);
 
 let chunks = [];
 let debounceTimer = null;
