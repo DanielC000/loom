@@ -165,40 +165,45 @@ try {
 
   // ════════ E. CASCADE — deleteProject (rows + on-disk snapshots) + deleteAgent ════════
   // Build a fully-populated project: 2 agents, sessions under each, tasks, schedules, an api key + run.
-  db.insertProject(mkProject("pCas"));
-  db.insertAgent(mkAgent("aCas1", "pCas"));
-  db.insertAgent(mkAgent("aCas2", "pCas", { position: 1 }));
-  db.insertSession(mkSession("sCas1", "pCas", "aCas1", { engineSessionId: engineId, cwd: fakeCwd }));
-  db.insertSession(mkSession("sCas2", "pCas", "aCas2"));
-  db.insertTask(mkTask("tCas1", "pCas"));
+  // card 629e2d11: the PROJECT id must be UUID-shaped — deleteProjectArchives/deleteProjectWorkDir's
+  // shared isSingleProjectSegmentUnderRoot guard (card c2fc8d84) refuses anything else, and this section
+  // asserts the on-disk snapshot dir is actually REMOVED, not merely refused. Every OTHER entity id here
+  // (agent/session/task/etc.) keeps its short literal — only project ids need this shape.
+  const pCasId = "cccccccc-1111-4111-8111-111111111111";
+  db.insertProject(mkProject(pCasId));
+  db.insertAgent(mkAgent("aCas1", pCasId));
+  db.insertAgent(mkAgent("aCas2", pCasId, { position: 1 }));
+  db.insertSession(mkSession("sCas1", pCasId, "aCas1", { engineSessionId: engineId, cwd: fakeCwd }));
+  db.insertSession(mkSession("sCas2", pCasId, "aCas2"));
+  db.insertTask(mkTask("tCas1", pCasId));
   db.insertSchedule(mkSchedule("schCas1", "aCas1"));
-  const keyCas = db.createApiKey({ projectId: "pCas", name: "k", endpointAgentIds: [], caps: { maxConcurrentRuns: null, dailyTokenCap: null, dailySpendCap: null } });
-  db.insertRun({ id: "rCas1", projectId: "pCas", agentId: "aCas1", sessionId: null, keyId: keyCas.key.id, status: "completed", input: null, schema: null, result: null, usage: null, transcriptRef: null, error: null, webhookUrl: null, idempotencyKey: null, createdAt: now, startedAt: null, endedAt: null });
+  const keyCas = db.createApiKey({ projectId: pCasId, name: "k", endpointAgentIds: [], caps: { maxConcurrentRuns: null, dailyTokenCap: null, dailySpendCap: null } });
+  db.insertRun({ id: "rCas1", projectId: pCasId, agentId: "aCas1", sessionId: null, keyId: keyCas.key.id, status: "completed", input: null, schema: null, result: null, usage: null, transcriptRef: null, error: null, webhookUrl: null, idempotencyKey: null, createdAt: now, startedAt: null, endedAt: null });
   // orchestration_events are session-keyed (manager OR worker) with NO project_id — a permanent delete
   // must clear them so the cross-project Activity feed shows no orphans. Seed: one row where BOTH ids are
-  // under pCas (manager-branch match) + one where only the WORKER is under pCas but the manager is an
-  // unrelated survivor (worker-branch match — proves the OR clause, not just the manager column).
+  // under this project (manager-branch match) + one where only the WORKER is under this project but the
+  // manager is an unrelated survivor (worker-branch match — proves the OR clause, not just the manager column).
   db.appendEvent({ id: "evCas1", ts: now, managerSessionId: "sCas2", workerSessionId: "sCas1", taskId: null, kind: "worker_report", detail: null });
   db.appendEvent({ id: "evCas2", ts: now, managerSessionId: "survivorMgr", workerSessionId: "sCas1", taskId: null, kind: "worker_report", detail: null });
   check("E: orchestration_events seeded before delete", db.listEvents("sCas2").length === 1 && db.listEvents("survivorMgr").length === 1);
   // Seed an on-disk transcript snapshot for one session so the dir-removal is provable.
   fs.mkdirSync(claudeDir, { recursive: true });
   fs.writeFileSync(claudeFile, '{"type":"user","message":{"content":"hi"}}\n');
-  snapshotTranscript(fakeCwd, engineId, "pCas", "sCas1");
-  check("E: snapshot seeded under archives/pCas before delete", archivedTranscriptExists("pCas", "sCas1"));
+  snapshotTranscript(fakeCwd, engineId, pCasId, "sCas1");
+  check("E: snapshot seeded under archives/<project id> before delete", archivedTranscriptExists(pCasId, "sCas1"));
 
-  const delP = await app.inject({ method: "DELETE", url: "/api/projects/pCas/permanent" });
+  const delP = await app.inject({ method: "DELETE", url: `/api/projects/${pCasId}/permanent` });
   check("E: permanent-delete → 200", delP.statusCode === 200 && JSON.parse(delP.body).ok === true);
-  check("E: project row gone", !db.getProject("pCas"));
-  check("E: agents cascaded", db.listAgents("pCas").length === 0 && !db.getAgent("aCas1") && !db.getAgent("aCas2"));
+  check("E: project row gone", !db.getProject(pCasId));
+  check("E: agents cascaded", db.listAgents(pCasId).length === 0 && !db.getAgent("aCas1") && !db.getAgent("aCas2"));
   check("E: sessions cascaded", !db.getSession("sCas1") && !db.getSession("sCas2"));
-  check("E: tasks cascaded", db.listTasks("pCas").length === 0 && !db.getTask("tCas1"));
+  check("E: tasks cascaded", db.listTasks(pCasId).length === 0 && !db.getTask("tCas1"));
   check("E: schedules cascaded", !db.getSchedule("schCas1") && !db.listSchedules().some((s) => s.id === "schCas1"));
-  check("E: keys + runs cascaded", db.listApiKeys("pCas").length === 0 && !db.getRun("rCas1"));
+  check("E: keys + runs cascaded", db.listApiKeys(pCasId).length === 0 && !db.getRun("rCas1"));
   check("E: orchestration_events cascaded (manager-branch + worker-branch from a survivor manager)",
     db.listEvents("sCas2").length === 0 && db.listEvents("survivorMgr").length === 0);
-  check("E: on-disk snapshot dir removed (archives/pCas gone)",
-    !archivedTranscriptExists("pCas", "sCas1") && !fs.existsSync(path.dirname(archivedTranscriptPath("pCas", "sCas1"))));
+  check("E: on-disk snapshot dir removed (archives/<project id> gone)",
+    !archivedTranscriptExists(pCasId, "sCas1") && !fs.existsSync(path.dirname(archivedTranscriptPath(pCasId, "sCas1"))));
 
   // deleteAgent cascade — its sessions + that agent's schedules go; the OTHER agent's are untouched.
   db.insertProject(mkProject("pAg"));
