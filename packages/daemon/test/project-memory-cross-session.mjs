@@ -38,6 +38,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { composeWorkerStartupPrompt } = await import("../dist/sessions/worker-prompt.js");
 const { PROJECT_MEMORY_TAG } = await import("../dist/sessions/project-memory-recall.js");
+const { projectWorkDir } = await import("../dist/paths.js");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
 const repo = path.join(os.tmpdir(), `loom-pm-xsession-repo-${Date.now()}-${process.pid}`);
@@ -177,7 +178,14 @@ try {
   const workerB = await svc.spawnWorker("mgrB", { taskId: tB, agentId: "workerAgentB", kickoffPrompt: kickoffB });
   worktrees.push(workerB.worktreePath);
   const workerBOpts = optsFor(workerB.id);
-  const expectedUnmodified = composeWorkerStartupPrompt("WORKER_PROMPT_B", kickoffB, workerB.worktreePath);
+  // card 5eace211 added a trailing projectWorkDir(project.id) argument to the real spawnWorker call site
+  // (sessions/service.ts) — mirror it exactly here, or this "byte-identical to composeWorkerStartupPrompt
+  // alone" check drifts from what spawnWorker actually composes.
+  const expectedUnmodified = composeWorkerStartupPrompt(
+    "WORKER_PROMPT_B", kickoffB, workerB.worktreePath,
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    projectWorkDir(projB),
+  );
   check("(additive) zero-notes project: worker startupPrompt is BYTE-IDENTICAL to composeWorkerStartupPrompt alone",
     workerBOpts.startupPrompt === expectedUnmodified);
   check("(additive) zero-notes project: no PROJECT_MEMORY_TAG anywhere in the kickoff",
