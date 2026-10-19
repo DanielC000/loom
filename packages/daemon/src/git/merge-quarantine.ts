@@ -2138,13 +2138,25 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   const { filename } = diskReconciled;
   const atFilenameIdx = pendingUnresolvedQuarantines.findIndex((p) => p.sourceFile === filename);
   const atFinalBasenameIdx = finalBasename === filename ? -1 : pendingUnresolvedQuarantines.findIndex((p) => p.sourceFile === finalBasename);
+  // Capture BOTH indices' own current entries NOW, before anything below unions against them or mutates
+  // the array — `oldAtFinalBasename` in particular must be read now, since branch 1 below splices that
+  // slot away.
+  const oldAtFilename = atFilenameIdx >= 0 ? pendingUnresolvedQuarantines[atFilenameIdx]!.entry : undefined;
+  const oldAtFinalBasename = atFinalBasenameIdx >= 0 ? pendingUnresolvedQuarantines[atFinalBasenameIdx]!.entry : undefined;
+  // @decision 8db913e2 (Follow-up cd5a3cf9) — a basename match is never proof of same identity; gate
+  // every union/re-point use of `oldAtFilename`/`oldAtFinalBasename` below on a verified identity match
+  // against `toPersist.repoPath`, captured here before any union or mutation. See the decision record.
+  const occupantIdentity = directPathIdentity(toPersist.repoPath);
+  const atFilenameSameIdentity = oldAtFilename !== undefined && directPathIdentity(oldAtFilename.repoPath) === occupantIdentity;
+  const atFinalBasenameSameIdentity = oldAtFinalBasename !== undefined && directPathIdentity(oldAtFinalBasename.repoPath) === occupantIdentity;
   // @decision 8db913e2 (Follow-up 6451a749, Round 2) — ALSO union the in-memory record at
   // `atFilenameIdx` (never `atFinalBasenameIdx`) ON TOP of the disk read above — memory can legitimately
   // outrun disk (an earlier durable write for this identity already failed); see the decision record.
   // @decision 8db913e2 (card 050a4428) — ACCEPTED RESIDUAL: this entry's own `resolvedKey` can be a STALE,
   // never-filtered copy that resurrects an unrelated key a prior union already excluded (fail-closed only).
-  const toWriteUnfiltered = atFilenameIdx >= 0
-    ? unionQuarantineEntries(diskReconciled.toWrite, pendingUnresolvedQuarantines[atFilenameIdx]!.entry, { explicitResolvedKeyRule: true })
+  // @decision 8db913e2 (Follow-up cd5a3cf9) — gated on `atFilenameSameIdentity`, never the bare index.
+  const toWriteUnfiltered = atFilenameSameIdentity
+    ? unionQuarantineEntries(diskReconciled.toWrite, oldAtFilename!, { explicitResolvedKeyRule: true })
     : diskReconciled.toWrite;
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — re-apply the SAME exclusion to whatever either
   // union above produced — a union against an on-disk or in-memory sibling can reintroduce a key
@@ -2157,10 +2169,6 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
       resolvedKey: excludeLiftedResolvedKey(toWriteUnfiltered.resolvedKey, final, liftedKeys),
       resolvedKeys: excludeLiftedResolvedKeys(toWriteUnfiltered.resolvedKeys, final, liftedKeys),
     };
-  // Capture BOTH indices' own current entries before anything below mutates the array — `oldAtFinalBasename`
-  // in particular must be read NOW, since branch 1 below splices that slot away.
-  const oldAtFilename = atFilenameIdx >= 0 ? pendingUnresolvedQuarantines[atFilenameIdx]!.entry : undefined;
-  const oldAtFinalBasename = atFinalBasenameIdx >= 0 ? pendingUnresolvedQuarantines[atFinalBasenameIdx]!.entry : undefined;
   // @decision 8db913e2 (Follow-up 4b06875f) — `toPersist`/`toWrite` carry `resolvedKey` ONLY as filtered by
   // `excludeLiftedResolvedKey` (never `armedKeys`) — including the in-memory entry a union below may
   // introduce; nothing here bypasses that filter. This keeps 82032b5c/c9114934's own invariant intact.
@@ -2179,7 +2187,9 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // @decision 8db913e2 (Follow-up 37452ddd) — `oldAtFinalBasename` can ALSO be an 883e29bc twin armed
     // in `activeQuarantines`; re-point via `replaceEntryEverywhere` before overwriting this slot, or the
     // active side is left pointing at an object this double-fault branch is about to discard.
-    if (atFinalBasenameIdx >= 0) {
+    // @decision 8db913e2 (Follow-up cd5a3cf9) — gated on `atFinalBasenameSameIdentity`, never the bare
+    // index: a mismatched-identity slot is left completely untouched, not re-pointed or overwritten.
+    if (atFinalBasenameSameIdentity) {
       replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, kept);
       pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: kept, sourceFile: finalBasename };
     } else {
@@ -2202,12 +2212,15 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // @decision 8db913e2 (Follow-up 37452ddd) — EITHER index's own entry can be an 883e29bc twin, and the
   // two indices' entries can be TWO DIFFERENT objects (one armed, one pending-only) — re-point BOTH via
   // `replaceEntryEverywhere` before either slot is overwritten/discarded, or the active side goes stale.
-  if (atFilenameIdx >= 0) {
+  // @decision 8db913e2 (Follow-up cd5a3cf9) — every branch below is gated on `atFilenameSameIdentity`/
+  // `atFinalBasenameSameIdentity`, never the bare index — a mismatched-identity slot is left completely
+  // untouched (no union, no re-point, no splice) and falls through to the independent-mint `else` below.
+  if (atFilenameSameIdentity) {
     replaceEntryEverywhere(activeQuarantines, oldAtFilename!, toWrite);
-    if (atFinalBasenameIdx >= 0) replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, toWrite);
+    if (atFinalBasenameSameIdentity) replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, toWrite);
     pendingUnresolvedQuarantines[atFilenameIdx] = { entry: toWrite, sourceFile: filename };
-    if (atFinalBasenameIdx >= 0) pendingUnresolvedQuarantines.splice(atFinalBasenameIdx, 1);
-  } else if (atFinalBasenameIdx >= 0) {
+    if (atFinalBasenameSameIdentity) pendingUnresolvedQuarantines.splice(atFinalBasenameIdx, 1);
+  } else if (atFinalBasenameSameIdentity) {
     // @decision 8db913e2 (Follow-up 37452ddd) — re-point for the REPLACEMENT only, never as a union
     // source — `c9114934` still forbids unioning `atFinalBasenameIdx`'s own tokens into `toWrite`.
     replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, toWrite);
