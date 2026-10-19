@@ -60,7 +60,7 @@ import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
-import { waitUntil, sleepPast } from "./_wait.mjs";
+import { waitUntil, sleepPast, ambientScaledBudget } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -156,14 +156,26 @@ try {
     const batchPromise = sessions.mergeBatchTracked(mgrId, [wA, wB]);
 
     // Poll until the batch's OWN gate request is genuinely queued behind the holder — deterministic (reads
-    // live semaphore state), not a timed guess; bounded so a real regression fails fast rather than hanging
-    // the suite.
-    const queueDeadline = Date.now() + 20_000;
+    // live semaphore state), not a timed guess. Card f581a956: a FIXED 20_000ms wall-clock budget here went
+    // red 2 of 3 runs on main under 2-3 concurrent serial test lanes — the batch's own real git assembly
+    // (cutBranch's worktrees + mergeBatchTracked's own branch assembly, all real git I/O) runs BEFORE the
+    // gate request is ever enqueued, and that assembly alone can outrun a fixed budget under host
+    // contention well before the holder/cap interaction is even reached. `ambientScaledBudget` (same base,
+    // same 3x margin as the structurally-identical precondition in batch-guard-release-on-throw.mjs's own
+    // `ADMIT_BUDGET_MS`) self-calibrates to real ambient contention instead of guessing a bigger fixed
+    // number — a genuine regression (the batch never queues) still fails loudly: `waitUntil` throws with a
+    // diagnostic naming the elapsed time and budget, caught below so the existing precondition-unmet branch
+    // (which already handles "it never queued" cleanly) still runs.
+    const QUEUE_BUDGET_MS = ambientScaledBudget(20_000, 3);
     let queuedEntry;
-    while (Date.now() <= queueDeadline) {
-      queuedEntry = sessions.gateSemaphore.snapshot().entries.find((e) => e.phase === "queued" && e.projectId === projId);
-      if (queuedEntry) break;
-      await new Promise((r) => setTimeout(r, 5));
+    try {
+      queuedEntry = await waitUntil(
+        () => sessions.gateSemaphore.snapshot().entries.find((e) => e.phase === "queued" && e.projectId === projId),
+        { timeoutMs: QUEUE_BUDGET_MS, intervalMs: 5, label: "(e2e, CANCELLED) the batch's own gate request to queue behind the holder" },
+      );
+    } catch (err) {
+      console.error(`(e2e, CANCELLED) precondition wait failed: ${err.message}`);
+      queuedEntry = undefined;
     }
     check("(e2e, CANCELLED) precondition: the batch's own gate request is genuinely queued behind the holder", !!queuedEntry);
 
