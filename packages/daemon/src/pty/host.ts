@@ -1579,6 +1579,17 @@ export const MCP_DISMISS_INITIAL_DELAY_MS = Number(process.env.LOOM_MCP_DISMISS_
  */
 const MCP_READY_TIMEOUT_MS = Number(process.env.LOOM_MCP_READY_TIMEOUT_MS) || 9_000;
 
+/**
+ * Card d1521fca, Code Review round: how many recent inter-arrival gaps `recordMcpRouterSeen` keeps per
+ * (session, router), so `getMcpRouterCadenceMs` can take their MAX instead of trusting the single last
+ * gap — a request BURST (e.g. `initialize` immediately followed by `tools/list`) produces a near-zero
+ * last gap that, read alone, collapses the observed cadence toward zero and drags the MCP-silence
+ * watchdog's stale threshold down to its floor, making it MORE trigger-happy, not less. Small and fixed
+ * (not per-session configurable) — five gaps comfortably spans one burst plus the real keepalive gap
+ * that follows it, without growing unboundedly over a long-lived session.
+ */
+const MCP_ROUTER_CADENCE_WINDOW = 5;
+
 // Card 0050a17e removed `STARTUP_PROMPT_GRACE_MS` (formerly a ~10s window here, env-overridable via
 // LOOM_STARTUP_PROMPT_GRACE_MS): it existed ONLY to outlast the vendor CLI's own auto-type-and-submit of
 // a positional startup prompt, which no longer happens for ANY role (buildSpawnArgs never emits the
@@ -3347,6 +3358,18 @@ interface Live {
   // (called + emptied) by markMcpSeen on success and by pty.onExit on death, so a waiter never outlives
   // its pty instance.
   mcpSeenWaiters: Array<(seen: boolean) => void>;
+  // Card d1521fca: per-router last-seen timestamp + a BOUNDED window of the last
+  // MCP_ROUTER_CADENCE_WINDOW inter-arrival gaps (ms), for EVERY inbound MCP hit (any method, not just
+  // tools/call — see recordMcpRouterSeen), keyed by router name exactly as logged in an [mcp] line
+  // (mcp/inbound-log.ts) — "task"/"orchestration"/"platform"/etc. Unlike `mcpSeen` above (a once-per-pty
+  // gate), this updates on EVERY hit so a reader can derive each router's own observed cadence — see
+  // getMcpRouterLastSeen/getMcpRouterCadenceMs, consumed by the MCP-silence watchdog
+  // (orchestration/idle-watcher.ts) to tell a router that's gone quiet from one this session never uses.
+  // `gaps` (plural) exists because a single last gap let a request BURST (initialize immediately
+  // followed by tools/list) collapse the observed cadence toward zero.
+  // Reset to an empty Map on every (re)spawn (fresh Live object) — a resume/recycle starts a clean
+  // cadence baseline rather than carrying over a stale one from a dead pty.
+  mcpRouterSeenAt: Map<string, { lastAt: number; gaps: number[] }>;
   // @decision 68459420 — a manager-facing PULL surface (never cleared, see getLastMismatchReplay), not an
   // advisory.
   //
@@ -3491,6 +3514,10 @@ export interface CodexLive {
   role: SessionRole | null;
   mcpSeen: boolean;
   mcpSeenWaiters: Array<(seen: boolean) => void>;
+  // Card d1521fca: same shape and purpose as `Live.mcpRouterSeenAt` above — a codex session is served
+  // by the SAME harness-agnostic `/mcp*` gateway routes, so its MCP-silence cadence is tracked the same
+  // way, unlike a genuinely claude-only field such as `lastOutputAt` (see this interface's own doc).
+  mcpRouterSeenAt: Map<string, { lastAt: number; gaps: number[] }>;
   activeTurnRoute: TurnRoute | null;
   lastPromptRoute: TurnRoute | null;
   activeTurnProactive: boolean;
@@ -6290,6 +6317,7 @@ export class PtyHost {
       readyFallbackTimer: null, // armed just below; re-armed by the SessionStart handler — see its own doc
       mcpSeen: false, // flipped on the first observed loom-orchestration MCP hit — see Live.mcpSeen / markMcpSeen
       mcpSeenWaiters: [],
+      mcpRouterSeenAt: new Map(),
       busySince: null,
       lastOutputAt: Date.now(),
       composerLen: 0,
@@ -6625,7 +6653,7 @@ export class PtyHost {
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
-      mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
+      mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
@@ -7000,7 +7028,7 @@ export class PtyHost {
       busyPersistDirty: false,
       pending: [], stopping: false, drainHeld: false,
       role: opts.role ?? null,
-      mcpSeen: false, mcpSeenWaiters: [],
+      mcpSeen: false, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnProactive: false, lastPromptProactive: false,
       activeTurnOwnerText: null, lastPromptOwnerText: null,
@@ -7890,7 +7918,7 @@ export class PtyHost {
       logStream: openSessionLogStream(opts.id, "canned test seed"),
       logBroken: false,
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
-      mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
+      mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
@@ -10624,6 +10652,57 @@ export class PtyHost {
     live.mcpSeenWaiters = [];
     for (const w of waiters) w(true);
     return true; // newly seen: the caller (gateway) may run its once-per-pty hook
+  }
+
+  /**
+   * Card d1521fca: records ONE inbound MCP hit (any method/tool — see `mcp/inbound-log.ts`'s own
+   * `onSeen` param, threaded from gateway/server.ts's shared per-route `logInboundMcpRequest` call so
+   * every one of the 8 `/mcp*` routers feeds this from ONE definition, never a per-route re-derivation)
+   * on `router` for `sessionId`'s per-router cadence baseline. Cheap (one Map read + write, no I/O) and
+   * idempotent-safe for an unknown/dead session (no-op). UNLIKE `markMcpSeen` above, this is NOT a
+   * once-per-pty gate — it updates on EVERY hit, so `getMcpRouterCadenceMs` can derive this session's own
+   * observed inter-arrival gap for `router` instead of only "has this router ever been seen". Feeds the
+   * MCP-silence watchdog (orchestration/idle-watcher.ts).
+   */
+  recordMcpRouterSeen(sessionId: string, router: string): void {
+    const live = this.findAnyLive(sessionId);
+    if (!live?.alive) return;
+    const now = Date.now();
+    const prior = live.mcpRouterSeenAt.get(router);
+    const gaps = prior ? [...prior.gaps, now - prior.lastAt] : [];
+    if (gaps.length > MCP_ROUTER_CADENCE_WINDOW) gaps.shift();
+    live.mcpRouterSeenAt.set(router, { lastAt: now, gaps });
+  }
+
+  /** Epoch ms `sessionId` was last seen on `router` (any method/tool), or `undefined` if never seen, or
+   *  not live. See {@link recordMcpRouterSeen}. */
+  getMcpRouterLastSeen(sessionId: string, router: string): number | undefined {
+    return this.findAnyLive(sessionId)?.mcpRouterSeenAt.get(router)?.lastAt;
+  }
+
+  /**
+   * This session's own OBSERVED cadence for `router` — the MAX of its last (up to)
+   * {@link MCP_ROUTER_CADENCE_WINDOW} inter-arrival gaps — or `undefined` until a SECOND sighting has
+   * been recorded (a single sighting has no interval to measure) or the session isn't live. MAX, never
+   * the single last gap: a request burst (`initialize` immediately followed by `tools/list`) produces a
+   * near-zero LAST gap that, read alone, would collapse the observed cadence toward zero and drag the
+   * idle-watcher's stale threshold down to its floor — the opposite of what a burst should do. Taking
+   * the max over a short recent window surfaces the real periodic keepalive gap instead, as long as at
+   * least one such gap is still inside the window. Deliberately the session's OWN measured interval,
+   * never a project-wide or hardcoded default — two sessions' legitimate MCP polling cadence can differ.
+   */
+  getMcpRouterCadenceMs(sessionId: string, router: string): number | undefined {
+    const entry = this.findAnyLive(sessionId)?.mcpRouterSeenAt.get(router);
+    if (!entry || entry.gaps.length === 0) return undefined;
+    return Math.max(...entry.gaps);
+  }
+
+  /** Every router name `sessionId` has EVER been seen on (>=1 sighting), live only — lets a caller
+   *  discover which routers are relevant to THIS session without hardcoding a role->router mapping
+   *  (a worker mounts task+orchestration; a Lead mounts task+platform; etc). */
+  getMcpRoutersSeen(sessionId: string): string[] {
+    const live = this.findAnyLive(sessionId);
+    return live ? [...live.mcpRouterSeenAt.keys()] : [];
   }
 
   /**

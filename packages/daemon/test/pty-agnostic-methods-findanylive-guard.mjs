@@ -60,6 +60,9 @@ const AGNOSTIC_METHODS = [
   "deleteQueued", "editQueued", "reorderQueued",
   "subscribe", "isAlive", "isBusy", "holdDrain", "releaseDrain", "liveStartedAt", "getPid",
   "hasFirstTurnStarted",
+  // Card d1521fca (MCP-silence watchdog): the per-router cadence baseline — fed from both claude's and
+  // codex's own `/mcp*` routes via gateway/server.ts's shared `logInboundMcpRequest` onSeen callback.
+  "recordMcpRouterSeen", "getMcpRouterLastSeen", "getMcpRouterCadenceMs", "getMcpRoutersSeen",
 ];
 
 /**

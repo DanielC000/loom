@@ -62,6 +62,15 @@ interface ToolAttributionLike {
  * SAME line without this module knowing anything about PtyHost. Returning `undefined`/null appends
  * nothing (byte-identical line to before this param existed) — the default for every existing call site
  * that doesn't pass it.
+ *
+ * `onSeen` (card d1521fca) is an OPTIONAL callback fired ONCE per call — regardless of whether `body` is
+ * a single request or a batch array — with (sessionId, router): "this session's MCP transport reached
+ * this router just now", for a caller (PtyHost.recordMcpRouterSeen) to build a per-router cadence
+ * baseline from, the same one-shared-definition reasoning `onRepeatedCall`/`attribute` already follow —
+ * every one of the 8 `/mcp*` routers feeds it from this ONE call site rather than 8 independent ones.
+ * Wrapped in its own try/catch (Code Review round) — unlike `attribute`/`onRepeatedCall`, this fires
+ * BEFORE the census line is built, so a throwing implementation must never prevent that line, let alone
+ * the real request `logInboundMcpRequest` sits in front of, from being logged/dispatched at all.
  */
 export function logInboundMcpRequest(
   router: string,
@@ -69,7 +78,9 @@ export function logInboundMcpRequest(
   body: unknown,
   attribute?: (sessionId: string, tool: string) => ToolAttributionLike | null | undefined,
   onRepeatedCall?: (sessionId: string, tool: string, argsHash: string) => void,
+  onSeen?: (sessionId: string, router: string) => void,
 ): void {
+  try { onSeen?.(sessionId, router); } catch { /* never let this break the request it was only observing */ }
   const at = new Date().toISOString();
   const entries = Array.isArray(body) ? body : [body];
   for (const entry of entries) {

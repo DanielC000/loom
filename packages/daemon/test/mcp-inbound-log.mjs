@@ -68,8 +68,16 @@ const stub = {};
 const ptyAuth = mcpAuthStub();
 const tokenS = ptyAuth.registerTestMcpSession("S");
 const tokenM = ptyAuth.registerTestMcpSession("M");
+// Card d1521fca, Code Review round: records every (sessionId, router) the shared `onSeen` callback
+// (threaded through logInboundMcpRequest, mcp/inbound-log.ts) is fired with — proves the real
+// gateway/server.ts wiring reaches PtyHost.recordMcpRouterSeen's call site, not just that the method
+// itself works in isolation (see pty-mcp-router-cadence.mjs for that). `THROW_ON_SEEN` lets test (5)
+// below flip this into a throwing implementation to prove logInboundMcpRequest's own try/catch keeps
+// the real request alive regardless.
+const seenCalls = [];
+let THROW_ON_SEEN = false;
 const app = await buildServer({
-  db, pty: { markMcpSeen: () => {}, ...ptyAuth }, sessions: stub,
+  db, pty: { markMcpSeen: () => {}, recordMcpRouterSeen: (sid, router) => { seenCalls.push({ sid, router }); if (THROW_ON_SEEN) throw new Error("boom"); }, ...ptyAuth }, sessions: stub,
   mcp: new TaskMcpRouter(db, {}), // wakes stub — untouched by tasks_list, the only tool this test calls on it
   orchMcp: new OrchestrationMcpRouter(db, {}),
   platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, operatorMcp: stub, runMcp: stub,
@@ -152,10 +160,47 @@ const BASE = `http://127.0.0.1:${port}`;
     mcpLines.some((l) => l.includes("method=tools/list") && l.includes("tool=-")));
 }
 
+// ============================ (4) onSeen threading: the real gateway wiring reaches recordMcpRouterSeen ============================
+{
+  // No settle-wait needed here (unlike (1)-(3) above, which wait for trailing async LOG lines to
+  // settle): `onSeen` fires synchronously inside the gateway route handler, strictly before the
+  // response is produced — by the time `callTool`'s own promise resolves, the call has already landed.
+  seenCalls.length = 0;
+  const client = new Client({ name: "mcp-log-test-onseen", version: "0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`), mcpAuthRequestInit(tokenS)));
+  await client.callTool({ name: "tasks_list", arguments: { limit: 1 } });
+  await client.close();
+  check(`(4) onSeen fired at least once for the task router with the real sessionId (got ${JSON.stringify(seenCalls)})`,
+    seenCalls.some((c) => c.sid === "S" && c.router === "task"));
+}
+{
+  seenCalls.length = 0;
+  const client = new Client({ name: "mcp-log-test-onseen-orch", version: "0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp-orch/M`), mcpAuthRequestInit(tokenM)));
+  await client.callTool({ name: "my_context", arguments: {} });
+  await client.close();
+  check(`(4) onSeen fired at least once for the orchestration router with the real sessionId (got ${JSON.stringify(seenCalls)})`,
+    seenCalls.some((c) => c.sid === "M" && c.router === "orchestration"));
+}
+
+// ============================ (5) onSeen is exception-safe: a throwing implementation never breaks the real request ============================
+{
+  THROW_ON_SEEN = true;
+  try {
+    const client = new Client({ name: "mcp-log-test-onseen-throw", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp/S`), mcpAuthRequestInit(tokenS)));
+    const result = await client.callTool({ name: "tasks_list", arguments: { limit: 1 } });
+    check("(5) the real tool call still succeeds even though onSeen threw on every hit", Array.isArray(result.content));
+    await client.close();
+  } finally {
+    THROW_ON_SEEN = false;
+  }
+}
+
 await app.close();
 db.close();
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — MCP inbound requests now emit an [mcp] log line (identity/shape only) across both routers exercised."
+  ? "\n✅ ALL PASS — MCP inbound requests now emit an [mcp] log line (identity/shape only) across both routers exercised, the shared onSeen callback (card d1521fca) reaches PtyHost.recordMcpRouterSeen through the real gateway wiring, and a throwing onSeen implementation never breaks the real request."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

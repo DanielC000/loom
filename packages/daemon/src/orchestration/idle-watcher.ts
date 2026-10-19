@@ -29,6 +29,26 @@ export interface IdlePty {
    * "slept through every nudge".
    */
   enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string): { delivered: boolean; position?: number; queued?: boolean };
+  /**
+   * Card d1521fca (MCP-silence watchdog): epoch ms `sessionId` was last seen on `router` (any MCP
+   * method/tool), or `undefined` if never seen / not live. See `PtyHost.getMcpRouterLastSeen`.
+   * Optional — mirrors `recordToolCallArgsHash?.` elsewhere in this codebase: a minimal test stub for
+   * `deps.pty` predating this card stays a harmless no-op (classifyMcpSilence sees "nothing established"
+   * rather than throwing) instead of every such stub needing to grow three new methods it doesn't care
+   * about just to keep constructing an `IdleWatcher`.
+   */
+  getMcpRouterLastSeen?(sessionId: string, router: string): number | undefined;
+  /**
+   * This session's OWN observed cadence for `router` — the gap (ms) between its last two sightings — or
+   * `undefined` until a second sighting exists. See `PtyHost.getMcpRouterCadenceMs`. Optional — see
+   * `getMcpRouterLastSeen`'s own doc just above for why.
+   */
+  getMcpRouterCadenceMs?(sessionId: string, router: string): number | undefined;
+  /**
+   * Every router name `sessionId` has EVER been seen on (>=1 sighting). See `PtyHost.getMcpRoutersSeen`.
+   * Optional — see `getMcpRouterLastSeen`'s own doc just above for why.
+   */
+  getMcpRoutersSeen?(sessionId: string): string[];
 }
 
 export interface IdleWatcherDeps {
@@ -60,6 +80,28 @@ export interface IdleWatcherDeps {
    * misleading shape board card 99efaab3 exists to prevent.
    */
   isWorkerStranded: (workerSessionId: string) => boolean;
+  /**
+   * Card d1521fca (MCP-silence watchdog, WORKER shape — the b5668822 incident): deliver an already-built
+   * notice to `parentSessionId` (the silent worker's own owning manager). Mirrors
+   * SessionService.notifyMcpSilenceParent — a durable nudge, never a raw `enqueueStdin`, so a
+   * parked/offline manager still gets it. Returns whether the nudge was accepted, recorded verbatim in
+   * the durable `mcp_silence_detected` event's `detail.notifiedParent`. Optional for the SAME reason as
+   * `IdlePty`'s own new optional getters — unreachable by a pre-existing test stub unless its `pty`
+   * ALSO implements those getters (nothing is ever judged stale without them), but kept optional anyway
+   * for symmetry and so a future minimal stub never needs a dummy no-op just to satisfy the type.
+   */
+  notifyMcpSilenceParent?: (parentSessionId: string, text: string, taskId: string | null) => { notifiedParent: boolean };
+  /**
+   * Card d1521fca (MCP-silence watchdog, MANAGER/LEAD shape — the a7c072c4 incident): deliver an
+   * already-built notice to the Platform Lead about `sessionId` (a manager, or the Lead itself — which
+   * has no parent to notify). Mirrors SessionService.notifyMcpSilenceLead — reuses the latest still-open
+   * Platform board task for this session (never files a second one for a shape change within the same
+   * open episode) plus a best-effort live Lead nudge (skipped when `sessionId` IS the live Lead itself).
+   * Returns `leadBoardTaskId` so the caller can record it in `mcp_silence_detected`'s own detail — the
+   * SAME field a LATER call reads back to find the task to reuse. Optional — see
+   * `notifyMcpSilenceParent`'s own doc.
+   */
+  notifyMcpSilenceLead?: (sessionId: string, text: string) => { leadNotified: boolean; leadBoardTaskId?: string };
   /** Tick cadence; defaults to 60s. Injectable so a test drives tick() directly. */
   intervalMs?: number;
   /**
@@ -96,6 +138,34 @@ const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<Orchest
  * idle with no one waiting on it.
  */
 const ANSWERED_QUESTION_STUCK_MINUTES = 15;
+
+/**
+ * MCP-silence watchdog (card d1521fca, tickMcpSilence below) — a live session's own OBSERVED cadence
+ * per MCP router (`PtyHost.getMcpRouterCadenceMs`) is multiplied by this factor to derive its
+ * STALE threshold, floored at MCP_SILENCE_STALE_FLOOR_MS. Both incidents this watchdog exists for
+ * (b5668822, a7c072c4) showed a ~6min cadence; a 3x multiplier (~18min there) is comfortably past
+ * ordinary jitter/backoff without waiting unreasonably long to notice a genuine outage. The floor
+ * guards a session with an unusually tight observed cadence (e.g. a burst of rapid calls) from
+ * tripping on a tiny, harmless gap.
+ */
+export const MCP_SILENCE_STALE_MULTIPLIER = 3;
+export const MCP_SILENCE_STALE_FLOOR_MS = 10 * 60_000;
+
+/**
+ * MCP-silence watchdog, ALL-SILENT shape only (card d1521fca): "don't fire on a session that has simply
+ * been idle with no turns" — if EVERY established router has gone stale, additionally require this
+ * session's own `lastActivity` to be more recent than this bound, or the episode is a long-dormant,
+ * nothing-is-wrong session rather than the a7c072c4 shape (a session that WAS actively turning/writing/
+ * hooking right up until its MCP traffic stopped). Deliberately generous — this is a floor against
+ * ancient dormancy, not a tight "must be busy right now" gate (the ASYMMETRIC shape needs no such gate
+ * at all: a fresh sibling router already proves ongoing engagement).
+ */
+const MCP_SILENCE_ALL_SILENT_MAX_DORMANT_MINUTES = 120;
+
+// @decision d1521fca — tick-lag detection + two-evaluation confirmation exist to kill a real replayed
+// false-positive class (9 of 13 sessions flagged on the first tick after a host stall); never drop
+// either half, and never derive their windows from a constant disconnected from intervalMs.
+export const MCP_SILENCE_LAG_MULTIPLIER = 3;
 
 /**
  * Idle-nudge board-scan throttle (card a193398f — perf: bound the idle-nudge re-drain). The board scan
@@ -183,6 +253,32 @@ export class IdleWatcher {
    * a genuinely idle manager produces ~1 line per idle episode, not one per 60s tick.
    */
   private lastSkipReason = new Map<string, string>();
+  /**
+   * Card d1521fca (MCP-silence watchdog): one entry per session CURRENTLY in a notified MCP-silence
+   * episode — `shape`/`staleRouters` identify the episode so a CHANGED shape (e.g. a second router also
+   * going stale) re-notifies as a new episode rather than being silently absorbed into the old one. Same
+   * in-memory, pruned-to-live-sessions pattern as `lastSkipReason`/`lastIdleScanAt` above — a daemon
+   * restart mid-episode just re-notifies once more, the same accepted tradeoff this file already makes
+   * elsewhere (see `mcp_silence_detected`'s own doc, `packages/shared/src/types.ts`). Deleted once the
+   * session's own routers recover (clears the episode so a FUTURE recurrence notifies again).
+   */
+  private mcpSilenceEpisodes = new Map<string, { shape: "asymmetric" | "all-silent"; staleRouters: string[] }>();
+  /**
+   * Card d1521fca, Code Review round (see the module-level decision note above) — a
+   * session newly seen stale sits HERE, never notified, until a LATER evaluation at least
+   * `MCP_SILENCE_STALE_FLOOR_MS` after `firstSeenAt` still finds it stale (see `evaluateMcpSilence`).
+   * Cleared for a session the moment it's no longer stale at all (recovered before confirming) OR on a
+   * detected tick lag (see `lastTickAt` below) — a lagged tick's own staleness readings are unreliable,
+   * so any "first seen stale" timestamp recorded before the lag must not count toward confirmation
+   * after it. Same in-memory, pruned-to-live-sessions pattern as its siblings above.
+   */
+  private mcpSilencePending = new Map<string, { shape: "asymmetric" | "all-silent"; staleRouters: string[]; firstSeenAt: number }>();
+  /** Card d1521fca — epoch ms of the previous `tick()` call, for lag detection; `null` before the first
+   *  tick, which is never treated as lagged (nothing to compare against). */
+  private lastTickAt: number | null = null;
+  /** Card d1521fca — while `nowMs` is before this, `tickMcpSilence` skips its ENTIRE sweep (a detected
+   *  tick lag's grace period); `0` means no grace in effect. */
+  private mcpSilenceGraceUntilMs = 0;
   constructor(private deps: IdleWatcherDeps) {}
 
   /**
@@ -202,6 +298,19 @@ export class IdleWatcher {
     const { db, pty, control, recycleRatio } = this.deps;
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
+
+    // Card d1521fca (MCP-silence watchdog, Code Review round — see this file's module-level decision
+    // note): detect THIS daemon's own tick lag BEFORE any other tick() work — a stall severe enough to
+    // starve the host also starves setInterval, so a big gap since the last tick means every session's
+    // apparent MCP staleness this tick is unreliable, not just real.
+    const intervalMs = this.deps.intervalMs ?? 60_000;
+    if (this.lastTickAt !== null && nowMs - this.lastTickAt > intervalMs * MCP_SILENCE_LAG_MULTIPLIER) {
+      this.mcpSilencePending.clear();
+      this.mcpSilenceGraceUntilMs = nowMs + MCP_SILENCE_STALE_FLOOR_MS;
+      // eslint-disable-next-line no-console
+      console.log(`[idle-watcher] tick lag detected (${nowMs - this.lastTickAt}ms since last tick, interval=${intervalMs}ms) — MCP-silence evaluation paused until ${new Date(this.mcpSilenceGraceUntilMs).toISOString()}`);
+    }
+    this.lastTickAt = nowMs;
 
     // Card 86c9bdbd: the SAME daemon-global signal worker_spawn's own refusal reads
     // (isLikelyNearClaudeUsageLimit + the SAME resolveConfig recencyWindowMs — see
@@ -593,6 +702,7 @@ export class IdleWatcher {
     this.tickIdleWorkers(nowMs, nowIso, usageLimited);
     this.tickAnsweredStuckQuestions(nowMs);
     this.tickStaleRequests(nowMs, nowIso);
+    this.tickMcpSilence(nowMs);
   }
 
   /**
@@ -881,6 +991,175 @@ export class IdleWatcher {
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] re-nudged idle-unreported worker ${w.id} (~${Math.round(idleForMin)}m idle)`);
     }
+  }
+
+  /**
+   * MCP-silence watchdog — a HEALTH check, not a "nothing to do" check: independent of the idle-nudge
+   * state machine above (idleNudgeMinutes, snooze/suppress policy, usage-limit skip), so a manager that
+   * correctly snoozed its idle nudge is still checked.
+   *
+   * GRACE: if `nowMs` is still inside a post-lag grace window (`mcpSilenceGraceUntilMs`, armed by
+   * `tick()`'s own lag detection), the ENTIRE sweep is skipped for this tick.
+   *
+   * Covers every live worker (notify its parent manager) and every live manager/platform session
+   * (notify the Platform Lead — it has no parent). Prunes `mcpSilenceEpisodes`/`mcpSilencePending` to
+   * currently-live session ids first, mirroring `lastIdleScanAt`/`lastSkipReason`'s own pattern.
+   *
+   * @decision d1521fca — never drop the grace-window skip or let a confirmation-ladder worsening
+   * short-circuit it; either one alone reproduces the replayed false positive (9 of 13 live sessions
+   * flagged on one post-stall tick).
+   */
+  private tickMcpSilence(nowMs: number): void {
+    if (nowMs < this.mcpSilenceGraceUntilMs) return;
+    const { db } = this.deps;
+    const workers = db.listLiveWorkers();
+    const managers = db.listLiveManagers();
+    const platforms = db.listLivePlatformSessions();
+    const liveIds = new Set<string>([...workers.map((w) => w.id), ...managers.map((m) => m.id), ...platforms.map((p) => p.id)]);
+    for (const id of this.mcpSilenceEpisodes.keys()) if (!liveIds.has(id)) this.mcpSilenceEpisodes.delete(id);
+    for (const id of this.mcpSilencePending.keys()) if (!liveIds.has(id)) this.mcpSilencePending.delete(id);
+
+    for (const w of workers) this.evaluateMcpSilence(w.id, w.parentSessionId ?? null, w.taskId ?? null, w.lastActivity, w.harness === "codex", nowMs);
+    for (const m of managers) this.evaluateMcpSilence(m.id, null, null, m.lastActivity, m.harness === "codex", nowMs);
+    for (const p of platforms) this.evaluateMcpSilence(p.id, null, null, p.lastActivity, p.harness === "codex", nowMs);
+  }
+
+  /**
+   * Classifies `sessionId`'s current MCP-silence state from its own per-router cadence, or `null` if
+   * there's nothing established to compare yet (a brand-new session, or one that's never been seen on
+   * ≥2 occasions on any router — see `PtyHost.getMcpRouterCadenceMs`'s own doc for why a single sighting
+   * has no interval to measure). A router this session has NEVER been seen on at all is never considered
+   * — only routers it demonstrably uses are judged "silent", so a role that legitimately mounts only one
+   * router never collides with the ASYMMETRIC shape.
+   *
+   * @decision d1521fca — never let `isCodex` exclude the ASYMMETRIC shape too; only ALL-SILENT is
+   * excluded for codex (no keepalive evidence there, so a false recycle would discard real work).
+   */
+  private classifyMcpSilence(sessionId: string, isCodex: boolean, nowMs: number): { shape: "asymmetric" | "all-silent"; staleRouters: string[]; freshRouters: string[]; staleForMs: number } | null {
+    const { pty } = this.deps;
+    const stale: string[] = [];
+    const fresh: string[] = [];
+    let maxStaleForMs = 0;
+    for (const router of pty.getMcpRoutersSeen?.(sessionId) ?? []) {
+      const cadenceMs = pty.getMcpRouterCadenceMs?.(sessionId, router);
+      if (cadenceMs === undefined) continue; // only one sighting so far — nothing to compare against yet
+      const lastSeen = pty.getMcpRouterLastSeen?.(sessionId, router);
+      if (lastSeen === undefined) continue; // defensive — unreachable if cadenceMs resolved above
+      const thresholdMs = Math.max(MCP_SILENCE_STALE_FLOOR_MS, MCP_SILENCE_STALE_MULTIPLIER * cadenceMs);
+      const sinceMs = nowMs - lastSeen;
+      if (sinceMs > thresholdMs) { stale.push(router); maxStaleForMs = Math.max(maxStaleForMs, sinceMs); }
+      else fresh.push(router);
+    }
+    if (stale.length === 0) return null;
+    if (isCodex && fresh.length === 0) return null; // ALL-SILENT excluded for codex — see this method's own doc
+    return { shape: fresh.length > 0 ? "asymmetric" : "all-silent", staleRouters: stale, freshRouters: fresh, staleForMs: maxStaleForMs };
+  }
+
+  /**
+   * One session's worth of the MCP-silence watchdog tick — see `tickMcpSilence`'s own doc.
+   *
+   * Confirmation ladder: a session's FIRST evaluation showing staleness beyond whatever is already
+   * confirmed (see "beyond", below) is NEVER notified on that same evaluation — it is recorded in
+   * `mcpSilencePending` instead, and only promoted to a notified `mcpSilenceEpisodes` entry once a
+   * LATER evaluation, at least `MCP_SILENCE_STALE_FLOOR_MS` after the first such sighting, still shows
+   * it. This applies UNIFORMLY whether or not a confirmed episode already exists.
+   *
+   * "Beyond" is a SUBSET test, not an equality test: if the current stale-router set is a SUBSET of (or
+   * equal to) the confirmed episode's own set — things got better or stayed the same, never worse —
+   * this is NEVER notified, not even through the ladder; it is quietly reconciled into the confirmed
+   * bookkeeping. Only a stale set that is NOT a subset is a candidate for the ladder at all.
+   *
+   * @decision d1521fca — never skip this ladder for a shape change on an already-confirmed episode, and
+   * never notify a stale set that's a subset of the confirmed one; both reproduce a real false-positive
+   * (a stall-induced ALL-SILENT re-notify, and a partial recovery announced as new silence).
+   */
+  private evaluateMcpSilence(
+    sessionId: string, parentSessionId: string | null, taskId: string | null, lastActivityIso: string, isCodex: boolean, nowMs: number,
+  ): void {
+    const { pty, db } = this.deps;
+    if (!pty.isAlive(sessionId)) { this.mcpSilenceEpisodes.delete(sessionId); this.mcpSilencePending.delete(sessionId); return; }
+    const result = this.classifyMcpSilence(sessionId, isCodex, nowMs);
+    if (!result) { this.mcpSilenceEpisodes.delete(sessionId); this.mcpSilencePending.delete(sessionId); return; }
+    if (result.shape === "all-silent") {
+      const dormantMinutes = (nowMs - Date.parse(lastActivityIso)) / 60_000;
+      if (dormantMinutes > MCP_SILENCE_ALL_SILENT_MAX_DORMANT_MINUTES) {
+        // Simply idle with no turns — not this watchdog's concern (the ordinary idle-nudge loop above
+        // already covers "nothing to do"). See MCP_SILENCE_ALL_SILENT_MAX_DORMANT_MINUTES's own doc.
+        this.mcpSilenceEpisodes.delete(sessionId);
+        this.mcpSilencePending.delete(sessionId);
+        return;
+      }
+    }
+    const sortedStale = [...result.staleRouters].sort();
+
+    const confirmedEpisode = this.mcpSilenceEpisodes.get(sessionId);
+    if (confirmedEpisode && sortedStale.every((r) => confirmedEpisode.staleRouters.includes(r))) {
+      // The current reading is a SUBSET of (or equal to) the confirmed baseline — never notify, even
+      // through the ladder. Any in-flight "worsening beyond this baseline" pending candidate is now
+      // moot (whatever it was tracking has itself recovered back to, or below, this baseline).
+      this.mcpSilencePending.delete(sessionId);
+      const unchanged = sortedStale.length === confirmedEpisode.staleRouters.length
+        && sortedStale.every((r, i) => r === confirmedEpisode.staleRouters[i]);
+      if (!unchanged) this.mcpSilenceEpisodes.set(sessionId, { shape: result.shape, staleRouters: sortedStale });
+      return;
+    }
+
+    // Either no confirmed episode yet, or the current reading has something genuinely NEW stale beyond
+    // the confirmed baseline — both run through the SAME two-evaluation confirmation ladder.
+    const pending = this.mcpSilencePending.get(sessionId);
+    if (!pending) {
+      this.mcpSilencePending.set(sessionId, { shape: result.shape, staleRouters: sortedStale, firstSeenAt: nowMs });
+      return; // first sighting of this (new-beyond-baseline) staleness — wait for a later confirming evaluation
+    }
+    if (nowMs - pending.firstSeenAt < MCP_SILENCE_STALE_FLOOR_MS) {
+      // Still within the confirmation window — keep the ORIGINAL firstSeenAt as the anchor, but track
+      // the latest shape/routers so a worsening/changing signal is what actually gets notified once
+      // confirmed, not a stale snapshot from the first sighting.
+      this.mcpSilencePending.set(sessionId, { shape: result.shape, staleRouters: sortedStale, firstSeenAt: pending.firstSeenAt });
+      return;
+    }
+    // Confirmed: still stale (and still beyond the prior baseline) at least one keepalive period after
+    // the first sighting — promote and notify.
+    this.mcpSilencePending.delete(sessionId);
+
+    const staleForMin = Math.round(result.staleForMs / 60_000);
+    const routerWord = result.staleRouters.length > 1 ? "routes" : "route";
+    const whatHappened = result.shape === "asymmetric"
+      ? `its loom-${result.staleRouters.join("/")} MCP ${routerWord} went silent ~${staleForMin}+ min ago while its loom-${result.freshRouters.join("/")} ${result.freshRouters.length > 1 ? "routes" : "route"} kept working`
+      : `every one of its MCP routes (loom-${result.staleRouters.join(", loom-")}) went silent together ~${staleForMin}+ min ago`;
+
+    let notifiedParent: boolean | undefined;
+    let leadNotified: boolean | undefined;
+    let leadBoardTaskId: string | undefined;
+    if (parentSessionId) {
+      const text = `[loom:mcp-silence] worker ${sessionId}${taskId ? ` (task ${taskId})` : ""}: ${whatHappened}, even though the pty is still live. This looks like an MCP connection wedge, not a worker that's merely idle — it will likely not self-recover. Check worker_transcript, and if it's genuinely stuck, worker_recycle it (a fresh process gets a fresh MCP connection).`;
+      notifiedParent = this.deps.notifyMcpSilenceParent?.(parentSessionId, text, taskId)?.notifiedParent;
+    } else {
+      const text = `[loom:mcp-silence] session ${sessionId}: ${whatHappened}, even though the pty is still live. This looks like an MCP connection wedge, not a session that's merely idle — it will likely not self-recover on its own. Check its live screen and, if genuinely stuck, session_stop + respawn (or recycle, for a manager).`;
+      const outcome = this.deps.notifyMcpSilenceLead?.(sessionId, text);
+      leadNotified = outcome?.leadNotified;
+      leadBoardTaskId = outcome?.leadBoardTaskId;
+    }
+    this.mcpSilenceEpisodes.set(sessionId, { shape: result.shape, staleRouters: sortedStale });
+    // Mirrors `worker_stuck`'s own convention: a WORKER-shape event carries its owning manager's id as
+    // `managerSessionId` with `workerSessionId` set to the silent session itself; a MANAGER/LEAD-shape
+    // event (no parent) carries the silent session's own id as `managerSessionId`, `workerSessionId`
+    // left absent. `notifiedParent`/`leadNotified`/`leadBoardTaskId` (Code Review round) are each
+    // omitted (never a fabricated `false`/absent placeholder) when their shape didn't apply — e.g. a
+    // WORKER-shape event never carries `leadBoardTaskId`, since no Lead task was ever filed for it.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(nowMs).toISOString(),
+      managerSessionId: parentSessionId ?? sessionId, workerSessionId: parentSessionId ? sessionId : undefined, taskId,
+      kind: "mcp_silence_detected",
+      detail: {
+        shape: result.shape, staleRouters: sortedStale, freshRouters: result.freshRouters, staleForMs: result.staleForMs,
+        ...(notifiedParent !== undefined ? { notifiedParent } : {}),
+        ...(leadNotified !== undefined ? { leadNotified } : {}),
+        ...(leadBoardTaskId !== undefined ? { leadBoardTaskId } : {}),
+      },
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[idle-watcher] mcp-silence ${sessionId} shape=${result.shape} stale=${sortedStale.join(",")} fresh=${result.freshRouters.join(",")} staleForMin=${staleForMin}`);
   }
 
   /** True if the manager appended a genuine orchestration-work event strictly after `sinceIso`. */

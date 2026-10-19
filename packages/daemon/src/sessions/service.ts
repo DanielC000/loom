@@ -11054,6 +11054,81 @@ export class SessionService {
   }
 
   /**
+   * Card d1521fca — durable delivery half of the MCP-silence watchdog's WORKER shape (the b5668822
+   * incident: its orchestration MCP route went permanently silent while its task route kept working).
+   * `IdleWatcher` (orchestration/idle-watcher.ts) already classified the episode and built `text`; this
+   * just routes it to the worker's own parent manager via the SAME durable `enqueueSystemNudge` every
+   * other watcher notice in this file uses — never a raw, non-durable `pty.enqueueStdin`. Returns
+   * whether the nudge was accepted so the caller can record it in the durable `mcp_silence_detected`
+   * event's own `detail.notifiedParent` (Code Review round — the field exists so that detail is TRUE,
+   * never assumed).
+   */
+  notifyMcpSilenceParent(parentSessionId: string, text: string, taskId: string | null): { notifiedParent: boolean } {
+    const result = this.enqueueSystemNudge(parentSessionId, text, { kind: "warning", taskId });
+    return { notifiedParent: result.delivered === true || result.queued === true };
+  }
+
+  /**
+   * Card d1521fca — durable delivery half of the MCP-silence watchdog's MANAGER/LEAD shape (the
+   * a7c072c4 incident: both its MCP routes went silent together, with no parent to notify — mirrors
+   * `notifyLeadOfStuckManager` just above, including ITS prior-open-task reuse (Code Review round:
+   * dedup moved from `IdleWatcher`'s own in-memory episode map, which only ever suppressed a SHAPE-
+   * UNCHANGED re-notify, to here, keyed off the durable `mcp_silence_detected` event history — so a
+   * SHAPE CHANGE on the same session within an open episode still notifies, but reuses the SAME task
+   * rather than filing a second one). `sessionId` is the SILENT session (a manager, or the Lead
+   * itself), never the Lead's own id. No-op if no platform-tier home is seeded on this install.
+   */
+  notifyMcpSilenceLead(sessionId: string, text: string): { leadNotified: boolean; leadBoardTaskId?: string } {
+    const home = resolveLiveLeadHome(this.db);
+    if (!home) return { leadNotified: false };
+
+    // Reuse the latest still-open task THIS session's own prior mcp_silence_detected events filed —
+    // `listEventsForSession` (not `listEventsForWorker`) because the silent session is recorded as
+    // `managerSessionId` for the MANAGER/LEAD shape (no parent) but `workerSessionId` for the WORKER
+    // shape — this method is only ever called for the former, but the query covers both regardless.
+    const priorWithTask = this.db.listEventsForSession(sessionId).findLast(
+      (e) => e.kind === "mcp_silence_detected" && typeof (e.detail as Record<string, unknown> | undefined)?.leadBoardTaskId === "string",
+    );
+    const priorTaskId = priorWithTask ? (priorWithTask.detail as Record<string, unknown>).leadBoardTaskId as string : undefined;
+    const priorTask = priorTaskId ? this.db.getTask(priorTaskId) : undefined;
+    let leadBoardTaskId = priorTask && this.columnEscalationStatus(home.id, priorTask.columnKey) !== "resolved"
+      ? priorTask.id
+      : undefined;
+    if (!leadBoardTaskId) {
+      const now = new Date().toISOString();
+      const s = this.db.getSession(sessionId);
+      const originProject = s?.projectId ? this.db.getProject(s.projectId) : undefined;
+      const body = [
+        "**A session's MCP traffic has gone silent — likely a connection wedge, not a session that's merely idle.**",
+        "",
+        `- **Session:** \`${sessionId}\` (${s?.role ?? "unknown role"})`,
+        `- **Origin project:** ${originProject?.name ?? s?.projectId ?? "unknown"} (\`${s?.projectId ?? "unknown"}\`)`,
+        "",
+        text,
+      ].join("\n");
+      const task: Task = {
+        id: randomUUID(), projectId: home.id, title: `[MCP silence] ${sessionId.slice(0, 8)}`, body,
+        columnKey: this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "backlog",
+        position: Date.now(), priority: DEFAULT_TASK_PRIORITY,
+        createdAt: now, updatedAt: now, version: 1,
+      };
+      this.db.insertTask(task);
+      leadBoardTaskId = task.id;
+    }
+
+    // Card d1521fca, Code Review round: when the SILENT session IS the live Lead itself, a self-nudge
+    // is meaningless (and, worse, assumes a channel into the very session whose MCP connection this
+    // notice says may be wedged) — file only the board task.
+    const liveLead = this.db.listAllSessions().find((x) => x.role === "platform" && x.processState === "live" && !this.db.hasSuccessor(x.id));
+    let leadNotified = false;
+    if (liveLead && liveLead.id !== sessionId && !this.pty.isLiveAndPreBoot(liveLead.id)) {
+      this.enqueueSystemNudge(liveLead.id, `${text} Filed as Platform task ${leadBoardTaskId}.`, { kind: "warning", taskId: null });
+      leadNotified = true;
+    }
+    return { leadNotified, leadBoardTaskId };
+  }
+
+  /**
    * The RESOLVE half of `claude_boot_dialog_stuck`/`claude_boot_dialog_resolved`. Fired from
    * `pty/host.ts`'s `deliverHook` on the first hook of every Live incarnation, whether or not this
    * session was ever stuck. Derives the pairing decision from durable event history alone (never

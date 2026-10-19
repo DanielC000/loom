@@ -1493,6 +1493,11 @@ async function main(): Promise<void> {
     notifyIdleWorker: (workerSessionId) => sessions.notifyManagerOfIdleWorker(workerSessionId),
     // Single-sources the SAME reconciliation for the manager loop's own idle message (CR blocker #2).
     isWorkerStranded: (workerSessionId) => sessions.isWorkerGenuinelyStranded(workerSessionId),
+    // MCP-silence watchdog (card d1521fca) — a LIVE session's MCP traffic going quiet one-sidedly
+    // (worker shape) or entirely (manager/Lead shape). Delivery lives in SessionService (board task +
+    // durable nudge machinery); IdleWatcher owns only the classification + message text.
+    notifyMcpSilenceParent: (parentSessionId, text, taskId) => sessions.notifyMcpSilenceParent(parentSessionId, text, taskId),
+    notifyMcpSilenceLead: (sessionId, text) => sessions.notifyMcpSilenceLead(sessionId, text),
   });
   idleWatcher.start();
   console.log(`[boot] idle-manager watcher on (tick ${idleWatchMs}ms)`);

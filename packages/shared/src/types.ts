@@ -1251,6 +1251,26 @@ export type OrchestrationEventKind =
   // manager decides whether to check on it. Emitted ONCE per episode (re-arms when the worker makes
   // progress, i.e. lastActivity advances).
   | "worker_stuck"
+  // MCP-silence watchdog (IdleWatcher, card d1521fca): a LIVE, non-recycled session whose MCP traffic
+  // has gone quiet — one router stale while another stays recent (ASYMMETRIC), or every established
+  // router stale at once (ALL-SILENT) — while the session itself shows no sign of having simply gone
+  // idle with no turns. TWO shapes for WHO it's filed under, same convention `worker_stuck` above uses:
+  // for a silent WORKER, `managerSessionId` is its OWNING manager and `workerSessionId` is the worker
+  // itself; for a silent MANAGER or the Lead (no parent to notify), `managerSessionId` IS the silent
+  // session's own id and `workerSessionId` is absent. `detail` carries { shape, staleRouters,
+  // freshRouters, staleForMs, notifiedParent? | leadNotified?, leadBoardTaskId? }. Never auto-fixes (no
+  // recycle/kill) — purely advisory, surfaced to the silent worker's parent manager, or to the Platform
+  // Lead for a silent manager/Lead (`notifyMcpSilenceLead`, `sessions/service.ts`) — which reuses the
+  // same still-open Platform board task across repeat notifications for one session (queried from this
+  // event kind's own durable history, `listEventsForSession`, not a fresh task per notification) rather
+  // than filing a new one each time. In-memory episode/pending tracking means a daemon restart
+  // mid-episode can re-notify once more; accepted as harmless, same tradeoff this file already makes
+  // elsewhere.
+  //
+  // @decision d1521fca — a worsening beyond a confirmed episode is still a second, distinct
+  // notification gated by the full confirmation ladder (never an immediate re-notify), and a stale set
+  // that's a subset of the confirmed one never notifies at all.
+  | "mcp_silence_detected"
   // Worktree-vanished advisory (WorktreeVanishedWatcher, card 652d312f): a LIVE worker's own
   // `worktreePath` was found gone or git-broken (fs checks only — no git subprocess; see the watcher's
   // own doc for the three detected states and the one deliberately NOT detected). Filed under the
@@ -2018,7 +2038,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   schedule_fire_missed: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true,
-  give_up_recovery_escalated: true, worker_stuck: true,
+  give_up_recovery_escalated: true, worker_stuck: true, mcp_silence_detected: true,
   worktree_vanished: true,
   manager_manage: true, session_message: true, session_steer_dropped: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
