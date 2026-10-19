@@ -2584,6 +2584,10 @@ export interface PendingGateOpVerdict {
   /** The separate, LATER fact `batchBranchCount` doesn't cover: whether the batch's assembled branches
    *  actually landed on main (@decision 553ea58c — see this id's second record, on this field). */
   batchLanded?: boolean;
+  /** @decision 89bc3b86 — set (with `kind:"error"`, never `"fail"`) when a landing-check's own target
+   *  worktree vanished mid-run — mirrors the dist-importer advisory's `mechanismLike` non-red
+   *  classification. `undefined` on every other row. */
+  worktreeMissing?: boolean;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

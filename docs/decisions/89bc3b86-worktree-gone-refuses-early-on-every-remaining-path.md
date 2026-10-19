@@ -143,6 +143,102 @@ just the `if (preLanded)` finalize shortcut. And this file's own top-of-file hea
 scenario (H)'s fault factory as "the real worktree is never touched" — stale since round 1's own (H)
 rework (a prior pass in this same card) made it genuinely rename the worktree away.
 
+## Round 3 (card `ae1a53ac`) — the non-blocking round-2 findings, closed
+
+Round 2's "Do not assume `reunionAtAdmission`'s own re-union covers every worktree-vanishes-during-the-wait
+shape" item named `captureGatedTip`/`heldStamp` as the two sites that need their OWN `fs.existsSync`
+disambiguation — both already carried the fix by the time this round started, but nothing in
+`worktree-gone-landing-unconfirmed.mjs` ever exercised the "stamp unreadable, directory still present"
+leg of either one; only the "directory genuinely gone" leg (scenarios (L)/(M)) was pinned. Scenarios (P)
+(mirrors (L), `captureGatedTip`) and (Q) (mirrors (M), `heldStamp`) close that gap: both remove only the
+worktree's own `.git` FILE (a `git worktree add` worktree's `.git` is a pointer file, not a directory) so
+the directory stays on disk throughout — proving the over-broad direction was never actually wrong, just
+untested.
+
+Three more sites shared the identical "a null/failed stamp is ambiguous between gone and
+unreadable-but-present" shape and had NOT yet been given the disambiguation at all:
+
+1. **The ungated-landing-check's own PRE-STAMP** (`preStamp`, read before `acquireRepoGuardOnly` is ever
+   taken — no gate-queue wait to race, so its twin fix is still correct defense-in-depth for a narrow
+   window between the pre-gate union-merge and this read). Fixed to check `fs.existsSync(worktreePath)`
+   on a null head before falling into `refuseWorktreeDirty`, exactly like `heldStamp`. Scenarios (R1)/(R2)
+   (`worktree-gone-landing-unconfirmed.mjs`) pin both legs, vanishing the worktree as a side effect of the
+   pre-gate union-merge's own cheap no-write merge-base probe (via `unionMergeGitFactory`) — deterministic,
+   no real concurrency needed.
+2. **The ungated-landing-check's own QUEUE-WAIT/RUN leg** (`runUngatedLandingCheck`): a worktree vanishing
+   while this check itself waits in the gate-queue or runs (its command spawns with `cwd=worktreePath`)
+   produced a false "fail" verdict indistinguishable from a genuine command failure — refused as
+   `ungated_landing_check_failed` ("fix it, then re-run"), which is the WRONG remedy for a vanished tree.
+   Fixed: after a red settle, check `fs.existsSync(worktreePath)` before falling into that refusal; route a
+   missing worktree to `refuseWorktreeMissingAtAdmission` instead. Scenario (14) in
+   `ungated-landing-check.mjs` pins it (the injected `runGate` removes the worktree as a side effect, then
+   returns `passed:false` — mirrors that file's own (9a)/(9b) "side effect inside the injected gate" style).
+3. **The FIRST pre-gate union-merge** (`service.ts`, the earliest of the four `mergeMainIntoWorktree` call
+   sites — runs unconditionally whenever `!preLanded`, before any gate-queue wait at all). It never checked
+   `union.worktreeMissing`, falling through into the generic `union_merge_failed`/`union_conflict`
+   rejection with the RAW `GitConstructError` text in `reason` — the exact "do not put raw underlying-error
+   text into a worktree-missing refusal" violation round 2's own "Do not" list already named for every
+   OTHER site. Fixed: `if (union.worktreeMissing) return refuseWorktreeMissingAtAdmission(...)`, mirroring
+   the other three sites exactly. Scenario (O) pins it (the `unionMergeGitFactory` seam vanishes the
+   worktree on its very first construction attempt — no sibling-commit side effect needed, unlike (H),
+   since this is the FIRST call, never the later admission-time re-union).
+
+## Round 3, Code Review round 2 (`e09ad211`) — item 2's fix left a stray red record behind
+
+The round-3 fix for item 2 above did the `fs.existsSync` disambiguation in the CALLER
+(`confirmWorkerMerge`), AFTER `runUngatedLandingCheck` had already settled its OWN two durable records as
+a real red: the pending-op tombstone as `kind:"fail"` (so `gate_status(opId)` read `outcome:"fail"`), and
+a `worker_gate` event with `passed:false, failedStep:"test"` — both indistinguishable from a genuine
+command failure to anything reading them later (a dashboard, `countGateEvents`'s tally, a future
+diagnostic). The replacement `merge_rejected` event also dropped `ungatedLandingCheckOpId`, so nothing
+joined the stray red row to the refusal that superseded it.
+
+**The fix.** Moved the `fs.existsSync` disambiguation INSIDE `runUngatedLandingCheck`, immediately before
+it settles anything, and classified the vanished-target case the SAME way the dist-importer advisory
+already classifies its own "the check's own machinery broke, not a real red" case
+(`sessions/service.ts`'s `runWorkerGate`/`scanDirectDistImporters` settle, card `cee17efe`): the tombstone
+settles `kind:"error"` (never `"fail"`) with a new `PendingGateOpVerdict.worktreeMissing:true` field, and
+the `worker_gate` event detail carries `mechanismLike:true` alongside it — the SAME existing, already-wired
+non-red signal `gateOutcomeFromDetail` (db.ts) checks BEFORE `passed`, so `countGateEvents`'s tally and the
+rendered `gate_history` row both read "error", never "reject". `runUngatedLandingCheck` returns a new
+`{outcome:"worktree-missing", opId}` variant instead of a bare `{outcome:"settled", passed:false}`, so the
+caller routes on that outcome directly rather than re-deriving existsSync itself — the caller-side check
+from the first round-3 pass is REMOVED (dead once the function disambiguates internally). The caller also
+threads `landingCheck.opId` onto the replacement `merge_rejected` event as `ungatedLandingCheckOpId` (plus
+`landingCheckOnly:true`), matching the ordinary check-failed refusal's own fields, so a reader can join the
+two rows. `refuseWorktreeMissingAtAdmission` gained an optional `extraEventFields` param for this (never
+threaded into the returned `ConfirmMergeResult`, same scope as the ordinary refusal's identical fields).
+`PendingGateOpVerdict.worktreeMissing` was classified `"structural"` in the cross-project
+`GATE_VERDICT_FIELD_CLASSIFICATION` Record (card `753b9699`) — a bare mechanism-classification boolean,
+same bucket as `batchLanded`/`retryPassed`.
+
+Scenario (14) (`ungated-landing-check.mjs`) now asserts on what the check itself persisted — the
+worker_gate row's `mechanismLike`/`worktreeMissing` tags, the threaded opId, and `gate_status(opId)`
+reading `outcome:"error"` — never merely the merge-level `worktree_missing_at_admission` reason, which
+alone proved nothing about the stray red record the CR's own probe found. (R1)/(R2)
+(`worktree-gone-landing-unconfirmed.mjs`) also now assert the landing-check command never ran and the
+merge-gate interval state stays untouched, mirroring (14). The phase text passed to
+`refuseWorktreeMissingAtAdmission` from this site was also corrected to "during the ungated landing
+check's own gate-queue wait or run" — it fires on EITHER, not just the queue wait.
+
+**Negative control (lesson 199).** Reverted the one-line disambiguation inside `runUngatedLandingCheck`
+(`const worktreeMissing = !result.passed && !fs.existsSync(args.worktreePath);` → `false`), rebuilt: (14)
+went RED on exactly the new assertions (the worker_gate tag, the threaded opId, `gate_status`'s outcome,
+and the merge-level reason/event checks that depend on the `"worktree-missing"` outcome ever being
+returned) — proving the test is not vacuous. Restored byte-identical, rebuilt, confirmed green again.
+
+A retry link's `captureGatedTip` discovering a worktree gone after an EARLIER link's gate already ran
+(`gateHasRun:true`) stays attempt 1's red verdict rather than reclassifying — defensible: `gateHasRun`
+means a real gate already produced a verdict on this op, and `captureGatedTip`'s own catch
+(`!gateHasRun` guard at the `GateWorktreeDirtyError` catch site) is deliberately scoped to the FIRST link
+only, so a later link's vanish is a DIFFERENT, already-decided question (per-link gate cleanliness, not
+admission). Not changed by this round; noted per round 2's own optional item.
+
+Also fixed: the (M) scenario's own TOP-OF-FILE summary comment said "the project has no `gateCommand` at
+all" — wrong; (M)'s actual fixture configures a real `gateCommand` WITH `orchestration.mergeGate:"off"`
+(the scenario's own detailed comment, just above its code, already had this right — only the file's
+earlier summary list was stale).
+
 ## Do not
 
 - Do not fold `reunion.worktreeMissing` into the inert-reclassify re-union's `reunionFailed` branch, at
@@ -169,3 +265,18 @@ rework (a prior pass in this same card) made it genuinely rename the worktree aw
 - Do not test "no gateCommand" as if it were the same condition as `orchestration.mergeGate:"off"` — a
   project with NO gateCommand at all never enters `if (gate)`, so `gateDisabled`/`inertSkip`/`heldStamp`
   are never reached; a gate-off/interval-skip test needs a REAL gateCommand configured, just disabled.
+- Do not leave a `preStamp`/`heldStamp`-shaped null-head check without the `fs.existsSync` disambiguation
+  just because its SIBLING already has it — each new `computeWorktreeGateStamp` read introduced at a new
+  call site is its own, separate ambiguity; check it explicitly rather than assuming an adjacent fix covers
+  it. The ungated-landing-check's own pre-stamp and its queue-wait/run leg were both missed this way.
+- Do not assume the FIRST `mergeMainIntoWorktree` call site is safe from `worktreeMissing` just because it
+  runs before any gate-queue wait — a reap, a `findLandedSquashCommit` lookup, or ordinary host contention
+  can still race it. Check `union.worktreeMissing` there too, exactly like the other three sites.
+- Do not add a test for "stamp unreadable but directory present" by removing the WHOLE worktree directory
+  — that reaches the directory-gone leg, not the unreadable-but-present one. Remove only the worktree's
+  own `.git` FILE (a pointer, not a directory) to exercise that leg deterministically.
+- Do not disambiguate a vanished-target false red in the CALLER after the op being disambiguated has
+  already settled its own durable tombstone/event as a real fail — classify it INSIDE the op itself,
+  before anything durable settles, or a stray red record survives the replacement refusal with nothing
+  joining the two. Use the existing `mechanismLike`/`"error"` non-red classification (already wired
+  through `gateOutcomeFromDetail`) rather than inventing a new verdict kind.

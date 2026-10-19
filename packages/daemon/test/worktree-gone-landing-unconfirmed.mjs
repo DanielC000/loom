@@ -91,8 +91,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (L) the queued-wait-no-main-move leg — holds the repo guard directly (same technique as (I)/(J)),
 //       removes the worktree while held, releases with main UNTOUCHED. `captureGatedTip`'s own detection
 //       is what fires here, not `reunionAtAdmission`.
-//   (M) the gate-OFF `heldStamp` leg — same hold-then-remove technique, but the project has no
-//       `gateCommand` at all, so the gate-disabled/inert-skip `heldStamp` check is what fires.
+//   (M) the gate-OFF `heldStamp` leg — same hold-then-remove technique, but the project has a
+//       `gateCommand` configured WITH `orchestration.mergeGate:"off"` (a project with NO gateCommand at
+//       all never reaches `if (gate)` at all), so the gate-disabled/inert-skip `heldStamp` check fires.
 //
 // Finding 2: nothing in this file goes RED without card 89bc3b86 round 1's `fs.existsSync`-in-the-catch
 // fix (`mergeMainIntoWorktree`'s wtGit-construction catch, git/worktrees.ts). Scenario (N) exercises
@@ -817,6 +818,283 @@ try {
     check("(M) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
     const rejected = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
     check("(M) a merge_rejected event is recorded with the named reason", rejected.length === 1);
+  }
+
+  // ── (O) card ae1a53ac finding 4 — the FIRST pre-gate union-merge (no gate-queue wait at all — this is
+  //        the EARLIEST of the four `mergeMainIntoWorktree` call sites) never checked `union.worktreeMissing`
+  //        at all, falling through into the generic union_merge_failed rejection with the raw
+  //        GitConstructError text. Seam-driven via the EXISTING `unionMergeGitFactory` test seam — the very
+  //        FIRST construction attempt itself vanishes the real worktree directory before throwing (no
+  //        sibling-commit side effect needed here, unlike (H): this is the FIRST union-merge call, never
+  //        the later admission-time re-union). ──────────────────────────────────────────────────────────
+  {
+    const sfx = `o-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+    const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true });
+    registerForCleanup(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# wtglu\n");
+    execSync(`git init -q && git config user.email wtglu@loom && git config user.name wtglu`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
+
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    registerForCleanup(worktreePath);
+    const parkedPath = `${worktreePath}.parked-o`;
+    registerForCleanup(parkedPath);
+    fs.writeFileSync(path.join(worktreePath, "feat.txt"), "feature work\n");
+    commitAll(worktreePath, "feat: add feature", GIT_ID);
+
+    const unionMergeGitFactory = (p, ms) => {
+      if (p !== worktreePath) return canonicalGit(p, ms);
+      // The very first (and in this scenario, only) construction: a genuine, real vanish — same
+      // rename-away technique as (H), just on the FIRST attempt instead of the second.
+      fs.renameSync(worktreePath, parkedPath);
+      throw new Error("Cannot use simple-git on a directory that does not exist (fault-injected, card ae1a53ac test)");
+    };
+
+    const db = new Db();
+    dbs.push(db);
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+      unionMergeGitFactory,
+    });
+    db.insertProject({ id: projId, name: "WTGLU-O", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "WTGLU-O-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    check("(O) settles ok:true (the refusal is a RESULT, not a crash/mislabel)", r1.settled === true && r1.ok === true);
+    check("(O) merged:false, worktreeMissingAtAdmission:true (NOT the generic union_merge_failed mislabel)", r1.ok && r1.value.merged === false && r1.value.worktreeMissingAtAdmission === true);
+    check("(O) reason is the SAME fixed string, never the raw GitConstructError text", r1.ok && r1.value.reason === "the worktree no longer exists");
+    check("(O) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
+    const rejectedO = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
+    check("(O) a merge_rejected event is recorded with the named reason", rejectedO.length === 1);
+    const oldStyleO = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && (e.detail?.reason === "union_merge_failed" || e.detail?.reason === "union_conflict"));
+    check("(O) never recorded the OLD generic union_merge_failed/union_conflict reason", oldStyleO.length === 0);
+  }
+
+  // ── (P) card ae1a53ac finding 1 — the OVER-BROAD-DIRECTION test gap, `captureGatedTip`'s own leg: its
+  //        `!fs.existsSync(worktreePath)` disambiguation (89bc3b86 round 2) routes a readable-but-present
+  //        failure through the ordinary gateWorktreeDirty refusal — but nothing in this file ever exercised
+  //        that leg, only (L)'s directory-genuinely-gone leg. Same hold-then-remove technique as (L), but
+  //        removes only the worktree's own `.git` FILE (a `git worktree add` worktree's `.git` is a file,
+  //        not a directory) — the directory itself stays on disk throughout, so
+  //        `fs.existsSync(worktreePath)` reads true the whole time; `computeWorktreeGateStamp` still can't
+  //        read HEAD (no gitdir pointer), giving `head:null` with the directory present. ──────────────────
+  {
+    const sfx = `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+    const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    makeInertCapableRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    let gateCalls = 0;
+    const fakeGate = async () => { gateCalls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+      runGate: fakeGate,
+    });
+
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    registerForCleanup(worktreePath);
+    // A REAL (non-docs) change — same reasoning as (L): this must take the full runExclusive admission
+    // path, never the inert-skip's own acquireRepoGuardOnly.
+    mkdirp(path.join(worktreePath, "src"));
+    fs.writeFileSync(path.join(worktreePath, "src", "feat.ts"), "export const feat = true;\n");
+    commitAll(worktreePath, "feat: add feature", GIT_ID);
+    const mainHeadBefore = git(repo, "rev-parse HEAD");
+
+    db.insertProject({ id: projId, name: "WTGLU-P", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "WTGLU-P-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const releaseTestHold = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: repo, projectId: projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op-p",
+    });
+
+    const pConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const queuedP = await sharedWaitUntil(() => sessions.gateQueueForManager(projId).queued.some((e) => e.gateType === "merge"), { timeoutMs: 60000, intervalMs: 10, label: "(P) confirm genuinely queued behind the held repo guard" });
+    check("(P) the confirm genuinely reached the real gate-admission queue, blocked by the held repo guard", queuedP);
+
+    // While held: remove ONLY the worktree's own `.git` file — the directory itself stays on disk.
+    const gitFilePathP = path.join(worktreePath, ".git");
+    check("(P) PRECONDITION: .git is a file (a worktree pointer), not a directory", fs.statSync(gitFilePathP).isFile());
+    fs.rmSync(gitFilePathP, { force: true });
+    releaseTestHold();
+    const r1 = await pConfirm;
+
+    check("(P) PRECONDITION held: the worktree directory itself genuinely still exists", fs.existsSync(worktreePath));
+    check("(P) settles ok:true (the refusal is a RESULT, not a crash/mislabel)", r1.settled === true && r1.ok === true);
+    check("(P) merged:false, the ORDINARY gateWorktreeDirty refusal (directory present, stamp unreadable)", r1.ok && r1.value.merged === false && r1.value.gateWorktreeDirty !== undefined);
+    check("(P) does NOT carry worktreeMissingAtAdmission — the directory never vanished, only its gitdir pointer did", r1.ok && r1.value.worktreeMissingAtAdmission === undefined);
+    check("(P) the fake gate command was NEVER spawned — refused before the gate's own spawn", gateCalls === 0);
+    check("(P) main HEAD is completely unchanged", git(repo, "rev-parse HEAD") === mainHeadBefore);
+    check("(P) branch ref still exists (untouched)", git(repo, `branch --list ${branch}`) !== "");
+    check("(P) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
+    const rejectedP = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "gate_worktree_dirty");
+    check("(P) a merge_rejected event is recorded with the gate_worktree_dirty reason (never worktree_missing_at_admission)", rejectedP.length === 1);
+  }
+
+  // ── (Q) card ae1a53ac finding 1 — the OVER-BROAD-DIRECTION test gap, the `heldStamp` leg (mirrors (P)
+  //        for `captureGatedTip`). Same hold-then-remove technique as (M), but removes only the worktree's
+  //        own `.git` file — the directory stays on disk, so `fs.existsSync(worktreePath)` stays true and
+  //        this must stay the ordinary gateWorktreeDirty refusal, never worktreeMissingAtAdmission. ───────
+  {
+    const sfx = `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+    const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    makeInertCapableRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+    });
+
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    registerForCleanup(worktreePath);
+    mkdirp(path.join(worktreePath, "docs"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "notes\n");
+    commitAll(worktreePath, "docs: add note", GIT_ID);
+    const mainHeadBefore = git(repo, "rev-parse HEAD");
+
+    db.insertProject({ id: projId, name: "WTGLU-Q", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE, mergeGate: "off" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "WTGLU-Q-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const releaseTestHold = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: repo, projectId: projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op-q",
+    });
+
+    const pConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const queuedQ = await waitUntilRepoGuardQueued(sessions, projId, repo, 60000);
+    check("(Q) the confirm genuinely reached its own repo-guard-only wait before we release our hold", queuedQ);
+
+    const gitFilePathQ = path.join(worktreePath, ".git");
+    check("(Q) PRECONDITION: .git is a file (a worktree pointer), not a directory", fs.statSync(gitFilePathQ).isFile());
+    fs.rmSync(gitFilePathQ, { force: true });
+    releaseTestHold();
+    const r1 = await pConfirm;
+
+    check("(Q) PRECONDITION held: the worktree directory itself genuinely still exists", fs.existsSync(worktreePath));
+    check("(Q) settles ok:true (the refusal is a RESULT, not a crash/mislabel)", r1.settled === true && r1.ok === true);
+    check("(Q) merged:false, the ORDINARY gateWorktreeDirty refusal (directory present, stamp unreadable)", r1.ok && r1.value.merged === false && r1.value.gateWorktreeDirty !== undefined);
+    check("(Q) does NOT carry worktreeMissingAtAdmission", r1.ok && r1.value.worktreeMissingAtAdmission === undefined);
+    check("(Q) main HEAD is completely unchanged", git(repo, "rev-parse HEAD") === mainHeadBefore);
+    check("(Q) branch ref still exists (untouched)", git(repo, `branch --list ${branch}`) !== "");
+    check("(Q) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
+    const rejectedQ = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "gate_worktree_dirty");
+    check("(Q) a merge_rejected event is recorded with the gate_worktree_dirty reason (never worktree_missing_at_admission)", rejectedQ.length === 1);
+  }
+
+  // ── (R) card ae1a53ac finding 2 — the ungated-landing PRE-STAMP's own `preStamp.head === null` check
+  //        had NO `fs.existsSync` disambiguation at all (unlike its `heldStamp` twin, (Q)/(M) above): ANY
+  //        unreadable stamp here — missing-directory or not — fell into the ordinary gateWorktreeDirty
+  //        refusal. Two legs, same fixture shape: (R1) the worktree directory is genuinely gone — must now
+  //        route to refuseWorktreeMissingAtAdmission; (R2) only the `.git` pointer is gone (the directory
+  //        itself stays on disk) — must still go to the ordinary gateWorktreeDirty refusal, unchanged.
+  //        This pre-stamp read runs BEFORE `acquireRepoGuardOnly` is ever taken, so there's no gate-queue
+  //        wait to race — both legs vanish the worktree as a side effect of the pre-gate union-merge's own
+  //        cheap no-write merge-base probe (the `unionMergeGitFactory` seam), deterministically, right
+  //        before the preStamp read a moment later. ─────────────────────────────────────────────────────
+  {
+    async function buildR(label, { removeWhole }) {
+      const sfx = `${label}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+      const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+      const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+      makeInertCapableRepo(repo);
+      const db = new Db();
+      dbs.push(db);
+
+      const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+      registerForCleanup(worktreePath);
+      mkdirp(path.join(worktreePath, "docs"));
+      fs.writeFileSync(path.join(worktreePath, "docs", `note-${label}.md`), "notes\n");
+      commitAll(worktreePath, "docs: add note", GIT_ID);
+      const mainHeadBefore = git(repo, "rev-parse HEAD");
+
+      let sideEffectDone = false;
+      const unionMergeGitFactory = (p, ms) => {
+        if (p !== worktreePath) return canonicalGit(p, ms);
+        const real = canonicalGit(p, ms);
+        return {
+          raw: async (args) => {
+            const result = await real.raw(args);
+            if (!sideEffectDone && args[0] === "merge-base") {
+              sideEffectDone = true;
+              // The union-merge's own cheap no-write probe just succeeded (main is already an ancestor);
+              // vanish the worktree right after, before `mergeMainIntoWorktree` returns — simulating
+              // "gone between the union-merge and the preStamp read a moment later" (this scenario), not
+              // "gone during the union-merge's own probe itself" (finding 4, scenario (O), above).
+              if (removeWhole) fs.rmSync(worktreePath, { recursive: true, force: true });
+              else fs.rmSync(path.join(worktreePath, ".git"), { force: true });
+            }
+            return result;
+          },
+        };
+      };
+
+      // Card ae1a53ac (round 2 nit): counts whether `runUngatedLandingCheck`'s own injected gate ever
+      // actually spawned — both legs here must refuse BEFORE this check ever runs at all (the pre-stamp
+      // read sits strictly before it), so this must stay 0 on both.
+      let landingCheckGateCalls = 0;
+      const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+        reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+        unionMergeGitFactory,
+        runGate: async () => { landingCheckGateCalls++; return { passed: true, steps: [] }; },
+      });
+
+      // mergeGateInterval (not "never") so skipReason is "gate-interval" — the ONLY skip reason this
+      // check is scoped to (see ungated-landing-check.mjs's own negative control (4)); ungatedLandingCheckCommand
+      // configured so the pre-stamp block is actually entered at all.
+      db.insertProject({ id: projId, name: `WTGLU-${label.toUpperCase()}`, repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE, mergeGate: "off", mergeGateInterval: 3, ungatedLandingCheckCommand: PASS_GATE } }, createdAt: now, archivedAt: null });
+      db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      db.insertTask({ id: taskId, projectId: projId, title: `WTGLU-${label.toUpperCase()}-TASK`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+      const stateBefore = JSON.stringify(db.getMergeGateState(projId));
+      return { db, sessions, repo, projId, taskId, mgrId, workerId, worktreePath, branch, mainHeadBefore, stateBefore, gateCalls: () => landingCheckGateCalls };
+    }
+
+    // (R1) worktree genuinely gone right after the union-merge's own probe, before the pre-stamp read.
+    {
+      const f = await buildR("r1", { removeWhole: true });
+      const r1 = await f.sessions.confirmWorkerMergeTracked(f.mgrId, f.workerId);
+      check("(R1) settles ok:true", r1.settled === true && r1.ok === true);
+      check("(R1) merged:false, worktreeMissingAtAdmission:true (NOT the generic gate_worktree_dirty mislabel)", r1.ok && r1.value.merged === false && r1.value.worktreeMissingAtAdmission === true);
+      check("(R1) does not carry the generic gateWorktreeDirty shape", r1.ok && r1.value.gateWorktreeDirty === undefined);
+      check("(R1) reason text names the worktree being gone", r1.ok && /no longer exists/.test(r1.value.reason ?? ""));
+      check("(R1) task column unchanged (still in_progress)", f.db.getTask(f.taskId)?.columnKey === "in_progress");
+      const rejectedR1 = f.db.listEventsForWorker(f.workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
+      check("(R1) a merge_rejected event is recorded with the named reason", rejectedR1.length === 1);
+      check("(R1) the landing-check command NEVER ran (refused before the pre-stamp read's own caller reaches it)", f.gateCalls() === 0);
+      check("(R1) the merge-gate interval state (counter, gateOwed, lastPassSha, ring) is COMPLETELY UNTOUCHED", JSON.stringify(f.db.getMergeGateState(f.projId)) === f.stateBefore);
+    }
+
+    // (R2) only `.git` gone — the directory itself stays on disk; must stay the ordinary dirty refusal.
+    {
+      const f = await buildR("r2", { removeWhole: false });
+      const r1 = await f.sessions.confirmWorkerMergeTracked(f.mgrId, f.workerId);
+      check("(R2) PRECONDITION: the worktree directory itself still exists", fs.existsSync(f.worktreePath));
+      check("(R2) settles ok:true", r1.settled === true && r1.ok === true);
+      check("(R2) merged:false, the ORDINARY gateWorktreeDirty refusal", r1.ok && r1.value.merged === false && r1.value.gateWorktreeDirty !== undefined);
+      check("(R2) does NOT carry worktreeMissingAtAdmission", r1.ok && r1.value.worktreeMissingAtAdmission === undefined);
+      check("(R2) main HEAD unchanged", git(f.repo, "rev-parse HEAD") === f.mainHeadBefore);
+      const rejectedR2 = f.db.listEventsForWorker(f.workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "gate_worktree_dirty");
+      check("(R2) a merge_rejected event is recorded with the gate_worktree_dirty reason", rejectedR2.length === 1);
+      check("(R2) the landing-check command NEVER ran (refused before the pre-stamp read's own caller reaches it)", f.gateCalls() === 0);
+      check("(R2) the merge-gate interval state (counter, gateOwed, lastPassSha, ring) is COMPLETELY UNTOUCHED", JSON.stringify(f.db.getMergeGateState(f.projId)) === f.stateBefore);
+    }
   }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }

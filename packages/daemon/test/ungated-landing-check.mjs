@@ -519,6 +519,52 @@ try {
     // (one `.split("\n")[0]`, no stack, no full message), never a substitute for a real gate diagnostic.
     check("(13) the ruling-5 finally settle carries the thrown error's first line as `reason` (cheap, not a full diagnostic)", status?.reason === "boom: landing-check runner crashed unexpectedly");
   }
+
+  // ── (14) card ae1a53ac finding 3 — the worktree vanishing WHILE the check itself runs must not be
+  // misreported as the check's own ordinary "failed" verdict: `landingCheck.passed:false` is ambiguous
+  // between a genuine command failure and a vanished cwd, and the un-fixed code always read it as the
+  // former. Refuse via the SAME shared worktree-missing-at-admission classification every other
+  // admission-time worktree-missing discovery uses instead, never the generic ungated_landing_check_failed
+  // mislabel ───────────────────────────────────────────────────────────────────────────────────────────
+  {
+    const P = mk("u14"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    await seedProject(db, P, { mergeGate: "off", mergeGateInterval: 3, ungatedLandingCheckCommand: "pnpm guards" });
+    const w = await addWorker(db, P, "u14a", { "src/u14a.ts": "export const u14a = 1;\n" });
+    const stateBefore = JSON.stringify(db.getMergeGateState(P.projId));
+    ctx.sessions.runGate = async (command) => {
+      ctx.gate.calls++; ctx.gate.lastCommand = command; ctx.gate.commands.push(command);
+      // Simulates the worktree vanishing WHILE this check's own gate-queue wait/run is in flight (a
+      // sibling/host race unrelated to the check's own command) — a false "fail" the check's own result
+      // (passed:false) cannot distinguish from a genuine command failure.
+      fs.rmSync(w.worktreePath, { recursive: true, force: true });
+      return { passed: false, failedStep: "test", failedStatus: 1, steps: [] };
+    };
+    const v = await confirm(ctx.sessions, P.mgrId, w.workerId);
+    check("(14) merged:false, worktreeMissingAtAdmission:true (NOT the generic ungated_landing_check_failed mislabel)", v.merged === false && v.worktreeMissingAtAdmission === true);
+    check("(14) does not carry the generic ungatedLandingCheckFailed shape", v.ungatedLandingCheckFailed === undefined);
+    check("(14) reason text names the worktree being gone", /no longer exists/.test(v.reason ?? ""));
+    const rejected = db.listEvents(P.mgrId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
+    check("(14) a merge_rejected event is recorded with the named reason", rejected.length === 1);
+    const oldRejected = db.listEvents(P.mgrId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "ungated_landing_check_failed");
+    check("(14) never recorded the old mislabelled reason", oldRejected.length === 0);
+    check("(14) the merge-gate interval state (counter, gateOwed, lastPassSha, ring) is COMPLETELY UNTOUCHED — never treated as a periodic gate failure", JSON.stringify(db.getMergeGateState(P.projId)) === stateBefore);
+    // Round 2 (Code Review e09ad211): the EXISTENCE check alone proved nothing about what the landing
+    // check's OWN durable records settled as — its tombstone/worker_gate row, written BEFORE the caller
+    // ever sees a result, used to settle as a real red (kind:"fail", passed:false) regardless of this
+    // refusal's own classification, leaving a stray fail record with nothing joining it to the refusal
+    // that replaced it. Assert on what the check itself persisted, not just the merge-level outcome.
+    const rows = landingCheckRows(db, P.mgrId);
+    check("(14) the landing-check's own worker_gate row is tagged mechanismLike + worktreeMissing (never a plain red)", rows.length === 1 && rows[0].detail.mechanismLike === true && rows[0].detail.worktreeMissing === true);
+    const landingCheckOpId = rows[0].detail.opId;
+    check("(14) the replacement merge_rejected event threads the landing-check's own opId (joins the two rows)", rejected[0].detail.ungatedLandingCheckOpId === landingCheckOpId && rejected[0].detail.landingCheckOnly === true);
+    const status = ctx.sessions.gateStatus(landingCheckOpId);
+    check("(14) gate_status(opId) resolves outcome:\"error\" (a mechanism break), NEVER outcome:\"fail\" (a real red)", status?.state === "settled" && status?.outcome === "error");
+    check("(14) gate_status(opId) carries the honest reason, not a fabricated command-failure diagnostic", typeof status?.reason === "string" && /no longer existed/.test(status.reason));
+    const countsAfter = db.countGateEvents({ projectId: P.projId });
+    check("(14) countGateEvents tallies this row under \"error\", never under the generic reject/fail bucket", (countsAfter.byOutcome.error ?? 0) >= 1 && !countsAfter.byOutcome.reject);
+  }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }
 }

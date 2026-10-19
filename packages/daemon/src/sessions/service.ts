@@ -5648,6 +5648,9 @@ export class SessionService {
         // actually land on main) — no foreign path/test/error content of its own, same bucket as
         // `batchBranchCount` immediately above and `retryPassed`/`transientRetried` below.
         batchLanded: "structural",
+        // Card ae1a53ac: a plain boolean mechanism classification (did the TARGET vanish, as opposed to
+        // the command genuinely failing) — same bucket as batchLanded/retryPassed, no foreign content.
+        worktreeMissing: "structural",
         // Card 753b9699 — the OUTER return fields (see this Record's own doc, above, for the gap this
         // closes). All "structural": fleet-operational metadata with no foreign path/test/error content of
         // its own. `admittedAt` (a mint timestamp) and `outcome` (the 5-value verdict-kind enum) were
@@ -17673,10 +17676,12 @@ export class SessionService {
     // @decision 89bc3b86 — ONE shared, never-cached refusal for "the worktree vanished while this merge
     //  was being admitted/gated" — `reason` is always the SAME fixed string, never the raw
     //  GitConstructError text.
-    const refuseWorktreeMissingAtAdmission = async (phaseText: string): Promise<ConfirmMergeResult> => {
+    // @decision 89bc3b86 — `extraEventFields` lets the ungated-landing-check site thread its own
+    //  `ungatedLandingCheckOpId`/`landingCheckOnly` onto the replacement event, never into the return value.
+    const refuseWorktreeMissingAtAdmission = async (phaseText: string, extraEventFields?: Record<string, unknown>): Promise<ConfirmMergeResult> => {
       const detailText = `WORKTREE GONE: this worker's worktree directory no longer exists — it vanished ${phaseText}. Squash phase never reached, canonical repo untouched — nothing was touched. This is NOT a confirmed failure: re-run worker_merge_confirm to retry, or recreate the worktree / re-task this work if it's permanently gone.`;
       const { suppressed, sha } = await rejectNotify("worktree_missing_at_admission", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "worktree_missing_at_admission", sha, ...(suppressed ? { suppressed: true } : {}) });
+      evt("merge_rejected", { reason: "worktree_missing_at_admission", sha, ...extraEventFields, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: "the worktree no longer exists", detailText, notified: !suppressed, opId: thisOpId, worktreeMissingAtAdmission: true };
     };
     // Card 92be634e — a reduced gate's --only-file= overflow write (buildReducedGateCommand) failing is a
@@ -18035,6 +18040,9 @@ export class SessionService {
       if (!preLanded) {
         const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, gitFactory: this.unionMergeGitFactory }, owedBase, branch);
         if (!union.ok) {
+          // @decision 89bc3b86 — mirrors the inert-reclassify re-union and the admission-time re-union:
+          //  refuse HERE, immediately, never fall through into quarantine/conflict/generic-failure below.
+          if (union.worktreeMissing) return refuseWorktreeMissingAtAdmission("during the pre-gate union-merge");
           // Card 7e5b23e7: a quarantine raised (or already in force) by the union-merge's own kill-confirm
           // is NOT an ordinary union failure — the canonical repo now refuses EVERY merge until a human
           // clears it. Reuse `assertRepoNotQuarantined`'s own text for that repo-wide remedy (never
@@ -18410,6 +18418,9 @@ export class SessionService {
           // `OrchestrationConfig.ungatedLandingCheckCommand`'s own doc; read it there, not restated here.
           if (gateDisabled && mergeSkipReason === "gate-interval" && targetRepo.ungatedLandingCheckCommand) {
             const preStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+            // @decision 89bc3b86 — mirrors the `heldStamp` twin below: disambiguate a null head with the
+            //  same fs.existsSync check before falling into the generic dirty-tree refusal.
+            if (preStamp.head === null && !fs.existsSync(worktreePath)) return refuseWorktreeMissingAtAdmission("before the ungated landing check could run");
             if (preStamp.dirty || preStamp.head === null) {
               return refuseWorktreeDirty("before-gate", preStamp.dirty ? "the worktree is dirty before the ungated landing check could run" : "worktree stamp unreadable before the ungated landing check could run");
             }
@@ -18421,6 +18432,12 @@ export class SessionService {
             if (landingCheck.outcome === "cancelled") {
               evt("merge_cancelled", { cancelled: true, cancelKind: landingCheck.cancelKind, cancelDetail: landingCheck.cancelDetail, landingCheckOnly: true });
               return { merged: false, cancelled: true, cancelKind: landingCheck.cancelKind, reason: landingCheck.cancelDetail, opId: thisOpId };
+            }
+            // @decision 89bc3b86 — `runUngatedLandingCheck` disambiguates a vanished worktree BEFORE
+            //  settling anything durable, returning this outcome instead of a bare `passed:false`. Thread
+            //  its opId onto the replacement event so a reader can join the two rows.
+            if (landingCheck.outcome === "worktree-missing") {
+              return refuseWorktreeMissingAtAdmission("during the ungated landing check's own gate-queue wait or run", { landingCheckOnly: true, ungatedLandingCheckOpId: landingCheck.opId });
             }
             landingCheckRan = true;
             landingCheckPreHead = preStamp.head;
@@ -22386,6 +22403,7 @@ export class SessionService {
     taskId: string | null; workerSessionId: string; command: string; timeoutMs: number; cap: number;
   }): Promise<
     | { outcome: "cancelled"; cancelKind: GateCancelKind; cancelDetail: string; opId: string }
+    | { outcome: "worktree-missing"; opId: string }
     | { outcome: "settled"; passed: boolean; failedStep?: string; outputTail?: string; durationMs: number; opId: string }
   > {
     const opId = randomUUID();
@@ -22459,12 +22477,17 @@ export class SessionService {
         });
         return { outcome: "cancelled", cancelKind: "manual", cancelDetail: runningCancelReason, opId };
       }
+      // @decision 89bc3b86 — a vanished-target command failure is indistinguishable from a real red;
+      //  classify it HERE, before anything durable settles, never left for a caller to reclassify after.
+      const worktreeMissing = !result.passed && !fs.existsSync(args.worktreePath);
       tombstoneSettled = true;
       this.db.settlePendingGateOp(opId, {
-        kind: result.passed ? "pass" : "fail",
+        kind: worktreeMissing ? "error" : result.passed ? "pass" : "fail",
         payload: {
           durationMs, outputTail: result.outputTail, steps: result.steps,
-          ...(result.passed ? {} : { gateDetail: { failedStep: result.failedStep, exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? null, timedOut: result.failedTimedOut ?? false, stderrTail: result.outputTail } }),
+          ...(worktreeMissing
+            ? { reason: "the worker's worktree no longer existed when this check settled", worktreeMissing: true }
+            : result.passed ? {} : { gateDetail: { failedStep: result.failedStep, exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? null, timedOut: result.failedTimedOut ?? false, stderrTail: result.outputTail } }),
         },
       });
       this.db.appendEvent({
@@ -22472,6 +22495,7 @@ export class SessionService {
         workerSessionId: args.workerSessionId, taskId: args.taskId, kind: "worker_gate",
         detail: {
           opId, landingCheckOnly: true, passed: result.passed, gateSpawned: true, durationMs,
+          ...(worktreeMissing ? { mechanismLike: true, worktreeMissing: true } : {}),
           ...(result.failedStep ? { failedStep: result.failedStep } : {}),
           ...(result.outputTail ? { outputTail: result.outputTail } : {}),
           ...(result.failingTest ? { failingTest: result.failingTest } : {}),
@@ -22479,6 +22503,7 @@ export class SessionService {
           ...(result.failedSignal ? { signal: result.failedSignal } : {}),
         },
       });
+      if (worktreeMissing) return { outcome: "worktree-missing", opId };
       return { outcome: "settled", passed: result.passed, failedStep: result.failedStep, outputTail: result.outputTail, durationMs, opId };
     } catch (err) {
       unexpectedErrorFirstLine = err instanceof Error ? err.message.split("\n", 1)[0]?.slice(0, 200) : undefined;
