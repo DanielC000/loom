@@ -15,6 +15,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build (pnpm build), 2) node packages/daemon/test/stale-worktree-leftovers.mjs
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 
@@ -24,6 +25,7 @@ requireHermeticEnv();
 const {
   listStaleAsideWorktrees, repoKeysByProjectFromProjects, isStaleAsideWorktreeDir,
   reclaimStaleAsideWorktreeDir, resolveWorktreePath, isRegisteredRepoKeyAxisDir,
+  killableRemoveDir,
 } = await import("../dist/git/worktrees.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
 const { Db } = await import("../dist/db.js");
@@ -520,6 +522,82 @@ check("isStaleAsideWorktreeDir rejects a non-numeric suffix", !isStaleAsideWorkt
   check("(10) a stale-shaped path that never existed on disk reports missing", outcome.outcome === "missing");
 }
 
+// --- (40)/(41)/(42) card 3640abf5 — reclaimStaleAsideWorktreeDir now routes its removeDir call through
+// raceRemoval, so its three distinct settlement shapes (card c2fc8d84's own classification) must each be
+// proven separately — a never-settling stub does NOT stand in for all three (per the kickoff's own
+// warning): (40) a REAL wedge resolves via killableRemoveDir's OWN inner timer (kind:"result",
+// killed:true — the inner timer wins the race against raceRemoval's outer one of the same duration);
+// (41) raceRemoval's OWN outer timeout fires only when the inner promise never settles at all; (42) a
+// synchronous `removeDir` rejection (e.g. a real `spawn()` failure) is classified distinctly from both,
+// never retried, and never left to propagate past this function as an unhandled rejection.
+
+// --- (40) resolved-killed: a REAL hanging child, same pattern as node-modules-reclaim.mjs's (c) ---
+{
+  const proj = "projSwl40";
+  const cleanPath = resolveWorktreePath(proj, "task40-wedged");
+  const stalePath = mkStaleAside(cleanPath, 1700000000040);
+  const HANG_TIMEOUT_MS = 300;
+  let spawnCalls = 0;
+  const hangingChild = () => { spawnCalls++; return spawn(process.execPath, ["-e", "setInterval(() => {}, 999999)"], { stdio: "ignore" }); };
+  const removeDir = (target, ms) => killableRemoveDir(target, ms, hangingChild);
+  const outcome = await reclaimStaleAsideWorktreeDir(stalePath, HANG_TIMEOUT_MS, { removeDir, repoKeysByProject: new Map() });
+  check("(40) a genuinely wedged (force-killed) removal reports 'wedged', never 'removed'", outcome.outcome === "wedged");
+  check("(40) bytesReclaimed is null on a wedged outcome", outcome.bytesReclaimed === null);
+  check("(40) the leftover dir is STILL on disk (a killed removal is never retried)", fs.existsSync(stalePath));
+  check("(40) exactly ONE removal attempt was made", spawnCalls === 1);
+  fs.rmSync(stalePath, { recursive: true, force: true });
+}
+
+// --- (41) outer-timeout seam: a removeDir stub whose promise NEVER settles at all — distinct from (40),
+// where the INNER killableRemoveDir timer settles the promise itself. Only a promise with no inner timer
+// of its own can exercise raceRemoval's OWN outer timeout branch. ---
+{
+  const proj = "projSwl41";
+  const cleanPath = resolveWorktreePath(proj, "task41-outer-timeout");
+  const stalePath = mkStaleAside(cleanPath, 1700000000041);
+  const RACE_TIMEOUT_MS = 200;
+  let removeDirCalls = 0;
+  const removeDir = () => { removeDirCalls++; return new Promise(() => { /* never settles */ }); };
+  const t0 = performance.now();
+  const outcome = await reclaimStaleAsideWorktreeDir(stalePath, RACE_TIMEOUT_MS, { removeDir, repoKeysByProject: new Map() });
+  const elapsed = performance.now() - t0;
+  check("(41) a removeDir promise that never settles still resolves via the OUTER raceRemoval timeout, reported as 'wedged'", outcome.outcome === "wedged");
+  check("(41) bytesReclaimed is null", outcome.bytesReclaimed === null);
+  check(`(41) returned within the outer bound (~${RACE_TIMEOUT_MS}ms), not an infinite hang: ${Math.round(elapsed)}ms`,
+    elapsed >= RACE_TIMEOUT_MS - 50 && elapsed < RACE_TIMEOUT_MS * 4 + 1500);
+  check("(41) exactly ONE removeDir call was made", removeDirCalls === 1);
+  check("(41) the leftover dir is STILL on disk", fs.existsSync(stalePath));
+  fs.rmSync(stalePath, { recursive: true, force: true });
+}
+
+// --- (42) rejected seam: removeDir's returned promise REJECTS synchronously (e.g. a real spawn()
+// failure inside killableRemoveDir's executor) — must settle as a structured "rejected" outcome, never
+// propagate as an unhandled rejection past this function. ---
+{
+  const proj = "projSwl42";
+  const cleanPath = resolveWorktreePath(proj, "task42-rejected");
+  const stalePath = mkStaleAside(cleanPath, 1700000000042);
+  let removeDirCalls = 0;
+  const removeDir = () => { removeDirCalls++; return Promise.reject(new Error("ENOENT: spawn rmdir ENOENT (synthetic)")); };
+  const realWarn = console.warn;
+  const warns = [];
+  console.warn = (...a) => { warns.push(a.join(" ")); };
+  let outcome;
+  try {
+    outcome = await reclaimStaleAsideWorktreeDir(stalePath, 5000, { removeDir, repoKeysByProject: new Map() });
+  } finally {
+    console.warn = realWarn;
+  }
+  check("(42) a rejected removeDir promise settles as outcome 'rejected', never throws past this function", outcome.outcome === "rejected");
+  check("(42) bytesReclaimed is null on a rejected outcome", outcome.bytesReclaimed === null);
+  check("(42) rejectionMessage carries the real error text", outcome.rejectionMessage === "ENOENT: spawn rmdir ENOENT (synthetic)");
+  check("(42) NEGATIVE CONTROL: a 'rejected' outcome is never reported as 'wedged' — the two must stay distinguishable", outcome.outcome !== "wedged");
+  check("(42) the leftover dir is STILL on disk (a never-started removal touches nothing)", fs.existsSync(stalePath));
+  check("(42) a rejection WARNS (no UI surface for this route — this is the only daemon trail) with the path and real message", warns.some((w) => w.includes("[worktree] could not reclaim") && w.includes(stalePath) && w.includes("ENOENT: spawn rmdir ENOENT (synthetic)")));
+  check("(42) exactly ONE removeDir call was made (never retried)", removeDirCalls === 1);
+  fs.rmSync(stalePath, { recursive: true, force: true });
+}
+
 // --- (19) card e3fcd8ea item 1: repoKeysByProject is REQUIRED — omitting it (or the whole `deps` arg)
 // refuses, never silently skipping the independent registry-axis guard ---
 {
@@ -797,6 +875,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — renamed-aside stale worktree dirs are enumerated cheaply (byte-free, registry-driven, never matching a live worktree), reclaimed one-by-path with gcWorktreeDir's own guards (fresh re-derivation, case/separator-insensitive matching, a defensive no-live-claimant check, exact-path process-reap), and served_status carries a count-only signal."
+  ? "\n✅ ALL PASS — renamed-aside stale worktree dirs are enumerated cheaply (byte-free, registry-driven, never matching a live worktree), reclaimed one-by-path with gcWorktreeDir's own guards (fresh re-derivation, case/separator-insensitive matching, a defensive no-live-claimant check, exact-path process-reap), served_status carries a count-only signal, and reclaimStaleAsideWorktreeDir proves a genuine wedge and raceRemoval's own outer timeout (both settle as 'wedged') distinctly from a rejected (never-started) removeDir call across three separate seams, none ever retried."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

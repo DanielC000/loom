@@ -136,6 +136,66 @@ function makeWorktree(tag) {
   fs.rmSync(repo, { recursive: true, force: true });
 }
 
+// (c2) card 3640abf5 — raceRemoval's OWN outer timeout, distinct from (c) above: (c) exercises
+//      killableRemoveDir's own INNER timer settling the promise with {killed:true} (kind:"result"); this
+//      case uses a removeDir stub whose promise NEVER settles at all, so only raceRemoval's OUTER timer
+//      can resolve it. Both must report the same "wedged" outcome to the caller, but they are genuinely
+//      distinct seams — a never-settling stub does not exercise (c)'s path, and vice versa.
+{
+  const repo = makeWorktree("outer-timeout");
+  writeFile(path.join(repo, "node_modules", "pkg-e", "index.js"), "e".repeat(200));
+
+  const RACE_TIMEOUT_MS = 200;
+  let removeDirCalls = 0;
+  const removeDir = () => { removeDirCalls++; return new Promise(() => { /* never settles */ }); };
+
+  const t0 = performance.now();
+  const outcome = await reclaimNodeModulesDir(repo, RACE_TIMEOUT_MS, { removeDir });
+  const elapsed = performance.now() - t0;
+
+  check("(c2) a removeDir promise that never settles still resolves via raceRemoval's OUTER timeout, reported as 'wedged'", outcome.outcome === "wedged");
+  check("(c2) bytesReclaimed is null", outcome.bytesReclaimed === null);
+  check(`(c2) returned within the outer bound (~${RACE_TIMEOUT_MS}ms), not an infinite hang: ${Math.round(elapsed)}ms`,
+    elapsed >= RACE_TIMEOUT_MS - TIMER_SLACK_MS && elapsed < RACE_TIMEOUT_MS * 4 + 1500);
+  check("(c2) exactly ONE removeDir call was made", removeDirCalls === 1);
+  check("(c2) node_modules is STILL on disk", fs.existsSync(path.join(repo, "node_modules", "pkg-e", "index.js")));
+
+  fs.rmSync(repo, { recursive: true, force: true });
+}
+
+// (c3) card 3640abf5 — THE REJECTION SEAM this card exists for: removeDir's returned promise REJECTS
+//      synchronously (standing in for a real spawn() failure inside killableRemoveDir's own executor —
+//      see raceRemoval's own doc). Before this card's fix, this propagated straight out of
+//      reclaimNodeModulesDir as an unhandled rejection; it must now settle as a structured "rejected"
+//      outcome, distinct from "wedged" (no kill ever happened), and never retried.
+{
+  const repo = makeWorktree("rejected");
+  writeFile(path.join(repo, "node_modules", "pkg-f", "index.js"), "f".repeat(300));
+
+  let removeDirCalls = 0;
+  const removeDir = () => { removeDirCalls++; return Promise.reject(new Error("ENOENT: spawn rmdir ENOENT (synthetic)")); };
+
+  const realWarn = console.warn;
+  const warns = [];
+  console.warn = (...a) => { warns.push(a.join(" ")); };
+  let outcome;
+  try {
+    outcome = await reclaimNodeModulesDir(repo, 5000, { removeDir });
+  } finally {
+    console.warn = realWarn;
+  }
+
+  check("(c3) a rejected removeDir promise settles as outcome 'rejected', never throws past this function", outcome.outcome === "rejected");
+  check("(c3) bytesReclaimed is null on a rejected outcome", outcome.bytesReclaimed === null);
+  check("(c3) rejectionMessage carries the real error text", outcome.rejectionMessage === "ENOENT: spawn rmdir ENOENT (synthetic)");
+  check("(c3) NEGATIVE CONTROL: a 'rejected' outcome is never reported as 'wedged' — the two must stay distinguishable", outcome.outcome !== "wedged");
+  check("(c3) node_modules is STILL on disk (a never-started removal touches nothing)", fs.existsSync(path.join(repo, "node_modules", "pkg-f", "index.js")));
+  check("(c3) a rejection WARNS, mirroring every sibling raceRemoval caller (removeWorktree/removeRunSnapshot)", warns.some((w) => w.includes("[worktree] could not reclaim") && w.includes(path.join(repo, "node_modules")) && w.includes("ENOENT: spawn rmdir ENOENT (synthetic)")));
+  check("(c3) exactly ONE removeDir call was made (never retried)", removeDirCalls === 1);
+
+  fs.rmSync(repo, { recursive: true, force: true });
+}
+
 // (d) measureDirSize truncation is honestly signalled — a scan capped mid-walk reports truncated:true,
 //     and the partial sum is still returned (a lower bound), never silently dropped to 0.
 {
@@ -328,9 +388,60 @@ function seedSession(db, s) {
   for (const wt of [wtWedge, wtOk]) fs.rmSync(wt, { recursive: true, force: true });
 }
 
+// (n) card 3640abf5 — THE BATCH-CONTINUATION CASE: a candidate in the MIDDLE of reclaimNodeModules's
+//     batch whose removeDir call REJECTS must be reported as rejected:1 (never abort the whole batch),
+//     and the candidates both BEFORE and AFTER it in iteration order must still be attempted and
+//     succeed. Before this card's fix, a rejection here would throw out of the for-loop in
+//     SessionService.reclaimNodeModules, losing every already-accumulated result and leaving every
+//     later candidate (wtAfter below) completely untouched and unreported.
+{
+  const db = new Db();
+  const projId = "nmr-proj-n";
+  seedProject(db, projId, "NMR Project N");
+  db.insertAgent({ id: "nmr-agent-n", projectId: projId, name: "t", startupPrompt: "", position: 0 });
+
+  // Named/seeded in the exact order they must be ITERATED in (listNodeModulesReclaimCandidates has no
+  // sort of its own beyond insertion/Map-iteration order) so "middle" is actually the middle of the batch.
+  const wtBefore = makeWorktree("n-before");
+  writeFile(path.join(wtBefore, "node_modules", "pkg", "i.js"), "x".repeat(10));
+  seedSession(db, { id: "nmr-s-nbefore", projectId: projId, agentId: "nmr-agent-n", worktreePath: wtBefore, processState: "exited", resumability: "dead", lastActivity: iso(48 * HOUR), taskId: "task-nbefore" });
+
+  const wtRejected = makeWorktree("n-rejected");
+  writeFile(path.join(wtRejected, "node_modules", "pkg", "i.js"), "y".repeat(20));
+  seedSession(db, { id: "nmr-s-nrejected", projectId: projId, agentId: "nmr-agent-n", worktreePath: wtRejected, processState: "exited", resumability: "dead", lastActivity: iso(48 * HOUR), taskId: "task-nrejected" });
+
+  const wtAfter = makeWorktree("n-after");
+  writeFile(path.join(wtAfter, "node_modules", "pkg", "i.js"), "z".repeat(30));
+  seedSession(db, { id: "nmr-s-nafter", projectId: projId, agentId: "nmr-agent-n", worktreePath: wtAfter, processState: "exited", resumability: "dead", lastActivity: iso(48 * HOUR), taskId: "task-nafter" });
+
+  let removeDirCalls = 0;
+  const sessions = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target, ms) => {
+      removeDirCalls++;
+      if (target === path.join(wtRejected, "node_modules")) throw new Error("ENOENT: spawn rmdir ENOENT (synthetic, n-test)");
+      return killableRemoveDir(target, ms); // real removal for the other two
+    },
+  });
+
+  const result = await sessions.reclaimNodeModules({ minAgeHours: 24 });
+  check("(n) all THREE candidates were attempted — the rejection did not abort the batch", removeDirCalls === 3);
+  check("(n) the rejected one is reported rejected:1", result.rejected === 1);
+  check("(n) candidatesConsidered still counts all three", result.candidatesConsidered === 3);
+  check("(n) the BEFORE candidate (iterated ahead of the rejection) succeeded", !fs.existsSync(path.join(wtBefore, "node_modules")));
+  check("(n) THE CASE THIS TEST EXISTS FOR: the AFTER candidate (iterated past the rejection) ALSO succeeded — proving the loop continued", !fs.existsSync(path.join(wtAfter, "node_modules")));
+  check("(n) the rejected worktree's node_modules is STILL on disk (never even started)", fs.existsSync(path.join(wtRejected, "node_modules")));
+  check("(n) removed:2 (before + after), bytesReclaimed sums only those two", result.removed === 2 && result.bytesReclaimed === 10 + 30);
+  const rejectedRow = result.results.find((r) => r.worktreePath === wtRejected);
+  check("(n) the per-entry result row carries outcome:'rejected' with the real rejectionMessage", rejectedRow && rejectedRow.outcome === "rejected" && rejectedRow.rejectionMessage === "ENOENT: spawn rmdir ENOENT (synthetic, n-test)");
+  check("(n) NEGATIVE CONTROL: the rejected row's bytesReclaimed is null, never a measured quantity", rejectedRow && rejectedRow.bytesReclaimed === null);
+
+  db.close();
+  for (const wt of [wtBefore, wtRejected, wtAfter]) fs.rmSync(wt, { recursive: true, force: true });
+}
+
 fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — node_modules reclaim measures real bytes, removes only node_modules (git/tracked state byte-identical), never retries a genuinely wedged removal, and SessionService's candidate list/reclaim correctly excludes live sessions, too-fresh worktrees, and re-derives eligibility fresh at reclaim time rather than trusting a caller-supplied list."
+  ? "\n✅ ALL PASS — node_modules reclaim measures real bytes, removes only node_modules (git/tracked state byte-identical), never retries a genuinely wedged removal, classifies a rejected (never-started) removeDir call distinctly from a wedged one and never lets it abort the batch, and SessionService's candidate list/reclaim correctly excludes live sessions, too-fresh worktrees, and re-derives eligibility fresh at reclaim time rather than trusting a caller-supplied list."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

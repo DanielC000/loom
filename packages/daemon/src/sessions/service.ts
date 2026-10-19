@@ -535,10 +535,15 @@ export interface NodeModulesReclaimRunResult {
   missing: number;
   wedged: number;
   leftOnDisk: number;
+  /** Card 3640abf5 — the removal never even STARTED (a rejected `removeDir` promise, e.g. a synchronous
+   *  `spawn()` failure) — distinct from `wedged` (a genuine kill) and never retried either. */
+  rejected: number;
   results: Array<{
     worktreePath: string; projectId: string; projectName: string; taskId: string | null;
-    outcome: "removed" | "missing" | "wedged" | "left-on-disk" | "no-longer-eligible";
+    outcome: "removed" | "missing" | "wedged" | "left-on-disk" | "rejected" | "no-longer-eligible";
     bytesReclaimed: number | null;
+    /** Set ONLY when `outcome === "rejected"` — the real error text from the never-started removal. */
+    rejectionMessage?: string;
   }>;
 }
 
@@ -26468,12 +26473,15 @@ export class SessionService {
     const scoped = requestedKeys ? entries.filter((e) => requestedKeys.has(worktreeIdentityKey(e.worktreePath))) : entries;
     const result: NodeModulesReclaimRunResult = {
       candidatesConsidered: scoped.length, removed: 0, bytesReclaimed: 0, sizeTruncatedCount: 0,
-      noLongerEligible: 0, missing: 0, wedged: 0, leftOnDisk: 0, results: [],
+      noLongerEligible: 0, missing: 0, wedged: 0, leftOnDisk: 0, rejected: 0, results: [],
     };
     for (const c of scoped) {
       // No timeout override passed — reclaimNodeModulesDir's own default (NODE_MODULES_RECLAIM_TIMEOUT_MS)
       // is a dedicated bulk-filesystem-delete budget, deliberately never borrowed from this.gitOpMs (a
       // git-ref-op budget — review finding [2]).
+      // Card 3640abf5: reclaimNodeModulesDir never REJECTS any more (a never-started removal now settles
+      // as a structured "rejected" outcome) — so this await can no longer throw out of the loop and abort
+      // the batch; every candidate still gets a chance to run even when an earlier one failed to start.
       const outcome = await reclaimNodeModulesDir(c.worktreePath, undefined, { removeDir: this.removeDirOverride, protectedRepoPaths: this.allRegisteredRepoPaths() });
       switch (outcome.outcome) {
         case "removed":
@@ -26484,10 +26492,12 @@ export class SessionService {
         case "missing": result.missing++; break;
         case "wedged": result.wedged++; break;
         case "left-on-disk": result.leftOnDisk++; break;
+        case "rejected": result.rejected++; break;
       }
       result.results.push({
         worktreePath: c.worktreePath, projectId: c.projectId, projectName: c.projectName, taskId: c.taskId,
         outcome: outcome.outcome, bytesReclaimed: outcome.bytesReclaimed,
+        ...(outcome.outcome === "rejected" ? { rejectionMessage: outcome.rejectionMessage } : {}),
       });
     }
     // Any explicitly-requested path that the fresh recompute above no longer considers eligible (gone

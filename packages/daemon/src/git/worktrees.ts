@@ -1916,13 +1916,19 @@ export interface NodeModulesReclaimOutcome {
    *  deleted — `bytesReclaimed` is a real MEASURED total (a lower bound when `sizeTruncated`). "wedged":
    *  the removal was force-killed (genuinely stuck, see {@link killableRemoveDir}'s decision record
    *  bd9fc808) and is NEVER retried by this function; nothing was reclaimed. "left-on-disk": a clean
-   *  (non-hang) removal failure (e.g. a transient handle lock); also nothing reclaimed. */
-  outcome: "missing" | "removed" | "wedged" | "left-on-disk";
+   *  (non-hang) removal failure (e.g. a transient handle lock); also nothing reclaimed. "rejected": the
+   *  removal never even STARTED — `removeDir`'s own promise rejected (e.g. a synchronous `spawn()`
+   *  failure inside {@link killableRemoveDir}'s executor, see {@link raceRemoval}'s own doc, card
+   *  3640abf5) — distinct from "wedged" (which means a kill genuinely happened) and never retried either;
+   *  `rejectionMessage` carries the real error text. */
+  outcome: "missing" | "removed" | "wedged" | "left-on-disk" | "rejected";
   /** Measured (never estimated) bytes actually freed. `null` unless `outcome === "removed"`. */
   bytesReclaimed: number | null;
   /** True when the size measurement hit {@link DIR_SIZE_SCAN_MAX_ENTRIES} — `bytesReclaimed` is then a
    *  LOWER BOUND, not a complete total. Always false when `bytesReclaimed` is null. */
   sizeTruncated: boolean;
+  /** Set ONLY when `outcome === "rejected"` — the real error text from the never-started removal. */
+  rejectionMessage?: string;
 }
 
 /**
@@ -1931,8 +1937,10 @@ export interface NodeModulesReclaimOutcome {
  * is eligible; this only ever removes exactly `<worktreePath>/node_modules`, nothing else, and never
  * touches git state at all (node_modules is gitignored — there is no git call anywhere in this function,
  * so a worktree's HEAD/branch/tracked-file state is structurally unaffected by calling it). Routes
- * through {@link killableRemoveDir} directly, the same primitive {@link removeWorktree} already uses.
- * @decision bd9fc808 — a single removal attempt, never a retry loop on a killed (wedged) result.
+ * through {@link killableRemoveDir} via {@link raceRemoval} (card 3640abf5) — same primitive
+ * {@link removeWorktree} already uses — so a synchronous `spawn()` rejection is classified and returned
+ * as a structured outcome, never left to propagate as an unhandled rejection past this function.
+ * @decision bd9fc808 — a single removal attempt, never a retry loop on a killed (wedged) OR rejected result.
  */
 export async function reclaimNodeModulesDir(
   worktreePath: string,
@@ -1959,7 +1967,19 @@ export async function reclaimNodeModulesDir(
   const measureSize = deps.measureSize ?? measureDirSize;
   const { bytes, truncated } = await measureSize(nodeModulesPath);
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
-  const result = await removeDir(nodeModulesPath, timeoutMs);
+  const raceOutcome = await raceRemoval(removeDir(nodeModulesPath, timeoutMs), timeoutMs);
+  if (raceOutcome.kind === "timeout") {
+    return { worktreePath, nodeModulesPath, outcome: "wedged", bytesReclaimed: null, sizeTruncated: false };
+  }
+  if (raceOutcome.kind === "rejected") {
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] could not reclaim ${nodeModulesPath} (removal failed to start: ${raceOutcome.message})`);
+    return {
+      worktreePath, nodeModulesPath, outcome: "rejected",
+      bytesReclaimed: null, sizeTruncated: false, rejectionMessage: raceOutcome.message,
+    };
+  }
+  const result = raceOutcome.result;
   if (result.removed) {
     return { worktreePath, nodeModulesPath, outcome: "removed", bytesReclaimed: bytes, sizeTruncated: truncated };
   }
@@ -2235,13 +2255,17 @@ export function isRegisteredRepoKeyAxisDir(
 const STALE_LEFTOVER_RECLAIM_TIMEOUT_MS = 120_000;
 
 /** {@link reclaimStaleAsideWorktreeDir}'s result. `"refused"` covers BOTH the basename-shape check and
- *  {@link worktreeRemovalRefusal} — `reason` names which. */
+ *  {@link worktreeRemovalRefusal} — `reason` names which. `"rejected"` (card 3640abf5) means the removal
+ *  never even STARTED — `removeDir`'s own promise rejected (see {@link raceRemoval}'s own doc) — distinct
+ *  from "wedged" (a genuine kill) and never retried either; `rejectionMessage` carries the real error. */
 export interface StaleAsideReclaimOutcome {
   path: string;
-  outcome: "removed" | "missing" | "wedged" | "left-on-disk" | "refused";
+  outcome: "removed" | "missing" | "wedged" | "left-on-disk" | "refused" | "rejected";
   bytesReclaimed: number | null;
   sizeTruncated: boolean;
   reason?: string;
+  /** Set ONLY when `outcome === "rejected"` — the real error text from the never-started removal. */
+  rejectionMessage?: string;
 }
 
 /**
@@ -2256,7 +2280,10 @@ export interface StaleAsideReclaimOutcome {
  * link; `reclaimWedgedWorktreePathForSpawn` only renames aside a dir already on the wedged-retry list,
  * whose own prior removal attempt already ran `git worktree prune` against the now-vacated original
  * path) — this is a pure filesystem removal, same shape as {@link reclaimNodeModulesDir}'s own delete
- * (which also runs no git ops).
+ * (which also runs no git ops). Routes through {@link killableRemoveDir} via {@link raceRemoval} (card
+ * 3640abf5), exactly like {@link reclaimNodeModulesDir} — a synchronous `spawn()` rejection is classified
+ * and returned as a structured "rejected" outcome, never left to propagate past this function.
+ * @decision bd9fc808 — a single removal attempt, never a retry loop on a killed (wedged) OR rejected result.
  */
 export async function reclaimStaleAsideWorktreeDir(
   targetPath: string,
@@ -2310,7 +2337,19 @@ export async function reclaimStaleAsideWorktreeDir(
   const measureSize = deps.measureSize ?? measureDirSize;
   const { bytes, truncated } = await measureSize(targetPath);
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
-  const result = await removeDir(targetPath, timeoutMs);
+  const raceOutcome = await raceRemoval(removeDir(targetPath, timeoutMs), timeoutMs);
+  if (raceOutcome.kind === "timeout") {
+    return { path: targetPath, outcome: "wedged", bytesReclaimed: null, sizeTruncated: false };
+  }
+  if (raceOutcome.kind === "rejected") {
+    // eslint-disable-next-line no-console
+    console.warn(`[worktree] could not reclaim ${targetPath} (removal failed to start: ${raceOutcome.message})`);
+    return {
+      path: targetPath, outcome: "rejected",
+      bytesReclaimed: null, sizeTruncated: false, rejectionMessage: raceOutcome.message,
+    };
+  }
+  const result = raceOutcome.result;
   if (result.removed) {
     return { path: targetPath, outcome: "removed", bytesReclaimed: bytes, sizeTruncated: truncated };
   }

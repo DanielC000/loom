@@ -2526,6 +2526,10 @@ const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: st
     tone: "amber", label: "Not removed", freed: "Freed: nothing",
     note: "the removal failed cleanly — most likely a file handle was still held. Nothing was deleted.",
   },
+  rejected: {
+    tone: "red", label: "Failed to start", freed: "Freed: nothing",
+    note: "the removal never started — nothing on disk was touched.",
+  },
   missing: {
     tone: "muted", label: "Already gone", freed: "Freed: nothing",
     note: "node_modules was no longer there when the reclaim ran. Nothing was deleted.",
@@ -2567,9 +2571,10 @@ function reclaimHeadline(r: NodeModulesReclaimRunResult): string {
   const cleared = r.removed > 0
     ? `Cleared ${r.removed} of ${r.candidatesConsidered} · ${freed}`
     : "Nothing was cleared";
-  return r.wedged > 0
-    ? `${cleared} · ${r.wedged} interrupted, amount freed unknown`
-    : cleared;
+  const notes: string[] = [];
+  if (r.wedged > 0) notes.push(`${r.wedged} interrupted, amount freed unknown`);
+  if ((r.rejected ?? 0) > 0) notes.push(`${r.rejected} failed to start`);
+  return notes.length > 0 ? `${cleared} · ${notes.join(" · ")}` : cleared;
 }
 
 function NodeModulesReclaimPanel() {
@@ -2755,7 +2760,7 @@ function NodeModulesReclaimPanel() {
 // estimate-free source there is — and an entry whose freed amount is genuinely UNKNOWN says so in those
 // words rather than borrowing zero's typography (DoD-3).
 function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclaimRunResult; onDismiss: () => void }) {
-  const clean = result.wedged === 0 && result.leftOnDisk === 0 && result.noLongerEligible === 0;
+  const clean = result.wedged === 0 && result.leftOnDisk === 0 && result.noLongerEligible === 0 && (result.rejected ?? 0) === 0;
   return (
     <div data-testid="reclaim-result" style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -2780,6 +2785,12 @@ function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclai
           const freed = r.outcome === "removed" && r.bytesReclaimed !== null
             ? `Freed ${humanBytes(r.bytesReclaimed)}`
             : o.freed;
+          // A "rejected" row carries the real error text from the daemon — show it ALONGSIDE the static
+          // note (never in place of it), so the reassurance that nothing on disk was touched survives.
+          const noteLines = [
+            o.note,
+            r.outcome === "rejected" && r.rejectionMessage ? r.rejectionMessage : null,
+          ].filter((line): line is string => !!line);
           return (
             <div key={`${r.outcome}:${r.worktreePath}`} data-testid="reclaim-row" data-outcome={r.outcome}
               style={{ display: "flex", flexDirection: "column", gap: 3, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
@@ -2789,7 +2800,9 @@ function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclai
                 {r.projectName && <Badge tone="muted">{r.projectName}</Badge>}
               </div>
               <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>{r.worktreePath}</span>
-              {o.note && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>{o.note}</span>}
+              {noteLines.map((line, i) => (
+                <span key={i} style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>{line}</span>
+              ))}
             </div>
           );
         })}

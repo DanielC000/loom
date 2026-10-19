@@ -87,11 +87,13 @@ export interface NodeModulesReclaimCandidate {
 export interface NodeModulesReclaimListing { count: number; entries: NodeModulesReclaimCandidate[]; }
 
 /** How ONE worktree's reclaim ended. `bytesReclaimed` is non-null ONLY for `"removed"` — and the nulls
- *  on the other four do NOT all mean the same thing, so a consumer must branch on THIS field, never on
- *  `bytesReclaimed === null`. `"wedged"` above all is an UNKNOWN, not a zero: the removal was
+ *  on the other outcomes do NOT all mean the same thing, so a consumer must branch on THIS field, never
+ *  on `bytesReclaimed === null`. `"wedged"` above all is an UNKNOWN, not a zero: the removal was
  *  force-killed part-way (one attempt, never retried — decision record bd9fc808, anchored in the daemon's
- *  own reclaimNodeModulesDir), so a real fraction of that tree may already be gone. */
-export type NodeModulesReclaimOutcome = "removed" | "missing" | "wedged" | "left-on-disk" | "no-longer-eligible";
+ *  own reclaimNodeModulesDir), so a real fraction of that tree may already be gone. `"rejected"` (card
+ *  3640abf5) means the removal never even STARTED — distinct from `"wedged"`, this one freed nothing at
+ *  all (never partial), and carries a `rejectionMessage` on the result row. */
+export type NodeModulesReclaimOutcome = "removed" | "missing" | "wedged" | "left-on-disk" | "rejected" | "no-longer-eligible";
 export interface NodeModulesReclaimRunResult {
   candidatesConsidered: number;
   removed: number;
@@ -103,10 +105,13 @@ export interface NodeModulesReclaimRunResult {
   missing: number;
   wedged: number;
   leftOnDisk: number;
+  rejected: number;
   results: Array<{
     worktreePath: string; projectId: string; projectName: string; taskId: string | null;
     outcome: NodeModulesReclaimOutcome;
     bytesReclaimed: number | null;
+    /** Set ONLY when `outcome === "rejected"` — the real error text from the never-started removal. */
+    rejectionMessage?: string;
   }>;
 }
 
