@@ -2,8 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Db } from "../db.js";
 import { SCRATCH_ROOT_DIR } from "../paths.js";
-import { withTimeout } from "../git/bounded.js";
-import { killableRemoveDir, type RemoveDirResult } from "../git/worktrees.js";
+import { killableRemoveDir, raceRemoval, type RemoveDirResult } from "../git/worktrees.js";
 import { listAllTranscriptIds } from "../pty/claude-transcript.js";
 import { engineTranscriptExists } from "./transcript.js";
 
@@ -113,7 +112,7 @@ async function withBoundedConcurrency<T>(items: T[], limit: number, worker: (ite
  * PLUS a directory scan — far too heavy for `createPty`'s synchronous spawn path); wired in alongside
  * `reconcileRunsOnBoot`'s own `sweepAllRunSnapshots` call (`sessions/service.ts`), same fire-and-forget
  * shape. Best-effort and NEVER throws for an individual entry — a wedged removal is simply left on disk
- * for the next boot's sweep (`killableRemoveDir` + `withTimeout`, fail-SAFE — never a retrying `fs.rm`;
+ * for the next boot's sweep (`killableRemoveDir` + `raceRemoval`, fail-SAFE — never a retrying `fs.rm`;
  * see `git/worktrees.ts`'s own doc on why a retry loop over a hung removal leaked the whole daemon once
  * already, card 26c661cd/bd9fc808).
  *
@@ -172,14 +171,19 @@ export async function sweepUnresumableScratchDirs(db: Db, deps: ScratchGcDeps = 
 
   await withBoundedConcurrency(candidates, SCRATCH_GC_CONCURRENCY, async (name) => {
     const target = path.join(SCRATCH_ROOT_DIR, name);
-    const outcome = await withTimeout(removeDir(target, timeoutMs), timeoutMs, "removeDir scratch gc")
-      .catch((): RemoveDirResult => ({ removed: false, killed: true })); // injected/broken seam that never settles ⇒ fail SAFE as WEDGED
-    if (outcome.removed) {
+    const raceOutcome = await raceRemoval(removeDir(target, timeoutMs), timeoutMs);
+    const removed = raceOutcome.kind === "result" && raceOutcome.result.removed;
+    if (removed) {
       result.reaped.push(name);
     } else {
       result.wedged.push(name);
+      // card c2fc8d84: a "rejected" (never-started) removeDir — e.g. killableRemoveDir's own spawnChild
+      // throwing synchronously — is logged distinctly from a genuine timeout/kill; never "genuinely wedged".
+      const reason = raceOutcome.kind === "rejected"
+        ? `removal failed to start: ${raceOutcome.message}`
+        : (raceOutcome.kind === "timeout" || raceOutcome.result.killed) ? "genuinely wedged" : "clean failure";
       // eslint-disable-next-line no-console
-      console.warn(`[scratch-gc] boot sweep could not remove ${target} (${outcome.killed ? "genuinely wedged" : "clean failure"}; left for the next boot sweep)`);
+      console.warn(`[scratch-gc] boot sweep could not remove ${target} (${reason}; left for the next boot sweep)`);
     }
   });
 

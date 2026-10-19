@@ -204,6 +204,49 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   fs.rmSync(W.repo, { recursive: true, force: true });
 }
 
+// --- (rejected) card c2fc8d84 — a removeDir that REJECTS (never-started, e.g. killableRemoveDir's own
+// spawnChild throwing synchronously) must be logged distinctly from a genuine timeout/kill, but treated
+// IDENTICALLY for retry purposes (tracked as wedged, never retried within the same pass) ---
+{
+  const db = new Db();
+  const RJ = { projId: `wwr-rj-proj-${sfx}`, agentId: `wwr-rj-top-${sfx}`, workerId: `wwr-rj-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-wwr-rejected-${sfx}`) };
+  initRepo(RJ.repo);
+  RJ.worktreePath = leftoverDir("rejected", sfx);
+  seed(db, RJ);
+
+  let removeDirCalls = 0;
+  const sessions = new SessionService(db, {}, new OrchestrationControl(), {
+    removeDir: async (target) => {
+      if (target !== RJ.worktreePath) return { removed: true, killed: false };
+      removeDirCalls++;
+      throw new Error("ENOENT: spawn rmdir ENOENT (simulated sync spawn failure)");
+    },
+  });
+
+  const warned = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => warned.push(a.join(" "));
+  let r1;
+  try {
+    r1 = await sessions.reconcileOrchestrationOnBoot();
+  } finally {
+    console.warn = origWarn;
+  }
+  check("(rejected) first pass ATTEMPTS the removal exactly once (never retried within one pass)", removeDirCalls === 1);
+  check("(rejected) worktree dir is LEFT ON DISK (never-started, not removed)", fs.existsSync(RJ.worktreePath));
+  check("(rejected) is tracked as wedged, same as a genuine timeout would be", db.getWedgedWorktree(RJ.worktreePath)?.attempts === 1);
+  check("(rejected) first pass attempted but did NOT actually prune, NOT a give-up", r1.worktreesPruned === 0 && r1.worktreesNeedsHuman === 0);
+  check("(rejected) a warn fires naming the real error message with the 'removal failed to start' wording",
+    warned.some((w) => w.includes("could not remove dir") && w.includes("removal failed to start") && w.includes("ENOENT: spawn rmdir ENOENT")));
+  check("(rejected) the warn NEVER claims 'genuinely wedged' for a rejection that was never a timeout",
+    !warned.some((w) => w.includes("could not remove dir") && w.includes("genuinely wedged")));
+
+  db.clearWedgedWorktree(RJ.worktreePath);
+  db.close();
+  fs.rmSync(RJ.repo, { recursive: true, force: true });
+  fs.rmSync(RJ.worktreePath, { recursive: true, force: true });
+}
+
 // --- (unit-alias legacy-duplicate) CR 601ab6c2 (round 2 of 3709d686) on card 1243e342 — a pre-fix
 //     daemon could already have written TWO raw-keyed entries for the SAME dir under different
 //     spellings. Both READS (listWedgedWorktrees/getWedgedWorktree) AND WRITES

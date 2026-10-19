@@ -120,6 +120,26 @@ export function projectWorkDir(projectId: string): string {
   return path.join(PROJECTS_WORK_ROOT, projectId);
 }
 
+/** Matches a v4-ish UUID string shape — used only as a REFUSAL predicate below, never for parsing. */
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True iff `dir` is a single UUID-shaped path segment directly under `root` AND `projectId` is itself
+ * UUID-shaped — the shared refusal predicate for a one-off, irreversible, per-project directory delete
+ * keyed by `projectId` (card c2fc8d84, originally `deleteProjectWorkDir`-only, card 5eace211's own
+ * Code Review MINOR 5). A traversal-shaped or otherwise non-UUID id resolves `dir` outside or deeper than
+ * a direct child of `root` — refusing on BOTH checks (not just the relative-path shape) catches an id
+ * that happens to produce a single-segment relative path without itself being the real UUID Loom assigns.
+ *
+ * @decision c2fc8d84 — every per-project directory-delete call site keyed by `projectId` must call this
+ * before touching disk; do not re-derive the shape check per site (lesson 155).
+ */
+export function isSingleProjectSegmentUnderRoot(root: string, dir: string, projectId: string): boolean {
+  const rel = path.relative(root, dir);
+  const isSingleSegmentUnderRoot = rel.length > 0 && rel === path.basename(rel) && !rel.startsWith("..");
+  return isSingleSegmentUnderRoot && UUID_SHAPE_RE.test(projectId);
+}
+
 /**
  * Human-legible marker written/refreshed inside {@link projectWorkDir} (card 5eace211) so the owner can
  * tell a hundred id-named dirs apart without a DB lookup. See `ensureProjectWorkDir`.

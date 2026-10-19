@@ -95,6 +95,19 @@ function neverSettlingRemoveDir() {
   return fn;
 }
 
+// A `removeDir` seam that RESOLVES IMMEDIATELY with a given result — card c2fc8d84 round 2 (manager CR):
+// a real `killableRemoveDir` facing a genuinely wedged child does NOT reach `raceRemoval`'s own outer
+// timeout branch at all — ITS OWN internal timer always wins that race (measured 20/20), resolving
+// `{removed:false, killed:true}` directly. `neverSettlingRemoveDir` above (which never resolves at all)
+// only exercises the outer-timeout branch; THIS seam is what exercises the path a real wedge actually
+// takes through `removeDirWithCleanRetry`'s `if (outcome.result.killed)` branch.
+function instantResult(result) {
+  const calls = [];
+  const fn = (target, timeoutMs) => { calls.push({ target, timeoutMs }); return Promise.resolve(result); };
+  fn.calls = calls;
+  return fn;
+}
+
 // Card 5eace211 Code Review MINOR 8: `measureProjectsWorkRootBytes` was test-only (its own doc said so)
 // and moved out of src/paths.ts entirely — this is the SAME synchronous ground-truth recursive sum,
 // local to this file (its only real consumer), so production code carries no test-only export.
@@ -303,6 +316,20 @@ try {
     check("(5c-clean-exhausted) ...and logs EXACTLY one warn (never zero, never once per attempt)", warned.length === 1);
     check("(5c-clean-exhausted) ...and the dir survives untouched (a failed removal must not partially remove/corrupt it)",
       fs.existsSync(projectWorkDir(idD)));
+
+    // ── (5d) NEW section — card c2fc8d84 round 2 (manager CR, MAJOR): a removeDir that RESOLVES with
+    // killed:true — THE PATH A REAL WEDGE ACTUALLY TAKES — must be attempted exactly once with the same
+    // "genuinely wedged" wording as (5c-wedged)'s hanging seam. (5c) above is left otherwise unchanged.
+    const idG = "11111111-7777-4777-8777-777777777777";
+    ensureProjectWorkDir(idG, "Eta Project");
+    const removeDirResolvedKilled = instantResult({ removed: false, killed: true });
+    warned.length = 0;
+    await deleteProjectWorkDir(idG, { removeDir: removeDirResolvedKilled, timeoutMs: 5000 });
+    check("(5d-wedged-resolved) a resolved killed:true result is attempted EXACTLY ONCE (never retried)", removeDirResolvedKilled.calls.length === 1);
+    check("(5d-wedged-resolved) exactly one warn fires", warned.length === 1);
+    check("(5d-wedged-resolved) the warn uses the WEDGED wording, never the rejected/'failed to start'/'clean failure' wording",
+      warned[0]?.includes("genuinely wedged") && !warned[0]?.includes("failed to start") && !warned[0]?.includes("clean failure"));
+    check("(5d-wedged-resolved) the work dir survives untouched", fs.existsSync(projectWorkDir(idG)));
   } finally {
     console.warn = origWarn;
   }
@@ -336,6 +363,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PROJECTS_WORK_ROOT is a sibling of LOOM_HOME (never nested), projectWorkDir is a pure id-keyed join, projectWorkDirEnv is pure (no disk I/O), ensureProjectWorkDir creates the dir and refreshes its marker non-destructively (a rename reaches it, a no-name call never nulls an existing one), a local ground-truth sum counts real bytes scoped correctly, deleteProjectWorkDir removes scoped and best-effort (async) while REFUSING a non-UUID-shaped or traversal-shaped id outright (leaving a real canary untouched), and, via its injectable removeDir seam (card 8e32605d), a never-settling (wedged) removal still resolves bounded and is attempted exactly once with 'genuinely wedged' wording, a REJECTED (never-started) removal is likewise attempted exactly once but with distinct 'removal failed to start' wording (each proven absent from the other's warn), a clean failure followed by success retries and actually removes the dir with no warn, a clean failure on every attempt is bounded to 3 attempts and logs exactly one warn naming the project id + path, and LOOM_PROJECT_WORK_ROOT overrides the default root in a real child process."
+  ? "\n✅ ALL PASS — PROJECTS_WORK_ROOT is a sibling of LOOM_HOME (never nested), projectWorkDir is a pure id-keyed join, projectWorkDirEnv is pure (no disk I/O), ensureProjectWorkDir creates the dir and refreshes its marker non-destructively (a rename reaches it, a no-name call never nulls an existing one), a local ground-truth sum counts real bytes scoped correctly, deleteProjectWorkDir removes scoped and best-effort (async) while REFUSING a non-UUID-shaped or traversal-shaped id outright (leaving a real canary untouched), and, via its injectable removeDir seam (card 8e32605d), a never-settling (wedged) removal still resolves bounded and is attempted exactly once with 'genuinely wedged' wording, a removeDir that RESOLVES with killed:true (the path a real wedge actually takes) is likewise attempted exactly once with the same wedged wording, a REJECTED (never-started) removal is likewise attempted exactly once but with distinct 'removal failed to start' wording (each proven absent from the others' warns), a clean failure followed by success retries and actually removes the dir with no warn, a clean failure on every attempt is bounded to 3 attempts and logs exactly one warn naming the project id + path, and LOOM_PROJECT_WORK_ROOT overrides the default root in a real child process."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

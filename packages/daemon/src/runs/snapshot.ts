@@ -3,7 +3,7 @@ import path from "node:path";
 import type { SimpleGit } from "simple-git";
 import { RUNS_DIR } from "../paths.js";
 import { withTimeout, boundedSimpleGit, scrubGitEnv, deleteEnvKeys, GIT_ENV_TRANSPORT_KEYS } from "../git/bounded.js";
-import { killableRemoveDir, type RemoveDirResult } from "../git/worktrees.js";
+import { killableRemoveDir, raceRemoval, type RemoveDirResult } from "../git/worktrees.js";
 
 /**
  * Per-git-op ceiling for this file's read-tree/checkout-index plumbing (card 091de765) — a SEPARATE
@@ -110,11 +110,16 @@ export async function removeRunSnapshot(sessionId: string, deps: RunSnapshotRemo
   const dir = runSnapshotDir(sessionId);
   const timeoutMs = deps.timeoutMs ?? RUN_SNAPSHOT_TIMEOUT_MS;
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
-  const result = await withTimeout(removeDir(dir, timeoutMs), timeoutMs, "removeDir run snapshot")
-    .catch((): RemoveDirResult => ({ removed: false, killed: true })); // an injected/broken seam that itself never settles ⇒ fail SAFE as WEDGED (never loop a hang)
-  if (!result.removed) {
+  const outcome = await raceRemoval(removeDir(dir, timeoutMs), timeoutMs);
+  const removed = outcome.kind === "result" && outcome.result.removed;
+  if (!removed) {
+    // card c2fc8d84: a "rejected" (never-started) removeDir is logged distinctly from a genuine
+    // timeout/kill — never "genuinely wedged" for a removal that never even started.
+    const reason = outcome.kind === "rejected"
+      ? `removal failed to start: ${outcome.message}`
+      : (outcome.kind === "timeout" || outcome.result.killed) ? "genuinely wedged — killed the removal child" : "clean failure";
     // eslint-disable-next-line no-console
-    console.warn(`[run] could not remove snapshot dir ${dir} (${result.killed ? "genuinely wedged — killed the removal child" : "clean failure"}; left on disk for the next boot sweep)`);
+    console.warn(`[run] could not remove snapshot dir ${dir} (${reason}; left on disk for the next boot sweep)`);
   }
   try { fs.rmSync(runIndexFile(sessionId), { force: true }); } catch { /* best-effort */ }
 }
@@ -135,11 +140,14 @@ export async function sweepAllRunSnapshots(deps: RunSnapshotRemoveDeps = {}): Pr
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
   await Promise.all(entries.map(async (name) => {
     const target = path.join(RUNS_DIR, name);
-    const result = await withTimeout(removeDir(target, timeoutMs), timeoutMs, "removeDir run snapshot sweep")
-      .catch((): RemoveDirResult => ({ removed: false, killed: true })); // fail SAFE as WEDGED, never loop a hang
-    if (!result.removed) {
+    const outcome = await raceRemoval(removeDir(target, timeoutMs), timeoutMs);
+    const removed = outcome.kind === "result" && outcome.result.removed;
+    if (!removed) {
+      const reason = outcome.kind === "rejected"
+        ? `removal failed to start: ${outcome.message}`
+        : (outcome.kind === "timeout" || outcome.result.killed) ? "genuinely wedged" : "clean failure";
       // eslint-disable-next-line no-console
-      console.warn(`[run] boot sweep could not remove ${target} (${result.killed ? "genuinely wedged" : "clean failure"}; left for the next boot sweep)`);
+      console.warn(`[run] boot sweep could not remove ${target} (${reason}; left for the next boot sweep)`);
     }
   }));
 }

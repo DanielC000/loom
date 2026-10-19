@@ -1470,7 +1470,8 @@ export function killableRemoveDir(
   });
 }
 
-/** `await`able delay — used only for the short bounded clean-reject retry in {@link removeWorktree}. */
+/** `await`able delay — used by the short bounded clean-reject retries in {@link removeWorktree} and
+ *  {@link removeDirWithCleanRetry}. */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1480,6 +1481,115 @@ function delay(ms: number): Promise<void> {
  *  wedged (killed) removal is NEVER looped — see {@link removeWorktree}. */
 const REMOVE_DIR_CLEAN_RETRY_ATTEMPTS = 3;
 const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
+
+/** Outcome of one {@link raceRemoval} attempt — a STRUCTURAL discrimination (which branch settled first/
+ *  at all), never a message-string classification (see `git/bounded.ts`'s own `treeDeathUnconfirmed` doc
+ *  for why sniffing error text is the wrong tool for exactly this kind of distinction).
+ *
+ * @decision c2fc8d84 — moved here from `projects/work-dir.ts`; do not re-inline a per-caller copy of
+ * this discrimination again — every `killableRemoveDir` caller must share this ONE function.
+ */
+export type RemovalRaceOutcome =
+  | { kind: "result"; result: RemoveDirResult }
+  | { kind: "timeout" }
+  | { kind: "rejected"; message: string };
+
+/**
+ * Races `p` against a plain timer, but — unlike `git/bounded.ts`'s generic `withTimeout` — never
+ * conflates "my own timer fired" with "the underlying promise rejected for some other reason": a real
+ * `killableRemoveDir` call can itself reject if its `spawnChild` throws SYNCHRONOUSLY inside the Promise
+ * executor (e.g. a genuinely failed `spawn()`) — that is a removal that never even STARTED, not a wedge,
+ * and must never be logged as one.
+ *
+ * @decision c2fc8d84 — never collapse `"timeout"` and `"rejected"` back into one message-string-free
+ * `{removed:false,killed:true}` via a bare `.catch` — that reintroduces the "a never-started removal
+ * gets logged as wedged" bug. Use `raceRemoval` at every `killableRemoveDir` call site.
+ */
+export function raceRemoval(p: Promise<RemoveDirResult>, ms: number): Promise<RemovalRaceOutcome> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ kind: "timeout" });
+    }, ms);
+    p.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ kind: "result", result });
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ kind: "rejected", message: err instanceof Error ? err.message : String(err) });
+      },
+    );
+  });
+}
+
+/** {@link removeDirWithCleanRetry}'s result — carries enough for a caller to reconstruct its OWN warn
+ *  wording (each call site keeps its own message/tag, per `c2fc8d84`'s review direction) without
+ *  re-deriving the classification itself.
+ *  - `"removed"` — success.
+ *  - `"wedged"` — genuinely killed (either {@link raceRemoval}'s own outer timeout won the race, or
+ *    `removeDir`'s OWN internal timeout fired first and resolved with `killed:true` — both mean the same
+ *    thing to a caller: never retry, treat as wedged).
+ *  - `"rejected"` — `removeDir` itself rejected (never started) rather than timing out; `rejectionMessage`
+ *    carries the real error text.
+ *  - `"clean-failure"` — every attempt settled (not killed, not rejected) but never actually removed the
+ *    target; the retry budget is exhausted. */
+export interface RemoveDirCleanRetryOutcome {
+  result: RemoveDirResult;
+  kind: "removed" | "wedged" | "rejected" | "clean-failure";
+  rejectionMessage?: string;
+}
+
+/** Options for {@link removeDirWithCleanRetry} — mirrors the per-site `deps: {removeDir?, timeoutMs?}`
+ *  seam every caller already exposed, plus the retry budget those callers used to hardcode individually. */
+export interface RemoveDirCleanRetryOpts {
+  timeoutMs: number;
+  attempts: number;
+  delayMs: number;
+  removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
+}
+
+/**
+ * The shared shape behind a ONE-OFF (no later sweep) bounded directory removal with a short CLEAN-failure
+ * retry: try up to `attempts` times, waiting `delayMs` between a CLEAN (settled, non-killed, non-
+ * rejected) failure's attempts, and NEVER retrying a killed (wedged) or rejected (never-started) outcome
+ * — card `8e32605d`'s own load-bearing invariant, now owned by this ONE function instead of being
+ * re-implemented per caller (lesson 155).
+ *
+ * @decision c2fc8d84 — deliberately does NOT own the final warn/log line (each caller keeps its own
+ * wording) and must NOT be forced onto `removeWorktree`/`sweepUnresumableScratchDirs`/`removeRunSnapshot`/
+ * `sweepAllRunSnapshots` — those keep their own retry semantics; only swap their `.catch` for `raceRemoval`.
+ */
+export async function removeDirWithCleanRetry(
+  dir: string,
+  opts: RemoveDirCleanRetryOpts,
+): Promise<RemoveDirCleanRetryOutcome> {
+  const removeDir = opts.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
+  for (let attempt = 1; attempt <= opts.attempts; attempt++) {
+    const outcome = await raceRemoval(removeDir(dir, opts.timeoutMs), opts.timeoutMs);
+    if (outcome.kind === "timeout") {
+      return { result: { removed: false, killed: true }, kind: "wedged" };
+    }
+    if (outcome.kind === "rejected") {
+      return { result: { removed: false, killed: true }, kind: "rejected", rejectionMessage: outcome.message };
+    }
+    if (outcome.result.removed) {
+      return { result: outcome.result, kind: "removed" };
+    }
+    if (outcome.result.killed) {
+      return { result: outcome.result, kind: "wedged" };
+    }
+    if (attempt < opts.attempts) await delay(opts.delayMs);
+  }
+  return { result: { removed: false, killed: false }, kind: "clean-failure" };
+}
 
 // Windows extended-length path prefixes, spelled out via concatenation of a single escaped backslash
 // rather than a multi-backslash literal — easier to get right than counting backslashes by eye.
@@ -1636,6 +1746,9 @@ export async function removeWorktree(
   // failed/killed `removeDir` call. The directory itself was never touched on THIS call — a respawn
   // claimed the path (correct, safe behaviour), not a removal failure.
   let aborted = false;
+  // Set ONLY on a "rejected" (never-started) outcome — see `raceRemoval`'s own doc (card c2fc8d84) for
+  // why that must never share "genuinely wedged" wording with a real timeout.
+  let rejectionMessage: string | null = null;
   for (let attempt = 1; attempt <= REMOVE_DIR_CLEAN_RETRY_ATTEMPTS; attempt++) {
     // @decision a5d9c458 — re-consulted on EVERY iteration (never just once before the loop): a claim
     // can land during a PRIOR iteration's own removeDir await or retry delay, so only a fresh check right
@@ -1654,11 +1767,12 @@ export async function removeWorktree(
     // the first attempt always calls removeDir unconditionally, mirroring the pre-existing force-remove
     // semantics (a target that's already gone is simply a no-op removal, not specially short-circuited).
     if (attempt > 1 && !fs.existsSync(worktreePath)) { removed = true; wedged = false; break; }
-    const result = await withTimeout(removeDir(worktreePath, timeoutMs), timeoutMs, "removeDir worktree")
-      .catch((): RemoveDirResult => ({ removed: false, killed: true })); // an injected/broken seam that itself never settles ⇒ fail SAFE as WEDGED (never loop a hang)
-    removed = result.removed;
+    const outcome = await raceRemoval(removeDir(worktreePath, timeoutMs), timeoutMs);
+    if (outcome.kind === "timeout") { removed = false; wedged = true; break; } // genuinely wedged — hand to the caller's slow-retry policy, NEVER loop a hang HERE
+    if (outcome.kind === "rejected") { removed = false; wedged = true; rejectionMessage = outcome.message; break; } // never-started — never retried either, but logged distinctly below
+    removed = outcome.result.removed;
     if (removed) { wedged = false; break; }
-    if (result.killed) { wedged = true; break; } // genuinely wedged — hand to the caller's slow-retry policy, NEVER loop a hang HERE
+    if (outcome.result.killed) { wedged = true; break; } // removeDir's OWN internal timeout won the race — same "genuinely wedged" treatment
     if (attempt < REMOVE_DIR_CLEAN_RETRY_ATTEMPTS) await delay(REMOVE_DIR_CLEAN_RETRY_DELAY_MS); // clean reject → short bounded retry
   }
   if (!removed && !aborted) {
@@ -1666,8 +1780,11 @@ export async function removeWorktree(
     // warn for it entirely, so the two logs never contradict each other (the old behaviour logged BOTH
     // "aborting... nothing further was touched" AND "could not remove dir ... left on disk for a later
     // GC" for the exact same event).
+    const reason = rejectionMessage !== null
+      ? `removal failed to start: ${rejectionMessage}`
+      : wedged ? "genuinely wedged — caller retries it slowly" : "left on disk for a later GC";
     // eslint-disable-next-line no-console
-    console.warn(`[worktree] could not remove dir ${worktreePath} (${wedged ? "genuinely wedged — caller retries it slowly" : "left on disk for a later GC"})`);
+    console.warn(`[worktree] could not remove dir ${worktreePath} (${reason})`);
   }
   // The dir is gone (if `removed`), so `prune` alone would leave a LOCKED record (a killed-mid-checkout
   // marker) behind: unlock first, best-effort (a not-locked worktree makes this exit non-zero, which is

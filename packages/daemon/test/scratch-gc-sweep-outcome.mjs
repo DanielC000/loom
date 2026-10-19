@@ -53,6 +53,10 @@ const { buildServedStatus } = await import("../dist/served-status.js");
 
 fs.mkdirSync(SCRATCH_ROOT_DIR, { recursive: true });
 
+const warned = [];
+const origWarn = console.warn;
+console.warn = (...a) => warned.push(a.join(" "));
+
 const db = new Db();
 const now = new Date().toISOString();
 db.insertProject({ id: "proj1", name: "P", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
@@ -172,6 +176,31 @@ async function waitForSettle(timeoutMs = 5000) {
   fs.rmSync(path.join(SCRATCH_ROOT_DIR, deadId), { recursive: true, force: true });
 }
 
+// ============================== 4b. a REJECTED (never-started) removeDir — card c2fc8d84 — is logged distinctly ==============================
+{
+  __resetScratchGcSweepOutcomeForTest();
+  const id = randomUUID();
+  const engineId = randomUUID();
+  mkScratchDir(id);
+  insertSessionRow({ id, engineSessionId: engineId, processState: "exited", lastActivity: oldIso });
+  // Standing in for killableRemoveDir's own spawnChild throwing synchronously — a removal that never
+  // even started, which must NEVER be logged as "genuinely wedged" (that wording is reserved for a
+  // genuine timeout).
+  const removeDir = () => Promise.reject(new Error("ENOENT: spawn rmdir ENOENT (simulated sync spawn failure)"));
+
+  warned.length = 0;
+  runBootScratchGcSweep(db, { transcriptIds: new Set(), nowMs, removeDir });
+  const outcome = await waitForSettle();
+  check('4b a rejected removal still settles to state "completed" (the sweep itself did not throw)', outcome.state === "completed");
+  check("4b the rejected dir is counted as wedged (not silently dropped, not reaped)", outcome.wedged === 1 && outcome.reaped === 0);
+  check("4b exactly one warn fires", warned.length === 1);
+  check("4b the warn uses the 'removal failed to start' wording AND includes the real error message",
+    warned[0]?.includes("removal failed to start") && warned[0]?.includes("ENOENT: spawn rmdir ENOENT"));
+  check("4b the warn NEVER claims 'genuinely wedged' for a rejection that was never a timeout",
+    !warned[0]?.includes("genuinely wedged"));
+  fs.rmSync(path.join(SCRATCH_ROOT_DIR, id), { recursive: true, force: true });
+}
+
 // ============================== 5. buildServedStatus surfaces whatever the outcome record currently holds ==============================
 {
   __resetScratchGcSweepOutcomeForTest();
@@ -191,6 +220,7 @@ async function waitForSettle(timeoutMs = 5000) {
   check("5 with the same reaped count the sweep itself reported", completedStatus.scratchGcSweep.state === "completed" && completedStatus.scratchGcSweep.reaped === 1);
 }
 
+console.warn = origWarn;
 db.close();
 fs.rmSync(tmpHome, { recursive: true, force: true });
 

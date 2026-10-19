@@ -102,6 +102,17 @@ a number that would silently go stale if either constant changes.
   `paths.ts` as a "tidiness" follow-up to this card — they need no `git/*` import and have many existing
   importers; leaving them in place kept this diff focused.
 
+## Update (card c2fc8d84)
+
+`raceRemoval`/`RemovalRaceOutcome` (Round 2's MINOR 1 fix, above) moved OUT of this file into
+`git/worktrees.ts`, exported beside `killableRemoveDir`/`RemoveDirResult`, so every `killableRemoveDir`
+caller can share one discriminator instead of only this function having it. The retry LOOP itself
+(attempts/delay/never-retry-killed-or-rejected) also moved out, into a new shared
+`removeDirWithCleanRetry` (same file), which `deleteProjectWorkDir` now calls. Its own warn wording and
+every behavior this record describes are UNCHANGED — see `docs/decisions/c2fc8d84-*.md` for the full
+change (it also fixes the identical collapsing-`.catch` bug this card's Round 2 only fixed locally, at
+three other sites, and bounds `deleteProjectArchives` the same way).
+
 ## Consequences
 
 A wedged Windows directory handle during a permanent project delete now blocks only a disposable child

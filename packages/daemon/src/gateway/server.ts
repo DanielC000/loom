@@ -5109,18 +5109,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "cannot delete a project with a gate still running or queued for it — wait for it to settle first" });
     }
     const { sessionIds } = deps.db.deleteProject(id);
-    deleteProjectArchives(id); // best-effort: drop the whole LOOM_HOME/archives/<id> snapshot dir
-    // Card 5eace211 Code Review MAJOR: deleteProjectWorkDir is ASYNC and bounded (card 8e32605d: a
-    // killable child process, never the libuv threadpool — see that decision record) — the DB delete and
-    // the hasLiveGateForProject check above both stay synchronous and run BEFORE this, so this await can
-    // never block either of those; it only means the response waits for the (best-effort, never-throwing)
-    // removal to actually finish. Its real worst case is bounded, but NOT by a single timeoutMs: up to
-    // DELETE_PROJECT_WORK_DIR_CLEAN_RETRY_ATTEMPTS attempts at up to its own timeoutMs each, plus
-    // (DELETE_PROJECT_WORK_DIR_CLEAN_RETRY_ATTEMPTS - 1) inter-attempt delays of
-    // DELETE_PROJECT_WORK_DIR_CLEAN_RETRY_DELAY_MS each (projects/work-dir.ts) — never retried past a
-    // genuinely KILLED or REJECTED outcome, only a clean settled failure. Matches the same "await a real
-    // I/O cost for a human-watched, one-off action" posture the soft-archive route above already uses for
-    // its own size measurement.
+    // Card 5eace211 Code Review MAJOR / card c2fc8d84: both removals below are ASYNC + bounded (killable
+    // child processes, never the libuv threadpool) and awaited SEQUENTIALLY, deliberately not
+    // parallelized — see docs/decisions/c2fc8d84-*.md for why, and the combined worst-case response time.
+    //
+    // @decision c2fc8d84 — keep these two awaits sequential; do not parallelize them "for speed".
+    await deleteProjectArchives(id); // best-effort: drop the whole LOOM_HOME/archives/<id> snapshot dir
     await deleteProjectWorkDir(id);
     return { ok: true, deleted: { project: id, agents: true, sessions: sessionIds.length } };
   });

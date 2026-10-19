@@ -66,11 +66,26 @@ function instantRemoveDir(result) {
   return fn;
 }
 
+// A `removeDir` seam that REJECTS (never started) rather than timing out — card c2fc8d84: standing in
+// for `killableRemoveDir`'s own `spawnChild` throwing synchronously. Must be logged distinctly from a
+// genuine timeout/kill, never "genuinely wedged".
+function rejectingRemoveDir(message) {
+  const calls = [];
+  const fn = (target, timeoutMs) => { calls.push({ target, timeoutMs }); return Promise.reject(new Error(message)); };
+  fn.calls = calls;
+  return fn;
+}
+
+const warned = [];
+const origWarn = console.warn;
+console.warn = (...a) => warned.push(a.join(" "));
+
 // ============================== 1. removeRunSnapshot — never-settling removeDir ==============================
 {
   const sessionId = "sess-wedged-1";
   const removeDir = neverSettlingRemoveDir();
   const timeoutMs = 150;
+  warned.length = 0;
   const t0 = performance.now();
   await withWatchdog(removeRunSnapshot(sessionId, { removeDir, timeoutMs }), timeoutMs * 5, "removeRunSnapshot(wedged)");
   const elapsed = performance.now() - t0;
@@ -82,6 +97,25 @@ function instantRemoveDir(result) {
     elapsed >= timeoutMs - TIMER_SLACK_MS);
   check("1 removeRunSnapshot NEVER throws even when the removal is genuinely wedged",
     true); // reaching this line without an uncaught rejection above is the proof
+  check("1 the warn uses the WEDGED wording, never the rejected/'failed to start' wording",
+    warned.at(-1)?.includes("genuinely wedged") && !warned.at(-1)?.includes("failed to start"));
+}
+
+// ============================== 1b. removeRunSnapshot — REJECTED (never-started) removeDir, card c2fc8d84 ==============================
+{
+  const sessionId = "sess-rejected-1";
+  const removeDir = rejectingRemoveDir("ENOENT: spawn rmdir ENOENT (simulated sync spawn failure)");
+  warned.length = 0;
+  let threw = false;
+  try { await removeRunSnapshot(sessionId, { removeDir, timeoutMs: 5000 }); } catch { threw = true; }
+
+  check("1b removeRunSnapshot NEVER throws even when removeDir rejects", threw === false);
+  check("1b a rejected (never-started) result is attempted EXACTLY ONCE (never retried)", removeDir.calls.length === 1);
+  check("1b exactly one warn fires", warned.length === 1);
+  check("1b the warn uses the 'removal failed to start' wording AND includes the real error message",
+    warned[0]?.includes("removal failed to start") && warned[0]?.includes("ENOENT: spawn rmdir ENOENT"));
+  check("1b the warn NEVER claims 'genuinely wedged' for a rejection that was never a timeout",
+    !warned[0]?.includes("genuinely wedged"));
 }
 
 // ============================== 2. removeRunSnapshot — positive control (clean removal) ==============================
@@ -129,6 +163,22 @@ function instantRemoveDir(result) {
   for (const n of names) fs.rmSync(path.join(RUNS_DIR, n), { recursive: true, force: true }); // cleanup: these were never really removed (mocked)
 }
 
+// ============================== 4b. sweepAllRunSnapshots — REJECTED (never-started) removeDir, card c2fc8d84 ==============================
+{
+  fs.mkdirSync(path.join(RUNS_DIR, "rejected-a"), { recursive: true });
+  const removeDir = rejectingRemoveDir("ENOENT: spawn rmdir ENOENT (simulated sync spawn failure)");
+  warned.length = 0;
+  await withWatchdog(sweepAllRunSnapshots({ removeDir, timeoutMs: 5000 }), 20_000, "sweepAllRunSnapshots(rejected)");
+
+  check("4b a rejected (never-started) entry is attempted EXACTLY ONCE (never retried)", removeDir.calls.length === 1);
+  check("4b exactly one warn fires", warned.length === 1);
+  check("4b the warn uses the 'removal failed to start' wording AND includes the real error message",
+    warned[0]?.includes("removal failed to start") && warned[0]?.includes("ENOENT: spawn rmdir ENOENT"));
+  check("4b the warn NEVER claims 'genuinely wedged' for a rejection that was never a timeout",
+    !warned[0]?.includes("genuinely wedged"));
+  fs.rmSync(path.join(RUNS_DIR, "rejected-a"), { recursive: true, force: true }); // cleanup: never really removed (mocked)
+}
+
 // ============================== 5. sweepAllRunSnapshots — REAL removal (boot-sweep path) actually clears entries ==============================
 {
   const names = ["real-a", "real-b"];
@@ -160,6 +210,7 @@ function instantRemoveDir(result) {
     result && typeof result === "object" && typeof result.then !== "function" && typeof result.failed === "number");
 }
 
+console.warn = origWarn;
 console.log(failures === 0
   ? "\n✅ ALL PASS — removeRunSnapshot/sweepAllRunSnapshots are bounded against a genuinely never-settling removal (never looped, never hang), the real killableRemoveDir path still actually deletes snapshot dirs, the boot sweep bounds in PARALLEL rather than summing per-entry, and reconcileRunsOnBoot stays synchronous (fire-and-forgets the sweep) so a wedged dir can never block boot."
   : `\n❌ ${failures} FAILURE(S).`);

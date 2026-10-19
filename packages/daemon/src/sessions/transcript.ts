@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { LOOM_HOME } from "../paths.js";
+import { LOOM_HOME, isSingleProjectSegmentUnderRoot } from "../paths.js";
 import { SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { removeDirWithCleanRetry, type RemoveDirResult } from "../git/worktrees.js";
 import {
   type TranscriptTurn,
   encodeProjectDir,
@@ -490,11 +491,59 @@ export function deleteArchivedTranscript(projectId: string, sessionId: string): 
   try { fs.rmSync(archivedTranscriptPath(projectId, sessionId), { force: true }); } catch { /* best-effort */ }
 }
 
+/** Injectable seam for {@link deleteProjectArchives} — mirrors `DeleteProjectWorkDirDeps`
+ *  (projects/work-dir.ts) exactly. Lets a test simulate a wedged (never-settling) removal, or a clean
+ *  reject-then-succeed sequence, without real filesystem flakiness. Real callers never pass this. */
+export interface DeleteProjectArchivesDeps {
+  removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
+  timeoutMs?: number;
+}
+
+/**
+ * Card c2fc8d84 — ONE-OFF human delete of a potentially large transcript-snapshot tree, with no later
+ * sweep ever revisiting it, same posture as `projects/work-dir.ts`'s `DELETE_PROJECT_WORK_DIR_TIMEOUT_MS`
+ * (see that constant's own doc for the full reasoning: a long budget pins no daemon resource while it
+ * waits — `killableRemoveDir` runs a disposable CHILD process, never the libuv threadpool — so the only
+ * cost is the human-only `DELETE /api/projects/:id/permanent` response settling later in the genuinely
+ * wedged case). 10 minutes.
+ */
+const DELETE_PROJECT_ARCHIVES_TIMEOUT_MS = 600_000;
+
+/** Same shape/reasoning as `DELETE_PROJECT_WORK_DIR_CLEAN_RETRY_ATTEMPTS`/`..._DELAY_MS`
+ *  (projects/work-dir.ts) — a transient EBUSY/EPERM handle-lag is worth a couple of short retries; a
+ *  genuinely KILLED (wedged) or REJECTED (never-started) removal is NEVER retried. */
+const DELETE_PROJECT_ARCHIVES_CLEAN_RETRY_ATTEMPTS = 3;
+const DELETE_PROJECT_ARCHIVES_CLEAN_RETRY_DELAY_MS = 500;
+
 /**
  * Best-effort removal of ALL transcript snapshots for a project (on PERMANENT project delete) — drops
  * the whole `LOOM_HOME/archives/<projectId>` dir in one shot, so no orphan snapshot survives the
  * cascade. Never throws (mirrors deleteArchivedTranscript). A project with no snapshots dir is a no-op.
+ *
+ * @decision c2fc8d84 — moved off a synchronous `fs.rmSync` (blocked the EVENT LOOP on a wedged handle)
+ * onto `removeDirWithCleanRetry` (git/worktrees.ts), same shape as `deleteProjectWorkDir`; also refuses
+ * a non-UUID/traversal `projectId` via the shared `isSingleProjectSegmentUnderRoot` (paths.ts).
  */
-export function deleteProjectArchives(projectId: string): void {
-  try { fs.rmSync(path.join(LOOM_HOME, "archives", projectId), { recursive: true, force: true }); } catch { /* best-effort */ }
+export async function deleteProjectArchives(projectId: string, deps: DeleteProjectArchivesDeps = {}): Promise<void> {
+  const archivesRoot = path.join(LOOM_HOME, "archives");
+  const dir = path.join(archivesRoot, projectId);
+  if (!isSingleProjectSegmentUnderRoot(archivesRoot, dir, projectId)) {
+    // eslint-disable-next-line no-console
+    console.warn(`[sessions] deleteProjectArchives REFUSED — projectId is not a single UUID-shaped path segment directly under LOOM_HOME/archives: ${JSON.stringify(projectId)}`);
+    return;
+  }
+  const outcome = await removeDirWithCleanRetry(dir, {
+    timeoutMs: deps.timeoutMs ?? DELETE_PROJECT_ARCHIVES_TIMEOUT_MS,
+    attempts: DELETE_PROJECT_ARCHIVES_CLEAN_RETRY_ATTEMPTS,
+    delayMs: DELETE_PROJECT_ARCHIVES_CLEAN_RETRY_DELAY_MS,
+    removeDir: deps.removeDir,
+  });
+  if (!outcome.result.removed) {
+    const reason = outcome.kind === "rejected"
+      ? `removal failed to start: ${outcome.rejectionMessage}`
+      : outcome.kind === "wedged" ? "genuinely wedged — killed the removal child" : "clean failure after retries";
+    // A human permanent-delete has no later sweep to retry this — this warning is the only trail.
+    // eslint-disable-next-line no-console
+    console.warn(`[sessions] deleteProjectArchives COULD NOT remove the archives dir for project ${projectId} (${reason}): ${dir} left on disk.`);
+  }
 }
