@@ -641,6 +641,35 @@ function matchPastedContentWrapFramingOfRemainder(leadingRemainder: string, trai
   return { idLen: lm[1]!.length };
 }
 
+/** Card 37acd59f — the WHOLE-STRING form of the bare-tag shape above, anchored both ends, for a direct
+ *  content-identity check against `intended` — never matched against any ring entry. */
+const PASTED_CONTENT_BARE_WRAP_RE = /^<pasted_content id="([0-9a-zA-Z]+)">\n([\s\S]*)\n<\/pasted_content id="\1">$/;
+
+/** Card 37acd59f — the bare-tag-framing TWIN of `isRecognizedPastedContentWrap` (above `matchPastedContent
+ *  WrapFramingOfRemainder`'s own bare shape, never `PASTED_CONTENT_WRAP_RE`'s full shape): proves that
+ *  `reported`, once this exact bare-tag framing is stripped, is byte-for-byte what THIS generation itself
+ *  intended — the same proof `isRecognizedPastedContentWrap` already relies on for the full-framing shape.
+ *  Mirrors that function's own `unescapeNestedPastedContentTag` fallback arm (card 691d02e1) exactly.
+ *
+ *  THIS FUNCTION ALONE DOES NOT ESTABLISH WHICH GENERATION'S CONTENT ARRIVED — only that `reported`'s
+ *  inner body matches `intended`'s text. Round 2 (Code Review BLOCKING, a real lag-by-one-chain specimen,
+ *  session a7c072c4, 2026-10-18): when an EARLIER generation's own recorded write is ALSO identical to
+ *  `intended` (the card's own "continue sent twice" shape), this match and `wrappedReplayOfPriorWrite`'s
+ *  own ring-based match fire on the SAME echo. The CALL SITE, not this function, decides whether a
+ *  competing ring match exists before treating this as confirmed-benign — see its own
+ *  `bareWrapOfCurrentAmbiguous` local.
+ *  @decision 37acd59f — never widen to a substring/partial match on `inner`, never drop the `\1`
+ *  backreference, and never move the ambiguity guard here — it must stay at the call site (one echo
+ *  resolves at most one lineage, per `7a64f16b`). */
+function isRecognizedBarePastedContentWrapOfCurrent(reported: string, intended: string): boolean {
+  const m = PASTED_CONTENT_BARE_WRAP_RE.exec(reported);
+  if (m === null) return false;
+  const inner = m[2]!;
+  if (inner === intended || inner === intended.trimEnd()) return true;
+  const unescaped = unescapeNestedPastedContentTag(inner);
+  return unescaped === intended || unescaped === intended.trimEnd();
+}
+
 /** Card b1cc4f01 (owner ruling, card 16c93a50 / request 0eb43216): a coarse, disclosure-safe
  *  classification of a single dropped character — logged UNCONDITIONALLY, alongside (never instead of)
  *  `redactedExcerpt(droppedChar)` through the same chokepoint every content-bearing diagnostic in this
@@ -9384,6 +9413,44 @@ export class PtyHost {
               // (id-backreferenced wrapper stripped, remainder byte-for-byte equal to `intended`), never
               // by signature/length alone — a genuine loss wrapped the same way still fails this check.
               const isPastedContentWrap = isRecognizedPastedContentWrap(reported, intended);
+              // @decision 37acd59f — never involves the ring on its own; the ring is consulted ONLY to
+              // detect AMBIGUITY (below), never to confirm anything itself.
+              const isBarePastedContentWrapOfCurrent = isRecognizedBarePastedContentWrapOfCurrent(reported, intended);
+              // Round 3 (Code Review BLOCKING, the CR's own probe): `unmatchedRecognized !== null` is too
+              // broad — `findRecognizedSubstring` fires on ANY earlier ring entry that is merely a
+              // substring of `reported`, with no minimum length and no requirement that it actually
+              // resolves anything (e.g. gen=1 "ok", gen=2 intended "ok, continue with the plan", bare-
+              // wrapped: "ok" is a substring of the wrap's inner, but `wrappedReplayOfPriorWrite` stays
+              // null — nothing about gen=1 was actually resolved by this echo). Ambiguity instead means
+              // "this echo ACTUALLY resolved another generation" — i.e. one of the two markers above
+              // (`replayedEntry`/`wrappedReplayOfPriorWrite`) itself fired. Only THOSE shapes can compete
+              // with this check's own `mismatchResolvedGens.add(live.submitGeneration)` for a double-
+              // resolution; a bare substring that resolves nothing is not a competing claim at all.
+              // @decision 37acd59f — one echo resolves at most one lineage (`7a64f16b`); never let this
+              // flag confirm when a competing ring match exists, but a mere substring that resolves
+              // nothing is not a competing match.
+              const bareWrapOfCurrentAmbiguous = isBarePastedContentWrapOfCurrent && (wrappedReplayOfPriorWrite !== null || replayedEntry !== undefined);
+              const confirmedBarePastedContentWrapOfCurrent = isBarePastedContentWrapOfCurrent && !bareWrapOfCurrentAmbiguous;
+              if (isBarePastedContentWrapOfCurrent) {
+                // Disclosure-safe by construction, like `detectPastedContentWrapSmallExcess`'s own decline
+                // log: gen numbers + lengths only, never content — no `redactedExcerpt(` call needed here.
+                // CONTENT-IDENTITY wording only (dc92f4b6's own "never lineage" discipline) — never claims
+                // this IS or ISN'T a replay of any particular generation; that is exactly the question the
+                // ambiguous case cannot answer from this check alone. `resolvedPriorGen` names WHICH prior
+                // generation this echo actually resolved (Round 3) — only meaningful when ambiguous.
+                const resolvedPriorGen = wrappedReplayOfPriorWrite ? wrappedReplayOfPriorWrite.gen : replayedEntry ? replayedEntry.gen : null;
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-bare-pasted-content-wrap-of-current] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} ambiguous=${bareWrapOfCurrentAmbiguous} resolvedPriorGen=${resolvedPriorGen} — the engine's bare-wrap inner is content-identical to THIS generation's own intended text (card 37acd59f).${bareWrapOfCurrentAmbiguous ? ` AMBIGUOUS — this echo already resolved generation ${resolvedPriorGen} (via ${wrappedReplayOfPriorWrite ? "a wrapped" : "a bare"} replay match); resolution deferred to that mechanism, this generation's own unresolved-timer stays armed.` : " UNAMBIGUOUS — no competing ring match; every byte Loom intended for THIS turn arrived."}`);
+                if (confirmedBarePastedContentWrapOfCurrent) {
+                  // Card 37acd59f — pure state hygiene, no observable effect (no timer is ever reachable
+                  // for this generation on this branch — the else-if below, where any timer would be
+                  // armed, is structurally skipped by this same flag): mirrors dc92f4b6's own "mark N too"
+                  // posture so a later reader never mis-reads this generation as never resolved for a
+                  // shape that was, in fact, fully explained. NEVER reached in the ambiguous case (see
+                  // above) — an ambiguous echo marks neither generation resolved from THIS check.
+                  live.mismatchResolvedGens.add(live.submitGeneration);
+                }
+              }
               // Card b1cc4f01 — sibling diagnostic, gated on the wrap NOT already being recognized: the
               // wrap FRAMING matches byte-for-byte but the body is missing exactly one character. Logged
               // unconditionally, diagnostic only — never suppresses anything, never weakens the safety
@@ -9465,7 +9532,7 @@ export class PtyHost {
                 // does not hold once a session has entered a persistent, sustained lag.
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-notice-self-exempt] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — this generation's own intended text IS one of Loom's own prompt-mismatch-family notices ([loom:prompt-mismatch] or [loom:prompt-mismatch-unresolved]); skipping mismatch detection/re-notification/timer-arming for it entirely so a notice can never mint a follow-up notice about its own confirmation (card 87d2dc95, the self-sustaining "notice delivered -> submit -> mismatches -> another notice" feedback loop observed on session 67568eba).`);
-              } else if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed && !isPastedContentWrap) {
+              } else if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed && !isPastedContentWrap && !confirmedBarePastedContentWrapOfCurrent) {
                 // @decision 68459420 — DoD-3: a FOURTH, uncharacterized mismatch population (reported
                 // LONGER than intended, matching no recent write). Characterize/tag only — never fold
                 // into the replay shape or invent a suppression for it; not yet understood.
