@@ -77,6 +77,11 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-pasted-content-wrap-replay-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 437daade (round 3, "also do"): scenarios 4/6 below assert the timer FIRES, not merely that it's
+// ARMED — needs the same env-shrunk resolve window as pty-prompt-mismatch-unresolved.mjs's own WINDOW_MS,
+// set before ../dist/pty/host.js is ever imported (the constant is read ONCE, at module load).
+const WINDOW_MS = 200;
+process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS = String(WINDOW_MS);
 
 const { PtyHost, framePossibleDuplicate } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -91,7 +96,13 @@ class TestPtyHost extends createSeamHost(PtyHost) {
     return fake;
   }
 }
-const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
+// Card 437daade (round 3): collected the same way pty-prompt-mismatch-unresolved.mjs does, so scenarios
+// 4/6 can prove the follow-up timer actually FIRES, not merely that it's armed.
+const unresolvedEvents = [];
+const events = {
+  onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {},
+  onPromptMismatchUnresolved(sessionId, info) { unresolvedEvents.push({ sessionId, info }); },
+};
 const host = new TestPtyHost(events);
 
 const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 5) => {
@@ -273,8 +284,18 @@ try {
   // UNRELATED new message (no re-mint tag at all — never even addresses generation 1), and the engine
   // happens to echo back a stale, unconfirmed generation 1 wrapped in paste framing. The original cut of
   // this fix matched the wrap against ANY prior entry and confirmed here, silently dropping generation 2's
-  // own real loss with no trace anywhere. Must NOT confirm — generation 2 is not a re-mint of anything, so
-  // its own loss must stay loud. =====
+  // own real loss with no trace anywhere. Must NOT confirm (dc92f4b6's own `confirmed-pasted-content-wrap-
+  // replay` arm, which requires a re-mint tag, correctly declines) — generation 2 is not a re-mint of
+  // anything, so its own loss must stay loud.
+  //
+  // Card 437daade (UPDATE, intentional): this exact shape — an untagged current generation, an earlier
+  // entry's own write wrapped in the FULL `\n\n...\n` framing — is now ALSO recognized by the new, tag-free
+  // `identicalContentPriorEntryFull` ring scan (which never existed before 437daade). Before that card this fell
+  // through to the generic `fallback-unrecognized` bucket (rate-gated manager push); now it is classified
+  // MORE PRECISELY as `fallback-full-wrapped-replay-awaiting-resolution` — an individually-armed follow-up
+  // timer + an immediate REPLAY-worded session notice, strictly more informative for the SAME underlying
+  // fact (generation 1's content did arrive late; generation 2's own content still might not have). This is
+  // an improvement, not a regression — the two assertions below were updated to match. =====
   {
     const sid = newSession("UnrelatedCurrentGenCounterSpecimen"); SIDS.push(sid);
     const genOneText = "A".repeat(500); // gen=1, never confirmed
@@ -296,15 +317,28 @@ try {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
 
-    check("4: NEGATIVE CONTROL (Code Review counter-specimen) — the new arm does NOT fire for an unrelated current generation",
+    check("4: NEGATIVE CONTROL (Code Review counter-specimen) — dc92f4b6's own tagged arm does NOT fire for an unrelated current generation",
       lines.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] ")).length === 0);
-    check("4: generation 2's own, genuine loss is STILL classified as unmatchable",
-      host.getLastMismatchUnmatched(sid) !== null && host.getLastMismatchUnmatched(sid)?.gen === 2);
-    check("4: REQUIRED — the manager push STILL fires for generation 2's own loss (no silent, traceless drop)",
-      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 1);
-    // Generation 2 must NOT be marked resolved by an echo that carries none of its own content.
+    // Card 437daade (UPDATE, intentional): no longer a silent, traceless "unmatchable" drop — the new
+    // tag-free detector now NAMES this as a full-wrapped replay of generation 1, loud via its own arm.
+    check("4: UPDATED (card 437daade) — generation 2's own, genuine loss is NO LONGER classified as unmatchable; it is now the NAMED full-wrapped-replay arm",
+      host.getLastMismatchUnmatched(sid) === null &&
+      lines.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-full-wrapped-replay-awaiting-resolution\b/.test(l)));
+    check("4: UPDATED (card 437daade) — the generic manager push no longer fires for THIS shape (replaced by the more precise per-event follow-up timer below, no silent/traceless drop either way)",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
+    // Generation 2 must NOT be marked resolved by an echo that carries none of its own content —
+    // UNCHANGED by card 437daade: only generation 1 (the matched entry) is marked resolved.
     const live = host.live.get(sid);
+    check("4: generation 1 (the matched entry) IS marked resolved (card 437daade's own unconditional marking)", live.mismatchResolvedGens.has(1));
     check("4: generation 2 is NOT marked resolved by an echo that has nothing to do with it", !live.mismatchResolvedGens.has(2));
+    check("4: REQUIRED — the follow-up unresolved-timer IS armed for generation 2 (card 437daade's own loss-possible arm, never silent)",
+      host.live.get(sid).pendingMismatchUnresolvedTimers.size === 1);
+    // Card 437daade (round 3, "also do"): the prior two assertions only prove the arm (ARMED), not that
+    // delivery/firing actually happen — add both, mirroring the CR's own probe.
+    const enqueued4 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("4: REQUIRED (round 3 \"also do\") — the session-facing mismatch notice DOES get enqueued (delivered, loud)", enqueued4);
+    const fired4 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("4: REQUIRED (round 3 \"also do\") — onPromptMismatchUnresolved actually FIRES once the window elapses with nothing to resolve it", fired4);
   }
 
   // ===== 5. POSITIVE CONTROL — the `trimEnd()` allowance, exercised independently on BOTH sides: the
@@ -343,7 +377,13 @@ try {
   // ANY window entry, and `strippedCurrent` against ANY window entry, independently, rather than the SAME
   // one — would wrongly confirm here (inner matches gen1=A via the loop; `strippedCurrent` separately
   // matches gen2=B elsewhere in the window), misattributing gen3 to gen1's content when gen3 is actually
-  // gen2's own re-mint. Must NOT confirm; gen3's real loss must still push. =====
+  // gen2's own re-mint. Must NOT confirm (dc92f4b6's own tagged arm correctly declines — this pairing
+  // protection is unaffected by card 437daade below).
+  //
+  // Card 437daade (UPDATE, intentional): same shape as scenario 4's own update — the engine's echo of
+  // gen1=A, full-wrapped, is now ALSO recognized by the tag-free `identicalContentPriorEntryFull` ring scan
+  // regardless of what gen3 re-mints. Gen3's own loss is no longer a silent `fallback-unrecognized` drop;
+  // it is now the NAMED full-wrapped-replay arm — strictly more informative, not a regression. =====
   {
     const sid = newSession("SameEntryPairingCounterSpecimen"); SIDS.push(sid);
     const genOneText = "A".repeat(500);
@@ -367,15 +407,27 @@ try {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
 
-    check("6: NEGATIVE CONTROL (Code Review round-2 counter-specimen) — the arm does NOT fire (wrong entry pairing)",
+    check("6: NEGATIVE CONTROL (Code Review round-2 counter-specimen) — dc92f4b6's own tagged arm does NOT fire (wrong entry pairing)",
       lines.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] ")).length === 0);
-    check("6: generation 3's own, genuine loss is STILL classified as unmatchable",
-      host.getLastMismatchUnmatched(sid) !== null && host.getLastMismatchUnmatched(sid)?.gen === 3);
-    check("6: REQUIRED — the manager push STILL fires for generation 3's own loss",
-      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 1);
+    // Card 437daade (UPDATE, intentional): see scenario 4's own comment — no longer a silent
+    // `fallback-unrecognized` drop; the tag-free detector now names this as a full-wrapped replay of gen1.
+    check("6: UPDATED (card 437daade) — generation 3's own, genuine loss is NO LONGER classified as unmatchable; it is now the NAMED full-wrapped-replay arm",
+      host.getLastMismatchUnmatched(sid) === null &&
+      lines.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-full-wrapped-replay-awaiting-resolution\b/.test(l)));
+    check("6: UPDATED (card 437daade) — the generic manager push no longer fires for THIS shape (replaced by the more precise per-event follow-up timer below)",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
     const live = host.live.get(sid);
+    check("6: generation 1 (the matched entry) IS marked resolved (card 437daade's own unconditional marking)", live.mismatchResolvedGens.has(1));
     check("6: generation 3 is NOT marked resolved by an echo that matches the WRONG entry",
       !live.mismatchResolvedGens.has(3));
+    check("6: REQUIRED — the follow-up unresolved-timer IS armed for generation 3 (card 437daade's own loss-possible arm, never silent)",
+      host.live.get(sid).pendingMismatchUnresolvedTimers.size === 1);
+    // Card 437daade (round 3, "also do"): the prior two assertions only prove the arm (ARMED), not that
+    // delivery/firing actually happen — add both, mirroring the CR's own probe.
+    const enqueued6 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6: REQUIRED (round 3 \"also do\") — the session-facing mismatch notice DOES get enqueued (delivered, loud)", enqueued6);
+    const fired6 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("6: REQUIRED (round 3 \"also do\") — onPromptMismatchUnresolved actually FIRES once the window elapses with nothing to resolve it", fired6);
   }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
@@ -383,6 +435,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card dc92f4b6's own gap is closed: a late engine echo wrapping an EARLIER generation's own recorded write in pasted-content paste-composer framing is now fully confirmed ONLY when the wrap's inner content AND the current generation's own (tag-stripped) intended text both match the SAME prior entry (paired per-entry, never decoupled — the round-2 Code Review counter-specimen, scenario 6, proves this; and a wrap-only match against any stale entry regardless of the current generation, the round-1 counter-specimen, scenario 4, stays refused too), no longer falsely classified as unmatchable for the real shape, no longer pushes a false `[loom:prompt-mismatch-unmatched]` \"possible LOSS\" alarm to the manager for it, marks BOTH the matched prior generation (a real effect) and the current generation (state hygiene, no observable effect) resolved, and its session-facing notice states CONTENT identity plainly (never lineage) while naming the current generation's own pending tagged write — not the already-confirmed one — as the duplicate-check risk; a genuinely different wrapped body, a superset match, an unrelated current generation, and the decoupled-pairing counter-specimen all still push the manager alarm exactly as before, and the trimEnd() allowance holds independently on the wrap side and the current-generation side."
+  ? "\n✅ ALL PASS — card dc92f4b6's own gap is closed: a late engine echo wrapping an EARLIER generation's own recorded write in pasted-content paste-composer framing is now fully confirmed ONLY when the wrap's inner content AND the current generation's own (tag-stripped) intended text both match the SAME prior entry (paired per-entry, never decoupled — the round-2 Code Review counter-specimen, scenario 6, proves this; and a wrap-only match against any stale entry regardless of the current generation, the round-1 counter-specimen, scenario 4, stays refused too), no longer falsely classified as unmatchable for the real shape, no longer pushes a false `[loom:prompt-mismatch-unmatched]` \"possible LOSS\" alarm to the manager for it, marks BOTH the matched prior generation (a real effect) and the current generation (state hygiene, no observable effect) resolved, and its session-facing notice states CONTENT identity plainly (never lineage) while naming the current generation's own pending tagged write — not the already-confirmed one — as the duplicate-check risk; a genuinely different wrapped body and a superset match still push the old generic manager alarm exactly as before, and the trimEnd() allowance holds independently on the wrap side and the current-generation side. UPDATED by card 437daade: the unrelated-current-generation and decoupled-pairing counter-specimens (scenarios 4/6) no longer fall through to the generic alarm — a NEW, tag-free detector now names each as its own full-wrapped-replay arm (loud, an individually-armed follow-up timer, strictly more informative for the same underlying fact), never confirming the wrong generation either way."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

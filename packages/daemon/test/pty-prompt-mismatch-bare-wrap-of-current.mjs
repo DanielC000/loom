@@ -39,31 +39,53 @@
 // && (wrappedReplayOfPriorWrite !== null || replayedEntry !== undefined)`. A mere substring match that
 // resolves nothing is not a competing claim.
 //
+// ROUND 4 (card 437daade's own "Round 2", Code Review BLOCKING, verified by probe — filed against BOTH
+// framings at once): Round 3's own remainder-regex ambiguity signal (`wrappedReplayOfPriorWrite`, driven
+// off `findRecognizedSubstring`'s single, newest-first substring hit) silently missed
+// FOUR more real shapes: a trailing-newline trim eating the framing boundary, a trailing-space variant with
+// no substring hit at all, the CLI's own escaped-nested-tag form, and a SHADOWED ring entry pre-empting an
+// earlier one's own exact match. THE FIX (replacing Round 3's own remainder matcher entirely):
+// `identicalContentPriorEntryBare` (host.ts) scans the ring DIRECTLY with the SAME recognizer
+// (`isRecognizedBarePastedContentWrapOfCurrent`) that accepted `reported` against `intended`, so the
+// trimEnd/escape/id-charset tolerances can never drift — `wrappedReplayOfPriorWrite` no longer exists;
+// every reference to it below now means `identicalContentPriorEntryBare`. Also skips any ring entry already
+// marked resolved by some OTHER mechanism (not a competing, ambiguous claim — scenario (n)). Minor 2
+// (manager ruling): the AMBIGUOUS-AND-IDENTICAL case's session notice now states CONTENT IDENTITY only,
+// never a lineage ("is a REPLAY ... did not reach you") claim.
+//
 // POSITIVE CONTROLS (unambiguous — no generation was actually resolved by this echo):
 //   (d) GEN=2's TEXT UNRELATED TO GEN=1, bare-wrapped gen=2's OWN (unrelated) text — NO ring match at all,
 //       so unambiguous. Proves the new check does NOT depend on the ring: before this fix this shape fell
 //       to `fallback-unrecognized` (nothing else in this file recognized "a bare wrap of the current
 //       generation's own, otherwise-unrelated-to-the-ring content" at all).
 //   (f) ROUND 3's OWN PROBE — gen=1 writes "ok", gen=2 (current) writes "ok, continue with the plan"
-//       (bare-wrapped). "ok" is a substring of the wrap's inner, but `wrappedReplayOfPriorWrite` never
-//       fires (the remainder isn't exactly the tag framing) — nothing was actually resolved by this echo,
-//       so this must stay unambiguous: fully silent, gen=2 resolved, no notice, no timer.
+//       (bare-wrapped). "ok" is a substring of the wrap's inner, but `identicalContentPriorEntryBare` never
+//       fires (gen=1's text isn't content-identical to anything in the wrap) — nothing was actually
+//       resolved by this echo, so this must stay unambiguous: fully silent, gen=2 resolved, no notice, no
+//       timer.
 //
 // AMBIGUOUS — PROVEN STILL LOUD (an earlier generation WAS actually resolved by this echo):
 //   (a) THE CARD'S OWN REPRO — gen=1 writes "continue", never confirmed; gen=2 (current) ALSO writes
 //       "continue" (byte-identical). An earlier ring entry (gen=1) ALSO matches this echo via
-//       `wrappedReplayOfPriorWrite`, so per the ruling above this must classify EXACTLY as
+//       `identicalContentPriorEntryBare`, so per the ruling above this must classify EXACTLY as
 //       `fallback-wrapped-replay-awaiting-resolution` (loud, timer armed for gen=2, only gen=1 marked
-//       resolved) — the new check fires its own diagnostic log (ambiguous=true) but confirms nothing. See
-//       PART 10 of pty-prompt-mismatch-unresolved.mjs for the companion proof that the timer this scenario
-//       arms actually FIRES when never resolved.
+//       resolved; session notice uses Round 4's own Minor 2 CONTENT-IDENTITY wording) — the new check fires
+//       its own diagnostic log (ambiguous=true) but confirms nothing. See PART 10 of
+//       pty-prompt-mismatch-unresolved.mjs for the companion proof that the timer this scenario arms
+//       actually FIRES when never resolved.
 //   (g) THE `replayedEntry` ARM (Round 3's Minor 3, the OTHER competing marker): gen=1's own LITERAL
 //       submitted text IS the exact bare-wrap string the engine later echoes for gen=2's own (different,
 //       shorter) intended text — a contrived but constructible shape (nothing sanitizes what Loom itself
-//       submits). `replayedEntry` (not `wrappedReplayOfPriorWrite`) fires here, marking gen=1 resolved via
-//       the PRE-EXISTING, unconditional `replayedEntry` marking (host.ts ~:9333) — the new check must
-//       defer to THIS marker too, not just the wrapped one, closing the double-resolution risk on BOTH
-//       competing markers.
+//       submits). `replayedEntry` (not `identicalContentPriorEntryBare`) fires here, marking gen=1 resolved
+//       via the PRE-EXISTING, unconditional `replayedEntry` marking — the new check must defer to THIS
+//       marker too, not just the ring-scan one, closing the double-resolution risk on BOTH competing
+//       markers.
+//   (i)/(j)/(k)/(l)/(m) — ROUND 4's own four tolerance/shadow shapes (trailing-newline trim, trailing-
+//       space/no-substring-hit, the CLI's escaped-nested-tag form, that escape combined with a trailing
+//       newline, and a SHADOWED ring) — each identical-text, each now correctly AMBIGUOUS where Round 3's
+//       own remainder-regex approach silently missed it.
+//   (n) THE RESOLVED-ENTRY FILTER — an entry already resolved by some OTHER mechanism before this echo is
+//       NOT a competing, ambiguous claim (lesson-199 DoD).
 //
 // NEGATIVE CONTROLS:
 //   (b) IDENTICAL-LENGTH ONE-BYTE DIVERGENCE — the wrap's inner differs from `intended` by exactly one
@@ -147,7 +169,7 @@ try {
   // ===== (a) AMBIGUOUS — PROVEN STILL LOUD (Round 2, Code Review BLOCKING): THE CARD'S OWN REPRO: gen=1
   // writes "continue", never confirmed; gen=2 (current) ALSO writes "continue" (byte-identical); the
   // engine bare-wraps the report. An earlier ring entry (gen=1) ALSO matches this echo via
-  // `wrappedReplayOfPriorWrite`, so the new check must NOT confirm-benign here — see PART 10 of
+  // `identicalContentPriorEntryBare`, so the new check must NOT confirm-benign here — see PART 10 of
   // pty-prompt-mismatch-unresolved.mjs for the companion proof that the armed timer actually fires. =====
   {
     const sid = newSession("DuplicateTextBareWrap"); SIDS.push(sid);
@@ -188,12 +210,17 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     await waitUntil(() => fake.writes.slice(writesBefore).join("").includes("your next report up.") || fake.writes.slice(writesBefore).join("").includes("check the message sent for that generation."));
     const noticeText = fake.writes.slice(writesBefore).join("");
-    check("a: the notice uses REPLAY wording, never \"NOT A LOSS\"", /is a REPLAY of an earlier generation/.test(noticeText) && !/NOT A LOSS/.test(noticeText));
+    // Card 437daade (Round 2, Minor 2, manager ruling): the AMBIGUOUS-AND-IDENTICAL case now states
+    // CONTENT IDENTITY, never a lineage ("is a REPLAY ... did not reach you") claim.
+    check("a: UPDATED (card 437daade) — the notice uses CONTENT-IDENTITY wording, never \"is a REPLAY\"/\"NOT A LOSS\"",
+      /CONTENT-IDENTICAL to an earlier, still-unconfirmed write/.test(noticeText) && !/is a REPLAY of an earlier generation/.test(noticeText) && !/NOT A LOSS/.test(noticeText));
+    check("a: the notice names the armed follow-up timer and the generation it was armed for",
+      /A follow-up timer is armed for THIS generation \(gen=2\)/.test(noticeText));
   }
 
   // ===== (g) AMBIGUOUS via the `replayedEntry` ARM (Round 3, Minor 3): gen=1's own LITERAL submitted
   // text IS the exact bare-wrap string the engine later echoes for gen=2's own (different) intended text.
-  // `replayedEntry` (the whole-string-match marker, NOT `wrappedReplayOfPriorWrite`) fires here — proving
+  // `replayedEntry` (the whole-string-match marker, NOT `identicalContentPriorEntryBare`) fires here — proving
   // the ambiguity guard must defer to BOTH competing markers, not just the wrapped one. =====
   {
     const sid = newSession("ReplayedEntryAmbiguous"); SIDS.push(sid);
@@ -213,7 +240,7 @@ try {
       lines.some((l) => l.startsWith(NEW_TAG) && / gen=2 /.test(l) && /ambiguous=true/.test(l) && /resolvedPriorGen=1/.test(l)));
     check("g: REQUIRED — [prompt-mismatch-arm] fires classified as the BARE replay arm (fallback-replay-awaiting-resolution), never the wrapped sibling",
       lines.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-replay-awaiting-resolution\b/.test(l)));
-    check("g: the wrapped-replay diagnostic did NOT fire — this echo matched via the WHOLE-STRING `replayedEntry`, never `wrappedReplayOfPriorWrite`",
+    check("g: the wrapped-replay diagnostic did NOT fire — this echo matched via the WHOLE-STRING `replayedEntry`, never `identicalContentPriorEntryBare`",
       lines.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-remainder-replay] ")).length === 0);
 
     const live = host.live.get(sid);
@@ -341,7 +368,7 @@ try {
 
   // ===== (f) POSITIVE CONTROL — Round 3's own probe: gen=1 writes "ok", gen=2 (current) writes "ok,
   // continue with the plan" (bare-wrapped). "ok" IS a substring of the wrap's inner (Round 2's own
-  // `unmatchedRecognized !== null` signal would have called this ambiguous), but `wrappedReplayOfPriorWrite`
+  // `unmatchedRecognized !== null` signal would have called this ambiguous), but `identicalContentPriorEntryBare`
   // never fires — the remainder around "ok" is NOT exactly the tag framing (there's trailing prose before
   // the closing tag), so nothing about gen=1 was actually resolved by this echo. Must stay UNAMBIGUOUS. =====
   {
@@ -399,12 +426,212 @@ try {
     check("e: gen=2 (the current, ordinary message) is NOT marked resolved — a real unresolved-timer risk remains, correctly", !live.mismatchResolvedGens.has(2));
     check("e: REQUIRED — the unresolved-timer IS armed for gen=2 (this population must stay loss-possible)", live.pendingMismatchUnresolvedTimers.size === 1);
   }
+
+  // ===== Round 2 (card 437daade, Code Review BLOCKING, verified by probe): FOUR real shapes a remainder-
+  // regex ambiguity signal silently missed, now fixed by scanning the ring directly with the SAME
+  // recognizer. Each must end AMBIGUOUS (gen=1 resolved, gen=2's own timer armed, fires) — mirrors scenario
+  // (a) exactly, just with a tolerance-requiring specimen instead of a byte-identical one. =====
+  const checkIdenticalAmbiguousShape = (label, sid, reported) => {
+    const lines = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check(`${label}: the new recognition log fires with ambiguous=true, resolvedPriorGen=1`,
+      lines.some((l) => l.startsWith(NEW_TAG) && /ambiguous=true/.test(l) && /resolvedPriorGen=1/.test(l)));
+    check(`${label}: REQUIRED — [prompt-mismatch-arm] fires classified as a wrapped-replay-awaiting-resolution arm`,
+      lines.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-wrapped-replay-awaiting-resolution\b/.test(l)));
+    const live = host.live.get(sid);
+    check(`${label}: REQUIRED — gen=2 (current) is NOT marked resolved`, !live.mismatchResolvedGens.has(2));
+    check(`${label}: gen=1 (the matched earlier entry) IS marked resolved`, live.mismatchResolvedGens.has(1));
+    check(`${label}: REQUIRED — the unresolved-timer IS armed for gen=2`, live.pendingMismatchUnresolvedTimers.size === 1);
+    check(`${label}: lastMismatchReplay IS populated (wrapped:true, replayedGen:1)`,
+      host.getLastMismatchReplay(sid)?.gen === 2 && host.getLastMismatchReplay(sid)?.replayedGen === 1 && host.getLastMismatchReplay(sid)?.wrapped === true);
+  };
+
+  // ===== (i) TRAILING-NEWLINE TRIM — gen=1 writes "continue\n"; gen=2 (current) ALSO writes "continue\n"
+  // (byte-identical). The engine's own composer trims trailing whitespace before wrapping, so the wrap's
+  // inner is "continue" (no newline) — gen=1's own trailing "\n" would have eaten the framing's own
+  // trailing "\n" under the OLD remainder-regex approach, declining the match entirely. =====
+  {
+    const sid = newSession("TrailingNewlineTrimBare"); SIDS.push(sid);
+    const DUP_TEXT = "continue\n";
+    host.enqueueStdin(sid, DUP_TEXT); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, DUP_TEXT); // gen=2 — CURRENT, byte-identical
+    const reported = wrapRemainder("abcd", "continue"); // the engine's own trim: no trailing \n in the wrap's inner
+    checkIdenticalAmbiguousShape("i", sid, reported);
+  }
+
+  // ===== (j) TRAILING-SPACE, NO SUBSTRING HIT AT ALL — gen=1 writes "continue " (trailing space); gen=2
+  // ALSO writes "continue " (byte-identical). The engine trims the space before wrapping, so gen=1's own
+  // RAW text ("continue ") is never even a literal substring of the trimmed echo — `findRecognizedSubstring`
+  // would have returned nothing at all under the OLD approach. =====
+  {
+    const sid = newSession("TrailingSpaceNoSubstringHitBare"); SIDS.push(sid);
+    const DUP_TEXT = "continue ";
+    host.enqueueStdin(sid, DUP_TEXT); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, DUP_TEXT); // gen=2 — CURRENT, byte-identical
+    const reported = wrapRemainder("abcd", "continue"); // trimmed, no trailing space
+    checkIdenticalAmbiguousShape("j", sid, reported);
+  }
+
+  // ===== (k) THE CLI'S OWN ESCAPED-NESTED-TAG FORM (card 691d02e1) — gen=1's own text contains literal
+  // pasted-content tag syntax; gen=2 ALSO writes the identical text. The CLI escapes the literal occurrence
+  // when echoing it back wrapped, so gen=1's own RAW (unescaped) text is never a literal substring of the
+  // ESCAPED echo — `findRecognizedSubstring` would have returned nothing under the OLD approach. =====
+  {
+    const sid = newSession("EscapedNestedTagIdenticalBare"); SIDS.push(sid);
+    const DUP_TEXT = 'discussing the wrap: it looks like `<pasted_content id="aa11">...</pasted_content id="aa11">`';
+    host.enqueueStdin(sid, DUP_TEXT); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, DUP_TEXT); // gen=2 — CURRENT, byte-identical
+    const escapedInner = DUP_TEXT.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
+    const reported = wrapRemainder("abcd", escapedInner);
+    checkIdenticalAmbiguousShape("k", sid, reported);
+  }
+
+  // ===== (l) ESCAPED + TRAILING NEWLINE, COMBINED — both gaps (3) and (1) from the card's own narrative at
+  // once, proving the recognizer's `unescaped === intended.trimEnd()` branch is exercised correctly. =====
+  {
+    const sid = newSession("EscapedAndTrailingNewlineIdenticalBare"); SIDS.push(sid);
+    const DUP_TEXT = 'mentions `<pasted_content id="bb22">` in prose\n';
+    host.enqueueStdin(sid, DUP_TEXT); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, DUP_TEXT); // gen=2 — CURRENT, byte-identical
+    const trimmedEscaped = DUP_TEXT.trimEnd().replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
+    const reported = wrapRemainder("abcd", trimmedEscaped);
+    checkIdenticalAmbiguousShape("l", sid, reported);
+  }
+
+  // ===== (m) A SHADOWED RING — gen=1 writes X="continue with the plan" (never confirmed); gen=2 writes
+  // "continue" (an ORDINARY, distinct message that happens to be a substring of X); gen=3 (current) ALSO
+  // writes X again (byte-identical to gen=1). `findRecognizedSubstring`'s own single, newest-first hit
+  // would have returned gen=2 (a non-framing partial hit) and NEVER reached gen=1's own exact match at all
+  // — the new ring scan, trying each entry's own exact recognizer match in turn, correctly skips gen=2 and
+  // finds gen=1. =====
+  {
+    const sid = newSession("ShadowedRingBare"); SIDS.push(sid);
+    const X = "continue with the plan";
+    host.enqueueStdin(sid, X); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, "continue"); // gen=2, an ordinary, distinct message — a substring of X
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // clears busy without confirming gen=2 either
+    host.enqueueStdin(sid, X); // gen=3 — CURRENT, byte-identical to gen=1 (NOT gen=2)
+    const reported = wrapRemainder("abcd", X);
+    const lines = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("m: the new recognition log fires with ambiguous=true, resolvedPriorGen=1 (NEVER gen=2, despite being scanned first)",
+      lines.some((l) => l.startsWith(NEW_TAG) && /ambiguous=true/.test(l) && /resolvedPriorGen=1\b/.test(l)));
+    check("m: REQUIRED — [prompt-mismatch-arm] fires classified as a wrapped-replay-awaiting-resolution arm",
+      lines.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-wrapped-replay-awaiting-resolution\b/.test(l)));
+    const live = host.live.get(sid);
+    check("m: REQUIRED — gen=3 (current) is NOT marked resolved", !live.mismatchResolvedGens.has(3));
+    check("m: gen=1 (the matched earlier entry, the SHADOWING target) IS marked resolved", live.mismatchResolvedGens.has(1));
+    check("m: gen=2 (the shadowing, non-matching entry scanned FIRST) is NOT marked resolved — it never actually matched", !live.mismatchResolvedGens.has(2));
+    check("m: REQUIRED — the unresolved-timer IS armed for gen=3", live.pendingMismatchUnresolvedTimers.size === 1);
+  }
+
+  // ===== (n) RESOLVED-ENTRY FILTER — lesson-199 DoD: an entry already marked resolved (by some OTHER
+  // mechanism) must NOT be returned as a competing candidate. gen=1 writes "continue", never confirmed.
+  // gen=2 writes something else ("unrelated-filler-n"), but its OWN echo is a PLAIN replay of gen=1's text
+  // ("continue") — the classic 201d0d95 shape — which marks gen=1 resolved via `replayedEntry`'s own
+  // unconditional marking BEFORE gen=3 ever runs. THEN gen=3 (current) ALSO writes "continue" (byte-
+  // identical to the now-ALREADY-RESOLVED gen=1), bare-wrapped. Must stay UNAMBIGUOUS: an already-resolved
+  // entry is not a competing claim. =====
+  {
+    const sid = newSession("ResolvedEntryFilterBare"); SIDS.push(sid);
+    const DUP_TEXT = "continue";
+    host.enqueueStdin(sid, DUP_TEXT); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, "unrelated-filler-n"); // gen=2 — own intended text, distinct from gen=1
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: DUP_TEXT }); // gen=2's own echo IS gen=1's text — a plain replay, resolves gen=1
+    const liveN = host.live.get(sid);
+    check("n: SETUP — gen=1 is already marked resolved before gen=3's own echo (gen=2's own plain-replay echo resolved it)",
+      liveN.mismatchResolvedGens.has(1));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const timersBeforeGen3 = liveN.pendingMismatchUnresolvedTimers.size; // gen=2's own replay-awaiting timer, if still pending
+    host.enqueueStdin(sid, DUP_TEXT); // gen=3 — CURRENT, byte-identical to the now-already-resolved gen=1
+    const reported = wrapRemainder("abcd", DUP_TEXT);
+    const lines = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("n: REQUIRED — the new recognition log fires with ambiguous=false (gen=1 is already resolved, not a competing claim)",
+      lines.some((l) => l.startsWith(NEW_TAG) && /ambiguous=false/.test(l)));
+    check("n: REQUIRED — no [prompt-mismatch-arm] line at all for THIS (gen=3) hook",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-arm] ")).length === 0);
+    check("n: gen=3 (current) IS marked resolved — the unambiguous case", liveN.mismatchResolvedGens.has(3));
+    check("n: REQUIRED — no NEW unresolved-timer was armed for THIS (gen=3) hook",
+      liveN.pendingMismatchUnresolvedTimers.size === timersBeforeGen3);
+  }
+  // ===== (o) ROUND 3 FIX — a prior generation confirmed by its OWN clean, byte-identical echo is NOT a
+  // competing ambiguous claim. gen=1 writes "continue" and is cleanly confirmed (UserPromptSubmit echoes
+  // exactly `live.lastPrompt`); gen=2 (current) ALSO writes "continue", bare-wrapped. Before round 3, gen=1
+  // was never added to `mismatchResolvedGens` (only the MISMATCH branch writes that set), so this echo
+  // falsely classified as AMBIGUOUS — a FALSE ALARM for two cleanly-delivered sends. Must now be
+  // UNAMBIGUOUS: silent, gen=2 marked resolved, no timer, no notice. =====
+  {
+    const sid = newSession("CleanConfirmedPriorUnambiguousBare"); SIDS.push(sid);
+    const DUP_TEXT = "continue";
+    host.enqueueStdin(sid, DUP_TEXT); // gen=1
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: DUP_TEXT }); // CLEAN confirm — byte-identical echo
+    const liveO = host.live.get(sid);
+    check("o: SETUP — gen=1 is recorded as echo-confirmed by its own clean echo", liveO.echoConfirmedGens.has(1));
+    check("o: SETUP — gen=1 is NOT in mismatchResolvedGens (never overloaded into that set)", !liveO.mismatchResolvedGens.has(1));
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // turn ends, clears busy
+
+    host.enqueueStdin(sid, DUP_TEXT); // gen=2 — CURRENT, byte-identical to the now-cleanly-confirmed gen=1
+    const reported = wrapRemainder("abcd", DUP_TEXT);
+    const lines = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+
+    check("o: REQUIRED (round 3 fix) — the new recognition log fires with ambiguous=false — a cleanly-confirmed prior is not a competing claim",
+      lines.some((l) => l.startsWith(NEW_TAG) && / gen=2 /.test(l) && /ambiguous=false/.test(l)));
+    check("o: REQUIRED — no [prompt-mismatch-arm] line at all — no false alarm",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-arm] ")).length === 0);
+    check("o: REQUIRED — the manager's false possible-LOSS push does NOT fire",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
+    check("o: REQUIRED — no session-facing mismatch notice is enqueued (silent)", !hasPendingMismatchNotice(sid));
+    check("o: REQUIRED — gen=2 (current) IS marked resolved — the unambiguous case", liveO.mismatchResolvedGens.has(2));
+    check("o: REQUIRED — no unresolved-timer was armed for gen=2", liveO.pendingMismatchUnresolvedTimers.size === 0);
+  }
+
+  // ===== (o2) SAME FIX, prior confirmed TWO generations back — gen=1 writes "continue" and is cleanly
+  // confirmed; gen=2 writes an unrelated "filler-o2" (never confirmed, just ring filler); gen=3 (current)
+  // ALSO writes "continue", bare-wrapped. Proves the exclusion isn't an immediate-prior-only special case. =====
+  {
+    const sid = newSession("CleanConfirmedPriorTwoBackUnambiguousBare"); SIDS.push(sid);
+    const DUP_TEXT = "continue";
+    host.enqueueStdin(sid, DUP_TEXT); // gen=1
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: DUP_TEXT }); // CLEAN confirm
+    const liveO2 = host.live.get(sid);
+    check("o2: SETUP — gen=1 is recorded as echo-confirmed", liveO2.echoConfirmedGens.has(1));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, "filler-o2"); // gen=2 — unrelated, never confirmed, just ring filler
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, DUP_TEXT); // gen=3 — CURRENT, byte-identical to the now-cleanly-confirmed gen=1 (2 back)
+    const reported = wrapRemainder("abcd", DUP_TEXT);
+    const lines = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+
+    check("o2: REQUIRED (round 3 fix) — ambiguous=false even though the confirmed entry is TWO generations back",
+      lines.some((l) => l.startsWith(NEW_TAG) && / gen=3 /.test(l) && /ambiguous=false/.test(l)));
+    check("o2: REQUIRED — no [prompt-mismatch-arm] line at all", lines.filter((l) => l.startsWith("[prompt-mismatch-arm] ")).length === 0);
+    check("o2: REQUIRED — no session-facing mismatch notice is enqueued (silent)", !hasPendingMismatchNotice(sid));
+    check("o2: REQUIRED — gen=3 (current) IS marked resolved", liveO2.mismatchResolvedGens.has(3));
+    check("o2: REQUIRED — no unresolved-timer was armed for gen=3", liveO2.pendingMismatchUnresolvedTimers.size === 0);
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card 37acd59f's own gap is closed for the UNAMBIGUOUS case (scenarios d and f): a bare wrap of the CURRENT generation's own content, whether genuinely ring-unrelated (d) or merely containing an earlier generation's text as a substring that resolves nothing (f, Round 3's own probe), is recognized as content-identical and goes fully silent, with no false-alarm unresolved-timer. Round 3 (Code Review BLOCKING): ambiguity means this echo ACTUALLY resolved another generation — via EITHER the wrapped marker (scenario a, the card's own 'continue sent twice' repro) OR the bare whole-string replayedEntry marker (scenario g, Minor 3) — in both cases the fix defers entirely to that pre-existing path: loud, timer armed, only the earlier generation marked resolved — never double-resolving two generations from one echo (7a64f16b). A one-byte divergence, a substring-only match, and a mismatched-id wrap all still decline exactly as before. card e59880fe's own genuinely-unrelated wrapped-replay population stays loud, unaffected."
+  ? "\n✅ ALL PASS — card 37acd59f's own gap is closed for the UNAMBIGUOUS case (scenarios d and f): a bare wrap of the CURRENT generation's own content, whether genuinely ring-unrelated (d) or merely containing an earlier generation's text as a substring that resolves nothing (f, Round 3's own probe), is recognized as content-identical and goes fully silent, with no false-alarm unresolved-timer. Ambiguity (scenario a, the card's own 'continue sent twice' repro, OR scenario g, Minor 3's `replayedEntry` arm) defers entirely to that pre-existing path: loud, timer armed, only the earlier generation marked resolved — never double-resolving two generations from one echo (7a64f16b). A one-byte divergence, a substring-only match, and a mismatched-id wrap all still decline exactly as before. card e59880fe's own genuinely-unrelated wrapped-replay population stays loud, unaffected. Card 437daade (Round 2, Code Review BLOCKING, verified by probe): the OLD remainder-regex ambiguity signal silently missed four real shapes — a trailing-newline trim (i), a trailing-space variant with no substring hit at all (j), the CLI's own escaped-nested-tag form (k), that same escape combined with a trailing newline (l), and a SHADOWED ring entry pre-empting an earlier one's own exact match (m) — all now correctly AMBIGUOUS by scanning the ring directly with the SAME recognizer (`isRecognizedBarePastedContentWrapOfCurrent`) instead of a parallel, looser remainder regex. (n) proves the resolved-entry filter: an entry already resolved by some OTHER mechanism is never a competing, ambiguous claim."
+  + " Round 3 (false-alarm fix): a prior generation confirmed by its own clean, byte-identical echo (o, and o2 two generations back) is no longer a competing ambiguous claim — a cleanly-delivered duplicate send no longer falsely arms a follow-up timer."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

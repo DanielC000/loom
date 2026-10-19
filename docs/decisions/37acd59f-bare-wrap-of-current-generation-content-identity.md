@@ -242,6 +242,23 @@ most it attributes the resolution to the wrong one of two generations whose cont
 arrived. Rare — requires literal paste-tag syntax inside ordinary session text — and accepted as a known,
 out-of-scope attribution asymmetry, same posture as the possible-duplicate residual above.
 
+## ROUND 4 — the MECHANISM behind `wrappedReplayOfPriorWrite` was replaced; read it in card 437daade's own record
+
+See `docs/decisions/437daade-full-wrap-of-current-generation-content-identity.md`'s own "Round 2: ring-scan
+replaces the remainder-regex ambiguity mechanism" section (filed against this card AND its full-framing
+twin, 437daade, at once — folded into 437daade's own record rather than a separate file, since the id this
+round was first, mistakenly, filed under was a Code Reviewer SESSION id, never a board card id, and the
+mistaken file was never committed). Round 3's own ambiguity signal, `wrappedReplayOfPriorWrite` (the
+remainder-regex match below), silently missed FOUR real shapes verified by direct probe: a trailing-newline
+trim, a trailing-space variant with no substring hit at all, the CLI's own escaped-nested-tag form, and a SHADOWED
+ring entry pre-empting an earlier one's own exact match. `wrappedReplayOfPriorWrite` no longer exists —
+every reference to it below now means `identicalContentPriorEntryBare`, produced by scanning the ring
+directly with the SAME recognizer (`isRecognizedBarePastedContentWrapOfCurrent`) instead of a parallel,
+looser remainder regex. The AMBIGUITY RULE itself (one echo resolves at most one lineage) and everything
+else in this record is UNCHANGED — only the mechanism that DETECTS a competing match changed. The
+session-notice WORDING for the ambiguous-and-identical case also changed (Minor 2, 437daade's own record):
+content identity only, never "is a REPLAY ... did not reach you".
+
 ## Do not
 
 - Do not widen `isRecognizedBarePastedContentWrapOfCurrent`'s match to a substring/partial recognition on
@@ -252,7 +269,7 @@ out-of-scope attribution asymmetry, same posture as the possible-duplicate resid
   deliberately mirrors `isRecognizedPastedContentWrap`'s own untagged-comparison scope; the tagged/bare
   combination is a named, uncovered residual (see above), not something to fold in here.
 - Do not mark the current generation resolved, and do not skip the notice/timer-arming else-if block, when
-  `wrappedReplayOfPriorWrite !== null || replayedEntry !== undefined` alongside
+  `identicalContentPriorEntryBare !== null || replayedEntry !== undefined` alongside
   `isRecognizedBarePastedContentWrapOfCurrent` — that is the double-resolution bug Round 2/3 fixed
   (`7a64f16b`: one echo resolves at most one lineage). The ambiguity guard (`bareWrapOfCurrentAmbiguous`)
   belongs at the CALL SITE, never inside `isRecognizedBarePastedContentWrapOfCurrent` itself, which has no
@@ -261,8 +278,9 @@ out-of-scope attribution asymmetry, same posture as the possible-duplicate resid
   BOTH too broad (a mere substring match that resolves nothing, scenario (f)) AND too narrow
   (`unmatchedRecognized` is only computed when `replayedEntry === undefined`, so it is structurally blind
   to the `replayedEntry`-carried ambiguity, scenario (g)). Round 3's lesson-199 mutant proved both
-  directions wrong in one run (9 failures). The signal is specifically "did `wrappedReplayOfPriorWrite` or
-  `replayedEntry` actually fire" — nothing else.
+  directions wrong in one run (9 failures). The signal is specifically "did `identicalContentPriorEntryBare`
+  or `replayedEntry` actually fire" — nothing else. See ROUND 4 above for the current rule governing HOW
+  that first candidate is found (never the remainder-regex mechanism this round's own text describes).
 - Do not word the new diagnostic log, or any description of this check, as a lineage claim ("replay of",
   "is the re-mint of", "not a replay of") — content identity only, `dc92f4b6`'s own standing discipline.
   Round 1's own log line violated this ("NOT A REPLAY of any earlier generation") and was corrected in
@@ -285,9 +303,10 @@ out-of-scope attribution asymmetry, same posture as the possible-duplicate resid
 ## Source
 
 Inline comments in `packages/daemon/src/pty/host.ts`: `PASTED_CONTENT_BARE_WRAP_RE`'s own doc,
-`isRecognizedBarePastedContentWrapOfCurrent`'s own doc, and the `isBarePastedContentWrapOfCurrent`/
-`bareWrapOfCurrentAmbiguous`/`confirmedBarePastedContentWrapOfCurrent`/`resolvedPriorGen` computation + its
-gate in `deliverHook`'s `UserPromptSubmit` case. Tests:
-`packages/daemon/test/pty-prompt-mismatch-bare-wrap-of-current.mjs` (scenarios a/d/f/g are the ones this
-round added or changed meaning), PART 10 of `packages/daemon/test/pty-prompt-mismatch-unresolved.mjs`
-(unchanged this round, re-verified).
+`isRecognizedBarePastedContentWrapOfCurrent`'s own doc, `findMostRecentUnresolvedPriorEntryAcceptedByRecognizer`'s
+own doc (card 437daade, the current ambiguity-detection mechanism), and the
+`isBarePastedContentWrapOfCurrent`/`bareWrapOfCurrentAmbiguous`/`confirmedBarePastedContentWrapOfCurrent`/
+`resolvedPriorGen` computation + its gate in `deliverHook`'s `UserPromptSubmit` case. Tests:
+`packages/daemon/test/pty-prompt-mismatch-bare-wrap-of-current.mjs` (scenarios a/d/f/g from this card's own
+rounds; scenarios i/j/k/l/m/n added by Round 4/437daade), PART 10 (this card) and PART 11 (437daade)
+of `packages/daemon/test/pty-prompt-mismatch-unresolved.mjs`.

@@ -15,14 +15,20 @@
 // tag framing alone: `<pasted_content id="X">\n` … `\n</pasted_content id="X">`, nothing else before/
 // after.
 //
-// THE FIX (`matchPastedContentWrapFramingOfRemainder`, pty/host.ts): reuses `findRecognizedSubstring`'s
-// own already-computed `leadingRemainder`/`trailingRemainder` (never a new, independent scan) and tests
-// them against two anchored regexes requiring the SAME backreferenced id on both sides — never a
-// substring/partial match on either side.
+// THE FIX, AS ORIGINALLY SHIPPED (`matchPastedContentWrapFramingOfRemainder`, pty/host.ts): reused
+// `findRecognizedSubstring`'s own already-computed `leadingRemainder`/`trailingRemainder` (never a new,
+// independent scan) and tested them against two anchored regexes requiring the SAME backreferenced id on
+// both sides — never a substring/partial match on either side. THIS FUNCTION NO LONGER EXISTS: card
+// 437daade's own Round 2 replaced it (for BOTH framings, bare and full) with a direct ring scan,
+// `identicalContentPriorEntryBare`/`Full`, reusing the SAME recognizer that accepts `reported` against
+// `intended` — see that card's own decision record for why (it closed four real shapes this remainder-
+// regex approach silently missed). The scenarios below still exercise the identical observable behavior
+// (the `[prompt-mismatch-pasted-content-wrap-remainder-replay]` tag is unchanged; only what populates it
+// changed), so they remain valid as written.
 //
 // SEVERITY: the SAME Code Review CRITICAL finding from dc92f4b6's own round 1 applies here unchanged —
 // a wrap of an unrelated earlier generation does not establish THIS generation's own content arrived.
-// So this does NOT classify as `confirmed-*`/benign: `wrappedReplayOfPriorWrite` is wired at the SAME
+// So this does NOT classify as `confirmed-*`/benign: `identicalContentPriorEntryBare` is wired at the SAME
 // severity as a bare `replayedEntry` match (a new arm, `fallback-wrapped-replay-awaiting-resolution`,
 // mirroring `fallback-replay-awaiting-resolution` exactly — same exclusion list, same
 // `checkPromptMismatchUnresolved` follow-up timer, same `mismatchResolvedGens` marking, NOT in
@@ -70,6 +76,11 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-wrapped-remainder-replay-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 437daade (round 3, "also do"): scenario 4 below asserts the timer FIRES, not merely that it's
+// ARMED — needs the same env-shrunk resolve window as pty-prompt-mismatch-unresolved.mjs's own WINDOW_MS,
+// set before ../dist/pty/host.js is ever imported (the constant is read ONCE, at module load).
+const WINDOW_MS = 200;
+process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS = String(WINDOW_MS);
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -84,7 +95,13 @@ class TestPtyHost extends createSeamHost(PtyHost) {
     return fake;
   }
 }
-const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
+// Card 437daade (round 3): collected the same way pty-prompt-mismatch-unresolved.mjs does, so scenario 4
+// can prove the follow-up timer actually FIRES, not merely that it's armed.
+const unresolvedEvents = [];
+const events = {
+  onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {},
+  onPromptMismatchUnresolved(sessionId, info) { unresolvedEvents.push({ sessionId, info }); },
+};
 const host = new TestPtyHost(events);
 
 const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 5) => {
@@ -244,11 +261,18 @@ try {
       lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 1);
   }
 
-  // ===== 4. NEGATIVE CONTROL — the ORIGINAL `PASTED_CONTENT_WRAP_RE` double-leading-newline/single-
-  // trailing-newline shape, on an ORDINARY (untagged) current generation. This fix's narrower regex must
-  // NOT touch this shape — it must classify EXACTLY as it did before this fix: `fallback-unrecognized`,
-  // pushed (dc92f4b6's own scenario 4 proves the SAME shape declines when a re-mint tag IS present; this
-  // proves the sibling fix doesn't accidentally widen that boundary either). =====
+  // ===== 4. NEGATIVE CONTROL (for THIS card, e59880fe) — the ORIGINAL `PASTED_CONTENT_WRAP_RE` double-
+  // leading-newline/single-trailing-newline shape, on an ORDINARY (untagged) current generation. e59880fe's
+  // own narrower BARE regex must NOT touch this shape — its own remainder-replay log must not fire for it.
+  //
+  // Card 437daade (UPDATE, intentional): this exact shape is now recognized by a DIFFERENT, NEW detector —
+  // `identicalContentPriorEntryFull`'s own ring scan (card 437daade's Round 2) — which didn't exist when
+  // this scenario was written and is this card's own, separate full-framing twin of e59880fe's mechanism.
+  // Before 437daade, nothing recognized an untagged full-wrap of a PRIOR generation at all, so this fell to
+  // the generic `fallback-unrecognized` bucket; now it is classified MORE PRECISELY as its own
+  // `fallback-full-wrapped-replay-awaiting-resolution` arm. This closes a second, compounding gap 437daade
+  // found during investigation — see that card's own decision record. The scenario's ORIGINAL purpose (e59880fe's
+  // own BARE-only regex must not touch the full-framing shape) is unaffected and still asserted below. =====
   {
     const sid = newSession("DoubleNewlineShapeUnchanged"); SIDS.push(sid);
     const genOneText = "N".repeat(500);
@@ -262,17 +286,31 @@ try {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
 
-    check("4: this fix's own new log line does NOT fire for the double-newline shape",
+    check("4: e59880fe's own BARE remainder-replay log does NOT fire for the double-newline (full) shape — unaffected by 437daade",
       lines.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-remainder-replay] ")).length === 0);
     // `PASTED_CONTENT_WRAP_RE` itself still matches this shape (it's valid for the CURRENT generation's
     // own wrap check), but declines because the inner (500 chars) isn't within 1-2 chars of the current
     // generation's own 10-char intended — so it logs the EXISTING excess-decline diagnostic, unchanged.
-    check("4: the EXISTING wrap-excess decline diagnostic still fires, unaffected by this fix",
+    check("4: the EXISTING wrap-excess decline diagnostic still fires, unaffected by either card",
       lines.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-excess-declined] ")).length === 1);
-    check("4: still classified as unmatchable (arm=fallback-unrecognized) — UNCHANGED from before this fix",
-      host.getLastMismatchUnmatched(sid) !== null && host.getLastMismatchUnmatched(sid)?.gen === 2);
-    check("4: REQUIRED — the manager push STILL fires — UNCHANGED from before this fix",
-      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 1);
+    // UPDATED (card 437daade): no longer a silent `fallback-unrecognized` drop — its own NEW full-framing
+    // detector now names this as a full-wrapped replay of generation 1.
+    check("4: UPDATED (card 437daade) — no longer classified as unmatchable; now the NAMED full-wrapped-replay arm",
+      host.getLastMismatchUnmatched(sid) === null &&
+      lines.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-full-wrapped-replay-awaiting-resolution\b/.test(l)));
+    check("4: UPDATED (card 437daade) — the generic manager push no longer fires for THIS shape (replaced by the more precise per-event follow-up timer below)",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
+    const live = host.live.get(sid);
+    check("4: generation 1 (the matched entry) IS marked resolved (card 437daade's own unconditional marking)", live.mismatchResolvedGens.has(1));
+    check("4: generation 2 is NOT marked resolved — its own content is unrelated to the wrapped entry", !live.mismatchResolvedGens.has(2));
+    check("4: REQUIRED — the follow-up unresolved-timer IS armed for generation 2 (card 437daade's own loss-possible arm, never silent)",
+      live.pendingMismatchUnresolvedTimers.size === 1);
+    // Card 437daade (round 3, "also do"): the prior two assertions only prove the arm (ARMED), not that
+    // delivery/firing actually happen — add both, mirroring the CR's own probe.
+    const enqueued4 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("4: REQUIRED (round 3 \"also do\") — the session-facing mismatch notice DOES get enqueued (delivered, loud)", enqueued4);
+    const fired4 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("4: REQUIRED (round 3 \"also do\") — onPromptMismatchUnresolved actually FIRES once the window elapses with nothing to resolve it", fired4);
   }
 
   // ===== 5. POSITIVE CONTROL (wording) — a gap of 2 (not immediately preceding) between the wrapped
@@ -313,6 +351,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card e59880fe's own gap is closed: an UNTAGGED current generation's otherwise-unmatched remainder, when it is EXACTLY the engine's bare pasted-content tag framing (id-backreferenced) around an earlier generation's own recorded write, is now classified as a NAMED, WRAPPED replay (arm=fallback-wrapped-replay-awaiting-resolution) at the SAME severity as a bare replay — never confirmed-benign (dc92f4b6's own Code Review CRITICAL finding still applies) — no longer falsely classified as unmatchable, no longer pushes the manager's false possible-LOSS escalation, and surfaces via the EXISTING lastMismatchReplay pull surface (wrapped:true, wrapIdLen) rather than a new field. A non-framing same-length remainder, a mismatched-id wrap, and the ORIGINAL double-newline PASTED_CONTENT_WRAP_RE shape on an untagged generation all still classify exactly as before this fix."
+  ? "\n✅ ALL PASS — card e59880fe's own gap is closed: an UNTAGGED current generation's otherwise-unmatched remainder, when it is EXACTLY the engine's bare pasted-content tag framing (id-backreferenced) around an earlier generation's own recorded write, is now classified as a NAMED, WRAPPED replay (arm=fallback-wrapped-replay-awaiting-resolution) at the SAME severity as a bare replay — never confirmed-benign (dc92f4b6's own Code Review CRITICAL finding still applies) — no longer falsely classified as unmatchable, no longer pushes the manager's false possible-LOSS escalation, and surfaces via the EXISTING lastMismatchReplay pull surface (wrapped:true, wrapIdLen) rather than a new field. A non-framing same-length remainder and a mismatched-id wrap still classify exactly as before this fix. UPDATED by card 437daade: the ORIGINAL double-newline PASTED_CONTENT_WRAP_RE shape on an untagged generation (scenario 4) is NO LONGER left at the generic fallback — a separate, new full-framing detector (437daade's own twin of this card's mechanism) now names it as its own full-wrapped-replay arm too, closing a second, compounding gap; e59880fe's own BARE-only regex still correctly declines that shape, unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
