@@ -1,5 +1,28 @@
 # 0658d6d8 — `purgeConfirmedGiveUpRequeueCore` unwraps a pasted-content composer wrap before its content-match signature check
 
+**MECHANISM PARTIALLY SUPERSEDED by card `aeb62a82`** (`docs/decisions/aeb62a82-*.md`): the "Addendum
+(card `fc82dd76`)" section's `unescapedUnwrappedSig` (reversing the CLI's escape on the REPORTED side) is
+REMOVED. The comparison now uses a forward-escaped `escapedSig`, precomputed from the real text in
+`requeueGiveUpOrigin` and propagated through `archiveAmbiguousDispatch`, compared against the unmodified
+`unwrappedSig`.
+
+**Correction (Code Review, Minor 3): the addendum's own "Accepted residual — a non-injective escape can
+collide two distinct give-ups" section is STILL CURRENT, NOT closed.** An earlier version of this pointer
+claimed otherwise — wrong: the residual is inherent to the engine's own real escape being non-injective
+(it never touches an already-escaped occurrence), and `aeb62a82`'s `escapeNestedPastedContentTag` mirrors
+that real escape exactly, so it inherits the exact same collision shape — switching which direction
+(reverse-unescape vs forward-escape) this code applies changes nothing about whether the collision can
+occur. **A second correction to the same earlier pointer text: the two cases below are NOT both safe.**
+Read the "Accepted residual" section below exactly as it already states: the BOTH-AMBIGUOUS case is safe
+(declined, fails toward a duplicate, never a loss); the ASYMMETRIC case (M already resolved/removed, N
+still ambiguous) is a genuine, accepted LOSS — N's requeue gets purged for a confirmation that was never
+about N. Neither case's outcome changed by this card. Only the MECHANISM that reaches the collision
+changed: the match is now `entry.escapedSig` compared on arm 3 of `matchesSig`, not the removed
+`unescapedUnwrappedSig` the section below still names (that section is kept as-written, describing how the
+residual was originally found — the comparison target is what moved, not the residual itself). Everything
+ABOVE the addendum (the base `0658d6d8` fix: unwrap-then-compare, the `trimEnd()`-less limitation, the "Do
+not" items on substring-widening) is UNCHANGED and still governs.
+
 ## Narrative
 
 From the round-2 Code Review of dc92f4b6: `purgeConfirmedGiveUpRequeueCore` (host.ts) matched the RAW

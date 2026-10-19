@@ -480,28 +480,30 @@ const PASTED_CONTENT_WRAP_RE = /^\n\n<pasted_content id="([0-9a-zA-Z]+)">\n([\s\
  *
  *  The engine also trims TRAILING whitespace off the pasted body, so an `intended` ending in whitespace
  *  comes back as `intended.trimEnd()` inside the wrap (the +57).
- *  @decision 7c1487c8 — accept ONLY `intended`, `intended.trimEnd()`, or (since `691d02e1`) either of those
- *  after reversing the CLI's own literal-tag escape (see `unescapeNestedPastedContentTag` below) as inner;
- *  never widen further than those two mechanisms. */
+ *  @decision 7c1487c8 — accept ONLY `intended`, `intended.trimEnd()`, or (since `aeb62a82`, superseding
+ *  `691d02e1`) either of those after applying the CLI's own FORWARD escape (see
+ *  `escapeNestedPastedContentTag` below) as inner; never widen further than those two mechanisms. */
 function isRecognizedPastedContentWrap(reported: string, intended: string): boolean {
   const m = PASTED_CONTENT_WRAP_RE.exec(reported);
   if (m === null) return false;
   const inner = m[2]!;
   if (inner === intended || inner === intended.trimEnd()) return true;
-  const unescaped = unescapeNestedPastedContentTag(inner);
-  return unescaped === intended || unescaped === intended.trimEnd();
+  return escapeNestedPastedContentTag(intended) === inner || escapeNestedPastedContentTag(intended.trimEnd()) === inner;
 }
 
 /** The current CLI escapes a literal `<pasted_content` / `</pasted_content` occurrence found WITHIN the
  *  pasted body itself (inserting a single `\` right after the `<`) — e.g. a message that quotes this very
- *  wrap's own syntax as prose, which is exactly what card 691d02e1's 3 specimens all did. This reverses
- *  ONLY that one substitution, applied to the already-captured inner (`m[2]`), never to `reported` as a
- *  whole.
- *  @decision 691d02e1 — reverses ONLY the CLI's literal `<pasted_content`/`</pasted_content` escape in
- *  `inner`; never widen to another escape shape without a new specimen. Removal-only, so it can produce a
- *  false ALARM (if `intended` itself already contains the escaped form) but never mask a real loss. */
-function unescapeNestedPastedContentTag(inner: string): string {
-  return inner.replace(/<\\(\/?)pasted_content/g, "<$1pasted_content");
+ *  wrap's own syntax as prose. This is the FORWARD mirror of that CLI behavior, applied to `intended` and
+ *  compared against the already-captured inner, rather than reversed out of `inner`. NOT injective (never
+ *  touching an already-escaped occurrence means two distinct inputs CAN produce the same output) — it
+ *  mirrors the real CLI escape's own non-injectivity exactly, by design; see `docs/decisions/0658d6d8-*.md`'s
+ *  "Accepted residual" for the one place that collision is still observable (unchanged by this function).
+ *
+ *  @decision aeb62a82 — never widen this regex without a new specimen, and never reintroduce a
+ *  reverse-direction (unescape-the-echo) comparison — that direction could not tell a CLI-added backslash
+ *  apart from an author-typed one and caused a false ALARM on a legitimate transmission. */
+function escapeNestedPastedContentTag(s: string): string {
+  return s.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
 }
 
 /** Card b1cc4f01 — sibling diagnostic to `isRecognizedPastedContentWrap`: the wrap FRAMING matches the
@@ -665,7 +667,7 @@ const PASTED_CONTENT_BARE_WRAP_RE = /^<pasted_content id="([0-9a-zA-Z]+)">\n([\s
  *  WrapFramingOfRemainder`'s own bare shape, never `PASTED_CONTENT_WRAP_RE`'s full shape): proves that
  *  `reported`, once this exact bare-tag framing is stripped, is byte-for-byte what THIS generation itself
  *  intended — the same proof `isRecognizedPastedContentWrap` already relies on for the full-framing shape.
- *  Mirrors that function's own `unescapeNestedPastedContentTag` fallback arm (card 691d02e1) exactly.
+ *  Mirrors that function's own `escapeNestedPastedContentTag` fallback arm (card aeb62a82) exactly.
  *
  *  THIS FUNCTION ALONE DOES NOT ESTABLISH WHICH GENERATION'S CONTENT ARRIVED — only that `reported`'s
  *  inner body matches `intended`'s text. Round 2 (Code Review BLOCKING, a real lag-by-one-chain specimen,
@@ -682,8 +684,7 @@ function isRecognizedBarePastedContentWrapOfCurrent(reported: string, intended: 
   if (m === null) return false;
   const inner = m[2]!;
   if (inner === intended || inner === intended.trimEnd()) return true;
-  const unescaped = unescapeNestedPastedContentTag(inner);
-  return unescaped === intended || unescaped === intended.trimEnd();
+  return escapeNestedPastedContentTag(intended) === inner || escapeNestedPastedContentTag(intended.trimEnd()) === inner;
 }
 
 /** Card b1cc4f01 (owner ruling, card 16c93a50 / request 0eb43216): a coarse, disclosure-safe
@@ -3225,11 +3226,13 @@ interface Live {
   // `hasAmbiguousMatch` (the manual-resend auto-join check) needs `memberSig` instead, since a manual
   // resend can only ever carry ONE member's own text, never the joined text of a batch the sender never
   // knew was coalesced. See `hasAmbiguousMatch`'s own doc for why both are tried.
-  ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>;
+  // @decision aeb62a82 — `escapedSig` (additive, alongside `memberSig`) must stay precomputed HERE from
+  // the real text, never derived at comparison time — the comparison site only ever holds a signature.
+  ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string }; escapedSig: { len: number; hash: string } }>;
   // @decision dbc7ffea — archives every superseded give-up cycle's signature (3 paths feed it); only a
   // PROVEN engine confirmation may ever consult it, never `hasAmbiguousMatch`'s guess. Bounded by count,
   // never time — never archive the count-eviction path (a memory-safety backstop, not a supersede event).
-  retiredGiveUpSignatures: Map<string, Array<{ len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>>;
+  retiredGiveUpSignatures: Map<string, Array<{ len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string }; escapedSig: { len: number; hash: string } }>>;
   // @decision c00231e2 — rolling fire timestamps for the owner give-up alarm; see that record for the
   // episode/latch mechanics. Manager/platform-lead only — a worker's entry stays permanently empty.
   giveUpRecoveryFiredAt: number[];
@@ -12678,6 +12681,8 @@ export class PtyHost {
     }
     const submittedText = live.giveUpOriginWrittenText ?? joinSubmittedText(origin, gen - 1);
     const submittedSig = textSignature(submittedText);
+    // @decision aeb62a82 — precomputed HERE, from the real text, never re-derived at the comparison site.
+    const escapedSig = textSignature(escapeNestedPastedContentTag(submittedText));
     const kept: QueuedMessage[] = [];
     for (const m of origin) {
       // Card 4a0af485: seed/refresh `ambiguousDispatches` for THIS message's logicalId regardless of which
@@ -12714,7 +12719,7 @@ export class PtyHost {
       // `archiveAmbiguousDispatch`'s own doc) so a late confirmation of the ORIGINAL (pre-auto-join) write
       // can still be recognized even after this overwrite. A no-op for the common case (no prior entry).
       this.archiveAmbiguousDispatch(live, m.logicalId);
-      live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, memberSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
+      live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, memberSig, escapedSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
       this.capAmbiguousDispatches(live);
       // @decision 844ca34e — mark unconditionally, for EVERY origin member, kept or exhausted: no future
       // attempt sharing this logicalId may take the backspace+repaste branch again WHILE marked.
@@ -12825,7 +12830,7 @@ export class PtyHost {
     const current = live.ambiguousDispatches.get(logicalId);
     if (!current) return;
     const retiredForId = live.retiredGiveUpSignatures.get(logicalId) ?? [];
-    retiredForId.push({ len: current.len, hash: current.hash, memberSig: current.memberSig, writtenAt: current.writtenAt, batchId: current.batchId });
+    retiredForId.push({ len: current.len, hash: current.hash, memberSig: current.memberSig, escapedSig: current.escapedSig, writtenAt: current.writtenAt, batchId: current.batchId });
     while (retiredForId.length > RETIRED_GIVEUP_SIG_CAP) retiredForId.shift();
     live.retiredGiveUpSignatures.set(logicalId, retiredForId);
     this.capRetiredGiveUpSignatures(live);
@@ -13140,22 +13145,27 @@ export class PtyHost {
     if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && (live.ambiguousDispatches.size > 0 || live.retiredGiveUpSignatures.size > 0)) {
       const sig = textSignature(reportedPrompt);
       // @decision 0658d6d8 — unwrap PASTED_CONTENT_WRAP_RE before this check (exact whole-inner equality
-      // only, never a substring, never trimEnd()-compensated); also try the inner with the CLI's own
-      // literal-tag escape reversed (card fc82dd76) — never widen either reversal beyond exact equality.
+      // only, never a substring, never trimEnd()-compensated).
+      // @decision aeb62a82 — the third candidate compares `unwrappedSig` against each entry's own
+      // precomputed `escapedSig`; never reverse-escape `wrapMatch[2]` here instead.
       const wrapMatch = PASTED_CONTENT_WRAP_RE.exec(reportedPrompt);
       const unwrappedSig = wrapMatch !== null ? textSignature(wrapMatch[2]!) : null;
-      const unescapedUnwrappedSig = wrapMatch !== null ? textSignature(unescapeNestedPastedContentTag(wrapMatch[2]!)) : null;
       // Card ee56a894: deliberately checks `entry.len`/`entry.hash` (the joined `submittedSig`) only, never
       // `entry.memberSig` — that field is `hasAmbiguousMatch`'s own narrower-scoped addition, not a general
       // substitute for this, the engine-echo purge path's, own signature check.
-      const matchesSig = (entry: { len: number; hash: string }): boolean =>
+      const matchesSig = (entry: { len: number; hash: string; escapedSig: { len: number; hash: string } }): boolean =>
         (entry.len === sig.len && entry.hash === sig.hash) ||
         (unwrappedSig !== null && entry.len === unwrappedSig.len && entry.hash === unwrappedSig.hash) ||
-        (unescapedUnwrappedSig !== null && entry.len === unescapedUnwrappedSig.len && entry.hash === unescapedUnwrappedSig.hash);
+        (unwrappedSig !== null && entry.escapedSig.len === unwrappedSig.len && entry.escapedSig.hash === unwrappedSig.hash);
       // @decision 7a64f16b — CONTENT ANCESTRY, not a bare generation-number comparison: does
       // `reportedPrompt` ALSO equal `live.lastPrompt` (the currently-outstanding write's own text)? See
       // the decline check below, and the record, for why this is the discriminator.
-      const sigCurrentOutstanding = submitWasOutstanding ? textSignature(live.lastPrompt ?? "") : null;
+      // @decision aeb62a82 — `escapedSig` is REQUIRED on every `matchesSig` candidate, including this
+      // one: an undefined `escapedSig` here silently disarms arm 3 and the decline guard below never
+      // fires, purging an unrelated older lineage instead of declining.
+      const sigCurrentOutstanding = submitWasOutstanding
+        ? { ...textSignature(live.lastPrompt ?? ""), escapedSig: textSignature(escapeNestedPastedContentTag(live.lastPrompt ?? "")) }
+        : null;
       const isCurrentGenerationsOwnConfirmation = sigCurrentOutstanding !== null && matchesSig(sigCurrentOutstanding);
       // Code Reviewer follow-up (card 4a0af485, Major 4): a COALESCED drain seeds MULTIPLE member
       // logicalIds with the SAME joined signature (see `requeueGiveUpOrigin`'s own doc) — a single hook can

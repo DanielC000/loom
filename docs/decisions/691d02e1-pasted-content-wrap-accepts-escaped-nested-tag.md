@@ -1,5 +1,11 @@
 # 691d02e1 — the pasted-content wrap recognizer accepts the CLI's own escaped nested `<pasted_content`/`</pasted_content` tag
 
+**SUPERSEDED by card `aeb62a82`** (`docs/decisions/aeb62a82-*.md`): `unescapeNestedPastedContentTag` (the
+reverse-direction reversal this whole record describes) is REMOVED, replaced by a forward-direction
+`escapeNestedPastedContentTag` comparison. The "one accepted failure direction: false alarm, never a
+missed loss" section below, and the "Do not" item about never widening the reversal, describe code that
+no longer exists — kept here as history of why the old approach existed, not as a current constraint.
+
 ## Narrative
 
 Card 691d02e1 reported `[loom:prompt-mismatch]` arming UNMATCHED ("possible LOSS") on 3 real turns that

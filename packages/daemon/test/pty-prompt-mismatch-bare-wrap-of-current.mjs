@@ -366,6 +366,43 @@ try {
       lines.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-remainder-replay] ")).length === 0);
   }
 
+  // ===== (d2) CODE REVIEW MAJOR 2 — a POSITIVE CONTROL mirroring (d) (no ring collision, so unambiguous
+  // recognition is the only question in play), but gen=2's own intended text now has BOTH a raw open+close
+  // `<pasted_content>` tag pair AND an already-escaped literal substring — the exact shape
+  // `pty-prompt-mismatch.mjs` scenario 6x pins for the FULL-wrap recognizer, here for the BARE-wrap twin
+  // (`isRecognizedBarePastedContentWrapOfCurrent`). Site 2 had no test combining raw+pre-escaped tags at
+  // all before this: its only escape coverage (k)/(l) use raw-only tags, where the old reverse-unescape and
+  // the new forward-escape directions AGREE, so reverting site 2 alone stayed green. =====
+  {
+    const sid = newSession("RawAndPreEscapedUnambiguousBareWrapOfCurrent"); SIDS.push(sid);
+    const genOneText = "foo-gen-one-unrelated-d2";
+    host.enqueueStdin(sid, genOneText); // gen=1, never confirmed, unrelated to gen=2
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    const genTwoText = "bare pair `<pasted_content id=\"dd55\">...</pasted_content id=\"dd55\">`, and separately, " +
+      "already-escaped-looking prose quoting this exact fix: `<\\/pasted_content id=\"pre66\">`.";
+    host.enqueueStdin(sid, genTwoText); // gen=2 — CURRENT
+    // Simulate the real CLI: only the bare pair gets escaped; the pre-existing backslashed occurrence is
+    // left untouched — same simulation `pty-prompt-mismatch.mjs` scenario 6x uses independently.
+    const escapedInner = genTwoText.replace(/(?<!\\)<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("(fixture sanity d2) exactly two occurrences were escaped (the bare pair, not the pre-existing one)",
+      escapedInner.length === genTwoText.length + 2);
+    const reported = wrapRemainder("abcd", escapedInner); // bare-wraps gen=2's OWN content
+    const lines = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+
+    check("d2: THE FIX — the new recognition log fires for a bare wrap of the CURRENT gen's own raw+pre-escaped content, with ambiguous=false",
+      lines.some((l) => l.startsWith(NEW_TAG) && / gen=2 /.test(l) && /ambiguous=false/.test(l)));
+    check("d2: REQUIRED — no [prompt-mismatch-arm] line at all (fully silent, same as scenario d)",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-arm] ")).length === 0);
+    check("d2: REQUIRED — the manager's false possible-LOSS push does NOT fire",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
+    const live = host.live.get(sid);
+    check("d2: gen=2 (current) IS marked resolved", live.mismatchResolvedGens.has(2));
+    check("d2: gen=1 is NOT marked resolved (never matched, never involved)", !live.mismatchResolvedGens.has(1));
+  }
+
   // ===== (f) POSITIVE CONTROL — Round 3's own probe: gen=1 writes "ok", gen=2 (current) writes "ok,
   // continue with the plan" (bare-wrapped). "ok" IS a substring of the wrap's inner (Round 2's own
   // `unmatchedRecognized !== null` signal would have called this ambiguous), but `identicalContentPriorEntryBare`

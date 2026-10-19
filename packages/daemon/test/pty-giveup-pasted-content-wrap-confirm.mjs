@@ -57,8 +57,10 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakes = {};
 const busyLog = {};
+const giveUpConfirmedLog = [];
 const events = {
   onEngineSessionId() {}, onBusy(id, busy) { (busyLog[id] ??= []).push(busy); }, onContextStats() {}, onRateLimited() {}, onExit() {},
+  onGiveUpConfirmed(sessionId, logicalId, latencyMs) { giveUpConfirmedLog.push({ sessionId, logicalId, latencyMs }); },
 };
 class SilentTestPtyHost extends createSeamHost(PtyHost) {
   createPty(opts) {
@@ -281,6 +283,93 @@ try {
       !submitLog.some((l) => l.includes("CONFIRMED logicalId=") && l.includes("content-matched")));
     check("5: NEGATIVE CONTROL — gen 1's requeued duplicate STILL sits in pending (a non-tag backslash must not be reversed away)",
       host.getPendingEntries(sid).length === before && host.getPendingEntries(sid).some((m) => m.text === TEXT1));
+  }
+
+  // ===== 6. THE FORWARD-ESCAPE FIX (card aeb62a82): gen 1's give-up body contains BOTH a bare RAW tag
+  // pair (which the CLI's own echo escapes) AND an already-escaped literal substring (genuine authored
+  // content, e.g. quoting this exact fix) — exactly scenario 4's shape, plus a pre-existing escaped
+  // literal the OLD `unescapeNestedPastedContentTag` reversal would have wrongly stripped too (the same
+  // mechanism `pty-prompt-mismatch.mjs` scenario 6x pins for the UNRELATED mismatch-classification path).
+  // The purge path's `entry.escapedSig` (precomputed forward-escape of the real `submittedText` in
+  // `requeueGiveUpOrigin`) must still match the echo's raw captured-inner signature, since the engine's
+  // own escape never touches the pre-existing literal either. Mirrors scenario 4's shape exactly (give
+  // up, re-mint via an unrelated healthy gen 2, then the late wrapped confirmation arrives). =====
+  {
+    const sid = "sess-wrap-confirm-escaped-tag-plus-preescaped"; SIDS.push(sid);
+    const TEXT1 = "GEN1_BODY_QUOTES_BOTH_BARE_AND_PREESCAPED: bare pair `<pasted_content id=\"bb22\">...</pasted_content id=\"bb22\">`, " +
+      "and separately, already-escaped-looking prose quoting this exact fix: `<\\/pasted_content id=\"pre33\">`.";
+    spawnReady(sid);
+
+    const r1 = host.enqueueStdin(sid, TEXT1);
+    check("(setup 6) gen 1 delivered immediately, busy armed", r1.delivered === true && busyLog[sid]?.at(-1) === true);
+    await sharedWaitUntil(() => busyLog[sid]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: "pty-giveup-pasted-content-wrap-confirm: gen1 give-up (escaped-tag-plus-preescaped)" });
+    check("(setup 6) gen 1 genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
+    check("(setup 6) gen 1's TEXT1 is requeued, sitting ambiguous in pending", host.getPendingEntries(sid).some((m) => m.text === TEXT1));
+
+    const before = host.getPendingEntries(sid).length;
+    confirmNormally(sid, "HEALTHY_UNRELATED_GEN_2_ESCAPED_TAG_PLUS_PREESCAPED");
+
+    submitLog.length = 0;
+    // Simulate the real CLI: only the two BARE occurrences (no backslash already present) get one
+    // inserted each; the already-backslashed occurrence is left untouched — same simulation
+    // `pty-prompt-mismatch.mjs` scenario 6x uses independently.
+    const escapedInner = TEXT1.replace(/(?<!\\)<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("(fixture sanity 6) exactly two occurrences were escaped (the bare pair, not the pre-existing one)",
+      escapedInner.length === TEXT1.length + 2);
+    check("(fixture sanity 6) the pre-existing backslashed occurrence is untouched in escapedInner",
+      escapedInner.includes('<\\/pasted_content id="pre33">'));
+    const wrapped = pastedContentWrap("gw06", escapedInner);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: wrapped });
+
+    check("6: a CONTENT-MATCHED CONFIRMED log was emitted for gen 1's own logicalId despite the CLI's escape plus a pre-existing escaped literal",
+      submitLog.some((l) => l.includes("CONFIRMED logicalId=") && l.includes("content-matched")));
+    check("6: gen 1's requeued duplicate is purged despite the CLI's escape plus a pre-existing escaped literal (no duplicate redelivery)",
+      !host.getPendingEntries(sid).some((m) => m.text === TEXT1));
+  }
+
+  // ===== 7. CODE REVIEW MAJOR 1 REGRESSION, PINNED: the exact shape of `pty-giveup-lone-signature-
+  // ancestry.mjs` scenario (a) — a lone stale give-up signature (L1) must NOT resolve off an unrelated,
+  // never-given-up dispatch's (G3) own fresh, coincidentally-identical confirmation — but this time L1's
+  // text contains a raw open+close `<pasted_content>` tag pair, and G3's OWN confirming hook is delivered
+  // WRAPPED with the engine's own forward escape applied (never given up itself, so G3's hook is its own
+  // genuine, on-time confirmation, not a late echo of anything). Before the Major-1 fix, `matchesSig`'s
+  // `sigCurrentOutstanding` candidate (built from `live.lastPrompt`, the text L1 and G3 happen to share)
+  // carried no `escapedSig`, so `isCurrentGenerationsOwnConfirmation` was always false for this shape, the
+  // `7a64f16b` decline guard never fired, and G3's hook wrongly resolved+purged L1 instead. =====
+  {
+    const sid = "sess-7a64f16b-ancestry-tagged"; SIDS.push(sid);
+    const COLLISION_TEXT = "continue discussing `<pasted_content id=\"cc44\">...</pasted_content id=\"cc44\">` please.";
+    spawnReady(sid);
+    const live = host.live.get(sid);
+
+    const rL1 = host.enqueueStdin(sid, COLLISION_TEXT, "system", undefined, undefined, "agent");
+    check("(setup 7) L1 delivered immediately, busy armed", rL1.delivered === true && busyLog[sid]?.at(-1) === true);
+    await sharedWaitUntil(() => busyLog[sid]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: "pty-giveup-pasted-content-wrap-confirm: L1 give-up (ancestry-tagged)" });
+    check("(setup 7) L1 genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
+    const l1LogicalId = host.getPendingEntries(sid)[0]?.id;
+    check("(setup 7) L1 has a requeued duplicate sitting ambiguous in pending", l1LogicalId !== undefined &&
+      host.getPendingEntries(sid).filter((m) => m.text === COLLISION_TEXT).length === 1);
+    check("(setup 7) L1 is marked in giveUpLineages after its own give-up", live.giveUpLineages.has(l1LogicalId));
+
+    // G3: an entirely separate, FRESH, never-given-up dispatch whose own text ALSO happens to be
+    // byte-identical to L1's archived signature — confirmed via its OWN expected hook, wrapped and
+    // forward-escaped exactly as the real engine would echo a pasted-content submission carrying this tag.
+    submitLog.length = 0;
+    const rG3 = host.enqueueStdin(sid, COLLISION_TEXT, "system", undefined, undefined, "agent");
+    check("(setup 7) G3 delivered immediately, busy armed", rG3.delivered === true && busyLog[sid]?.at(-1) === true);
+    const escapedCollision = COLLISION_TEXT.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
+    check("(fixture sanity 7) the escape actually added characters", escapedCollision.length > COLLISION_TEXT.length);
+    const g3Wrapped = pastedContentWrap("gw07", escapedCollision);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: g3Wrapped }); // G3's own, legitimate, expected confirmation
+
+    check("7: THE FIX — a DECLINED content match log fired, naming L1's logicalId",
+      submitLog.some((l) => l.includes("DECLINED content match") && l.includes(l1LogicalId)));
+    check("7: THE FIX — NO content-matched CONFIRMED log fired for L1 off G3's wrapped+escaped hook",
+      !submitLog.some((l) => l.includes(`CONFIRMED logicalId=${l1LogicalId}`)));
+    check("7: THE FIX — L1's giveUpLineages mark is RETAINED (not wrongly released)", live.giveUpLineages.has(l1LogicalId));
+    check("7: THE FIX — L1's requeued duplicate SURVIVES", host.getPendingEntries(sid).some((m) => m.id === l1LogicalId));
+    check("7: THE FIX — onGiveUpConfirmed did NOT fire for L1 off G3's unrelated hook",
+      !giveUpConfirmedLog.some((e) => e.logicalId === l1LogicalId));
   }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
