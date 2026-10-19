@@ -143,19 +143,29 @@ try {
   // failed insert leaves the prior ask completely untouched (still pending) rather than cancelled with no
   // replacement filed. Simulated by monkey-patching db.insertQuestion to throw once — the ONLY way to force
   // this real failure mode in a hermetic test without a genuine disk/constraint fault.
+  // `finalizeQuestionAsk` (questionTool.ts) catches an insertQuestion throw itself and returns a structured
+  // `{error}` rather than letting it propagate — both routers render that as `ok({error})`, so `call()`
+  // returns normally with `{error}` instead of throwing. Accept EITHER shape (a real throw that somehow
+  // still escaped, or the structured error) as long as it carries the simulated message — this is what
+  // keeps the fixture-realness check meaningful under either calling convention.
   const orderingPrior = await call(mgrServer, "question_ask", { title: "Prior ask for the ordering test", body: "b" });
   const orderingPriorId = orderingPrior.questionId;
   const realInsertQuestion = db.insertQuestion.bind(db);
   db.insertQuestion = () => { throw new Error("simulated insertQuestion failure"); };
   let orderingThrew;
+  let orderingResult;
   try {
-    await call(mgrServer, "question_ask", { title: "Replacement that never lands", body: "b", supersedes: orderingPriorId });
+    orderingResult = await call(mgrServer, "question_ask", { title: "Replacement that never lands", body: "b", supersedes: orderingPriorId });
   } catch (e) {
     orderingThrew = e;
   } finally {
     db.insertQuestion = realInsertQuestion;
   }
-  check("(6) the simulated insert failure actually threw (the fixture is real)", !!orderingThrew);
+  const simulatedMessage = /simulated insertQuestion failure/;
+  const orderingFailedWithSimulatedMessage =
+    (!!orderingThrew && simulatedMessage.test(orderingThrew.message)) ||
+    (!!orderingResult?.error && simulatedMessage.test(orderingResult.error));
+  check("(6) the simulated insert failure actually fired (threw, or returned a structured error) and the fixture is real", orderingFailedWithSimulatedMessage);
   check("(6) the prior ask is STILL PENDING — never cancelled when the replacement failed to file", db.getQuestion(orderingPriorId).state === "pending");
   check("(6) no replacement question was left behind by the failed call", db.listQuestionsForAudit({ projectId: "pA" }).filter((q) => q.title === "Replacement that never lands").length === 0);
 } finally {
