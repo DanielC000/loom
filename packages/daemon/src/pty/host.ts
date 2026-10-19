@@ -3084,6 +3084,10 @@ interface Live {
   // `sendEnterAndVerify` chain captures the generation it was scheduled under and bails the instant the
   // live value no longer matches, regardless of what `enterConfirmed` currently reads.
   submitGeneration: number;
+  // @decision 7a64f16b — UNLIKE `submitGeneration` (also bumped by 3 no-write, out-of-band paths), this
+  // is stamped ONLY at submit()'s own actual write — the content-ancestry check compares against THIS,
+  // never the raw counter, or a no-write bump masquerades as a new write.
+  lastWriteGeneration: number;
   // Card ac7884e3: the generation `flushComposer` (worker_flush) most recently wrote a submit-only Enter
   // attempt for, while that attempt's own resolution is still OUTSTANDING — stamped the instant the
   // reassert+Enter write goes out, consumed (cleared to null) by the SAME confirming-hook sites that
@@ -3102,16 +3106,21 @@ interface Live {
   // ac7884e3's record for the null case and the two resolution-branch shapes.
   lastFlushAttribution: { gen: number; attributable: boolean; reason: string; resolvedAt: number } | null;
   // Card 441499ee: the exact QueuedMessage entry/entries this IN-FLIGHT submit()'s text came from — set
-  // in submit(), read ONLY by `fireEnterAndVerify`'s GIVE-UP RECOVERY branch so a give-up can put the
-  // ORIGINAL message(s) back on `live.pending` (identity-preserved, never re-derived from text) instead of
-  // discarding them after the caller was already told `delivered:true`. null ONLY for resumeAfterRateLimit's
-  // direct replay (a give-up there has no origin to restore — unchanged). `scheduleKickoffGuarantee`'s own
-  // direct submit() USED to be origin-less too — card 0050a17e (Code Review catch) gave it a synthetic
-  // single-element origin instead, once that call became the PRIMARY delivery path for every spawn rather
-  // than a rare fallback: an unconfirmed give-up there now correctly re-queues the kickoff instead of
-  // silently discarding it. Overwritten (not appended) by every submit() call; a stale reference from an
-  // already-confirmed/superseded turn is harmless because the give-up branch itself bails on
-  // `enterConfirmed`/a mismatched `submitGeneration` before ever reading it.
+  // in submit(). Read by THREE consumers: `fireEnterAndVerify`'s GIVE-UP RECOVERY branch (puts the
+  // ORIGINAL message(s) back on `live.pending`, identity-preserved, instead of discarding them after the
+  // caller was already told `delivered:true`); `resumeAfterRateLimit` (card 7a64f16b — captures it BEFORE
+  // replaying, so the replay can carry the killed turn's own identity forward); and
+  // `purgeConfirmedGiveUpRequeueCore`'s content-ancestry check (card 7a64f16b arm 2 — whether the
+  // CURRENTLY outstanding write's own identity overlaps a matched archived lineage). Every submit() call
+  // site now supplies SOME origin (`scheduleKickoffGuarantee`'s own direct submit() USED to be origin-less
+  // too — card 0050a17e gave it a synthetic single-element origin once that call became the PRIMARY
+  // kickoff delivery path; `resumeAfterRateLimit`'s replay — card 7a64f16b — threads forward whatever
+  // origin the killed turn itself had), so this is null only in the spawn-time default, before anything
+  // has ever been submitted for this session. Overwritten (not appended) by every submit() call; a stale
+  // reference from an already-confirmed/superseded turn is harmless because the give-up branch itself
+  // bails on `enterConfirmed`/a mismatched `submitGeneration` before ever reading it, and the ancestry
+  // check only trusts it when `submitWasOutstanding` is true (i.e. it is reading the CURRENT write's own,
+  // not-yet-superseded origin).
   giveUpOrigin: QueuedMessage[] | null;
   // @decision 49b382d9 — never re-derive this via `joinSubmittedText(origin, gen-1)` (unstripped) —
   // read ONLY this recorded, post-strip value, or a late-confirm content-match silently double-delivers.
@@ -6358,6 +6367,7 @@ export class PtyHost {
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet — nothing has called submit() for this pty at spawn time — see submit()'s reset
       submitGeneration: 0,
+      lastWriteGeneration: 0,
       flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — no worker_flush has ever run against a fresh spawn
       writeSeq: 0,
       giveUpOrigin: null,
@@ -6661,6 +6671,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      lastWriteGeneration: 0,
       flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — not applicable (worker_flush never targets a shell/canned kind)
       writeSeq: 0,
       giveUpOrigin: null,
@@ -7926,6 +7937,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      lastWriteGeneration: 0,
       flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — not applicable (worker_flush never targets a shell/canned kind)
       writeSeq: 0,
       giveUpOrigin: null,
@@ -9077,7 +9089,7 @@ export class PtyHost {
         const reportedPromptForPurge = typeof hook.prompt === "string" ? hook.prompt : undefined;
         // @decision 844ca34e (round 5) — moved AHEAD of the composerDirtyLenClearedByGen block below;
         // `contentMatchedLogicalIds` is what the giveUpLineages release just below now reads.
-        const purgeResult = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge); // card 441499ee/09e655d5/4a0af485 — see the method doc; UserPromptSubmit purges without advancing the queue
+        const purgeResult = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge, submitWasOutstanding); // card 441499ee/09e655d5/4a0af485/7a64f16b — see the method doc; UserPromptSubmit purges without advancing the queue
         const resolvedByContentMatch = purgeResult.resolved;
         // @decision a0735d53 — never re-gate this release on composerDirtyLenClearedByGen; a positive
         // content match is independent proof of delivery, orthogonal to this hook's own generation's
@@ -9126,7 +9138,10 @@ export class PtyHost {
           // @decision 4a0af485 — DoD#4: measure the engine-confirmation lag distribution by logging
           // CONFIRMED here only when no ambiguity preceded this hook AND the content-match purge above
           // didn't already attribute it elsewhere, else one real confirmation double-counts as two.
-          if (hadNoAmbiguityBeforeThisHook && !resolvedByContentMatch) {
+          // @decision 7a64f16b — ALSO log on `declinedButCurrentGeneration`, but ONLY restores it for a
+          // match against `retiredGiveUpSignatures` alone — the common decline (`ambiguousDispatches`
+          // non-empty) still suppresses this log here, unchanged.
+          if (hadNoAmbiguityBeforeThisHook && (!resolvedByContentMatch || purgeResult.declinedButCurrentGeneration === true)) {
             const logicalId = live.giveUpOrigin?.[0]?.logicalId ?? null;
             const latencyMs = live.currentGenFirstWrittenAt !== null ? Date.now() - live.currentGenFirstWrittenAt : null;
             // eslint-disable-next-line no-console
@@ -11700,14 +11715,14 @@ export class PtyHost {
       text = escStrippedText;
     }
     // Card 441499ee: remember the ORIGINAL queued message(s) this turn's text came from — see
-    // `Live.giveUpOrigin`'s doc. Of the two direct submit() callers that don't originate from
-    // enqueueStdin, only resumeAfterRateLimit's "rate-limit-replay" still calls with `origin` undefined
-    // (a give-up there has no origin to restore — unchanged), so this stays byte-identical (null) for
-    // it. `scheduleKickoffGuarantee`'s "kickoff-guarantee" caller is NO LONGER one of these — card
-    // 0050a17e gave it a synthetic single-element origin (see that call site) once it became the PRIMARY
-    // delivery path for every spawn, so an unconfirmed give-up there now correctly re-queues instead of
-    // discarding. (Card 25813ecc: this comment previously listed both callers as origin-less — stale
-    // since 0050a17e; see `Live.giveUpOrigin`'s own doc, which was updated correctly at the time.)
+    // `Live.giveUpOrigin`'s doc. Neither of the two direct submit() callers that don't originate from
+    // enqueueStdin is origin-less any more: `scheduleKickoffGuarantee`'s "kickoff-guarantee" caller got a
+    // synthetic single-element origin via card 0050a17e (once it became the PRIMARY delivery path for
+    // every spawn), and `resumeAfterRateLimit`'s "rate-limit-replay" caller now threads forward the
+    // killed turn's own `live.giveUpOrigin` (card 7a64f16b — captured before this call, so a give-up OR a
+    // coincidental content-ancestry match on the replay can still restore/attribute by true identity,
+    // instead of reopening either as a silent drop). (Card 25813ecc: this comment previously listed both
+    // callers as origin-less — stale since 0050a17e; see `Live.giveUpOrigin`'s own doc, kept current.)
     live.giveUpOrigin = origin ?? null;
     // @decision 49b382d9 — record the ACTUAL (post-strip) text alongside `giveUpOrigin`, same lifecycle —
     // `requeueGiveUpOrigin` must read this, never re-derive via `joinSubmittedText(origin, gen-1)` (see
@@ -11793,7 +11808,12 @@ export class PtyHost {
     // lastPromptSenderId mirrors lastPromptOwnerText for replay. Card f286919e: when `origin` is present,
     // this uses `originSenderId` — the SAME same-sender check that gated the owner-text attribution above
     // — instead of the raw `senderId` param, so a multi-sender coalesced batch nulls this too, not just
-    // ownerText. A caller with no `origin` (rate-limit replay) is unaffected and keeps the plain param.
+    // ownerText. `resumeAfterRateLimit`'s replay (card 7a64f16b) now threads its own killed turn's origin
+    // through too, so it takes THIS path (originSenderId) whenever that origin is non-null, same as any
+    // other origin-carrying caller — identical to the raw `senderId` param in the ordinary case (that
+    // param is `live.lastPromptSenderId`, itself already derived from the SAME origin at the original
+    // write), and more correct whenever a raw-terminal turn had separately set `lastPromptOwnerText`/
+    // `lastPromptSenderId` out of band (see `Live.giveUpOrigin`'s own doc).
     live.activeTurnSenderId = origin && origin.length > 0 ? originSenderId : (senderId ?? null);
     live.lastPromptSenderId = live.activeTurnSenderId;
     // Loom Companion (proactive event-line producer): pin whether THIS turn is a daemon-driven proactive
@@ -11807,6 +11827,8 @@ export class PtyHost {
     // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
     // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
     const gen = ++live.submitGeneration;
+    // @decision 7a64f16b — the ONLY site that sets this (see its own field doc for why).
+    live.lastWriteGeneration = gen;
     // Card c2c750a9: record THIS generation's own (gen, text) into the composer-accumulation window —
     // once per submit() call (never per Enter-retry, which re-fires without a new submit()), so the ring
     // always holds exactly one entry per generation, oldest-first, ending with this one. Must happen here
@@ -12941,13 +12963,15 @@ export class PtyHost {
    */
   // @decision 844ca34e (round 5) — `contentMatchedLogicalIds` lets a caller release a `giveUpLineages`
   // mark only on a PROVEN content match, never on the content-blind FIFO fallback (always empty there).
-  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): { resolved: boolean; contentMatchedLogicalIds: string[] } {
-    const result = this.purgeConfirmedGiveUpRequeueCore(sessionId, live, turnEnded, reportedPrompt);
+  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string, submitWasOutstanding = false): { resolved: boolean; contentMatchedLogicalIds: string[]; declinedButCurrentGeneration?: boolean } {
+    const result = this.purgeConfirmedGiveUpRequeueCore(sessionId, live, turnEnded, reportedPrompt, submitWasOutstanding);
     if (turnEnded) this.retireResolvedArchiveEntries(live);
     return result;
   }
 
-  private purgeConfirmedGiveUpRequeueCore(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): { resolved: boolean; contentMatchedLogicalIds: string[] } {
+  // @decision 7a64f16b — `submitWasOutstanding` feeds a CONTENT-ANCESTRY check below, never a bare
+  // generation-number comparison — see that check's own doc for why.
+  private purgeConfirmedGiveUpRequeueCore(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string, submitWasOutstanding = false): { resolved: boolean; contentMatchedLogicalIds: string[]; declinedButCurrentGeneration?: boolean } {
     if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && (live.ambiguousDispatches.size > 0 || live.retiredGiveUpSignatures.size > 0)) {
       const sig = textSignature(reportedPrompt);
       // @decision 0658d6d8 — unwrap PASTED_CONTENT_WRAP_RE before this check (exact whole-inner equality
@@ -12963,6 +12987,11 @@ export class PtyHost {
         (entry.len === sig.len && entry.hash === sig.hash) ||
         (unwrappedSig !== null && entry.len === unwrappedSig.len && entry.hash === unwrappedSig.hash) ||
         (unescapedUnwrappedSig !== null && entry.len === unescapedUnwrappedSig.len && entry.hash === unescapedUnwrappedSig.hash);
+      // @decision 7a64f16b — CONTENT ANCESTRY, not a bare generation-number comparison: does
+      // `reportedPrompt` ALSO equal `live.lastPrompt` (the currently-outstanding write's own text)? See
+      // the decline check below, and the record, for why this is the discriminator.
+      const sigCurrentOutstanding = submitWasOutstanding ? textSignature(live.lastPrompt ?? "") : null;
+      const isCurrentGenerationsOwnConfirmation = sigCurrentOutstanding !== null && matchesSig(sigCurrentOutstanding);
       // Code Reviewer follow-up (card 4a0af485, Major 4): a COALESCED drain seeds MULTIPLE member
       // logicalIds with the SAME joined signature (see `requeueGiveUpOrigin`'s own doc) — a single hook can
       // therefore legitimately confirm more than one logicalId at once. Collect every match instead of
@@ -13016,6 +13045,19 @@ export class PtyHost {
             return { resolved: true, contentMatchedLogicalIds: [] }; // still "handled" by content — do NOT fall through to the content-BLIND FIFO-position fallback, which could purge an entry whose text doesn't even match reportedPrompt; nothing was actually ATTRIBUTED (declined, not resolved), so nothing is release-eligible
           }
           resolvedBatchId = [...batchIds][0]!;
+        }
+        // @decision 7a64f16b — "current write's own identity" compares against `lastWriteGeneration`,
+        // never the raw, no-write-bumpable `submitGeneration` counter (heal/stop/redirect bump it too).
+        const sameGenerationAsCurrentWrite = resolvedBatchId === live.lastWriteGeneration;
+        const currentWriteLogicalIds = new Set((live.giveUpOrigin ?? []).map((m) => m.logicalId));
+        const matchedIsCurrentWritesOwnIdentity = sameGenerationAsCurrentWrite || matchedLogicalIds.some((id) => currentWriteLogicalIds.has(id));
+        if (submitWasOutstanding && isCurrentGenerationsOwnConfirmation && !matchedIsCurrentWritesOwnIdentity) {
+          // eslint-disable-next-line no-console
+          console.log(`[submit] ${sessionId} DECLINED content match: logicalId(s) ${matchedLogicalIds.join(",")} (batch ${resolvedBatchId}) share byte-identical text with generation ${live.submitGeneration}'s own CURRENTLY outstanding write (last actual write gen=${live.lastWriteGeneration}), but belong to a DIFFERENT, unrelated identity (not among ${[...currentWriteLogicalIds].join(",") || "<none>"}) — attributing this hook to the current generation instead of an older, unrelated lineage by coincidence alone (fails toward a duplicate, never a loss)`);
+          // handled by content, declined — same shape as the AMBIGUOUS branch above; never fall through to
+          // the content-blind FIFO fallback. `declinedButCurrentGeneration:true` lets the caller's own
+          // 4a0af485 CONFIRMED-gen measurement log still fire for this hook (see that log's own call site).
+          return { resolved: true, contentMatchedLogicalIds: [], declinedButCurrentGeneration: true };
         }
         for (const logicalId of matchedLogicalIds) {
           const oldestWrittenAt = Math.min(...matches.filter((m) => m.logicalId === logicalId).map((m) => m.writtenAt));
@@ -13181,6 +13223,9 @@ export class PtyHost {
     // never actually parked" hazard this function's own doc comment already names.
     // eslint-disable-next-line no-console
     console.log(`[rate-limit-resume] ${sessionId} invoked wasRateLimited=${live.rateLimited} busy=${live.busy} lastPromptLen=${live.lastPrompt?.length ?? 0}`);
+    // @decision 7a64f16b — capture the killed turn's own origin before replaying, so content ancestry can
+    // recognize the replay as that SAME identity instead of over-declining a genuine self-confirmation.
+    const replayOrigin = live.giveUpOrigin;
     // UNPARK: drop the suppress flag FIRST so the re-submitted turn (and the post-resume Stop drain of the
     // held queue) can proceed. submit() re-arms busy, so the reconcile drain stays no-op until that turn ends.
     live.rateLimited = false;
@@ -13197,9 +13242,12 @@ export class PtyHost {
         // minted at drain time.
         // @decision 270b963c — pass it THROUGH verbatim (never `?? undefined`): `null` ("unknown rank")
         // must stay `null`, not get coerced into "no override — mint fresh" and reopen this exact bug.
-        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, { ownerTextSeq: live.lastPromptOwnerTextSeq });
+        // @decision 7a64f16b — `logicalId` (only the HEAD member's, same limit any single-entry mint has)
+        // carries `replayOrigin`'s own identity through this fresh QueuedMessage, rather than minting an
+        // unrelated one — a later drain's own submit() then threads it on as that drain's real `origin`.
+        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, { ownerTextSeq: live.lastPromptOwnerTextSeq, logicalId: replayOrigin?.[0]?.logicalId });
       } else {
-        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay", undefined, live.lastPromptOwnerTextSeq);
+        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay", replayOrigin ?? undefined, live.lastPromptOwnerTextSeq);
       }
     }
     return true;

@@ -23,17 +23,15 @@ a content match — it already deletes the `ambiguousDispatches`/`retiredGiveUpS
 reset, unrelated to the lineage release) is ever reached. Nesting only the lineage release under that
 gate was inherited shape from round 4's own placement, never a deliberate dependency.
 
-## Known pre-existing limitation — out of scope here, carded separately by the owner
+## Known pre-existing limitation — FIXED by card 7a64f16b
 
-A content match is only as strong as `purgeConfirmedGiveUpRequeueCore`'s own disambiguation. If exactly
-ONE stale `ambiguousDispatches`/`retiredGiveUpSignatures` entry (from an OLDER, already-given-up lineage)
-happens to share byte-identical text with a fresh, unrelated, never-given-up generation's own successful
-submission, the match set is a single logicalId and the function resolves it as "confirmed by content" —
-`bc0774c4`'s multi-logicalId/multi-batchId ambiguity decline only guards a match spanning MORE than one
-distinct logicalId, not a single stale entry coincidentally matching unrelated fresh text. This is a
-pre-existing characteristic of the content-match mechanism itself (equally present before and after this
-card's hoist) — this card only changed WHERE the already-proven-by-this-mechanism release runs, never the
-strength of the proof itself.
+This limitation (a content match resolving on signature uniqueness alone, with no check on whether the
+confirming hook actually belongs to the matched lineage) was carded as `7a64f16b` and fixed there with a
+content-ancestry check — see
+`docs/decisions/7a64f16b-content-ancestry-for-lone-giveup-signature-match.md` for the mechanism, the real
+consequence (a genuine, window-dependent loss, not merely cosmetic), and why a bare generation-number
+comparison is NOT a safe substitute for it. This card's own hoist is unaffected either way — it only
+changed WHERE the already-proven-by-this-mechanism release runs, never the strength of the proof itself.
 
 ## Tests
 
@@ -58,6 +56,6 @@ of a bare prompt, matching the discipline every other confirming-hook fixture in
 - Do not re-gate the `giveUpLineages` release on `composerDirtyLenClearedByGen` (or any other condition
   tied to THIS hook's own generation's clear-prefix landing) — a positive content match from
   `purgeConfirmedGiveUpRequeueCore` is independent proof of delivery and must release unconditionally.
-- Do not treat the single-stale-entry coincidental-match gap (see above) as something this card fixes, or
-  as newly introduced by this hoist — it is a pre-existing property of the content-match mechanism itself,
-  tracked as its own, separate concern by the owner.
+- Do not treat the single-stale-entry coincidental-match gap (see above) as something THIS card fixes, or
+  as newly introduced by this hoist — it was a pre-existing property of the content-match mechanism
+  itself, fixed separately by card `7a64f16b` (see that record).
