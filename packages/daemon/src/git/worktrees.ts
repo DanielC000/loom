@@ -5298,7 +5298,12 @@ export interface EmitCompareGateResult {
    *  weaker, it doesn't run AT ALL (refuses at 0s, no assertion ever executes) — exactly the shape that
    *  made this field's PRIOR doc claim of "strictly stronger [than the full suite]" false for that class.
    *  Routed through the harness, running the file here really is at least as strong as leaving it unrun
-   *  in a full suite pass it would have passed anyway — the guarantee this field now actually delivers. */
+   *  in a full suite pass it would have passed anyway — the guarantee this field now actually delivers.
+   *  ⚠️ Card edbf9bd1: despite the NAME, by return time this is the already-WIDENED SELECTED set, not the
+   *  literally-changed one — {@link foldInTestImporters} (card 72769424) pushes every transitive importer
+   *  of a changed/deleted test file into this SAME array. Kept under its original name (a rename would
+   *  ripple across gate_status/gate_history and their consumers); `formatReducedGateWarning` renders its
+   *  `.length` as "N selected test file(s)", never "changed", for exactly this reason. */
   changedTestFiles: string[];
   /** Card 17cd1f30: repo-relative paths of changed, non-helper `test/*.mjs` files that were EXCLUDED from
    *  {@link changedTestFiles} because the harness's own `NOT_HERMETIC` set (scripts/test-daemon.mjs) names

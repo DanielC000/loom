@@ -137,7 +137,7 @@ try {
     // `--only=` — see EmitCompareGateResult.notHermeticExcluded's own doc), so exactly one file
     // (kickoff-real.mjs) was actually run in isolation here; the caveat must still fire for that one.
     check("(N) card cf4aa7d1: the isolation caveat still fires for the one ordinary test file actually run via --only= (the NOT_HERMETIC file is excluded, not counted)",
-      /this changed test file was run in ISOLATION/.test(nudgeText));
+      /this selected test file was run in ISOLATION/.test(nudgeText));
   }
 
   // ── (O) ALL-HERMETIC, POSITIVE CONTROL — no NOT_HERMETIC name; no stray clause/whitespace ──────────────
@@ -178,10 +178,10 @@ try {
       /no compiled \.ts or scripts\/\*\* file changed in this diff — transpile-identity check not applicable/.test(nudgeText));
     check("(O) card cf4aa7d1: the stale \"0 compiled file(s) proven transpile-identical\" wording is gone",
       !/0 compiled file\(s\) proven transpile-identical/.test(nudgeText));
-    // Card cf4aa7d1 DoD-3 (positive control, isolation caveat): the one changed test file WAS run via
+    // Card cf4aa7d1 DoD-3 (positive control, isolation caveat): the one selected test file WAS run via
     // `--only=` — an isolation run — so the caveat must be present and must name it as isolation, singular.
-    check("(O) card cf4aa7d1: the isolation caveat is present and singular-worded for the one changed test file",
-      /this changed test file was run in ISOLATION/.test(nudgeText));
+    check("(O) card cf4aa7d1: the isolation caveat is present and singular-worded for the one selected test file",
+      /this selected test file was run in ISOLATION/.test(nudgeText));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

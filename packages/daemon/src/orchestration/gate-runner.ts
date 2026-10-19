@@ -1400,6 +1400,11 @@ export function formatTransientRetryWarning(): string {
  *  dependency on the git layer for a six-field shape. */
 export interface ReducedGateWarningInput {
   identicalFileCount: number;
+  /** Card edbf9bd1: despite the field name (kept as-is to avoid a cross-surface rename — see
+   *  `EmitCompareGateResult.changedTestFiles`'s own doc in git/worktrees.ts), this is the already-WIDENED
+   *  SELECTED set `test:daemon --only=` actually runs — literally-changed test files PLUS every transitive
+   *  importer `foldInTestImporters` pulled in (card 72769424). `formatReducedGateWarning` below renders its
+   *  `.length` as "N selected test file(s)", never "changed", for exactly this reason. */
   changedTestFiles: string[];
   notHermeticExcluded: string[];
   inertPathsSkipped: string[];
@@ -1436,7 +1441,7 @@ export function formatReducedGateWarning(
     ? `${result.identicalFileCount} file(s) proven transpile/parse-identical (card 2154b6ad, 82662e98)`
     : "no compiled .ts or scripts/** file changed in this diff — transpile-identity check not applicable (card cf4aa7d1)";
   const isolationCaveat = result.changedTestFiles.length
-    ? ` ⚠️ ${result.changedTestFiles.length === 1 ? "this changed test file was" : `these ${result.changedTestFiles.length} changed test files were`} run in ISOLATION (\`test:daemon --only=\`); if ${result.changedTestFiles.length === 1 ? "its" : "their"} defect class is order-dependent (passes standalone, fails only in the full suite), this green is not evidence either way${batchLandedCount !== undefined ? ` for ANY of this batch's ${batchLandedCount} landed branch(es)` : ""} (card cf4aa7d1).`
+    ? ` ⚠️ ${result.changedTestFiles.length === 1 ? "this selected test file was" : `these ${result.changedTestFiles.length} selected test files were`} run in ISOLATION (\`test:daemon --only=\`); if ${result.changedTestFiles.length === 1 ? "its" : "their"} defect class is order-dependent (passes standalone, fails only in the full suite), this green is not evidence either way${batchLandedCount !== undefined ? ` for ANY of this batch's ${batchLandedCount} landed branch(es)` : ""} (card cf4aa7d1).`
     : "";
   const assetClause = result.changedAssetPaths.length
     ? `; ${result.changedAssetPaths.length} asset path(s) changed under packages/daemon/assets/** (${result.changedAssetPaths.join(", ")}) — ran the ${assetReadingTestCount} certified asset-reading test(s) too (card 3fbd95e0)`
@@ -1457,5 +1462,5 @@ export function formatReducedGateWarning(
     ? `; a packages/daemon/scripts/** file changed — also ran the ${changedScriptScannerTestCount} scripts-text-scanner test(s) (card f862f9c5)`
     : "";
   const subject = batchLandedCount !== undefined ? `batch merge gate reduced across ${batchLandedCount} landed branch(es)` : "merge gate reduced";
-  return `${subject}: ${compiledClause} — ran build + static guards only${result.changedTestFiles.length ? ` + ${result.changedTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${result.notHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${result.notHermeticExcluded.join(", ")}` : ""}${result.inertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${result.inertPathsSkipped.join(", ")}` : ""}${assetClause}${changedTsScannerClause}${changedScriptScannerClause}${isolationCaveat}`;
+  return `${subject}: ${compiledClause} — ran build + static guards only${result.changedTestFiles.length ? ` + ${result.changedTestFiles.length} selected test file(s)` : ""}, skipped the full daemon test suite${result.notHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${result.notHermeticExcluded.join(", ")}` : ""}${result.inertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${result.inertPathsSkipped.join(", ")}` : ""}${assetClause}${changedTsScannerClause}${changedScriptScannerClause}${isolationCaveat}`;
 }
