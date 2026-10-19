@@ -30,7 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -49,6 +49,16 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const GENEROUS_SYNC_BUDGET_MS = 600_000;
 const GIT_ID = "-c user.email=concstamp@loom -c user.name=concstamp";
 const now = new Date().toISOString();
+// Card 1c7b3f44: both waits below observe REAL timing (child-process spawn latency; a settled op's
+// gate_status reaching "settled") that a fixed 10s budget can legitimately exceed under host contention —
+// real child-start latency hit 10558ms against this exact 10000ms budget on main. Scale with this suite's
+// established ambientScaledBudget margin (3x — see kickoff-real-spawn.mjs's HEARTBEAT_STALL_MS) instead of
+// guessing a bigger fixed number; the margin itself is an always-applied multiplier, not a load response,
+// so even an idle host (overshoot 1x) floors the budget at 10_000*1*3=30s, scaling up to the
+// 10_000*AMBIENT_OVERSHOOT_CAP(4)*3=120s ceiling under real contention (observed in this file's own runs:
+// 36.3s-69s across six serial runs at overshoot 1.21x-2.30x).
+const CHILD_START_TIMEOUT_MS = ambientScaledBudget(10_000, 3);
+const GATE_STATUS_SETTLE_TIMEOUT_MS = ambientScaledBudget(10_000, 3);
 
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
@@ -81,7 +91,7 @@ const mk = (label) => ({
 // Mirrors gate-status.mjs's own settled-verdict pattern (wait past the live/retained view, then call
 // `gateStatus` for real) rather than reaching around it.
 async function readSettledStatus(sessions, opId) {
-  await waitUntil(() => (sessions.gateStatus(opId).state === "settled" ? true : undefined), { timeoutMs: 10_000, label: `gate_status(${opId}) to reach settled` });
+  await waitUntil(() => (sessions.gateStatus(opId).state === "settled" ? true : undefined), { timeoutMs: GATE_STATUS_SETTLE_TIMEOUT_MS, label: `gate_status(${opId}) to reach settled` });
   return sessions.gateStatus(opId);
 }
 
@@ -199,7 +209,7 @@ try {
     // Wait until BOTH gate children have genuinely started — the precondition that makes this a real
     // concurrency proof (both admitted while the other is still live) rather than an accidentally
     // serialized run.
-    await waitUntil(() => (calls.length === 2 ? true : undefined), { timeoutMs: 10_000, label: "both PASS and FAIL gate children to start" });
+    await waitUntil(() => (calls.length === 2 ? true : undefined), { timeoutMs: CHILD_START_TIMEOUT_MS, label: "both PASS and FAIL gate children to start" });
     check("(B precondition) both children are genuinely CO-LIVE at the same instant (cap raised to 2)", calls.length === 2);
 
     holds.get(P.worktreePath).release();
