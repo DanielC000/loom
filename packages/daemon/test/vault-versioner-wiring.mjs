@@ -19,7 +19,15 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { simpleGit } from "simple-git";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
-import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { waitUntil as sharedWaitUntil, ambientScaledBudget } from "./_wait.mjs";
+
+// ambientScaledBudget's own probe is a single 50ms sleep measured ONCE at module load — it calibrates
+// against momentary host state, not the real cost this file's waits are racing (several real `git` child
+// process spawns per commit, serially, across ~20 concurrent VaultVersioner watchers in one process).
+// Observed live: a late commit arrived at 14.1s (2.8x the un-scaled 5000ms budget) while the load-time
+// probe itself would read closer to 1x. A margin multiplier of 3 (floor 15s, ceiling 4x*3=60s) covers that
+// gap without disabling the bound — a genuine "never commits" regression still fails within 60s.
+const COMMIT_WAIT_BUDGET_MS = ambientScaledBudget(5000, 3);
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-vv-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -52,7 +60,7 @@ function plantObsidianGitMarker(repoRoot) {
 const commitCount = (dir) => parseInt(git(dir, "rev-list --all --count").trim() || "0", 10);
 // Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/50ms-interval budget,
 // still returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
-async function waitFor(fn, timeoutMs = 5000) {
+async function waitFor(fn, timeoutMs = COMMIT_WAIT_BUDGET_MS) {
   try {
     return await sharedWaitUntil(fn, { timeoutMs, intervalMs: 50, label: "vault-versioner-wiring: fn" });
   } catch (err) {
