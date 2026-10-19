@@ -17,10 +17,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (5) `deleteProjectWorkDir` removes the whole dir, best-effort (never throws on a dir that doesn't
 //       exist), ASYNC (card 5eace211 Code Review MAJOR), and REFUSES a non-UUID-shaped or traversal-
 //       shaped projectId outright (leaving whatever's there untouched).
-//   (5c) manager code-review follow-up (card 2c9f0854 round 2, item 2) — `deleteProjectWorkDir`'s
-//       injectable `rm` test seam: a fake that rejects once then delegates to the real `rm` proves the
-//       warn-on-failure/no-warn-on-success split across two calls, and a fake that always rejects proves
-//       exactly one warn and NEVER a throw.
+//   (5c) card 8e32605d — `deleteProjectWorkDir` moved off `fs.promises.rm` onto `killableRemoveDir`
+//       (projects/work-dir.ts), with an injectable `removeDir` seam mirroring `run-snapshot-remove-
+//       bound.mjs`'s own precedent for this exact bug class: a NEVER-SETTLING removeDir still resolves
+//       (bounded by `timeoutMs`), is attempted EXACTLY ONCE (a killed/wedged result is never retried —
+//       the bd9fc808 hazard), and logs exactly one warn (naming the project id + path) worded "genuinely
+//       wedged"; a removeDir that REJECTS instead (round 2 MINOR 1 — a never-started removal, e.g. a sync
+//       spawn failure, standing in for killableRemoveDir's own spawnChild throwing) is likewise attempted
+//       exactly once but warns "removal failed to start: <message>" — each wording is proven absent from
+//       the other's warn, a negative control for the classification itself; a CLEAN (non-killed) failure
+//       followed by success retries and actually removes the dir; a clean failure that never succeeds is
+//       attempted up to 3 times, logs exactly one warn, and never throws.
 //   (6) `LOOM_PROJECT_WORK_ROOT` overrides the default root — proven via a real child process (the root
 //       is a module-level `const`, computed once at import time, so the override must be set BEFORE
 //       paths.js is ever imported in that process).
@@ -54,9 +61,39 @@ const {
   projectWorkDirMarkerPath,
   ensureProjectWorkDir,
   projectWorkDirEnv,
-  deleteProjectWorkDir,
 } = await import("../dist/paths.js");
 const { WORKTREES_DIR, LOOM_HOME } = await import("../dist/paths.js");
+// Card 8e32605d: deleteProjectWorkDir moved out of dist/paths.js into its own module — see that module's
+// own doc (projects/work-dir.ts) for why (it needs killableRemoveDir/withTimeout from git/*, and paths.ts
+// must never import back from git/* — a circular-import risk, not just a style choice).
+const { deleteProjectWorkDir } = await import("../dist/projects/work-dir.js");
+const { killableRemoveDir } = await import("../dist/git/worktrees.js");
+
+// MONOTONIC (see CLAUDE.md's CI timing-flake note) + slack, so a loaded runner can't flake a lower bound.
+const TIMER_SLACK_MS = 80;
+
+// A test-harness watchdog so a genuinely regressed (hanging) implementation FAILS the test instead of
+// hanging the process forever — never a substitute for the code's own bound. Mirrors run-snapshot-remove-
+// bound.mjs's own helper for this exact bug class.
+function withWatchdog(promise, ms, label) {
+  return Promise.race([
+    promise.then((v) => ({ hung: false, v })),
+    new Promise((resolve) => setTimeout(() => resolve({ hung: true }), ms)),
+  ]).then((r) => {
+    if (r.hung) throw new Error(`${label} did not settle within the test watchdog (${ms}ms) — genuinely hung`);
+    return r.v;
+  });
+}
+
+// A `removeDir` seam that NEVER settles — the case that matters: a genuinely wedged removal. Records its
+// own call count so the test can prove the outer bound is what settled it (not a silent fallback) and
+// that a killed/wedged result is attempted EXACTLY ONCE (never retried — the bd9fc808 hazard).
+function neverSettlingRemoveDir() {
+  const calls = [];
+  const fn = (target, timeoutMs) => { calls.push({ target, timeoutMs }); return new Promise(() => {}); };
+  fn.calls = calls;
+  return fn;
+}
 
 // Card 5eace211 Code Review MINOR 8: `measureProjectsWorkRootBytes` was test-only (its own doc said so)
 // and moved out of src/paths.ts entirely — this is the SAME synchronous ground-truth recursive sum,
@@ -175,47 +212,96 @@ try {
   await deleteProjectWorkDir(traversalId);
   check("(5b) a traversal-shaped id is REFUSED — the escape target survives untouched", fs.existsSync(escapeTargetDir) && fs.existsSync(path.join(escapeTargetDir, "canary.bin")));
 
-  // ── (5c) deleteProjectWorkDir's injectable `rm` seam — manager code-review follow-up item 2 ────────
-  // `deleteProjectWorkDir` now delegates retrying to `fs.promises.rm`'s OWN `maxRetries`/`retryDelay`
-  // (never a hand-rolled loop) and accepts an optional `rm` override as its SECOND, test-only parameter.
-  const realRm = fs.promises.rm.bind(fs.promises);
+  // ── (5c) deleteProjectWorkDir's injectable `removeDir` seam — card 8e32605d ───────────────────────
+  // `deleteProjectWorkDir` now routes through `killableRemoveDir` (never `fs.promises.rm`/the libuv
+  // threadpool — the bd9fc808 hazard) and accepts a `deps: {removeDir?, timeoutMs?}` seam, mirroring
+  // run-snapshot-remove-bound.mjs's own precedent for this exact bug class.
   const warned = [];
   const origWarn = console.warn;
   console.warn = (...a) => warned.push(a.join(" "));
   try {
-    // "rm rejects then succeeds" — a SHARED-STATE fake: its first call rejects (no real removal, as a
-    // transient EBUSY never would), its second call delegates to the REAL rm (as Node's own internal
-    // retry eventually succeeding would). Two separate deleteProjectWorkDir calls against this ONE fake
-    // exercise both branches: the call where rm genuinely failed warns; the call where it genuinely
-    // succeeded does not, and the directory is actually removed.
+    // "never-settling removeDir" — THE CASE THAT MATTERS: a genuinely wedged removal. Proves the outer
+    // bound settles anyway (never hangs), the seam is attempted EXACTLY ONCE (a killed/wedged result is
+    // never retried — manager directive: never retry a KILLED result), and exactly one warn fires.
+    const idE = "eeeeeeee-5555-4555-8555-555555555555";
+    ensureProjectWorkDir(idE, "Epsilon Project");
+    fs.writeFileSync(path.join(projectWorkDir(idE), "e.bin"), Buffer.alloc(100, 5));
+    const removeDirWedged = neverSettlingRemoveDir();
+    const wedgedTimeoutMs = 150;
+    warned.length = 0;
+    const t0 = performance.now();
+    await withWatchdog(deleteProjectWorkDir(idE, { removeDir: removeDirWedged, timeoutMs: wedgedTimeoutMs }), wedgedTimeoutMs * 10, "deleteProjectWorkDir(wedged)");
+    const elapsedWedged = performance.now() - t0;
+    check("(5c-wedged) a never-settling removeDir still resolves (does not hang forever)", elapsedWedged < wedgedTimeoutMs * 10);
+    check(`(5c-wedged) the outer bound fires ~at timeoutMs (${Math.round(elapsedWedged)}ms >= ${wedgedTimeoutMs}ms)`,
+      elapsedWedged >= wedgedTimeoutMs - TIMER_SLACK_MS);
+    check("(5c-wedged) a killed/wedged result is attempted EXACTLY ONCE (never retried)", removeDirWedged.calls.length === 1);
+    // The call args are something the CODE UNDER TEST actually controls (unlike on-disk fs state, which
+    // this no-op fake never touches either way) — proves deleteProjectWorkDir computed the right target
+    // dir and forwarded the right timeoutMs to the seam, not just "called it with something".
+    check("(5c-wedged) the seam was called with THIS project's own work dir and the configured timeoutMs",
+      removeDirWedged.calls[0]?.target === projectWorkDir(idE) && removeDirWedged.calls[0]?.timeoutMs === wedgedTimeoutMs);
+    check("(5c-wedged) exactly one warn fires (never zero, never more than one)", warned.length === 1);
+    check("(5c-wedged) the warn names BOTH the project id and the on-disk path left behind",
+      warned[0]?.includes(idE) && warned[0]?.includes(projectWorkDir(idE)));
+    check("(5c-wedged) the warn uses the WEDGED wording, never the rejected/'failed to start' wording",
+      warned[0]?.includes("genuinely wedged") && !warned[0]?.includes("failed to start"));
+
+    // "rejected removeDir" — card 8e32605d round 2, MINOR 1 + its negative control. A removeDir that
+    // REJECTS (standing in for killableRemoveDir's own spawnChild throwing SYNCHRONOUSLY inside its
+    // Promise executor — a removal that never even started) must NEVER be logged as "wedged": that
+    // wording is reserved for a genuine timeout. Paired with the wedged case above as each other's
+    // negative control — same warn-emission code path, two different real inputs, each must produce ONLY
+    // its own wording, never the other's.
+    const idF = "ffffffff-6666-4666-8666-666666666666";
+    ensureProjectWorkDir(idF, "Zeta Project");
+    let rejectedCalls = 0;
+    const removeDirRejects = (target, timeoutMs) => { rejectedCalls++; return Promise.reject(new Error("ENOENT: spawn rmdir ENOENT (simulated sync spawn failure)")); };
+    warned.length = 0;
+    let threwF = false;
+    try { await deleteProjectWorkDir(idF, { removeDir: removeDirRejects, timeoutMs: 5000 }); } catch { threwF = true; }
+    check("(5c-rejected) a removeDir that REJECTS does NOT throw out of deleteProjectWorkDir", threwF === false);
+    check("(5c-rejected) a rejected (never-started) result is attempted EXACTLY ONCE (never retried)", rejectedCalls === 1);
+    check("(5c-rejected) exactly one warn fires", warned.length === 1);
+    check("(5c-rejected) the warn uses the 'removal failed to start' wording AND includes the real error message",
+      warned[0]?.includes("removal failed to start") && warned[0]?.includes("ENOENT: spawn rmdir ENOENT"));
+    check("(5c-rejected) the warn NEVER claims 'genuinely wedged' for a rejection that was never a timeout",
+      !warned[0]?.includes("genuinely wedged"));
+
+    // "clean failure, then success" — a SHARED-STATE fake: its first call resolves CLEANLY failed
+    // (removed:false, killed:false — e.g. a transient EBUSY that settled but didn't remove anything),
+    // its second call delegates to the REAL killableRemoveDir (as a transient failure clearing on retry
+    // would). Proves a clean (non-killed) failure IS retried, and a retry that succeeds actually removes
+    // the dir with no warn at all.
     const idC = "cccccccc-3333-4333-8333-333333333333";
     ensureProjectWorkDir(idC, "Gamma Project");
     fs.writeFileSync(path.join(projectWorkDir(idC), "c.bin"), Buffer.alloc(100, 3));
     let flakyCalls = 0;
-    const flakyThenRealRm = async (p, opts) => {
+    const flakyThenRealRemoveDir = (target, timeoutMs) => {
       flakyCalls++;
-      if (flakyCalls === 1) throw new Error("FAKE EBUSY (first attempt)");
-      return realRm(p, opts);
+      if (flakyCalls === 1) return Promise.resolve({ removed: false, killed: false });
+      return killableRemoveDir(target, timeoutMs);
     };
     warned.length = 0;
-    await deleteProjectWorkDir(idC, flakyThenRealRm);
-    check("(5c) rm REJECTS on the first call — exactly one warn, dir still exists (that call never removed anything)",
-      warned.length === 1 && fs.existsSync(projectWorkDir(idC)));
-    await deleteProjectWorkDir(idC, flakyThenRealRm);
-    check("(5c) rm SUCCEEDS on the second call — dir removed, NO additional warn",
-      warned.length === 1 && !fs.existsSync(projectWorkDir(idC)));
-    check("(5c) the fake was actually called twice (both branches genuinely exercised, not vacuously)", flakyCalls === 2);
+    await deleteProjectWorkDir(idC, { removeDir: flakyThenRealRemoveDir, timeoutMs: 5000 });
+    check("(5c-clean-retry) a clean failure followed by success actually removes the dir", !fs.existsSync(projectWorkDir(idC)));
+    check("(5c-clean-retry) the seam was called exactly twice (retried once, not looped further)", flakyCalls === 2);
+    check("(5c-clean-retry) NO warn fires — the final outcome is a genuine success", warned.length === 0);
 
-    // "rm always rejects" — never throws out of deleteProjectWorkDir, logs exactly one warn per call.
+    // "clean failure, every attempt" — never succeeds, never killed. Exhausts the bounded retry budget
+    // (never loops forever), logs exactly one warn (never zero, never one per attempt), never throws.
     const idD = "dddddddd-4444-4444-8444-444444444444";
     ensureProjectWorkDir(idD, "Delta Project");
-    const alwaysRejectRm = async () => { throw new Error("FAKE ALWAYS BUSY"); };
+    const removeDirAlwaysCleanFail = (target) => Promise.resolve({ removed: false, killed: false });
+    let cleanFailCalls = 0;
+    const countedAlwaysCleanFail = (target, timeoutMs) => { cleanFailCalls++; return removeDirAlwaysCleanFail(target, timeoutMs); };
     warned.length = 0;
     let threwD = false;
-    try { await deleteProjectWorkDir(idD, alwaysRejectRm); } catch { threwD = true; }
-    check("(5c) rm ALWAYS rejects — deleteProjectWorkDir does NOT throw", threwD === false);
-    check("(5c) ...and logs EXACTLY one warn (never zero, never more than one per call)", warned.length === 1);
-    check("(5c) ...and the dir survives untouched (a failed rm must not partially remove/corrupt it)",
+    try { await deleteProjectWorkDir(idD, { removeDir: countedAlwaysCleanFail, timeoutMs: 100 }); } catch { threwD = true; }
+    check("(5c-clean-exhausted) a clean failure on EVERY attempt does NOT throw", threwD === false);
+    check("(5c-clean-exhausted) the seam is attempted a bounded number of times (3), never looped indefinitely", cleanFailCalls === 3);
+    check("(5c-clean-exhausted) ...and logs EXACTLY one warn (never zero, never once per attempt)", warned.length === 1);
+    check("(5c-clean-exhausted) ...and the dir survives untouched (a failed removal must not partially remove/corrupt it)",
       fs.existsSync(projectWorkDir(idD)));
   } finally {
     console.warn = origWarn;
@@ -250,6 +336,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PROJECTS_WORK_ROOT is a sibling of LOOM_HOME (never nested), projectWorkDir is a pure id-keyed join, projectWorkDirEnv is pure (no disk I/O), ensureProjectWorkDir creates the dir and refreshes its marker non-destructively (a rename reaches it, a no-name call never nulls an existing one), a local ground-truth sum counts real bytes scoped correctly, deleteProjectWorkDir removes scoped and best-effort (async) while REFUSING a non-UUID-shaped or traversal-shaped id outright (leaving a real canary untouched) and, via its injectable rm seam, warns exactly once on a genuine failure (never zero, never duplicated on a later success) and never throws even when rm always rejects, and LOOM_PROJECT_WORK_ROOT overrides the default root in a real child process."
+  ? "\n✅ ALL PASS — PROJECTS_WORK_ROOT is a sibling of LOOM_HOME (never nested), projectWorkDir is a pure id-keyed join, projectWorkDirEnv is pure (no disk I/O), ensureProjectWorkDir creates the dir and refreshes its marker non-destructively (a rename reaches it, a no-name call never nulls an existing one), a local ground-truth sum counts real bytes scoped correctly, deleteProjectWorkDir removes scoped and best-effort (async) while REFUSING a non-UUID-shaped or traversal-shaped id outright (leaving a real canary untouched), and, via its injectable removeDir seam (card 8e32605d), a never-settling (wedged) removal still resolves bounded and is attempted exactly once with 'genuinely wedged' wording, a REJECTED (never-started) removal is likewise attempted exactly once but with distinct 'removal failed to start' wording (each proven absent from the other's warn), a clean failure followed by success retries and actually removes the dir with no warn, a clean failure on every attempt is bounded to 3 attempts and logs exactly one warn naming the project id + path, and LOOM_PROJECT_WORK_ROOT overrides the default root in a real child process."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -233,8 +233,8 @@ try {
   // (c) a SOFT archive KEEPS the shared work dir (reversible, mirrors rows/sessions staying retained) and
   // reports its size; (a) a PERMANENT delete REFUSES while a gate is still live for the project (the dir
   // survives the refusal); (b) once the gate clears, the permanent delete succeeds and the whole dir is
-  // actually removed — `deleteProjectWorkDir`'s own hardening (paths.ts) only acts on a real UUID-shaped
-  // id directly under PROJECTS_WORK_ROOT, so this id must genuinely look like one.
+  // actually removed — `deleteProjectWorkDir`'s own hardening (projects/work-dir.ts, card 8e32605d) only
+  // acts on a real UUID-shaped id directly under PROJECTS_WORK_ROOT, so this id must genuinely look like one.
   const pwdId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
   db.insertProject(mkProject(pwdId, { name: "WorkDirLifecycle" }));
   const workDir = ensureProjectWorkDir(pwdId, "WorkDirLifecycle");

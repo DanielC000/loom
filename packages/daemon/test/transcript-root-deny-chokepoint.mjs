@@ -56,6 +56,13 @@ process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 
+// Card 8e32605d (2c9f0854 Code Review follow-up, item 2): PART 2 below drives a REAL (unsubclassed)
+// PtyHost.spawn with projectId "proj-self"/"proj-other-a" (host.ts's ensureProjectWorkDir), with no prior
+// pin — under a foreign ambient LOOM_PROJECT_WORK_ROOT (e.g. a human/another test's own tmp root) this
+// created proj-self/proj-other-a inside THAT root instead of this test's own. Clear it before paths.js
+// computes PROJECTS_WORK_ROOT at module load, mirroring pty-claude-spawn-env.mjs's same-shaped pin.
+delete process.env.LOOM_PROJECT_WORK_ROOT;
+
 const { PtyHost, withTranscriptRootDenyForSpawn, TRANSCRIPT_ROOT_DENY_ROLES, TRANSCRIPT_ROOT_DENY_RULES } =
   await import("../dist/pty/host.js");
 const { otherProjectTranscriptDenyRules } = await import("../dist/pty/claude-transcript.js");

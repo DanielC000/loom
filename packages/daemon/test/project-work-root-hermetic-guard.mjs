@@ -79,6 +79,9 @@ function mkProbeHome(prefix) {
 // on Windows — pass the file:// URL itself (never fileURLToPath'd) into every probe script's import.
 const guardUrl = new URL("./_guard.mjs", import.meta.url).href;
 const pathsUrl = new URL("../dist/paths.js", import.meta.url).href;
+// Card 8e32605d: deleteProjectWorkDir moved out of dist/paths.js into its own module (projects/work-
+// dir.js — see that module's own doc for why), so the probe script below now imports it separately.
+const workDirUrl = new URL("../dist/projects/work-dir.js", import.meta.url).href;
 
 // The REAL canary — a dir + file standing in for "a human's real PROJECTS_WORK_ROOT, with real shared
 // content". Deliberately never touched by THIS process's own env (only ever handed to a CHILD process's
@@ -98,7 +101,8 @@ try {
     `delete process.env.LOOM_PROJECT_WORK_ROOT;` +
     `const { requireHermeticEnv } = await import(${JSON.stringify(guardUrl)});` +
     `requireHermeticEnv();` +
-    `const { ensureProjectWorkDir, deleteProjectWorkDir, PROJECTS_WORK_ROOT } = await import(${JSON.stringify(pathsUrl)});` +
+    `const { ensureProjectWorkDir, PROJECTS_WORK_ROOT } = await import(${JSON.stringify(pathsUrl)});` +
+    `const { deleteProjectWorkDir } = await import(${JSON.stringify(workDirUrl)});` +
     // A REAL round trip (creation + removal) against whatever this process resolves as ITS OWN root —
     // if the fix failed, this would be the exact shape that mutates the real ambient root instead.
     `ensureProjectWorkDir(${JSON.stringify(probeIdA)}, "Canary Probe A");` +
@@ -239,16 +243,16 @@ try {
   //       `createCodexPty()` call with `projectId` set, which internally calls it — a shape a text scan
   //       cannot reliably distinguish from the many OTHER real-spawn tests that pass a `projectId` for
   //       unrelated reasons (DB row fields, a deny-path test expecting the spawn to be REFUSED before it
-  //       ever reaches that call, etc.) without false-flagging most of them. These two are verified by
-  //       direct reading, not grep. KNOWN GAP, left open rather than silently absorbed into this scan's
-  //       scope: `transcript-root-deny-chokepoint.mjs` ALSO reaches `ensureProjectWorkDir` indirectly this
-  //       same way and is NOT pinned — a real, pre-existing, out-of-scope-for-this-card finding, reported
-  //       separately rather than fixed here.
+  //       ever reaches that call, etc.) without false-flagging most of them. These three are verified by
+  //       direct reading, not grep. (Card 8e32605d: `transcript-root-deny-chokepoint.mjs` was the same
+  //       class of gap — it ALSO reaches `ensureProjectWorkDir` indirectly this way via its own real
+  //       `PtyHost.spawn()` calls with `projectId:"proj-self"`/`"proj-other-a"` — now pinned and added
+  //       here, closing the known gap the prior round of this comment left open.)
   const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
   const SELF_FILE = path.basename(fileURLToPath(import.meta.url));
   const MUTATOR_CALL_RE = /\b(?:ensureProjectWorkDir|deleteProjectWorkDir|refreshProjectsWorkRootUsage)\(/;
   const PIN_RE = /delete\s+process\.env\.LOOM_PROJECT_WORK_ROOT\b|pinProjectWorkRootOverrideForTest\s*\(/;
-  const INDIRECT_CREATEPTY_MEMBERS = ["pty-claude-spawn-env.mjs", "pty-codex-spawn-env.mjs"];
+  const INDIRECT_CREATEPTY_MEMBERS = ["pty-claude-spawn-env.mjs", "pty-codex-spawn-env.mjs", "transcript-root-deny-chokepoint.mjs"];
 
   // Manager code-review follow-up (card 2c9f0854 round 2, item 1) — the reviewer ran the ORIGINAL
   // regexes above on synthetic inputs and found four real false-passes. `oldSourceHasPinBeforeImport`

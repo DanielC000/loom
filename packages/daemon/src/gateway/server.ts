@@ -9,7 +9,8 @@ import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Tas
 import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
-import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, deleteProjectWorkDir } from "../paths.js";
+import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
+import { deleteProjectWorkDir } from "../projects/work-dir.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import { buildServedStatus } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -5109,11 +5110,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     const { sessionIds } = deps.db.deleteProject(id);
     deleteProjectArchives(id); // best-effort: drop the whole LOOM_HOME/archives/<id> snapshot dir
-    // Card 5eace211 Code Review MAJOR: deleteProjectWorkDir is now ASYNC (fs.promises.rm) — the DB delete
-    // and the hasLiveGateForProject check above both stay synchronous and run BEFORE this, so this await
-    // can never block either of those; it only means the response waits for the (best-effort, never-
-    // throwing) removal to actually finish, matching the same "await a real I/O cost for a human-watched,
-    // one-off action" posture the soft-archive route above already uses for its own size measurement.
+    // Card 5eace211 Code Review MAJOR: deleteProjectWorkDir is ASYNC and bounded (card 8e32605d: a
+    // killable child process, never the libuv threadpool — see that decision record) — the DB delete and
+    // the hasLiveGateForProject check above both stay synchronous and run BEFORE this, so this await can
+    // never block either of those; it only means the response waits for the (best-effort, never-throwing)
+    // removal to actually finish. Its real worst case is bounded, but NOT by a single timeoutMs: up to
+    // DELETE_PROJECT_WORK_DIR_CLEAN_RETRY_ATTEMPTS attempts at up to its own timeoutMs each, plus
+    // (DELETE_PROJECT_WORK_DIR_CLEAN_RETRY_ATTEMPTS - 1) inter-attempt delays of
+    // DELETE_PROJECT_WORK_DIR_CLEAN_RETRY_DELAY_MS each (projects/work-dir.ts) — never retried past a
+    // genuinely KILLED or REJECTED outcome, only a clean settled failure. Matches the same "await a real
+    // I/O cost for a human-watched, one-off action" posture the soft-archive route above already uses for
+    // its own size measurement.
     await deleteProjectWorkDir(id);
     return { ok: true, deleted: { project: id, agents: true, sessions: sessionIds.length } };
   });
