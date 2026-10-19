@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { DB_PATH, DAEMON_TEST_DIR } from "./paths.js";
+import { DB_PATH, DAEMON_TEST_DIR, questionAttachmentDir } from "./paths.js";
 import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
 import { worktreeIdentityKey } from "./git/worktrees.js";
 import { parseMainlineWatermark, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX } from "./git/mainline-watch.js";
@@ -110,7 +110,7 @@ function assertProdDbOpenAllowed(file: string, allowProdDb?: boolean): void {
 import type {
   Project, Agent, AgentListItem, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, ScheduleHistoryPage, ScheduleHistoryEntry, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, FulfillmentTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion, DeliveredCredentialSummary,
+  OrchestrationEvent, OrchestrationEventKind, ScheduleHistoryPage, ScheduleHistoryEntry, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, FulfillmentTarget, QuestionAttachment, QuestionAttachmentKind, PendingBinding, PresetPrompt, PresetPromptSuggestion, DeliveredCredentialSummary,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -1357,7 +1357,11 @@ CREATE TABLE IF NOT EXISTS questions (
   last_surfaced_at TEXT,
   cancelled_reason TEXT,                   -- question_cancel/dismiss (only ever set alongside state='cancelled')
   cancelled_by TEXT,                       -- 'agent' | 'human'
-  cancelled_at TEXT
+  cancelled_at TEXT,
+  attachments_json TEXT                    -- card 432765ab: StoredQuestionAttachment[] JSON, NULL for a row
+                                            -- with no attachments. Carries the absolute original/store paths
+                                            -- internally — toQuestion NEVER maps it verbatim; see its own
+                                            -- attachments-mapping for the public-safe projection.
 );
 -- Serves both the manager's pull (session_id + state='answered') and a future project-scoped inbox read.
 CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id, state);
@@ -2313,6 +2317,10 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // column in the base SCHEMA — same reasoning as those two fields' own docs. Orthogonal to state/
   // acknowledged_until; never touched by any agent path.
   read_at: "TEXT",
+  // Card 432765ab — question_ask attachments. Nullable, no backfill: a legacy row simply reads null
+  // (toQuestion maps that to attachments: []), and no index references this column (deliberately — see
+  // CLAUDE.md's "no base-schema index may reference a migrate-added column" rule).
+  attachments_json: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
@@ -2337,6 +2345,26 @@ const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
 const DELIVERED_CREDENTIALS_ADDED_COLUMNS: Record<string, string> = {
   undeliverable_notified_at: "TEXT",
 };
+
+/**
+ * Card 432765ab — the INTERNAL per-attachment shape stored in `questions.attachments_json`. NEVER the
+ * same shape as the public `@loom/shared` `QuestionAttachment` (which every read surface serializes) —
+ * this one carries the two fields that must NEVER reach a client: `originalPath` (the asker's absolute
+ * source path) and `storedFilename` (the copy's name inside `questionAttachmentDir(questionId)`, joined
+ * with that dir by whoever eventually serves it — the not-yet-built child card 8f050b79). `toQuestion`
+ * below is the ONE place this is parsed and projected down to the public shape; nothing else reads this
+ * column directly today.
+ */
+export interface StoredQuestionAttachment {
+  id: string;
+  label: string;
+  kind: QuestionAttachmentKind;
+  sizeBytes: number;
+  imageDimensions: { width: number; height: number } | null;
+  storedFilename: string;
+  originalPath: string;
+  openedAt: string | null;
+}
 
 type Row = Record<string, unknown>;
 
@@ -8727,19 +8755,28 @@ export class Db {
   }
 
   // --- questions (manager→human Requests object, card 8701bdbb generalized by card 695ebab0) ---
-  insertQuestion(q: Question): void {
+  /**
+   * `q.attachments` (optional 2nd param of `insertQuestion` below, card 432765ab) — NEVER the public `Question.attachments` field
+   * (which is already redacted; see `toQuestion`'s own mapping), but the INTERNAL shape carrying the
+   * absolute `originalPath`/`storedFilename` the copy-at-send-time step already resolved. Callers
+   * (`questionTool.ts`'s `prepareQuestionAttachments`) always resolve+copy attachments BEFORE calling
+   * this, so by the time this runs there is nothing left to validate here — a dumb column write, same
+   * posture as every other JSON-in-TEXT column on this table.
+   */
+  insertQuestion(q: Question, attachments: StoredQuestionAttachment[] = []): void {
     this.db.prepare(
       `INSERT INTO questions
         (id,session_id,filed_by_session_id,project_id,type,title,body,options_json,recommendation,task_id,
          permission_action,permission_scope,permission_expires_at,credential_env_var,
          provision_target,fulfillment_target,state,chosen_option,note,created_at,answered_at,consumed_at,
-         cancelled_reason,cancelled_by,cancelled_at)
+         cancelled_reason,cancelled_by,cancelled_at,attachments_json)
        VALUES
         (@id,@sessionId,@filedBySessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
          @permissionAction,@permissionScopeHint,@permissionExpiresAt,@credentialEnvVar,
          @provisionTarget,@fulfillmentTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt,
-         @cancelledReason,@cancelledBy,@cancelledAt)`,
+         @cancelledReason,@cancelledBy,@cancelledAt,@attachmentsJson)`,
     ).run({
+      attachmentsJson: attachments.length > 0 ? JSON.stringify(attachments) : null,
       // `type` defaults to "decision" at the RUNTIME layer too (not just TS's Question interface) — a
       // plain-JS caller (a hermetic test predating card 695ebab0, or any future untyped caller) that never
       // set it is byte-identical to before this card, rather than tripping the column's NOT NULL.
@@ -10924,7 +10961,44 @@ function toQuestion(r0: unknown): Question {
     // fix, since session_id is the mutable routing target, not the filer).
     filedBySessionId: (r.filed_by_session_id as string | null) ?? null,
     readAt: (r.read_at as string | null) ?? null,
+    attachments: toQuestionAttachments(r.id as string, r.attachments_json as string | null),
   };
+}
+/**
+ * Card 432765ab — parse `questions.attachments_json`'s internal `StoredQuestionAttachment[]` shape and
+ * project it down to the PUBLIC `QuestionAttachment[]` every read surface serializes: `storedFilename`/
+ * `originalPath` are dropped here, never carried onto the `Question` object (mirrors how `toQuestion`
+ * never maps `secret_blob`). `available` is computed LIVE (an `fs.existsSync` against the store path),
+ * never stored — consistent with the GC child card (6f27469b) removing files out from under an
+ * unchanged row. `[]` for a legacy/attachment-less row (null column), never null.
+ */
+function toQuestionAttachments(questionId: string, json: string | null): QuestionAttachment[] {
+  if (!json) return [];
+  // A corrupt or malformed row (manual DB tampering, or a bug) must never throw on every inbox read —
+  // this column is otherwise ONLY ever written by this daemon's own JSON.stringify of a real array
+  // (never by an agent-facing writer), so either failure here is unexpected; log it and degrade to "no
+  // attachments" rather than taking the whole read down with it.
+  let stored: StoredQuestionAttachment[];
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) {
+      console.warn(`[db] question ${questionId}: attachments_json did not parse to an array, treating as no attachments`);
+      return [];
+    }
+    stored = parsed as StoredQuestionAttachment[];
+  } catch (err) {
+    console.warn(`[db] question ${questionId}: attachments_json failed to parse, treating as no attachments: ${(err as Error).message}`);
+    return [];
+  }
+  const dir = questionAttachmentDir(questionId);
+  // One fs.existsSync per attachment, per read — cheap and BOUNDED by orchestration.attachmentMaxCount
+  // (see HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS, mcp/platform.ts, for the live resolved value), so this
+  // can never scale past "a few stat calls per row," regardless of how many rows a caller reads at once.
+  return stored.map((a) => ({
+    id: a.id, label: a.label, kind: a.kind, sizeBytes: a.sizeBytes, imageDimensions: a.imageDimensions,
+    available: fs.existsSync(path.join(dir, a.storedFilename)),
+    openedAt: a.openedAt,
+  }));
 }
 // A question row already carrying the joined display columns (agent_name / project_name /
 // session_process_state / session_resumability) → the QuestionInboxItem the web reads. A LEFT-JOINed row

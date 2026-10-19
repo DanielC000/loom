@@ -12,7 +12,7 @@ import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
@@ -309,6 +309,11 @@ const orchestrationOverride = z.object({
   // alertWebhook/deployCommand tier. 0 is honored as a real value ("never allowed"); a generous ceiling
   // guards a fat-fingered value.
   maxNoticesPerHour: z.number().int().min(0).max(1000).optional(),
+  // Card 432765ab — `question_ask` attachment caps, SAME HUMAN-only-even-for-the-Lead trust tier as
+  // maxNoticesPerHour above (the asker must never be able to raise its own ceiling): omitted from the
+  // agent path below AND listed in HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS.
+  attachmentMaxBytes: z.number().int().min(1).max(500 * 1024 * 1024).optional(),
+  attachmentMaxCount: z.number().int().min(0).max(1000).optional(),
   // Idle-WORKER re-nudge window (whole minutes; 0 disables). Same 0-floor rationale as above.
   idleWorkerMinutes: z.number().int().min(0).optional(),
   // Busy-worker stuck window (whole minutes; 0 disables the watcher). Same 0-floor rationale as above.
@@ -373,6 +378,9 @@ export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = [
   // mergeGate — the party it governs must never be able to loosen its own governor — so it's blocked
   // even from the elevated Lead, not just the top-level omission below.
   "orchestration.maxNoticesPerHour",
+  // Card 432765ab — same trust tier as maxNoticesPerHour just above (the attachment caps' own doc,
+  // shared/config.ts, has the full rationale): the asker must never raise its own ceiling.
+  "orchestration.attachmentMaxBytes", "orchestration.attachmentMaxCount",
 ];
 /** The single list driving the "human-only means BOTH directions" unset/replace-drop guard below (card
  *  74f27ab5) — every human-only key, top-level AND nested, as dot-paths. The separate WRITE-direction
@@ -515,6 +523,8 @@ const agentOrchestrationOverride = orchestrationOverride
     deployCommand: true, deployCommandTimeoutMs: true,
     alertWebhook: true, alertWebhookTimeoutMs: true,
     maxNoticesPerHour: true,
+    // Card 432765ab — see maxNoticesPerHour's own comment just above for the reasoning.
+    attachmentMaxBytes: true, attachmentMaxCount: true,
   })
   .strict();
 // Agent-facing obsidian shape: `autoStart` only. `path` is omitted (host-launch capable, human-only), so
@@ -3661,7 +3671,19 @@ export class PlatformMcpRouter {
           "swallowed. You'll get a one-time push nudge into " +
           "your own session when the human answers; call question_pull (e.g. when you reach the point " +
           "this was blocking) to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
-          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}.",
+          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}. OPTIONAL " +
+          "`attachments: [{path, label?}]` — files to show the human alongside this ask (valid on every " +
+          "type, including \"notice\"). `path` MUST be an ABSOLUTE path under one of: the project repo " +
+          "root, this project's worker worktrees, this project's work dir, this project's vault root, " +
+          "or any of this project's registered multi-repo `repos[]` paths — a relative path is refused, " +
+          "and so is any path under LOOM_HOME regardless of which project binding admitted it (this " +
+          "matters for YOUR OWN project, whose repoPath/vaultPath ARE LOOM_HOME — you cannot attach " +
+          "secret.key/loom.db/anything else LOOM_HOME-rooted this way, by design). `label` defaults to " +
+          "the file's own basename. Everything else " +
+          "(kind/size/image dimensions/availability) is DERIVED server-side from the file itself at send " +
+          "time — you cannot mislabel a type or claim a file exists that doesn't. Rejected OUTRIGHT (the " +
+          "whole call fails, nothing filed) if any path is outside the allowed roots, doesn't exist, is a " +
+          "directory, or if the count/size exceeds this project's human-set caps.",
         inputSchema: strictShape(QUESTION_ASK_INPUT_SHAPE),
       },
       async (input) => {
@@ -3672,10 +3694,12 @@ export class PlatformMcpRouter {
         // than threading a role param through buildServer for a single caller that never varies.
         const built = buildQuestionAsk(input, { sessionId: callerSessionId, projectId, db, role: "platform" });
         if ("error" in built) return ok({ error: built.error });
-        const { question } = built;
-        // Insert the NEW ask BEFORE superseding the old one (see applySupersede's doc — the ordering, not a
-        // transaction, is what guarantees a failure never loses the owner's prior pending ask).
-        db.insertQuestion(question);
+        // Resolve+copy attachments and insert the NEW ask BEFORE superseding the old one (see
+        // applySupersede's doc — the ordering, not a transaction, is what guarantees a failure never
+        // loses the owner's prior pending ask).
+        const finalized = await finalizeQuestionAsk(db, projectId, built.question, input.attachments);
+        if ("error" in finalized) return ok({ error: finalized.error });
+        const { question } = finalized;
         const supersede = input.supersedes
           ? applySupersede(db, callerSessionId, input.supersedes, question)
           : undefined;

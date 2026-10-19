@@ -680,6 +680,22 @@ export interface OrchestrationConfig {
    */
   maxNoticesPerHour: number;
   /**
+   * Per-attachment byte cap on a `question_ask` `attachments` entry (card 432765ab) — enforced on bytes
+   * ACTUALLY COPIED into the store, never on a pre-copy `stat` (TOCTOU: the source could grow between a
+   * stat and a copy). Default 25MB.
+   *
+   * @decision 432765ab — HUMAN-only even on the ELEVATED Platform Lead's `project_configure` (listed in
+   * `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS`, `mcp/platform.ts`), same reasoning as `maxNoticesPerHour`
+   * above: the party this caps (the asker) must never be able to raise its own ceiling.
+   */
+  attachmentMaxBytes: number;
+  /**
+   * Per-request cap on the NUMBER of `question_ask` `attachments` entries (card 432765ab). 0 is honored
+   * as a real value ("no attachments allowed"); there is no "unlimited" sentinel. Default 10.
+   * @decision 432765ab — same HUMAN-only-even-for-the-Lead posture as `attachmentMaxBytes` above.
+   */
+  attachmentMaxCount: number;
+  /**
    * Busy-worker LONG-TURN advisory: minutes a LIVE worker may sit `busy` in a SINGLE uninterrupted turn
    * (no turn boundary → `lastActivity` not advancing, since `setBusy` re-stamps it on every turn edge)
    * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an informational heads-up (a
@@ -1612,7 +1628,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -2219,6 +2235,9 @@ export function resolveConfig(
       // Card 59fa6403 — notice rate limit. `??` so an explicit 0 ("never allowed") survives the merge
       // rather than falling back to the default; there is no "unlimited" sentinel.
       maxNoticesPerHour: override.orchestration?.maxNoticesPerHour ?? d.orchestration.maxNoticesPerHour,
+      // Card 432765ab — attachment caps. `??` so an explicit value (incl. 0 for the count) survives.
+      attachmentMaxBytes: override.orchestration?.attachmentMaxBytes ?? d.orchestration.attachmentMaxBytes,
+      attachmentMaxCount: override.orchestration?.attachmentMaxCount ?? d.orchestration.attachmentMaxCount,
       // `??` (not `||`) so an explicit 0 (disables the watcher) survives the merge.
       stuckWorkerMinutes: override.orchestration?.stuckWorkerMinutes ?? d.orchestration.stuckWorkerMinutes,
       // Crash-recovery auto-resume cap (0 disables the watcher). `??` so an explicit 0 survives.

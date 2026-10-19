@@ -3721,6 +3721,42 @@ export interface FulfillmentTarget {
   expectedValue?: unknown;
 }
 
+/** `Question.attachments` entry kind (card 432765ab) — derived SERVER-SIDE from the copied file's own
+ *  content type at send time, never from the asker's say-so: `"image"` (png/jpeg/gif/webp — the only
+ *  kinds `cheapImageDimensions` probes), `"html"` (served sandboxed by a separate, not-yet-built child
+ *  card), `"other"` (everything else). */
+export type QuestionAttachmentKind = "image" | "html" | "other";
+
+/**
+ * ONE attachment on a `question_ask` Request (card 432765ab, epic 7d1d66ab phase 1 — manifest only; no
+ * serving route yet, see `docs/decisions/432765ab-*.md`). This is the PUBLIC-SAFE projected shape every
+ * read surface (`question_pull`, `requests_list`, `task_request_get`, the web inbox REST routes) emits —
+ * `toQuestion` (db.ts) deliberately NEVER maps the absolute store path or the asker's original absolute
+ * path onto this object, mirroring how it already never maps `secret_blob`. Those two paths exist only
+ * in the `questions.attachments_json` column, read directly (bypassing `toQuestion`) by the future
+ * serving-route child card (8f050b79) — never through this type.
+ */
+export interface QuestionAttachment {
+  /** Stable per-attachment id (not the request id) — `${n}` of the ask-time array, so a later serving
+   *  route can address one attachment without leaking the store's real filename. */
+  id: string;
+  /** The asker's `label`, or the source file's own basename when omitted. */
+  label: string;
+  kind: QuestionAttachmentKind;
+  /** The size actually copied into the store — see `copyAttachmentWithCap`'s own doc for why this is
+   *  measured from bytes transferred, never from a pre-copy `stat` (TOCTOU). */
+  sizeBytes: number;
+  /** Width/height in pixels, PNG/JPEG header-only (no full decode) — null for every other kind, and null
+   *  when the header couldn't be parsed cheaply (never a reason to refuse the attachment itself). */
+  imageDimensions: { width: number; height: number } | null;
+  /** Computed LIVE at read time (an `fs.existsSync` against the store path, never stored) — consistent
+   *  with the GC child card (6f27469b) removing files out from under an unchanged row. */
+  available: boolean;
+  /** Stamped by the (not-yet-built) serving route the first time a human opens this attachment. Always
+   *  null today — nothing in this card's scope ever writes it. */
+  openedAt: string | null;
+}
+
 /**
  * A manager→human DECISION INBOX entry (card 8701bdbb, daemon core / child A), generalized (card
  * 695ebab0) into a typed Requests object via the `type` discriminator. A manager/orchestrator hits a
@@ -3877,6 +3913,11 @@ export interface Question {
    *  "consumed"/snoozed (same "two different questions on the same row" trap `cb7d6998` already named for
    *  `sessionId` vs. `filedBySessionId`). Never written by any agent MCP tool. */
   readAt: string | null;
+  /** Card 432765ab — files attached at ask time (every type, including "notice"), copied server-side into
+   *  a Loom-owned store. `[]` for every row that predates this column or that never attached anything —
+   *  never null, so every reader can iterate without a null-check. See `QuestionAttachment`'s own doc for
+   *  why this is the PUBLIC-SAFE shape only (no absolute paths). */
+  attachments: QuestionAttachment[];
 }
 
 /**

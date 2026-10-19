@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, contextPercentFor, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent, type GateType } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 // Card 40f4cae9 — the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8): reuse
 // the SAME generic `pickFields` (mcp/tasks.ts) rather than writing a second projector — see that
@@ -3996,7 +3996,17 @@ export class OrchestrationMcpRouter {
           "stuck past its own settle timeout (every OTHER fleet tool refused) is let through HERE ONLY, " +
           "and the response ALSO carries {note} naming the stuck successor + the human action that " +
           "resolves it — a question you file this way is auto-CANCELLED if that successor later reaches " +
-          "ready on its own, so you don't need to retract it yourself.",
+          "ready on its own, so you don't need to retract it yourself. OPTIONAL `attachments: " +
+          "[{path, label?}]` — files to show the human alongside this ask (valid on every type, " +
+          "including \"notice\"). `path` MUST be an ABSOLUTE path under one of: the project repo root, " +
+          "this project's worker worktrees, this project's work dir, this project's vault root, or any " +
+          "of this project's registered multi-repo `repos[]` paths — a relative path is refused, and so " +
+          "is any path under LOOM_HOME regardless of which project binding admitted it. `label` defaults " +
+          "to the file's own basename. Everything else " +
+          "(kind/size/image dimensions/availability) is DERIVED server-side from the file itself at send " +
+          "time — you cannot mislabel a type or claim a file exists that doesn't. Rejected OUTRIGHT (the " +
+          "whole call fails, nothing filed) if any path is outside the allowed roots, doesn't exist, is a " +
+          "directory, or if the count/size exceeds this project's human-set caps.",
         inputSchema: strictShape(QUESTION_ASK_INPUT_SHAPE),
       },
       async (input) => {
@@ -4015,10 +4025,12 @@ export class OrchestrationMcpRouter {
         if (!projectId) return ok({ error: "no project for this session" });
         const built = buildQuestionAsk(input, { sessionId: managerSessionId, projectId, db, role });
         if ("error" in built) return ok({ error: built.error });
-        const { question } = built;
-        // Insert the NEW ask BEFORE superseding the old one (see applySupersede's doc — the ordering, not a
-        // transaction, is what guarantees a failure never loses the owner's prior pending ask).
-        db.insertQuestion(question);
+        // Resolve+copy attachments and insert the NEW ask BEFORE superseding the old one (see
+        // applySupersede's doc — the ordering, not a transaction, is what guarantees a failure never
+        // loses the owner's prior pending ask).
+        const finalized = await finalizeQuestionAsk(db, projectId, built.question, input.attachments);
+        if ("error" in finalized) return ok({ error: finalized.error });
+        const { question } = finalized;
         const supersede = input.supersedes
           ? applySupersede(db, managerSessionId, input.supersedes, question)
           : undefined;

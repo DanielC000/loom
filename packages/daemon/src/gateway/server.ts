@@ -3821,6 +3821,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // Card 54007ab7 — same posture: insertQuestion's INSERT never binds read_at either, always
           // unread at insert time. A spec needing an already-read row marks it via markQuestionsRead.
           readAt: null,
+          // Card 432765ab — `insertQuestion` reads attachments from its own SEPARATE 2nd param, never
+          // from this field; always `[]` here (no e2e spec seeds attachments today).
+          attachments: [],
         });
         // Card 99d41588 / 889ae619 — apply a seeded escalatedAt/acknowledgedUntil as a follow-up write
         // through the REAL setters (markQuestionEscalated / acknowledgeQuestion), the ONLY way an e2e spec

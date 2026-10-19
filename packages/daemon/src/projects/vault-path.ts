@@ -40,7 +40,7 @@ export type VaultPathContainmentCheck =
   | { ok: true }
   | { ok: false; error: string };
 
-type PathCanonResult =
+export type PathCanonResult =
   | { ok: true; value: string }
   | { ok: false; error: string };
 
@@ -99,7 +99,7 @@ function hasWin32UnsafeTrailingSegment(p: string): boolean {
  * the resolved-but-unreal `path.resolve` form in that pathological case, matching
  * {@link canonicalizeExistingPath}'s own fallback).
  */
-function canonicalizeForContainment(raw: string): PathCanonResult {
+export function canonicalizeForContainment(raw: string): PathCanonResult {
   if (isUnsafeToCanonicalize(raw)) {
     return { ok: false, error: `path uses a network/device form that cannot be safely compared for containment: ${raw}` };
   }
@@ -146,8 +146,10 @@ export function canonicallyPaired(a: string, b: string): boolean {
 
 /** Is `childKey` PROPERLY nested under `parentKey` (never equal — equality is the caller's OWN, separately
  *  worded case)? Both arguments MUST already be {@link comparisonKey}-folded, canonicalized forms — this
- *  helper does no normalization of its own, it only compares. */
-function isProperlyUnder(childKey: string, parentKey: string): boolean {
+ *  helper does no normalization of its own, it only compares. Exported for reuse by
+ *  `mcp/attachments.ts` (card 432765ab) — the same containment primitive, generalized from "one vault
+ *  root" to "one of four project-scoped roots." */
+export function isProperlyUnder(childKey: string, parentKey: string): boolean {
   const rel = path.relative(parentKey, childKey);
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }

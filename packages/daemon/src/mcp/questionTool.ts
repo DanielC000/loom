@@ -1,12 +1,15 @@
+import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, resolveConfig, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
 import { resolveIdPrefix } from "../id-prefix.js";
-import type { Db } from "../db.js";
+import type { Db, StoredQuestionAttachment } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
 import { PROFILE_FIELD_NAMES } from "../profiles/validate.js";
 import { isValidCredentialEnvVarName, describeReservedEnvVarNames } from "../keys/credentialSessionEnv.js";
 import { SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { questionAttachmentDir } from "../paths.js";
+import { prepareQuestionAttachments, type AttachmentInput } from "./attachments.js";
 
 /** Roles allowed to set `provisionTo` on a `type:"credential"` ask (card 193de09e Q1) — manager and
  *  platform (the Lead) only. Enforced in `buildQuestionAsk` below so both `question_ask` registrations
@@ -65,6 +68,18 @@ export const QUESTION_ASK_INPUT_SHAPE = {
       expectedValue: z.unknown().optional(),
     })
     .optional(),
+  // Card 432765ab (epic 7d1d66ab phase 1) — files to attach, valid on every type including "notice". The
+  // agent supplies ONLY `path` + `label`; everything else (kind/size/dimensions/availability) is DERIVED
+  // server-side at send time (see `prepareQuestionAttachments`, `mcp/attachments.ts`) — an agent cannot
+  // mislabel a type or claim a file exists. `path` MUST be absolute (card 432765ab owner ruling): a
+  // relative path is ambiguous across the allowed roots, and every real producer (a worker report, a
+  // vault note, a screenshot) already hands a manager an absolute path. Bounded so a pathological string
+  // can't be fed through the resolver's canonicalization machinery: 4096 chars for `path` (generous for
+  // any real filesystem path, well short of Windows' own ~32767 extended-length ceiling — a sanity bound,
+  // not an attempt to express that exact limit), 200 for `label`.
+  attachments: z
+    .array(z.object({ path: z.string().max(4096), label: z.string().max(200).optional() }))
+    .optional(),
 } as const;
 
 export interface QuestionAskInput {
@@ -82,6 +97,7 @@ export interface QuestionAskInput {
   provisionTo?: ProvisionTarget;
   fulfillmentTarget?: FulfillmentTarget;
   supersedes?: string;
+  attachments?: { path: string; label?: string }[];
 }
 
 /**
@@ -224,8 +240,55 @@ export function buildQuestionAsk(
       acknowledgedUntil: null,
       // Card 54007ab7 — never read at ask time; only a human can set this, via POST /api/questions/mark-read.
       readAt: null,
+      // Card 432765ab — always `[]` here: attachments are resolved+copied SEPARATELY (see
+      // `prepareQuestionAttachments` below), asynchronously, AFTER this synchronous builder returns and
+      // BEFORE `db.insertQuestion` — which takes the real, derived attachment list as its own 2nd param,
+      // never reading this field. This placeholder only satisfies `Question`'s required field.
+      attachments: [],
     },
   };
+}
+
+/**
+ * `question_ask`'s attachment resolve+copy+insert tail (card 432765ab) — shared by BOTH `question_ask`
+ * registrations (`mcp/orchestration.ts`, `mcp/platform.ts`), called with the FRESH `question` a
+ * preceding `buildQuestionAsk` returned, AFTER that call and BEFORE anything else (supersede/event-
+ * append/etc. in the caller) — mirrors `applySupersede`'s own "insert before anything else" ordering
+ * contract, for the same reason: every failure mode here must leave the system in an obviously-safe
+ * state, never a half-done one.
+ *
+ * Resolves+copies every attachment (`prepareQuestionAttachments`, `mcp/attachments.ts` — see its own doc
+ * for the resolve-all-then-copy-all ordering and the TOCTOU-safe cap enforcement), then calls
+ * `db.insertQuestion`. If the INSERT itself throws (a DB error after a successful copy), the just-created
+ * attachment store dir is removed before the error propagates — closing the "no orphan store dir on a
+ * failed insert" half of the atomicity contract that `prepareQuestionAttachments` doesn't itself cover
+ * (it only owns the copy-phase failures).
+ */
+export async function finalizeQuestionAsk(
+  db: Db,
+  projectId: string,
+  question: Question,
+  attachmentInputs: AttachmentInput[] | undefined,
+): Promise<{ question: Question } | { error: string }> {
+  const project = db.getProject(projectId);
+  if (!project) return { error: "project not found" };
+  const caps = resolveConfig(project.config).orchestration;
+  const attachResult = await prepareQuestionAttachments(project, question.id, attachmentInputs, {
+    maxBytes: caps.attachmentMaxBytes,
+    maxCount: caps.attachmentMaxCount,
+  });
+  if (!attachResult.ok) return { error: attachResult.error };
+  try {
+    db.insertQuestion(question, attachResult.attachments);
+  } catch (err) {
+    if (attachResult.attachments.length > 0) {
+      try {
+        fs.rmSync(questionAttachmentDir(question.id), { recursive: true, force: true });
+      } catch { /* best-effort cleanup */ }
+    }
+    return { error: (err as Error).message };
+  }
+  return { question };
 }
 
 /**
@@ -382,15 +445,15 @@ export function computeFulfillment(db: Db, q: Question): { state: "unknown" | "u
  */
 export function questionPullItem(q: Question, db: Db): Record<string, unknown> {
   if (q.type === "credential") {
-    return { questionId: q.id, title: q.title, type: q.type, ack: credentialAck(q) };
+    return { questionId: q.id, title: q.title, type: q.type, ack: credentialAck(q), attachments: q.attachments };
   }
   if (q.type === "permission") {
     return {
       questionId: q.id, title: q.title, type: q.type, approved: q.chosenOption === PERMISSION_ANSWERS[0], note: q.note,
-      ...permissionGrant(q), fulfillment: computeFulfillment(db, q),
+      ...permissionGrant(q), fulfillment: computeFulfillment(db, q), attachments: q.attachments,
     };
   }
-  return { questionId: q.id, title: q.title, type: q.type, chosenOption: q.chosenOption, note: q.note };
+  return { questionId: q.id, title: q.title, type: q.type, chosenOption: q.chosenOption, note: q.note, attachments: q.attachments };
 }
 
 /**
@@ -444,16 +507,19 @@ export function pullQuestionsForAgent(
  */
 export function questionAnswerByType(q: Question, db: Db): Record<string, unknown> {
   const hasAnswer = q.state === "answered" || q.state === "consumed";
+  // Card 432765ab — attachments are an ASK-time fact, independent of answer state/type, so every branch
+  // surfaces the SAME `q.attachments` (the already-redacted public shape — see `toQuestion`'s own
+  // mapping). Both callers of this function (`taskRequestGetItem`, `auditRequestItem`) get it for free.
   if (q.type === "credential") {
-    return { ack: hasAnswer ? credentialAck(q) : null };
+    return { ack: hasAnswer ? credentialAck(q) : null, attachments: q.attachments };
   }
   if (q.type === "permission") {
     return {
       approved: hasAnswer ? q.chosenOption === PERMISSION_ANSWERS[0] : null, note: q.note,
-      ...permissionGrant(q), fulfillment: computeFulfillment(db, q),
+      ...permissionGrant(q), fulfillment: computeFulfillment(db, q), attachments: q.attachments,
     };
   }
-  return { chosenOption: q.chosenOption, note: q.note };
+  return { chosenOption: q.chosenOption, note: q.note, attachments: q.attachments };
 }
 
 /**
