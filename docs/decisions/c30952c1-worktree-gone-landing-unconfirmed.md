@@ -116,4 +116,13 @@ producer). Pinned by scenario H, seam-driven via the EXISTING `unionMergeGitFact
 - Do not duplicate `finishSoloAlreadyLanded`'s finalize sequence for the case where the retry succeeds —
   let the existing `if (preLanded)` branch below handle it; this fix only decides whether `preLanded` gets
   a second chance to be set. (Code Review round 2: this is still correct, but it is NOT by itself
-  sufficient — see the MAJOR finding above; the branch it hands off to had its own bug.)
+  sufficient — see the MAJOR finding above; the branch it hands off to had its own bug, closed by card
+  `89bc3b86`.)
+- (Round 3, card `89bc3b86` — docs/decisions/89bc3b86-*.md) The "every caller gets its own distinct
+  reason" rule two bullets up is narrower than it reads: the inert-reclassify re-union (a THIRD
+  `mergeMainIntoWorktree` caller, discovered after this record was first written) reuses the
+  admission-time producer's OWN `worktree_missing_at_admission` reason rather than minting a fourth one —
+  both describe the identical fact (vanished during a wait), just discovered at different checkpoints. Do
+  not assume a new caller needs a brand-new reason; check whether an existing one already describes the
+  same fact first. And do not let `finishSoloAlreadyLanded` returning `null` on a gone worktree fall
+  through unrefused — see `89bc3b86`'s fix 3.

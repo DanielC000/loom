@@ -7630,7 +7630,13 @@ export async function mergeMainIntoWorktree(
   try {
     wtGit = makeGit(worktreePath, timeoutMs);
   } catch (e) {
-    return { ok: false, worktreeMissing: true, reason: `the worktree no longer exists: ${(e as Error).message}` };
+    // @decision 89bc3b86 — never label this worktreeMissing when the path still exists on disk: every
+    //  caller maps that flag to a distinct "worktree is gone" refusal, which would misreport a different,
+    //  still-present-path failure (e.g. a transient fs/git-binary error) as the wrong cause.
+    if (!fs.existsSync(worktreePath)) {
+      return { ok: false, worktreeMissing: true, reason: `the worktree no longer exists: ${(e as Error).message}` };
+    }
+    return { ok: false, reason: `failed to construct a git handle for the worktree: ${(e as Error).message}` };
   }
 
   let mainSha: string;

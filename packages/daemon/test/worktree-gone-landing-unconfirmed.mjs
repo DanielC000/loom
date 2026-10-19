@@ -35,23 +35,27 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // path and mislabelled the refusal as `gate_worktree_dirty` ("uncommitted changes") about a worktree
 // that has none, leaving the task stuck in_progress. Fixed: skip the stamp entirely when the worktree is
 // missing and finish directly. Scenarios (F)/(G) below pin BOTH legs that reach this code (first-lookup-
-// success and retry-success), via a NEW test-only seam (`preLandedLookupGitFactory`, same style as the
-// pre-existing `alreadyLandedGitFactory`) threaded ONLY into the `if (gate)` block's own two
-// `findLandedSquashCommit` calls (the first attempt and the retry) — chosen because no EXISTING seam
-// reaches those two calls (the early `!fs.existsSync` short-circuit's own lookup, and the batch-fallback
-// fault-injection tests' `alreadyLandedGitFactory`, both reach DIFFERENT call sites — see
-// batch-fallback-already-landed-lookup-fault-injection-timeout.mjs's own header for why). Rather than
-// throwing to simulate a fault, the factory LANDS the branch for real (via `mergeBranch`, the same
-// lower-level helper `merge-content-reachability.mjs` uses) as a side effect of the Nth matching
-// `git log --grep=Loom-Worker-Branch` call — deterministic, no real timing/concurrency needed: the EARLY
-// short-circuit's own (unfaulted) lookup runs against a genuinely not-yet-landed repo and correctly
-// returns null (falling through, exactly like scenarios C/D), and only the `if (gate)` block's own
-// lookup(s) — the ones this seam controls — ever see the landing.
-//   (F) first-lookup-success leg: the landing happens on the FIRST `if (gate)` lookup (match #1) — the
+// success and retry-success), via a test-only seam (`preLandedLookupGitFactory`, same style as the
+// pre-existing `alreadyLandedGitFactory`) threaded into the `if (gate)` block's own two
+// `findLandedSquashCommit` calls (the first attempt and the retry). Rather than throwing to simulate a
+// fault, the factory LANDS the branch for real (via `mergeBranch`, the same lower-level helper
+// `merge-content-reachability.mjs` uses) as a side effect of the Nth matching `git log
+// --grep=Loom-Worker-Branch` call — deterministic, no real timing/concurrency needed.
+//   ⚠️ Card 89bc3b86 (finding 3): this seam now ALSO threads into TWO more call sites than when this
+//   paragraph was first written — the EARLY `!fs.existsSync` short-circuit's own `finishSoloAlreadyLanded`
+//   call (always its own match #1, correctly null here, since nothing has landed yet) and the LATER
+//   `if (preLanded)` finalize block's OWN `finishSoloAlreadyLanded` call (its own trailing match, which
+//   simply re-confirms the real landing once `if (gate)`'s own lookup already found it) — see scenario
+//   (K) below, which deliberately faults that second one. (F)/(G)'s own match numbering is shifted by
+//   one slot from this file's ORIGINAL design to account for the first of those two; read each
+//   scenario's own comment for its current count, not the numbers in this paragraph.
+//   (F) first-lookup-success leg: the landing happens on the `if (gate)` block's own first lookup — the
 //       retry never fires. Expect merged:true, ALREADY_MERGED, task done, no mislabelled refusal.
-//   (G) retry-success leg: the first `if (gate)` lookup (match #1) runs on a still-unlanded repo and
-//       correctly returns null, triggering the retry; the landing happens on the retry (match #2).
+//   (G) retry-success leg: the `if (gate)` block's own first lookup runs on a still-unlanded repo and
+//       correctly returns null, triggering the retry; the landing happens on the retry.
 //       Expect the same clean ALREADY_MERGED finish.
+//   (K) card 89bc3b86 finding 3 — `finishSoloAlreadyLanded`'s own trailing re-lookup (not (F)/(G)'s) is
+//       the one faulted; see its own header below.
 //
 // MINOR 1: `mergeMainIntoWorktree` is ALSO called for admission-time re-union (after a gate-queue wait of
 // possibly minutes), and used to construct its worktree git handle OUTSIDE any try — a worktree that
@@ -65,10 +69,38 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       path, advances canonical main as a side effect (deterministically simulating "a sibling landed
 //       while this op waited in the gate queue", with no real concurrency needed) before returning the
 //       real git handle, so the admission-time re-union's own `admissionHead !== gateBaseMainHead` check
-//       actually fires; on the SECOND such call (the re-union attempt itself), throws the same
-//       `GitConstructError`-shaped failure a genuinely-vanished worktree would produce. The real worktree
-//       is never touched, so a plain follow-up confirm (fresh SessionService, no fault) proves this isn't
-//       a permanent stuck state.
+//       actually fires; on the SECOND such call (the re-union attempt itself), RENAMES the real worktree
+//       directory away before throwing — a genuine, if transient, vanish (card 89bc3b86's own
+//       fs.existsSync-in-the-catch fix means a bare throw with the path still present no longer
+//       classifies as worktreeMissing at all — see finding 4 below). The test renames it back before the
+//       same-instance re-confirm and again before the fresh-instance recovery check, proving this isn't a
+//       permanent stuck state either way.
+//
+// CARD 89bc3b86 ROUND 2 — a Code Review of the first round's fixes found a MAJOR and several smaller
+// items, closed here:
+//
+// MAJOR: a worktree that vanishes during the gate-queue wait with MAIN UNCHANGED (only the worker's own
+// late commit, or nothing at all, moved) skips `reunionAtAdmission`'s own re-union entirely — it only
+// runs when `admissionHead !== gateBaseMainHead`. Flow then reaches `captureGatedTip` (called right
+// before every real gate spawn), whose own `computeWorktreeGateStamp` read returns `head:null` for the
+// gone worktree, throwing `GateWorktreeDirtyError` — caught as an ordinary `gate_worktree_dirty` mislabel,
+// exactly the MINOR-1 bug round 1 fixed at a DIFFERENT call site. The gate-OFF/interval-skip `heldStamp`
+// check (reached post-guard-wait, pre-gate, when the gate is disabled) has the identical shape. Fixed:
+// both now check `fs.existsSync(worktreePath)` on a null head and route to the shared
+// `refuseWorktreeMissingAtAdmission` helper (finding 4) instead.
+//   (L) the queued-wait-no-main-move leg — holds the repo guard directly (same technique as (I)/(J)),
+//       removes the worktree while held, releases with main UNTOUCHED. `captureGatedTip`'s own detection
+//       is what fires here, not `reunionAtAdmission`.
+//   (M) the gate-OFF `heldStamp` leg — same hold-then-remove technique, but the project has no
+//       `gateCommand` at all, so the gate-disabled/inert-skip `heldStamp` check is what fires.
+//
+// Finding 2: nothing in this file goes RED without card 89bc3b86 round 1's `fs.existsSync`-in-the-catch
+// fix (`mergeMainIntoWorktree`'s wtGit-construction catch, git/worktrees.ts). Scenario (N) exercises
+// `mergeMainIntoWorktree` directly: a factory throws while the path genuinely still exists, asserting
+// `worktreeMissing` is NOT set and the reason names the construction failure, never "worktree missing".
+//
+// Finding 3: (K)'s own "never cached" proof used to re-confirm on a FRESH `SessionService` (same gap
+// finding 2 of round 1 closed for (H)) — fixed to re-confirm on the SAME instance instead.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/worktree-gone-landing-unconfirmed.mjs
 import fs from "node:fs";
@@ -77,13 +109,14 @@ import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 useOwnLoomHome("loom-wtglu-home-");
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, mergeBranch } = await import("../dist/git/worktrees.js");
+const { createWorktree, mergeBranch, mergeMainIntoWorktree } = await import("../dist/git/worktrees.js");
 const { canonicalGit } = await import("../dist/git/bounded.js");
 
 let failures = 0;
@@ -93,6 +126,39 @@ const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const now = new Date().toISOString();
 const PASS_GATE = process.platform === "win32" ? "node -e \"process.exit(0)\"" : "true";
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {}, getPid() { return undefined; } };
+const mkdirp = (p) => fs.mkdirSync(p, { recursive: true });
+
+// Card 89bc3b86, scenarios (I)/(J): polls `gateQueueForManager` (the SAME read `gate_queue` uses) until a
+// repo-guard-only wait for `repoPath` shows up QUEUED — i.e. the confirming op has already captured its
+// own `gateBaseMainHead`/`preWaitBranchHead`/`inertSkip` and is now genuinely blocked behind the test's
+// own directly-held guard. Mirrors `merge-gate-inert-diff.mjs`'s identical helper (same reasoning: a fixed
+// sleep races real git-subprocess timing against this test's own hold/release).
+async function waitUntilRepoGuardQueued(sessions, projId, repoPath, timeoutMs) {
+  try {
+    return await sharedWaitUntil(() => {
+      const snap = sessions.gateQueueForManager(projId);
+      return snap.repoGuardOnly.some((e) => e.phase === "queued" && e.repoPath === repoPath);
+    }, { timeoutMs, intervalMs: 10, label: "worktree-gone-landing-unconfirmed: repo guard queued" });
+  } catch (err) {
+    if (err?.exhaustedOnThrow !== false) throw err;
+    return false;
+  }
+}
+
+// Card 89bc3b86, scenarios (I)/(J): a repo with a baseline JS/TS source file committed on main, so the
+// `docs/`-prefix allowlist's per-repo applicability guard (`repoTreeHasJsTsSourceFile`) actually applies —
+// without this, every docs-only diff below would full-gate regardless of `isInertMergeDiff`, which would
+// never reach the repo-guard-only wait this pair of scenarios exists to test. Mirrors `merge-gate-inert-
+// diff.mjs`'s own `makeRepo`.
+function makeInertCapableRepo(repo) {
+  fs.mkdirSync(repo, { recursive: true });
+  registerForCleanup(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "# wtglu-inert\n");
+  mkdirp(path.join(repo, "src"));
+  fs.writeFileSync(path.join(repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
+  execSync(`git init -q && git config user.email wtglu@loom && git config user.name wtglu`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
+}
 
 async function buildFixture(label, { landOutOfBand, keepWorktree }) {
   const sfx = `${label}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -205,11 +271,15 @@ try {
     check("(E) the real gate actually ran (build_gate event, passed:true)", passed.length === 1);
   }
 
-  // Shared setup for (F)/(G): worker worktree created, feature committed, then REMOVED — but NOT landed
-  // onto main at all yet (the fixture itself lands nothing; each scenario's own factory does, as a side
-  // effect of the matching `if (gate)` lookup call it wants to make succeed). `makeFactory({repo, branch})`
-  // is called AFTER the repo/branch are known, so the factory never needs a forward reference.
-  async function buildUnlandedGoneFixture(label, makeFactory) {
+  // Shared setup for (F)/(G)/(K): worker worktree created, feature committed, then REMOVED. When
+  // `preLand` is true, the branch is ALSO landed for real (via `mergeBranch`, through plain unfaulted
+  // git — this helper never routes through any test factory) before the factory or SessionService are
+  // even constructed, so every later read sees a stable, already-settled repo: no scenario below depends
+  // on a fault-injected `git log` read racing against a real squash commit's own write visibility. Each
+  // scenario's own factory instead decides, per match, whether to let a read see that real landing or to
+  // fault it (throw) to simulate "not yet landed" — deterministic either way. `makeFactory({repo, branch})`
+  // is called AFTER the repo/branch (and the real landing, if any) are settled.
+  async function buildUnlandedGoneFixture(label, makeFactory, { preLand = false } = {}) {
     const sfx = `${label}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
     const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
@@ -224,7 +294,12 @@ try {
     registerForCleanup(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "feature work\n");
     commitAll(worktreePath, "feat: add feature", GIT_ID);
-    fs.rmSync(worktreePath, { recursive: true, force: true }); // genuinely gone, nothing landed yet
+    fs.rmSync(worktreePath, { recursive: true, force: true }); // genuinely gone
+
+    if (preLand) {
+      const landed = await mergeBranch(repo, branch, "WTGLU-TASK");
+      if (!landed.ok) throw new Error(`(${label}) fixture setup: mergeBranch failed to pre-land: ${JSON.stringify(landed)}`);
+    }
 
     const counters = makeFactory({ repo, branch });
     const db = new Db();
@@ -240,9 +315,12 @@ try {
     return { db, sessions, repo, projId, taskId, mgrId, workerId, worktreePath, branch, counters };
   }
 
-  // A `--grep=Loom-Worker-Branch`-matching `git log` call, wrapping real git — `onMatch(matchCount)` runs
-  // BEFORE delegating, so it can land the branch (or not) depending on which call number this is.
-  function makeLandingOnMatchFactory({ repo, branch }, onMatch) {
+  // A `--grep=Loom-Worker-Branch`-matching `git log` call, wrapping real git — `faultMatches` names the
+  // match numbers (1-based) that should THROW (simulating "the lookup came back ambiguous/not-yet-landed"
+  // — `findLandedSquashCommit` fails safe to null on ANY error) instead of delegating to the real read.
+  // Deterministic: the repo's real content never changes mid-test, so which matches are faulted is the
+  // ONLY thing that varies the outcome, never real-git write-visibility timing.
+  function makeFaultedMatchFactory({ repo, branch }, faultMatches) {
     let matchCount = 0;
     const factory = (p, ms) => {
       const real = canonicalGit(p, ms);
@@ -250,7 +328,7 @@ try {
         raw: async (args) => {
           if (args[0] === "log" && args.some((a) => typeof a === "string" && a.startsWith("--grep=Loom-Worker-Branch"))) {
             matchCount++;
-            await onMatch(matchCount, repo, branch);
+            if (faultMatches.includes(matchCount)) throw new Error(`fault-injected transient git error (card 89bc3b86 test, match ${matchCount})`);
           }
           return real.raw(args);
         },
@@ -259,15 +337,18 @@ try {
     return { factory, get matchCount() { return matchCount; } };
   }
 
-  // (F) MAJOR FIX — first-lookup-success leg: the landing happens on match #1, no retry needed.
+  // (F) MAJOR FIX — first-lookup-success leg: the `if (gate)` block's own first attempt finds the
+  // (already-landed) branch immediately, no retry needed. Card 89bc3b86: `preLandedLookupGitFactory` now
+  // ALSO threads into the EARLY `!fs.existsSync(worktreePath)` short-circuit's own `finishSoloAlreadyLanded`
+  // call (match #1 — faulted here, so it still reads as "not yet landed", matching this scenario's
+  // original intent) and into the LATER `if (preLanded)` finalize block's own `finishSoloAlreadyLanded`
+  // call (match #3 — let through for real, confirming the real landing a second time).
   {
-    const f = await buildUnlandedGoneFixture("F", (ctx) => makeLandingOnMatchFactory(ctx, async (n, repo, branch) => {
-      if (n === 1) await mergeBranch(repo, branch, "WTGLU-TASK");
-    }));
+    const f = await buildUnlandedGoneFixture("F", (ctx) => makeFaultedMatchFactory(ctx, [1]), { preLand: true });
     dbs.push(f.db);
 
     const r1 = await f.sessions.confirmWorkerMergeTracked(f.mgrId, f.workerId);
-    check("(F) the factory's git-log lookup actually fired exactly once (no retry needed)", f.counters.matchCount === 1);
+    check("(F) the factory's git-log lookup fired exactly three times (early short-circuit, faulted + if(gate)'s own first attempt, real + finalize's own re-lookup, real)", f.counters.matchCount === 3);
     check("(F) settles ok:true", r1.settled === true && r1.ok === true);
     check("(F) merged:true (first lookup found the landing, no mislabelled gate_worktree_dirty)", r1.ok && r1.value.merged === true);
     check("(F) emptyKind ALREADY_MERGED", r1.ok && r1.value.emptyKind === "ALREADY_MERGED");
@@ -276,21 +357,95 @@ try {
     check("(F) does not carry the worktree_gone_landing_unconfirmed refusal", r1.ok && r1.value.worktreeGoneLandingUnconfirmed === undefined);
   }
 
-  // (G) MAJOR FIX — retry-success leg: match #1 runs on a still-unlanded repo (correctly null), the
-  // landing happens on match #2 (the retry).
+  // (G) MAJOR FIX — retry-success leg: the `if (gate)` block's own first attempt is faulted (reads as
+  // still-unlanded), triggering the retry; the retry reads the REAL (already-landed) content and finds
+  // it. Card 89bc3b86: same one-slot-of-faulting shift as (F) above, for the same reason (the early
+  // short-circuit's own now-threaded call is match #1, also faulted here).
   {
-    const g = await buildUnlandedGoneFixture("G", (ctx) => makeLandingOnMatchFactory(ctx, async (n, repo, branch) => {
-      if (n === 2) await mergeBranch(repo, branch, "WTGLU-TASK");
-    }));
+    const g = await buildUnlandedGoneFixture("G", (ctx) => makeFaultedMatchFactory(ctx, [1, 2]), { preLand: true });
     dbs.push(g.db);
 
     const r1 = await g.sessions.confirmWorkerMergeTracked(g.mgrId, g.workerId);
-    check("(G) the factory's git-log lookup fired exactly twice (first attempt + retry)", g.counters.matchCount === 2);
+    check("(G) the factory's git-log lookup fired exactly four times (early short-circuit, faulted + if(gate)'s own first attempt, faulted + its retry, real + finalize's own re-lookup, real)", g.counters.matchCount === 4);
     check("(G) settles ok:true", r1.settled === true && r1.ok === true);
     check("(G) merged:true (the retry found the landing)", r1.ok && r1.value.merged === true);
     check("(G) emptyKind ALREADY_MERGED", r1.ok && r1.value.emptyKind === "ALREADY_MERGED");
     check("(G) task moved to done", g.db.getTask(g.taskId)?.columnKey === "done");
     check("(G) does not carry the worktree_gone_landing_unconfirmed refusal (the retry succeeded)", r1.ok && r1.value.worktreeGoneLandingUnconfirmed === undefined);
+  }
+
+  // (K) card 89bc3b86 finding 3 — preLanded ends up TRUTHY (the branch is pre-landed for real, before the
+  // factory or SessionService even exist, same deterministic shape as (F)/(G) above), but
+  // `finishSoloAlreadyLanded`'s OWN internal re-lookup (its `tipAcrossLandedCheck` call) then comes back
+  // null (a second, independent ambiguity — the proof is no longer confirmable by the time finalize tries
+  // to re-verify it), with the worktree ALSO gone. Pre-fix: this fell through into the ordinary
+  // freshStamp/reuse logic, which reads a gone worktree as "unreadable" and mislabels the eventual
+  // refusal as `gate_worktree_dirty` ("uncommitted changes") about a worktree that has none, stranding the
+  // task `in_progress`. Chosen seam: reuses the EXISTING `preLandedLookupGitFactory` (no new seam) — it
+  // now threads into `finishSoloAlreadyLanded`'s own internal lookup too (card 89bc3b86's fix). THREE
+  // matches reach this one factory: (1) the EARLY short-circuit's own `finishSoloAlreadyLanded` call is
+  // faulted (so it does NOT short-circuit the whole confirm immediately off the real pre-landed content —
+  // this scenario needs to reach the `if (gate)` block, not finish at the early check); (2) the
+  // `if (gate)` block's own outer `preLanded` lookup reads the real (already-landed) content, making
+  // `preLanded` truthy; (3) the `if (preLanded)` finalize block's OWN call to `finishSoloAlreadyLanded`
+  // is the other faulted match — the one this finding is actually about.
+  {
+    const f = await buildUnlandedGoneFixture("K", (ctx) => makeFaultedMatchFactory(ctx, [1, 3]), { preLand: true });
+    dbs.push(f.db);
+
+    const r1 = await f.sessions.confirmWorkerMergeTracked(f.mgrId, f.workerId);
+    check("(K) the factory's git-log lookup fired exactly three times (early short-circuit, faulted + outer lookup, real + finalize's own re-lookup, faulted)", f.counters.matchCount === 3);
+    check("(K) settles ok:true (the refusal is a RESULT, not a crash/mislabel)", r1.settled === true && r1.ok === true);
+    check("(K) merged:false, named reason worktreeGoneLandingUnconfirmed:true (NOT the generic gate_worktree_dirty mislabel)", r1.ok && r1.value.merged === false && r1.value.worktreeGoneLandingUnconfirmed === true);
+    check("(K) does not carry the generic gateWorktreeDirty shape", r1.ok && r1.value.gateWorktreeDirty === undefined);
+    check("(K) reason text names the worktree being gone", r1.ok && /worktree is gone/.test(r1.value.reason ?? ""));
+    check("(K) task column unchanged (still in_progress, not stranded as a mislabelled dirty-tree refusal)", f.db.getTask(f.taskId)?.columnKey === "in_progress");
+    const rejected = f.db.listEventsForWorker(f.workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_gone_landing_unconfirmed");
+    check("(K) a merge_rejected event is recorded with the named reason", rejected.length === 1);
+
+    // Card 89bc3b86 round 2, finding 3: the ORIGINAL version of this check re-confirmed on a FRESH
+    // SessionService — the exact gap round 1's own finding 2 (scenario (H)) closed, re-opened here.
+    // `PendingOpRegistry`'s cache is per-instance; a fresh instance has nothing to hit regardless of
+    // classification. Re-confirm on the SAME `sessions` instance (faultMatches [1,3] still fixed) instead:
+    // its own EARLY short-circuit becomes match #4 — not in [1,3], so it reads the REAL (permanently
+    // landed) content and finds it immediately. A replayed cache hit would have reproduced the SAME
+    // merged:false refusal; genuinely re-running is what lets it instead correctly recover to merged:true.
+    const r2 = await f.sessions.confirmWorkerMergeTracked(f.mgrId, f.workerId);
+    check("(K) same-instance follow-up fired the factory a fourth time (its own early short-circuit, real)", f.counters.matchCount === 4);
+    check("(K) same-instance follow-up carries NO cacheHit (genuinely re-ran, not replayed)", r2.cacheHit === undefined);
+    check("(K) same-instance follow-up got a DIFFERENT opId than r1 (a fresh mint, not a replay)", r2.ok && r1.ok && r2.value.opId !== r1.value.opId);
+    check("(K) same-instance follow-up actually finds the real landing (merged:true — a replay could never flip the verdict)", r2.ok && r2.value.merged === true);
+    check("(K) task moved to done on the follow-up confirm", f.db.getTask(f.taskId)?.columnKey === "done");
+  }
+
+  // (N) card 89bc3b86 round 2, finding 2 — nothing in this file (pre-round-2) went RED without the
+  // round-1 fs.existsSync-in-the-catch fix (mergeMainIntoWorktree's own wtGit-construction catch,
+  // git/worktrees.ts). Exercises that function DIRECTLY, no confirmWorkerMerge machinery: a factory
+  // throws on the worktree-path construction while the real directory genuinely still exists. Must NOT
+  // classify worktreeMissing, and the reason must name the construction failure, never claim the
+  // worktree is gone.
+  {
+    const sfx = `n-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true });
+    registerForCleanup(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# wtglu\n");
+    execSync(`git init -q && git config user.email wtglu@loom && git config user.name wtglu`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
+    const { worktreePath, branch } = await createWorktree(repo, `wtglu-proj-${sfx}`, `wtglu-task-${sfx}`);
+    registerForCleanup(worktreePath);
+    check("(N) PRECONDITION: the worktree directory genuinely exists on disk", fs.existsSync(worktreePath));
+
+    const throwingFactory = (p, ms) => {
+      if (p === worktreePath) throw new Error("fault-injected transient git error (card 89bc3b86 round 2 test, path still present)");
+      return canonicalGit(p, ms);
+    };
+    const result = await mergeMainIntoWorktree(repo, worktreePath, { timeoutMs: 5_000, gitFactory: throwingFactory }, undefined, branch);
+    check("(N) ok:false", result.ok === false);
+    check("(N) NOT worktreeMissing — the path genuinely still exists, so the throw is a DIFFERENT failure", !result.worktreeMissing);
+    check("(N) reason names the construction failure, not a claimed vanish", /failed to construct a git handle/.test(result.reason ?? ""));
+    check("(N) reason does NOT claim the worktree no longer exists", !/no longer exists/.test(result.reason ?? ""));
+    check("(N) the real worktree directory was never touched by this call (still on disk)", fs.existsSync(worktreePath));
   }
 
   // (H) MINOR 1 — the worktree vanishing DURING the gate-queue wait, discovered at admission-time
@@ -309,6 +464,8 @@ try {
 
     const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
     registerForCleanup(worktreePath);
+    const parkedPath = `${worktreePath}.parked`;
+    registerForCleanup(parkedPath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "feature work\n");
     commitAll(worktreePath, "feat: add feature", GIT_ID);
     const headBeforeSibling = git(repo, "rev-parse HEAD");
@@ -317,6 +474,13 @@ try {
     // side effect must fire on the RETURNED HANDLE's first `raw()` call (the merge-base check, which runs
     // AFTER `mainSha` is already captured), never at factory-construction time, or it would advance main
     // before `mainSha` is read and the admission-time "moved" check would never see a difference.
+    //
+    // Card 89bc3b86: the SECOND (and every later) construction genuinely RENAMES the real worktree away
+    // (not just throws) so `fs.existsSync(worktreePath)` is honestly false at the exact moment
+    // `mergeMainIntoWorktree`'s own catch checks it (card 89bc3b86's fs.existsSync disambiguation — a
+    // throw alone, with the path still present, now correctly classifies as a DIFFERENT, non-worktree-
+    // missing failure instead, since the real directory is never otherwise touched). The vanish is still
+    // only ever transient — restored explicitly by the test, below, before the recovery check.
     let worktreePathConstructs = 0;
     const unionMergeGitFactory = (p, ms) => {
       if (p !== worktreePath) return canonicalGit(p, ms);
@@ -338,7 +502,8 @@ try {
           },
         };
       }
-      // SECOND construction (the admission-time re-union itself): simulate the worktree having vanished.
+      // SECOND (and any later) construction (the admission-time re-union itself): a genuine, real vanish.
+      fs.renameSync(worktreePath, parkedPath);
       throw new Error("Cannot use simple-git on a directory that does not exist (fault-injected, card c30952c1 test)");
     };
 
@@ -363,12 +528,34 @@ try {
     check("(H) main HEAD only differs by the deliberate sibling commit (no squash landed)", git(repo, "rev-parse HEAD") !== headBeforeSibling && git(repo, "rev-list --count HEAD") === "2");
     check("(H) branch ref still exists (untouched)", git(repo, `branch --list ${branch}`) !== "");
     check("(H) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
-    check("(H) the real worktree directory was NEVER actually touched (still on disk)", fs.existsSync(worktreePath));
+    // Card 89bc3b86: the vanish is now a REAL (rename-away) removal at the moment of the catch — proving
+    // fix 4's fs.existsSync disambiguation actually classified this correctly, not merely a throw with the
+    // path still present (which would now classify as a DIFFERENT, non-worktreeMissing failure instead).
+    check("(H) the real worktree directory genuinely does not exist under its own name right after the refusal", !fs.existsSync(worktreePath) && fs.existsSync(parkedPath));
     const rejected = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
     check("(H) a merge_rejected event is recorded with the named reason", rejected.length === 1);
 
-    // NEVER CACHED + genuinely recoverable: a FRESH SessionService (no fault factory) confirming the SAME
-    // worker now succeeds normally — the "vanish" was only ever simulated, the real worktree is fine.
+    // Card 89bc3b86 finding 2 (Code Review round 2 on c30952c1): the ORIGINAL version of this check
+    // re-confirmed on a FRESH SessionService — `PendingOpRegistry`'s `untilSupersededVerdicts` cache is
+    // per-instance and in-memory, so a fresh instance has nothing to hit regardless of whether
+    // `worktree-missing-at-admission` is actually in `NEVER_CACHED_OUTCOMES`. A negative control (removing
+    // that string from the set) left the old check green. Re-confirm on the SAME `sessions` instance
+    // instead, worktree STILL genuinely parked (no restore): this hits the EARLY `!fs.existsSync(worktreePath)`
+    // short-circuit before `unionMergeGitFactory` is ever reached again, so the factory's own construct
+    // count does NOT advance — a DIFFERENT but equally never-cached classification
+    // (`worktree-gone-landing-unconfirmed`, since nothing ever actually landed), proving a same-instance
+    // re-confirm genuinely re-runs rather than replaying ANY stale worktree-gone verdict from the cache.
+    const r1b = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    check("(H) same-instance re-confirm settles ok:true (a real re-run, not a crash)", r1b.settled === true && r1b.ok === true);
+    check("(H) same-instance re-confirm did NOT reach the union-merge factory again (early short-circuit, worktree still gone)", worktreePathConstructs === 2);
+    check("(H) same-instance re-confirm carries NO cacheHit (genuinely re-ran, not replayed)", r1b.cacheHit === undefined);
+    check("(H) same-instance re-confirm got a DIFFERENT opId than r1 (a fresh mint, not a replay)", r1b.ok && r1.ok && r1b.value.opId !== r1.value.opId);
+    check("(H) same-instance re-confirm also refuses cleanly, merged:false", r1b.ok && r1b.value.merged === false);
+
+    // NEVER CACHED + genuinely recoverable: restore the worktree, then a FRESH SessionService (no fault
+    // factory) confirming the SAME worker now succeeds normally — the vanish was only ever transient, the
+    // real worktree is fine.
+    fs.renameSync(parkedPath, worktreePath);
     const sessions2 = new SessionService(db, ptyStub, new OrchestrationControl(), {
       reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
     });
@@ -376,6 +563,260 @@ try {
     check("(H) a follow-up confirm with the fault cleared carries NO cacheHit (genuinely re-ran)", r2.cacheHit === undefined);
     check("(H) a follow-up confirm with the fault cleared actually merges (not a permanent stuck state)", r2.ok && r2.value.merged === true);
     check("(H) task moved to done on the follow-up confirm", db.getTask(taskId)?.columnKey === "done");
+  }
+
+  // ── (I) card 89bc3b86 finding 1, leg (a) — MAIN moved during the INERT-RECLASSIFY repo-guard-only wait,
+  //        and the worktree is ALSO genuinely gone by the time the reclassification's own re-union runs.
+  //        Round-2 Code Review on c30952c1: the pre-fix code folded `reunion.worktreeMissing` into the
+  //        ordinary `reunionFailed` branch here, which — once admitted — would run a full real gate before
+  //        the squash's own entry check refuses anyway (a wasted gate lane for a doomed merge). Mirrors
+  //        `merge-gate-inert-diff.mjs` scenario (H)'s own "hold the repo guard directly from the test, land
+  //        a real sibling commit on MAIN while held" technique, but ALSO removes the real worktree
+  //        directory before releasing — the genuinely-gone leg this card's fix exists for. ────────────────
+  {
+    const sfx = `i-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+    const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    makeInertCapableRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+    });
+
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    registerForCleanup(worktreePath);
+    // Docs-only — provably inert against main BEFORE the wait (same precondition `isInertMergeDiff` needs).
+    mkdirp(path.join(worktreePath, "docs"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "notes\n");
+    commitAll(worktreePath, "docs: add note", GIT_ID);
+    const headBeforeSibling = git(repo, "rev-parse HEAD");
+
+    db.insertProject({ id: projId, name: "WTGLU-I", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "WTGLU-I-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    // Hold the repo-guard-only slot directly from the test — the SAME primitive the inert-skip path itself
+    // calls (`GateSemaphore.acquireRepoGuardOnly`).
+    const releaseTestHold = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: repo, projectId: projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op-i",
+    });
+
+    const pConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const queued = await waitUntilRepoGuardQueued(sessions, projId, repo, 60000);
+    check("(I) the confirm genuinely reached its own repo-guard-only wait before we release our hold", queued);
+
+    // While held: land a real commit DIRECTLY on main (simulating a same-repo sibling landing while this
+    // op waits), AND remove the real worktree directory — the leg this fix covers.
+    mkdirp(path.join(repo, "src"));
+    fs.writeFileSync(path.join(repo, "src", "sibling.ts"), "export const sibling = true;\n");
+    commitAll(repo, "feat: sibling landed while queued", GIT_ID);
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+
+    releaseTestHold();
+    const r1 = await pConfirm;
+
+    check("(I) settles ok:true (the refusal is a RESULT, not a crash)", r1.settled === true && r1.ok === true);
+    check("(I) merged:false, named reason worktreeMissingAtAdmission:true", r1.ok && r1.value.merged === false && r1.value.worktreeMissingAtAdmission === true);
+    check("(I) reason text names the worktree being gone", r1.ok && /no longer exists/.test(r1.value.reason ?? ""));
+    check("(I) main HEAD only differs by the deliberate sibling commit (no squash landed)", git(repo, "rev-parse HEAD") !== headBeforeSibling && git(repo, "rev-list --count HEAD") === "2");
+    check("(I) branch ref still exists (untouched)", git(repo, `branch --list ${branch}`) !== "");
+    check("(I) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
+    const rejected = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
+    check("(I) a merge_rejected event is recorded with the named reason", rejected.length === 1);
+    // NOTE: unlike (J) below, this leg's FINAL classification is correct even without this card's fix —
+    // `reunionAtAdmission`'s own pre-existing (c30952c1) check catches it too, just after first being
+    // admitted through the real gate's queue (the "wasted queue wait" this card's own finding names, not
+    // a wrong answer). This scenario therefore does NOT by itself discriminate the fix; (J) does.
+  }
+
+  // ── (J) card 89bc3b86 finding 1, leg (b) — ONLY the BRANCH moves during the wait (the db413510 trigger)
+  //        — MAIN NEVER MOVES — and the worktree is gone by the time the reclassification's own re-union
+  //        runs. Pre-fix: `postWaitHead` is still truthy even though it only equals `gateBaseMainHead` by
+  //        coincidence, so the re-union still runs; the old code folded its `worktreeMissing` result into
+  //        `reunionFailed`, which (per the card) went on to crash/mislabel one call later as a generic
+  //        `gate_worktree_dirty` refusal instead of the correct `worktree_missing_at_admission`. Mirrors
+  //        `merge-gate-inert-diff.mjs` scenario (J)'s own "hold the guard directly, commit to the BRANCH
+  //        while held, main never moves" technique, plus removing the worktree before releasing. ─────────
+  {
+    const sfx = `j-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+    const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    makeInertCapableRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+    });
+
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    registerForCleanup(worktreePath);
+    mkdirp(path.join(worktreePath, "docs"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "notes\n");
+    commitAll(worktreePath, "docs: add note", GIT_ID);
+
+    db.insertProject({ id: projId, name: "WTGLU-J", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "WTGLU-J-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const mainHeadBefore = git(repo, "rev-parse HEAD");
+
+    const releaseTestHold = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: repo, projectId: projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op-j",
+    });
+
+    const pConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const queued = await waitUntilRepoGuardQueued(sessions, projId, repo, 60000);
+    check("(J) the confirm genuinely reached its own repo-guard-only wait before we release our hold", queued);
+
+    // While held: commit a new, non-docs file directly to the worker's OWN branch (the worktree is still
+    // present for this — a still-active worker committing further while its own merge waits), THEN remove
+    // the real worktree directory. Main is NEVER touched — isolates the branch-only-move leg.
+    mkdirp(path.join(worktreePath, "src"));
+    fs.writeFileSync(path.join(worktreePath, "src", "late.ts"), "export const late = true;\n");
+    commitAll(worktreePath, "feat: late commit during the guard wait", GIT_ID);
+    const mainHeadStillDuringWait = git(repo, "rev-parse HEAD");
+    check("(J) sanity: main genuinely never moved during the wait — isolates the branch-only case", mainHeadStillDuringWait === mainHeadBefore);
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+
+    releaseTestHold();
+    const r1 = await pConfirm;
+
+    check("(J) settles ok:true (the refusal is a RESULT, not a crash/mislabel)", r1.settled === true && r1.ok === true);
+    check("(J) merged:false, named reason worktreeMissingAtAdmission:true (NOT the generic gate_worktree_dirty mislabel)", r1.ok && r1.value.merged === false && r1.value.worktreeMissingAtAdmission === true);
+    check("(J) does not carry the generic gateWorktreeDirty shape", r1.ok && r1.value.gateWorktreeDirty === undefined);
+    check("(J) reason text names the worktree being gone", r1.ok && /no longer exists/.test(r1.value.reason ?? ""));
+    check("(J) main HEAD is STILL completely unchanged (the branch-only move never touched it)", git(repo, "rev-parse HEAD") === mainHeadBefore);
+    check("(J) branch ref still exists, including the late commit (untouched by any squash)", git(repo, `branch --list ${branch}`) !== "");
+    check("(J) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
+    const rejected = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
+    check("(J) a merge_rejected event is recorded with the named reason", rejected.length === 1);
+  }
+
+  // ── (L) card 89bc3b86 round 2, finding 1 (MAJOR) — the queued-wait-no-main-move leg. A REAL (non-inert)
+  //        branch, so this takes the full `runExclusive` gate-admission path, never the inert-skip's own
+  //        `acquireRepoGuardOnly`. Holding the repo guard directly from the test (the SAME `activeMergeRepos`
+  //        registry `runExclusive`'s own `mergeRepoFree` admission check reads — `acquireRepoGuardOnly`
+  //        writes to it too, see that method's own doc) blocks this confirm's admission exactly the same
+  //        way it would block a same-repo sibling inert-skip. Main is NEVER touched — isolates the leg
+  //        `reunionAtAdmission` cannot see (it only re-unions when main moved) from (I)'s own main-moved leg.
+  //        The reviewer's own repro. ──────────────────────────────────────────────────────────────────────
+  {
+    const sfx = `l-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+    const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    makeInertCapableRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    let gateCalls = 0;
+    const fakeGate = async () => { gateCalls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+      runGate: fakeGate,
+    });
+
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    registerForCleanup(worktreePath);
+    // A REAL (non-docs) change — this must NOT be inert, or it takes (I)/(J)'s own repo-guard-only path.
+    mkdirp(path.join(worktreePath, "src"));
+    fs.writeFileSync(path.join(worktreePath, "src", "feat.ts"), "export const feat = true;\n");
+    commitAll(worktreePath, "feat: add feature", GIT_ID);
+    const mainHeadBefore = git(repo, "rev-parse HEAD");
+
+    db.insertProject({ id: projId, name: "WTGLU-L", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "WTGLU-L-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const releaseTestHold = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: repo, projectId: projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op-l",
+    });
+
+    const pConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const queued = await sharedWaitUntil(() => sessions.gateQueueForManager(projId).queued.some((e) => e.gateType === "merge"), { timeoutMs: 60000, intervalMs: 10, label: "(L) confirm genuinely queued behind the held repo guard" });
+    check("(L) the confirm genuinely reached the real gate-admission queue, blocked by the held repo guard", queued);
+
+    // While held: remove the real worktree directory. Main is NEVER touched.
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+    releaseTestHold();
+    const r1 = await pConfirm;
+
+    check("(L) settles ok:true (the refusal is a RESULT, not a crash/mislabel)", r1.settled === true && r1.ok === true);
+    check("(L) merged:false, named reason worktreeMissingAtAdmission:true (NOT the generic gate_worktree_dirty mislabel)", r1.ok && r1.value.merged === false && r1.value.worktreeMissingAtAdmission === true);
+    check("(L) does not carry the generic gateWorktreeDirty shape", r1.ok && r1.value.gateWorktreeDirty === undefined);
+    check("(L) reason text names the worktree being gone", r1.ok && /no longer exists/.test(r1.value.reason ?? ""));
+    check("(L) the fake gate command was NEVER spawned — refused before captureGatedTip's own spawn", gateCalls === 0);
+    check("(L) main HEAD is completely unchanged (this leg never moves it)", git(repo, "rev-parse HEAD") === mainHeadBefore);
+    check("(L) branch ref still exists (untouched)", git(repo, `branch --list ${branch}`) !== "");
+    check("(L) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
+    const rejected = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
+    check("(L) a merge_rejected event is recorded with the named reason", rejected.length === 1);
+  }
+
+  // ── (M) card 89bc3b86 round 2, finding 1 (MAJOR), the heldStamp leg — same hold-then-remove technique
+  //        as (I)/(J), but `orchestration.mergeGate:"off"` (WITH a gateCommand still configured, so `gate`
+  //        stays truthy and the `if (gate)` block — and its own inert-skip/heldStamp logic — is still
+  //        entered; a project with NO gateCommand at all never reaches `if (gate)`, confirmed by a direct
+  //        repro) makes `gateDisabled` true, routing into the gate-off/interval-skip `heldStamp` check
+  //        instead of `captureGatedTip`. ──────────────────────────────────────────────────────────────────
+  {
+    const sfx = `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const projId = `wtglu-proj-${sfx}`, agentId = `wtglu-agent-${sfx}`, taskId = `wtglu-task-${sfx}`;
+    const mgrId = `wtglu-mgr-${sfx}`, workerId = `wtglu-wkr-${sfx}`;
+    const repo = path.join(os.tmpdir(), `loom-wtglu-repo-${sfx}`);
+    makeInertCapableRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      reapWorktreeProcesses: async () => ({ killedPids: [] }), gitOpMs: 5_000, syncAttachBudgetMs: 60_000,
+    });
+
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    registerForCleanup(worktreePath);
+    // Docs-only — the gate-off `heldStamp` check this scenario targets is ONLY reached via `inertSkip`.
+    mkdirp(path.join(worktreePath, "docs"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "notes\n");
+    commitAll(worktreePath, "docs: add note", GIT_ID);
+    const mainHeadBefore = git(repo, "rev-parse HEAD");
+
+    // gateCommand CONFIGURED (so `gate` stays truthy — `if (gate)` is still entered) but
+    // orchestration.mergeGate:"off" makes gateDisabled:true — the combination that routes into the
+    // heldStamp check instead of captureGatedTip.
+    db.insertProject({ id: projId, name: "WTGLU-M", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE, mergeGate: "off" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "WTGLU-M-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const releaseTestHold = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: repo, projectId: projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op-m",
+    });
+
+    const pConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const queued = await waitUntilRepoGuardQueued(sessions, projId, repo, 60000);
+    check("(M) the confirm genuinely reached its own repo-guard-only wait before we release our hold", queued);
+
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+    releaseTestHold();
+    const r1 = await pConfirm;
+
+    check("(M) settles ok:true (the refusal is a RESULT, not a crash/mislabel)", r1.settled === true && r1.ok === true);
+    check("(M) merged:false, named reason worktreeMissingAtAdmission:true (NOT the generic gate_worktree_dirty mislabel)", r1.ok && r1.value.merged === false && r1.value.worktreeMissingAtAdmission === true);
+    check("(M) does not carry the generic gateWorktreeDirty shape", r1.ok && r1.value.gateWorktreeDirty === undefined);
+    check("(M) reason text names the worktree being gone", r1.ok && /no longer exists/.test(r1.value.reason ?? ""));
+    check("(M) main HEAD is completely unchanged", git(repo, "rev-parse HEAD") === mainHeadBefore);
+    check("(M) branch ref still exists (untouched)", git(repo, `branch --list ${branch}`) !== "");
+    check("(M) task column unchanged (still in_progress)", db.getTask(taskId)?.columnKey === "in_progress");
+    const rejected = db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_rejected" && e.detail?.reason === "worktree_missing_at_admission");
+    check("(M) a merge_rejected event is recorded with the named reason", rejected.length === 1);
   }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }

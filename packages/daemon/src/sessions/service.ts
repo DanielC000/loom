@@ -2384,7 +2384,12 @@ class ForeignSpawnInFlightError extends Error {
  *  on the stale base, distinct from the benign `gateBaseInvalidated` staleness race reported at squash.
  */
 class GateWorktreeDirtyError extends Error {
-  constructor(public readonly detail: string) {
+  constructor(
+    public readonly detail: string,
+    // @decision 89bc3b86 — set ONLY on a confirmed-gone worktree (never a bare dirty/unreadable read);
+    //  the catch site routes this to `refuseWorktreeMissingAtAdmission` instead of the dirty-tree wording.
+    public readonly worktreeMissing?: boolean,
+  ) {
     super(`gate worktree dirty before spawn: ${detail}`);
     this.name = "GateWorktreeDirtyError";
   }
@@ -2715,9 +2720,13 @@ export class SessionService {
    *  `undefined` in every existing test constructor ⇒ each call's own default (real `canonicalGit`),
    *  byte-identical to before this seam existed. */
   private readonly alreadyLandedGitFactory?: BoundedGitDeps["gitFactory"];
-  /** @decision c30952c1 — TEST SEAM, same style as {@link alreadyLandedGitFactory}: threaded ONLY into the
+  /** @decision c30952c1 — TEST SEAM, same style as {@link alreadyLandedGitFactory}: threaded into the
    *  `if (gate)` block's own `preLanded`-computing `findLandedSquashCommit` calls (first lookup + retry).
-   *  `undefined` ⇒ real `canonicalGit`, byte-identical to before this seam existed. */
+   *  `undefined` ⇒ real `canonicalGit`, byte-identical to before this seam existed.
+   *
+   *  @decision 89bc3b86 — ALSO threaded into {@link finishSoloAlreadyLanded}'s own re-lookup, which
+   *  serves BOTH the EARLY short-circuit near the top of `confirmWorkerMerge` AND the `if (preLanded)`
+   *  finalize shortcut further down — a test arming this factory sees all three call sites. */
   private readonly preLandedLookupGitFactory?: BoundedGitDeps["gitFactory"];
   /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
    *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
@@ -3166,8 +3175,9 @@ export class SessionService {
       /** TEST SEAM (card 31f8467c): git factory for the already-landed detection calls only
        *  (tipAcrossLandedCheck/pinnedTipForLandedSquash) — see the field's own doc. */
       alreadyLandedGitFactory?: BoundedGitDeps["gitFactory"];
-      /** TEST SEAM (card c30952c1): git factory for the `if (gate)` block's own preLanded-computing
-       *  `findLandedSquashCommit` calls only — see the field's own doc. */
+      /** TEST SEAM (card c30952c1, widened by card 89bc3b86): git factory for the `if (gate)` block's
+       *  own preLanded-computing `findLandedSquashCommit` calls AND `finishSoloAlreadyLanded`'s own
+       *  internal re-lookup (the early short-circuit + the finalize shortcut) — see the field's own doc. */
       preLandedLookupGitFactory?: BoundedGitDeps["gitFactory"];
       /** TEST SEAM (card cee17efe): the dist-importer check's own build step — see {@link distImporterCheckBuild}'s own doc. */
       distImporterCheckBuild?: (worktreePath: string, cancelSignal?: AbortSignal) => Promise<{ ok: boolean; reason?: string }>;
@@ -17571,6 +17581,24 @@ export class SessionService {
       evt("merge_rejected", { reason: "gate_worktree_dirty", sha, phase, detail, ...(reuseRefusalReasons && reuseRefusalReasons.length > 0 ? { reuseRefusalReasons } : {}), ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateWorktreeDirty: { phase, detail } };
     };
+    // @decision 89bc3b86 — ONE shared, never-cached refusal for "the worktree is gone and whether this
+    //  branch landed on main could not be confirmed" — every site that can discover this ambiguity must
+    //  reuse it, never hand-roll a second copy or fall through into an ordinary dirty-tree refusal.
+    const refuseWorktreeGoneLandingUnconfirmed = async (extra: string): Promise<ConfirmMergeResult> => {
+      const detailText = `WORKTREE GONE: this worker's worktree directory no longer exists, and whether '${branch}' already landed on main could not be confirmed (${extra}). Squash phase never reached, canonical repo untouched — nothing was touched. This is NOT a confirmed failure: re-run worker_merge_confirm to retry (a transient lookup glitch clearing on its own will then take the already-landed path and finish cleanly); if the worktree is permanently gone and this branch genuinely never landed, recreate the worktree or re-task this work instead.`;
+      const { suppressed, sha } = await rejectNotify("worktree_gone_landing_unconfirmed", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "worktree_gone_landing_unconfirmed", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: "worktree is gone and this branch's landing could not be confirmed", detailText, notified: !suppressed, opId: thisOpId, worktreeGoneLandingUnconfirmed: true };
+    };
+    // @decision 89bc3b86 — ONE shared, never-cached refusal for "the worktree vanished while this merge
+    //  was being admitted/gated" — `reason` is always the SAME fixed string, never the raw
+    //  GitConstructError text.
+    const refuseWorktreeMissingAtAdmission = async (phaseText: string): Promise<ConfirmMergeResult> => {
+      const detailText = `WORKTREE GONE: this worker's worktree directory no longer exists — it vanished ${phaseText}. Squash phase never reached, canonical repo untouched — nothing was touched. This is NOT a confirmed failure: re-run worker_merge_confirm to retry, or recreate the worktree / re-task this work if it's permanently gone.`;
+      const { suppressed, sha } = await rejectNotify("worktree_missing_at_admission", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "worktree_missing_at_admission", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: "the worktree no longer exists", detailText, notified: !suppressed, opId: thisOpId, worktreeMissingAtAdmission: true };
+    };
     // Card 92be634e — a reduced gate's --only-file= overflow write (buildReducedGateCommand) failing is a
     // genuine prep-time failure, surfaced exactly like a dirty worktree: never a silent fallback to an
     // over-length inline --only= that would fail later as a misleading "command line too long" RED. Shared
@@ -17922,12 +17950,7 @@ export class SessionService {
       //  refuse rather than let that propagate — never treat the unverified lookup as landed.
       if (!preLanded && !fs.existsSync(worktreePath)) {
         preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory });
-        if (!preLanded) {
-          const detailText = `WORKTREE GONE: this worker's worktree directory no longer exists, and whether '${branch}' already landed on main could not be confirmed (the already-landed lookup, retried once, found no landing). Squash phase never reached, canonical repo untouched — nothing was touched. This is NOT a confirmed failure: re-run worker_merge_confirm to retry (a transient lookup glitch clearing on its own will then take the already-landed path and finish cleanly); if the worktree is permanently gone and this branch genuinely never landed, recreate the worktree or re-task this work instead.`;
-          const { suppressed, sha } = await rejectNotify("worktree_gone_landing_unconfirmed", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-          evt("merge_rejected", { reason: "worktree_gone_landing_unconfirmed", sha, ...(suppressed ? { suppressed: true } : {}) });
-          return { merged: false, reason: "worktree is gone and this branch's landing could not be confirmed", detailText, notified: !suppressed, opId: thisOpId, worktreeGoneLandingUnconfirmed: true };
-        }
+        if (!preLanded) return refuseWorktreeGoneLandingUnconfirmed("the already-landed lookup, retried once, found no landing");
       }
       if (!preLanded) {
         const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, gitFactory: this.unionMergeGitFactory }, owedBase, branch);
@@ -18010,6 +18033,10 @@ export class SessionService {
         if (worktreeGone || (landedStamp && landedStamp.head !== null && !landedStamp.dirty)) {
           const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed", expectedMainlineRef });
           if (finished) return finished;
+          // @decision 89bc3b86 — a gone worktree whose own finalize re-lookup also came back null must
+          //  refuse here, never fall through into the freshStamp/reuse logic below, which mislabels a gone
+          //  worktree as gate_worktree_dirty.
+          if (worktreeGone) return refuseWorktreeGoneLandingUnconfirmed("the landing could not be reconfirmed when finalizing");
         }
       }
 
@@ -18406,6 +18433,11 @@ export class SessionService {
                 // union a second time.
                 reclassifyBase = reunion.mainSha;
                 gateBaseMainHead = reunion.mainSha;
+              } else if (reunion.worktreeMissing) {
+                // @decision 89bc3b86 — mirrors the quarantine early-return below: refuse HERE, never fall
+                //  through into `reunionFailed`. Shares `refuseWorktreeMissingAtAdmission` with the
+                //  full-admission re-union site below and `captureGatedTip`'s own detection further down.
+                return refuseWorktreeMissingAtAdmission("while this merge was re-checking main/the branch during the repo-guard wait");
               } else if (reunion.quarantined) {
                 // @decision 7e5b23e7 — do NOT fall through to the real gate on a quarantine here: that
                 // burns a full gate lane before the squash's own entry check refuses anyway. Return the
@@ -18484,6 +18516,9 @@ export class SessionService {
           // worktree. With the gate OFF, re-stamp NOW that the guard is held and refuse if dirty/unreadable.
           if (gateDisabled && inertSkip) {
             const heldStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+            // @decision 89bc3b86 — MAJOR round-2, the gate-OFF/interval-skip twin of `captureGatedTip`'s
+            //  own fix: disambiguate an unreadable held stamp via fs.existsSync before refusing dirty.
+            if (heldStamp.head === null && !fs.existsSync(worktreePath)) return refuseWorktreeMissingAtAdmission("after the repo merge guard was granted");
             if (heldStamp.dirty || heldStamp.head === null) {
               return refuseWorktreeDirty("before-gate", heldStamp.dirty ? "the worktree is dirty after the guard wait" : "worktree stamp unreadable after the repo merge guard was granted");
             }
@@ -18623,7 +18658,11 @@ export class SessionService {
         if (pin) pinnedGateTip = gatedTip;
         gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         if (gatePreStamp.dirty) throw new GateWorktreeDirtyError("the worktree carries uncommitted changes before the gate spawns");
-        if (gatePreStamp.head === null) throw new GateWorktreeDirtyError("the worktree stamp is unreadable before the gate spawns");
+        if (gatePreStamp.head === null) {
+          // @decision 89bc3b86 — MAJOR round-2: a worktree gone with main UNCHANGED skips
+          //  `reunionAtAdmission`'s own re-union (it only runs when main moved) — disambiguate here too.
+          throw new GateWorktreeDirtyError("the worktree stamp is unreadable before the gate spawns", !fs.existsSync(worktreePath));
+        }
         // @decision 01777ceb — the gate reads the WORKTREE's HEAD while the verdict is keyed on the BRANCH ref: they must name the same commit.
         const preOnBranch = gateHeadOnBranch(gatePreStamp.head, gatedTip);
         if (preOnBranch.onBranch === "unverified") gateLinkPreUnverified = true; else if (preOnBranch.onBranch === false) gateLinkPreHeadOff = preOnBranch.head ?? undefined;
@@ -18949,12 +18988,7 @@ export class SessionService {
         // @decision c30952c1 — the worktree vanished DURING the gate-queue wait (a genuinely different
         //  fact from a dirty tree or a content conflict): never a verdict about the branch, so refuse with
         //  a distinct, never-cached reason rather than folding it into the conflict/transient wording below.
-        if (err.failReason === "worktree_missing_at_admission") {
-          const detailText = `WORKTREE GONE: this worker's worktree directory no longer exists — it vanished during the gate-queue wait. Squash phase never reached, canonical repo untouched — nothing was touched. This is NOT a confirmed failure: re-run worker_merge_confirm to retry, or recreate the worktree / re-task this work if it's permanently gone.`;
-          const { suppressed, sha } = await rejectNotify(err.failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-          evt("merge_rejected", { reason: err.failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
-          return { merged: false, reason: "the worktree no longer exists", detailText, notified: !suppressed, opId: thisOpId, worktreeMissingAtAdmission: true };
-        }
+        if (err.failReason === "worktree_missing_at_admission") return refuseWorktreeMissingAtAdmission("during the gate-queue wait");
         // @decision 8c3d6c04 round 2 — a worktree ALREADY dirty before the admission-time re-union was
         // attempted reuses the SAME never-cached `gateWorktreeDirty` outcome as the pre-gate site.
         if (err.dirtyWorktree) return refuseWorktreeDirty("before-gate", err.why);
@@ -19216,7 +19250,12 @@ export class SessionService {
         // Card 92be634e: the admission-time re-derivation's own buildReducedGateCommand call (inside
         // reunionAtAdmission, above) can throw this when its --only-file= overflow write fails.
         if (err instanceof ReducedGateOnlyFileError) return rejectReducedGateOnlyFileFailure(err);
-        if (err instanceof GateWorktreeDirtyError && !gateHasRun) return refuseWorktreeDirty("before-gate", err.detail);
+        if (err instanceof GateWorktreeDirtyError && !gateHasRun) {
+          // @decision 89bc3b86 — MAJOR round-2: `captureGatedTip`'s own detection names a confirmed-gone
+          //  worktree distinctly; route it to the shared refusal instead of the generic dirty-tree one.
+          if (err.worktreeMissing) return refuseWorktreeMissingAtAdmission("while the gate was about to spawn");
+          return refuseWorktreeDirty("before-gate", err.detail);
+        }
         // CANCELLED-WHILE-QUEUED (card 361520a0, Half Two — mirrors runWorkerGate's identical catch): thrown
         // by GateSemaphore.runExclusive when THIS op was withdrawn (gate_cancel, card 8d585277) before it
         // was ever admitted — no process was ever spawned, so this is never a real gate/runner exception and
@@ -20154,7 +20193,10 @@ export class SessionService {
     // qualified (`refs/heads/<branch>`). `undefined` (no watermark yet) falls back to "HEAD", unchanged.
     expectedMainlineRef?: string;
   }): Promise<ConfirmMergeResult | null> {
-    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }));
+    // @decision 89bc3b86 — reuses the SAME `preLandedLookupGitFactory` test seam the pre-gate lookup
+    //  threads through (never a second, dedicated seam): production callers never set it, so this is
+    //  byte-identical outside a hermetic test that deliberately faults this specific re-lookup.
+    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory }));
     const alreadyLanded = looked.result;
     if (!alreadyLanded) return null;
     const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded, repoKey: a.repoKey });
