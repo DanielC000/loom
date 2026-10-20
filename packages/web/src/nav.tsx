@@ -1,4 +1,7 @@
 import type { ReactNode } from "react";
+import ReviewPanel from "./pages/ReviewPanel";
+import QuestionAnswer from "./pages/QuestionAnswer";
+import SessionView from "./pages/SessionView";
 import MissionControl from "./pages/MissionControl";
 import Projects from "./pages/Projects";
 import Overview from "./pages/Overview";
@@ -41,8 +44,8 @@ export type NavPage = {
 // (components/Sidebar.tsx), the route table (App.tsx), and the Command Palette page list
 // (CommandPalette.tsx) all derive from this array, so they can never drift out of sync.
 // Add a new destination here only — tag it with a `group`, and `scoped` as needed.
-// (The /review/:workerId route is parameterized and not a nav destination, so it stays
-// declared directly in App.tsx.)
+// (The parameterized routes are not nav destinations — nothing can link to /session/:id without an
+// id — so they live in PARAM_PAGES at the bottom of this file instead.)
 //
 // The rail re-groups by `group`, so a destination's placement in this array only sets its order
 // WITHIN its group; the section dividers below are for reading, not display order.
@@ -136,6 +139,39 @@ export const NAV_PAGES: NavPage[] = [
   // ── System group ─────────────────────────────────────────────────────────────
   { label: "Usage", to: "/usage", element: <Usage />, group: "system" },
   { label: "Settings", to: "/settings", element: <Settings />, group: "system", scoped: true },
+];
+
+// ── The parameterized routes ───────────────────────────────────────────────────────────────────
+// Where a parameterized address lives in the Atlas tree. Only the frame reads this; the page
+// component underneath neither knows nor cares, which is phase 1's one hard rule
+// (docs/plans/atlas-ui/02-architecture.md).
+//
+// Two shapes, because the three routes genuinely are two shapes. A SESSION address names an entity
+// the tree holds a node for in its own right — the node hangs off that session's OWN project, which
+// is not necessarily the active one — optionally with a node tab below it. A DETAIL address names a
+// row WITHIN an existing nav destination, so the node stays that destination and the row is the last
+// crumb. Homes assigned by `docs/plans/atlas-ui/01-parity-checklist.md` §A, not re-decided here.
+export type AtlasAddress =
+  /** `param` names a SESSION: the node IS that session, under its own project node, `tab` below it. */
+  | { kind: "session"; param: string; tab?: string }
+  /** `param` names a detail row inside the NAV_PAGES destination whose `to` is `under`. */
+  | { kind: "detail"; under: string; param: string };
+
+export type ParamPage = {
+  /** The route pattern, mounted verbatim by both shells. */
+  to: string;
+  element: ReactNode;
+  atlas: AtlasAddress;
+};
+
+// Declared HERE rather than inline in a shell because BOTH shells mount them (App.tsx's LegacyShell
+// and components/AtlasShell.tsx). A path/element pair copied into two route tables drifts the moment
+// one of them is edited — and the drift is silent, since each shell renders only when its own switch
+// state is live, so a test exercising one can never notice the other went stale.
+export const PARAM_PAGES: ParamPage[] = [
+  { to: "/review/:workerId", element: <ReviewPanel />, atlas: { kind: "session", param: "workerId", tab: "Diff" } },
+  { to: "/question/:id", element: <QuestionAnswer />, atlas: { kind: "detail", under: "/inbox", param: "id" } },
+  { to: "/session/:id", element: <SessionView />, atlas: { kind: "session", param: "id" } },
 ];
 
 // The source of truth for what the rail nav (Sidebar) and the Command Palette LIST show (both call this).

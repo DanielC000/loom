@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import ReviewPanel from "./pages/ReviewPanel";
-import QuestionAnswer from "./pages/QuestionAnswer";
-import SessionView from "./pages/SessionView";
-import { NAV_PAGES } from "./nav";
+import { NAV_PAGES, PARAM_PAGES } from "./nav";
 import { Button } from "./components/ui";
 import { Sidebar } from "./components/Sidebar";
 import { AtlasShell } from "./components/AtlasShell";
@@ -318,7 +315,7 @@ function ShellBanners() {
 
 // Today's shell: the fixed Instrument Rail + its 60px flow gutter on the left, the page column on
 // the right. The route table below maps EVERY NAV_PAGES route (a companion-gated page stays
-// reachable by URL) plus the legacy redirects.
+// reachable by URL), the legacy redirects, and every PARAM_PAGES route.
 //
 // Extracted from App() unchanged, and it stays the DEFAULT until the owner signs off the parity
 // checklist (docs/plans/atlas-ui/), so this subtree must keep rendering exactly what it always has.
@@ -351,9 +348,11 @@ function LegacyShell() {
                 lingering links/bookmarks to the right tab (/git → the Git tab via ?tab=git). */}
             <Route path="/vault" element={<Navigate to="/repository" replace />} />
             <Route path="/git" element={<Navigate to="/repository?tab=git" replace />} />
-            <Route path="/review/:workerId" element={<ReviewPanel />} />
-            <Route path="/question/:id" element={<QuestionAnswer />} />
-            <Route path="/session/:id" element={<SessionView />} />
+            {/* The 3 parameterized routes, from the SAME declaration the Atlas shell mounts
+                (src/nav.tsx › PARAM_PAGES) — see its comment for why they are not two lists. */}
+            {PARAM_PAGES.map((p) => (
+              <Route key={p.to} path={p.to} element={p.element} />
+            ))}
           </Routes>
         </main>
       </div>

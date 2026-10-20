@@ -846,6 +846,19 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     const resolveSeededQuestions: LoomDaemon["resolveSeededQuestions"] = async () => {
       if (seededQuestionIds.length === 0) return;
       const ids = seededQuestionIds.splice(0); // clear as we go — an already-answered / unknown id just 400/404s
+      // Answering clears a row's PENDING state but leaves `read_at` untouched, and the rail's own
+      // unread badge (`loom-rail-badge-muted`, components/Sidebar.tsx) is driven by `read_at`, not by
+      // pending. So a resolved-but-never-opened seeded row keeps adding an ELEMENT to the rail of
+      // every later spec on this shared worker daemon — invisible until a spec fingerprints the shell
+      // and reds for something it never did (measured on atlas-switch.spec.ts's BASELINE_SHELL, with
+      // this very cleanup having already run). Mark read for EVERY type, not just the notice below.
+      const markRead = async (id: string) => {
+        await fetch(`${baseURL}/api/questions/mark-read`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ids: [id] }),
+        });
+      };
       for (const id of ids) {
         // Answer via the real human-only route. The answer SHAPE branches by the question's type (card
         // 695ebab0): credential → {secret}; permission → {decision}; decision/input → {note}. So we read
@@ -862,11 +875,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
           // attention item — see lib/attention.ts). Mark it READ instead, via the real human-only
           // mark-read route, which is this kind's actual "resolved" equivalent.
           if (type === "notice") {
-            await fetch(`${baseURL}/api/questions/mark-read`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ ids: [id] }),
-            });
+            await markRead(id);
             continue;
           }
           const body =
@@ -878,6 +887,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
           });
+          await markRead(id);
         } catch { /* best-effort — a torn-down daemon at teardown must never fail the test */ }
       }
     };

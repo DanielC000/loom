@@ -38,11 +38,15 @@ function splitByDepth(pages: NavPage[]): { workspace: NavPage[]; project: NavPag
 // depth already says it — a destination under the project node is scoped to that project, and the
 // node names which one. Round 2's approved IA retires the scope dot for this exact reason ("tree
 // selection IS scoping"); re-adding it would be decoration restating the indent.
-function TreeNode({ page }: { page: NavPage }) {
+function TreeNode({ page, activeTo }: { page: NavPage; activeTo?: string }) {
   return (
     <li>
+      {/* `activeTo` is for an address the ROUTER cannot resolve to this node by path: a detail row
+          lives at its own URL (/question/:id under the Inbox node), so NavLink's own isActive is
+          false there even though the frame's crumbs and heading both name this node. Without it the
+          tree would be the one part of the frame disagreeing about where you are. */}
       <NavLink to={page.to} end={page.end}
-        className={({ isActive }) => `loom-atlas-node${isActive ? " is-active" : ""}`}
+        className={({ isActive }) => `loom-atlas-node${isActive || page.to === activeTo ? " is-active" : ""}`}
         data-testid={`atlas-node-${page.to}`}>
         {/* The twist column is RESERVED, never drawn, while nothing in this tree expands. Keeping the
             width holds every label on one text origin (so rows don't step in and out as the phase-2
@@ -56,7 +60,7 @@ function TreeNode({ page }: { page: NavPage }) {
   );
 }
 
-export function AtlasTree() {
+export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
   const pages = useVisibleNavPages();
   const { workspace, project } = splitByDepth(pages);
   const { projectId, projects } = useActiveProject();
@@ -71,7 +75,7 @@ export function AtlasTree() {
       <div className="loom-atlas-treebody">
         <SectionLabel style={{ margin: "0 0 4px", padding: "0 10px" }}>Workspace</SectionLabel>
         <ul className="loom-atlas-nodes">
-          {workspace.map((p) => <TreeNode key={p.to} page={p} />)}
+          {workspace.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />)}
         </ul>
 
         <SectionLabel style={{ margin: "18px 0 4px", padding: "0 10px" }}>Project</SectionLabel>
@@ -85,7 +89,7 @@ export function AtlasTree() {
           <span className="loom-atlas-lbl">{active?.name ?? "No project"}</span>
         </div>
         <ul className="loom-atlas-nodes is-kids">
-          {project.map((p) => <TreeNode key={p.to} page={p} />)}
+          {project.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />)}
         </ul>
         {/* Deliberately a HINT, not a gate. Today every one of these destinations is reachable with no
             project resolved (ActiveProjectProvider only yields "" when the workspace holds no projects

@@ -385,9 +385,11 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     await expect(atlas(page).locator('[role="status"]').filter({ hasText: "A new Loom release is available" }))
       .toBeVisible();
 
-    // A URL with no node yet (the parameterized routes are P1-2, the legacy redirects P1-3) still
-    // lands on the frame via the shell's catch-all, never a blank column.
-    await page.goto(loomDaemon.baseURL + "/review/no-such-worker");
+    // A URL with no node still lands on the frame via the shell's catch-all, never a blank column.
+    // This was `/review/no-such-worker` until card 1d3192dc (P1-2) gave the parameterized routes real
+    // nodes; a path that is simply not an address — a typo, or a legacy redirect until P1-3 — is now
+    // the only thing the catch-all is for, and is what it must keep handling after P1-3 too.
+    await page.goto(loomDaemon.baseURL + "/no-such-node");
     await expect(page.getByTestId("atlas-empty")).toBeVisible();
 
     // The zero-console-error claim is scoped to THIS route, deliberately, and the collector is reset
