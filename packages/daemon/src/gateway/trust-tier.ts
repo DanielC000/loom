@@ -85,9 +85,21 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   // Requests inbox reads
   { method: "GET", pattern: "/api/questions" },
   { method: "GET", pattern: "/api/questions/:id" },
+  // Attachment serving (card 8f050b79, child 2 of 7d1d66ab) — same class as the question reads just
+  // above: viewing a Request's own attachment is part of reading that Request, so this stays Tier-1 for
+  // the same reason GET /api/questions/:id is. See docs/decisions/8f050b79-*.md for the header/CSP design.
+  { method: "GET", pattern: "/api/questions/:id/attachments/:attachmentId" },
+  // HEAD sibling (mirrors the vault/raw HEAD entry above, decision f7525818) — a HEAD returns the
+  // headers of a GET that is already Tier-1 and no body, strictly less than the admission it rides on.
+  { method: "HEAD", pattern: "/api/questions/:id/attachments/:attachmentId" },
   // --- Answer / steer (first-person human actions on an already-running session) ---
   { method: "POST", pattern: "/api/questions/:id/answer" },
   { method: "POST", pattern: "/api/questions/:id/dismiss" },
+  // The open-tracking stamp (card 8f050b79) is a first-person human action on a Request, same class as
+  // answer/dismiss just above — Tier-1 for the same reason. Automatically swept into the loopback-secret
+  // bearer guard too (gateway/server.ts's `isGuardedApiWrite`, see decision 9ccedbee): it's a non-GET
+  // `/api/*` route and not in `LOOPBACK_GUARD_KEY_AUTHED_EXEMPT`, so nothing else needs to change for that.
+  { method: "POST", pattern: "/api/questions/:id/attachments/:attachmentId/opened" },
   { method: "POST", pattern: "/api/sessions/:id/input" },
   { method: "POST", pattern: "/api/sessions/:id/end" },
   { method: "POST", pattern: "/api/sessions/:id/stop" },

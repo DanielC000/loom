@@ -456,3 +456,88 @@ export async function prepareQuestionAttachments(
   }
   return { ok: true, attachments: stored };
 }
+
+// --- Serving-route helpers (card 8f050b79, child 2) ---------------------------------------------------
+
+/** The question id shape `question_ask` actually mints (`randomUUID()`, questionTool.ts) — a v4 UUID. */
+export const QUESTION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** The per-attachment id shape `prepareQuestionAttachments` actually mints above (`id: String(i)`) — a
+ *  bare non-negative integer string, bounded so a pathological digit run can't be used to probe anything. */
+export const ATTACHMENT_ID_RE = /^[0-9]{1,10}$/;
+
+/** Content-Type for the two kinds this route renders INLINE (never trusted from the asker — this is the
+ *  SAME extension derivation `deriveAttachmentKind` already committed to at copy time, just mapped to a
+ *  servable type). Everything else (`kind:"other"`, which already includes `.svg` — see the module doc
+ *  below) is served `application/octet-stream` regardless of its real extension: it downloads either
+ *  way (`Content-Disposition: attachment`), so a precise type buys nothing and a wrong one costs nothing. */
+const INLINE_CONTENT_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+};
+
+export function attachmentServeContentType(absPath: string): string {
+  const ext = path.extname(absPath).toLowerCase();
+  return INLINE_CONTENT_TYPES[ext] ?? "application/octet-stream";
+}
+
+export type ResolveStoredAttachmentResult = { ok: true; absPath: string } | { ok: false };
+
+/**
+ * Resolve ONE already-stored attachment's absolute file path from its DB record's `storedFilename` —
+ * defence in depth (card 8f050b79, manager condition 1): `storedFilename` is entirely daemon-written
+ * (`sanitizeBasename` at copy time, never client input), so this can never actually escape in practice,
+ * but the route still canonicalizes and re-checks containment under THIS question's own store dir before
+ * any fs touch — the same "never trust a path without re-proving containment, however it was produced"
+ * posture `resolveAttachmentPath` (above) applies on the write side. Pure path-math; does not touch the
+ * filesystem beyond canonicalization (no existence/regular-file check — the caller does that separately,
+ * since a missing file is a 404, not a resolution failure).
+ */
+export function resolveStoredAttachmentFile(questionId: string, storedFilename: string): ResolveStoredAttachmentResult {
+  const dir = questionAttachmentDir(questionId);
+  const rawTarget = path.join(dir, storedFilename);
+  const canonDir = canonicalizeForContainment(dir);
+  const canonTarget = canonicalizeForContainment(rawTarget);
+  if (!canonDir.ok || !canonTarget.ok) return { ok: false };
+  const dirKey = comparisonKey(canonDir.value);
+  const targetKey = comparisonKey(canonTarget.value);
+  if (!isProperlyUnder(targetKey, dirKey)) return { ok: false };
+  return { ok: true, absPath: canonTarget.value };
+}
+
+/** RFC 5987 `attr-char` — everything else in a `filename*=UTF-8''…` value must be percent-encoded. */
+const RFC5987_ATTR_CHAR = /^[A-Za-z0-9!#$&+\-.^_`|~]$/;
+
+function encodeRfc5987Value(input: string): string {
+  const bytes = Buffer.from(input, "utf8");
+  let out = "";
+  for (const byte of bytes) {
+    const ch = String.fromCharCode(byte);
+    out += RFC5987_ATTR_CHAR.test(ch) ? ch : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+/**
+ * Build a `Content-Disposition: attachment` header value from an attachment's human-authored `label` —
+ * card 8f050b79, manager condition 3. Two hardening steps, in order:
+ *  1. Strip CR/LF and every other control character FIRST, unconditionally — this is what stops a label
+ *     like `evil"\r\nX-Injected: yes` from smuggling a second header line; everything below operates on
+ *     the already-cleaned string, so neither encoding step can reintroduce the byte this removes.
+ *  2. Emit BOTH forms, same as every modern server: a legacy ASCII `filename="…"` fallback (non-ASCII
+ *     collapsed to `_`, `"`/`\` backslash-escaped per the quoted-string grammar) for a client that only
+ *     reads the old parameter, and the RFC 5987 `filename*=UTF-8''…` extended form for everyone else,
+ *     which is what actually preserves non-ASCII labels (e.g. a mockup titled in Japanese) losslessly.
+ */
+export function attachmentContentDisposition(label: string): string {
+  // eslint-disable-next-line no-control-regex -- deliberately stripping control bytes (incl. CR/LF) from a header value
+  const cleaned = label.replace(/[\x00-\x1f\x7f]/g, "").trim() || "attachment";
+  const asciiRaw = cleaned.replace(/[^\x20-\x7e]/g, "_");
+  const asciiEscaped = asciiRaw.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `attachment; filename="${asciiEscaped}"; filename*=UTF-8''${encodeRfc5987Value(cleaned)}`;
+}

@@ -173,6 +173,9 @@ try {
     "GET /api/usage/limits", "GET /api/usage/history", "GET /api/usage/sessions/history",
     "GET /api/projects/:id/vault", "GET /api/projects/:id/vault/file", "GET /api/projects/:id/vault/raw",
     "GET /api/questions", "GET /api/questions/:id",
+    // Inbox attachment serving (card 8f050b79) — same class as the question reads/answer-dismiss just
+    // above; see docs/decisions/8f050b79-inbox-attachment-serving.md.
+    "GET /api/questions/:id/attachments/:attachmentId", "POST /api/questions/:id/attachments/:attachmentId/opened",
     "POST /api/questions/:id/answer", "POST /api/questions/:id/dismiss", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
     "POST /api/sessions/:id/stop", "POST /api/sessions/:id/resume", "POST /api/sessions/:id/rate-limit/clear",
     "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId", "GET /ws/fleet",
@@ -258,6 +261,18 @@ try {
       && routeTier("HEAD", "/api/projects/:id/vault/file") === 0);
     check("(1f) every OTHER method on the raw-vault path stays Tier-0 (the admission did not widen the route)",
       ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"].every((m) => routeTier(m, VAULT_RAW) === 0));
+  }
+  // (1f2) card 8f050b79 — the SECOND deliberately-admitted HEAD, same shape as (1f): mirrors the vault/raw
+  // HEAD entry for the attachment-serving GET. Same three polarities, same reason HEAD is pinned here
+  // directly rather than via LIVE_ROUTES/EXPECTED_TIER_1 (HEAD is filtered out of that derivation above).
+  {
+    const ATTACH_GET = "/api/questions/:id/attachments/:attachmentId";
+    check("(1f2) HEAD /api/questions/:id/attachments/:attachmentId is Tier-1 (mirrors vault/raw's HEAD entry)",
+      routeTier("HEAD", ATTACH_GET) === 1);
+    check("(1f2) HEAD of ANOTHER Tier-1 GET is still Tier-0 — one exact {method,pattern}, never a blanket HEAD rule",
+      routeTier("HEAD", "/api/questions") === 0 && routeTier("HEAD", "/api/questions/:id") === 0);
+    check("(1f2) every OTHER method on the attachment GET path stays Tier-0 (the admission did not widen the route)",
+      ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"].every((m) => routeTier(m, ATTACH_GET) === 0));
   }
 
   check("(1d) the webhook-endpoints ADMIN surface (a writer, not the ingress route) stays Tier-0 (loopback-only)",

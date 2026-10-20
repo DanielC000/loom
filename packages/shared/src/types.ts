@@ -3723,18 +3723,19 @@ export interface FulfillmentTarget {
 
 /** `Question.attachments` entry kind (card 432765ab) — derived SERVER-SIDE from the copied file's own
  *  content type at send time, never from the asker's say-so: `"image"` (png/jpeg/gif/webp — the only
- *  kinds `cheapImageDimensions` probes), `"html"` (served sandboxed by a separate, not-yet-built child
- *  card), `"other"` (everything else). */
+ *  kinds `cheapImageDimensions` probes), `"html"` (served sandboxed by the serving route, card 8f050b79),
+ *  `"other"` (everything else — including `.svg`, which is deliberately NOT in the `"image"` extension
+ *  set: an SVG is a scriptable document, so it is classified `"other"` and always downloads). */
 export type QuestionAttachmentKind = "image" | "html" | "other";
 
 /**
- * ONE attachment on a `question_ask` Request (card 432765ab, epic 7d1d66ab phase 1 — manifest only; no
- * serving route yet, see `docs/decisions/432765ab-*.md`). This is the PUBLIC-SAFE projected shape every
- * read surface (`question_pull`, `requests_list`, `task_request_get`, the web inbox REST routes) emits —
- * `toQuestion` (db.ts) deliberately NEVER maps the absolute store path or the asker's original absolute
- * path onto this object, mirroring how it already never maps `secret_blob`. Those two paths exist only
- * in the `questions.attachments_json` column, read directly (bypassing `toQuestion`) by the future
- * serving-route child card (8f050b79) — never through this type.
+ * ONE attachment on a `question_ask` Request (card 432765ab, epic 7d1d66ab phase 1 — manifest; served by
+ * `GET /api/questions/:id/attachments/:attachmentId`, card 8f050b79). This is the PUBLIC-SAFE projected
+ * shape every read surface (`question_pull`, `requests_list`, `task_request_get`, the web inbox REST
+ * routes) emits — `toQuestion` (db.ts) deliberately NEVER maps the absolute store path or the asker's
+ * original absolute path onto this object, mirroring how it already never maps `secret_blob`. Those two
+ * paths exist only in the `questions.attachments_json` column, read directly (bypassing `toQuestion`) by
+ * the serving route's own DB accessors (`getQuestionAttachmentRecord`/`markQuestionAttachmentOpened`).
  */
 export interface QuestionAttachment {
   /** Stable per-attachment id (not the request id) — `${n}` of the ask-time array, so a later serving
@@ -3752,8 +3753,8 @@ export interface QuestionAttachment {
   /** Computed LIVE at read time (an `fs.existsSync` against the store path, never stored) — consistent
    *  with the GC child card (6f27469b) removing files out from under an unchanged row. */
   available: boolean;
-  /** Stamped by the (not-yet-built) serving route the first time a human opens this attachment. Always
-   *  null today — nothing in this card's scope ever writes it. */
+  /** Stamped by `POST .../attachments/:attachmentId/opened` the FIRST time a human opens this attachment
+   *  — first-open-wins (`markQuestionAttachmentOpened`, db.ts); a later open never overwrites the stamp. */
   openedAt: string | null;
 }
 

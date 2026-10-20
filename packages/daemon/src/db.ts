@@ -2351,9 +2351,9 @@ const DELIVERED_CREDENTIALS_ADDED_COLUMNS: Record<string, string> = {
  * same shape as the public `@loom/shared` `QuestionAttachment` (which every read surface serializes) —
  * this one carries the two fields that must NEVER reach a client: `originalPath` (the asker's absolute
  * source path) and `storedFilename` (the copy's name inside `questionAttachmentDir(questionId)`, joined
- * with that dir by whoever eventually serves it — the not-yet-built child card 8f050b79). `toQuestion`
- * below is the ONE place this is parsed and projected down to the public shape; nothing else reads this
- * column directly today.
+ * with that dir by the serving route, card 8f050b79, via `resolveStoredAttachmentFile`). `toQuestion`
+ * is the read-surface projection (drops both fields); `getQuestionAttachmentRecord`/
+ * `markQuestionAttachmentOpened` (below) are the only other readers/writers of this column.
  */
 export interface StoredQuestionAttachment {
   id: string;
@@ -9182,6 +9182,55 @@ export class Db {
       if (stmt.run(readAt, id).changes > 0) updated.push(id);
     }
     return updated;
+  }
+  /**
+   * Read ONE stored attachment's INTERNAL shape (`StoredQuestionAttachment`, carrying `storedFilename`)
+   * by `(questionId, attachmentId)` — the lookup the attachment-serving route (card 8f050b79) resolves a
+   * store path from. Bypasses `toQuestion`'s public projection deliberately (that projection NEVER maps
+   * `storedFilename`/`originalPath` — see `toQuestionAttachments`'s own doc). Returns undefined when the
+   * question doesn't exist, carries no attachments, its `attachments_json` fails to parse, or no entry
+   * in it has this `attachmentId`.
+   */
+  getQuestionAttachmentRecord(questionId: string, attachmentId: string): StoredQuestionAttachment | undefined {
+    const row = this.db.prepare("SELECT attachments_json FROM questions WHERE id = ?").get(questionId) as { attachments_json: string | null } | undefined;
+    if (!row || !row.attachments_json) return undefined;
+    let stored: StoredQuestionAttachment[];
+    try {
+      const parsed = JSON.parse(row.attachments_json);
+      if (!Array.isArray(parsed)) return undefined;
+      stored = parsed as StoredQuestionAttachment[];
+    } catch { return undefined; }
+    return stored.find((a) => a.id === attachmentId);
+  }
+  /**
+   * Stamp `openedAt` on ONE attachment the FIRST time a human opens it (card 8f050b79) — FIRST-OPEN-WINS:
+   * a later call is a no-op that returns the attachment's EXISTING stamp unchanged, never overwriting it
+   * with a later `openedAt`. Atomic (card manager condition 5): reads and rewrites the WHOLE
+   * `attachments_json` column inside one `db.transaction()`, so two concurrent "open" calls on the same
+   * attachment can't interleave into a lost update — the second transaction to acquire the write always
+   * observes the first's already-stamped value and no-ops on it. Returns undefined when the question or
+   * attachment id doesn't resolve (mirrors `getQuestionAttachmentRecord` above).
+   */
+  markQuestionAttachmentOpened(questionId: string, attachmentId: string, openedAt: string): StoredQuestionAttachment | undefined {
+    return this.db.transaction((): StoredQuestionAttachment | undefined => {
+      const row = this.db.prepare("SELECT attachments_json FROM questions WHERE id = ?").get(questionId) as { attachments_json: string | null } | undefined;
+      if (!row || !row.attachments_json) return undefined;
+      let stored: StoredQuestionAttachment[];
+      try {
+        const parsed = JSON.parse(row.attachments_json);
+        if (!Array.isArray(parsed)) return undefined;
+        stored = parsed as StoredQuestionAttachment[];
+      } catch { return undefined; }
+      const idx = stored.findIndex((a) => a.id === attachmentId);
+      if (idx === -1) return undefined;
+      const existing = stored[idx];
+      if (!existing) return undefined;
+      if (existing.openedAt) return existing; // already stamped — first-open wins, no-op
+      const stamped: StoredQuestionAttachment = { ...existing, openedAt };
+      stored[idx] = stamped;
+      this.db.prepare("UPDATE questions SET attachments_json = ? WHERE id = ?").run(JSON.stringify(stored), questionId);
+      return stamped;
+    })();
   }
   /**
    * The manager-only pull/consume: atomically reads every 'answered' question for `sessionId` and flips

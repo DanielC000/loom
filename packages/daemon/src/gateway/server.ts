@@ -5,11 +5,12 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
+import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, QuestionAttachmentKind, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
 import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
-import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
+import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir } from "../paths.js";
+import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition } from "../mcp/attachments.js";
 import { deleteProjectWorkDir } from "../projects/work-dir.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import { buildServedStatus } from "../served-status.js";
@@ -6478,6 +6479,114 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "ids is required — an array of question id strings" });
     const updated = deps.db.markQuestionsRead(body.ids as string[], new Date().toISOString());
     return reply.send({ updated });
+  });
+
+  // --- Inbox attachment serving (card 8f050b79, child 2 of epic 7d1d66ab) ---------------------------
+  // Serves ONE stored `question_ask` attachment by (questionId, attachmentId) — ids only, never a client
+  // path. Same trust posture as the sibling Requests routes just above: Tier-1 (gateway/trust-tier.ts),
+  // human-only, no per-project ownership check beyond "can reach this daemon at all" (this route mirrors
+  // GET /api/questions/:id exactly). Both `:id` and `:attachmentId` are validated against their REAL
+  // minted shapes (a v4 UUID / a bare digit string — see mcp/attachments.ts) BEFORE any DB or fs access,
+  // so a malformed param 400s outright rather than reaching `getQuestionAttachmentRecord` or the fs.
+  // @decision 8f050b79 — never drop the sandbox CSP, the nosniff/no-referrer pair, the id-shape
+  // validation, or the realpath containment re-check below; none of this is polish.
+  //
+  // Code Review (round 1): the CSP must be derived from the SAME value as the inline Content-Type — the
+  // SERVED file's real extension — never from `record.kind`. A tampered/legacy row can carry a `kind`
+  // that disagrees with its `storedFilename`'s real extension (kind:"image" + storedFilename "0-x.html"),
+  // and a CSP keyed on `kind` would then serve real text/html with NO sandbox at all.
+  // `isActiveDocumentContentType` (vault/browser.ts) is the single source of truth for "is this served
+  // type a scriptable document" — reused here rather than re-derived, so the two routes can never drift
+  // on what counts as "active".
+  const resolveAttachmentHeaders = (
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): { ok: true; absPath: string } | { ok: false } => {
+    const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+    if (!QUESTION_ID_RE.test(id) || !ATTACHMENT_ID_RE.test(attachmentId)) {
+      reply.code(400).send({ error: "invalid question or attachment id" });
+      return { ok: false };
+    }
+    const record = deps.db.getQuestionAttachmentRecord(id, attachmentId);
+    if (!record) {
+      reply.code(404).send({ error: "attachment not found", available: false });
+      return { ok: false };
+    }
+    // Defence in depth (manager condition 1, card 8f050b79): `storedFilename` is entirely daemon-written
+    // (never client input), so this can never actually escape in practice — but re-prove containment
+    // under THIS question's own store dir before any fs touch anyway, mirroring resolveAttachmentPath's
+    // posture on the write side.
+    const resolved = resolveStoredAttachmentFile(id, record.storedFilename);
+    if (!resolved.ok) {
+      reply.code(404).send({ error: "attachment not found", available: false });
+      return { ok: false };
+    }
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(resolved.absPath);
+    } catch {
+      reply.code(404).send({ error: "attachment not found", available: false });
+      return { ok: false };
+    }
+    if (!stat.isFile()) {
+      reply.code(404).send({ error: "attachment not found", available: false });
+      return { ok: false };
+    }
+    const contentType = attachmentServeContentType(resolved.absPath);
+    reply
+      .header("Content-Type", contentType)
+      .header("Content-Length", stat.size)
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Referrer-Policy", "no-referrer");
+    if (isActiveDocumentContentType(contentType)) {
+      // Scripts run (`allow-scripts`), but the opaque origin (no `allow-same-origin`) can't reach this
+      // origin's localStorage/cookies — see the decision record's Origin/CORS leg for the separate
+      // "can it reach the daemon at all" verification. `form-action 'none'` closes form submission (the
+      // sandbox token never includes `allow-forms` either, so this is additive hardening against a future
+      // edit that adds that token without revisiting the CSP). `connect-src 'none'` closes fetch/XHR/
+      // WebSocket/sendBeacon exfiltration — narrowing, not closing, data exfiltration: see the record for
+      // the residual (navigation, image-src-style beacons) this does NOT cover.
+      reply.header("Content-Security-Policy", "sandbox allow-scripts; form-action 'none'; connect-src 'none'");
+    } else {
+      // EVERY non-HTML-like response still gets a sandbox CSP — images and downloads lose nothing by it
+      // (sandbox alone has no effect on how an <img>/download consumer uses the bytes), and it means a
+      // mismatched/tampered row can never silently reach the "scriptable document, no CSP at all" state
+      // the round-1 probe found.
+      reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
+    }
+    if (record.kind === "other") {
+      // Download (includes .svg — see QuestionAttachmentKind's own doc for why SVG is never "image"):
+      // nosniff + a forced attachment disposition means the browser never tries to render this inline
+      // even if `attachmentServeContentType`'s octet-stream fallback understated it.
+      reply.header("Content-Disposition", attachmentContentDisposition(record.label));
+    }
+    return { ok: true, absPath: resolved.absPath };
+  };
+  // @decision 3c783791 (mirrored from /vault/raw) — keep this an EXPLICIT app.head(), registered BEFORE
+  // app.get() below, and never construct a read stream here: either change silently reopens the whole-
+  // file-read-on-HEAD bug / the duplicate-route-registration throw.
+  app.head("/api/questions/:id/attachments/:attachmentId", async (req, reply) => {
+    const r = resolveAttachmentHeaders(req, reply);
+    if (!r.ok) return reply;
+    return reply.send();
+  });
+  app.get("/api/questions/:id/attachments/:attachmentId", async (req, reply) => {
+    const r = resolveAttachmentHeaders(req, reply);
+    if (!r.ok) return reply;
+    return reply.send(fs.createReadStream(r.absPath));
+  });
+  // Open-tracking (card 8f050b79 §5): stamps `openedAt` the FIRST time a human opens an attachment —
+  // first-open-wins (db.ts's `markQuestionAttachmentOpened`), so a repeat POST is a harmless no-op that
+  // returns the existing stamp rather than refreshing it. Deliberately does NOT require the store file to
+  // still exist on disk (a GC'd-but-previously-opened attachment should keep its real open time) — only
+  // that the DB record resolves, mirroring the GET route's own id validation.
+  app.post("/api/questions/:id/attachments/:attachmentId/opened", async (req, reply) => {
+    const { id, attachmentId } = req.params as { id: string; attachmentId: string };
+    if (!QUESTION_ID_RE.test(id) || !ATTACHMENT_ID_RE.test(attachmentId))
+      return reply.code(400).send({ error: "invalid question or attachment id" });
+    const updated = deps.db.markQuestionAttachmentOpened(id, attachmentId, new Date().toISOString());
+    if (!updated) return reply.code(404).send({ error: "attachment not found" });
+    return reply.send({ id: updated.id, openedAt: updated.openedAt });
   });
 
   // --- Delivered credentials (card af08f7e8) — HUMAN-ONLY loopback REST, NO MCP path of ANY router (same
