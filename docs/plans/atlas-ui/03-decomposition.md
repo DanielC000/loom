@@ -1,0 +1,68 @@
+# Decomposition
+
+Ordered build cards. Each is independently mergeable, carries its own DoD, and (per standing project
+convention for a new/changed user-facing web feature) adds or updates a Playwright e2e spec on the
+`loomDaemon` harness fixture (`packages/web/e2e/`) as part of its DoD. Titles are in Conventional
+Commits form, `web` or `daemon` scope, ≤72 chars — ready to become board card titles directly.
+
+**Decided mechanism (owner answer, request `770bfd62`, 2026-10-20): build on `main`, behind a switch.**
+Every card below merges to `main` through the ordinary worker gate, same day it's ready — there is no
+second branch or checkout to target. "Behind the switch" in a card's DoD means: with the switch at its
+default (off), that card's diff is observable nowhere in the running app; with it flipped on (opt-in,
+per the Settings toggle P1-0 adds), the card's feature is live. Every phase-1/2 card's Playwright check
+therefore has two assertions, not one — the feature works when the switch is on, *and* the existing UI
+is byte-for-byte unaffected when it's off — and every DoD below should be read with that second
+assertion implied even where it isn't spelled out line by line.
+
+## Phase 1 — the switch, the empty shell, then today's pages mounted unchanged
+
+| # | Card | DoD | Reviewer? |
+|---|---|---|---|
+| P1-0 | `feat(web): add the Atlas UI switch and an empty shell route` | A persisted, human-only toggle (Settings UI; `localStorage`-backed to start) gates a new top-level shell component that, for now, renders an empty tree + breadcrumb frame with no nodes. Default **off**. With the switch off, `App.tsx`'s existing `Sidebar` + `<Routes>` render exactly as today — diffed, not just asserted. This is the card every later phase-1/2 card lands behind. Playwright: switch off → old UI, pixel/DOM-identical to pre-change; switch on → the empty Atlas frame renders with zero console errors; toggling persists across a reload. | **yes** — new top-level layout + the first `App.tsx` route-table touch, even though the intended behavior change is zero |
+| P1-1 | `feat(web): map NAV_PAGES onto Atlas tree nodes` | Behind the switch: every one of the 17 `NAV_PAGES` entries gets a tree node; each node's tab renders the *existing* component from `NAV_PAGES[i].element`, unmodified. The `scoped` flag drives which nodes need an active project selected first. Playwright: for each of the 17, switch on → clicking its tree node renders the same content the old route rendered (snapshot or key-DOM-marker comparison); switch off → unaffected. | no |
+| P1-2 | `feat(web): wire the 3 parameterized routes as node tabs` | Behind the switch: `/review/:workerId` → worker node's Diff tab, `/question/:id` → Inbox detail pane + pop-over, `/session/:id` → the session node itself. Playwright: switch on → deep-linking each of the 3 old URLs lands on the right node+tab. | no |
+| P1-3 | `feat(web): redirect legacy routes to Atlas node+tab URLs` | Behind the switch: all 8 existing redirects (`/setup`, `/workspace`, `/profiles`, `/skills`, `/schedules`, `/event-triggers`, `/vault`, `/git`) now land on the right Atlas node+tab instead of the old flat page. With the switch off, all 8 behave exactly as today. Playwright: each of the 8 old URLs resolves correctly under both switch states. | no |
+| P1-4 | `feat(web): carry the active-project picker into tree selection` | Behind the switch: selecting a project node in the tree sets `ActiveProjectProvider`'s active project — the exact same context every scoped page already reads. The old rail chip is untouched (it still exists for the switch-off UI) until phase 3's retirement card. Playwright: switch on → selecting project B in the tree re-scopes an already-open Overview/Board/etc. the same way the old chip did. | no |
+| P1-5 | `feat(web): keep cross-cutting chrome mounted at the shell root` | Confirm (not rebuild) that Command Palette, `UpdateBanner`, `CredentialBanner`, `GatewayTokenBanner`, `ToastContainer`, `FirstRunWelcome` all still mount and function identically regardless of switch state — they stay at `App.tsx`'s root, outside both route trees. Mostly a verification card — expect near-zero diff. Playwright: ⌘K still opens the palette and a toast still fires on a seeded attention item, under both switch states. | no |
+
+**Phase-1 exit criterion:** every ✅ row in `01-parity-checklist.md` §§A–B is reachable through the
+Atlas tree (switch on), pixel-for-pixel identical to today (same component, same data), while the
+switch-off experience remains provably untouched. This is the parity sign-off's *dry run* — phase 3
+repeats the same check against the phase-2 rebuild.
+
+## Phase 2 — the approved rebuild + closing the gaps
+
+| # | Card | DoD | Reviewer? |
+|---|---|---|---|
+| P2-1 | `feat(web): build the Workspace Deck and project Deck (Overview/Deck tabs)` | Behind the switch: round-4 V2 — an Overview tab + a Deck tab at both the Workspace root and the project node, per the approved mockup. Composes existing `api.*` calls only (no new `api.ts` members). Playwright: switch on → KPI deck renders, board embeds full at 7 lanes, pop-overs open. | no (pure composition of existing calls — the reuse rule is the safety net) |
+| P2-2 | `feat(web): add the Agents panel and Agents tree node` | Behind the switch: the dashboard-band Agents panel + the Agents node (`SpawnControls`/`AgentControl`, the go-live guards, the `+` quick-spawn). Closes the agent-spawn placement gap round 4 found. Playwright: spawn flow end-to-end (spawn → tree node appears → fleet row → stop → guard releases), mirroring round 4's own "proven, not drawn" checks. | no |
+| P2-3 | `feat(web): add the Fleet controls cluster (clear hold / pause / resume / kill all)` | Behind the switch: one renderer, two mounts (shell-chrome chip + Workspace-head bar), per round 4. Playwright: pause persists visually across a node navigation; kill-all's two-step inline confirm (never a modal) actually empties the fleet. | no |
+| P2-4 | `feat(web): rebuild the Platform node (both editions)` | Behind the switch: full Platform node — View-as toggle, both go-live cards, both session layouts, both cadence variants, both histories, its own board, Findings with inline Adopt/Dismiss. Playwright: edition toggle flips all 10 dev-only / 10 end-user-only elements; the Platform node's own board shows the Platform project's cards, never the active project's. | **yes** — Platform's dev/end-user fork is a real trust-boundary surface (`@decision 8adccd37`) |
+| P2-5 | `feat(web): replace the board card drawer with the centred dialog` | Behind the switch: every board surface (Workspace Deck, project Deck, Board node, Platform's own board) opens a card in the existing centred-modal shape (`min(820px,92vw)`/`role="dialog" aria-modal`), never a drawer, and the board never reflows. Playwright: lanes measured 7→7 before/after open, on at least 2 of the 4 board surfaces. | no |
+| P2-6 | `feat(web): place Companion's Chat / Manage / Terminal modes on the Atlas tree` | **Closes gap §J.1.** Behind the switch: decide and build where the 3-way mode toggle lives (most likely: Companion node tabs = Chat / Manage / Terminal, with Manage's 10 sections as sub-sections or further sub-tabs) and route all 20 Companion write actions + the companion-chat non-REST write to their real mode, not a single undifferentiated tab. Playwright: Chat sends a message over the websocket from the new location; the read-only Terminal mode renders with stdin genuinely disabled. | **yes** — Companion writes include capability grants + restricted-tools + lead-mode, real trust-boundary surface |
+| P2-7 | `fix(web): reconcile the session-cockpit tab shape with the real code` | **Closes gap §J.2.** Decide (owner call, filed as a `question_ask` by the manager if not already answered) whether Queue/Wakes/bound-task-card become real tabs in Atlas's session node or stay inline sections under Terminal/Transcript/Timeline-or-Diff — then build whichever was decided, instead of the unverified 5-tab/4-tab shape from round 2's diagram. Playwright: a manager node's tabs match the decided shape; a worker node's does too. | no |
+| P2-8 | `feat(web): carry keyboard shortcuts into the rebuilt surfaces` | **Closes gap §J.3.** `Cmd/Ctrl+Enter` submit in the new composer location, Agents editor, preset editor, queue editor; `Cmd/Ctrl+F` scoped find in the rebuilt Vault/Repository pane; terminal `Cmd/Ctrl+V`/`Cmd/Ctrl+C` smart clipboard handling preserved verbatim (it's inside `Terminal.tsx`, reused unchanged — this card is really "prove it still fires in the new frame," not a rebuild). Playwright: each shortcut fires in its new location. | no |
+| P2-9 | `feat(web): carry the Board multi-select filters into Atlas` | **Closes gap §J.4.** The real `Set`-based multi-select priority filter and the column/lane filter (`colFilter`), plus "N of M shown" and one-click clear — not the mockup's single-priority-chip approximation. Playwright: selecting P0+P1 together narrows correctly; selecting 2 lanes does too; clear resets both. | no |
+| P2-10 | `feat(web): verify deep links against the Atlas URL scheme` | **Closes gap §J.5.** `?task=<id>` opens the right card dialog under the new URL scheme; `?profile=<id>&grant=<capability>` pre-selects the right profile on the rebuilt Actors/Profiles surface. Playwright: both deep links, freshly loaded (no prior client state), land correctly with the switch on. | no |
+| P2-11 | `feat(web): add the first-run welcome and credential/gateway-token/notification-permission states to Atlas` | **Closes gaps §J.6–§J.8.** `FirstRunWelcome` on a fresh install; `CredentialBanner`'s locked/recovery state exercised with a deliberately-wrong pasted token; the browser-notification permission ask + Settings mute respected — all already covered by P1-5 for the shared-chrome case, this card only needs to prove the Atlas-specific surfaces (e.g. the Settings mute toggle's own new location) don't regress it. Playwright: seed a fresh install state, confirm the welcome modal renders; seed a 401, confirm the banner's recovery flow. | no |
+| P2-12 | `fix(web): verify Settings' project/workspace split against real section scope` | **Closes gap §J.9.** Walk every one of the ~26–29 `SectionLabel` sections in today's `Settings.tsx` and place each on the correct side of the Atlas split (project node's Settings tab vs. Workspace Settings), per the data each section actually reads/writes (project-scoped config vs. `PlatformConfigOverride`). Playwright: a project-scoped section (e.g. Board Columns) only appears under the project node; a daemon-global one (e.g. Rate Limits) only appears under Workspace. | no |
+
+## Phase 3 — parity sign-off, then switch-over, then retirement
+
+| # | Card | DoD | Reviewer? |
+|---|---|---|---|
+| P3-sign-off | `test(web): run the full parity checklist against the built Atlas` | Every row in `01-parity-checklist.md` (183 rows) is checked off against the *built* Atlas (switch on), not the mockup — re-run the same AST/grep scripts this plan used (kept under this folder or re-derived fresh) against the Atlas code to regenerate the write/route tables, and manually confirm every §J gap's closing card actually closed it. Produces a signed-off copy of the checklist (or a short addendum noting any row that still needs owner input) for the owner to review via the live switch before switch-over. | **yes** — this is the gate the whole plan exists to earn |
+| P3-switch-over | `feat(web): make Atlas the default UI` | Only after the owner's explicit sign-off on P3-sign-off's result: flip the switch's *default* to on. The old UI stays reachable (switch off) for one more release as a safety net — this card does **not** delete anything yet, it only changes who sees which UI by default. Playwright: a fresh session with no stored preference now lands on Atlas; an existing session with an explicit "old UI" preference is unaffected (opt-out still honored). | **yes** |
+| P3-retire | `chore(web): remove the old UI and the Atlas switch` | Once the owner confirms the safety-net period is over: delete the old `NAV_PAGES`-driven shell, the old rail `Sidebar`, and the switch itself (Atlas's route tree becomes the only route tree — there's nothing left to switch between). This is the one truly hard-to-reverse step in the whole plan, hence its own card, separate from P3-switch-over. Playwright: the full e2e suite still passes with no switch-conditional branches left to test. | **yes** |
+| P3-archive | `docs(web): archive this plan once retirement lands` | Move `docs/plans/atlas-ui/` to a `docs/plans/archive/` (or equivalent) once P3-retire is done — this plan's own shelf life ends at retirement, per the doc-hygiene convention of not leaving a stale "in progress" plan at a live path. | no |
+
+## What's deliberately not its own card
+
+The parity-checklist generation scripts themselves (the AST extraction + caller scan) are **not** a
+deliverable to ship as repo tooling — they were a one-time research instrument for this planning task.
+P3-sign-off re-derives them ad hoc (they're short, and kept referenced from this plan's commit) rather
+than this plan adding a permanent `scripts/` entry nobody else needs.
+
+A second registered checkout/daemon for side-by-side comparison is **not** needed under the decided
+mechanism — the switch itself is the comparison UX (see `02-architecture.md`), so there is no "spin up a
+second daemon" card anywhere in this plan.
