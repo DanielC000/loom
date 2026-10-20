@@ -1,22 +1,28 @@
-// The Atlas entity tree — card 8cbb2ac2 (P1-1), the rail that gives every nav destination a node.
-// Visual language: the round-4 V2 mockup's tree (Mockups/2026-10-19 UI Overhaul Round 4) — a reserved
-// twist column, an icon, a label, a hairline indent for children, a phosphor left-edge on the active
-// node. Chrome lives in styles/global.css (.loom-atlas-node*): structure here, colour there.
+// The Atlas entity tree — cards 8cbb2ac2 (P1-1, a node per nav destination) and e47df20a (P1-4, the
+// project tier becomes the active-project selector). Visual language: the round-4 V2 mockup's tree
+// (Mockups/2026-10-19 UI Overhaul Round 4) — a twist column, an icon, a label, a hairline indent for
+// children, a phosphor left-edge on the active node, a live-session marker on a project row. Chrome
+// lives in styles/global.css (.loom-atlas-node*): structure here, colour there.
 //
 // A <nav>, not an <aside>: with real nodes in it this IS the app's primary navigation (P1-0 Code
-// Review finding, carried on this card). Plain NavLinks in document order rather than a role="tree"
-// with roving tabindex — the DoD's navigation contract is Tab/Enter, which links give natively, and
-// claiming tree semantics without arrow keys would be a worse lie than the <aside> it replaces. A
-// real role="tree" belongs with the card that gives the tree genuine entity hierarchy.
+// Review finding, carried on P1-1). Plain NavLinks in document order rather than a role="tree" with
+// roving tabindex — the navigation contract is Tab/Enter, which links give natively, and claiming
+// tree semantics without arrow keys would be a worse lie than the <aside> it replaces.
 //
-// ⛔ The node list is DERIVED from src/nav.tsx, never hand-listed: a hand-copied list shows a node
-// for a page that no longer exists — or, worse, silently drops a newly added one.
+// ⛔ Both tiers are DERIVED — destinations from src/nav.tsx, projects from ActiveProjectProvider's
+// own list. A hand-copied list shows a node for a page that no longer exists, or silently drops a
+// new one; a second Atlas-only idea of which project is active would mis-scope the pages below it.
+import { useMemo, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import type { Project } from "@loom/shared";
 import { useVisibleNavPages, type NavPage } from "../nav";
 import { NavIcon } from "./navIcons";
 import { Logo } from "./Logo";
 import { SectionLabel } from "./ui";
 import { useActiveProject } from "../lib/activeProject";
+import { api } from "../lib/api";
+import { isCompanionSession } from "../lib/sessions";
 import { color, font } from "../theme";
 
 // Scope is depth (round 2's rule, kept by the approved round-4 IA): a destination lives at the
@@ -48,10 +54,11 @@ function TreeNode({ page, activeTo }: { page: NavPage; activeTo?: string }) {
       <NavLink to={page.to} end={page.end}
         className={({ isActive }) => `loom-atlas-node${isActive || page.to === activeTo ? " is-active" : ""}`}
         data-testid={`atlas-node-${page.to}`}>
-        {/* The twist column is RESERVED, never drawn, while nothing in this tree expands. Keeping the
-            width holds every label on one text origin (so rows don't step in and out as the phase-2
-            branches land); drawing a triangle that collapses nothing would promise an affordance that
-            isn't there. The triangle returns with the card that makes nodes genuinely expandable. */}
+        {/* A DESTINATION's twist column is reserved and blank: there is nothing under a destination
+            to open, so a triangle here would promise an affordance that isn't there. The width is
+            held anyway, so every label sits on one text origin and rows don't step in and out as
+            phase-2's branches land. (A PROJECT row does draw one — see ProjectNode: it has children
+            and genuinely opens and closes.) */}
         <span className="loom-atlas-twist" aria-hidden />
         <span className="loom-atlas-ico" aria-hidden><NavIcon to={page.to} /></span>
         <span className="loom-atlas-lbl">{page.label}</span>
@@ -60,11 +67,80 @@ function TreeNode({ page, activeTo }: { page: NavPage; activeTo?: string }) {
   );
 }
 
+// Live, non-companion session count per project — the marker on each project row. The rail chip's
+// dropdown already showed exactly this (components/Sidebar.tsx › RailProjectControl), and it is the
+// one thing a reader would lose when selection moves from a dropdown to the tree, so it comes along
+// — derived the SAME way, from the SAME shared ["allSessions"] cache entry ActiveProjectProvider
+// already fills, so the tree issues no request of its own and can never disagree with the chip.
+function useLiveCountsByProject(): Map<string, number> {
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  return useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const s of sessionsQ.data ?? []) {
+      if (isCompanionSession(s)) continue;
+      if (s.processState !== "live" && s.processState !== "starting") continue;
+      counts.set(s.projectId, (counts.get(s.projectId) ?? 0) + 1);
+    }
+    return counts;
+  }, [sessionsQ.data]);
+}
+
+// One project row — card e47df20a (P1-4). A real control: clicking it writes the active project to
+// the SAME ActiveProjectProvider the rail chip writes and every `scoped` page reads, so a tree
+// selection and a chip selection are indistinguishable downstream. There is deliberately no second
+// Atlas-only notion of "which project" to keep in step.
+//
+// A <button>, not a NavLink: selecting a project does not change the address. It re-scopes the page
+// you are already on — which is the whole point of "tree selection IS scoping" — so a link would
+// promise navigation it never performs. (The project node becomes a destination of its own with
+// P2-1's project Deck; until then it only selects.)
+function ProjectNode({ project, open, live, onSelect, children }: {
+  project: Project;
+  open: boolean;
+  live: number;
+  onSelect: (id: string) => void;
+  children?: ReactNode;
+}) {
+  return (
+    <li>
+      {/* `data-testid` marks only the OPEN row: "the project node you are under" stays a single
+          element, so P1-1's own structural assertion keeps meaning what it meant. The other rows are
+          addressed by their accessible name (the project's own), which is what a reader clicks. */}
+      <button type="button"
+        className={`loom-atlas-node is-branch${open ? " is-open" : ""}`}
+        data-testid={open ? "atlas-project-node" : undefined}
+        aria-current={open ? "true" : undefined}
+        title={open ? project.name : `Scope to ${project.name}`}
+        onClick={() => onSelect(project.id)}>
+        {/* Drawn here, unlike on a destination row: a project row genuinely has children and
+            genuinely opens and closes — selecting another project closes this one — so the triangle
+            reports a state that exists. It is a single-open set, not an independent collapse
+            control, which is why it carries no `aria-expanded`: the row claims selection (what it
+            really does), and the nesting below is conveyed by the list structure. */}
+        <span className="loom-atlas-twist" aria-hidden>▸</span>
+        <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
+        <span className="loom-atlas-lbl">{project.name}</span>
+        {live > 0 && (
+          <span className="loom-atlas-live" title={`${live} live session${live === 1 ? "" : "s"}`}>
+            {live}
+            <span className="loom-atlas-livedot" aria-hidden />
+          </span>
+        )}
+      </button>
+      {children}
+    </li>
+  );
+}
+
 export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
   const pages = useVisibleNavPages();
   const { workspace, project } = splitByDepth(pages);
-  const { projectId, projects } = useActiveProject();
-  const active = projects.find((p) => p.id === projectId);
+  const { projectId, setProjectId, projects } = useActiveProject();
+  const liveByProject = useLiveCountsByProject();
+
+  // Built once and rendered by whichever branch below owns it, so the empty-workspace path and the
+  // populated path cannot drift into showing different destination sets.
+  const scopedNodes = project.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />);
 
   return (
     <nav className="loom-atlas-tree" aria-label="Primary navigation" data-testid="atlas-tree">
@@ -78,28 +154,46 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
           {workspace.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />)}
         </ul>
 
-        <SectionLabel style={{ margin: "18px 0 4px", padding: "0 10px" }}>Project</SectionLabel>
-        {/* The project node is a LABEL at this phase, not a control: making tree selection set the
-            active project is P1-4's job, and a node that looked clickable but changed nothing would
-            be worse than one that plainly doesn't. It reads the SAME ActiveProjectProvider value the
-            scoped pages below already read, so what it names is always what they are scoped to. */}
-        <div className="loom-atlas-node is-branch" data-testid="atlas-project-node">
-          <span className="loom-atlas-twist" aria-hidden />
-          <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
-          <span className="loom-atlas-lbl">{active?.name ?? "No project"}</span>
-        </div>
-        <ul className="loom-atlas-nodes is-kids">
-          {project.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />)}
-        </ul>
-        {/* Deliberately a HINT, not a gate. Today every one of these destinations is reachable with no
-            project resolved (ActiveProjectProvider only yields "" when the workspace holds no projects
-            at all) and each page renders its own empty state; disabling them here would be a real
-            behaviour change, and phase 1's one hard rule is that the pages behave exactly as they do
-            today. So the dependency is stated, and the pages keep answering for themselves. */}
-        {!active && (
-          <p style={{ margin: "6px 10px 0", color: color.textMuted, fontFamily: font.mono, fontSize: 11.5, lineHeight: 1.6 }}>
-            No project is active yet — these scope to one once a project exists.
-          </p>
+        {/* Plural, and plural even at one project: the label names the kind of node under it, the
+            way "Workspace" above does, not how many there happen to be today. */}
+        <SectionLabel style={{ margin: "18px 0 4px", padding: "0 10px" }}>Projects</SectionLabel>
+        {projects.length === 0 ? (
+          <>
+            {/* Nothing to select, so nothing here pretends to be selectable — the row stays the plain
+                label it was before selection existed. The destinations stay reachable beneath it:
+                every one of them renders with no project resolved today (each has its own empty
+                state), and phase 1's hard rule is that the pages behave exactly as they do now. */}
+            <div className="loom-atlas-node is-branch is-open" data-testid="atlas-project-node">
+              <span className="loom-atlas-twist" aria-hidden>▸</span>
+              <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
+              <span className="loom-atlas-lbl">No project</span>
+            </div>
+            <ul className="loom-atlas-nodes is-kids">{scopedNodes}</ul>
+            {/* Deliberately a HINT, not a gate — see above. */}
+            <p style={{ margin: "6px 10px 0", color: color.textMuted, fontFamily: font.mono, fontSize: 11.5, lineHeight: 1.6 }}>
+              No project is active yet — these scope to one once a project exists.
+            </p>
+          </>
+        ) : (
+          // Source order, never reordered by selection or by liveness: a nav rail whose rows move
+          // under the cursor as sessions start and stop is a nav rail you stop trusting to be where
+          // you left it. The rail chip sorts live-first because a dropdown is read once per use; a
+          // standing tree is read continuously.
+          //
+          // The open branch is ALWAYS the id ActiveProjectProvider resolved — never a tree-local
+          // guess — or the destinations under it would claim a scope the pages themselves don't
+          // have. That is total by construction (the provider only yields "" when the workspace
+          // holds no projects at all, which is the branch above), and if it ever stopped being,
+          // the scoped destinations would vanish from the tree rather than quietly mis-scope —
+          // which atlas-tree.spec.ts's node-set parity check fails on, loudly.
+          <ul className="loom-atlas-nodes">
+            {projects.map((p) => (
+              <ProjectNode key={p.id} project={p} open={p.id === projectId}
+                live={liveByProject.get(p.id) ?? 0} onSelect={setProjectId}>
+                {p.id === projectId && <ul className="loom-atlas-nodes is-kids">{scopedNodes}</ul>}
+              </ProjectNode>
+            ))}
+          </ul>
         )}
       </div>
     </nav>

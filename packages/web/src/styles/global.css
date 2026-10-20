@@ -1149,10 +1149,26 @@ body {
     color 80ms linear,
     background 80ms linear;
 }
-a.loom-atlas-node {
+/* Both element kinds are real controls: a destination is an <a>, a project row (card e47df20a — P1-4)
+   is a <button> that re-scopes rather than navigating. They share one set of interaction states so
+   the tier a row sits in never changes how it answers the pointer or the keyboard. */
+a.loom-atlas-node,
+button.loom-atlas-node {
   cursor: pointer;
 }
-a.loom-atlas-node:hover {
+/* A <button> arrives with UA chrome an <a> does not: a bevelled border on all four sides, centred
+   text, and a shrink-to-fit width. Reset all three, then restore the transparent 2px left edge the
+   active-state rule below lights. Font is NOT touched — .loom-atlas-node already sets family and
+   size, and author origin beats the UA's `button { font }` whatever the specificity. */
+button.loom-atlas-node {
+  border: none;
+  border-left: 2px solid transparent;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+}
+a.loom-atlas-node:hover,
+button.loom-atlas-node:hover {
   color: var(--loom-text);
   background: var(--loom-panel);
 }
@@ -1163,20 +1179,62 @@ a.loom-atlas-node.is-active {
 }
 /* Keyboard focus ring, matching the rail's inset phosphor ring. The tree is the app's primary
    navigation with the switch on, so every node has to be reachable and VISIBLY focused by Tab. */
-a.loom-atlas-node:focus-visible {
+a.loom-atlas-node:focus-visible,
+button.loom-atlas-node:focus-visible {
   outline: 2px solid var(--loom-phosphor);
   outline-offset: -2px;
 }
-/* The project row: a label, not a link (tree selection is P1-4), so it reads brighter than a
-   destination without pretending to be clickable. */
-.loom-atlas-node.is-branch {
+/* The no-project placeholder row (a <div>): there is nothing to select, so it stays the plain label
+   the project tier was before selection existed. */
+div.loom-atlas-node.is-branch {
   color: var(--loom-text);
   cursor: default;
 }
-/* Reserved, not drawn — see the note in AtlasTree.tsx. The width is the point: it keeps every label
-   on one text origin so the phase-2 branch nodes can land without the rows shifting. */
+/* The OPEN project row says which branch you are INSIDE, not where you are — so it takes the
+   phosphor edge and the brighter text but NOT the active destination's gradient fill. Two rows
+   wearing an identical "you are here" treatment would leave neither reading as it. Closed rows keep
+   the dim rest colour every other row has, so the tier reads as one list with one selection. */
+button.loom-atlas-node.is-branch.is-open {
+  color: var(--loom-text);
+  border-left-color: var(--loom-phosphor);
+}
+/* Reserved, blank on a destination row — see the note in AtlasTree.tsx. The width is the point: it
+   keeps every label on one text origin so the phase-2 branch nodes can land without rows shifting. */
 .loom-atlas-twist {
   flex: 0 0 12px;
+}
+/* Drawn only on a project row, where it reports a real open/closed state. Centred so the rotation
+   turns in place rather than drifting off its own column. */
+.loom-atlas-node.is-branch .loom-atlas-twist {
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--loom-text-muted);
+  transition:
+    transform 110ms cubic-bezier(0.2, 0, 0, 1),
+    color 80ms linear;
+}
+.loom-atlas-node.is-branch.is-open .loom-atlas-twist {
+  transform: rotate(90deg);
+  color: var(--loom-phosphor);
+}
+/* Live-session marker on a project row: the same count + phosphor dot the rail chip's dropdown rows
+   carry, so both shells say "work is running here" in one language. */
+.loom-atlas-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--loom-text-dim);
+  font-size: 11px;
+}
+.loom-atlas-livedot {
+  width: 7px;
+  height: 7px;
+  border-radius: 7px;
+  background: var(--loom-phosphor);
+  box-shadow: 0 0 6px var(--loom-phosphor);
 }
 .loom-atlas-ico {
   flex: 0 0 14px;
@@ -1266,7 +1324,11 @@ a.loom-atlas-node:focus-visible {
   .loom-rail-item,
   .loom-rail-statrow,
   .loom-manifest-row,
-  .loom-gate-row {
+  .loom-gate-row,
+  /* The Atlas tree's rows: their hover/active colour fade, and the project twist's rotation (card
+     e47df20a). The node row itself was missed when the tree landed — same block, same fix. */
+  .loom-atlas-node,
+  .loom-atlas-twist {
     transition: none;
   }
   .loom-mic-pulse {
