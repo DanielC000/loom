@@ -13,7 +13,7 @@
 //
 // Builds on the shared `loomDaemon` fixture; profiles-agents.spec.ts is the template. Seeds its own
 // uniquely-named profile over REST and never touches a BUNDLED profile, so the shared store stays clean.
-import { expect, test } from "./fixtures/daemon";
+import { expect, openActorsProfile, test } from "./fixtures/daemon";
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -96,8 +96,9 @@ test.describe("profile harness control", () => {
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Harness Persist ${Date.now()}` });
     expect(profile.harness ?? null).toBeNull();
 
-    await page.goto(`${loomDaemon.baseURL}/actors`);
-    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    // Card 8206994d: the agents list must be warm before Save, or a harness→codex widening races
+    // ProfileEditor's planGrantSave into an unhandled grant-reach confirm instead of landing the save.
+    await openActorsProfile(page, loomDaemon.baseURL, profile.name);
     await page.getByTestId("harness-card-codex").click();
 
     const save = page.getByRole("button", { name: "Save", exact: true });

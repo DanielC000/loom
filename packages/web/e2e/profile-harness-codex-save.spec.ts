@@ -11,7 +11,7 @@
 // Deliberately a SIBLING of profile-harness.spec.ts rather than an extension of it: that spec is about the
 // per-field ANNOTATIONS being present and correctly severity-tagged, this one is about the SAVE landing.
 // Full narrative + prohibitions: docs/decisions/6232fe9d-codex-rejected-vs-dropped-fields.md.
-import { expect, test, type Page } from "./fixtures/daemon";
+import { expect, openActorsProfile, test, type Page } from "./fixtures/daemon";
 
 /**
  * Collect every native dialog the page raises, accepting each one. Mirrors mutation-error-alert.spec.ts's
@@ -93,8 +93,7 @@ test.describe("codex profile with legacy restrictedTools / capabilities", () => 
     expect(profile.browserTesting).toBe(true);
     expect(profile.documentConversion).toBe(true);
 
-    await page.goto(`${loomDaemon.baseURL}/actors`);
-    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    await openActorsProfile(page, loomDaemon.baseURL, profile.name);
 
     const restrictedToggle = page.locator("label", { hasText: "Restricted tools" }).locator('input[type="checkbox"]');
     const browserToggle = page.locator("label", { hasText: "Browser testing" }).locator('input[type="checkbox"]');
@@ -161,8 +160,7 @@ test.describe("codex profile with legacy restrictedTools / capabilities", () => 
     // contradicted. The counts/labels are now derived from the two field sets, so this asserts the split.
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Drop Copy ${Date.now()}` });
 
-    await page.goto(`${loomDaemon.baseURL}/actors`);
-    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    await openActorsProfile(page, loomDaemon.baseURL, profile.name);
     await page.getByTestId("harness-card-codex").click();
 
     const summary = page.getByTestId("harness-drop-summary");
@@ -188,8 +186,7 @@ test.describe("codex profile with legacy restrictedTools / capabilities", () => 
     expect(profile.restrictedTools).toBe(false);
     expect(profile.browserTesting).toBe(false);
 
-    await page.goto(`${loomDaemon.baseURL}/actors`);
-    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    await openActorsProfile(page, loomDaemon.baseURL, profile.name);
     await page.getByTestId("harness-card-codex").click();
 
     // The drop summary still shows (fields codex ignores at spawn — a separate, pre-existing concern); the
@@ -216,8 +213,7 @@ test.describe("codex profile with legacy restrictedTools / capabilities", () => 
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Save Error ${Date.now()}` });
 
     const dialogs = collectDialogs(page);
-    await page.goto(`${loomDaemon.baseURL}/actors`);
-    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    await openActorsProfile(page, loomDaemon.baseURL, profile.name);
     await expect(page.getByTestId("profile-save-error")).toHaveCount(0); // negative control
 
     // The real wording of the refusal this card is about, so the assertion pins the field-naming text a

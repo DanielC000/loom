@@ -928,4 +928,37 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
   },
 });
 
+// Card 8206994d. `ProfileEditor.submit()` (pages/Profiles.tsx) checks `planGrantSave()` before calling
+// `onSave` — a save that changes `role`, or a human-only grant key (harness/browserTesting/
+// documentConversion/vaultWrite/connections/capabilities/allowDelta), is a "widening" and is held behind
+// a `grant-reach-confirm` panel unless `useAllAgents()` (lib/useAllAgents.ts, ONE `GET /api/agents`) has
+// already resolved. If that request hasn't settled yet, `planGrantSave` fails CLOSED (@decision 3c4e0df6)
+// and returns `confirm-unknown` even when the profile truly has zero bound agents — so a Save click just
+// opens an unhandled confirm instead of landing, with no write and no error. A spec that opens the
+// Profiles editor, changes a widening field, and expects an ordinary immediate save MUST open it through
+// one of these two helpers instead of a bare `page.goto` — never through its own copy of the pattern.
+//
+// The one deliberate exception: a spec exercising the fail-closed path ITSELF (profile-grant-reach.spec.ts's
+// FAIL-CLOSED tests) must route AROUND these, since they exist precisely to hold `/api/agents` unresolved.
+//
+// Two variants because `ProfileEditor` mounts (and therefore fires `useAllAgents()`) at two different
+// moments depending on how the editor is opened: immediately, for a `?profile=<id>` deep link, or only
+// after a sidebar row click, for a bare `/actors` navigation. Registering `waitForResponse` before
+// whichever one actually triggers the request — and awaiting it after — covers both.
+
+/** Deep-linked open (`?profile=<id>` or similar): `ProfileEditor` mounts on navigation itself. */
+export async function gotoActorsReady(page: Page, baseURL: string, path = "/actors"): Promise<void> {
+  const agentsReady = page.waitForResponse((r) => r.url().includes("/api/agents") && r.ok());
+  await page.goto(`${baseURL}${path}`);
+  await agentsReady;
+}
+
+/** Sidebar-click open: `ProfileEditor` mounts only once the named row is clicked. */
+export async function openActorsProfile(page: Page, baseURL: string, profileName: string, path = "/actors"): Promise<void> {
+  const agentsReady = page.waitForResponse((r) => r.url().includes("/api/agents") && r.ok());
+  await page.goto(`${baseURL}${path}`);
+  await page.getByRole("button").filter({ hasText: profileName }).first().click();
+  await agentsReady;
+}
+
 export { expect } from "@playwright/test";

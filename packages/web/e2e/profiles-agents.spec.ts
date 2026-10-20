@@ -21,7 +21,7 @@
 // This spec only ever CREATES new agents/profiles (uniquely named) and never mutates a BUNDLED profile, so
 // the shared store stays clean for other specs — no reset step is needed (unlike skills.spec.ts, which
 // mutates a bundled skill and restores it).
-import { expect, test } from "./fixtures/daemon";
+import { expect, openActorsProfile, test } from "./fixtures/daemon";
 import type { Page } from "@playwright/test";
 
 // --- REST seeding helpers (the same human/loopback endpoints the UI drives) --------------------------
@@ -166,10 +166,9 @@ test.describe("profiles & agents", () => {
   test("profile capability toggles render; documentConversion reveals the provisioning panel and browserTesting persists", async ({ page, loomDaemon }) => {
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Toggles ${Date.now()}` });
     // Profiles are a daemon-global store — no active-project pin needed (unlike Workspace).
-    await page.goto(`${loomDaemon.baseURL}/actors`);
-
-    // Open the seeded profile in the editor (sidebar rows are <button>s; the unique name pins one).
-    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    // Card 8206994d: browserTesting/documentConversion are planGrantSave widening keys — open with the
+    // agents list already warm or the Save click below races into an unhandled grant-reach confirm.
+    await openActorsProfile(page, loomDaemon.baseURL, profile.name);
 
     // The capability toggles RENDER, each as a labelled checkbox.
     const browserToggle = page.locator("label", { hasText: "Browser testing" }).locator('input[type="checkbox"]');
@@ -212,8 +211,8 @@ test.describe("profiles & agents", () => {
     // grant path (no agent MCP tool can set this field).
     const connection = await seedConnection(loomDaemon.baseURL, { name: `E2E Conn ${Date.now()}`, host: "api.example.com", authScheme: "bearer", secret: "e2e-test-secret-not-real" });
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Connections ${Date.now()}` });
-    await page.goto(`${loomDaemon.baseURL}/actors`);
-    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    // Card 8206994d: connections is a planGrantSave widening key too — same warm-agents-list requirement.
+    await openActorsProfile(page, loomDaemon.baseURL, profile.name);
 
     // The Connections section renders the seeded connection as a toggle button (mirrors the Skills subset
     // picker's pattern), labelled with its name.

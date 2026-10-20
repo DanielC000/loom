@@ -27,7 +27,7 @@
 // FIXTURE IDENTITY — every test asserts on a UNIQUE seeded string (a project name, a profile name, a prompt
 // body) so a silent fall-through to another spec's record on this shared daemon fails loudly rather than
 // reading plausibly green.
-import { expect, test } from "./fixtures/daemon";
+import { expect, gotoActorsReady, test } from "./fixtures/daemon";
 
 type Page = import("@playwright/test").Page;
 
@@ -514,7 +514,9 @@ test("Profiles: a codex switch sends the cleared fields even when they already e
   expect(profile.harness ?? null).toBeNull();
   expect(profile.browserTesting ?? false).toBe(false);
 
-  await page.goto(`${loomDaemon.baseURL}/actors?profile=${profile.id}`);
+  // Card 8206994d: the editor switches harness onto codex below, a planGrantSave widening key — the
+  // agents list must already be warm or the Save click races into an unhandled grant-reach confirm.
+  await gotoActorsReady(page, loomDaemon.baseURL, `/actors?profile=${profile.id}`);
   const browserToggle = page.locator("label", { hasText: "Browser testing" }).locator('input[type="checkbox"]');
   await expect(field(page, "Name")).toHaveValue(profile.name);
   await expect(browserToggle).not.toBeChecked();

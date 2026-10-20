@@ -22,7 +22,7 @@
 // uniquely-named profile + agent over REST and never touches a BUNDLED profile, so the shared store stays
 // clean. The fixture is worker-scoped (other specs' profiles/agents coexist), so every assertion addresses
 // rows by unique name/id, never by list position.
-import { expect, test } from "./fixtures/daemon";
+import { expect, openActorsProfile, test } from "./fixtures/daemon";
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -71,9 +71,19 @@ async function seedBoundRig(baseURL: string, label: string, createProject: (n: s
   return { profile, project, agent };
 }
 
-const openProfile = async (page: import("@playwright/test").Page, baseURL: string, name: string) => {
-  await page.goto(`${baseURL}/actors`);
-  await page.getByRole("button").filter({ hasText: name }).first().click();
+// Card 8206994d: ProfileEditor's planGrantSave races useAllAgents() unless the agents list is already
+// warm by the time Save is clicked — pass `{ waitForAgents: false }` ONLY for a test that deliberately
+// holds `/api/agents` unresolved/aborted itself (the FAIL-CLOSED test below), since pre-warming it there
+// would defeat the very state that test exists to exercise.
+const openProfile = async (
+  page: import("@playwright/test").Page, baseURL: string, name: string, opts: { waitForAgents?: boolean } = {},
+) => {
+  if (opts.waitForAgents === false) {
+    await page.goto(`${baseURL}/actors`);
+    await page.getByRole("button").filter({ hasText: name }).first().click();
+  } else {
+    await openActorsProfile(page, baseURL, name);
+  }
 };
 
 const browserToggle = (page: import("@playwright/test").Page) =>
@@ -287,7 +297,7 @@ test.describe("profile grant blast radius", () => {
     // planner would see an empty list, read it as "nobody is bound", and save the grant with no prompt.
     await page.route("**/api/agents", (r) => r.abort());
 
-    await openProfile(page, loomDaemon.baseURL, profile.name);
+    await openProfile(page, loomDaemon.baseURL, profile.name, { waitForAgents: false });
     await browserToggle(page).check();
     await page.getByRole("button", { name: "Save", exact: true }).click();
 
@@ -301,6 +311,40 @@ test.describe("profile grant blast radius", () => {
     // And Cancel still withholds the save, exactly as in the loaded case.
     await page.getByTestId("grant-reach-cancel").click();
     expect((await getProfile(loomDaemon.baseURL, profile.id)).browserTesting ?? false).toBe(false);
+  });
+
+  test("FAIL-CLOSED (DELAYED, not aborted): a role change surfaces the confirm instead of racing the save through (card 8206994d)", async ({ page, loomDaemon }) => {
+    // The real-world shape of the bug this card investigated: `/api/agents` isn't BROKEN, it's merely
+    // still loading when Save is clicked — the cold-cache window every fresh page load opens for real.
+    // A permanent regression guard, as opposed to `openActorsProfile`/`openProfile`'s own race-avoidance:
+    // this test PROVES the fail-closed confirm is what a real user sees in that window, on a profile with
+    // ZERO bound agents (so a pre-fix reader might assume nothing would ever prompt) — never a silent,
+    // unobservable no-op.
+    const profile = await seedProfile(loomDaemon.baseURL, `Grant Reach Delayed ${Date.now()}`);
+    expect(profile.role ?? null).toBeNull();
+
+    await page.route("**/api/agents", async (route) => {
+      await new Promise((r) => setTimeout(r, 3000));
+      await route.fallback();
+    });
+
+    // Deliberately the RAW goto+click (never `openProfile`/`openActorsProfile`) — pre-warming the agents
+    // list here would defeat the exact still-loading window this test exists to pin.
+    await page.goto(`${loomDaemon.baseURL}/actors`);
+    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    await roleCard(page, "worker").click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+
+    // AFTER: the confirm appears — worded as unknown, since the list hasn't resolved yet — and the save
+    // button it stood behind is disabled, never a second write path around it.
+    const confirm = page.getByTestId("grant-reach-confirm");
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText(/could not load/i);
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+
+    // AND NO WRITE HAPPENED: the stored role is still null, well past the delayed route's own 3s window.
+    await page.waitForTimeout(500);
+    expect((await getProfile(loomDaemon.baseURL, profile.id)).role ?? null).toBeNull();
   });
 
   test("a page that warmed the shared agent cache first does NOT suppress the confirm", async ({ page, loomDaemon }) => {

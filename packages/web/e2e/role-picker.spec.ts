@@ -10,7 +10,7 @@
 //   4. Save round-trips: the picked role persists to the store (REST read-back).
 // Builds on the shared `loomDaemon` fixture (card c3fd1d68); profiles-agents.spec.ts is the template.
 // Only ever CREATES a uniquely-named profile (never mutates a bundled one), so the shared store stays clean.
-import { expect, test } from "./fixtures/daemon";
+import { expect, openActorsProfile, test } from "./fixtures/daemon";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -27,9 +27,11 @@ const seedProfile = (baseURL: string, name: string, role?: string) =>
 const getProfile = (baseURL: string, id: string) =>
   apiJson<SeededProfile>(`${baseURL}/api/profiles/${encodeURIComponent(id)}`);
 
-// Open a seeded profile in the Profiles editor (sidebar rows are <button>s; the unique name pins one).
-const openProfile = (page: import("@playwright/test").Page, name: string) =>
-  page.getByRole("button").filter({ hasText: name }).first().click();
+// Open a seeded profile in the Profiles editor, with the cross-project agents list already warm — card
+// 8206994d: every test here changes `role`, a planGrantSave widening key, so a Save click races
+// useAllAgents() unless this has already resolved.
+const openProfile = (page: import("@playwright/test").Page, baseURL: string, name: string) =>
+  openActorsProfile(page, baseURL, name, "/profiles");
 const saveButton = (page: import("@playwright/test").Page) => page.getByRole("button", { name: "Save", exact: true });
 
 test.describe("role picker", () => {
@@ -37,9 +39,8 @@ test.describe("role picker", () => {
     const shots = mkdtempSync(path.join(tmpdir(), "role-picker-shots-"));
     // A freshly seeded profile carries no role (null) → the plain card is selected by default.
     const profile = await seedProfile(loomDaemon.baseURL, `Role Picker Rig ${Date.now()}`);
-    await page.goto(`${loomDaemon.baseURL}/profiles`);
 
-    await openProfile(page, profile.name);
+    await openProfile(page, loomDaemon.baseURL, profile.name);
 
     // 1. The picker renders, with a card per conferrable role (the display map's PICKER_ROLES).
     const picker = page.getByTestId("role-picker");
@@ -84,8 +85,7 @@ test.describe("role picker", () => {
     // dev-layer role from ever being saved is that the picker never lets you select (or dirty) it. This
     // proves the lock is a real save-time guard, not just a cosmetic disabled attribute.
     const profile = await seedProfile(loomDaemon.baseURL, `Locked Rig ${Date.now()}`);
-    await page.goto(`${loomDaemon.baseURL}/profiles`);
-    await openProfile(page, profile.name);
+    await openProfile(page, loomDaemon.baseURL, profile.name);
 
     const platform = page.getByTestId("role-card-platform");
     const plain = page.getByTestId("role-card-plain");
@@ -115,8 +115,7 @@ test.describe("role picker", () => {
   test("selecting Plain round-trips a role back to null", async ({ page, loomDaemon }) => {
     // Start from a real role, pick Plain ("" → null), Save, and read it back — the no-role branch persists.
     const profile = await seedProfile(loomDaemon.baseURL, `Plain Round-trip Rig ${Date.now()}`, "manager");
-    await page.goto(`${loomDaemon.baseURL}/profiles`);
-    await openProfile(page, profile.name);
+    await openProfile(page, loomDaemon.baseURL, profile.name);
 
     const plain = page.getByTestId("role-card-plain");
     const manager = page.getByTestId("role-card-manager");
