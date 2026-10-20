@@ -271,12 +271,18 @@ async function assertSkeletonInstrumentFires(page: Page): Promise<void> {
 
 // Console + page errors, collected from before the first navigation. Returns the collected list plus
 // its own positive control, so a zero reading is only ever believed from a collector shown to fire.
-function collectConsoleErrors(page: Page): { errors: string[]; assertFires: () => Promise<void> } {
+function collectConsoleErrors(page: Page): { errors: string[]; reset: () => void; assertFires: () => Promise<void> } {
   const errors: string[] = [];
   page.on("console", (msg) => { if (msg.type() === "error") errors.push("console.error: " + msg.text()); });
   page.on("pageerror", (err) => { errors.push("pageerror: " + err.message); });
+  // Chromium's "Failed to load resource: 404" console error names no URL, so a red here is
+  // unactionable without recording the failing response alongside it.
+  page.on("response", (res) => {
+    if (res.status() >= 400) errors.push(`http ${res.status()}: ${new URL(res.url()).pathname}`);
+  });
   return {
     errors,
+    reset: () => { errors.length = 0; },
     assertFires: async () => {
       const probe = "loom-console-positive-control-" + Date.now();
       await page.evaluate((text) => { console.error(text); }, probe);
@@ -355,7 +361,7 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     expect(actual, "the classic shell's structure changed. Actual fingerprint:\n" + actual + "\n").toBe(BASELINE_SHELL);
   });
 
-  test("switch ON renders the empty Atlas frame with zero console errors", async ({ page, loomDaemon }) => {
+  test("switch ON renders the Atlas frame with zero console errors", async ({ page, loomDaemon }) => {
     const consoleErrors = collectConsoleErrors(page);
     await seedAtlasOn(page);
     await fakeUpdateAvailable(page);
@@ -365,13 +371,13 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     // The classic rail is replaced, not merely hidden: exactly one shell is ever mounted.
     await expect(rail(page)).toHaveCount(0);
 
-    // The frame the card promises: an entity tree, a breadcrumb trail, a node header, and an empty
-    // node body. No nodes yet, by design — the tree says so rather than rendering nothing at all.
+    // The frame: an entity tree, a breadcrumb trail, a node header. The tree is POPULATED as of card
+    // 8cbb2ac2 (P1-1) — what it holds, and that it holds one node per nav destination, is that card's
+    // own spec (atlas-tree.spec.ts); here it only has to be present and the heading has to name the
+    // landed node rather than the frame's old placeholder title.
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
-    await expect(page.getByTestId("atlas-tree")).toContainText("No nodes yet");
     await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toBeVisible();
-    await expect(page.getByRole("heading", { level: 1, name: "Workspace" })).toBeVisible();
-    await expect(page.getByTestId("atlas-empty")).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Mission Control" })).toBeVisible();
 
     // The `banners` slot is really wired, not just declared: the same forced banner the switch-off
     // baseline pins renders INSIDE the Atlas frame too. Nothing else in this spec would notice if
@@ -379,17 +385,28 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     await expect(atlas(page).locator('[role="status"]').filter({ hasText: "A new Loom release is available" }))
       .toBeVisible();
 
-    // Any URL lands on the frame (the shell's catch-all route), never a blank column.
-    await page.goto(loomDaemon.baseURL + "/board");
+    // A URL with no node yet (the parameterized routes are P1-2, the legacy redirects P1-3) still
+    // lands on the frame via the shell's catch-all, never a blank column.
+    await page.goto(loomDaemon.baseURL + "/review/no-such-worker");
     await expect(page.getByTestId("atlas-empty")).toBeVisible();
 
-    // Settle first: a zero read taken the instant the frame appears can simply predate an error that
-    // a still-in-flight request was about to log.
+    // The zero-console-error claim is scoped to THIS route, deliberately, and the collector is reset
+    // on arrival to make that scoping real rather than implied.
+    //
+    // It is the FRAME's claim, and this is the only route where the frame renders alone. Since card
+    // 8cbb2ac2 (P1-1) every other URL mounts a real page, and a page brings its own expected network
+    // behaviour: MissionControl at "/" reads GET /api/platform/home with `retry:false` precisely
+    // because it 404s in the shipping edition (pages/MissionControl.tsx:92-96), which a non-dev
+    // throwaway daemon is — and Chromium logs a console error for every 404 response. That fires
+    // identically under the classic shell, so folding it in here would redden this spec for something
+    // Atlas neither caused nor governs. Whether Atlas introduces a NEW error on any REAL page is
+    // asserted in atlas-tree.spec.ts, against the classic shell as its contrast case.
+    consoleErrors.reset();
     await page.waitForLoadState("networkidle");
     await consoleErrors.assertFires();
     expect(
       consoleErrors.errors,
-      "Atlas frame logged " + consoleErrors.errors.length + " console error(s)",
+      "the bare Atlas frame logged " + consoleErrors.errors.length + " error(s)",
     ).toEqual([]);
   });
 
@@ -419,8 +436,8 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     await expect(rail(page)).toHaveCount(0);
     expect(await page.evaluate((k) => localStorage.getItem(k), ATLAS_KEY)).toBe("1");
 
-    // And back: the frame's own escape hatch is the only way out while the tree has no Settings node,
-    // so it has to work — otherwise the switch is a one-way door.
+    // And back: the frame's own escape hatch. Since P1-1 the tree also reaches Settings, so this is no
+    // longer the ONLY exit — but it is the one-click one, and it still has to work.
     await page.getByTestId("atlas-leave").click();
     await expect(rail(page)).toBeVisible();
     await expect(atlas(page)).toHaveCount(0);
