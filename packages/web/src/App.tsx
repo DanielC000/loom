@@ -7,6 +7,8 @@ import SessionView from "./pages/SessionView";
 import { NAV_PAGES } from "./nav";
 import { Button } from "./components/ui";
 import { Sidebar } from "./components/Sidebar";
+import { AtlasShell } from "./components/AtlasShell";
+import { AtlasSwitchNotice } from "./components/AtlasSwitchNotice";
 import { CommandPalette } from "./components/CommandPalette";
 import { SetupWizard } from "./components/SetupWizard";
 import { CredentialBanner } from "./components/CredentialBanner";
@@ -16,6 +18,7 @@ import { api } from "./lib/api";
 import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionOpenTarget, isAnswerableRequest, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider } from "./lib/activeProject";
+import { useAtlasUi } from "./lib/atlasUi";
 import { color, font, radius, tone } from "./theme";
 import { Dot } from "./components/ui";
 import { page } from "./ui";
@@ -286,51 +289,89 @@ function FirstRunWelcome() {
   );
 }
 
+// The cross-cutting chrome, ONE definition each, mounted by whichever shell is live (the placement
+// rule: docs/plans/atlas-ui/02-architecture.md). Both return fragments, so neither adds a DOM node of
+// its own and the legacy tree below renders the same elements in the same order it always has. The
+// overlays are fixed-position or null and sit at the shell root; the banners are in document flow
+// directly above the page content. Nothing here knows which shell it is in, and nothing here is
+// inside a route table.
+function ShellOverlays() {
+  return (
+    <>
+      <CommandPalette />
+      <FirstRunWelcome />
+      <ToastContainer />
+      <AtlasSwitchNotice />
+    </>
+  );
+}
+
+function ShellBanners() {
+  return (
+    <>
+      <CredentialBanner />
+      <GatewayTokenBanner />
+      <UpdateBanner />
+    </>
+  );
+}
+
+// Today's shell: the fixed Instrument Rail + its 60px flow gutter on the left, the page column on
+// the right. The route table below maps EVERY NAV_PAGES route (a companion-gated page stays
+// reachable by URL) plus the legacy redirects.
+//
+// Extracted from App() unchanged, and it stays the DEFAULT until the owner signs off the parity
+// checklist (docs/plans/atlas-ui/), so this subtree must keep rendering exactly what it always has.
+function LegacyShell() {
+  return (
+    <div style={{ display: "flex", minHeight: "100vh" }}>
+      <ShellOverlays />
+      <Sidebar />
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <ShellBanners />
+        <main style={page}>
+          <Routes>
+            {NAV_PAGES.map((p) => (
+              <Route key={p.to} path={p.to} element={p.element} />
+            ))}
+            {/* /setup was the old end-user Platform route — now consolidated into /platform. Redirect any
+                lingering links/bookmarks (and the first-run welcome's historical target). */}
+            <Route path="/setup" element={<Navigate to="/platform" replace />} />
+            {/* /workspace was renamed + repositioned to /projects (card 274f9ba9) — redirect lingering links. */}
+            <Route path="/workspace" element={<Navigate to="/projects" replace />} />
+            {/* /profiles + /skills were consolidated into the single /actors page (IA merge #1) — redirect any
+                lingering links/bookmarks to the right tab (/skills → the Skills tab via ?tab=skills). */}
+            <Route path="/profiles" element={<Navigate to="/actors" replace />} />
+            <Route path="/skills" element={<Navigate to="/actors?tab=skills" replace />} />
+            {/* /schedules + /event-triggers were consolidated into the single /automation page (IA merge #2) —
+                redirect any lingering links/bookmarks to the right tab (/event-triggers → the Events tab). */}
+            <Route path="/schedules" element={<Navigate to="/automation" replace />} />
+            <Route path="/event-triggers" element={<Navigate to="/automation?tab=events" replace />} />
+            {/* /vault + /git were consolidated into the single /repository page (IA merge #3) — redirect any
+                lingering links/bookmarks to the right tab (/git → the Git tab via ?tab=git). */}
+            <Route path="/vault" element={<Navigate to="/repository" replace />} />
+            <Route path="/git" element={<Navigate to="/repository?tab=git" replace />} />
+            <Route path="/review/:workerId" element={<ReviewPanel />} />
+            <Route path="/question/:id" element={<QuestionAnswer />} />
+            <Route path="/session/:id" element={<SessionView />} />
+          </Routes>
+        </main>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  // The Atlas UI switch (lib/atlasUi.ts, card 757c80dd) gates WHICH top-level shell mounts, and
+  // nothing else. Exactly one shell is ever mounted — never both, never one hidden behind the other -
+  // so no Atlas rule, class or handler can reach the classic UI.
+  const [atlasUi] = useAtlasUi();
   return (
     <ActiveProjectProvider>
       <RequestModalProvider>
-      {/* Shell layout: the fixed Instrument Rail + its 60px flow gutter on the left, the page column on
-          the right. The route table below maps EVERY NAV_PAGES route (a companion-gated page stays
-          reachable by URL) plus the legacy redirects. */}
-      <div style={{ display: "flex", minHeight: "100vh" }}>
-        <CommandPalette />
-        <FirstRunWelcome />
-        <ToastContainer />
-        <Sidebar />
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <CredentialBanner />
-          <GatewayTokenBanner />
-          <UpdateBanner />
-          <main style={page}>
-            <Routes>
-              {NAV_PAGES.map((p) => (
-                <Route key={p.to} path={p.to} element={p.element} />
-              ))}
-              {/* /setup was the old end-user Platform route — now consolidated into /platform. Redirect any
-                  lingering links/bookmarks (and the first-run welcome's historical target). */}
-              <Route path="/setup" element={<Navigate to="/platform" replace />} />
-              {/* /workspace was renamed + repositioned to /projects (card 274f9ba9) — redirect lingering links. */}
-              <Route path="/workspace" element={<Navigate to="/projects" replace />} />
-              {/* /profiles + /skills were consolidated into the single /actors page (IA merge #1) — redirect any
-                  lingering links/bookmarks to the right tab (/skills → the Skills tab via ?tab=skills). */}
-              <Route path="/profiles" element={<Navigate to="/actors" replace />} />
-              <Route path="/skills" element={<Navigate to="/actors?tab=skills" replace />} />
-              {/* /schedules + /event-triggers were consolidated into the single /automation page (IA merge #2) —
-                  redirect any lingering links/bookmarks to the right tab (/event-triggers → the Events tab). */}
-              <Route path="/schedules" element={<Navigate to="/automation" replace />} />
-              <Route path="/event-triggers" element={<Navigate to="/automation?tab=events" replace />} />
-              {/* /vault + /git were consolidated into the single /repository page (IA merge #3) — redirect any
-                  lingering links/bookmarks to the right tab (/git → the Git tab via ?tab=git). */}
-              <Route path="/vault" element={<Navigate to="/repository" replace />} />
-              <Route path="/git" element={<Navigate to="/repository?tab=git" replace />} />
-              <Route path="/review/:workerId" element={<ReviewPanel />} />
-              <Route path="/question/:id" element={<QuestionAnswer />} />
-              <Route path="/session/:id" element={<SessionView />} />
-            </Routes>
-          </main>
-        </div>
-      </div>
+        {atlasUi
+          ? <AtlasShell overlays={<ShellOverlays />} banners={<ShellBanners />} />
+          : <LegacyShell />}
       </RequestModalProvider>
     </ActiveProjectProvider>
   );

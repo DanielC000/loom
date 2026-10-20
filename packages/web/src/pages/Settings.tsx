@@ -37,8 +37,9 @@ import {
   type NodeModulesReclaimRunResult,
 } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useAtlasUi } from "../lib/atlasUi";
 import { useAllAgentLabels } from "../lib/useAllAgents";
-import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import {
   CodexDefaultConfirm, HarnessDrainBanner, fleetScopeAvailable, FLEET_SCOPE_DISABLED_REASON,
@@ -68,6 +69,14 @@ export default function Settings() {
 
   return (
     <div style={{ maxWidth: 820, display: "flex", flexDirection: "column", gap: 28 }}>
+      {/* Which shell this browser renders (card 757c80dd). FIRST on the page: it is the only control
+          here that changes the whole app's chrome, and the owner's Atlas review workflow is flipping
+          it back and forth to compare (docs/plans/atlas-ui/). */}
+      <div>
+        <SectionLabel>Interface</SectionLabel>
+        <InterfacePanel />
+      </div>
+
       <div>
         <SectionLabel>Project Settings</SectionLabel>
         {project ? (
@@ -141,6 +150,36 @@ export default function Settings() {
         <NodeModulesReclaimPanel />
       </div>
     </div>
+  );
+}
+
+// The Atlas UI switch (card 757c80dd; what Atlas is: docs/plans/atlas-ui/02-architecture.md).
+//
+// The ONLY client-local preference on this page, and it looks different for a reason: it is a
+// per-browser display choice backed by localStorage (lib/atlasUi.ts), not project or daemon config. So
+// it has no Save button, no override/inherit field and no REST write — it takes effect the instant you
+// pick a side, affects nobody else on this daemon, and no agent can reach it.
+function InterfacePanel() {
+  const [atlasUi, setAtlasUi] = useAtlasUi();
+  return (
+    <Panel>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={fieldLabel}>Which UI this browser renders</span>
+        <Segmented
+          data-testid="atlas-ui-switch"
+          ariaLabel="Which UI this browser renders"
+          value={atlasUi ? "atlas" : "classic"}
+          onChange={(v) => setAtlasUi(v === "atlas")}
+          items={[{ key: "classic", label: "Classic" }, { key: "atlas", label: "Atlas preview" }]}
+        />
+      </div>
+      <Hint style={{ display: "block", marginTop: 12, maxWidth: "68ch", lineHeight: 1.6 }}>
+        Atlas is the replacement shell being built now: one entity tree for projects, agents, boards and
+        sessions, in place of the nav rail. It is still going up, so expect it to be largely empty.
+        Classic stays the default and is unchanged by it. Stored in this browser alone, and the Atlas
+        frame carries its own way back here.
+      </Hint>
+    </Panel>
   );
 }
 
