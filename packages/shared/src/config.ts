@@ -1079,7 +1079,22 @@ export interface PlatformConfig {
    * general set of toggles) + HUMAN-only, mirroring the rest of `PlatformConfig`.
    */
   mutedBrowserNotifications: BrowserNotificationKind[];
+  /**
+   * Retention window, in whole days, past a request's TERMINAL-state transition before its stored
+   * `question_ask` attachments (card 432765ab) are garbage-collected (`mcp/attachment-gc.ts`). Minimum 1;
+   * default 30. DAEMON-GLOBAL (no per-project layer) + HUMAN-only, mirroring the rest of `PlatformConfig`
+   * — there is no agent-facing platform-config WRITE surface at all, so this reaches an agent no
+   * differently than `operatorEnabled` does.
+   *
+   * @decision 6f27469b — a 0 or negative value is REJECTED, never a "disable GC" sentinel. An unread
+   * notice has no age-based fallback terminal time — never borrow a fixed window for it.
+   */
+  attachmentRetentionDays: number;
 }
+
+/** Default for `PlatformConfig.attachmentRetentionDays` — a single named constant, mirroring
+ *  `COMPANION_VOICE_ENABLED_DEFAULT`/`OPERATOR_ENABLED_DEFAULT`. 30 days past terminal transition. */
+export const ATTACHMENT_RETENTION_DAYS_DEFAULT = 30;
 
 /** Default for `PlatformConfig.companionVoiceEnabled` — a single named constant so flipping the shipped
  *  default is a one-line change. OFF: companion voice provisioning is explicit human opt-in. */
@@ -1474,6 +1489,8 @@ export interface PlatformConfigOverride {
    *  is not a `DEEP_MERGE_GROUPS` member in the PATCH handler) — the Settings panel always emits the full
    *  muted set, so there is no partial-list shape to merge. */
   mutedBrowserNotifications?: BrowserNotificationKind[];
+  /** See PlatformConfig.attachmentRetentionDays. */
+  attachmentRetentionDays?: number;
   /** See RemoteAccessConfig. Deep-partial: `tls`/`rateLimit` replace whole when present. */
   remoteAccess?: Partial<RemoteAccessConfig>;
   /** See ResolvedConfig.harness. Daemon-global fleet default; deep-partial (`default`/`scope` each optional). */
@@ -1651,6 +1668,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     // Card 51a80b4d: nothing muted by default — every attention kind still fires its browser
     // Notification, so an unset override behaves exactly as it did before the toggles existed.
     mutedBrowserNotifications: [],
+    // Card 6f27469b: attachment GC retention window, 30 days past terminal transition.
+    attachmentRetentionDays: ATTACHMENT_RETENTION_DAYS_DEFAULT,
   },
   // Access-story Phase A: OFF + loopback by default — ships inert (see RemoteAccessConfig). The
   // rateLimit default is carried here too (Phase C) so it applies the moment a human flips `enabled`
@@ -1986,6 +2005,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
     companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,
     operatorEnabled: po?.operatorEnabled ?? d.operatorEnabled,
     mutedBrowserNotifications: po?.mutedBrowserNotifications ?? d.mutedBrowserNotifications,
+    attachmentRetentionDays: po?.attachmentRetentionDays ?? d.attachmentRetentionDays,
   };
 }
 

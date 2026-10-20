@@ -1042,6 +1042,12 @@ const platformConfigOverrideSchema = z.object({
   // reachable. Plain operational tuning (a list of UI category ids) with no credential/host-path shape,
   // so `sanitizePlatformConfigForAgent` passes it through unredacted.
   mutedBrowserNotifications: z.array(z.enum(BROWSER_NOTIFICATION_KINDS)).optional(),
+  // Card 6f27469b — attachment GC retention window, whole days. Min 1: a 0/negative value is REJECTED,
+  // never a "disable GC" sentinel (see PlatformConfig.attachmentRetentionDays). HUMAN-only like every
+  // platform key above — there is no agent-facing platform-config WRITE surface at all, so this reaches
+  // an agent no differently than operatorEnabled does. Plain operational tuning (a day count) with no
+  // credential/host-path shape, so `sanitizePlatformConfigForAgent` passes it through unredacted.
+  attachmentRetentionDays: z.number().int().min(1).max(3650).optional(),
   remoteAccess: remoteAccessOverride.optional(),
   // Pillar-B trigger gate (§19b), moved here from the per-project orchestration shape (see the removal
   // note on orchestrationOverride above) — schedulerEnabled is a daemon-wide service, not per-project.
@@ -1180,6 +1186,8 @@ const platformConfigPatchSchema = z.object({
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().nullable().optional(),
   companionVoiceEnabled: z.boolean().optional(),
+  // Card 6f27469b — no blank-to-inherit control today, same plain-optional shape as companionVoiceEnabled.
+  attachmentRetentionDays: z.number().int().min(1).max(3650).optional(),
   operatorEnabled: z.boolean().nullable().optional(),
   // Card 51a80b4d — nullable like the toggles above: the Settings panel sends `null` when nothing is
   // muted, so an all-on config stores no key at all rather than an empty array.

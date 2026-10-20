@@ -50,6 +50,7 @@ import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { runBootScratchGcSweep } from "./scratch-gc.js";
 import { sweepOrphanedSettingsDirSecrets } from "../pty/mcp-config-gc.js";
+import { runBootAttachmentGcSweep, attachmentRetentionMsFromDays } from "../mcp/attachment-gc.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
 import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
@@ -8338,6 +8339,10 @@ export class SessionService {
     } catch (e) {
       console.warn(`[boot] settings-dir sweep failed: ${(e as Error).message}`);
     }
+    // Card 6f27469b: same fire-and-forget shape as runBootScratchGcSweep above — a wedged removal can
+    // never block boot. attachmentRetentionDays is daemon-global (PlatformConfig), read fresh each boot.
+    const attachmentRetentionDays = resolveConfig({}, this.db.getPlatformConfig()).platform.attachmentRetentionDays;
+    runBootAttachmentGcSweep(this.db, attachmentRetentionMsFromDays(attachmentRetentionDays));
     // Card 92be634e: the stale .only.txt sweep lives in its OWN try block in index.ts, NOT here — a throw
     // from this function's own earlier, unrelated run-reconcile logic (listInterruptedRuns/failRun/
     // runBootScratchGcSweep, none individually guarded) would otherwise skip it too, since it's the last

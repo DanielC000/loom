@@ -131,6 +131,7 @@ try {
     rateLimit: { defaultBackoffMs: 120000 },
     coalesceAgentMessages: true,
     maxConcurrentGates: 3,
+    attachmentRetentionDays: 45,
     integrations: { codescape: { path: "/private/host/path/to/codescape-cli" } },
     remoteAccess: {
       enabled: true,
@@ -142,6 +143,17 @@ try {
   const cfg = await call("platform_config_get", {});
   check("(1) plain operational fields pass through unredacted (rateLimit, coalesceAgentMessages, maxConcurrentGates)",
     cfg.override.rateLimit?.defaultBackoffMs === 120000 && cfg.override.coalesceAgentMessages === true && cfg.override.maxConcurrentGates === 3);
+  // Card 6f27469b — attachmentRetentionDays is a plain day-count, no secret/host-path shape, so it must
+  // pass through unredacted exactly like the other operational fields above, on BOTH override and
+  // resolved. This is the ONLY agent-reachable surface that can ever see this key at all (read-only —
+  // see the (0) tool-presence check above and the (4) trust-gate check below: no platform_config_set/
+  // update tool is registered anywhere, on loom-platform or any other surface).
+  check("(1) attachmentRetentionDays passes through unredacted on the override",
+    cfg.override.attachmentRetentionDays === 45);
+  check("(1) attachmentRetentionDays passes through unredacted on the resolved group",
+    cfg.resolved.attachmentRetentionDays === 45);
+  check("(1) no platform_config WRITE tool is registered on loom-platform (platform_config_get is read-only)",
+    platToolNames.every((n) => !/^platform_config_(set|update|patch)$/.test(n)));
   // `resolved` mirrors resolveConfig's PlatformConfig group exactly (same shape the human REST GET
   // returns) — maxConcurrentGates resolves under `orchestration.maxConcurrentGates`, not this group, so
   // it's correctly ABSENT here; it's still readable via `override.maxConcurrentGates` above.

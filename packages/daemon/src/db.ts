@@ -9137,6 +9137,35 @@ export class Db {
     ).all(beforeIso) as Row[]).map(toQuestion);
   }
   /**
+   * Every request carrying stored `question_ask` attachments (card 432765ab) whose TERMINAL-state
+   * transition happened at or before `cutoffIso` — the attachment GC sweep's (`mcp/attachment-gc.ts`)
+   * work set: 'consumed' -> consumed_at, 'cancelled' -> cancelled_at (covers question_cancel + dismiss),
+   * 'notice' -> read_at (only once non-null). 'pending'/'answered' and an unread 'notice' never match (no
+   * terminal timestamp exists for them). Deliberately NON-CONSUMING — the attachment FILES on disk are
+   * the GC target, never this row; `toQuestionAttachments`'s `available` flag reads disk state live, not
+   * anything here, so this query touching nothing is what keeps that live-ness correct.
+   *
+   * @decision 6f27469b — an unread notice never falls back to an age window; the only such window this
+   * codebase ever had (`NOTICE_INBOX_WINDOW_MS`) was deleted by card 54007ab7, not merely superseded.
+   *
+   * Returns bare ids, deliberately NOT `Question[]` via `toQuestion` — mapping through `toQuestion` would
+   * run `toQuestionAttachments`'s per-attachment `fs.existsSync` for every candidate on every boot, a cost
+   * that only grows (a row is never removed from this query's result set once terminal — see the
+   * "Do not mutate" rule above). The sweep only ever needs the id to compute `questionAttachmentDir`.
+   */
+  listAttachmentGcCandidateIds(cutoffIso: string): string[] {
+    return (this.db.prepare(
+      `SELECT id FROM questions
+       WHERE attachments_json IS NOT NULL
+         AND (
+           (state = 'consumed' AND consumed_at IS NOT NULL AND consumed_at <= ?)
+           OR (state = 'cancelled' AND cancelled_at IS NOT NULL AND cancelled_at <= ?)
+           OR (state = 'notice' AND read_at IS NOT NULL AND read_at <= ?)
+         )
+       ORDER BY id`,
+    ).all(cutoffIso, cutoffIso, cutoffIso) as { id: string }[]).map((r) => r.id);
+  }
+  /**
    * Stamp `escalated_at` on ONE Request — the write half of the stale-Request watchdog (card 99d41588).
    * Guarded by `state = 'pending' AND escalated_at IS NULL` in the SAME statement (mirrors cancelQuestion's
    * observed-not-assumed discipline above) so the caller can tell a genuine first-stamp apart from a race

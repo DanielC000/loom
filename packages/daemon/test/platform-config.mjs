@@ -1580,6 +1580,71 @@ clearWatcherEnvs();
   }
 }
 
+// ============================ (27) attachmentRetentionDays: attachment GC retention window (card 6f27469b) ============================
+// A whole-day retention window past a request's terminal transition before its stored question_ask
+// attachments (card 432765ab) are GC'd (mcp/attachment-gc.ts). Default 30; min 1 (0/negative is REJECTED,
+// never a "disable GC" sentinel — see docs/decisions/6f27469b-attachment-gc.md). No agent-facing
+// platform-config WRITE surface exists at all (only the read-only platform_config_get), so there is
+// nothing further to pin here beyond this key's own validator bounds + REST round-trip.
+clearWatcherEnvs();
+{
+  check("(27) default is 30 days",
+    resolveConfig(undefined).platform.attachmentRetentionDays === 30);
+  check("(27) platform override reaches resolved.platform.attachmentRetentionDays (no-project-override fast path)",
+    resolveConfig(undefined, { attachmentRetentionDays: 14 }).platform.attachmentRetentionDays === 14);
+  check("(27) platform override reaches it on the full-merge path too (WITH a project override present)",
+    resolveConfig({ docLint: false }, { attachmentRetentionDays: 14 }).platform.attachmentRetentionDays === 14);
+
+  // --- validatePlatformConfigOverride: bounds ---
+  check("(27) accepts the minimum (1)", validatePlatformConfigOverride({ attachmentRetentionDays: 1 }).ok === true);
+  check("(27) accepts a typical value (30)", validatePlatformConfigOverride({ attachmentRetentionDays: 30 }).ok === true);
+  check("(27) accepts the ceiling (3650)", validatePlatformConfigOverride({ attachmentRetentionDays: 3650 }).ok === true);
+  check("(27) REJECTS 0 — never a 'disable GC' sentinel", validatePlatformConfigOverride({ attachmentRetentionDays: 0 }).ok === false);
+  check("(27) REJECTS a negative value", validatePlatformConfigOverride({ attachmentRetentionDays: -5 }).ok === false);
+  check("(27) REJECTS a non-integer", validatePlatformConfigOverride({ attachmentRetentionDays: 1.5 }).ok === false);
+  check("(27) REJECTS a value past the ceiling", validatePlatformConfigOverride({ attachmentRetentionDays: 3651 }).ok === false);
+  check("(27) REJECTS a non-number", validatePlatformConfigOverride({ attachmentRetentionDays: "30" }).ok === false);
+  // No blank-to-inherit control exists for this key (plain-optional, like companionVoiceEnabled) — PATCH
+  // must REJECT the null sentinel rather than silently accepting a no-op clear nobody can trigger from the UI.
+  check("(27) PATCH REJECTS the null sentinel (no clearable control wired for this key)", validatePlatformConfigPatch({ attachmentRetentionDays: null }).ok === false);
+  check("(27) PATCH still accepts a plain valid value", validatePlatformConfigPatch({ attachmentRetentionDays: 45 }).ok === true);
+
+  // --- agent-reachable-config-path check (manager-mandated, item 5) ---
+  // There is no exported seam for the FULL sanitizePlatformConfigForAgent (exporting it would drag the
+  // whole PlatformConfigOverride type, incl. integrations, into the published .d.ts — see its own doc).
+  // The real, tool-level proof that this key passes through platform_config_get unredacted (and that no
+  // platform_config WRITE tool exists anywhere to set it via an agent) lives in
+  // platform-forensics-reads.mjs's own (1) and (4) sections, driven over a REAL MCP InMemoryTransport —
+  // run that file alongside this one; it is not re-derived here.
+  // And confirm the PROJECT-config path (project_configure / project_update / project_create) cannot ever
+  // carry this key — it lives only on PlatformConfig, a structurally different schema from
+  // ProjectConfigOverride, which is `.strict()` and so rejects any unrecognized key outright.
+  check("(27) the PROJECT config validator REJECTS attachmentRetentionDays as an unrecognized key — it is a PlatformConfig-only field, unreachable via project_configure/project_update/project_create",
+    validateProjectConfigOverride({ attachmentRetentionDays: 10 }).ok === false);
+
+  // --- REST round-trip ---
+  const dbFile = path.join(TMP, "attachment-retention-6f27469b.db");
+  const db = new Db(dbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    const set = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { attachmentRetentionDays: 45 } });
+    check("(27) PATCH a valid value → 200", set.statusCode === 200);
+    check("(27) persisted to the DB", db.getPlatformConfig().attachmentRetentionDays === 45);
+    const g = (await app.inject({ method: "GET", url: "/api/platform/config" })).json();
+    check("(27) GET's RESOLVED group carries it", g.resolved.attachmentRetentionDays === 45);
+
+    await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentGates: 3 } });
+    check("(27) an UNRELATED PATCH leaves it byte-identical", db.getPlatformConfig().attachmentRetentionDays === 45);
+
+    const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { attachmentRetentionDays: 0 } });
+    check("(27) a REJECTED 400 PATCH (0) never clobbers the persisted value", bad.statusCode === 400 && db.getPlatformConfig().attachmentRetentionDays === 45);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field; and (sweep G4/G5/G6) `backup` is now a 4th deep-partial group in DEEP_MERGE_GROUPS (mirroring rateLimit/watchers/timeouts end-to-end: resolveConfig fast-path + full-merge two-path symmetry, intervalMinutes' env-then-default fallback, validator bounds 0-1440/1-500, PATCH whole-group + per-field null, deep-merge-not-wipe on a single-field PATCH) and resolveBackupConfig(platformOverride) — the exact function index.ts/sessions/service.ts call — now actually threads a passed override through, fixing the pre-migration-boot-vs-post-Db-open split (the boot snapshot call site structurally can't consult it; every other call site now does; `usageSampleIntervalMs`/`usageSampleRetentionDays` are proven to now ACTUALLY consult `platformOverride` on both resolveConfig paths — the exact doc/code mismatch this sweep fixes (their own field docs already claimed this before the fix; resolveConfig silently never read it) — with validator bounds 60000-3600000 / 1-3650 and full PATCH round-trip coverage; and `updateCheckIntervalMs` is a NEW daemon-global scalar mirroring backup.intervalMinutes's override-then-env-then-default precedence (incl. env-0-treated-as-unset), validator bounds 1h-24h, and full PATCH round-trip coverage; and (sweep G3) `gateRetry` is a NEW deep-partial group whose override lives top-level (like `backup`) but resolves onto `orchestration.gateRetry` (like `maxConcurrentGates`) — proven correctly wired on BOTH resolveConfig paths, override-beats-env-beats-default for both fields (incl. an explicit env settleMs:0 surviving, unlike the old `||` module const it replaces), validator bounds (enabled bool, settleMs 0-60000), and full PATCH round-trip coverage incl. deep-merge-not-wipe on a single-field PATCH and whole-group clear; and (card db1e3503) the bounded platform_config CHANGE HISTORY: recordPlatformConfigChange records one entry per write naming only the top-level keys that actually differ (an untouched sibling never appears) with each key's prior + resulting value, actor, and a timestamp, a genuine no-op (before===after) records nothing, entries are newest-first and never mutated in place, a ring buffer prunes the oldest rows once past PLATFORM_CONFIG_HISTORY_LIMIT so the table provably never grows unbounded, and the REST PATCH handler wires it end-to-end (a real PATCH records an entry attributed to \"human\" — platform_config's only write surface — a resubmitted-same-value PATCH records nothing new, a REJECTED 400 PATCH never records a phantom change, and GET /api/platform/config's existing shape stays byte-identical with no history field leaking in); and (card 51a80b4d) `mutedBrowserNotifications` is a NEW daemon-global list-shaped key — defaulting to [] (every attention kind still raises its browser Notification, so an unset override is byte-identical to pre-card behavior), resolving onto resolved.platform on BOTH resolveConfig paths with an explicitly-stored [] honored rather than re-derived, validated against the SHARED BROWSER_NOTIFICATION_KINDS enum domain so an unknown id / a display label / a non-string entry / a bare string all 400 at write time instead of persisting as inert data nothing will ever match, the domain itself non-empty and duplicate-free, and a full REST round-trip: the GET's RESOLVED group (the exact field the web ToastContainer reads) carries the list, a resubmitted list REPLACES rather than unions (it is deliberately not a DEEP_MERGE_GROUPS member), an unrelated PATCH leaves it byte-identical, the null sentinel DELETES the key rather than storing [], and a rejected 400 PATCH never clobbers the persisted list."
   : `\n❌ ${failures} FAILURE(S).`);

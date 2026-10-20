@@ -52,6 +52,7 @@ try {
     "companionVoiceEnabled",
     "operatorEnabled",
     "mutedBrowserNotifications", // card 51a80b4d — a list of UI attention-category ids the human muted browser Notifications for: plain operational tuning, no secret/host-path shape; passes through unredacted
+    "attachmentRetentionDays", // card 6f27469b — a day-count retention window for attachment GC: plain operational tuning, no secret/host-path shape; passes through unredacted
     "remoteAccess", // PARTIALLY REDACTED — tls.{certPath,keyPath} collapses to {configured}; rest passes through
     "schedulerEnabled",
     "maxConcurrentGates",
