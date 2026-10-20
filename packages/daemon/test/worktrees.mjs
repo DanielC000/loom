@@ -970,27 +970,62 @@ try {
     //      INDEPENDENTLY, not that "a sufficiently large timeout works trivially": the SAME delay would
     //      have rejected under the pre-fix shared-bound design (prune/branch-list's own 200ms), and (s2)
     //      below proves prune still rejects fast despite add's own budget being much larger.
+    //
+    // Card 0c7b434f: the small `refOpMs` here is the VALUE UNDER TEST (compared against `addDelayMs` to
+    // prove independence), so unlike (r1)-(r6) it can't just be left at the real GIT_OP_TIMEOUT_MS default
+    // — which means every OTHER real git call createWorktree makes before "worktree add" (rev-parse
+    // --show-toplevel, rev-parse HEAD, worktree prune, branch --list) would otherwise race a REAL git
+    // child-process spawn against this same tight bound. Measured on this host (10-run repro): 8/10
+    // flaked, with "worktree prune" the worst offender (4/8), rev-parse --show-toplevel only 2/8 — a fix
+    // that stubbed only the toplevel-guard rev-parse would still leave this flaky. Fix: every pre-"add"
+    // call is now a deterministic, INSTANT stub (no real spawn at all) instead of falling through to real
+    // git — `realToplevelS1`/`realHeadShaS1` are captured ONCE, outside the timed call, via a genuine real
+    // git read, so the stub's answers are still correct, just never separately spawned. FAILS LOUDLY on
+    // any call this stub doesn't recognise (rather than silently falling through to real git), and
+    // `s1Reached` is asserted below against the exact expected set — so a future new git call added to
+    // createWorktree's pre-add sequence breaks this test visibly instead of silently reintroducing the race.
     {
       const tS1 = "worktree-add-tolerates-longer-than-refop-bound";
       const refOpMs = 200;
       const addBudgetMs = 2000;
       const addDelayMs = 600; // > refOpMs (would have failed the OLD shared bound), < addBudgetMs
-      const delayedAddFactory = (repoPathArg, _blockMs) => {
+      const realToplevelS1 = (await realSimpleGit(repo).raw(["rev-parse", "--show-toplevel"])).trim();
+      const realHeadShaS1 = (await realSimpleGit(repo).raw(["rev-parse", "HEAD"])).trim();
+      const s1Reached = new Set();
+      const stubbedAddFactory = (repoPathArg, _blockMs) => {
         const real = realSimpleGit(repoPathArg);
         return {
-          raw: (args) => (args[0] === "worktree" && args[1] === "add"
-            ? new Promise((resolve, reject) => setTimeout(() => real.raw(args).then(resolve, reject), addDelayMs))
-            : real.raw(args)),
+          raw: (args) => {
+            const sub = gitSubcommand(args);
+            if (sub === "worktree" && args[1] === "add") {
+              s1Reached.add("worktree add");
+              return new Promise((resolve, reject) => setTimeout(() => real.raw(args).then(resolve, reject), addDelayMs));
+            }
+            if (sub === "rev-parse" && args[args.length - 1] === "--show-toplevel") {
+              s1Reached.add("rev-parse --show-toplevel");
+              return Promise.resolve(`${realToplevelS1}\n`);
+            }
+            if (sub === "rev-parse" && args[args.length - 1] === "HEAD") {
+              s1Reached.add("rev-parse HEAD");
+              return Promise.resolve(`${realHeadShaS1}\n`);
+            }
+            if (sub === "worktree" && args[1] === "prune") { s1Reached.add("worktree prune"); return Promise.resolve(""); }
+            if (sub === "branch" && args[1] === "--list") { s1Reached.add("branch --list"); return Promise.resolve(""); }
+            throw new Error(`(s1) stubbedAddFactory: unrecognised git call ${JSON.stringify(args)} — this stub must explicitly handle every pre-"worktree add" call createWorktree makes, or it silently reintroduces a real-spawn timing race`);
+          },
         };
       };
       const res = await timeAndSettle(createWorktree(repo, "projWT", tS1, {}, undefined, undefined,
-        { gitFactory: delayedAddFactory, timeoutMs: refOpMs, addWorktreeTimeoutMs: addBudgetMs }));
+        { gitFactory: stubbedAddFactory, timeoutMs: refOpMs, addWorktreeTimeoutMs: addBudgetMs }));
       check("(s1) worktree add RESOLVES despite a delay longer than the ref-op bound (not confirmed-killed)", res.ok === true);
       check(`(s1) the delay genuinely happened — elapsed (${Math.round(res.elapsed)}ms) >= the simulated add delay (${addDelayMs}ms)`,
         res.elapsed >= addDelayMs - TIMER_SLACK_MS);
       check(`(s1) still bounded, not accidentally unbounded — elapsed < add's own budget (${addBudgetMs}ms)`, res.elapsed < addBudgetMs);
       check("(s1) the worktree actually landed (the delayed call really completed, not a false resolve)",
         res.ok === true && fs.existsSync(res.value?.worktreePath ?? ""));
+      check("(s1) every pre-add git call was reached via the deterministic stub (no real-spawn race reintroduced)",
+        ["rev-parse --show-toplevel", "rev-parse HEAD", "worktree prune", "branch --list", "worktree add"]
+          .every((k) => s1Reached.has(k)));
       if (res.ok) {
         await removeWorktree(repo, res.value.worktreePath);
         await deleteBranch(repo, res.value.branch);
@@ -1000,19 +1035,47 @@ try {
     // (s2) card f2c976ea — `worktree prune` stays bounded by the ORIGINAL tight ref-op timeout even
     //      though `worktree add`'s own budget (set deliberately much larger here) is now independent of
     //      it — proving the widened add budget never rescues a genuinely wedged prune/branch-list call.
+    //
+    // Card 0c7b434f: same exposure as (s1) — rev-parse --show-toplevel and rev-parse HEAD are real,
+    // unmocked calls that precede the hung "worktree prune" and share its tight `refOpMs` bound; stubbed
+    // the same way, FAILS LOUDLY on an unrecognised call, and `s2Reached` is asserted against the exact
+    // expected set. Also adds the "the reject came FROM the simulated hang" discriminator (r2)/(r3)/(r4)
+    // already carry — (s2) never had one, so a reject from the wrong real call (e.g. the toplevel guard
+    // timing out instead of the intended prune hang) would have passed vacuously.
     {
       const tS2 = "worktree-prune-still-bounded-despite-larger-add-budget";
       const refOpMs = 200;
       const addBudgetMs = 10_000; // deliberately much larger than refOpMs — must NOT bail prune out
-      const hangOnPruneFactory = (repoPathArg, _blockMs) => {
+      const realToplevelS2 = (await realSimpleGit(repo).raw(["rev-parse", "--show-toplevel"])).trim();
+      const realHeadShaS2 = (await realSimpleGit(repo).raw(["rev-parse", "HEAD"])).trim();
+      const s2Reached = new Set();
+      const stubbedHangOnPruneFactory = (repoPathArg, _blockMs) => {
         const real = realSimpleGit(repoPathArg);
-        return { raw: (args) => (args[0] === "worktree" && args[1] === "prune" ? new Promise(() => {}) : real.raw(args)) };
+        return {
+          raw: (args) => {
+            const sub = gitSubcommand(args);
+            if (sub === "rev-parse" && args[args.length - 1] === "--show-toplevel") {
+              s2Reached.add("rev-parse --show-toplevel");
+              return Promise.resolve(`${realToplevelS2}\n`);
+            }
+            if (sub === "rev-parse" && args[args.length - 1] === "HEAD") {
+              s2Reached.add("rev-parse HEAD");
+              return Promise.resolve(`${realHeadShaS2}\n`);
+            }
+            if (sub === "worktree" && args[1] === "prune") { s2Reached.add("worktree prune"); return new Promise(() => {}); }
+            throw new Error(`(s2) stubbedHangOnPruneFactory: unrecognised git call ${JSON.stringify(args)} — "worktree prune" hangs forever, so nothing after it should ever be reached; a new call here means createWorktree's pre-add sequence changed`);
+          },
+        };
       };
       const res = await timeAndSettle(createWorktree(repo, "projWT", tS2, {}, undefined, undefined,
-        { gitFactory: hangOnPruneFactory, timeoutMs: refOpMs, addWorktreeTimeoutMs: addBudgetMs }));
+        { gitFactory: stubbedHangOnPruneFactory, timeoutMs: refOpMs, addWorktreeTimeoutMs: addBudgetMs }));
       check("(s2) worktree prune: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check("(s2) the reject came FROM the simulated hang at worktree prune, not an unrelated real-call timeout",
+        s2Reached.has("worktree prune") && /worktree prune/.test(res.err?.message ?? ""));
       check(`(s2) bounded by the ref-op timeout, NOT add's much larger budget — settled in ${Math.round(res.elapsed)}ms (cap ${refOpMs}ms, not ${addBudgetMs}ms)`,
         res.elapsed >= refOpMs - TIMER_SLACK_MS && res.elapsed < addBudgetMs);
+      check("(s2) every real-git call before the hang was reached via the deterministic stub (no real-spawn race reintroduced)",
+        ["rev-parse --show-toplevel", "rev-parse HEAD", "worktree prune"].every((k) => s2Reached.has(k)));
     }
   }
 } finally {
