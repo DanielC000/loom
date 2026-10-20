@@ -10,7 +10,7 @@ import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnK
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir } from "../paths.js";
-import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition } from "../mcp/attachments.js";
+import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition, deriveAttachmentKind, sanitizeBasename } from "../mcp/attachments.js";
 import { deleteProjectWorkDir } from "../projects/work-dir.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import { buildServedStatus } from "../served-status.js";
@@ -20,7 +20,7 @@ import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
-import type { Db } from "../db.js";
+import type { Db, StoredQuestionAttachment } from "../db.js";
 import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
@@ -3493,6 +3493,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // cancelled seed defaults cancelledBy to "human" and cancelledAt to now, mirroring how "answered"
           // defaults answeredAt.
           cancelledReason?: string | null; cancelledBy?: "agent" | "human";
+          // Attachments (epic 7d1d66ab: store 432765ab · serving 8f050b79 · inbox manifest 19b7cf7a) — the
+          // ONLY way an e2e spec can seed them: the real path is `question_ask`'s own copy step, which
+          // resolves an absolute host path under a project root a spec cannot stage. Writes REAL BYTES into
+          // the SAME `questionAttachmentDir` the serving route resolves against, so a seeded attachment is
+          // genuinely servable and `available` is derived by the same live `fs.existsSync` as a real one.
+          //   `content`/`contentBase64` — the bytes (base64 for a real PNG). Omit BOTH to seed an
+          //     UNAVAILABLE row: the record exists, the file does not — the GC'd case (card 6f27469b).
+          //   `kind` — defaults to the server's own `deriveAttachmentKind` over `label`; pass it only to
+          //     seed a deliberately mismatched row. `sizeBytes` — defaults to the bytes actually written.
+          //   `openedAt` — defaults to null (never opened), which the manifest shows as NEW.
+          attachments?: {
+            label: string; kind?: QuestionAttachmentKind; content?: string; contentBase64?: string;
+            sizeBytes?: number; imageDimensions?: { width: number; height: number } | null; openedAt?: string | null;
+          }[];
         }[];
         // Project memory (Memory) rows — the ONLY way an e2e spec can seed project_memory for the /memory
         // page (there is no REST/agent write path — writing stays the memory MCP's job). Upserted via the
@@ -3780,8 +3794,64 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           return reply.code(400).send({ error: "questions[].sessionId and projectId are required strings" });
         }
         const id = q.id ?? randomUUID();
+        // @decision 19b7cf7a — validate an explicitly-supplied `id` against QUESTION_ID_RE BEFORE the
+        // attachment block below reaches the filesystem with it: `questionAttachmentDir("../../x")`
+        // resolves a store dir outside <LOOM_HOME>/attachments/ and would be mkdirSync'd + written into.
+        //
+        // Checked unconditionally (not only when `attachments` is present) so the one value that can reach
+        // fs is never gated by a narrower rule than the one that reaches the DB; a generated randomUUID()
+        // always matches, so every existing caller is unaffected. Same posture as the GET/POST attachment
+        // routes, which validate both ids before any DB or fs access.
+        if (!QUESTION_ID_RE.test(id)) {
+          return reply.code(400).send({ error: "questions[].id must be a v4 uuid" });
+        }
         const state = q.state ?? "pending";
         const now = new Date().toISOString();
+        // Stage the seeded attachments into the REAL store dir (see the seed body type's own doc above for
+        // the field contract): the manifest UI reads `available` from a live existsSync against exactly
+        // this path, and the serving route streams from it, so a seeded attachment has to be a real file or
+        // the spec would only be exercising a hand-set flag. `storedFilename` is minted the same
+        // `${i}-${sanitizeBasename(label)}` way `prepareQuestionAttachments` mints it, so the serving
+        // route's own containment re-check sees the shape it expects. Omitting both byte fields writes NO
+        // file — the deliberately UNAVAILABLE row.
+        const attachmentInputs = q.attachments ?? [];
+        // EVERY entry is validated before ANY of them is written: a bad label at index 3 would otherwise
+        // be rejected only after 0-2 had already landed real files in the store, leaving orphans behind a
+        // request row that was never inserted.
+        for (let i = 0; i < attachmentInputs.length; i++) {
+          const label = attachmentInputs[i]?.label;
+          if (typeof label !== "string" || label.length === 0) {
+            return reply.code(400).send({ error: `questions[].attachments[${i}].label is a required non-empty string` });
+          }
+        }
+        const seededAttachments: StoredQuestionAttachment[] = [];
+        if (attachmentInputs.length > 0) {
+          const dir = questionAttachmentDir(id);
+          fs.mkdirSync(dir, { recursive: true });
+          attachmentInputs.forEach((a, i) => {
+            const storedFilename = `${i}-${sanitizeBasename(a.label)}`;
+            let written: number | null = null;
+            if (typeof a.contentBase64 === "string" || typeof a.content === "string") {
+              const bytes = typeof a.contentBase64 === "string"
+                ? Buffer.from(a.contentBase64, "base64")
+                : Buffer.from(a.content as string, "utf8");
+              fs.writeFileSync(path.join(dir, storedFilename), bytes);
+              written = bytes.byteLength;
+            }
+            seededAttachments.push({
+              id: String(i),
+              label: a.label,
+              kind: a.kind ?? deriveAttachmentKind(storedFilename),
+              sizeBytes: a.sizeBytes ?? written ?? 0,
+              imageDimensions: a.imageDimensions ?? null,
+              storedFilename,
+              // The asker's own absolute source path. Internal-only (toQuestion never maps it onto the
+              // public shape), so a seed's synthetic value can never leak into what the UI reads.
+              originalPath: path.join(dir, storedFilename),
+              openedAt: a.openedAt ?? null,
+            });
+          });
+        }
         deps.db.insertQuestion({
           id, sessionId: q.sessionId,
           // Card cb7d6998 / 5b22b262 — an OMITTED filer defaults to the seeded sessionId (mirroring the
@@ -3823,9 +3893,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // unread at insert time. A spec needing an already-read row marks it via markQuestionsRead.
           readAt: null,
           // Card 432765ab — `insertQuestion` reads attachments from its own SEPARATE 2nd param, never
-          // from this field; always `[]` here (no e2e spec seeds attachments today).
+          // from this field, so this stays `[]` even when a spec DID seed some (card 19b7cf7a): the
+          // staged `seededAttachments` go through that 2nd param below.
           attachments: [],
-        });
+        }, seededAttachments);
         // Card 99d41588 / 889ae619 — apply a seeded escalatedAt/acknowledgedUntil as a follow-up write
         // through the REAL setters (markQuestionEscalated / acknowledgeQuestion), the ONLY way an e2e spec
         // can seed an ALREADY-STALE (and optionally already-snoozed) row directly — the real escalation path

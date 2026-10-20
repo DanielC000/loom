@@ -20,6 +20,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       own REST reads), and 400s on a malformed payload.
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
@@ -323,6 +324,81 @@ try {
       unsub();
     }
 
+    // (c) Question ATTACHMENT seeding (epic 7d1d66ab, card 19b7cf7a) — the ONLY seed field that reaches
+    // the FILESYSTEM, and therefore the only one where a malformed id is a WRITE primitive rather than
+    // just a bad row: `questionAttachmentDir(id)` path.joins the caller's id onto
+    // <LOOM_HOME>/attachments/, so `id: "../x"` resolves a directory OUTSIDE the store and the block would
+    // mkdirSync + writeFileSync straight into it. Test-mode + loopback-only is a real mitigation, not a
+    // reason to skip validating the first value a seed payload hands to `fs`.
+    {
+      const attachmentsRoot = path.join(TMP, "attachments");
+      // Deliberately escapes the ATTACHMENT STORE while staying inside this test's own TMP sandbox: it
+      // proves the escape without this test itself writing outside the dir it owns.
+      const escapedDir = path.join(TMP, "pwned-by-seed");
+      const traversal = await testApp.inject({
+        method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+        payload: {
+          questions: [{
+            id: "../pwned-by-seed", sessionId: "live-mgr-1", projectId: "proj-1",
+            title: "traversal probe", attachments: [{ label: "owned.txt", content: "owned" }],
+          }],
+        },
+      });
+      check("(c) a path-traversal question id -> 400", traversal.statusCode === 400);
+      check("(c) the traversal id wrote NOTHING outside the attachment store", !fs.existsSync(escapedDir));
+      check("(c) the traversal seed inserted no question row", db.getQuestion("../pwned-by-seed") === undefined);
+
+      // The same gate rejects an ordinary non-uuid too — the check is the id's REAL minted shape, not a
+      // hand-rolled "does it contain ..".
+      const notAUuid = await testApp.inject({
+        method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+        payload: { questions: [{ id: "not-a-uuid", sessionId: "live-mgr-1", projectId: "proj-1" }] },
+      });
+      check("(c) a non-uuid question id -> 400 even with no attachments at all", notAUuid.statusCode === 400);
+
+      // A bad label must leave NO partial write: entry 0 is perfectly valid, so a per-entry
+      // validate-as-you-write loop would already have landed `0-ok.html` before rejecting entry 1.
+      const orphanId = randomUUID();
+      const badLabel = await testApp.inject({
+        method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+        payload: {
+          questions: [{
+            id: orphanId, sessionId: "live-mgr-1", projectId: "proj-1", title: "orphan probe",
+            attachments: [{ label: "ok.html", content: "<p>ok</p>" }, { label: "", content: "bad" }],
+          }],
+        },
+      });
+      check("(c) an empty attachment label -> 400", badLabel.statusCode === 400);
+      check("(c) a rejected label leaves no orphan files for that question",
+        !fs.existsSync(path.join(attachmentsRoot, orphanId)));
+
+      // The positive half: a valid seed lands REAL bytes in the right per-question dir, and the row reads
+      // back with `available` derived from that file actually existing.
+      const goodId = randomUUID();
+      const good = await testApp.inject({
+        method: "POST", url: "/internal/test/seed", remoteAddress: "127.0.0.1",
+        payload: {
+          questions: [{
+            id: goodId, sessionId: "live-mgr-1", projectId: "proj-1", title: "attachment seed",
+            attachments: [
+              { label: "note.html", content: "<p>hi</p>" },
+              { label: "gone.png", kind: "image", sizeBytes: 61000 },
+            ],
+          }],
+        },
+      });
+      check("(c) a valid attachment seed -> 201", good.statusCode === 201);
+      const seededFile = path.join(attachmentsRoot, goodId, "0-note.html");
+      check("(c) the bytes landed INSIDE <LOOM_HOME>/attachments/<questionId>/",
+        fs.existsSync(seededFile) && fs.readFileSync(seededFile, "utf8") === "<p>hi</p>");
+      const seededRow = db.getQuestion(goodId);
+      check("(c) the row reads back both attachments, with `available` derived from the real file",
+        seededRow?.attachments.length === 2
+        && seededRow.attachments[0]?.available === true && seededRow.attachments[0]?.kind === "html"
+        && seededRow.attachments[0]?.sizeBytes === 9
+        && seededRow.attachments[1]?.available === false && seededRow.attachments[1]?.kind === "image");
+    }
+
     // Cleanup directive: archiving a seeded live session removes it from the live rail (its row stays
     // addressable by id, archived). This is how a spec keeps the SHARED e2e daemon's live rail clean.
     // Also DROPS any canned pty entry (dropCanned) so it can't leak into a later spec's shared daemon.
@@ -350,6 +426,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — POST /internal/test/seed is ABSENT in normal mode, and under LOOM_TEST=1 is loopback-gated, validates its payload, and seeds usage samples + run rows + a companion + live sessions/wakes that round-trip through the Db."
+  ? "\n✅ ALL PASS — POST /internal/test/seed is ABSENT in normal mode, and under LOOM_TEST=1 is loopback-gated, validates its payload (including the one id that reaches the filesystem, before any fs touch), and seeds usage samples + run rows + a companion + live sessions/wakes + question attachments that round-trip through the Db."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

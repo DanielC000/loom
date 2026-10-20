@@ -8,6 +8,8 @@ import {
   DECISION_WATCHDOG_MS, relativeAge, isDecisionWatchdog, questionStateChip, decisionAttentionText,
   requestAttentionLabel, requestOutcome,
   requestFilerLabel, requestRoutedLabel, requestProvenanceText,
+  formatAttachmentSize, attachmentDetail, attachmentCountChip, attachmentStateChip,
+  attachmentPreviewMode, attachmentOpenRefusal,
 } from "../src/lib/questions.ts";
 
 let pass = 0;
@@ -142,6 +144,106 @@ check("requestAttentionLabel: type-aware global attention label, per Request typ
   assert.equal(requestAttentionLabel("input"), "INPUT NEEDED");
   assert.equal(requestAttentionLabel("permission"), "PERMISSION NEEDED");
   assert.equal(requestAttentionLabel("credential"), "SECRET NEEDED");
+});
+
+// ── Request ATTACHMENTS (epic 7d1d66ab, card 19b7cf7a — Direction B "Manifest") ─────────────────────
+// Both surfaces (the collapsed row's count chip, the opened detail's manifest) read these, so a drift
+// here is a drift between the two. The origin-dependent helpers are checked at BOTH polarities:
+// loopback and remote genuinely resolve to different answers, and a test that only ever passes the
+// ambient one would pass identically if the parameter were ignored outright.
+const att = (over = {}) => ({
+  id: "0", label: "direction-b-manifest.html", kind: "html", sizeBytes: 37_000,
+  imageDimensions: null, available: true, openedAt: null, ...over,
+});
+
+check("formatAttachmentSize: B / KB / MB, and no fake 0 for a non-finite count", () => {
+  assert.equal(formatAttachmentSize(0), "0 B");
+  assert.equal(formatAttachmentSize(640), "640 B");
+  assert.equal(formatAttachmentSize(1024), "1 KB");
+  assert.equal(formatAttachmentSize(90_112), "88 KB");
+  assert.equal(formatAttachmentSize(1_258_291), "1.2 MB");
+  assert.equal(formatAttachmentSize(-1), "—");
+  assert.equal(formatAttachmentSize(Number.NaN), "—");
+});
+
+check("attachmentDetail: size (+ image dimensions when known), and WHAT HAPPENED when unavailable", () => {
+  assert.equal(attachmentDetail(att({ sizeBytes: 90_112 })), "88 KB");
+  assert.equal(
+    attachmentDetail(att({ sizeBytes: 90_112, imageDimensions: { width: 1440, height: 420 } })),
+    "88 KB · 1440×420",
+  );
+  // ⛔ An unavailable row must NOT read as a size: those bytes are gone, so the number would describe
+  // something that is no longer there.
+  assert.equal(attachmentDetail(att({ sizeBytes: 90_112, available: false })), "the bytes are gone — nothing to open");
+});
+
+check("attachmentCountChip: kinds in a FIXED order, unavailable excluded from the counts", () => {
+  const chip = attachmentCountChip([
+    att({ id: "0", kind: "html" }),
+    att({ id: "1", kind: "image" }),
+    att({ id: "2", kind: "html" }),
+    att({ id: "3", kind: "image" }),
+    att({ id: "4", kind: "image", available: false }),
+  ]);
+  // image before html regardless of attach order — the chip must read the same across reads.
+  assert.equal(chip.text, "2 image · 2 html");
+  assert.equal(chip.unavailable, 1, "the unavailable one is counted separately, never inside a kind tally");
+  assert.equal(chip.unopened, 4);
+  assert.match(chip.title, /^5 attached · 2 image, 2 html · 4 not yet opened · 1 unavailable$/);
+});
+
+check("attachmentCountChip: ALL-unavailable leaves an empty text but still reports the count", () => {
+  const chip = attachmentCountChip([att({ available: false }), att({ id: "1", available: false })]);
+  assert.equal(chip.text, "", "no kind tally — nothing is actually there");
+  assert.equal(chip.unavailable, 2);
+  assert.equal(chip.unopened, 0, "an unavailable file is not 'unopened' — it is unopenable");
+  assert.match(chip.title, /2 attached/);
+  assert.match(chip.title, /2 unavailable/);
+});
+
+check("attachmentCountChip: an empty list is empty on every field (never a phantom '0 image')", () => {
+  const chip = attachmentCountChip([]);
+  assert.equal(chip.text, "");
+  assert.equal(chip.unavailable, 0);
+  assert.equal(chip.unopened, 0);
+  assert.equal(chip.title, "0 attached");
+});
+
+check("attachmentStateChip: unavailable → new → opened <age>, in that precedence", () => {
+  assert.deepEqual(attachmentStateChip({ available: false, openedAt: null }, NOW), { tone: "red", label: "unavailable" });
+  // ⛔ unavailable WINS over an openedAt stamp: a file opened earlier and reaped since is gone NOW, and
+  // reading "opened 4m ago" would describe bytes that no longer exist.
+  assert.deepEqual(attachmentStateChip({ available: false, openedAt: ago(4 * 60_000) }, NOW), { tone: "red", label: "unavailable" });
+  assert.deepEqual(attachmentStateChip({ available: true, openedAt: null }, NOW), { tone: "phosphor", label: "new" });
+  assert.deepEqual(attachmentStateChip({ available: true, openedAt: ago(4 * 60_000) }, NOW), { tone: "muted", label: "opened 4m ago" });
+  // An unparseable stamp still reads as opened — the FACT of the stamp is what the column is about.
+  assert.deepEqual(attachmentStateChip({ available: true, openedAt: "not-a-date" }, NOW), { tone: "muted", label: "opened" });
+});
+
+check("attachmentPreviewMode: html renders inline ONLY on loopback; a remote origin says so instead", () => {
+  assert.equal(attachmentPreviewMode({ kind: "html", available: true }, false), "html");
+  assert.equal(attachmentPreviewMode({ kind: "html", available: true }, true), "html-needs-loopback");
+  // An image works on BOTH — remote goes through the credentialed blob fetch (components/VaultAsset's
+  // precedent), so the mode itself does not change.
+  assert.equal(attachmentPreviewMode({ kind: "image", available: true }, false), "image");
+  assert.equal(attachmentPreviewMode({ kind: "image", available: true }, true), "image");
+  assert.equal(attachmentPreviewMode({ kind: "other", available: true }, false), "download");
+  // ⛔ Availability is checked FIRST: a gone file is `missing` whatever its kind or the origin, so no
+  // branch below can ever try to render bytes that are not there.
+  for (const kind of ["image", "html", "other"]) {
+    for (const remote of [false, true]) {
+      assert.equal(attachmentPreviewMode({ kind, available: false }, remote), "missing", `${kind}/${remote}`);
+    }
+  }
+});
+
+check("attachmentOpenRefusal: openable only on loopback, and never for a gone file", () => {
+  assert.equal(attachmentOpenRefusal({ available: true }, false), null, "loopback reads are ungated");
+  // A new-tab navigation carries no Authorization header, so a remote open would 401 — refuse it WITH a
+  // reason rather than landing a JSON error page in a fresh tab.
+  assert.match(String(attachmentOpenRefusal({ available: true }, true)), /loopback/i);
+  assert.match(String(attachmentOpenRefusal({ available: false }, false)), /bytes are gone/i);
+  assert.match(String(attachmentOpenRefusal({ available: false }, true)), /bytes are gone/i);
 });
 
 console.log(`\n${pass} passed — decision-inbox helpers`);

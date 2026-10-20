@@ -1,10 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { QuestionInboxItem, QuestionType, PermissionScope } from "@loom/shared";
+import type { QuestionAttachment, QuestionInboxItem, QuestionType, PermissionScope } from "@loom/shared";
 import { PERMISSION_SCOPES } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { isRemoteOrigin } from "../lib/gatewayCredential";
+import { viewBlobType } from "../lib/vaultAsset";
 import { Panel, Button, Dot, SectionLabel, Badge, Select } from "./ui";
 import { DecisionStateChip } from "./decisions";
 import { color, font, radius, tone, type Tone } from "../theme";
@@ -13,6 +15,8 @@ import {
   REQUEST_TYPE_TONE, REQUEST_TYPE_ORDER,
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
   requestProvenanceText,
+  ATTACHMENT_CHIP_GLYPH, ATTACHMENT_GLYPH, attachmentCountChip, attachmentDetail, attachmentOpenRefusal,
+  attachmentPreviewMode, attachmentStateChip,
 } from "../lib/questions";
 import {
   EMPTY_REQUEST_DRAFT, clearRequestDraft, getRequestDraft, isRequestDraftDirty, setRequestDraft,
@@ -148,6 +152,291 @@ function LinkedTaskChip({ taskId, title, columnKey, onClick }: { taskId: string;
   );
 }
 
+// ── Request ATTACHMENTS — Direction B "Manifest" (epic 7d1d66ab, card 19b7cf7a) ───────────────────
+// The owner's pick on request 0bbf7d1b. TWO surfaces, one source of truth for both (the pure helpers in
+// lib/questions.ts): the COLLAPSED inbox row gets a one-line typed count chip, and the OPENED detail gets
+// a manifest — one dense `ls`-like row per file — beside a SINGLE preview pane. Nothing here introduces a
+// colour, a component or a chart lib: it is Panel/Button/Badge plus the signal tones this file already
+// uses, and the manifest row's hover/focus chrome lives in global.css like every other kit control's.
+//
+// @decision 19b7cf7a — an HTML attachment previews ONLY as an `<iframe src>` on loopback, never through
+// blob:/srcdoc and never with `allow-same-origin`; no `message` listener is ever registered for the frame,
+// because a sandboxed document's `origin` is "null" and cannot be verified.
+
+/** The collapsed row's indicator: "▨ 2 html · 2 image", with a red ✕N when something is unavailable, and
+ *  phosphor-outlined while any available attachment is still unopened. ONE LINE at any attachment count —
+ *  never a thumbnail strip, never a second line. Renders nothing at all for a request with no files. */
+function RequestAttachmentChip({ attachments }: { attachments: QuestionAttachment[] }) {
+  if (attachments.length === 0) return null;
+  const chip = attachmentCountChip(attachments);
+  const unopened = chip.unopened > 0;
+  return (
+    <span data-testid="attachment-count-chip" title={chip.title} aria-label={chip.title}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0, fontFamily: font.mono,
+        fontSize: 10.5, letterSpacing: "0.04em", color: unopened ? color.phosphor : color.textDim,
+        border: `1px solid ${unopened ? color.phosphor : color.borderStrong}`, borderRadius: radius.sm,
+        padding: "1px 7px", whiteSpace: "nowrap" }}>
+      <span aria-hidden style={{ fontSize: 11, lineHeight: 1 }}>{ATTACHMENT_CHIP_GLYPH}</span>
+      {chip.text && <span>{chip.text}</span>}
+      {chip.unavailable > 0 && <span style={{ color: color.red }}>✕{chip.unavailable}</span>}
+    </span>
+  );
+}
+
+// The manifest's column geometry, shared by the header and every row so the columns actually line up —
+// one object rather than two sets of literals that could drift apart.
+const MANIFEST_GLYPH_W = 16;
+const MANIFEST_STATE_W = 96;
+const MANIFEST_ACTION_W = 76;
+
+/**
+ * The `<img src>` for an image attachment. On LOOPBACK this resolves synchronously to the route URL and
+ * never fetches — the browser streams it, range-requests it, and caches it. On a REMOTE origin the route
+ * is Bearer-only, so the bytes are fetched through the api client (which attaches the gateway credential
+ * a bare `<img src>` cannot carry) and handed back as an object URL, revoked when the selection changes or
+ * the pane unmounts. Mirrors components/VaultAsset.tsx's `useVaultAsset`, which solved exactly this
+ * Tier-1 problem for `/vault/raw`; the blob is minted through that module's own `viewBlobType`, so a
+ * scriptable image type could never become a same-origin document even if one reached here as
+ * `kind:"image"` (it cannot — `.svg` is classified `"other"` server-side at copy time, card 432765ab).
+ */
+function useAttachmentImageSrc(questionId: string, attachmentId: string, remote: boolean) {
+  const [state, setState] = useState<{ url: string | null; error: string | null }>(
+    remote ? { url: null, error: null } : { url: api.questionAttachmentUrl(questionId, attachmentId), error: null },
+  );
+  // The object URL THIS hook minted, so the cleanup revokes exactly that and never the loopback route URL
+  // (which is not an object URL and must not be revoked).
+  const owned = useRef<string | null>(null);
+  useEffect(() => {
+    if (!remote) {
+      setState({ url: api.questionAttachmentUrl(questionId, attachmentId), error: null });
+      return;
+    }
+    let live = true;
+    setState({ url: null, error: null });
+    void api.questionAttachmentBlob(questionId, attachmentId)
+      .then(({ blob, contentType }) => {
+        const url = URL.createObjectURL(new Blob([blob], { type: viewBlobType(contentType) }));
+        // The effect may have been torn down mid-flight — mint-then-revoke rather than leaking the URL for
+        // the document's lifetime.
+        if (!live) { URL.revokeObjectURL(url); return; }
+        owned.current = url;
+        setState({ url, error: null });
+      })
+      .catch((err: unknown) => {
+        if (!live) return;
+        setState({ url: null, error: err instanceof Error ? err.message : String(err) });
+      });
+    return () => {
+      live = false;
+      if (owned.current) { URL.revokeObjectURL(owned.current); owned.current = null; }
+    };
+  }, [questionId, attachmentId, remote]);
+  return state;
+}
+
+/** A centred note inside the preview frame — the shared shape for every state that has no picture to
+ *  show (gone, needs-loopback, downloads-only, still loading). Never a blank frame: the pane always says
+ *  WHY it is not rendering something. */
+function PreviewNote({ glyph, glyphTone, children }: { glyph: string; glyphTone?: string; children: ReactNode }) {
+  return (
+    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center",
+      justifyContent: "center", gap: 6, textAlign: "center", padding: 12, fontFamily: font.mono, fontSize: 10.5,
+      color: color.textMuted, lineHeight: 1.5 }}>
+      <span aria-hidden style={{ fontSize: 20, lineHeight: 1, color: glyphTone ?? color.textMuted, opacity: 0.85 }}>{glyph}</span>
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function AttachmentImagePreview({ questionId, a, remote }: { questionId: string; a: QuestionAttachment; remote: boolean }) {
+  const img = useAttachmentImageSrc(questionId, a.id, remote);
+  if (img.error) return <PreviewNote glyph="✕" glyphTone={color.red}>{img.error}</PreviewNote>;
+  if (!img.url) return <PreviewNote glyph="▨">loading…</PreviewNote>;
+  return (
+    <img src={img.url} alt={a.label}
+      style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+  );
+}
+
+/**
+ * The single preview pane: a 16:10 plate for whichever manifest row is selected, the file's own label +
+ * size/dimensions beneath it, and the same `Open ↗` action the row carries. Exactly ONE of these exists
+ * regardless of attachment count, which is what keeps the panel's height independent of how many files the
+ * agent sent and means only one image ever decodes at a time.
+ */
+function AttachmentPreviewPane({ questionId, a, remote }: { questionId: string; a: QuestionAttachment; remote: boolean }) {
+  const mode = attachmentPreviewMode(a, remote);
+  return (
+    <div data-testid="attachment-preview" data-preview-mode={mode}
+      style={{ flex: "0 1 236px", minWidth: 196, alignSelf: "flex-start", display: "flex", flexDirection: "column",
+        gap: 8, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base, padding: 8 }}>
+      <div style={{ position: "relative", aspectRatio: "16 / 10", overflow: "hidden", background: color.bg,
+        border: `1px solid ${mode === "missing" ? color.red : color.border}`, borderRadius: radius.sm }}>
+        {mode === "image" && <AttachmentImagePreview questionId={questionId} a={a} remote={remote} />}
+        {mode === "html" && (
+          // The REAL route, so the document is governed by the route's own
+          // `sandbox allow-scripts; form-action 'none'; connect-src 'none'` CSP (card 8f050b79). The
+          // `sandbox` attribute is set here too as belt and braces, deliberately WITHOUT
+          // `allow-same-origin` — so even a lost header still leaves the page in an opaque origin with no
+          // reach into this origin's localStorage, where the loopback/gateway tokens live. A thumbnail is
+          // not an interaction surface: `pointerEvents:none` keeps untrusted agent bytes from taking
+          // clicks or focus inside the answer dialog — `Open ↗` is where you actually interact with it.
+          <iframe data-testid="attachment-preview-frame" title={`Preview of ${a.label}`}
+            src={api.questionAttachmentUrl(questionId, a.id)} sandbox="allow-scripts"
+            referrerPolicy="no-referrer" loading="lazy"
+            style={{ position: "absolute", top: 0, left: 0, width: "286%", height: "286%", border: "none",
+              transform: "scale(0.35)", transformOrigin: "top left", pointerEvents: "none" }} />
+        )}
+        {mode === "html-needs-loopback" && (
+          <PreviewNote glyph={ATTACHMENT_GLYPH.html}>HTML preview needs loopback access — this origin signs requests with a header a frame can’t send</PreviewNote>
+        )}
+        {mode === "download" && (
+          <PreviewNote glyph={ATTACHMENT_GLYPH.other}>no inline preview — this one downloads when opened</PreviewNote>
+        )}
+        {mode === "missing" && (
+          <PreviewNote glyph="✕" glyphTone={color.red}>source gone — Loom has no copy of these bytes any more</PreviewNote>
+        )}
+      </div>
+      <div style={{ fontFamily: font.mono, fontSize: 10.5, lineHeight: 1.6, wordBreak: "break-word" }}>
+        <div style={{ color: color.textDim }}>{a.label}</div>
+        <div style={{ color: color.textMuted }}>{attachmentDetail(a)}</div>
+      </div>
+      <AttachmentOpenAction questionId={questionId} a={a} remote={remote} />
+    </div>
+  );
+}
+
+/**
+ * `Open ↗` — the one action, on every row and in the pane. It opens the serving route in a NEW TAB (so an
+ * HTML mockup runs under the route's full CSP rather than a degraded inline one) and stamps `openedAt`,
+ * which is what flips the row's STATE from `new` to `opened <age>`.
+ *
+ * `rel="noopener noreferrer"` is load-bearing, not hygiene: the opened document is untrusted agent-authored
+ * bytes and must never receive a `window.opener` handle back into this app. The stamp is fired-and-forgotten
+ * alongside the navigation — a failed stamp leaves the row honestly reading `new` rather than blocking the
+ * open; first-open-wins server-side, so a repeat click can never rewrite the original time.
+ */
+function AttachmentOpenAction({ questionId, a, remote }: { questionId: string; a: QuestionAttachment; remote: boolean }) {
+  const qc = useQueryClient();
+  const refusal = attachmentOpenRefusal(a, remote);
+  const stamp = useMutation({
+    mutationFn: () => api.markQuestionAttachmentOpened(questionId, a.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["question", questionId] });
+      qc.invalidateQueries({ queryKey: ["openQuestions"] });
+    },
+  });
+  const geometry = { padding: "2px 8px", fontSize: 11, whiteSpace: "nowrap" as const };
+  if (refusal) {
+    return (
+      <Button data-testid="attachment-open" variant="default" disabled title={refusal} style={geometry}>Open ↗</Button>
+    );
+  }
+  return (
+    <a data-testid="attachment-open" className={`loom-btn loom-btn-${a.openedAt ? "default" : "primary"}`}
+      href={api.questionAttachmentUrl(questionId, a.id)} target="_blank" rel="noopener noreferrer"
+      title={`Open ${a.label} in a new tab`} onClick={() => stamp.mutate()}
+      style={{ ...geometry, display: "inline-block", textAlign: "center", textDecoration: "none",
+        borderRadius: radius.base, fontFamily: font.mono }}>
+      Open ↗
+    </a>
+  );
+}
+
+/** One manifest row: glyph · label + size/dimensions · STATE · `Open ↗`. The row body is the select
+ *  control (it drives the shared preview pane) and the action sits OUTSIDE it — a button inside a button
+ *  is invalid HTML, so this is a flex row with fixed column widths rather than one nested control. An
+ *  UNAVAILABLE row keeps its place, struck through, still selectable (its pane says what happened) with
+ *  the action disabled; it is never dropped, which would silently rewrite what the agent said it sent. */
+function AttachmentRow({ questionId, a, selected, now, remote, onSelect }: {
+  questionId: string; a: QuestionAttachment; selected: boolean; now: number; remote: boolean; onSelect: () => void;
+}) {
+  const state = attachmentStateChip(a, now);
+  return (
+    <div data-testid="attachment-row" data-attachment-id={a.id} data-selected={selected}
+      style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: `1px solid ${color.border}`,
+        borderLeft: `2px solid ${selected ? color.phosphor : "transparent"}`,
+        background: selected ? color.panel2 : "transparent" }}>
+      <button className="loom-manifest-row" onClick={onSelect} aria-current={selected}
+        title={`${a.label} — ${attachmentDetail(a)}`}
+        style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, padding: "7px 6px",
+          background: "transparent", border: "none", font: "inherit", color: "inherit", cursor: "pointer", textAlign: "left" }}>
+        <span aria-hidden style={{ width: MANIFEST_GLYPH_W, flexShrink: 0, textAlign: "center", fontSize: 12, lineHeight: 1,
+          color: a.available ? (a.kind === "html" ? color.phosphor : color.textDim) : color.red }}>
+          {a.available ? ATTACHMENT_GLYPH[a.kind] : "✕"}
+        </span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ display: "block", fontFamily: font.mono, fontSize: 12, overflow: "hidden",
+            textOverflow: "ellipsis", whiteSpace: "nowrap",
+            color: a.available ? color.text : color.textDim,
+            textDecoration: a.available ? "none" : "line-through" }}>{a.label}</span>
+          <span style={{ display: "block", fontFamily: font.mono, fontSize: 10, color: color.textMuted, overflow: "hidden",
+            textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{attachmentDetail(a)}</span>
+        </span>
+        <span data-testid="attachment-state" style={{ width: MANIFEST_STATE_W, flexShrink: 0, fontFamily: font.mono,
+          fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: tone[state.tone] }}>{state.label}</span>
+      </button>
+      <span style={{ width: MANIFEST_ACTION_W, flexShrink: 0, display: "flex", justifyContent: "flex-end", paddingRight: 6 }}>
+        <AttachmentOpenAction questionId={questionId} a={a} remote={remote} />
+      </span>
+    </div>
+  );
+}
+
+/** The whole ATTACHED panel in the opened detail: the manifest on the left, the single preview pane on the
+ *  right, wrapping to one column on a narrow viewport (flex-wrap rather than a media query, so the panel
+ *  reflows inside the 720px dialog AND on a phone with no second styling path to keep in sync). */
+function RequestAttachments({ question }: { question: QuestionInboxItem }) {
+  const attachments = question.attachments;
+  const remote = isRemoteOrigin();
+  const now = Date.now();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Resolved against the LIVE list on every render, never held as a copy: a refetch (the inbox polls, and
+  // an Open stamp invalidates) can drop or add an attachment, and a stale id must degrade to the first
+  // available row rather than leaving the pane pointing at nothing. An unavailable row is selectable but
+  // is never what the panel OPENS on — the first thing you can actually look at is.
+  const selected = attachments.find((a) => a.id === selectedId)
+    ?? attachments.find((a) => a.available)
+    ?? attachments[0];
+  if (attachments.length === 0 || !selected) return null;
+  const chip = attachmentCountChip(attachments);
+
+  return (
+    <Panel style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <SectionLabel style={{ margin: 0 }}>Attached · {attachments.length}</SectionLabel>
+        {chip.unopened > 0 && <Badge tone="phosphor">{chip.unopened} unopened</Badge>}
+        {chip.unavailable > 0 && <Badge tone="red">{chip.unavailable} unavailable</Badge>}
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column" }}>
+          {/* Column header — the same three widths the rows use, so the manifest reads as a table. */}
+          <div aria-hidden style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 6px 5px",
+            borderBottom: `1px solid ${color.border}`, fontFamily: font.head, fontSize: 9.5, fontWeight: 700,
+            letterSpacing: "0.12em", textTransform: "uppercase", color: color.textMuted }}>
+            <span style={{ width: MANIFEST_GLYPH_W, flexShrink: 0 }} />
+            <span style={{ flex: 1, minWidth: 0 }}>file</span>
+            <span style={{ width: MANIFEST_STATE_W, flexShrink: 0 }}>state</span>
+            <span style={{ width: MANIFEST_ACTION_W, flexShrink: 0, textAlign: "right", paddingRight: 6 }}>action</span>
+          </div>
+          {attachments.map((a) => (
+            <AttachmentRow key={a.id} questionId={question.id} a={a} now={now} remote={remote}
+              selected={a.id === selected.id} onSelect={() => setSelectedId(a.id)} />
+          ))}
+        </div>
+        <AttachmentPreviewPane questionId={question.id} a={selected} remote={remote} />
+      </div>
+      {chip.unavailable > 0 && (
+        <span style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textDim, lineHeight: 1.6,
+          borderLeft: `2px solid ${color.borderStrong}`, paddingLeft: 10 }}>
+          A source was removed before you got here — most often a worker’s worktree reaped after it
+          finished. The row stays so you can still see what the agent sent; the bytes themselves are gone.
+        </span>
+      )}
+    </Panel>
+  );
+}
+
 // ── RequestRow — one inbox entry (Direction A signal row) ─────────────────────────
 // The left edge is signed the type's color while pending (amber on the answered-stuck watchdog case). The
 // row action opens the detail MODAL in place (no route push); answered rows get a View that opens the same.
@@ -157,7 +446,11 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
   const edge = q.state === "pending" ? tone[typeTone] : watchdog ? color.amber : "transparent";
   const metaDot = q.state === "pending" ? typeTone : watchdog ? "amber" : "muted";
   return (
-    <Panel style={{ display: "flex", flexDirection: "column", gap: 5, borderLeft: `3px solid ${edge}` }}>
+    // `data-testid` + `data-question-id`: an e2e needs to scope an assertion to ONE row, and filtering a
+    // bare `div` by its title text matches every ANCESTOR container too — which silently widens the scope
+    // to a sibling row's controls (the same collision class as the agent-row/project-name one).
+    <Panel data-testid="request-row" data-question-id={q.id}
+      style={{ display: "flex", flexDirection: "column", gap: 5, borderLeft: `3px solid ${edge}` }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
           <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
@@ -167,6 +460,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
             <span>· <RequestProvenance q={q} /></span>
             <span>· {q.state === "pending" ? "asked" : q.state === "notice" ? "posted" : "answered"} {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}</span>
             {q.taskId && <LinkedTaskChip taskId={q.taskId} columnKey={q.linkedTaskColumnKey} />}
+            <RequestAttachmentChip attachments={q.attachments} />
           </span>
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
@@ -500,6 +794,14 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
             <div style={{ fontFamily: font.mono, fontSize: 15, color: color.text, lineHeight: 1.45 }}>{question.title}</div>
             {question.body && <div style={{ fontFamily: font.mono, fontSize: 13, color: color.textDim, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{question.body}</div>}
           </Panel>
+
+          {/* ATTACHED — its own panel between the ask and the answer controls, for EVERY state and type
+              (a `notice` carries files just as legitimately as a pending decision, and a consumed row's
+              files are still what the human was shown). Renders nothing when there are none, so a
+              request without attachments is byte-identical to before. ⛔ The answer controls below are
+              deliberately untouched — the owner's note on this card: "answer options optional as always,
+              and the note field as before". */}
+          <RequestAttachments question={question} />
 
           {/* Resolved → the recorded readout; pending → the type-specific control. */}
           {question.state !== "pending"

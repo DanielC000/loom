@@ -351,9 +351,22 @@ body {
 .loom-toggle:focus-visible,
 .loom-btn:focus-visible,
 .loom-task-link:focus-visible,
+.loom-manifest-row:focus-visible,
 .loom-field:focus-visible {
   outline: 2px solid var(--loom-phosphor);
   outline-offset: 2px;
+}
+
+/* Attachment-manifest row (the Requests inbox's attached-files list, card 19b7cf7a): one dense `ls`-like
+   row per file. Reads as plain text at rest and lifts to panel-2 on hover, so a whole manifest of 20 rows
+   isn't pre-highlighted — the SELECTED row's own phosphor left edge (inline, since it is state, not
+   chrome) stays the one strong mark. Hover/focus chrome lives here rather than inline for the same reason
+   .loom-btn's does: an inline declaration beats the class and would make these rules inert. */
+.loom-manifest-row {
+  transition: background 80ms linear;
+}
+.loom-manifest-row:hover {
+  background: var(--loom-panel-2);
 }
 
 /* NavTab: uppercase mono, phosphor underline when active. */
@@ -1157,6 +1170,7 @@ body {
   .loom-rail-revealonly,
   .loom-rail-item,
   .loom-rail-statrow,
+  .loom-manifest-row,
   .loom-gate-row {
     transition: none;
   }

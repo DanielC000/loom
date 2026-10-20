@@ -452,6 +452,16 @@ export interface LoomDaemon {
     // ALREADY-STALE (and optionally already-snoozed) pending row directly, since the real escalation path
     // is a staleRequestMinutes-gated IdleWatcher tick a spec can't wait out.
     escalatedAt?: string | null; acknowledgedUntil?: string | null;
+    // Attachments (epic 7d1d66ab — the inbox manifest, card 19b7cf7a). The daemon seed writes REAL BYTES
+    // into the same per-question store dir the serving route reads from, so `available` is derived by the
+    // same live existsSync as a real attachment — never a hand-set flag. Give `content` (utf8, e.g. an
+    // html mockup) or `contentBase64` (e.g. a real PNG); OMIT BOTH to seed the UNAVAILABLE row the
+    // manifest must keep rendering struck through. `kind` defaults to the server's own extension
+    // derivation over `label`, so a spec gets the real classification rather than one it asserted.
+    attachments?: {
+      label: string; kind?: "image" | "html" | "other"; content?: string; contentBase64?: string;
+      sizeBytes?: number; imageDimensions?: { width: number; height: number } | null; openedAt?: string | null;
+    }[];
   }) => Promise<string>;
   /**
    * Spawn ONE real, LIVE host shell via `POST /api/terminals` (card ShellTile-e2e) — the ONLY way to make a

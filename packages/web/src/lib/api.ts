@@ -431,6 +431,13 @@ async function provisionCompanionReq(body: { name?: string }): Promise<Companion
   return r.json() as Promise<CompanionConfigMasked>;
 }
 
+// The ONE place the inbox-attachment route path is spelled (epic 7d1d66ab) — a module-level function, not
+// an `api.questionAttachmentUrl(…)` self-reference from inside the object literal below, which would make
+// `api` implicitly `any` (TS cannot infer a type that references itself in its own initializer).
+function questionAttachmentPath(questionId: string, attachmentId: string): string {
+  return `/api/questions/${encodeURIComponent(questionId)}/attachments/${encodeURIComponent(attachmentId)}`;
+}
+
 export const api = {
   projects: () => get<Project[]>("/api/projects"),
   // Platform Manager P6 — discover the reserved "Loom Platform" home (hidden from the ordinary picker)
@@ -887,6 +894,29 @@ export const api = {
   // silently skipped server-side). Returns the ids actually updated (a subset of the request).
   markQuestionsRead: (ids: string[]) =>
     post<{ updated: string[] }>("/api/questions/mark-read", { ids }),
+
+  // --- Request ATTACHMENTS (epic 7d1d66ab: store = card 432765ab, serving route = card 8f050b79, this
+  // inbox manifest = card 19b7cf7a). Exactly TWO daemon routes back all three members below, addressed by
+  // (questionId, attachmentId) only — never a path, which the public QuestionAttachment deliberately does
+  // not carry. `questionAttachmentUrl` is the bare URL for an `<img>`/`<iframe>`/new-tab `href`, mirroring
+  // `vaultRawUrl`'s shape, and carries the same ⚠️ ONLY LOADABLE AS-IS ON LOOPBACK caveat for the same
+  // reason: the route is Tier-1, i.e. Bearer-only on a remote origin, and a browser attaches no header to
+  // any of those. `questionAttachmentBlob` is the same bytes fetched THROUGH this client so
+  // `withGatewayAuth` can attach the credential a bare load cannot — used only for a raster image (see
+  // decision 19b7cf7a for which preview modes may use it, and which must never). ---
+  questionAttachmentUrl: (questionId: string, attachmentId: string) => questionAttachmentPath(questionId, attachmentId),
+  questionAttachmentBlob: async (questionId: string, attachmentId: string): Promise<{ blob: Blob; contentType: string | null }> => {
+    const url = questionAttachmentPath(questionId, attachmentId);
+    const r = await guardedFetch(url);
+    if (!r.ok) throw new Error(await errorMessageFrom(url, r));
+    return { blob: await r.blob(), contentType: r.headers.get("content-type") };
+  },
+  // Open-tracking write (POST …/opened) — FIRST-OPEN-WINS server-side (`markQuestionAttachmentOpened`,
+  // db.ts), so a repeat call is a harmless no-op returning the ORIGINAL stamp, never a refreshed one.
+  // `postErr` like every other write above, so the route's `{ error }` (a 400 on a malformed id, a 404 on
+  // an unknown attachment) surfaces verbatim instead of an opaque status code.
+  markQuestionAttachmentOpened: (questionId: string, attachmentId: string) =>
+    postErr<{ id: string; openedAt: string | null }>(`${questionAttachmentPath(questionId, attachmentId)}/opened`),
 
   // --- Session/run AUDIT LOG (replayable timeline + run-vs-run diff). READ-ONLY, HUMAN-only loopback
   // readers over the existing `orchestration_events` record — NEVER an agent MCP tool (mirrors

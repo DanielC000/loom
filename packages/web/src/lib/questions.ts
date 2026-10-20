@@ -1,4 +1,4 @@
-import type { Question, QuestionType } from "@loom/shared";
+import type { Question, QuestionAttachment, QuestionAttachmentKind, QuestionType } from "@loom/shared";
 import type { Tone } from "../theme";
 
 // Pure (JSX-free) helpers for the manager→human DECISION INBOX web surfaces (card 8701bdbb, child B):
@@ -225,4 +225,136 @@ export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note
     default: // decision
       return q.chosenOption ? `chose ${q.chosenOption}` : q.note ? `“${q.note}”` : "—";
   }
+}
+
+// ── Request ATTACHMENTS (epic 7d1d66ab, Direction B "Manifest" — the owner's pick on request 0bbf7d1b) ──
+// A Request can carry files its asker attached (`Question.attachments`, card 432765ab), each served on its
+// own by `GET /api/questions/:id/attachments/:attachmentId` (card 8f050b79). TWO surfaces read them — the
+// COLLAPSED inbox row (a one-line typed count chip) and the OPENED detail (one manifest row per file plus
+// a single preview pane) — and these pure helpers are the single source of truth for both, so the chip and
+// the manifest can never disagree about what is attached, what is new, and what is gone.
+//
+// ⛔ A QuestionAttachment deliberately carries NO PATH — neither the asker's original absolute path nor
+// the store path (see its own doc in @loom/shared). So nothing here may render a "where did this come
+// from" line: the reference mockup showed one from its own richer fixture, and reproducing it would mean
+// inventing a fact this contract does not carry.
+
+/** Per-kind glyph for the chip + manifest. Text glyphs, not icons — the cockpit is a monospace surface and
+ *  every other mark in it (✓ ✕ ·) is already a character. Rendered `aria-hidden` everywhere: the kind is
+ *  always also spelled in the row's own text, so the glyph is never the sole carrier of meaning. */
+export const ATTACHMENT_GLYPH: Record<QuestionAttachmentKind, string> = {
+  image: "▨",
+  html: "‹›",
+  other: "▤",
+};
+
+/** The one generic "files are attached" mark, for the collapsed row's count chip — which summarises a MIX
+ *  of kinds and so can't wear any single kind's glyph. */
+export const ATTACHMENT_CHIP_GLYPH = "▨";
+
+/** The word a kind reads as in the count chip. An image is NOT spelled "png": `kind` is derived
+ *  server-side across png/jpg/jpeg/gif/webp (`deriveAttachmentKind`), so naming one of them would be a
+ *  guess the contract cannot back. */
+const ATTACHMENT_KIND_WORD: Record<QuestionAttachmentKind, string> = {
+  image: "image",
+  html: "html",
+  other: "file",
+};
+
+/** Fixed order for the chip's parts, so it reads the same across reads instead of echoing the asker's own
+ *  attach order (which would make the same composition render differently from one ask to the next). */
+const ATTACHMENT_KIND_ORDER: QuestionAttachmentKind[] = ["image", "html", "other"];
+
+/** A byte count as the manifest spells it — "640 B" / "88 KB" / "1.2 MB". 1024-based; MB keeps one decimal
+ *  so a 1.2 MB mockup doesn't flatten to "1 MB". A negative/non-finite count reads "—", never a fake 0. */
+export function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${Math.round(kb)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+/** The sub-line under a manifest row's label: size, plus an image's pixel dimensions when the cheap header
+ *  parse found them (null for every non-image AND for an image whose header didn't parse — see
+ *  `imageDimensions`' own doc; absence is never a licence to invent one). An unavailable row says what
+ *  happened instead of a size, since its `sizeBytes` describes bytes that are no longer there. */
+export function attachmentDetail(a: Pick<QuestionAttachment, "sizeBytes" | "imageDimensions" | "available">): string {
+  if (!a.available) return "the bytes are gone — nothing to open";
+  const dim = a.imageDimensions ? ` · ${a.imageDimensions.width}×${a.imageDimensions.height}` : "";
+  return `${formatAttachmentSize(a.sizeBytes)}${dim}`;
+}
+
+export interface AttachmentCountChip {
+  /** "2 html · 2 image" — the AVAILABLE files by kind, in ATTACHMENT_KIND_ORDER. Empty when every
+   *  attachment is unavailable; the chip then carries only its ✕N mark. */
+  text: string;
+  unavailable: number;
+  /** Available attachments the human has never opened — what tints the chip phosphor. */
+  unopened: number;
+  /** The same facts spelled as a sentence, for `title`/`aria-label`, so the terse chip is never the only
+   *  carrier of meaning. */
+  title: string;
+}
+
+/** The COLLAPSED row's indicator. One line at any attachment count — a composition chip, never a thumbnail
+ *  strip (Direction B's own rule): it costs no image decode and holds its shape at 2 files or 20. */
+export function attachmentCountChip(attachments: readonly QuestionAttachment[]): AttachmentCountChip {
+  const byKind = new Map<QuestionAttachmentKind, number>();
+  let unavailable = 0;
+  let unopened = 0;
+  for (const a of attachments) {
+    if (!a.available) { unavailable += 1; continue; }
+    byKind.set(a.kind, (byKind.get(a.kind) ?? 0) + 1);
+    if (!a.openedAt) unopened += 1;
+  }
+  const parts = ATTACHMENT_KIND_ORDER
+    .filter((k) => (byKind.get(k) ?? 0) > 0)
+    .map((k) => `${byKind.get(k) ?? 0} ${ATTACHMENT_KIND_WORD[k]}`);
+  const sentence = [`${attachments.length} attached`];
+  if (parts.length > 0) sentence.push(parts.join(", "));
+  if (unopened > 0) sentence.push(`${unopened} not yet opened`);
+  if (unavailable > 0) sentence.push(`${unavailable} unavailable`);
+  return { text: parts.join(" · "), unavailable, unopened, title: sentence.join(" · ") };
+}
+
+export interface AttachmentStateSpec { tone: Tone; label: string; }
+
+/** The manifest's STATE column — the opened-tracking surface, legible without hovering anything:
+ *  `unavailable` (red — the bytes are gone) → `new` (phosphor — never opened) → `opened <age>` (muted).
+ *  `openedAt` is stamped ONLY by `POST …/opened`, i.e. by the human's own Open action; SELECTING a row to
+ *  preview it deliberately does not count, so `new` keeps meaning "you have not opened this through the
+ *  real route yet" rather than "you have not glanced at a 232px thumbnail of it". */
+export function attachmentStateChip(a: Pick<QuestionAttachment, "available" | "openedAt">, nowMs: number): AttachmentStateSpec {
+  if (!a.available) return { tone: "red", label: "unavailable" };
+  if (!a.openedAt) return { tone: "phosphor", label: "new" };
+  const age = relativeAge(a.openedAt, nowMs);
+  return { tone: "muted", label: age ? `opened ${age}` : "opened" };
+}
+
+/**
+ * What the single preview pane can render for the selected attachment, resolved from its kind/availability
+ * AND the page's origin (the serving route is Tier-1: ungated on loopback, Bearer-only remotely, and no
+ * header rides an `<img src>`/`<iframe src>`/new-tab navigation).
+ *
+ * @decision 19b7cf7a — an HTML attachment renders ONLY as an `<iframe src>` on loopback, never a
+ * blob:/srcdoc fallback and never with `allow-same-origin`; a remote origin gets `html-needs-loopback`
+ * instead of a frame that silently 401'd.
+ */
+export type AttachmentPreviewMode = "missing" | "image" | "html" | "html-needs-loopback" | "download";
+
+export function attachmentPreviewMode(a: Pick<QuestionAttachment, "kind" | "available">, remote: boolean): AttachmentPreviewMode {
+  if (!a.available) return "missing";
+  if (a.kind === "image") return "image";
+  if (a.kind === "html") return remote ? "html-needs-loopback" : "html";
+  return "download";
+}
+
+/** Whether the row's `Open ↗` action can do anything, and the reason when it can't. A new-tab navigation
+ *  carries no Authorization header, so on a remote origin EVERY kind's open would 401 — the action is
+ *  disabled there with the reason spelled out, rather than left to land a JSON error page in a new tab. */
+export function attachmentOpenRefusal(a: Pick<QuestionAttachment, "available">, remote: boolean): string | null {
+  if (!a.available) return "The bytes are gone — nothing to open";
+  if (remote) return "Opening an attachment needs loopback access — this origin authenticates with a header a new tab cannot send";
+  return null;
 }

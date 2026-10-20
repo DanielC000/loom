@@ -222,6 +222,17 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
     if a worker's progress is worth the owner knowing, YOU file the notice on its behalf, composing the
     body yourself (there's no structured "on behalf of worker X" field — name it in the text).
 
+  **Showing the human a finished image, mockup, or screenshot? Pass it as a structured `attachments`
+  param (every type, including `notice`) — don't type its path into `body` as prose.** If your platform's
+  `question_ask` supports it, give `{path, label?}`: an absolute path under a root it recognizes as yours
+  to attach from (a project repo, a worker's own worktree, a shared project work dir, a docs/notes vault —
+  check what your platform actually allows before assuming one). It derives the file's kind/size/
+  dimensions itself and copies it somewhere durable — you don't need to, and a bare path typed into `body`
+  is NOT the same thing: it's just text the human has to go find on disk themselves, and it's gone the
+  moment whatever produced it (a worker's worktree, in particular) is cleaned up. A relative path, or one
+  outside an allowed root, is refused outright — the WHOLE ask fails, not just the attachment — so resolve
+  to an absolute path first.
+
   It's NON-BLOCKING: keep orchestrating your other tracks, but don't guess past *this* point —
   `question_pull` the answer (which consumes it; a credential returns only the ack, a permission returns
   `approved`) when you reach it, or when the push nudge says it's answered.
