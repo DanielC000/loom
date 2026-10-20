@@ -357,6 +357,15 @@ body {
   outline-offset: 2px;
 }
 
+/* Segmented option (components/ui `Segmented`): the same phosphor ring, drawn INSET. The segments sit
+   flush inside a rounded `overflow: hidden` track, which clips anything painted outside a segment's
+   border box — so the positive offset above would be invisible here. Same reason the rail items and
+   Atlas tree nodes below use a negative offset. */
+.loom-segment:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
+}
+
 /* Attachment-manifest row (the Requests inbox's attached-files list, card 19b7cf7a): one dense `ls`-like
    row per file. Reads as plain text at rest and lifts to panel-2 on hover, so a whole manifest of 20 rows
    isn't pre-highlighted — the SELECTED row's own phosphor left edge (inline, since it is state, not

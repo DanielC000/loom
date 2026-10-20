@@ -230,6 +230,8 @@ export function NavTab({ to, end, children, className, ...rest }: NavTabProps) {
 // A compact single-choice toggle (mono, uppercase) — the one primitive for the small "swap which body
 // mounts" switches, e.g. Runs' Runs|Keys and Actors' Profiles|Skills. The active segment fills with
 // phosphorDim + phosphor text; the rest read dim. Keyed generically so any string-union tab set fits.
+// Each segment carries `.loom-segment` purely so global.css can give it the shared phosphor
+// `:focus-visible` ring — the rest chrome stays inline, since it is per-segment state.
 type SegmentedProps<T extends string> = {
   value: T;
   onChange: (value: T) => void;
@@ -246,7 +248,7 @@ export function Segmented<T extends string>({
       {items.map((it) => {
         const active = value === it.key;
         return (
-          <button key={it.key} role="tab" aria-selected={active} onClick={() => onChange(it.key)}
+          <button key={it.key} className="loom-segment" role="tab" aria-selected={active} onClick={() => onChange(it.key)}
             style={{
               background: active ? color.phosphorDim : "transparent",
               color: active ? color.phosphor : color.textDim,
