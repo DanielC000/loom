@@ -12,11 +12,16 @@
 //      this editor used to PIN to `false`, so a tick that saves silently is the regression it guards.
 //   5. NEGATIVE CONTROL: a grant-free edit (description only) saves straight through with NO confirm.
 //   6. FAIL-CLOSED: with the agents request ABORTED, the confirm STILL appears — and never claims zero.
+//   7. STILL LOADING (card 586a0efe) — the OTHER half of (6)'s one unresolved state: a DELAYED request
+//      holds the save with a "checking…" hint and no write, then lands it on its own; an edit made while
+//      it is held wins; Cancel kills it for good, even once the list arrives.
 //
-// (6) is the load-bearing one and the reason this spec exists alongside the unit test. The planner is
-// pure, so a unit test supplies its own inputs and can never be wrong about WHEN the caller sampled them
-// (the 654869e2 lesson). Route-abort is the only way to hold the UI in the unresolved state for real and
-// prove `isSuccess ? data : null` is what Profiles.tsx actually passes, rather than `data ?? []`.
+// (6) and (7) are the load-bearing ones and the reason this spec exists alongside the unit test. The
+// planner is pure, so a unit test supplies its own inputs and can never be wrong about WHEN the caller
+// sampled them (the 654869e2 lesson). Driving a real route is the only way to hold the UI in each
+// unresolved state and prove `isSuccess ? data : null` is what Profiles.tsx actually passes, rather than
+// `data ?? []` — and, for (7), that the hold resolves off LIVE state rather than a click-time snapshot,
+// which no pure test can see at all.
 //
 // Builds on the shared `loomDaemon` fixture; profiles-agents.spec.ts is the template. Seeds its OWN
 // uniquely-named profile + agent over REST and never touches a BUNDLED profile, so the shared store stays
@@ -313,13 +318,16 @@ test.describe("profile grant blast radius", () => {
     expect((await getProfile(loomDaemon.baseURL, profile.id)).browserTesting ?? false).toBe(false);
   });
 
-  test("FAIL-CLOSED (DELAYED, not aborted): a role change surfaces the confirm instead of racing the save through (card 8206994d)", async ({ page, loomDaemon }) => {
-    // The real-world shape of the bug this card investigated: `/api/agents` isn't BROKEN, it's merely
+  test("STILL LOADING (delayed, not aborted): the save is HELD and says so, writes nothing, then lands on its own (card 586a0efe)", async ({ page, loomDaemon }) => {
+    // The real-world shape of the bug card 8206994d investigated: `/api/agents` isn't BROKEN, it's merely
     // still loading when Save is clicked — the cold-cache window every fresh page load opens for real.
-    // A permanent regression guard, as opposed to `openActorsProfile`/`openProfile`'s own race-avoidance:
-    // this test PROVES the fail-closed confirm is what a real user sees in that window, on a profile with
-    // ZERO bound agents (so a pre-fix reader might assume nothing would ever prompt) — never a silent,
-    // unobservable no-op.
+    // Card 8206994d pinned the PRE-586a0efe behaviour here (the "could not load" confirm). 586a0efe keeps
+    // the fail-closed half of that — nothing is written while the reach is unknown — and replaces the
+    // wrong WORDING with a held, self-resolving save, which is what this test now pins instead.
+    //
+    // Run on a profile with ZERO bound agents on purpose: the plan that eventually lands is therefore
+    // `save`, so the hold has to release into a REAL WRITE with no further clicking. A test on a bound
+    // profile would end at a confirm panel and could not tell "held then resolved" from "held forever".
     const profile = await seedProfile(loomDaemon.baseURL, `Grant Reach Delayed ${Date.now()}`);
     expect(profile.role ?? null).toBeNull();
 
@@ -335,15 +343,80 @@ test.describe("profile grant blast radius", () => {
     await roleCard(page, "worker").click();
     await page.getByRole("button", { name: "Save", exact: true }).click();
 
-    // AFTER: the confirm appears — worded as unknown, since the list hasn't resolved yet — and the save
-    // button it stood behind is disabled, never a second write path around it.
-    const confirm = page.getByTestId("grant-reach-confirm");
-    await expect(confirm).toBeVisible();
-    await expect(confirm).toContainText(/could not load/i);
-    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+    // DURING: the held state is named as LOADING, and never as a failure. Both polarities are asserted —
+    // a hint that merely appeared would not prove the misleading confirm is gone.
+    await expect(page.getByTestId("grant-reach-checking")).toBeVisible();
+    await expect(page.getByTestId("grant-reach-checking")).toContainText(/checking which agents/i);
+    await expect(page.getByTestId("grant-reach-confirm")).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText(/could not load/i);
+    // Save is visibly PENDING, not dead: disabled against a double-submit, but labelled for what it is
+    // waiting on rather than left reading "Save" under a click that did nothing.
+    await expect(page.getByRole("button", { name: "Checking…", exact: true })).toBeDisabled();
 
-    // AND NO WRITE HAPPENED: the stored role is still null, well past the delayed route's own 3s window.
-    await page.waitForTimeout(500);
+    // AND NOTHING IS WRITTEN WHILE HELD. Sampled INSIDE the route's own 3s window (the click lands within
+    // ~1s of it opening), so this is a real observation of the held state, not a post-hoc one.
+    expect((await getProfile(loomDaemon.baseURL, profile.id)).role ?? null).toBeNull();
+
+    // AFTER: the list resolves and the save completes BY ITSELF — no second click anywhere above. Polled
+    // against REST (this spec's own observable for a landed write), not the UI's own "saved" label.
+    await expect.poll(() => getProfile(loomDaemon.baseURL, profile.id).then((p) => p.role), { timeout: 15_000 }).toBe("worker");
+    await expect(page.getByTestId("grant-reach-checking")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
+  });
+
+  test("STILL LOADING: editing again while the save is held saves the LATEST value, not the stale one (card 586a0efe)", async ({ page, loomDaemon }) => {
+    // Lesson 196: the held save re-plans from LIVE form state when the list arrives, never from a patch
+    // captured at click time. A snapshot would be invisible to the human — they can see the field they
+    // just changed, and would get the value they had abandoned. So: click Save on `worker`, then switch to
+    // `manager` while held, and assert the STORED role is `manager`.
+    const profile = await seedProfile(loomDaemon.baseURL, `Grant Reach Relan ${Date.now()}`);
+    expect(profile.role ?? null).toBeNull();
+
+    await page.route("**/api/agents", async (route) => {
+      await new Promise((r) => setTimeout(r, 4000));
+      await route.fallback();
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/actors`);
+    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    await roleCard(page, "worker").click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByTestId("grant-reach-checking")).toBeVisible();
+
+    // The second edit, made while the save is held. The role picker stays live on purpose: a held save is
+    // not a modal, and freezing the form would be a worse answer than re-planning off it.
+    await roleCard(page, "manager").click();
+
+    // The LATEST value landed. A stale-snapshot regression fails here with `worker` — a distinct, named
+    // wrong value, not merely an absent one, so this cannot pass for want of any write at all.
+    await expect.poll(() => getProfile(loomDaemon.baseURL, profile.id).then((p) => p.role), { timeout: 15_000 }).toBe("manager");
+  });
+
+  test("STILL LOADING: Cancel on the held save withholds it even after the list resolves (card 586a0efe)", async ({ page, loomDaemon }) => {
+    // The hold is the only state in this flow with no decision in it, so it needs an out: a human cannot
+    // see the request it is waiting on. Cancel must CLEAR the hold, not just hide the hint — otherwise the
+    // save fires anyway the moment the list lands, which is the worst of both worlds.
+    const profile = await seedProfile(loomDaemon.baseURL, `Grant Reach Cancel ${Date.now()}`);
+    expect(profile.role ?? null).toBeNull();
+
+    await page.route("**/api/agents", async (route) => {
+      await new Promise((r) => setTimeout(r, 3000));
+      await route.fallback();
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/actors`);
+    await page.getByRole("button").filter({ hasText: profile.name }).first().click();
+    await roleCard(page, "worker").click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByTestId("grant-reach-checking")).toBeVisible();
+    await page.getByTestId("grant-reach-checking-cancel").click();
+
+    // Save is live again (the editor is still dirty), and the hint is gone.
+    await expect(page.getByTestId("grant-reach-checking")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+
+    // Well past the route's own 3s window: the resolved list must NOT revive the cancelled save.
+    await page.waitForTimeout(4000);
     expect((await getProfile(loomDaemon.baseURL, profile.id)).role ?? null).toBeNull();
   });
 

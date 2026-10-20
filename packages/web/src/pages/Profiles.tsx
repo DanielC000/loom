@@ -14,7 +14,8 @@ import { changedFields, type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
 import { errorText } from "../lib/loopbackCredential";
 import {
-  grantFieldsOfProfile, grantFieldsOfValues, grantKeyList, parseAllowDelta, planGrantSave, type GrantSavePlan,
+  grantFieldsOfProfile, grantFieldsOfValues, grantKeyList, parseAllowDelta, planGrantSave,
+  GRANT_REACH_CHECKING, type GrantSavePlan,
 } from "../lib/profileGrantReach";
 import { GrantReachConfirm } from "../components/GrantReachConfirm";
 import { useAllAgents } from "../lib/useAllAgents";
@@ -444,6 +445,12 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   const [pendingGrant, setPendingGrant] = useState<
     { patch: Partial<Omit<Profile, "id">>; plan: Extract<GrantSavePlan, { kind: "confirm" } | { kind: "confirm-unknown" }> } | null
   >(null);
+  // Card 586a0efe: a Save clicked while the cross-project agent list was still in flight. A bare flag,
+  // deliberately NOT a captured patch like `pendingGrant` above — the two are opposites. `pendingGrant`
+  // freezes a patch the human has ALREADY REVIEWED in the confirm; this one holds a save nobody has been
+  // shown anything about yet, while they stay free to keep editing. So resolving it RE-PLANS from live
+  // state (see the effect below) and a snapshot here would be the bug, not the safety.
+  const [awaitingAgents, setAwaitingAgents] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [resolver, setResolver] = useState<ProfileMergeResult | null>(null); // open ⇔ a conflicting adopt
@@ -486,6 +493,13 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   // is bound", or a trust-boundary grant saves silently. lib/profileGrantReach carries the @decision.
   const allAgents = useAllAgents();
   const boundAgents = allAgents.isSuccess ? allAgents.data : null;
+  // Card 586a0efe — "still arriving" is NOT "could not load", and the gate above cannot tell them apart:
+  // both read as `boundAgents === null`. `isPending` alone can't either, because react-query stays PENDING
+  // across its whole retry backoff (~7s at the defaults) after the first attempt fails — so a broken or
+  // aborted request would sit under a "checking…" hint for seconds before admitting anything is wrong.
+  // `failureCount` moves on the FIRST failed attempt, so pairing them puts a real outage straight onto the
+  // error confirm while a genuinely in-flight first load is the only thing that reads as loading.
+  const agentsLoading = allAgents.isPending && allAgents.failureCount === 0;
 
   const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
   const availableCapabilities = capabilityList.data ?? [];
@@ -597,10 +611,36 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     // the human should see BEFORE it takes effect, not discover afterwards. Computed from the STORED row
     // against what this save would land, by the same `@loom/shared` helpers the daemon uses on its side
     // to record the audit event.
-    const plan = planGrantSave(grantFieldsOfProfile(profile), grantFieldsOfValues(sent), profile.id, boundAgents);
+    const plan = planGrantSave(grantFieldsOfProfile(profile), grantFieldsOfValues(sent), profile.id, boundAgents, agentsLoading);
+    // Card 586a0efe. `wait` means the reach is still arriving, so there is nothing truthful to show yet:
+    // hold the save pending rather than planning against a null list, which would draw the "could not
+    // load" confirm (and a dead Save) over a list that is merely a few hundred ms late. The patch built
+    // above is DROPPED on purpose — the effect below re-runs this whole function once the list settles.
+    if (plan.kind === "wait") { setAwaitingAgents(true); return; }
     if (plan.kind !== "save") { setPendingGrant({ patch, plan }); return; }
     onSave(patch);
   };
+
+  // Card 586a0efe — resolve a held save by RE-RUNNING `submit` against the values as they stand NOW, not a
+  // patch captured when Save was clicked: the human can keep editing while this is held (including the very
+  // field being granted), and what lands must be what they can still see on screen. `submit` reads only
+  // live state, so re-running it IS the re-plan — there is no second code path to keep in step.
+  //
+  // Terminates on EITHER outcome: `agentsLoading` goes false when the list resolves (→ the normal `save`/
+  // `confirm` flow) AND when it fails (→ the ordinary `confirm-unknown`, i.e. exactly today's behaviour),
+  // so a dead request can never strand this flag. Unmounting drops it with the component, and Cancel below
+  // clears the flag, which is why that is enough to stop the save rather than merely hiding the hint.
+  //
+  // `submit` is NOT a dep, deliberately: it is rebuilt every render, so listing it would fire this effect
+  // on every keystroke. React runs the callback belonging to the render whose deps CHANGED — the render
+  // where the list settled — so the closure it fires with already holds the human's latest values. That is
+  // the re-plan, not a loophole in it; adding `submit` back would change nothing but the churn.
+  useEffect(() => {
+    if (!awaitingAgents || agentsLoading) return;
+    setAwaitingAgents(false);
+    submit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingAgents, agentsLoading]);
 
   // The confirm Save. Submits the patch EXACTLY as `submit` built it — never a rebuilt one, which
   // could pick up state that changed while the confirm was open and save something nobody reviewed.
@@ -909,10 +949,27 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
         <GrantReachConfirm plan={pendingGrant.plan} saving={saving}
           onConfirm={confirmGrantSave} onCancel={() => setPendingGrant(null)} />
       )}
+      {/* Card 586a0efe: the save is held because the reach isn't known YET. One cyan status line in the
+          same inline slot the amber confirm uses — not that confirm in a gentler colour: this is a
+          progress state with no decision in it, so it carries no Grant button, and amber here would read
+          as a warning about a save that hasn't been judged. A Cancel, because the human is otherwise
+          waiting on a request they can't see; it clears the hold outright, it does not merely hide it. */}
+      {awaitingAgents && (
+        <div data-testid="grant-reach-checking" role="status"
+          style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ color: color.cyan, fontFamily: font.mono, fontSize: 11, lineHeight: 1.5 }}>
+            {GRANT_REACH_CHECKING} Your save lands as soon as that is known.
+          </span>
+          <Button data-testid="grant-reach-checking-cancel" onClick={() => setAwaitingAgents(false)}>Cancel</Button>
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        {/* Disabled while the confirm is open so the row underneath cannot re-submit around it. */}
-        <Button variant="primary" disabled={!dirty || !name.trim() || saving || !!pendingGrant} onClick={submit}>
-          {saving ? "Saving…" : "Save"}
+        {/* Disabled while the confirm is open so the row underneath cannot re-submit around it — and while
+            a save is HELD awaiting the reach, where a second click would only re-set a flag already set.
+            `awaitingAgents` wins the LABEL over `saving` because nothing is being written yet: calling it
+            "Saving…" there would claim a write that deliberately has not happened. */}
+        <Button variant="primary" disabled={!dirty || !name.trim() || saving || !!pendingGrant || awaitingAgents} onClick={submit}>
+          {awaitingAgents ? "Checking…" : saving ? "Saving…" : "Save"}
         </Button>
         {dirty
           ? <Button onClick={reset}>Reset</Button>

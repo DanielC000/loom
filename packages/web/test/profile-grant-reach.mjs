@@ -76,6 +76,41 @@ check("FAIL-CLOSED: an UNLOADED agent list still confirms, and never claims zero
   assert.equal(plan.agents, undefined);
 });
 
+// Card 586a0efe — the SAME unloaded list, split by WHY it is unloaded. Both halves fail closed (nothing
+// is written while the reach is unknown); they differ only in what the human is told and whether the save
+// is held for a retry. The default-false 5th arg is itself a safety property: a caller that forgets it
+// lands on the error confirm, never on a silent save.
+check("STILL LOADING: an in-flight agent list HOLDS the save instead of claiming it could not load", () => {
+  const plan = planGrantSave(fields(), fields({ vaultWrite: true }), "rig", null, true);
+  assert.equal(plan.kind, "wait");
+  assert.deepEqual(plan.addedKeys, ["vaultWrite"]);
+  // Same fail-closed shape as confirm-unknown: no count, no agents, nothing that could read as "0 agents".
+  assert.equal(plan.agentCount, undefined);
+  assert.equal(plan.agents, undefined);
+});
+
+check("the loading flag DEFAULTS false, so an un-updated caller still gets the error confirm", () => {
+  // The 4-arg call is every pre-586a0efe caller. It must not silently become a hold (which would hide a
+  // real outage behind "checking…"), and it must certainly not become a save.
+  assert.equal(planGrantSave(fields(), fields({ vaultWrite: true }), "rig", null).kind, "confirm-unknown");
+  assert.equal(planGrantSave(fields(), fields({ vaultWrite: true }), "rig", null, false).kind, "confirm-unknown");
+});
+
+check("a RESOLVED list ignores a stale loading flag — a real answer outranks it", () => {
+  // The flag is sampled from a live query, so it can lag the data by a render. A loaded list is an answer:
+  // holding on it would strand the save with nothing left to wait for.
+  assert.equal(planGrantSave(fields(), fields({ vaultWrite: true }), "rig", AGENTS, true).kind, "confirm");
+  assert.equal(planGrantSave(fields(), fields({ vaultWrite: true }), "rig", [], true).kind, "save");
+});
+
+check("a LOADING list does not hold a save that widens nothing", () => {
+  // The mirror of the confirm-unknown case below, and the reason `wait` lives in the planner rather than
+  // in the caller: a rename must still land immediately while the agents list is in flight, or every
+  // unrelated profile edit waits on a cross-project query it has no stake in.
+  assert.equal(planGrantSave(fields({ vaultWrite: true }), fields({ vaultWrite: true }), "rig", null, true).kind, "save");
+  assert.equal(planGrantSave(fields({ vaultWrite: true }), fields(), "rig", null, true).kind, "save");
+});
+
 check("an unloaded list does NOT invent a prompt when no grant is being added", () => {
   // Fail-closed applies to the REACH, not to the grant test itself — a rename must still save cleanly
   // even while the agents query is down, or an outage blocks every unrelated profile edit.

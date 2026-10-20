@@ -27,6 +27,21 @@ The key list, the "what did this save add" computation and the "who is bound" co
 - **Do not derive "how many agents" from `detail.agents.length`.** That array is capped at `GRANT_REACH_AGENTS_CAP` so a widely-bound profile cannot bloat an append-only row. `agentCount` is always the true total.
 - **Do not let the editor's confirm fail OPEN.** The bound list comes from a query. An unresolved or failed `GET /api/agents` must never read as "0 agents bound" and skip the prompt — that saves a trust-boundary widening silently, which is the whole defect this card exists to remove. The reach is typed `… | null` (`null` = not loaded, distinct from an empty list), gated on `isSuccess`, and an unknown reach still shows the confirm, worded as unknown.
 
+## Loading is not an error (card `586a0efe`)
+
+The original gate had ONE unloaded state. `GET /api/agents` is cross-project and runs on the editor's first mount, so a human who clicks Save inside that cold window hit the "Loom could not load the agent list" confirm with Save disabled — a failure message, and a dead button, for a list that was merely a few hundred milliseconds late. The fail-closed property was right; the thing the human was told was not.
+
+The split is in the planner, not the page: `planGrantSave` takes an `agentsLoading` flag and returns a fourth plan, `kind: "wait"` — hold the save, show one cyan status line (`grant-reach-checking`) with Save disabled and relabelled `Checking…`, and no confirm panel, because this state carries no decision. `confirm-unknown` is untouched. Both fail closed: nothing is written while the reach is unknown, and `null` still never reads as "0 agents bound".
+
+The discriminator in `Profiles.tsx` is `isPending && failureCount === 0`, NOT `isPending` alone — react-query stays PENDING across its whole retry backoff, so `isPending` alone would park a broken request under "checking…" for seconds before admitting anything was wrong. Resolving the hold re-runs `submit()` against LIVE form state, the opposite of the `pendingGrant` snapshot beside it: that freezes a patch the human has already reviewed, while a held save is one nobody has been shown anything about.
+
+### Do not (this section)
+
+- **Do not give `agentsLoading` a truthy default, and do not let it reach a non-null `agents`.** Either turns "could not load" into a hold, which hides a real outage behind "checking…" with nothing left to wait for. The default-false parameter is itself the safety property: a caller that forgets it lands on the error confirm, never on a silent save.
+- **Do not hoist the hold into the caller.** `planGrantSave` returns `save` for a non-widening edit BEFORE it consults the reach at all. Checking "is the list loading" in `submit()` instead would hold a rename during an outage, so one failing cross-project query would block every unrelated profile edit.
+- **Do not resolve the hold from a captured patch.** The human can edit while it is held — including the very field being granted — so a snapshot saves a value they can no longer see. `submit()` reads only live state, which is why re-running it IS the re-plan and there is no second code path to keep in step.
+- **Do not let Cancel merely hide the hint.** It must clear the held flag, or the save fires anyway the moment the list lands.
+
 ## Scope
 
 The CONFIRM is the editor's (`PUT /api/profiles/:id`) only. The event and the `grantReach` response field also cover **adopt** (`POST /api/profiles/:id/adopt`) and **reset** (`POST /api/profiles/:id/reset`) — both are human clicks that can pull in a shipped `browserTesting` / `capabilities` the profile had dropped. Those two have no pre-save confirm yet; that is a deliberate follow-up, not an oversight.

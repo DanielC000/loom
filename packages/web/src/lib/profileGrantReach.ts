@@ -100,6 +100,10 @@ export function grantFieldsOfProfile(p: ProfileWideningFields): ProfileWideningF
  * - `kind: "save"` — nothing is being widened; submit straight through, no prompt.
  * - `kind: "confirm"` — something IS being widened and at least one agent is already bound. `agents`
  *   lists them; `agentCount` is their number.
+ * - `kind: "wait"` — something IS being widened and the bound list is STILL IN FLIGHT. Hold the save: no
+ *   write, and no prompt yet. The caller re-plans once the list settles, which lands on one of the three
+ *   other kinds. Fail-closed exactly like `confirm-unknown` (nothing is written while the reach is
+ *   unknown); it differs only in what the human is TOLD, because "still arriving" is not "could not load".
  * - `kind: "confirm-unknown"` — something IS being widened but the bound list could not be loaded. STILL
  *   a prompt, worded as unknown. Never silently a save, and never a false "0 agents".
  *
@@ -112,12 +116,17 @@ export function grantFieldsOfProfile(p: ProfileWideningFields): ProfileWideningF
  */
 export type GrantSavePlan =
   | { kind: "save" }
+  | { kind: "wait"; addedKeys: ProfileWideningKey[] }
   | { kind: "confirm"; addedKeys: ProfileWideningKey[]; agents: BoundAgentRef[]; agentCount: number; roleChange?: { from: string | null; to: string | null } }
   | { kind: "confirm-unknown"; addedKeys: ProfileWideningKey[]; roleChange?: { from: string | null; to: string | null } };
 
 /** Copy for the unknown-reach state, so the component and its test agree on one string. */
 export const GRANT_REACH_UNKNOWN =
   "Loom could not load the agent list, so it cannot show which agents this already reaches.";
+
+/** Copy for the `wait` state. Deliberately a different sentence from GRANT_REACH_UNKNOWN above, not a
+ *  softer wording of it: the whole point of the split is that a human can tell the two apart on sight. */
+export const GRANT_REACH_CHECKING = "Checking which agents this reaches…";
 
 /**
  * Plan a pending profile save.
@@ -128,17 +137,27 @@ export const GRANT_REACH_UNKNOWN =
  * @param agents    every agent across every project, or `null` when that list has not loaded
  *                  SUCCESSFULLY. An empty array is a real answer ("this install has no agents"); `null`
  *                  is not an answer, and must not be spelled as one.
+ * @param agentsLoading  whether that `null` is "still in flight" rather than "failed" — see the
+ *                  `@decision` at the split below. Ignored when `agents` is non-null: a resolved list is
+ *                  an answer, whatever a stale flag says.
  */
 export function planGrantSave(
   before: ProfileWideningFields,
   after: ProfileWideningFields,
   profileId: string,
   agents: readonly AgentListItem[] | null,
+  agentsLoading = false,
 ): GrantSavePlan {
   const addedKeys = profileWideningsOf(before, after);
+  // Checked BEFORE the reach is consulted at all, so an in-flight (or broken) agents list never holds up
+  // a save that widens nothing — a rename must still land during an outage, or one failing query blocks
+  // every unrelated profile edit. This ordering is the reason `wait` can't be hoisted into the caller.
   if (addedKeys.length === 0) return { kind: "save" };
   const roleChange = addedKeys.includes("role") ? { from: before.role ?? null, to: after.role ?? null } : undefined;
-  if (agents === null) return { kind: "confirm-unknown", addedKeys, roleChange };
+  // @decision 3c4e0df6 — `agentsLoading` splits the ONE unloaded state in two for the HUMAN only; both
+  // halves still fail closed. Never give it a truthy default, and never let it reach a non-null `agents`:
+  // either turns "could not load" into a hold that hides a real outage behind "checking…" forever.
+  if (agents === null) return agentsLoading ? { kind: "wait", addedKeys } : { kind: "confirm-unknown", addedKeys, roleChange };
   const bound = agentsBoundToProfile(agents, profileId);
   if (bound.length === 0) return { kind: "save" };
   return { kind: "confirm", addedKeys, agents: bound, agentCount: bound.length, roleChange };
