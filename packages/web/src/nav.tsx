@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Navigate } from "react-router-dom";
 import ReviewPanel from "./pages/ReviewPanel";
 import QuestionAnswer from "./pages/QuestionAnswer";
 import SessionView from "./pages/SessionView";
@@ -172,6 +173,52 @@ export const PARAM_PAGES: ParamPage[] = [
   { to: "/review/:workerId", element: <ReviewPanel />, atlas: { kind: "session", param: "workerId", tab: "Diff" } },
   { to: "/question/:id", element: <QuestionAnswer />, atlas: { kind: "detail", under: "/inbox", param: "id" } },
   { to: "/session/:id", element: <SessionView />, atlas: { kind: "session", param: "id" } },
+];
+
+// ── The legacy redirects ───────────────────────────────────────────────────────────────────────
+// Old URLs kept working after an IA merge or a rename. Each one's `to` is the destination's CURRENT
+// address — including the `?tab=` that picks its sub-tab — which under phase 1 is also its ATLAS
+// node+tab address, because both shells mount every NAV_PAGES destination at its own path. So there
+// is ONE `to` per row and not an Atlas/classic pair: a second target would be a second thing to keep
+// in step, and since each shell renders only under its own switch state, a test exercising one could
+// never see the other go stale. If phase 2 ever moves a destination's real address, change `to`
+// here and BOTH shells follow.
+export type LegacyRedirect = {
+  /** The old path, mounted verbatim by both shells. */
+  from: string;
+  /** Where it lands — a NAV_PAGES `to`, plus the `?tab=` that selects its sub-tab where one applies. */
+  to: string;
+  element: ReactNode;
+};
+
+// The `<Navigate>` is built HERE, once per row, rather than in each shell's route table: `replace`
+// (keep the dead URL out of the history stack, so Back leaves the page rather than bouncing through
+// the redirect) is part of the redirect's behaviour, and a flag spelled out in two route tables is a
+// flag that can end up spelled differently in two route tables.
+//
+// `to` is a plain path string, so react-router resolves it as given: the INCOMING query and hash are
+// dropped, and a target's own `?tab=` always wins. That is exactly what these redirects have always
+// done — carrying a stale page's query onto a different page is not parity, and nothing links to
+// these paths WITH a query — so it stays the behaviour under both shells.
+function redirect(from: string, to: string): LegacyRedirect {
+  return { from, to, element: <Navigate to={to} replace /> };
+}
+
+export const LEGACY_REDIRECTS: LegacyRedirect[] = [
+  // /setup was the old end-user Platform route — now consolidated into /platform. Catches lingering
+  // links/bookmarks and the first-run welcome's historical target.
+  redirect("/setup", "/platform"),
+  // /workspace was renamed + repositioned to /projects (card 274f9ba9).
+  redirect("/workspace", "/projects"),
+  // /profiles + /skills were consolidated into the single /actors page (IA merge #1).
+  redirect("/profiles", "/actors"),
+  redirect("/skills", "/actors?tab=skills"),
+  // /schedules + /event-triggers were consolidated into the single /automation page (IA merge #2).
+  redirect("/schedules", "/automation"),
+  redirect("/event-triggers", "/automation?tab=events"),
+  // /vault + /git were consolidated into the single /repository page (IA merge #3).
+  redirect("/vault", "/repository"),
+  redirect("/git", "/repository?tab=git"),
 ];
 
 // The source of truth for what the rail nav (Sidebar) and the Command Palette LIST show (both call this).

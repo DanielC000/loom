@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
 import { AtlasTree } from "./AtlasTree";
-import { NAV_PAGES, PARAM_PAGES, type NavPage, type ParamPage } from "../nav";
+import { LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, type NavPage, type ParamPage } from "../nav";
 import { setAtlasUi } from "../lib/atlasUi";
 import { useActiveProject } from "../lib/activeProject";
 import { api } from "../lib/api";
@@ -13,14 +13,14 @@ import { color, font } from "../theme";
 // The Atlas shell — cards 757c80dd (P1-0, the frame) and 8cbb2ac2 (P1-1, the nodes). What Atlas is,
 // and which card builds what: docs/plans/atlas-ui/02-architecture.md + 03-decomposition.md.
 //
-// P1-1 fills the frame: the tree (components/AtlasTree.tsx) holds a node per nav destination, and the
-// route table mounts each destination's EXISTING component verbatim. P1-2 (card 1d3192dc) adds the
-// three PARAMETERIZED addresses on the same terms, from the same PARAM_PAGES declaration the classic
-// shell mounts; only the frame's crumbs and heading learn where each one sits in the tree.
+// Phase 1 MOUNTS, it does not redesign: the tree (components/AtlasTree.tsx) holds a node per nav
+// destination, and every route below renders that destination's EXISTING component verbatim — the
+// nav destinations, the three parameterized addresses, and the legacy-URL redirects, each from the
+// one declaration in src/nav.tsx that the classic shell maps too. Only the frame's crumbs and
+// heading learn where an address sits in the tree.
 //
-// Routes, crumbs and the node heading are all DERIVED from NAV_PAGES / PARAM_PAGES. Never hand-list
-// them: a path copied into this file drifts invisibly the moment someone edits nav.tsx. The legacy
-// redirects (P1-3) and tree-selection-scoping (P1-4) are still unmounted — the catch-all holds them.
+// Routes, crumbs and the node heading are all DERIVED from those declarations. Never hand-list them:
+// a path copied into this file drifts invisibly the moment someone edits nav.tsx.
 //
 // Chrome is PASSED IN, never imported: App.tsx mounts the overlays and banners for BOTH shells and
 // stays their single owner. Both slots sit OUTSIDE the route table, as in the legacy shell.
@@ -204,8 +204,15 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {PARAM_PAGES.map((p) => (
               <Route key={p.to} path={p.to} element={p.element} />
             ))}
-            {/* Anything not yet mounted (the legacy redirects, a typo) lands on the frame with an
-                explanation instead of an empty column. */}
+            {/* The legacy-URL redirects (P1-3), from the SAME declaration LegacyShell mounts. They
+                need nothing Atlas-specific: each lands on a NAV_PAGES address that is already a node
+                above, so the crumbs, the heading and the tree's active node all derive themselves
+                from the destination exactly as a direct visit to it would. */}
+            {LEGACY_REDIRECTS.map((r) => (
+              <Route key={r.from} path={r.from} element={r.element} />
+            ))}
+            {/* Anything not yet mounted (an address phase 2 still owes, a typo) lands on the frame
+                with an explanation instead of an empty column. */}
             <Route path="*" element={<AtlasEmptyNode />} />
           </Routes>
         </main>

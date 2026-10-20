@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { NAV_PAGES, PARAM_PAGES } from "./nav";
+import { LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES } from "./nav";
 import { Button } from "./components/ui";
 import { Sidebar } from "./components/Sidebar";
 import { AtlasShell } from "./components/AtlasShell";
@@ -331,23 +331,12 @@ function LegacyShell() {
             {NAV_PAGES.map((p) => (
               <Route key={p.to} path={p.to} element={p.element} />
             ))}
-            {/* /setup was the old end-user Platform route — now consolidated into /platform. Redirect any
-                lingering links/bookmarks (and the first-run welcome's historical target). */}
-            <Route path="/setup" element={<Navigate to="/platform" replace />} />
-            {/* /workspace was renamed + repositioned to /projects (card 274f9ba9) — redirect lingering links. */}
-            <Route path="/workspace" element={<Navigate to="/projects" replace />} />
-            {/* /profiles + /skills were consolidated into the single /actors page (IA merge #1) — redirect any
-                lingering links/bookmarks to the right tab (/skills → the Skills tab via ?tab=skills). */}
-            <Route path="/profiles" element={<Navigate to="/actors" replace />} />
-            <Route path="/skills" element={<Navigate to="/actors?tab=skills" replace />} />
-            {/* /schedules + /event-triggers were consolidated into the single /automation page (IA merge #2) —
-                redirect any lingering links/bookmarks to the right tab (/event-triggers → the Events tab). */}
-            <Route path="/schedules" element={<Navigate to="/automation" replace />} />
-            <Route path="/event-triggers" element={<Navigate to="/automation?tab=events" replace />} />
-            {/* /vault + /git were consolidated into the single /repository page (IA merge #3) — redirect any
-                lingering links/bookmarks to the right tab (/git → the Git tab via ?tab=git). */}
-            <Route path="/vault" element={<Navigate to="/repository" replace />} />
-            <Route path="/git" element={<Navigate to="/repository?tab=git" replace />} />
+            {/* The legacy-URL redirects, from the SAME declaration the Atlas shell mounts
+                (src/nav.tsx › LEGACY_REDIRECTS) — see its comment for why each has one target and
+                not a per-shell pair. Each row's own comment there says what it is compatibility for. */}
+            {LEGACY_REDIRECTS.map((r) => (
+              <Route key={r.from} path={r.from} element={r.element} />
+            ))}
             {/* The 3 parameterized routes, from the SAME declaration the Atlas shell mounts
                 (src/nav.tsx › PARAM_PAGES) — see its comment for why they are not two lists. */}
             {PARAM_PAGES.map((p) => (
