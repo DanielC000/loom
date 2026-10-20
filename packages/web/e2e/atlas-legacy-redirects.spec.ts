@@ -97,47 +97,128 @@ async function pageSkeleton(page: Page, maxDepth: number): Promise<string> {
   }, maxDepth);
 }
 
-// These pages are react-query reads, so a fingerprint taken straight after a navigation is a coin
-// flip on which parts have resolved (measured on P1-0). Sample until two consecutive reads agree.
+// ── Readiness: when is a page's fingerprint safe to take? ──────────────────────────────────────
+// These destinations are react-query reads, so a fingerprint taken straight after a navigation is a
+// coin flip on which parts have resolved. "Two consecutive reads agree" is NOT enough on its own and
+// this spec measured it failing (card 625d791c): a page that has not yet received its data is
+// perfectly STABLE in its placeholder state, so the poll settles on the placeholder and returns it as
+// if it were the finished page. Stability says the page STOPPED CHANGING; it cannot distinguish
+// "finished" from "has not started". /repository?tab=git is the specimen — its tablist renders
+// synchronously while the body holds a one-<p> placeholder until the git read lands:
+//
+//     div                               div
+//       div[role=tablist]                 div[role=tablist]
+//         button[role=tab] x2               button[role=tab] x2
+//       div                               div
+//         p            <- placeholder       div … input.loom-field …   <- loaded
+//
+// ⛔ So do NOT "fix" this by lengthening the interval or adding samples — a slower poll settles on
+// the same placeholder, just later. Readiness needs a signal about the DATA, not about the DOM
+// holding still.
+//
+// The signal used here is NETWORK QUIESCENCE, deliberately page-agnostic: wait until the page has
+// both ISSUED and DRAINED its `/api/` reads, with none in flight across a whole observation window,
+// and only then require the fingerprint to be identical across that same window. A per-page
+// readiness marker (the card's other option) was rejected: the honest marker differs per destination
+// — note above that the obvious generic one, "the first real control", is already satisfied by those
+// two tabs while the body is still a placeholder — so it would mean eight hand-written selectors
+// that rot independently of the pages, in a spec whose whole design derives its expectations instead.
+//
+// ⛔ And never make readiness "wait until the fingerprint matches the classic capture": that is the
+// assertion itself, and waiting for it would make every comparison below vacuously true.
 const SETTLE_INTERVAL_MS = 300;
-const SETTLE_MAX_SAMPLES = 20;
+const SETTLE_MAX_SAMPLES = 40;
 
-async function settledPageSkeleton(page: Page): Promise<string> {
+/**
+ * Tracks in-flight `/api/` requests so a fingerprint is only ever taken on a quiet page.
+ *
+ * `startedSinceMark` is what stops the gate passing BEFORE the page has asked for anything: right
+ * after a navigation the in-flight count is legitimately 0 because no query has fired yet, which is
+ * indistinguishable from 0-because-everything-resolved if you only read the count.
+ */
+function trackApiRequests(page: Page): { inFlight: () => number; startedSinceMark: () => number; mark: () => void } {
+  let inFlight = 0;
+  let started = 0;
+  const isApi = (url: string) => {
+    try { return new URL(url).pathname.startsWith("/api/"); } catch { return false; }
+  };
+  page.on("request", (req) => { if (isApi(req.url())) { inFlight++; started++; } });
+  const done = (req: { url: () => string }) => { if (isApi(req.url())) inFlight--; };
+  page.on("requestfinished", done);
+  page.on("requestfailed", done);
+  return { inFlight: () => inFlight, startedSinceMark: () => started, mark: () => { started = 0; } };
+}
+
+/**
+ * The fingerprint of a page that has finished loading: identical across one full observation window
+ * during which NOTHING was in flight and nothing new started. Checking quiescence only at the two
+ * sample instants would accept a window with a request opening and closing inside it, so the window
+ * is voided and resampled whenever a request starts during it.
+ */
+async function settledPageSkeleton(page: Page, api: ReturnType<typeof trackApiRequests>): Promise<string> {
   let last = await pageSkeleton(page, FINGERPRINT_DEPTH);
+  let sawRequest = api.startedSinceMark() > 0;
   for (let i = 0; i < SETTLE_MAX_SAMPLES; i++) {
+    const quietAtStart = api.inFlight() === 0;
+    api.mark();
     await page.waitForTimeout(SETTLE_INTERVAL_MS);
+    const startedDuringWindow = api.startedSinceMark();
+    if (startedDuringWindow > 0) sawRequest = true;
     const next = await pageSkeleton(page, FINGERPRINT_DEPTH);
-    if (next === last) return next;
+    const quiet = quietAtStart && startedDuringWindow === 0 && api.inFlight() === 0;
+    if (next === last && quiet && sawRequest) return next;
     last = next;
   }
   throw new Error(
-    `the page skeleton never settled over ${(SETTLE_INTERVAL_MS * SETTLE_MAX_SAMPLES) / 1000}s. Last read:\n${last}`,
+    `the page never reached a quiet, stable state over ${(SETTLE_INTERVAL_MS * SETTLE_MAX_SAMPLES) / 1000}s`
+    + ` (inFlight=${api.inFlight()}, sawRequest=${sawRequest}). Last read:\n${last}`,
   );
 }
 
 // Prove pageSkeleton can report a DIFFERENCE, here, now, on this page: without it an evaluate() that
 // silently returned "" would make every comparison below pass.
-async function assertSkeletonInstrumentFires(page: Page): Promise<void> {
-  const before = await pageSkeleton(page, FINGERPRINT_DEPTH);
-  await page.evaluate(() => {
-    const main = document.querySelector("main");
-    const first = main?.firstElementChild;
-    if (!main || !first) throw new Error("positive control: <main> has no element child to wrap");
-    const probe = document.createElement("div");
-    probe.id = "loom-redirect-skeleton-positive-control";
-    main.insertBefore(probe, first);
-    probe.appendChild(first);
-  });
-  const during = await pageSkeleton(page, FINGERPRINT_DEPTH);
-  await page.evaluate(() => {
-    const probe = document.getElementById("loom-redirect-skeleton-positive-control");
-    const main = document.querySelector("main");
-    const inner = probe?.firstElementChild;
-    if (probe && main && inner) { main.insertBefore(inner, probe); probe.remove(); }
-  });
-  expect(during, "positive control: an injected wrapper did not move the page fingerprint").not.toBe(before);
-  expect(await pageSkeleton(page, FINGERPRINT_DEPTH),
-    "positive control: removing the wrapper did not restore the page fingerprint").toBe(before);
+//
+// Takes its own three readings inside ONE quiet window (card 625d791c): the probe asserts that
+// wrapping and then unwrapping an element returns the fingerprint to exactly what it was, which is
+// only true of a page that is not independently re-rendering. On a still-loading page the data lands
+// between the first and last reading and the restore comparison fails — not because the instrument
+// is broken, but because the page legitimately grew underneath it. That is a real measured flake
+// (1 of 5 runs on the landed spec), and it is the same root cause as the /git comparison below.
+//
+// A window that turns out not to have been quiet is RETAKEN rather than tolerated: loosening the
+// comparison instead would blunt the very control this function exists to be.
+const PROBE_MAX_ATTEMPTS = 5;
+
+async function assertSkeletonInstrumentFires(page: Page, api: ReturnType<typeof trackApiRequests>): Promise<void> {
+  for (let attempt = 1; attempt <= PROBE_MAX_ATTEMPTS; attempt++) {
+    const before = await settledPageSkeleton(page, api);
+    api.mark();
+    await page.evaluate(() => {
+      const main = document.querySelector("main");
+      const first = main?.firstElementChild;
+      if (!main || !first) throw new Error("positive control: <main> has no element child to wrap");
+      const probe = document.createElement("div");
+      probe.id = "loom-redirect-skeleton-positive-control";
+      main.insertBefore(probe, first);
+      probe.appendChild(first);
+    });
+    const during = await pageSkeleton(page, FINGERPRINT_DEPTH);
+    await page.evaluate(() => {
+      const probe = document.getElementById("loom-redirect-skeleton-positive-control");
+      const main = document.querySelector("main");
+      const inner = probe?.firstElementChild;
+      if (probe && main && inner) { main.insertBefore(inner, probe); probe.remove(); }
+    });
+    const after = await pageSkeleton(page, FINGERPRINT_DEPTH);
+
+    // If the app fetched anything while the probe was mid-flight, this window cannot say whether a
+    // difference came from the probe or from the app — so it proves nothing either way. Retake it.
+    if (api.startedSinceMark() > 0 && attempt < PROBE_MAX_ATTEMPTS) continue;
+
+    expect(during, "positive control: an injected wrapper did not move the page fingerprint").not.toBe(before);
+    expect(after, "positive control: removing the wrapper did not restore the page fingerprint").toBe(before);
+    return;
+  }
 }
 
 function collectConsoleErrors(page: Page): { errors: string[]; reset: () => void; assertFires: () => Promise<void> } {
@@ -201,6 +282,7 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     // the query-string case, is far past the 30s default.
     test.setTimeout(300_000);
     const consoleErrors = collectConsoleErrors(page);
+    const api = trackApiRequests(page);
 
     // ── The table under test, parsed from the real declaration ──
     const { rows, rawMarkers, block } = parseLegacyRedirects();
@@ -225,7 +307,7 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     // ── Phase 1: the CLASSIC shell. CAPTURE today's behaviour; never assert it from memory. ──
     await page.goto(loomDaemon.baseURL + "/repository");
     await expect(page.locator(".loom-rail")).toBeVisible();
-    await assertSkeletonInstrumentFires(page);
+    await assertSkeletonInstrumentFires(page, api);
 
     const classic = new Map<string, { url: string; skeleton: string }>();
     for (const r of rows) {
@@ -233,7 +315,7 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       // The redirect itself: the old URL does not stay in the address bar.
       await expect(page, `${r.from} did not redirect under the classic shell`)
         .toHaveURL(loomDaemon.baseURL + r.to);
-      classic.set(r.from, { url: page.url(), skeleton: await settledPageSkeleton(page) });
+      classic.set(r.from, { url: page.url(), skeleton: await settledPageSkeleton(page, api) });
     }
 
     // Positive control on the fingerprint's DISCRIMINATION: the redirects land on several DIFFERENT
@@ -291,7 +373,7 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       }
 
       // ── The same PAGE: structurally what the classic redirect landed on. ──
-      const after = await settledPageSkeleton(page);
+      const after = await settledPageSkeleton(page, api);
       expect(after, `${r.from} rendered different content under Atlas than the classic redirect did.\n`
         + `--- classic shell ---\n${classic.get(r.from)?.skeleton}\n--- atlas shell ---\n${after}\n`)
         .toBe(classic.get(r.from)?.skeleton);
