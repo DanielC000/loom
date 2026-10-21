@@ -105,6 +105,52 @@ export function canResumeSession(s: SessionResumeGate): boolean {
   return (s.processState === "exited" || !!s.archivedAt) && s.resumability !== "dead";
 }
 
+// ── The manager go-live guard ──────────────────────────────────────────────────────────────────
+
+/** The minimal shape the go-live guard needs — Session and SessionListItem both satisfy it. */
+export type SessionGoLiveSlot = Pick<Session, "processState">;
+
+/**
+ * THE GO-LIVE SLOT — whether a session already occupies its agent's one running slot.
+ *
+ * `live` OR **`starting`**, and the `starting` half is the whole reason this function exists.
+ * Every surface that offers a manager go-live control used to ask `processState === "live"` on its
+ * own, which is a guard with a hole exactly the width of a spawn's own startup: between the POST
+ * and the pty reaching `live` the row sits at `starting`, so the guard read "nothing is live", kept
+ * the spawn button enabled, and a second click minted a SECOND manager session. The daemon has no
+ * guard of its own here (`SessionService.startNew` inserts a fresh `starting` row for any agent,
+ * however many are already running), so this client-side predicate IS the only thing standing
+ * between a double-click and two orchestrators on one project.
+ *
+ * @decision 318b5a21 — never re-spell this test inline. Overview's `AgentControl` and the Atlas
+ * roster both call it; a surface that goes back to a bare `=== "live"` reopens the double-spawn.
+ */
+export function holdsGoLiveSlot(s: SessionGoLiveSlot | null | undefined): boolean {
+  return s?.processState === "live" || s?.processState === "starting";
+}
+
+/**
+ * What the HELD control says once `holdsGoLiveSlot` is holding it. Shared for the same reason the
+ * predicate is: a button reading "Live" over a session that is still `starting` states something
+ * the guard itself no longer believes, and two surfaces inventing that string separately is how one
+ * of them keeps saying it after the other stops.
+ */
+export function goLiveHeldControl(s: SessionGoLiveSlot): { label: string; title: string } {
+  return s.processState === "starting"
+    ? { label: "Starting…", title: "Manager is already starting — it holds the go-live slot" }
+    : { label: "Live", title: "Manager is already live" };
+}
+
+/**
+ * The status pill for a session holding the slot. `pending` drives the amber tone + glow every
+ * caller already uses for `busy`: a session mid-startup is transitional in exactly the way a busy
+ * one is, and it must not borrow the settled phosphor "live" treatment.
+ */
+export function goLiveSessionPill(s: Pick<Session, "processState" | "busy">): { label: string; pending: boolean } {
+  if (s.processState === "starting") return { label: "starting", pending: true };
+  return { label: s.busy ? "busy" : "live", pending: s.busy };
+}
+
 /**
  * Most-recent activity timestamp (epoch ms) across a group's members — for ranking GROUPS (a
  * project lane, a manager's subtree) by their freshest member, so the group you're driving floats

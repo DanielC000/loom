@@ -127,6 +127,15 @@ function useLiveCountsByProject(): Map<string, number> {
 // you are already on — which is the whole point of "tree selection IS scoping" — so a link would
 // promise navigation it never performs. (The project node becomes a destination of its own with
 // P2-1's project Deck; until then it only selects.)
+// The `＋` rides as a SIBLING of the selector button, inside a flex row — card 318b5a21, the round-4
+// mockup's §1 affordance that P2-2 could not carry. A <button> nested inside a <button> is invalid
+// HTML: the browser closes the outer one at the inner tag, so the row's own selection handler loses
+// the markup under it and the inner control is unreachable by the keyboard. The row therefore gets a
+// wrapper element and the two controls sit beside each other, exactly as HomeNode's own `trailing`
+// does — the one difference being that a project row ALSO has a child list, which must stay outside
+// the flex row or it would be laid out as a third column beside the two buttons.
+//
+// @decision 318b5a21 — never nest the `＋` inside the selector button. Siblings in a flex row.
 function ProjectNode({ project, open, live, onSelect, children }: {
   project: Project;
   open: boolean;
@@ -136,30 +145,40 @@ function ProjectNode({ project, open, live, onSelect, children }: {
 }) {
   return (
     <li>
-      {/* `data-testid` marks only the OPEN row: "the project node you are under" stays a single
-          element, so P1-1's own structural assertion keeps meaning what it meant. The other rows are
-          addressed by their accessible name (the project's own), which is what a reader clicks. */}
-      <button type="button"
-        className={`loom-atlas-node is-branch${open ? " is-open" : ""}`}
-        data-testid={open ? "atlas-project-node" : undefined}
-        aria-current={open ? "true" : undefined}
-        title={open ? project.name : `Scope to ${project.name}`}
-        onClick={() => onSelect(project.id)}>
-        {/* Drawn here, unlike on a destination row: a project row genuinely has children and
-            genuinely opens and closes — selecting another project closes this one — so the triangle
-            reports a state that exists. It is a single-open set, not an independent collapse
-            control, which is why it carries no `aria-expanded`: the row claims selection (what it
-            really does), and the nesting below is conveyed by the list structure. */}
-        <span className="loom-atlas-twist" aria-hidden>▸</span>
-        <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
-        <span className="loom-atlas-lbl">{project.name}</span>
-        {live > 0 && (
-          <span className="loom-atlas-live" title={`${live} live session${live === 1 ? "" : "s"}`}>
-            {live}
-            <span className="loom-atlas-livedot" aria-hidden />
-          </span>
-        )}
-      </button>
+      <div className="loom-atlas-noderow">
+        {/* `data-testid` marks only the OPEN row: "the project node you are under" stays a single
+            element, so P1-1's own structural assertion keeps meaning what it meant. The other rows are
+            addressed by their accessible name (the project's own), which is what a reader clicks. */}
+        <button type="button"
+          className={`loom-atlas-node is-branch${open ? " is-open" : ""}`}
+          data-testid={open ? "atlas-project-node" : undefined}
+          aria-current={open ? "true" : undefined}
+          title={open ? project.name : `Scope to ${project.name}`}
+          onClick={() => onSelect(project.id)}>
+          {/* Drawn here, unlike on a destination row: a project row genuinely has children and
+              genuinely opens and closes — selecting another project closes this one — so the triangle
+              reports a state that exists. It is a single-open set, not an independent collapse
+              control, which is why it carries no `aria-expanded`: the row claims selection (what it
+              really does), and the nesting below is conveyed by the list structure. */}
+          <span className="loom-atlas-twist" aria-hidden>▸</span>
+          <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
+          <span className="loom-atlas-lbl">{project.name}</span>
+          {live > 0 && (
+            <span className="loom-atlas-live" title={`${live} live session${live === 1 ? "" : "s"}`}>
+              {live}
+              <span className="loom-atlas-livedot" aria-hidden />
+            </span>
+          )}
+        </button>
+        {/* On EVERY project row, open or not — spawning into a project you are not scoped to without
+            first re-scoping is the whole reach this control adds over the Agents node's own `＋`,
+            which only ever sees the open one. It is `projectId`-addressed, never active-project-
+            addressed, so a spawn from here lands where the row says it will.
+            Its own testid stem (`atlas-project-quickspawn-<id>`): a workspace has many project rows,
+            so the Agents node's shared `atlas-quickspawn-open` would resolve N elements. */}
+        <AgentsQuickSpawn projectId={project.id} projectName={project.name}
+          testId={`atlas-project-quickspawn-${project.id}`} />
+      </div>
       {children}
     </li>
   );

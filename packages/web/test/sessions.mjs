@@ -7,7 +7,7 @@
 // wired into @loom/web's `build` script (which CI runs via `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/sessions.mjs
 import assert from "node:assert/strict";
-import { groupSessionRows, canResumeSession } from "../src/lib/sessions.ts";
+import { groupSessionRows, canResumeSession, goLiveHeldControl, goLiveSessionPill, holdsGoLiveSlot } from "../src/lib/sessions.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -86,6 +86,55 @@ check("an ARCHIVED session exposes resume — the durable path this fix adds", (
 check("a confirmed-dead session never exposes resume, archived or not", () => {
   assert.equal(canResumeSession({ processState: "exited", resumability: "dead", archivedAt: null }), false);
   assert.equal(canResumeSession({ processState: "exited", resumability: "dead", archivedAt: "2026-07-01T00:00:00.000Z" }), false);
+});
+
+// ── The manager go-live guard (card 318b5a21) ─────────────────────────────────────────────────────
+//
+// THE DEFECT THIS PINS: both spawn surfaces asked `processState === "live"`, so for the whole of a
+// spawn's own startup — the row sitting at `starting` — the guard read "nothing is running", left the
+// spawn button enabled, and a second click minted a SECOND manager. The daemon has no guard of its
+// own (`SessionService.startNew` inserts a fresh `starting` row for any agent, however many are
+// already up), so this predicate is the only thing between a double-click and two orchestrators.
+//
+// `starting` is therefore the ONE case worth a test, and it is asserted ALONGSIDE both polarities it
+// has to stay distinct from: `live` (which the old form already caught) and `exited` (which must keep
+// releasing the guard, or a finished manager could never be restarted).
+
+check("holdsGoLiveSlot: a STARTING session holds the slot — the double-spawn window this closes", () => {
+  assert.equal(holdsGoLiveSlot({ processState: "starting" }), true);
+});
+
+check("holdsGoLiveSlot: a LIVE session holds it too — the case the narrow form already caught", () => {
+  assert.equal(holdsGoLiveSlot({ processState: "live" }), true);
+});
+
+check("holdsGoLiveSlot: every terminal/absent state RELEASES it", () => {
+  // The release direction is as load-bearing as the hold: a guard that never let go would make a
+  // finished manager permanently un-spawnable, which is a worse bug than the one being fixed.
+  assert.equal(holdsGoLiveSlot({ processState: "exited" }), false);
+  assert.equal(holdsGoLiveSlot({ processState: "none" }), false);
+  // And an absent session at all — the no-session case every caller passes through here.
+  assert.equal(holdsGoLiveSlot(null), false);
+  assert.equal(holdsGoLiveSlot(undefined), false);
+});
+
+check("goLiveHeldControl: a starting manager's held button does NOT claim to be live", () => {
+  // The whole point of the pair: widening the guard without widening its WORDING would put "Live"
+  // over a session the guard itself knows is only starting.
+  const starting = goLiveHeldControl({ processState: "starting" });
+  const live = goLiveHeldControl({ processState: "live" });
+  assert.equal(starting.label, "Starting…");
+  assert.match(starting.title, /starting/);
+  assert.equal(live.label, "Live");
+  assert.notEqual(starting.label, live.label, "the two held states must be distinguishable to a reader");
+});
+
+check("goLiveSessionPill: starting reads as pending; live/busy keep their existing wording", () => {
+  assert.deepEqual(goLiveSessionPill({ processState: "starting", busy: false }), { label: "starting", pending: true });
+  // A starting row's own `busy` flag is irrelevant — it has not taken a turn yet.
+  assert.deepEqual(goLiveSessionPill({ processState: "starting", busy: true }), { label: "starting", pending: true });
+  assert.deepEqual(goLiveSessionPill({ processState: "live", busy: false }), { label: "live", pending: false });
+  assert.deepEqual(goLiveSessionPill({ processState: "live", busy: true }), { label: "busy", pending: true });
 });
 
 console.log(`\n${pass} passed`);

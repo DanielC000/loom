@@ -7,7 +7,7 @@ import { api, workerDiffQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention, type AttentionItem } from "../lib/attention";
 import { useOpenRequest } from "../components/requests";
-import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions";
+import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById, goLiveHeldControl, goLiveSessionPill, holdsGoLiveSlot } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 import { useStopSession, useForkSession, useEndSession } from "../lib/useSessionActions";
 import Board from "./Board";
@@ -166,9 +166,12 @@ export default function Overview() {
   // worker spawn card is clutter + a footgun. Every other agent (managers, plus null/unknown-role agents)
   // still gets a card; each resolves its agent's profile role for the badge + the spawn default.
   const projectAgents = (agents.data ?? []).filter((a) => roleOf(a) !== "worker");
-  // Any live session for this agent — drives the live-status pill and the manager go-live guard below.
+  // The session holding this agent's go-live slot — drives the status pill and the manager go-live
+  // guard below. `holdsGoLiveSlot` counts `starting` as well as `live` (card 318b5a21): this used to
+  // ask `=== "live"`, which left the guard blind for the whole of a spawn's startup and let a second
+  // click mint a second manager. lib/atlasAgents.ts's roster calls the SAME predicate.
   const liveSessionFor = (agentId: string) =>
-    all.find((s) => s.agentId === agentId && s.processState === "live");
+    all.find((s) => s.agentId === agentId && holdsGoLiveSlot(s));
 
   return (
     // The fleet rows and terminal tiles below all render sessions from THIS project-filtered live set,
@@ -349,12 +352,13 @@ function OtherAttentionList({ items }: { items: AttentionItem[] }) {
 // the agent has a live session, and the SHARED SpawnControls split-button (spawn from profile, or
 // override the role → manager/plain) wired to api.startSession(agent.id, role).
 //
-// MANAGER GO-LIVE GUARD (preserved from the old ManagerControl): a manager-role agent that's ALREADY
-// live must not be re-spawned — a human double-spawning the orchestrator is a footgun — so it keeps the
-// disabled "Live" button + a graceful Stop instead of the spawn split-button. Every other agent (incl.
-// a non-manager that happens to be live) keeps spawn always-enabled, matching Workspace (which never
-// disables spawn). Live-session management (Fork/Resume/Stop) lives in the Fleet accordion below, so
-// this card stays spawn-focused; only the manager Stop is retained here as part of the guard.
+// MANAGER GO-LIVE GUARD (preserved from the old ManagerControl): a manager-role agent that already
+// holds its go-live slot must not be re-spawned — a human double-spawning the orchestrator is a
+// footgun — so it keeps the disabled held button + a graceful Stop instead of the spawn split-button.
+// Every other agent (incl. a non-manager that happens to be running) keeps spawn always-enabled,
+// matching Workspace (which never disables spawn). Live-session management (Fork/Resume/Stop) lives in
+// the Fleet accordion below, so this card stays spawn-focused; only the manager Stop is retained here
+// as part of the guard. The slot test itself is lib/sessions' `holdsGoLiveSlot` — shared with Atlas.
 function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRole | null; session?: SessionListItem }) {
   const qc = useQueryClient();
   const spawn = useMutation({
@@ -366,19 +370,22 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
     mutationFn: (id: string) => api.stopSession(id, "graceful"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
   });
-  const live = session?.processState === "live";
+  const live = holdsGoLiveSlot(session);
   const managerLive = role === "manager" && live;
+  const pill = session ? goLiveSessionPill(session) : null;
+  const held = session ? goLiveHeldControl(session) : null;
   return (
-    <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+    <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}
+      data-testid={`agent-control-${agent.id}`}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <RoleBadge role={role} />
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
-        {live && <StatusPill tone={session!.busy ? "amber" : "phosphor"} glow={session!.busy} label={session!.busy ? "busy" : "live"} />}
+        {live && pill && <StatusPill tone={pill.pending ? "amber" : "phosphor"} glow={pill.pending} label={pill.label} />}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        {managerLive ? (
-          <Button variant="primary" disabled title="Manager is already live">Live</Button>
+        {managerLive && held ? (
+          <Button variant="primary" disabled title={held.title}>{held.label}</Button>
         ) : (
           <SpawnControls profileRole={role} onSpawn={(r) => spawn.mutate(r)} pending={spawn.isPending} />
         )}

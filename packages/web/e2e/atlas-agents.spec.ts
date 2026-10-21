@@ -287,7 +287,13 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     const rig = page.getByTestId(`atlas-worker-rig-${seeded.worker.id}`);
     await expect(rig).toBeVisible();
     await expect(rig).toContainText(seeded.worker.name);
-    await expect(rig.locator("button")).toHaveCount(0);
+    // No LIFECYCLE control — the claim this row has always made. Narrowed from a flat "no buttons at
+    // all" by card 318b5a21, which put an Edit here: editing a rig's DEFINITION is what this node's own
+    // footer has always told the reader to do, while spawning or stopping one is still the footgun
+    // (a hand-spawned worker gets a branch nobody is reviewing). atlas-agent-editor.spec.ts asserts
+    // that Edit's own behaviour; this pair stays the lifecycle absence.
+    await expect(rig.locator('button[title^="Spawn from profile"]')).toHaveCount(0);
+    await expect(rig.locator("button.loom-btn-danger")).toHaveCount(0);
     await expect(page.getByTestId("atlas-spawn-explainer")).toBeVisible();
   });
 

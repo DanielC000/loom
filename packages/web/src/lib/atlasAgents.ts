@@ -14,6 +14,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { contextPercentFor, type Agent, type ProfileSummary, type SessionListItem, type SessionRole } from "@loom/shared";
 import { api } from "./api";
+import { holdsGoLiveSlot } from "./sessions";
 
 /** One agent, with everything a spawn control needs to render and gate itself. */
 export interface RosterAgent {
@@ -28,11 +29,12 @@ export interface RosterAgent {
   session: SessionListItem | null;
   live: boolean;
   /**
-   * THE GO-LIVE GUARD. A manager-role agent that is already live must not be re-spawned — a human
-   * double-spawning the orchestrator is a footgun — so its control becomes a disabled "Live" plus a
-   * graceful Stop. Every other agent (a live NON-manager included) keeps spawn enabled.
+   * THE GO-LIVE GUARD. A manager-role agent that already holds its go-live slot must not be
+   * re-spawned — a human double-spawning the orchestrator is a footgun — so its control becomes a
+   * disabled held button plus a graceful Stop. Every other agent (a non-manager holding its own
+   * slot included) keeps spawn enabled.
    *
-   * @decision c6160c7d — keyed on `processState === "live"`, NOT on lib/atlasHome's `isLiveSession`.
+   * @decision 318b5a21 — the test is lib/sessions' `holdsGoLiveSlot`, never a local `=== "live"`.
    */
   managerLive: boolean;
 }
@@ -47,14 +49,13 @@ export interface AgentRoster {
 const EMPTY_ROSTER: AgentRoster = { spawnable: [], workers: [] };
 
 /**
- * Join an agent to its rig and its live session.
+ * Join an agent to its rig and the session holding its go-live slot.
  *
- * The live-session lookup is `agentId` + `processState === "live"`, carried VERBATIM from
- * pages/Overview.tsx's own `liveSessionFor` rather than reusing lib/atlasHome's `isLiveSession`
- * (which also counts `starting`). The two predicates genuinely differ, and the guard is a
- * behavioural contract this card is reusing, not redesigning: widening it here would make the Atlas
- * roster and the classic Overview disagree about when a manager may be spawned, which is exactly the
- * divergence phase 2 is not allowed to introduce.
+ * That lookup is `agentId` + lib/sessions' `holdsGoLiveSlot`, the SAME predicate
+ * pages/Overview.tsx's own `liveSessionFor` now calls — so the Atlas roster and the classic Overview
+ * cannot disagree about when a manager may be spawned. Card c6160c7d carried Overview's then-narrow
+ * `=== "live"` form here verbatim for exactly that reason; card 318b5a21 confirmed the narrow form
+ * was a real double-spawn hole and moved BOTH surfaces onto the fixed predicate together.
  */
 export function rosterAgent(
   agent: Agent,
@@ -63,7 +64,7 @@ export function rosterAgent(
 ): RosterAgent {
   const profile = profiles?.find((p) => p.id === agent.profileId) ?? null;
   const role = profile?.role ?? null;
-  const session = (sessions ?? []).find((s) => s.agentId === agent.id && s.processState === "live") ?? null;
+  const session = (sessions ?? []).find((s) => s.agentId === agent.id && holdsGoLiveSlot(s)) ?? null;
   const live = session !== null;
   return {
     agent,

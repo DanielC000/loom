@@ -1,10 +1,12 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useActiveProject } from "../lib/activeProject";
 import { useAgentRoster } from "../lib/atlasAgents";
-import { AgentRosterCard, RosterEmpty, SpawnTermRow, WorkersDispatchedNote } from "../components/atlasAgents";
-import { Badge, Panel, SectionLabel, StatusPill } from "../components/ui";
+import { AgentEditDialog, AgentRosterCard, RosterEmpty, SpawnTermRow, WorkersDispatchedNote } from "../components/atlasAgents";
+import { Badge, Button, Panel, SectionLabel, StatusPill } from "../components/ui";
 import { RoleBadge } from "../lib/roleDisplay";
 import { plural } from "../lib/atlasHome";
+import { goLiveSessionPill } from "../lib/sessions";
 import { color, font } from "../theme";
 
 // THE AGENTS NODE — card c6160c7d (Atlas P2-2), the project tier's roster at full size.
@@ -15,16 +17,20 @@ import { color, font } from "../theme";
 // full size, every worker rig named rather than silently filtered away, and a plain statement of
 // what a spawn actually does, which is the question a spawn button never answers on its own.
 //
-// ⛔ Agent CRUD (create / rename / re-profile / delete) is NOT here. Round 4 homes those three
-// writes to this node, but they are a whole editor that lives on the Projects node today and
-// reaching it is one click from the head below. Building a second one would be a second editor to
-// keep in step, which is the duplication this plan exists to avoid — see
-// docs/decisions/c6160c7d-atlas-agents-node.md.
+// Agent CRUD (create / re-profile / re-prompt / delete) IS here as of card 318b5a21 — the parity row
+// c6160c7d could not carry. It arrived the only way it was ever allowed to: the editor that lives on
+// the Projects node was MOVED to components/agentEditor.tsx and is mounted here, in this node's own
+// dialog frame. There is one editor, not two.
+//
+// @decision 318b5a21 — never build a second editor here. Mount components/agentEditor.tsx's.
 
 export default function AgentsNode() {
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
   const { roster, isLoading } = useAgentRoster(projectId);
+  // `null` = closed; `{ agentId: null }` = the create form; `{ agentId: "…" }` = that agent's editor.
+  // A wrapper object rather than a bare `string | null`, because `null` has to mean two things.
+  const [editing, setEditing] = useState<{ agentId: string | null } | null>(null);
 
   if (!projectId) {
     return (
@@ -50,11 +56,17 @@ export default function AgentsNode() {
             {project ? ` in ${project.name}` : ""}
           </span>
           <span style={{ flex: 1 }} />
-          {/* The way to agent CRUD, named for what it does rather than for where it goes — the
-              Projects node is where an agent is defined, and this is the only reason to leave. */}
+          {/* Define an agent HERE now, on the node that lists them (card 318b5a21). The primary, so
+              it reads ahead of the exit beside it: creating an agent is the action, leaving is not. */}
+          <Button variant="primary" className="loom-bandlink" data-testid="atlas-agents-new"
+            title={project ? `Define a new agent in ${project.name}` : "Define a new agent"}
+            onClick={() => setEditing({ agentId: null })}>＋ New agent</Button>
+          {/* The exit SURVIVES the editor landing here: the Projects node is the three-pane surface
+              where agents are defined alongside the project itself, and this node is scoped to one
+              project's roster. Named for what it does, not for where it goes. */}
           <Link to="/projects" className="loom-btn loom-btn-default loom-bandlink"
-            data-testid="atlas-agents-define" title="Define agents on the Projects node">
-            Define agents <span aria-hidden>↗</span>
+            data-testid="atlas-agents-define" title="Manage every project's agents on the Projects node">
+            All projects <span aria-hidden>↗</span>
           </Link>
         </div>
 
@@ -62,24 +74,36 @@ export default function AgentsNode() {
           ? <RosterEmpty workers={roster.workers} projectName={project?.name} />
           : (
             <div className="loom-agentgrid" data-testid="atlas-agent-grid">
-              {roster.spawnable.map((entry) => <AgentRosterCard key={entry.agent.id} entry={entry} />)}
+              {roster.spawnable.map((entry) => (
+                <AgentRosterCard key={entry.agent.id} entry={entry}
+                  onEdit={() => setEditing({ agentId: entry.agent.id })} />
+              ))}
             </div>
           )}
         <WorkersDispatchedNote workers={roster.workers} />
       </section>
 
       <div className="loom-agentsplit">
-        <WorkerRigs roster={roster} />
+        <WorkerRigs roster={roster} onEdit={(id) => setEditing({ agentId: id })} />
         <WhatASpawnDoes />
       </div>
+
+      {editing && (
+        <AgentEditDialog projectId={projectId} agentId={editing.agentId} onClose={() => setEditing(null)} />
+      )}
     </div>
   );
 }
 
 /** The worker rigs, as DEFINITIONS. They carry a live pill because a dispatched worker is a real
- *  running thing worth seeing from here — but no control, because nothing a human presses here
- *  would be correct: a hand-spawned worker gets a branch nobody is reviewing. */
-function WorkerRigs({ roster }: { roster: ReturnType<typeof useAgentRoster>["roster"] }) {
+ *  running thing worth seeing from here — and, since card 318b5a21, an Edit, because the footer has
+ *  always said "edit the rig here" and a worker rig is an agent like any other. Still no SPAWN and no
+ *  STOP: a hand-spawned worker gets a branch nobody is reviewing, which is the lifecycle control
+ *  nothing a human presses here would make correct. */
+function WorkerRigs({ roster, onEdit }: {
+  roster: ReturnType<typeof useAgentRoster>["roster"];
+  onEdit: (agentId: string) => void;
+}) {
   return (
     <Panel style={{ padding: "10px 12px 12px" }} data-testid="atlas-worker-rigs">
       <div className="loom-bandhead">
@@ -99,9 +123,11 @@ function WorkerRigs({ roster }: { roster: ReturnType<typeof useAgentRoster>["ros
             </span>
             <span style={{ flex: 1 }} />
             {w.session
-              ? <StatusPill tone={w.session.busy ? "amber" : "phosphor"} glow={w.session.busy}
-                  label={w.session.busy ? "busy" : "live"} />
+              ? <WorkerRigPill session={w.session} />
               : <Badge tone="muted">idle</Badge>}
+            <Button variant="ghost" data-testid={`atlas-agent-edit-${w.agent.id}`}
+              title={`Edit ${w.agent.name} — its rig, startup prompt, or delete it`}
+              onClick={() => onEdit(w.agent.id)}>Edit</Button>
           </div>
         ))}
         <p className="loom-bandfoot" style={{ fontFamily: font.mono }}>
@@ -111,6 +137,13 @@ function WorkerRigs({ roster }: { roster: ReturnType<typeof useAgentRoster>["ros
       </div>
     </Panel>
   );
+}
+
+/** A dispatched worker's pill, through the SAME `goLiveSessionPill` every other agent readout uses —
+ *  so a worker mid-startup reads "starting", not a settled "live" (card 318b5a21). */
+function WorkerRigPill({ session }: { session: NonNullable<ReturnType<typeof useAgentRoster>["roster"]["workers"][number]["session"]> }) {
+  const pill = goLiveSessionPill(session);
+  return <StatusPill tone={pill.pending ? "amber" : "phosphor"} glow={pill.pending} label={pill.label} />;
 }
 
 /** What pressing the button does, in the product's own terms. Static copy, deliberately: it states
@@ -131,7 +164,8 @@ function WhatASpawnDoes() {
           edits the rig.
         </SpawnTermRow>
         <SpawnTermRow term="Guard">
-          A live manager shows <strong>Live + Stop</strong>, never a second spawn.
+          A manager that is already live <em>or still starting</em> shows <strong>Stop</strong>, never a
+          second spawn.
         </SpawnTermRow>
         <SpawnTermRow term="Then">
           A session starts under this project and joins the fleet.

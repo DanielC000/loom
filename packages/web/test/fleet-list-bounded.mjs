@@ -43,8 +43,15 @@ check("dedupe preserves order and handles the empty list", () => {
 
 // ── SOURCE-SCAN: Overview.tsx ────────────────────────────────────────────────────
 check("both live+archived merges are routed through dedupeSessionsById before render", () => {
-  assert.ok(overviewSrc.includes('import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById } from "../lib/sessions"'),
-    "Overview must import dedupeSessionsById");
+  // The named-specifier LIST, not the whole clause byte-for-byte. The claim is "dedupeSessionsById
+  // comes from lib/sessions", and an exact-string pin additionally asserted which OTHER symbols
+  // Overview imports from that module and in what order — so adding one unrelated helper to the
+  // clause failed this with a message about dedupeSessionsById, which was still imported (card
+  // 318b5a21, which added the go-live-guard helpers to exactly this line).
+  const sessionsImport = /import\s*\{([^}]*)\}\s*from\s*"\.\.\/lib\/sessions"/.exec(overviewSrc);
+  assert.ok(sessionsImport, "Overview must import from ../lib/sessions at all");
+  assert.ok(sessionsImport[1].split(",").map((s) => s.trim()).includes("dedupeSessionsById"),
+    `Overview must import dedupeSessionsById from ../lib/sessions — its clause names: ${sessionsImport[1].trim()}`);
   assert.match(overviewSrc, /accordionManagers\s*=\s*dedupeSessionsById\(\[\.\.\.managers, \.\.\.archivedManagers\]\)/,
     "accordionManagers must dedupe the live+archived manager merge");
   assert.match(overviewSrc, /accordionWorkers\s*=\s*dedupeSessionsById\(\[\.\.\.workers, \.\.\.archivedWorkers\]\)/,
