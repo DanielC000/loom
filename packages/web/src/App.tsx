@@ -96,11 +96,21 @@ function UpdateBanner() {
 const TOAST_TTL_MS = 6000;
 let nextToastId = 0;
 
-// Routes whose page ALREADY renders the full pending-Request queue: Mission Control ("/") and the project
-// Overview both show the attention queue, and /inbox IS the queue. On those the count pill is pure
-// duplication — suppress it there and let the page be the surface. (The sidebar badge is everywhere and is
+// Routes whose page ALREADY renders the full pending-Request queue, so the count pill there is pure
+// duplication — suppress it and let the page be the surface. (The sidebar badge is everywhere and is
 // only a bare count, so the pill's "→ inbox" affordance still earns its place on every OTHER route.)
-const REQUEST_PILL_SUPPRESSED_ROUTES = new Set(["/", "/overview", "/inbox"]);
+// Classic: Mission Control ("/") and the project Overview show the queue, and /inbox IS the queue.
+// Atlas (nav.tsx › ATLAS_HOMES) — exactly TWO of the four nodes render it, each a "Needs you" band
+// plus the `needs you` KPI pop-over off the same `useAttention()` and shared `AttentionList`: `/home`
+// over the unfiltered items (pages/WorkspaceHome.tsx), and `/project` over items filtered by
+// `attentionItemInProject` (pages/ProjectHome.tsx) — the SAME project-filtered queue classic
+// `/overview` builds from that same helper, so `/project` is parity with the already-suppressed
+// `/overview`, inherited trade-off included (pill counts daemon-wide, band is project-scoped).
+// `/agents` and `/workspace-settings` render no queue and keep the pill — listed by hand, never
+// derived from ATLAS_HOMES, since this set tracks what a node RENDERS, not that it is a node. The
+// lookup below is EXACT on `pathname`, never a prefix: `/project` cannot match the unrelated
+// `/projects`, and it covers both its sub-tabs, whose `?tab=` query `pathname` drops.
+const REQUEST_PILL_SUPPRESSED_ROUTES = new Set(["/", "/overview", "/inbox", "/home", "/project"]);
 
 function ToastContainer() {
   const navigate = useNavigate();
