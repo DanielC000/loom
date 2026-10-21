@@ -3246,9 +3246,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const { wasQuarantined, reason, latchKept, referencingRepoPaths } = clearMergeQuarantineReporting(repo.path);
+    const { wasQuarantined, reason, latchKept, referencingRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
     return {
       ok: true, wasQuarantined, repoPath: repo.path, ...(reason ? { reason } : {}),
+      // @decision 182c01cc (round 2) — spread UNCONDITIONALLY, never gated on `latchKept`: a RELOCATED
+      // co-occupant never sets latchKept, so gating here would silently drop it at the REST boundary.
+      stillBlockedCoOccupants,
       ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
     };
   });
@@ -3279,9 +3282,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
       // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
       // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
-      const { wasQuarantined, reason, latchKept, referencingRepoPaths } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      const { wasQuarantined, reason, latchKept, referencingRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
       return {
         ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}),
+        // @decision 182c01cc (round 2) — see the matching note on `/clear` above: unconditional, never
+        // gated on `latchKept`.
+        stillBlockedCoOccupants,
         ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
       };
     }
@@ -3289,6 +3295,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!result.ok) return reply.code(400).send({ error: result.reason });
     return {
       ok: true, wasQuarantined: result.wasQuarantined, id: body.id, liftedRepoPaths: result.liftedRepoPaths,
+      // @decision 182c01cc (round 2) — same reason as the two routes above: unconditional.
+      stillBlockedCoOccupants: result.stillBlockedCoOccupants,
       // @decision 64283e06 — card d4b25feb's "two independent raise-groups" shape: this id's own latch
       // was lifted, but the SAME identity is still quarantined by an independent record. Surface it
       // explicitly rather than letting a bare `liftedRepoPaths` omission go unexplained.

@@ -125,11 +125,12 @@ try {
   // activeQuarantines-only eviction regardless of this card's fix — a non-discriminating fixture that
   // would never actually exercise the "D's in-memory entry already removed via keysToLift" bug shape.
   // `resolvedKey` is what makes PASS 1 arm it directly (`armedKeys` present) instead of deferring —
-  // confirmed the `deleteMergeQuarantineLatchByKey` call reached here is the `foreignPending`-gated
-  // direct `protectOccupantContentBeforeDelete` call, not `protectDegradedOccupantBeforeDelete` (which
-  // never fires in this exact shape — `clearingRepoPath` is undefined whenever `entry` from
-  // `clearMergeQuarantineByKey` is itself undefined for this key, as it is before this fixture's own
-  // resolvedKey was added).
+  // confirmed the `deleteMergeQuarantineLatchByKey` call reached here IS `protectDegradedOccupantBeforeDelete`
+  // (card 182c01cc round 2: stale comment fix). D is genuinely ARMED at R's own key, so `entry` (D's own
+  // object) is DEFINED and its `repoPath` (d) differs from `identityRepoPath` (r) — `clearingRepoPath`
+  // is therefore SET, not undefined, which is exactly what routes this call through
+  // `protectDegradedOccupantBeforeDelete`, never the `foreignPending`-gated direct call (that one needs
+  // a PENDING record sharing this exact filename, which D is not — D is active here).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r = makeToplevelRepo("fp-r");
@@ -171,6 +172,24 @@ try {
   // fixture (not guessed), not because R itself ever had its own entry.
   check("(fp sanity) the clear of R itself reports wasQuarantined:true (D occupied R's own key)", reportResult?.wasQuarantined === true);
 
+  // Card 182c01cc, DOUBLE-FAULT branch: the protective write itself failed, so D survives only as an
+  // in-memory-only self-owned record at its OWN old name — protectOccupantContentBeforeDelete must still
+  // name it in `stillBlockedCoOccupants`, not just keep it enforced silently.
+  check("*** THE FIX (182c01cc, final-path double-fault) *** stillBlockedCoOccupants names D", Array.isArray(reportResult?.stillBlockedCoOccupants) && reportResult.stillBlockedCoOccupants.some((c) => c.repoPath === d));
+  const coFp = reportResult?.stillBlockedCoOccupants?.find((c) => c.repoPath === d);
+  check("*** THE FIX (182c01cc) *** D's own route names both a repoPath and a 24-hex id form", coFp?.route?.repoPath === d && /^[0-9a-f]{24}$/.test(coFp?.route?.id ?? ""));
+  // Card 182c01cc, round 2, M4 (CR test-gap): CORRECTED after the (AE) finding in
+  // merge-quarantine-clear-by-path.mjs applies here too — `survivingSharedClaimRepoPaths` has a SECOND
+  // half (a self-referencing `orphanLatchFiles` hit), and the double-fault branch's own `kept` object
+  // self-references `finalBasename` in its OWN `orphanLatchFiles` by design — so `sharedClaimants` DOES
+  // independently find D here too, via that self-reference, and latchKept is genuinely TRUE (D's old
+  // file really is still enforced, unconfirmed-removed). The double-fault's own `persisted` push and
+  // this self-reference happen to name the EXACT SAME filename in this shape (the write never moved
+  // anywhere — it failed), so the real discriminator is the ROUND-2 DEDUPE: D must still be named
+  // exactly ONCE, never twice, even though two independent mechanisms both found it.
+  check("*** THE FIX (182c01cc, M4) *** latchKept is TRUE (sharedClaimants' own orphanLatchFiles self-reference also finds D here)", reportResult?.latchKept === true);
+  check("*** THE FIX (182c01cc, M4 dedupe) *** D is named EXACTLY ONCE, never duplicated across kept+relocated", reportResult?.stillBlockedCoOccupants?.filter((c) => c.repoPath === d).length === 1);
+
   check("*** THE FIX (final-path) *** D's own file SURVIVES a failed protective write", fs.existsSync(finalPath));
   check("*** THE FIX (final-path) *** D's own content is still physically present (not overwritten/truncated)", (contentIfExists(finalPath) ?? "").includes("d-token"));
   // CR 66eab845, point 1(a): the occupant must stay enforced IN THIS PROCESS too, not only after a
@@ -182,6 +201,19 @@ try {
   fresh.reenterMergeQuarantinesAtBoot([]);
   check("*** THE FIX (final-path, restart) *** D's own token SURVIVES clearing R + a reboot", new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token"));
   check("*** THE FIX (final-path, restart) *** assertRepoNotQuarantined(d) STILL BLOCKS after the reboot", fresh.assertRepoNotQuarantined(d).ok === false);
+
+  // *** ROUND 4 (Code Review CR3, MAJOR) *** — a double-fault is KEPT at its own real file, never
+  // RELOCATED: nothing new was ever minted, so route.id === alsoClear.id (and a false "clear id X FIRST,
+  // THEN id X" text) was the bug, not a feature. Asserted against the ORIGINAL (first) module instance,
+  // BEFORE the restart checks above consume nothing (they use a SEPARATE `fresh` import) — D's own entry
+  // here is still live and unconsumed.
+  check("*** THE FIX (round 4, final-path double-fault) *** no alsoClear — exactly one route, not two", coFp?.alsoClear === undefined);
+  check("*** THE FIX (round 4, final-path double-fault) *** reason never claims a relocation that never happened", !(reportResult?.reason ?? "").includes("RELOCATED") && !(reportResult?.reason ?? "").includes("just removed"));
+  // ONE clear of the fold's own named route.id genuinely lifts D — never needs (and must never offer) a
+  // second id, since nothing was ever relocated to a different name.
+  const oneClearFp = clearMergeQuarantineLatchFile(coFp.route.id);
+  check("*** THE FIX (round 4, final-path double-fault) *** ONE clear of the named id lifts D", oneClearFp?.ok === true && oneClearFp?.wasQuarantined === true && (oneClearFp?.liftedRepoPaths ?? []).includes(d));
+  check("(final-path, round 4) D now reads as genuinely unblocked after that one clear", assertRepoNotQuarantined(d).ok === true);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -202,10 +234,17 @@ try {
   }, null, 2) + "\n");
 
   reenterMergeQuarantinesAtBoot([]);
-  clearMergeQuarantineReporting(r); // no injection this time — the write must succeed normally
+  const reportResultCtrl = clearMergeQuarantineReporting(r); // no injection this time — the write must succeed normally
 
   check("(fp control) D's own token survives clearing R (relocated, not destroyed)", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token-ctrl"));
   check("(fp control) R's own original file is actually removed once the protective write succeeds", !fs.existsSync(finalPath));
+  // Card 182c01cc, MINT branch: D has no pre-existing pending record anywhere (first discovery) — the
+  // successful protective write mints an independent record, and stillBlockedCoOccupants must name it.
+  // (The route's own actionability is already proven by (AD1) in merge-quarantine-clear-by-path.mjs —
+  // don't clear D here, or the "survives SOMEWHERE on disk" check just below would false-fail.)
+  check("*** THE FIX (182c01cc, final-path mint) *** stillBlockedCoOccupants names D", Array.isArray(reportResultCtrl?.stillBlockedCoOccupants) && reportResultCtrl.stillBlockedCoOccupants.some((c) => c.repoPath === d));
+  const coFpCtrl = reportResultCtrl?.stillBlockedCoOccupants?.find((c) => c.repoPath === d);
+  check("*** THE FIX (182c01cc) *** D's own route names both a repoPath and a 24-hex id form", coFpCtrl?.route?.repoPath === d && /^[0-9a-f]{24}$/.test(coFpCtrl?.route?.id ?? ""));
   check("(fp control) D's content survives SOMEWHERE on disk under a new name", fs.readdirSync(MERGE_QUARANTINE_DIR).some((f) => fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8").includes("d-token-ctrl")));
   }
 
@@ -241,12 +280,32 @@ try {
   check("(tp precondition) D's own tmp residue is still on disk before the clear", fs.existsSync(dTmpFile));
 
   const inject = injectPendingDivertWriteFailure();
+  let tpResult;
   try {
-    clearMergeQuarantineReporting(r); // clears R while D (foreign) occupies R's own key via the tmp residue
+    tpResult = clearMergeQuarantineReporting(r); // clears R while D (foreign) occupies R's own key via the tmp residue
   } finally {
     inject.restore();
   }
   check("(tp positive control) the protective write was actually attempted (and injected to fail)", inject.count() >= 1);
+
+  // Card 182c01cc, round 2, finding 1 (THE EXACT shape the Code Review named): D's content sits ONLY in
+  // the `.json.tmp-<pid>` residue, reached via protectForeignTmpResidueBeforeSweep — which used to
+  // discard its own protect call's result entirely. This double-fault sub-case (write injected to fail)
+  // keeps D at its OWN old tmp filename.
+  check("*** THE FIX (182c01cc, tmp-path double-fault) *** stillBlockedCoOccupants names D", Array.isArray(tpResult?.stillBlockedCoOccupants) && tpResult.stillBlockedCoOccupants.some((c) => c.repoPath === d));
+  check("*** THE FIX (182c01cc) *** D's own route names both a repoPath and a 24-hex id form", (() => {
+    const co = tpResult?.stillBlockedCoOccupants?.find((c) => c.repoPath === d);
+    return co?.route?.repoPath === d && /^[0-9a-f]{24}$/.test(co?.route?.id ?? "");
+  })());
+  // Card 182c01cc, round 2, M4 — R's own file IS cleanly unlinked here (R's own clear is unaffected by
+  // D's failure, per the pre-existing assertion just below), so `keptClaimants` (which is keyed on
+  // `finalBasename`, R's own file) never finds D. **CORRECTED, round 4**: this does NOT mean latchKept is
+  // absent — round 2 wrongly assumed D's own name here could only ever come from a RELOCATION; round 4's
+  // fix correctly buckets D's double-fault (it genuinely stays kept, at its OWN tmp filename, a DIFFERENT
+  // file than `finalBasename`) as kept too, via `protectForeignTmpResidueBeforeSweep`'s own now-split
+  // `{kept, relocated}` return — so `latchKept:true` is the CORRECT outcome, with D named in
+  // `referencingRepoPaths` at its own (not R's) filename.
+  check("*** THE FIX (round 4, 182c01cc M4 corrected) *** latchKept is TRUE — D's double-fault is genuinely kept, at its OWN tmp file", tpResult?.latchKept === true && (tpResult?.referencingRepoPaths ?? []).includes(d));
 
   check("*** THE FIX (tmp-path) *** D's own tmp residue SURVIVES a failed protective write", fs.existsSync(dTmpFile));
   check("*** THE FIX (tmp-path) *** D's own content is still physically present in the tmp residue", (contentIfExists(dTmpFile) ?? "").includes("d-token-tp"));
@@ -259,6 +318,16 @@ try {
   fresh.reenterMergeQuarantinesAtBoot([]);
   check("*** THE FIX (tmp-path, restart) *** D's own token SURVIVES clearing R + a reboot", new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token-tp"));
   check("*** THE FIX (tmp-path, restart) *** assertRepoNotQuarantined(d) STILL BLOCKS after the reboot", fresh.assertRepoNotQuarantined(d).ok === false);
+
+  // *** ROUND 4 (Code Review CR3, MAJOR) *** — same discriminator as the final-path double-fault above,
+  // for the tmp-residue shape: the .tmp residue genuinely SURVIVES at its OWN name (never removed), so
+  // this must never be reported as a relocation either. Asserted against the ORIGINAL module instance.
+  const coTp = tpResult?.stillBlockedCoOccupants?.find((c) => c.repoPath === d);
+  check("*** THE FIX (round 4, tmp-path double-fault) *** no alsoClear — exactly one route, not two", coTp?.alsoClear === undefined);
+  check("*** THE FIX (round 4, tmp-path double-fault) *** reason never claims a relocation that never happened", !(tpResult?.reason ?? "").includes("RELOCATED") && !(tpResult?.reason ?? "").includes("just removed"));
+  const oneClearTp = clearMergeQuarantineLatchFile(coTp.route.id);
+  check("*** THE FIX (round 4, tmp-path double-fault) *** ONE clear of the named id lifts D", oneClearTp?.ok === true && oneClearTp?.wasQuarantined === true && (oneClearTp?.liftedRepoPaths ?? []).includes(d));
+  check("(tmp-path, round 4) D now reads as genuinely unblocked after that one clear", assertRepoNotQuarantined(d).ok === true);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -342,7 +411,15 @@ try {
   }, null, 2) + "\n");
 
   reenterMergeQuarantinesAtBoot([]);
-  clearMergeQuarantineReporting(r); // no injection this time — the write must succeed normally
+  const tpCtrlResult = clearMergeQuarantineReporting(r); // no injection this time — the write must succeed normally
+
+  // Card 182c01cc, round 2, finding 1 — THE EXACT repro the Code Review named (R real, D's own content
+  // ONLY in a tmp residue, NO injected failure): protectForeignTmpResidueBeforeSweep's own successful
+  // relocation used to be discarded entirely, so this call returned a bare {wasQuarantined:true} with
+  // no stillBlockedCoOccupants even though D was genuinely still blocked.
+  check("*** THE FIX (182c01cc, tmp-path mint) *** stillBlockedCoOccupants names D", Array.isArray(tpCtrlResult?.stillBlockedCoOccupants) && tpCtrlResult.stillBlockedCoOccupants.some((c) => c.repoPath === d));
+  check("*** THE FIX (182c01cc) *** latchKept is ABSENT (D's old tmp residue is genuinely gone, relocated — never \"kept\")", tpCtrlResult?.latchKept === undefined);
+  check("*** THE FIX (182c01cc) *** assertRepoNotQuarantined(d) still correctly BLOCKS (the field addition changes reporting only, never lift/keep behavior)", assertRepoNotQuarantined(d).ok === false);
 
   check("(tp control) D's own token survives clearing R (relocated, not destroyed)", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d-token-tp-ctrl"));
   check("(tp control) D's own ORIGINAL tmp residue is swept once its content is durably copied aside", !fs.existsSync(dTmpFile));
@@ -416,6 +493,97 @@ try {
   fresh.reenterMergeQuarantinesAtBoot([y, x]);
   check("*** THE FIX (B1) *** after clearByToken(x,'x-token') + a reboot, X is NOT blocked", fresh.assertRepoNotQuarantined(x).ok === true);
   check("*** THE FIX (B1) *** after clearByToken(x,'x-token') + a reboot, the already-cleared Y is NOT blocked either", fresh.assertRepoNotQuarantined(y).ok === true);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO cr3-m3 — card 182c01cc round 4, CR3 untested-site findings (b)/(c): the CR's own probe
+  // construction (P unresolvable at boot, armed at a SYNTHETIC resolvedKey K — an 883e29bc-shaped raw
+  // twin, deliberately NEVER mkdir'd — stays unresolvable the whole scenario, unlike (AH) in
+  // merge-quarantine-clear-by-path.mjs); X's foreign record written to hash(K).json AFTER boot (a fresh
+  // mint, never a re-point). `clearMergeQuarantineReporting(p)` then dispatches via `clearMergeQuarantine`
+  // to `clearMergeQuarantineByRecordedPath` (p stays unresolvable the whole time) — NEVER
+  // `clearMergeQuarantineByKey` directly — reaching this card's (c) site: `clearMergeQuarantineReporting`'s
+  // own `latchKept` branch, composing onto a reason `clearMergeQuarantineByRecordedPath` ALREADY composed
+  // (the compose-ONCE fix, m3). With the pending-divert write injected to fail, X's own protect call
+  // double-faults — reaching this card's (b) site: `clearMergeQuarantineByRecordedPath`'s own
+  // kept/relocated split-and-recombine of its delegated `clearMergeQuarantineByKey` result (never reached
+  // when p is resolvable, since that dispatches straight to ByKey and never enters this function at all).
+  //
+  // MEASURED (not assumed): in THIS exact construction, X's double-fault is bucketed as PURELY kept (no
+  // relocation at all — nothing else here ever mints a NEW latch), so `mergeKeptAndRelocatedCoOccupant`
+  // itself (the literal combine call inside site (b), for ONE repoPath independently found in BOTH
+  // buckets) is NOT invoked — confirmed via a temporary debug instrument during development, not
+  // asserted blind. What IS genuinely exercised, and controlled below: `clearMergeQuarantineByRecordedPath`'s
+  // own `splitCoOccupants` call, its `keptReferencingRepoPaths`/`relocatedCoOccupants` Map-building, and
+  // the `combinedRelocated`/final-return assembly (site (b)'s surrounding machinery) — and
+  // `clearMergeQuarantineReporting`'s own compose-once branch (site (c)) with a REAL already-composed
+  // base reason to not double onto. See this card's own decision record, "Round 4" section, for why a
+  // construction that ALSO drives `mergeKeptAndRelocatedCoOccupant` itself was not found.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const p = path.join(os.tmpdir(), `loom-mqpwf-cr3m3-p-${freshSfx()}`); // never created — stays unresolvable
+  const k = "loom-mqpwf-cr3m3-synthetic-key";
+  const khash = createHash("sha256").update(k).digest("hex").slice(0, 24);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "mqpwf-cr3m3-p-twin.json"), JSON.stringify({
+    repoPath: p, branch: "p-branch", reason: "P — cr3-m3, armed at a synthetic resolvedKey K", enteredAt: Date.now(),
+    tokens: ["p-cr3m3-token"], resolvedKey: k, armedKeys: [k],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([p]);
+  check("(cr3-m3 precondition) P reads as blocked right after this boot", !!activeMergeQuarantineFor(p));
+
+  const x = path.join(os.tmpdir(), `loom-mqpwf-cr3m3-x-never-${freshSfx()}`);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${khash}.json`), JSON.stringify({
+    repoPath: x, branch: "x-branch", reason: "X — cr3-m3, foreign, written AFTER boot", enteredAt: Date.now(), tokens: ["x-cr3m3-token"],
+  }, null, 2) + "\n");
+  check("(cr3-m3 precondition) X is NOT yet known to memory before the clear (never scanned)", !activeMergeQuarantineFor(x));
+  check("(cr3-m3 precondition) p is genuinely unresolvable (never created)", !fs.existsSync(p));
+
+  const inject = injectPendingDivertWriteFailure();
+  let rr;
+  try { rr = clearMergeQuarantineReporting(p); } finally { inject.restore(); }
+  check("(cr3-m3 positive control) the protective write was actually attempted (and injected to fail)", inject.count() >= 1);
+
+  check("*** THE FIX (cr3-m3, sites b+c) *** stillBlockedCoOccupants names X via the ByRecordedPath dispatch", Array.isArray(rr?.stillBlockedCoOccupants) && rr.stillBlockedCoOccupants.some((c) => c.repoPath === x));
+  const coCr3m3 = rr?.stillBlockedCoOccupants?.find((c) => c.repoPath === x);
+  check("*** THE FIX (round 4, cr3-m3) *** no alsoClear (double-fault stays kept, never relocated)", coCr3m3?.alsoClear === undefined);
+  check("(cr3-m3) latchKept is true, X named in referencingRepoPaths", rr?.latchKept === true && (rr?.referencingRepoPaths ?? []).includes(x));
+  // *** THE FIX (c): compose-ONCE *** — `clearMergeQuarantineByRecordedPath`'s own reason ALREADY
+  // composes everything; `clearMergeQuarantineReporting`'s latchKept branch must pass it through
+  // UNCHANGED, never compose a SECOND time on top. A pre-round-3-m3-fix regression would double any
+  // relocated clause present — here there is none to double, so the discriminating assertion is that
+  // the base `keptReason` clause itself (identifiable by its own "stays on disk" wording) appears
+  // EXACTLY ONCE, never duplicated wholesale.
+  check("*** THE FIX (round 4, cr3-m3, m3 compose-once) *** the base reason clause appears exactly once, never doubled", ((rr?.reason ?? "").split("stays on disk").length - 1) === 1);
+  check("*** THE FIX (round 4, cr3-m3) *** reason never claims a relocation that never happened", !(rr?.reason ?? "").includes("RELOCATED") && !(rr?.reason ?? "").includes("just removed"));
+
+  // ONE clear of the fold's own named route.id genuinely lifts X.
+  const oneClearCr3m3 = clearMergeQuarantineLatchFile(coCr3m3.route.id);
+  check("*** THE FIX (round 4, cr3-m3) *** ONE clear of the named id lifts X", oneClearCr3m3?.ok === true && oneClearCr3m3?.wasQuarantined === true && (oneClearCr3m3?.liftedRepoPaths ?? []).includes(x));
+  check("(cr3-m3) X now reads as genuinely unblocked after that one clear", assertRepoNotQuarantined(x).ok === true);
+  }
+
+  // Positive control (no injection): the SAME p/k/x shape, but the protective write succeeds — a clean
+  // relocation through the ByRecordedPath dispatch, never latchKept, never a doubled clause (nothing to
+  // double in the first place — this is the baseline the injected case above is contrasted against).
+  {
+  const p = path.join(os.tmpdir(), `loom-mqpwf-cr3m3ctrl-p-${freshSfx()}`);
+  const k = "loom-mqpwf-cr3m3ctrl-synthetic-key";
+  const khash = createHash("sha256").update(k).digest("hex").slice(0, 24);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "mqpwf-cr3m3ctrl-p-twin.json"), JSON.stringify({
+    repoPath: p, branch: "p-branch", reason: "P — cr3-m3 control", enteredAt: Date.now(), tokens: ["p-cr3m3ctrl-token"], resolvedKey: k, armedKeys: [k],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([p]);
+  const x = path.join(os.tmpdir(), `loom-mqpwf-cr3m3ctrl-x-never-${freshSfx()}`);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${khash}.json`), JSON.stringify({
+    repoPath: x, branch: "x-branch", reason: "X — cr3-m3 control, foreign, written AFTER boot", enteredAt: Date.now(), tokens: ["x-cr3m3ctrl-token"],
+  }, null, 2) + "\n");
+
+  const rrCtrl = clearMergeQuarantineReporting(p); // no injection this time
+  check("(cr3-m3 control) stillBlockedCoOccupants names X", Array.isArray(rrCtrl?.stillBlockedCoOccupants) && rrCtrl.stillBlockedCoOccupants.some((c) => c.repoPath === x));
+  check("(cr3-m3 control) latchKept is absent (a clean mint, never kept)", rrCtrl?.latchKept === undefined);
+  check("(cr3-m3 control) reason correctly DOES say RELOCATED (a genuine mint, unlike the injected case above)", (rrCtrl?.reason ?? "").includes("RELOCATED"));
   }
 } finally {
   for (const d of tmpDirs) {

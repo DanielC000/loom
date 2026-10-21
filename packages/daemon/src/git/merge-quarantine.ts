@@ -1728,7 +1728,7 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
  * claimant ({@link survivingSharedClaimRepoPaths}) that kept `final` on disk (empty if none) — a check
  * that never yields to `provenCoverage`. See the decision record.
  */
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string | undefined, liftedKeys: ReadonlySet<string>): string[] {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string | undefined, liftedKeys: ReadonlySet<string>): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }> } {
   const final = quarantinePathForKey(key);
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — every key THIS clear is itself touching, never
   // `key` alone — the caller computes it (via `ownedKeysIncluding`/`keysToLift`) and must pass it
@@ -1740,15 +1740,34 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     ? survivingTokenHolderRepoPaths(readFinalOnDiskSurvivingTokens(final), clearIdentity)
     : [];
   let finalProtectOk = true;
-  if (clearingRepoPath) finalProtectOk = protectDegradedOccupantBeforeDelete(final, clearingRepoPath, undefined, liftedKeys) && finalProtectOk;
+  // @decision 182c01cc — collects every protect call's own already-computed `persisted`, never re-derived
+  // — `sharedClaimants`/`contentClaimants` below are keyed on the OLD filename and can't see a co-occupant
+  // a successful protect just moved OFF it. See the decision record.
+  //
+  // @decision 182c01cc (round 4, CR3 MAJOR) — split by `r.relocated`; a double-fault stays KEPT, never
+  // relocated — see ProtectResult's own doc and the decision record's "Round 4" section.
+  const persistedRelocated: Array<{ repoPath: string; sourceFile: string }> = [];
+  const persistedKept: Array<{ repoPath: string; sourceFile: string }> = [];
+  const collectPersisted = (r: ProtectResult) => { if (r.persisted) (r.relocated ? persistedRelocated : persistedKept).push(r.persisted); };
+  if (clearingRepoPath) {
+    const r = protectDegradedOccupantBeforeDelete(final, clearingRepoPath, undefined, liftedKeys);
+    finalProtectOk = r.ok && finalProtectOk;
+    collectPersisted(r);
+  }
   if (clearIdentity) {
     const finalBasename = path.basename(final);
     const foreignPending = pendingUnresolvedQuarantines.find((p) => p.sourceFile === finalBasename && directPathIdentity(p.entry.repoPath) !== clearIdentity);
     if (foreignPending && quarantineFileRepoPathIdentity(final) !== clearIdentity) {
-      finalProtectOk = protectOccupantContentBeforeDelete(final, foreignPending.entry.repoPath, clearIdentity, liftedKeys) && finalProtectOk;
+      const r = protectOccupantContentBeforeDelete(final, foreignPending.entry.repoPath, clearIdentity, liftedKeys);
+      finalProtectOk = r.ok && finalProtectOk;
+      collectPersisted(r);
     }
   }
-  if (clearedEntry) finalProtectOk = protectUnincorporatedOccupantBeforeDelete(final, clearedEntry, clearIdentity, liftedKeys) && finalProtectOk;
+  if (clearedEntry) {
+    const r = protectUnincorporatedOccupantBeforeDelete(final, clearedEntry, clearIdentity, liftedKeys);
+    finalProtectOk = r.ok && finalProtectOk;
+    collectPersisted(r);
+  }
   // @decision 63e49ee2 (round 5) — ALWAYS, unconditionally: a fresh read or a detector "none" never
   // overrides a mark — only a durable rename-over or copy-aside (both already removed it by this point).
   //
@@ -1794,12 +1813,24 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — a foreign occupant's content could not be durably protected (or could not be read) before this clear; see the error just above. It also stays marked kept in THIS PROCESS (a real self-owned record, or a basename-only read-failure mark), not only after a later boot.`);
   }
-  if (clearIdentity) protectForeignTmpResidueBeforeSweep(key, clearIdentity, liftedKeys);
+  // @decision 182c01cc (round 2, finding 1) — fold this sweep's OWN relocations (and, round 4, its own
+  // kept double-faults) in too; it used to discard them, so a clear whose only foreign content sat in a
+  // tmp residue returned a bare success.
+  if (clearIdentity) {
+    const tmpResult = protectForeignTmpResidueBeforeSweep(key, clearIdentity, liftedKeys);
+    persistedRelocated.push(...tmpResult.relocated);
+    persistedKept.push(...tmpResult.kept);
+  }
   // @decision be79f4d5 (round 3) — reference-aware, never the unconditional-by-hash sibling: a same-hash
   // tmp a DIFFERENT, surviving entry's own `orphanLatchFiles` still lists must not be destroyed just
   // because THIS key's own entry is being legitimately cleared.
   sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key));
-  return keptClaimants;
+  // @decision 182c01cc (round 2/4) — two SEPARATE buckets, never merged: `kept` (never unlinked) and
+  // `relocated` (moved to its own new sourceFile) are genuinely different physical outcomes.
+  return {
+    kept: [...keptClaimants.map((repoPath) => ({ repoPath, sourceFile: finalBasename })), ...persistedKept],
+    relocated: persistedRelocated,
+  };
 }
 
 /**
@@ -1989,16 +2020,166 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): 
  * — there is no parsed content to copy aside, so this never reaches {@link protectOccupantContentBeforeDelete}.
  * See the decision record.
  */
-function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string, protectResolvableToo = false, liftedKeys: ReadonlySet<string> = new Set()): boolean {
+/**
+ * Shared return of every protect-before-delete wrapper (this one, {@link
+ * protectUnincorporatedOccupantBeforeDelete}, and the chokepoint both delegate to, {@link
+ * protectOccupantContentBeforeDelete}): whether the occupant survived safely, and — ONLY when a caller
+ * can actually name it (a successful copy-aside, a union/re-point onto an existing same-identity slot, or
+ * the in-memory-only double-fault fallback) — the exact `repoPath`/`sourceFile` it now lives under. Every
+ * value here was already computed by the function returning it; a caller folds it straight into its own
+ * "still blocked" report without a second lookup. `persisted` is deliberately absent on "nothing to
+ * protect" (none/corrupt/unreadable) outcomes — there is no occupant to name there.
+ *
+ * @decision 182c01cc — introduced so `deleteMergeQuarantineLatchByKey` (and `clearMergeQuarantineByKey`
+ * above it) can name a co-occupant a clear re-homed to a NEW pending id instead of returning bare `void`
+ * — see the decision record for the repro this closes.
+ */
+// @decision 182c01cc (round 4, CR3 MAJOR) — `relocated:true` means a BRAND-NEW latch was actually
+// minted/re-pointed; false/absent (the double-fault fallback) means the occupant stays at its OWN
+// pre-existing file — a caller must bucket THAT as KEPT, never relocated. See the decision record.
+type ProtectResult = { ok: boolean; persisted?: { repoPath: string; sourceFile: string }; relocated?: boolean };
+
+/** A still-blocked co-occupant named in a clear's own result (card 182c01cc): its repoPath, plus both
+ *  forms of the clear-by-path route — `{repoPath}` (always valid) and `{id}` (derived from the exact
+ *  sourceFile it is currently filed under, via {@link pendingLatchIdFor}) — mirroring {@link
+ *  stillQuarantinedReason}'s own route-naming pattern for the SAME "name it and how to clear it" job.
+ *
+ * @decision 182c01cc (round 3, M1) — `alsoClear` is set ONLY when the SAME repoPath is independently
+ * found BOTH relocated (`route`, clear FIRST) and kept under its OLD name (clear SECOND) — the ONLY
+ * durable ordering; see the decision record's "Round 3" section for the measured proof.
+ *
+ * @decision 182c01cc (round 5, MAJOR) — `route.id` is OPTIONAL: it is omitted rather than hand back a
+ * known-non-working id (see {@link blockedCoOccupantForReferencer}). See the decision record's "Round 5".
+ */
+export type BlockedCoOccupant = {
+  repoPath: string;
+  route: { repoPath: string; id?: string };
+  alsoClear?: { repoPath: string; id: string };
+};
+
+function blockedCoOccupant(repoPath: string, sourceFile: string): BlockedCoOccupant {
+  return { repoPath, route: { repoPath, id: pendingLatchIdFor(sourceFile) } };
+}
+
+/**
+ * The SAME "name it and how to clear it" job as {@link blockedCoOccupant}, for a `repoPath` reached via
+ * one of {@link sweepOrphanLatchFileIfUnreferenced}/{@link sweepOwnLatchFileUnlessOwnedElsewhere}/
+ * {@link sweepTmpResidueForHashIfUnreferenced}'s own `referencingRepoPaths`/`keptEntries` — a repoPath can
+ * land there two structurally different ways, and only one of them makes `sourceFile`'s own id a WORKING
+ * clear-by-id route for it.
+ *
+ * @decision 182c01cc (round 5, MAJOR) — a mere `orphanLatchFiles` cross-reference to `sourceFile` is NOT
+ * physical ownership of it; using `sourceFile`'s own id for such an owner is a FIXED POINT that never
+ * lifts it. See the decision record's "Round 5" section for the full case split and the measured repro.
+ */
+function blockedCoOccupantForReferencer(repoPath: string, sourceFile: string): BlockedCoOccupant {
+  if (physicalOwnerRepoPaths(sourceFile).includes(repoPath)) return blockedCoOccupant(repoPath, sourceFile);
+  const ownEntry = [...activeQuarantines.values()].find((e) => e.repoPath === repoPath)
+    ?? pendingUnresolvedQuarantines.find((p) => p.entry.repoPath === repoPath)?.entry;
+  if (!ownEntry) return { repoPath, route: { repoPath } };
+  return { repoPath, route: { repoPath, id: quarantineLatchFileIdsFor(ownEntry)[0] } };
+}
+
+/** @decision 182c01cc (round 3, M1) — the SAME repoPath found both relocated (`relocatedSourceFile`,
+ *  the PRIMARY route — clear it first) and kept under its old name (`keptSourceFile`, the SECOND,
+ *  required route) in one clear. Never dedupe this down to one route — see this type's own doc.
+ *
+ * @decision 182c01cc (round 4, CR3 MAJOR) — a SAFETY NET on top of the real fix: `alsoClear` is set ONLY
+ * when the two sourceFiles genuinely differ. See the decision record's "Round 4" section. */
+function blockedCoOccupantBothRoutes(repoPath: string, relocatedSourceFile: string, keptSourceFile: string): BlockedCoOccupant {
+  if (relocatedSourceFile === keptSourceFile) return blockedCoOccupant(repoPath, relocatedSourceFile);
+  return {
+    repoPath,
+    route: { repoPath, id: pendingLatchIdFor(relocatedSourceFile) },
+    alsoClear: { repoPath, id: pendingLatchIdFor(keptSourceFile) },
+  };
+}
+
+/** The same combination as {@link blockedCoOccupantBothRoutes}, for a caller (clearMergeQuarantineByRecordedPath)
+ *  that already holds two independently-built `BlockedCoOccupant` objects for the SAME repoPath (one
+ *  pure-relocated, one pure-kept — e.g. found via two different matched active entries) rather than two
+ *  bare sourceFile strings. `relocatedCo`'s own `alsoClear` (if any — an already-combined entry from a
+ *  nested delegated call) is intentionally overwritten, never chained.
+ *
+ * @decision 182c01cc (round 4, CR3 MAJOR) — the SAME safety net as {@link blockedCoOccupantBothRoutes}:
+ * two IDENTICAL route ids collapse to one route, never a nonsensical "clear id X FIRST, THEN id X". */
+function mergeKeptAndRelocatedCoOccupant(relocatedCo: BlockedCoOccupant, keptCo: BlockedCoOccupant): BlockedCoOccupant {
+  if (relocatedCo.route.id === keptCo.route.id) return { repoPath: relocatedCo.repoPath, route: relocatedCo.route };
+  // @decision 182c01cc (round 5) — `keptCo.route.id` is undefined only on the structurally-unreachable
+  // no-owner-entry fallback (see blockedCoOccupantForReferencer's own doc); there is no real second id to
+  // offer, so fall back to the relocated route alone rather than a broken `alsoClear` with no id.
+  if (keptCo.route.id === undefined) return { repoPath: relocatedCo.repoPath, route: relocatedCo.route };
+  return { repoPath: relocatedCo.repoPath, route: relocatedCo.route, alsoClear: { repoPath: keptCo.route.repoPath, id: keptCo.route.id } };
+}
+
+/**
+ * Splits a clearMergeQuarantineByKey-shaped result's own `stillBlockedCoOccupants` into the "kept"
+ * subset (also named in `referencingRepoPaths` — its physical file literally survives on disk, under its
+ * OLD name) and the "relocated" subset (everything NEEDING the relocated reason clause — a pure
+ * relocation, or a combined kept+relocated entry; see below). Every caller that aggregates such a result
+ * uses this, rather than assuming `stillBlockedCoOccupants` is uniformly "kept" — a relocation must never
+ * be folded into `latchKept`/`referencingRepoPaths` (round 2, finding 2: the old file's physical absence
+ * makes "stays on disk … clear by its 24-hex id" text false for a relocated entry).
+ *
+ * @decision 182c01cc (round 3, M1) — NOT mutually exclusive anymore: a combined entry (`alsoClear` set)
+ * lands in BOTH buckets — see the decision record's "Round 3" section.
+ */
+function splitCoOccupants(coOccupants: BlockedCoOccupant[] | undefined, referencingRepoPaths: string[] | undefined): { kept: BlockedCoOccupant[]; relocated: BlockedCoOccupant[] } {
+  const keptSet = new Set(referencingRepoPaths ?? []);
+  const kept: BlockedCoOccupant[] = [];
+  const relocated: BlockedCoOccupant[] = [];
+  for (const co of coOccupants ?? []) {
+    if (keptSet.has(co.repoPath)) kept.push(co);
+    if (!keptSet.has(co.repoPath) || co.alsoClear) relocated.push(co);
+  }
+  return { kept, relocated };
+}
+
+/** The reason clause for a clear that durably RELOCATED one or more foreign co-occupants to their own
+ *  new latch(es) — the physical file at the OLD name is genuinely gone (unlike the shared-latch "WILL
+ *  RE-DIVERT" case, nothing stays on disk under the old name), so the wording must say so explicitly,
+ *  never imply the old file "stays on disk".
+ *
+ * @decision 182c01cc (round 3, M1) — a co-occupant carrying `alsoClear` gets its OWN clause stating the
+ * required two-step order explicitly — see BlockedCoOccupant's own doc for why neither id alone is
+ * durable.
+ */
+function relocatedCoOccupantsReason(coOccupants: BlockedCoOccupant[]): string {
+  // @decision 182c01cc (round 5, nit) — "a record of this same identity", never "this same record": the
+  // old file can legitimately hold a DIFFERENT record (cd5a3cf9/c93e9e7a's stale-sourceFile gap).
+  const names = coOccupants.map((c) => c.alsoClear
+    ? `'${c.repoPath}' — clear id '${c.route.id}' FIRST (its new, relocated latch), THEN id '${c.alsoClear.id}' (its OLD file, which also still durably holds a record of this same identity) — clearing only one of the two leaves it re-quarantined on the next restart`
+    : `'${c.repoPath}' (now filed under id '${c.route.id}')`).join(", ");
+  return `this clear also found ${coOccupants.length} other, unrelated identit${coOccupants.length === 1 ? "y" : "ies"} whose own content was sitting at the same physical file this clear just removed — durably RELOCATED to its own new, independent latch before deletion, never lost (${names}). Still genuinely quarantined; clear it separately via POST /internal/merge-quarantine/clear-by-path with {id} (or {repoPath}).`;
+}
+
+/** Appends {@link relocatedCoOccupantsReason}'s own clause onto an existing (possibly absent) base
+ *  reason — never silently drops the relocation just because there was nothing else to say. */
+function composeReasonWithRelocated(baseReason: string | undefined, relocated: BlockedCoOccupant[]): string | undefined {
+  if (relocated.length === 0) return baseReason;
+  const relocatedText = relocatedCoOccupantsReason(relocated);
+  return baseReason ? `${baseReason} ${relocatedText}` : relocatedText;
+}
+
+/** The reason text for a clear whose OWN identity is genuinely lifted, but a latch file it referenced is
+ *  kept on disk for `refs`' own sake — shared by {@link clearMergeQuarantineByRecordedPath}'s own kept
+ *  branch and {@link clearMergeQuarantineReporting}'s ByKey kept-only branch (round 5, nit) so the two
+ *  never drift and neither silently omits a reason for a genuinely kept result.
+ */
+function keptOnlyReasonFor(refs: string[]): string {
+  return `this identity's own quarantine is lifted and will NOT itself re-divert, but a latch file it referenced is still needed by ${refs.length} other claimant(s) that still structurally depend on it (${refs.join(", ")}) — it stays on disk, and every one of THOSE claimants still depending on it WILL RE-DIVERT on the next restart until EVERY one of them has been cleared too (note: a named claimant here can be OVER-reported due to a known, separately-tracked stale-sourceFile gap — it may already be resolved). If they share this exact degraded key, you can lift all of them durably right now by clearing the shared latch by its own 24-hex id instead (POST /internal/merge-quarantine/clear-by-path with {id}); otherwise, clear each one by its own repoPath or id (see stillBlockedCoOccupants).`;
+}
+
+function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string, protectResolvableToo = false, liftedKeys: ReadonlySet<string> = new Set()): ProtectResult {
   const result = differentUnresolvableOccupantRepoPathAt(final, clearingRepoPath, protectResolvableToo);
-  if (result.state === "none") return true;
+  if (result.state === "none") return { ok: true };
   if (result.state === "unknown") {
     // @decision 63e49ee2 (round 3) — mark this basename kept via the identity-less ownership set so
     // every OTHER reference-aware sweep in this module also honours it. See {@link keptUnreadableLatchFiles}.
     keptUnreadableLatchFiles.add(path.basename(final));
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — its content could not be read (for a reason other than being missing) while clearing ${clearingRepoPath}, so it may genuinely be a different, unresolvable entry's own exclusive backing; treating this as UNKNOWN rather than assuming nothing to protect. It is marked kept in THIS PROCESS too (fail-closed, over-broad until a reboot or a later successful read resolves it), and it survives on disk for either to recover.`);
-    return false;
+    return { ok: false };
   }
   return protectOccupantContentBeforeDelete(final, result.repoPath, clearingRepoPath, liftedKeys);
 }
@@ -2016,16 +2197,16 @@ function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: st
  * @decision 63e49ee2 — same `"unknown"`-returns-`false`-without-content contract as
  * {@link protectDegradedOccupantBeforeDelete}. See the decision record.
  */
-function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: MergeQuarantineEntry, clearIdentity?: string, liftedKeys: ReadonlySet<string> = new Set()): boolean {
+function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: MergeQuarantineEntry, clearIdentity?: string, liftedKeys: ReadonlySet<string> = new Set()): ProtectResult {
   const result = unincorporatedOccupantRepoPathAt(final, clearedEntry, clearIdentity);
-  if (result.state === "none") return true;
+  if (result.state === "none") return { ok: true };
   if (result.state === "unknown") {
     // @decision 63e49ee2 (round 3) — same identity-less ownership set as
     // {@link protectDegradedOccupantBeforeDelete}'s own "unknown" branch.
     keptUnreadableLatchFiles.add(path.basename(final));
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — its content could not be read (for a reason other than being missing) while clearing ${clearedEntry.repoPath}, so it may genuinely belong to an unincorporated foreign occupant; treating this as UNKNOWN rather than assuming nothing to protect. It is marked kept in THIS PROCESS too, fail-closed and over-broad until a reboot or a later successful read resolves it.`);
-    return false;
+    return { ok: false };
   }
   return protectOccupantContentBeforeDelete(final, result.repoPath, clearedEntry.repoPath, liftedKeys);
 }
@@ -2077,29 +2258,29 @@ function excludeLiftedResolvedKeys(keys: string[] | undefined, final: string, li
  * @decision 8db913e2 (Follow-up 7a7e041b) — reads on-disk tokens via {@link readSurvivingOnDiskTokens} (shared with
  * {@link reconcileMarkedBasenameBeforeWrite}) and skips the copy-aside when every real on-disk token is
  * already cleared — see the decision record for why that's safe. */
-function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: string, describeClearer: string, liftedKeys: ReadonlySet<string> = new Set()): boolean {
+function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: string, describeClearer: string, liftedKeys: ReadonlySet<string> = new Set()): ProtectResult {
   let raw: string;
   try {
     raw = fs.readFileSync(final, "utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // missing — nothing to protect
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { ok: true }; // missing — nothing to protect
     // @decision 63e49ee2 (round 3) — the caller already confirmed `occupantRepoPath` via an EARLIER
     // successful read; THIS read failing (a second, independent attempt) still needs the same
     // identity-less ownership mark as every other "unknown" branch, or no one ever marks this file kept.
     keptUnreadableLatchFiles.add(path.basename(final));
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] could not read ${path.basename(final)} (for a reason other than being missing) while protecting it for ${occupantRepoPath} before clearing ${describeClearer} — treating this as UNKNOWN rather than nothing to protect; it is marked kept in THIS PROCESS too, and ${path.basename(final)} is kept on disk, unmodified, instead of being overwritten or deleted.`);
-    return false;
+    return { ok: false };
   }
   let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { return true; } // corrupt — nothing to protect
-  if (!isReadableLatchRecord(parsed)) return true; // e.g. the bare literal `null` — nothing to protect
-  if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return true;
+  try { parsed = JSON.parse(raw); } catch { return { ok: true }; } // corrupt — nothing to protect
+  if (!isReadableLatchRecord(parsed)) return { ok: true }; // e.g. the bare literal `null` — nothing to protect
+  if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return { ok: true };
   const { raw: rawTokens, surviving: survivingTokens } = readSurvivingOnDiskTokens(parsed);
   // @decision 8db913e2 (Follow-up 7a7e041b) — every real on-disk token was already deliberately cleared by
   // THIS process — there is no owner left to protect, so skip the copy-aside entirely rather than persist
   // an empty or random-token record. See this function's own jsdoc above for why this is safe.
-  if (rawTokens.length > 0 && survivingTokens.length === 0) return true;
+  if (rawTokens.length > 0 && survivingTokens.length === 0) return { ok: true };
   const tokens = survivingTokens.length > 0 ? survivingTokens : [randomUUID()];
   // @decision 8db913e2 (Follow-up 4b06875f) — carry the occupant's own on-disk `resolvedKey` onto
   // `toPersist` via the shared {@link excludeLiftedResolvedKey} chokepoint — see that function's own doc.
@@ -2197,7 +2378,13 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     }
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] could not durably write a fresh pending-divert copy for degraded occupant ${occupantRepoPath} before clearing ${describeClearer} — ${finalBasename} is kept on disk, as its OWN self-owned pending record, instead; ${occupantRepoPath} stays enforced in THIS PROCESS too (not only after a later boot).`);
-    return false;
+    // @decision 182c01cc — even on this double-fault fallback, the occupant genuinely survives (in
+    // memory, at its OWN old name) — name it, so a caller's "still blocked" report isn't silently blind
+    // to this branch just because the durable write failed.
+    //
+    // @decision 182c01cc (round 4, CR3 MAJOR) — `relocated:false`: nothing new was minted, the occupant
+    // stays at `finalBasename` — a caller must bucket this as KEPT, never relocated.
+    return { ok: false, persisted: { repoPath: toPersist.repoPath, sourceFile: finalBasename }, relocated: false };
   }
   // @decision 63e49ee2 (round 5) — `final`'s own content is now durably copied aside (the write above
   // just succeeded) — a read-failure mark on `final`'s OWN basename (distinct from `filename`, already
@@ -2231,7 +2418,13 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // `liveEntrySupersettingTokens` branch resurrected a cleared token — see the decision record).
     pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
   }
-  return true;
+  // @decision 182c01cc — every branch above durably persists the occupant at `filename`; name it once
+  // here rather than duplicating this at each branch. `toPersist.repoPath` (never toWrite's, which can
+  // carry a union) is always this function's own occupant identity.
+  //
+  // @decision 182c01cc (round 4, CR3 MAJOR) — `relocated:true`: the write above just succeeded, so
+  // `filename` genuinely names a new/re-pointed latch, distinct from `final`'s own basename.
+  return { ok: true, persisted: { repoPath: toPersist.repoPath, sourceFile: filename }, relocated: true };
 }
 
 /**
@@ -2379,7 +2572,7 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
   // A different, still-unresolvable identity physically occupies `final` right now (confirmed by THIS
   // fresh read) — protect it durably before letting this raise's own write proceed; divert ONLY if that
   // protective copy itself fails.
-  return !protectOccupantContentBeforeDelete(final, parsed.repoPath, ownRepoPath, liftedKeys);
+  return !protectOccupantContentBeforeDelete(final, parsed.repoPath, ownRepoPath, liftedKeys).ok;
 }
 
 /**
@@ -2728,7 +2921,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // token carry-forward is {@link reconcileMarkedBasenameBeforeWrite}'s own job, called here (via
     // {@link foldInOnDiskTokensIfMarked}) so THIS process's own in-memory entry reflects it too, never
     // only `writeMergeQuarantineLatch`'s own chokepoint.
-    const protectOk = protectUnincorporatedOccupantBeforeDelete(finalForKey, existing, undefined, liftedKeys);
+    const protectOk = protectUnincorporatedOccupantBeforeDelete(finalForKey, existing, undefined, liftedKeys).ok;
     const mustDivert = resolveRaiseOverwrite(finalForKey, existing.repoPath, existing.tokens, protectOk, liftedKeys);
     const baseEntry: MergeQuarantineEntry = { ...existing, tokens: [...existing.tokens, token], contributorRepoPaths };
     if (mustDivert) {
@@ -2814,7 +3007,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — nothing else is armed yet at this key (`verified`
     // means no `existing` was found) — the only key THIS raise's own write touches is its own.
     const liftedKeys: ReadonlySet<string> = new Set([key]);
-    const protectOk = protectDegradedOccupantBeforeDelete(quarantinePathForKey(key), repoPath, undefined, liftedKeys);
+    const protectOk = protectDegradedOccupantBeforeDelete(quarantinePathForKey(key), repoPath, undefined, liftedKeys).ok;
     const mustDivert = resolveRaiseOverwrite(quarantinePathForKey(key), repoPath, [token], protectOk, liftedKeys);
     if (mustDivert) {
       divertRaiseEntry({ repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token] });
@@ -3070,7 +3263,14 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       for (const k of plan.ownedArmedKeys) {
         activeQuarantines.delete(k);
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity, L);
+        const { relocated } = deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity, L);
+        // @decision 182c01cc (round 2, item 4) — clearMergeQuarantineByToken has no human route to report
+        // a relocation through; LOG it (disclosure-safe: repoPath + pending id, never content) rather than
+        // silently discarding it, same as clearActiveEntryTokenAtKey's own full-lift call below.
+        if (relocated.length > 0) {
+          // eslint-disable-next-line no-console
+          console.warn(`[merge-quarantine] partial token clear at key ${k} also relocated ${relocated.length} foreign co-occupant(s) to their own new latch (no human route reaches this path — logging only): ${relocated.map((r) => `'${r.repoPath}' -> id '${pendingLatchIdFor(r.sourceFile)}'`).join(", ")}`);
+        }
       }
       // @decision 8db913e2 (round 4) — tombstone `token` HERE, after the splice/delete above already
       // removed every in-memory trace of this pending entry — see `tombstoneIfNotSurviving`'s own doc.
@@ -3140,7 +3340,14 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     //
     // @decision 8db913e2 (Follow-up d6efbc9b) — the delegated call's own touchedFinalBasenames-gated
     // tombstone can leave a RELEASED token un-tombstoned; tombstone it unconditionally here too.
-    clearMergeQuarantineByKey(key, entry.repoPath);
+    const result = clearMergeQuarantineByKey(key, entry.repoPath);
+    // @decision 182c01cc (round 2, item 4) — same disclosure-safe logging as clearTokenFromPendingIndices
+    // above; clearMergeQuarantineByToken has no human route to report a relocation through otherwise.
+    const { relocated } = splitCoOccupants(result?.stillBlockedCoOccupants, result?.referencingRepoPaths);
+    if (relocated.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] a token-clear's own full lift at key ${key} also relocated ${relocated.length} foreign co-occupant(s) to their own new latch (no human route reaches this path — logging only): ${relocated.map((r) => `'${r.repoPath}' -> id '${r.route.id}'`).join(", ")}`);
+    }
     tombstoneIfNotSurviving([token]);
     return;
   }
@@ -3452,10 +3659,19 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: s
  * keptUnreadableLatchFiles} — never the round-1 exclude-set/`Set<string>` return, and never round 2's
  * identity-matchable pending stub. See the decision record.
  */
-function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string, liftedKeys: ReadonlySet<string> = new Set()): void {
+function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string, liftedKeys: ReadonlySet<string> = new Set()): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }> } {
+  // @decision 182c01cc (round 2, finding 1) — this loop's own protect call ALSO relocates a foreign
+  // occupant; collect and return it, or a clear whose ONLY foreign content sat in a `.tmp-<pid>` residue
+  // silently returns a bare success.
+  //
+  // @decision 182c01cc (round 4, CR3 MAJOR) — split {kept, relocated} like deleteMergeQuarantineLatchByKey's
+  // own return — a double-fault here (the write-protecting-this-tmp-residue itself failed) means the tmp
+  // residue SURVIVES at its OWN name, which is KEPT, never relocated.
+  const relocated: Array<{ repoPath: string; sourceFile: string }> = [];
+  const kept: Array<{ repoPath: string; sourceFile: string }> = [];
   const prefix = `${quarantineHashForKey(key)}.json.tmp-`;
   let files: string[];
-  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return; }
+  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept, relocated }; }
   for (const f of files) {
     if (!f.startsWith(prefix)) continue;
     // @decision 63e49ee2 (round 3) — also honour the identity-less ownership set, never only
@@ -3482,8 +3698,10 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
     if (typeof parsed.repoPath !== "string") continue;
     if (directPathIdentity(parsed.repoPath) === clearIdentity) continue; // genuinely the clearer's own data
     if (isRepoPathCurrentlyResolvable(parsed.repoPath)) continue; // a resolvable leftover is safe to overwrite today
-    protectOccupantContentBeforeDelete(tmpPath, parsed.repoPath, clearIdentity, liftedKeys);
+    const r = protectOccupantContentBeforeDelete(tmpPath, parsed.repoPath, clearIdentity, liftedKeys);
+    if (r.persisted) (r.relocated ? relocated : kept).push(r.persisted);
   }
+  return { kept, relocated };
 }
 
 /**
@@ -3516,11 +3734,15 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
  * @decision 63e49ee2 (round 2) — a read-failure tmp residue is now protected by this function's own
  * EXISTING, unmodified ownership check (no `excludeFilenames` param needed). See the decision record.
  */
-function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; referencingRepoPaths: string[] } {
+// @decision 182c01cc (round 4) — `keptEntries` ALSO names each kept repoPath's own EXACT tmp filename
+// (additive; see the decision record's "Round 4" section for why `referencingRepoPaths` alone can't
+// build a real `{id}` route).
+function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; referencingRepoPaths: string[]; keptEntries: Array<{ repoPath: string; sourceFile: string }> } {
   const prefix = `${hash}.json.tmp-`;
   let files: string[];
-  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [] }; }
+  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [], keptEntries: [] }; }
   const referencingRepoPaths = new Set<string>();
+  const keptEntries: Array<{ repoPath: string; sourceFile: string }> = [];
   // @decision 63e49ee2 (round 3) — tracked separately from `referencingRepoPaths`: a read-failure-kept
   // file has no identity to attribute, but it must still suppress this file's own unlink below.
   let anyKeptUnattributed = false;
@@ -3531,12 +3753,12 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string): { kept: boolean; re
     for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
     for (const p of pendingUnresolvedQuarantines) if (p.entry.orphanLatchFiles?.includes(f)) owners.add(p.entry.repoPath);
     if (owners.size > 0) {
-      for (const o of owners) referencingRepoPaths.add(o);
+      for (const o of owners) { referencingRepoPaths.add(o); keptEntries.push({ repoPath: o, sourceFile: f }); }
     } else {
       try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
     }
   }
-  return { kept: referencingRepoPaths.size > 0 || anyKeptUnattributed, referencingRepoPaths: [...referencingRepoPaths] };
+  return { kept: referencingRepoPaths.size > 0 || anyKeptUnattributed, referencingRepoPaths: [...referencingRepoPaths], keptEntries };
 }
 
 /**
@@ -3679,7 +3901,7 @@ export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | un
  * `c9114934` it still durably PROTECTS a foreign degraded occupant's content before the unconditional
  * unlink destroys it; see `deleteMergeQuarantineLatchByKey`.
  */
-export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys?: ReadonlySet<string>): { wasQuarantined: true; latchKept: true; referencingRepoPaths: string[] } | void {
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys?: ReadonlySet<string>): { wasQuarantined: true; latchKept?: true; referencingRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | void {
   const entry = activeQuarantines.get(key);
   // @decision 8db913e2 (round 4) — candidate tokens for the ONE tombstone call at the end of this
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
@@ -3755,7 +3977,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     ? identityRepoPath : undefined;
   // @decision f5c42043 — CAPTURE and SURFACE every kept-file's own referencing repoPaths (previously
   // discarded for the deleteMergeQuarantineLatchByKey calls below) instead of a bare unqualified success.
-  const keptReferencingRepoPaths = new Set<string>();
+  // @decision 182c01cc — two SEPARATE Maps (repoPath -> sourceFile): `keptReferencingRepoPaths` feeds
+  // `latchKept` (file genuinely survives, unrelocated); `relocatedCoOccupants` never sets `latchKept`
+  // (round 2, finding 2 — the old file is genuinely gone) but still lands in `stillBlockedCoOccupants`.
+  const keptReferencingRepoPaths = new Map<string, string>();
+  const relocatedCoOccupants = new Map<string, string>();
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at this function's own sourceFilesToSweep loop below.
   let anyKeptUnattributed = false;
   // @decision d163aef5 (round 4) — neither protect pass below gates on resolvability anymore (round 3's
@@ -3766,7 +3992,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // rather than a `keysToLift`-only set, so a key only a tied pending twin owns is still correctly
   // recognised as already lifted by this call (round-2 MAJOR 2 — this active loop used to miss it).
   for (const k of keysToLift) {
-    for (const rp of deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, L)) keptReferencingRepoPaths.add(rp);
+    const r = deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, L);
+    for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, kc.sourceFile);
+    for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, rc.sourceFile);
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   const sourceFilesToSweep: string[] = [];
@@ -3819,7 +4047,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       activeQuarantines.delete(k);
       touchedFinalBasenames.push(path.basename(quarantinePathForKey(k)));
       // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-      for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L)) keptReferencingRepoPaths.add(rp);
+      const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L);
+      for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, kc.sourceFile);
+      for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, rc.sourceFile);
     }
     sourceFilesToSweep.push(p.sourceFile);
     return false;
@@ -3838,7 +4068,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   for (const f of sourceFilesToSweep) {
     const result = sweepOwnLatchFileUnlessOwnedElsewhere(f);
     if (result.kept) {
-      if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+      if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.set(rp, f);
       else anyKeptUnattributed = true;
     }
   }
@@ -3850,8 +4080,25 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
   tombstoneIfNotSurviving(candidateTokens, [...touchedFinalBasenames, ...sourceFilesToSweep]);
-  if (keptReferencingRepoPaths.size > 0 || anyKeptUnattributed) {
-    return { wasQuarantined: true, latchKept: true, referencingRepoPaths: [...keptReferencingRepoPaths] };
+  // @decision 182c01cc (round 2, finding 1) — a RELOCATED co-occupant alone must still produce a
+  // non-void result naming it: `latchKept` stays absent, but `stillBlockedCoOccupants` never is.
+  if (keptReferencingRepoPaths.size > 0 || anyKeptUnattributed || relocatedCoOccupants.size > 0) {
+    return {
+      wasQuarantined: true,
+      // @decision 182c01cc — latchKept/referencingRepoPaths name ONLY the kept subset; a relocation never
+      // sets either (round 2, finding 2).
+      ...(keptReferencingRepoPaths.size > 0 || anyKeptUnattributed
+        ? { latchKept: true as const, referencingRepoPaths: [...keptReferencingRepoPaths.keys()] } : {}),
+      // @decision 182c01cc (round 3, M1) — a repoPath BOTH kept and relocated is named ONCE, with BOTH
+      // routes (never deduped down to one — see BlockedCoOccupant's own doc + the decision record).
+      stillBlockedCoOccupants: [
+        ...[...relocatedCoOccupants.entries()].map(([rp, sf]) => {
+          const keptSf = keptReferencingRepoPaths.get(rp);
+          return keptSf !== undefined ? blockedCoOccupantBothRoutes(rp, sf, keptSf) : blockedCoOccupant(rp, sf);
+        }),
+        ...[...keptReferencingRepoPaths.entries()].filter(([rp]) => !relocatedCoOccupants.has(rp)).map(([rp, sf]) => blockedCoOccupant(rp, sf)),
+      ],
+    };
   }
 }
 
@@ -3882,11 +4129,11 @@ function resolveQuarantineFor(repoPath: string): MergeQuarantineEntry | undefine
 }
 
 /**
- * UNCONDITIONAL clear for `repoPath`. Called from exactly two places: (1) the human-only loopback REST
- * route (`POST /internal/merge-quarantine/clear`, gateway/server.ts), and (2) internally, once {@link
- * clearMergeQuarantineByToken} empties the token set itself. A RESTORED quarantine (re-entered at boot)
- * can ONLY ever be cleared this way, since the original in-process promise chain(s) that could
- * auto-clear it are gone once the process(es) that held them have exited.
+ * UNCONDITIONAL clear for `repoPath`. Called from exactly one place in this module: {@link
+ * clearMergeQuarantineReporting} — itself the thin wrapper the human-only loopback REST route
+ * (`POST /internal/merge-quarantine/clear`, gateway/server.ts) delegates to. A RESTORED quarantine
+ * (re-entered at boot) can ONLY ever be cleared this way, since the original in-process promise chain(s)
+ * that could auto-clear it are gone once the process(es) that held them have exited.
  *
  * When `repoPath` is NOT currently resolvable, a freshly-recomputed `canonicalRepoLockKey(repoPath)` can
  * walk UP past repoPath's own absence to an ENCLOSING repo's real key and lift ITS unrelated quarantine
@@ -3899,7 +4146,7 @@ function resolveQuarantineFor(repoPath: string): MergeQuarantineEntry | undefine
  * @decision 882d6cff (round 4) — returns the unresolvable branch's own result (`latchKept`/
  * `referencingRepoPaths` when a shared latch survives); `void` for the resolvable branch, unchanged.
  */
-export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; latchKept?: true; referencingRepoPaths?: string[] } | void {
+export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | void {
   if (!isRepoPathCurrentlyResolvable(repoPath)) {
     return clearMergeQuarantineByRecordedPath(repoPath);
   }
@@ -3925,7 +4172,7 @@ export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolea
  * decide which entry to clear; see the decision record for the key-drift bugs this closes, including
  * round 7's fix to this function's OWN final fallback (it used to do exactly that).
  */
-export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuarantined: boolean; reason?: string; latchKept?: true; referencingRepoPaths?: string[] } {
+export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuarantined: boolean; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
   const identity = directPathIdentity(repoPath);
   const matched: Array<{ key: string; repoPath: string }> = [];
   const seen = new Set<MergeQuarantineEntry>();
@@ -3955,7 +4202,13 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     pendingOwnedArmedKeys.set(p, ownedArmedKeys);
     for (const k of ownedArmedKeys) L.add(k);
   }
-  const keptReferencingRepoPaths = new Set<string>();
+  // @decision 182c01cc — a Map (repoPath -> BlockedCoOccupant), never a bare Set<string>: every fold-in
+  // site below already has (or can cheaply derive) the sourceFile a kept claimant is filed under, so this
+  // function's own "latchKept" result can name each one's clear-by-path route, not just its repoPath.
+  const keptReferencingRepoPaths = new Map<string, BlockedCoOccupant>();
+  // @decision 182c01cc (round 2, finding 2) — a SEPARATE bucket for a co-occupant relocated to a new
+  // latch (never folded into keptReferencingRepoPaths — that one must stay latchKept-eligible only).
+  const relocatedCoOccupants = new Map<string, BlockedCoOccupant>();
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at the matchedPending loop's own
   // sweepOwnLatchFileUnlessOwnedElsewhere call below: an unconfirmed EPERM/EBUSY unlink (or a
   // marked-but-unprovable-coverage keep) still means something was kept, with no repoPath to name.
@@ -3965,10 +4218,13 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     wasQuarantined = true;
     for (const m of matched) {
       const result = clearMergeQuarantineByKey(m.key, m.repoPath, L);
-      if (result?.latchKept) {
-        if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
-        else anyKeptUnattributed = true;
-      }
+      // @decision 182c01cc (round 2) — split EVERY result's own stillBlockedCoOccupants by whether it's
+      // also named in referencingRepoPaths (kept) or not (relocated) — never assume "has latchKept" means
+      // "every entry here is kept"; a single delegated call can carry BOTH kinds at once.
+      const { kept, relocated } = splitCoOccupants(result?.stillBlockedCoOccupants, result?.referencingRepoPaths);
+      for (const co of kept) keptReferencingRepoPaths.set(co.repoPath, co);
+      for (const co of relocated) relocatedCoOccupants.set(co.repoPath, co);
+      if (result?.latchKept && (result.referencingRepoPaths?.length ?? 0) === 0) anyKeptUnattributed = true;
     }
   }
   // Also sweep every PENDING (boot-unverifiable) entry sharing this exact identity — UNCONDITIONALLY, never
@@ -4005,7 +4261,9 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
         activeQuarantines.delete(k);
         pendingTouchedBasenames.push(path.basename(quarantinePathForKey(k)));
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        for (const rp of deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L)) keptReferencingRepoPaths.add(rp);
+        const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L);
+        for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, blockedCoOccupant(kc.repoPath, kc.sourceFile));
+        for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, blockedCoOccupant(rc.repoPath, rc.sourceFile));
       }
       pendingTouchedBasenames.push(p.sourceFile);
       // @decision 883e29bc (round 4) — never a bare unlink: `p` is already removed from
@@ -4016,7 +4274,7 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
       // mark set by an unrelated identity's own earlier read failure can't outlive it forever here either.
       const sweepResult = sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile, p.entry.tokens);
       if (sweepResult.kept) {
-        if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.add(rp);
+        if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(rp, blockedCoOccupant(rp, p.sourceFile));
         else anyKeptUnattributed = true;
       }
     }
@@ -4035,16 +4293,31 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     return {
       wasQuarantined: false,
       reason: `no active or pending quarantine is stored under the exact repoPath '${repoPath}' — see GET /internal/merge-quarantine/list for the exact recorded repoPath/id to clear by`,
+      stillBlockedCoOccupants: [],
     };
   }
+  const relocated = [...relocatedCoOccupants.values()];
   if (keptReferencingRepoPaths.size > 0) {
-    const refs = [...keptReferencingRepoPaths];
+    const refs = [...keptReferencingRepoPaths.keys()];
     // @decision 8db913e2 (Follow-up 95ea8d3f, Round 3) — generalized from "sharing this exact degraded key" (true only for
     // the 882d6cff shared-corrupt-latch shape): a self-referencing protected-copy/safety-tmp keep
     // (4900c365/ef651188) is a DIFFERENT mechanism, and the old wording misdescribed its own keep cause.
+    //
+    // @decision 182c01cc — dropped "this (and every other) claimant": THIS identity is already fully
+    // lifted and will NOT itself re-divert — only `refs` can. `refs` may still be OVER-reported (a known,
+    // separately-tracked stale-sourceFile gap, cd5a3cf9/c93e9e7a) — over-warning stays the safe direction.
+    const keptReason = keptOnlyReasonFor(refs);
+    // @decision 182c01cc (round 3, M1) — a repoPath BOTH kept and relocated is named ONCE, with BOTH
+    // routes, same fix as clearMergeQuarantineByKey's own dedupe — see the decision record.
+    const relocatedSet = new Set(relocated.map((co) => co.repoPath));
+    const combinedRelocated = relocated.map((co) => {
+      const keptCo = keptReferencingRepoPaths.get(co.repoPath);
+      return keptCo !== undefined && !co.alsoClear ? mergeKeptAndRelocatedCoOccupant(co, keptCo) : co;
+    });
     return {
       wasQuarantined: true, latchKept: true, referencingRepoPaths: refs,
-      reason: `this identity's own quarantine is lifted, but a latch file it referenced is still needed by ${refs.length} other claimant(s) that still structurally depend on it (${refs.join(", ")}) — it stays on disk, and this (and every other) claimant still depending on it WILL RE-DIVERT on the next restart until EVERY one of them has been cleared too. If they share this exact degraded key, you can lift all of them durably right now by clearing the shared latch by its own 24-hex id instead (POST /internal/merge-quarantine/clear-by-path with {id}); otherwise, clear each one by its own repoPath.`,
+      stillBlockedCoOccupants: [...combinedRelocated, ...[...keptReferencingRepoPaths.values()].filter((co) => !relocatedSet.has(co.repoPath))],
+      reason: composeReasonWithRelocated(keptReason, combinedRelocated),
     };
   }
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — kept for an UNATTRIBUTED reason (an unconfirmed EPERM/EBUSY
@@ -4052,10 +4325,19 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   if (anyKeptUnattributed) {
     return {
       wasQuarantined: true, latchKept: true, referencingRepoPaths: [],
-      reason: "this identity's own quarantine is lifted, but a physical latch file it referenced is still on disk — its content could not be durably confirmed removed or fully covered, so no specific other claimant can be named; it will re-divert on the next restart until a later successful clear resolves it.",
+      stillBlockedCoOccupants: relocated,
+      reason: composeReasonWithRelocated(
+        "this identity's own quarantine is lifted, but a physical latch file it referenced is still on disk — its content could not be durably confirmed removed or fully covered, so no specific other claimant can be named; it will re-divert on the next restart until a later successful clear resolves it.",
+        relocated,
+      ),
     };
   }
-  return { wasQuarantined: true };
+  // @decision 182c01cc (round 2, finding 1) — a PURE relocation (nothing kept at all) must still report
+  // it, never fall through to a plain, uninformative success.
+  if (relocated.length > 0) {
+    return { wasQuarantined: true, stillBlockedCoOccupants: relocated, reason: relocatedCoOccupantsReason(relocated) };
+  }
+  return { wasQuarantined: true, stillBlockedCoOccupants: [] };
 }
 
 /**
@@ -4378,18 +4660,48 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, before: MergeQuaran
  * `referencingRepoPaths`; re-resolving `repoPath` afterward finds nothing (a diverted entry never
  * blocks via the degraded-key tier), so without this the caller sees a plain, uninformative success.
  */
-export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantined: boolean; reason?: string; latchKept?: true; referencingRepoPaths?: string[] } {
+export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantined: boolean; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
   const before = resolveQuarantineFor(repoPath);
   const wasQuarantined = !!before;
   const clearResult = clearMergeQuarantine(repoPath);
   const after = resolveQuarantineFor(repoPath);
+  // @decision 182c01cc (round 2, item 3) — field consistency: every branch below carries
+  // stillBlockedCoOccupants (empty when none), never omits it just because this branch has nothing NEW
+  // to say about it.
+  const stillBlocked = clearResult?.stillBlockedCoOccupants ?? [];
   if (after) {
-    return { wasQuarantined: true, reason: stillQuarantinedReason(after, before) };
+    // @decision 182c01cc (round 3, m4) — compose the relocated clause here too, consistent with
+    // clearMergeQuarantineLatchFile's own still-quarantined branch — this used to drop it silently.
+    return {
+      wasQuarantined: true,
+      reason: composeReasonWithRelocated(stillQuarantinedReason(after, before), splitCoOccupants(stillBlocked, clearResult?.referencingRepoPaths).relocated),
+      stillBlockedCoOccupants: stillBlocked,
+    };
   }
   if (clearResult && "latchKept" in clearResult && clearResult.latchKept) {
-    return { wasQuarantined, latchKept: true, referencingRepoPaths: clearResult.referencingRepoPaths, reason: clearResult.reason };
+    return {
+      wasQuarantined, latchKept: true, referencingRepoPaths: clearResult.referencingRepoPaths,
+      stillBlockedCoOccupants: stillBlocked,
+      // @decision 182c01cc (round 2) — `clearResult.reason` is undefined for the resolvable/key-addressed
+      // path (clearMergeQuarantineByKey has no reason field of its own) — compose ONLY the relocated
+      // clause in that case, never drop it just because there was no base reason to append it to.
+      //
+      // @decision 182c01cc (round 3, m3) — compose fresh ONLY when `clearResult.reason` is absent; when
+      // it's already set (the ByRecordedPath/unresolvable dispatch), it ALREADY carries this exact
+      // clause — composing again duplicated the text. Idempotent: compose at most once, ever.
+      //
+      // @decision 182c01cc (round 5, nit) — the base is `keptOnlyReasonFor(refs)`, never `undefined`: a
+      // pure kept-only ByKey result (no relocated co-occupant to compose a clause from either) used to
+      // return NO reason text at all, unlike clearMergeQuarantineByRecordedPath's own equivalent branch.
+      reason: clearResult.reason !== undefined
+        ? clearResult.reason
+        : composeReasonWithRelocated(keptOnlyReasonFor(clearResult.referencingRepoPaths ?? []), splitCoOccupants(stillBlocked, clearResult.referencingRepoPaths).relocated),
+    };
   }
-  return { wasQuarantined };
+  if (stillBlocked.length > 0) {
+    return { wasQuarantined, stillBlockedCoOccupants: stillBlocked, reason: relocatedCoOccupantsReason(stillBlocked) };
+  }
+  return { wasQuarantined, stillBlockedCoOccupants: [] };
 }
 
 const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
@@ -4418,7 +4730,7 @@ const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
  * names only an identity actually freed, never one still blocked by its own independent (d4b25feb) record
  * — `stillQuarantined`/`reason` name that case instead of a silently-false success.
  */
-export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; stillQuarantined?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[] } | { ok: false; reason: string } {
+export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; stillQuarantined?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
   if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
     return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list)` };
   }
@@ -4476,14 +4788,27 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision 64283e06 (CR 3439677b, item 3) — surface clearMergeQuarantineByKey's OWN latchKept/
     // referencingRepoPaths too, the same way the pending branch below already does, instead of discarding
     // the return value.
+    // @decision 182c01cc (round 2, M12) — the OLD fields gated stillBlockedCoOccupants on `latchKept`,
+    // silently dropping a pure relocation — split first, carry it unconditionally.
+    const activeStillBlocked = activeClearResult?.stillBlockedCoOccupants ?? [];
+    const { relocated: activeRelocated } = splitCoOccupants(activeStillBlocked, activeClearResult?.referencingRepoPaths);
     const activeLatchKeptFields = activeClearResult && "latchKept" in activeClearResult && activeClearResult.latchKept
       ? { latchKept: true as const, referencingRepoPaths: activeClearResult.referencingRepoPaths } : {};
     const after = resolveQuarantineFor(activeMatch.entry.repoPath);
     const sameIdentityStillQuarantined = !!after && directPathIdentity(after.repoPath) === directPathIdentity(activeMatch.entry.repoPath);
     if (sameIdentityStillQuarantined) {
-      return { ok: true, wasQuarantined: true, liftedRepoPaths: [], stillQuarantined: true, reason: stillQuarantinedReason(after, activeMatch.entry), ...activeLatchKeptFields };
+      return {
+        ok: true, wasQuarantined: true, liftedRepoPaths: [], stillQuarantined: true,
+        reason: composeReasonWithRelocated(stillQuarantinedReason(after, activeMatch.entry), activeRelocated),
+        stillBlockedCoOccupants: activeStillBlocked, ...activeLatchKeptFields,
+      };
     }
-    return { ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath], ...activeLatchKeptFields };
+    return {
+      ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath],
+      stillBlockedCoOccupants: activeStillBlocked,
+      ...(activeRelocated.length > 0 ? { reason: relocatedCoOccupantsReason(activeRelocated) } : {}),
+      ...activeLatchKeptFields,
+    };
   }
   if (matchedPending.length > 0) {
     // @decision 82032b5c (round 2 CR, Minor 5) — a PENDING entry can ALSO carry `contributorRepoPaths`
@@ -4523,6 +4848,10 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => !matchedPending.includes(p));
     const orphanFilesToSweep = new Set<string>();
     const keptRepoPaths = new Set<string>();
+    // @decision 182c01cc (round 4, CR3 finding 4) — a proper `{repoPath, sourceFile}` per kept occupant,
+    // never just its repoPath, so `stillBlockedCoOccupants` can name a real `{id}` route — see the
+    // decision record's "Round 4" section for why this branch used to hard-code `[]`.
+    const keptCoOccupants = new Map<string, BlockedCoOccupant>();
     // @decision 8db913e2 (round 4) — candidates + touched basenames for the ONE tombstone call below,
     // made after every mutation in this block is already applied — see `tombstoneIfNotSurviving`'s doc.
     const pendingCandidateTokens: string[] = [];
@@ -4534,7 +4863,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       pendingTouchedBasenames.push(pending.sourceFile);
       for (const f of pending.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
       const ownSweep = sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile);
-      if (ownSweep.kept) for (const rp of ownSweep.referencingRepoPaths) keptRepoPaths.add(rp);
+      if (ownSweep.kept) for (const rp of ownSweep.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupant(rp, pending.sourceFile)); }
     }
     // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
     // pending entry's own tokens, captured as each is processed above, before `tombstoneIfNotSurviving`.
@@ -4552,12 +4881,15 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       ? sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`)
       // @decision 8db913e2 (Follow-up f2cc5f18) — same `pendingCandidateTokens`, still in scope.
       : sweepOrphanLatchFileIfUnreferenced(`${id}.json`, pendingCandidateTokens);
-    if (finalSweep.kept) for (const rp of finalSweep.referencingRepoPaths) keptRepoPaths.add(rp);
+    // @decision 182c01cc (round 5, MAJOR) — `blockedCoOccupantForReferencer`, never the bare
+    // `blockedCoOccupant`: a repoPath here can be a mere `orphanLatchFiles` cross-reference to
+    // `${id}.json`, for which that id is a fixed point, not a working route. See that function's own doc.
+    if (finalSweep.kept) for (const rp of finalSweep.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, `${id}.json`)); }
     // @decision be79f4d5 — ownership-checked (never the unconditional sibling): a DIFFERENT, surviving
     // pending/active entry can own a `.tmp-<pid>` residue sharing THIS exact hash prefix (e.g. its own
     // stale graduation source) even though no entry actually matched/removed above claims it.
     const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id);
-    if (tmpSweep.kept) for (const rp of tmpSweep.referencingRepoPaths) keptRepoPaths.add(rp);
+    if (tmpSweep.kept) for (const ke of tmpSweep.keptEntries) { keptRepoPaths.add(ke.repoPath); keptCoOccupants.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile)); }
     // @decision 64283e06 — mirrors the active-match branch's truthful-liftedRepoPaths rule:
     // `matchedPending` can span MULTIPLE DISTINCT identities (882d6cff's multi-claimant shape) — re-resolve
     // EACH one; a repoPath still quarantined elsewhere is left OUT, never assumed fully freed.
@@ -4571,8 +4903,11 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       if (sameIdentityStillQuarantined) stillBlockedReasons.push(stillQuarantinedReason(after, before));
       else liftedRepoPaths.push(repoPath);
     }
+    // @decision 182c01cc (round 2/4) — this branch's own sweep mechanisms never relocate a foreign
+    // occupant to a new latch — there is no relocated-co-occupant mechanism reachable here — but a kept
+    // one is real (round 4 fix: `keptCoOccupants`, never a hard-coded `[]`).
     return {
-      ok: true, wasQuarantined: true, liftedRepoPaths,
+      ok: true, wasQuarantined: true, liftedRepoPaths, stillBlockedCoOccupants: [...keptCoOccupants.values()],
       ...(stillBlockedReasons.length > 0 ? { stillQuarantined: true, reason: stillBlockedReasons.join(" ") } : {}),
       ...(keptRepoPaths.size > 0 ? { latchKept: true, referencingRepoPaths: [...keptRepoPaths] } : {}),
     };
@@ -4588,11 +4923,20 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // an unconditional-by-hash delete.
   const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id);
   const keptRepoPaths = new Set<string>([...ownSweep.referencingRepoPaths, ...tmpSweep.referencingRepoPaths]);
+  // @decision 182c01cc (round 4, CR3 finding 4) — a real `BlockedCoOccupant[]`, never a hard-coded `[]`
+  // — see the decision record's "Round 4" section.
+  const keptCoOccupants = new Map<string, BlockedCoOccupant>();
+  // @decision 182c01cc (round 5, MAJOR) — same fix as the active-match branch above: `${id}.json`'s own id
+  // is not a working route for a mere `orphanLatchFiles` cross-referencer — see blockedCoOccupantForReferencer's own doc.
+  for (const rp of ownSweep.referencingRepoPaths) keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, `${id}.json`));
+  for (const ke of tmpSweep.keptEntries) keptCoOccupants.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile));
   // @decision 8db913e2 (Follow-up f2cc5f18) — a KEPT sweep with no attributable repoPath must still
   // surface as `latchKept`, mirroring `clearMergeQuarantineByKey`'s own `anyKeptUnattributed`.
   const anyKeptUnattributed = (ownSweep.kept && ownSweep.referencingRepoPaths.length === 0) || (tmpSweep.kept && tmpSweep.referencingRepoPaths.length === 0);
+  // @decision 182c01cc (round 2/4) — this raw fallback's own sweeps never relocate anything, but a kept
+  // one is real (round 4 fix).
   return {
-    ok: true, wasQuarantined: false, liftedRepoPaths: [],
+    ok: true, wasQuarantined: false, liftedRepoPaths: [], stillBlockedCoOccupants: [...keptCoOccupants.values()],
     ...(keptRepoPaths.size > 0 ? { latchKept: true, referencingRepoPaths: [...keptRepoPaths] }
       : anyKeptUnattributed ? { latchKept: true, referencingRepoPaths: [] } : {}),
   };

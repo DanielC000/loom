@@ -56,6 +56,31 @@ function makeNestedGitFixture(tag) {
   return { outer, inner };
 }
 
+// A REAL reboot — a fresh, second child process, SAME LOOM_HOME, re-scanning the quarantine dir from
+// scratch (mirrors merge-quarantine-unresolvable-path.mjs's own `rebootInChildProcess`). Used for a
+// DURABILITY claim (card 182c01cc round 3, lesson 203) — an in-process check can never tell "lifted" from
+// "lifted only until the next boot re-scans disk". Writes its result to a TEMP FILE rather than stdout:
+// the real module can `console.log` (not just `console.error`) during a boot/sweep (e.g. "deleted orphan
+// latch ..."), which would otherwise corrupt a stdout-JSON capture.
+function rebootInChildProcess(repoPaths, tag) {
+  const outFile = path.join(os.tmpdir(), `loom-mqcbp-reboot-out-${tag}-${sfx}.json`);
+  const childScript = `
+    const fs = (await import("node:fs")).default;
+    const { reenterMergeQuarantinesAtBoot, assertRepoNotQuarantined, listActiveMergeQuarantines } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    const repoPaths = ${JSON.stringify(repoPaths)};
+    const found = reenterMergeQuarantinesAtBoot(repoPaths);
+    const refusals = Object.fromEntries(repoPaths.map((p) => [p, assertRepoNotQuarantined(p).ok]));
+    const activeForThese = listActiveMergeQuarantines().filter((q) => repoPaths.includes(q.repoPath)).length;
+    fs.writeFileSync(${JSON.stringify(outFile)}, JSON.stringify({ foundRepos: found.map((q) => q.repoPath), refusals, activeForThese }));
+  `;
+  execFileSync(process.execPath, ["--input-type=module", "-e", childScript], {
+    env: { ...process.env, LOOM_HOME: loomHome },
+  });
+  const result = JSON.parse(fs.readFileSync(outFile, "utf8"));
+  fs.rmSync(outFile, { force: true });
+  return result;
+}
+
 // ===================== (A) quarantineLatchIdFor — format =====================
 const repoA = freshDir("repoA");
 const idA = quarantineLatchIdFor(repoA);
@@ -1396,12 +1421,53 @@ function hashKey(key) {
   check("(Z1) THE FIX: the file is KEPT (not silently deleted) while repoZ1_C1/C2 still reference it", clearZ1.ok === true && clearZ1.latchKept === true);
   check("(Z1) the result names BOTH referencing repoPaths", clearZ1.ok === true && clearZ1.referencingRepoPaths?.includes(repoZ1_C1) && clearZ1.referencingRepoPaths?.includes(repoZ1_C2));
   check("(Z1) the file genuinely SURVIVES on disk", fs.existsSync(latchPathZ1_Ghost));
+  // *** THE FIX (round 4, CR3 finding 4) *** — this raw-fallback branch used to hard-code
+  // `stillBlockedCoOccupants:[]` even while reporting `latchKept:true` — field-inconsistent with every
+  // other clear path in this card. Both referencing repoPaths now get a real `{id}` route too.
+  const z1CoC1 = clearZ1.stillBlockedCoOccupants?.find((c) => c.repoPath === repoZ1_C1);
+  const z1CoC2 = clearZ1.stillBlockedCoOccupants?.find((c) => c.repoPath === repoZ1_C2);
+  check("*** THE FIX (round 4, Z1) *** stillBlockedCoOccupants names BOTH referencing repoPaths", !!z1CoC1 && !!z1CoC2);
 
-  // Positive control: this is NOT "never delete" — once nothing references it, it's swept for real.
-  clearMergeQuarantine(repoZ1_C1);
-  check("(Z1) still survives with ONE referencing repo left", fs.existsSync(latchPathZ1_Ghost));
-  clearMergeQuarantine(repoZ1_C2);
-  check("(Z1) POSITIVE CONTROL: once BOTH referencing repos are cleared, the file is finally swept for real", !fs.existsSync(latchPathZ1_Ghost));
+  // *** THE FIX (round 5, MAJOR) *** — round 4's own offered `{id}` route was `hashZ1_Ghost` itself, the
+  // id this exact clear just acted on: C1/C2 only CROSS-REFERENCE the ghost's file via `orphanLatchFiles`,
+  // they do not own it, so that id is a FIXED POINT for them — nothing in memory ever matches it as their
+  // OWN identity, and re-clearing it no-ops forever while the repo stays blocked. The working route is
+  // each repo's own real latch id instead.
+  const ownIdC1 = quarantineLatchFileIdsFor(activeMergeQuarantineFor(repoZ1_C1))[0];
+  const ownIdC2 = quarantineLatchFileIdsFor(activeMergeQuarantineFor(repoZ1_C2))[0];
+  check("*** THE FIX (round 5, MAJOR) *** C1's offered route id is its OWN latch id, never the ghost's", z1CoC1.route.id === ownIdC1 && z1CoC1.route.id !== hashZ1_Ghost);
+  check("*** THE FIX (round 5, MAJOR) *** C2's offered route id is its OWN latch id, never the ghost's", z1CoC2.route.id === ownIdC2 && z1CoC2.route.id !== hashZ1_Ghost);
+
+  // NEGATIVE CONTROL reproducing round 4's own bug: re-clearing the GHOST's id (what the old test asserted
+  // as "the real route") is a no-op — C1 is still blocked.
+  clearMergeQuarantineLatchFile(hashZ1_Ghost);
+  check("(Z1) negative control: re-clearing the GHOST's id is a FIXED POINT — C1 is still quarantined", !!activeMergeQuarantineFor(repoZ1_C1));
+
+  // *** THE FIX (round 5, MAJOR) *** — clearing the OFFERED route genuinely lifts C1 in-process.
+  const clearByOwnIdZ1 = clearMergeQuarantineLatchFile(z1CoC1.route.id);
+  check("(Z1) THE FIX: clearing C1 by its OWN offered route id reports ok:true", clearByOwnIdZ1.ok === true);
+  check("(Z1) THE FIX: C1 is genuinely unblocked in-process", !activeMergeQuarantineFor(repoZ1_C1));
+  check("(Z1) the ghost file still survives — C1's own clear never touched it (C2 still references it)", fs.existsSync(latchPathZ1_Ghost));
+  // NOTE: deliberately no intermediate reboot here, in either direction — while the ghost's own corrupt
+  // file is STILL on disk, a boot re-scan would fail closed and durably RE-WRITE a fresh fail-closed latch
+  // for C1 to disk (the ghost is still unreadable, so a boot can't yet tell it's resolved) — a side effect
+  // this test's own later clears/sweeps (keyed off THIS process's in-memory state) would never account
+  // for, contaminating the durability proof below. Go straight to resolving the root cause instead.
+
+  // *** THE FIX (round 5, MAJOR) *** — clear C2 by ITS OWN offered route too (never by repoPath, which
+  // round 4's test used and which proves nothing about the fix). Once BOTH referencing repos are cleared
+  // through their own real routes, the ghost's own corrupt file is finally unreferenced and swept for
+  // real — and NEITHER C1 NOR C2 re-quarantines after a REAL reboot (lesson 203: an in-process check alone
+  // can't tell "lifted" from "lifted only until the next boot re-scans disk").
+  const clearZ1Again = clearMergeQuarantineLatchFile(hashZ1_Ghost); // ghost still corrupt; C2 still references it — same as before, nothing changed yet
+  const z1CoC2Again = clearZ1Again.stillBlockedCoOccupants?.find((c) => c.repoPath === repoZ1_C2);
+  check("(Z1) sanity: C2's offered route is still its own id, unaffected by C1's own clear", !!z1CoC2Again && z1CoC2Again.route.id === ownIdC2);
+  const clearByOwnIdZ1C2 = clearMergeQuarantineLatchFile(z1CoC2Again.route.id);
+  check("(Z1) THE FIX: clearing C2 by its OWN offered route id reports ok:true", clearByOwnIdZ1C2.ok === true);
+  check("(Z1) THE FIX: C2 is genuinely unblocked in-process", !activeMergeQuarantineFor(repoZ1_C2));
+  check("(Z1) POSITIVE CONTROL: once BOTH referencing repos are cleared via their OWN routes, the ghost file is finally swept for real", !fs.existsSync(latchPathZ1_Ghost));
+  const rebootZ1AfterBoth = rebootInChildProcess([repoZ1_C1, repoZ1_C2], "z1-both-own-ids");
+  check("*** THE FIX (round 5, MAJOR) *** with the ghost file genuinely gone, BOTH C1 and C2 stay unblocked after a REAL reboot", rebootZ1AfterBoth.refusals[repoZ1_C1] === true && rebootZ1AfterBoth.refusals[repoZ1_C2] === true && rebootZ1AfterBoth.activeForThese === 0);
 }
 
 // ===================== (Z1-route) POST /internal/merge-quarantine/clear-by-path {id} forwards latchKept/referencingRepoPaths over REAL HTTP (card 9cabd143, Round 2 item 5) =====================
@@ -1641,6 +1707,505 @@ function hashKey(key) {
   fs.renameSync(parkedAC, repoAC); // restore, then cleanup
   clearMergeQuarantineByRecordedPath(repoAC);
   check("(AC cleanup) repoAC is fully cleared", !activeMergeQuarantineFor(repoAC));
+}
+
+// ===================== (AD) stillBlockedCoOccupants names a co-occupant found at the physical file being
+// deleted, including one re-homed to a NEW pending id (card 182c01cc — the a4481c3b repro shape: X a
+// placeholder occupying sub's own key file) =====================
+// Root cause: deleteMergeQuarantineLatchByKey's protect wrappers (protectDegradedOccupantBeforeDelete,
+// protectUnincorporatedOccupantBeforeDelete — exercised below, since `clearedEntry` is ALWAYS passed
+// whenever an active `entry` exists — and the inline foreignPending branch) each already have the
+// foreign occupant's own repoPath in hand before calling protectOccupantContentBeforeDelete, which used
+// to discard it behind a bare boolean. THE FIX threads {ok, persisted:{repoPath,sourceFile}} through to
+// a `stillBlockedCoOccupants: [{repoPath, route:{repoPath,id}}]` field on clearMergeQuarantineByKey /
+// clearMergeQuarantine / clearMergeQuarantineReporting / clearMergeQuarantineByRecordedPath.
+//
+// Construction: X's content is written DIRECTLY into sub's own physical final file AFTER sub's own
+// genuine raise — sub's in-memory entry is unaffected by the overwrite, but a fresh disk read at clear
+// time (unincorporatedOccupantRepoPathAt) finds X's foreign bytes sitting there.
+{
+  // --- (AD1) MINT branch: X has no pre-existing pending record anywhere — first discovery. ---
+  const subAD1 = freshDir("subAD1");
+  enterMergeQuarantine(subAD1, "b", "sub's own genuine raise (AD1)");
+  const ksubAD1 = canonicalRepoLockKey(subAD1);
+  const subFinalAD1 = path.join(MERGE_QUARANTINE_DIR, `${hashKey(ksubAD1)}.json`);
+  check("(AD1 precondition) sub's own final file exists after its own raise", fs.existsSync(subFinalAD1));
+  const xAD1 = path.join(os.tmpdir(), `loom-mqcbp-xAD1-never-exists-${sfx}`); // X's own repoPath — never created
+  fs.writeFileSync(subFinalAD1, JSON.stringify({
+    repoPath: xAD1, branch: "x-ad1-branch", reason: "X's own placeholder, now occupying sub's own key file (AD1)",
+    enteredAt: Date.now(), tokens: ["x-ad1-token"],
+  }, null, 2) + "\n");
+  check("(AD1 precondition) sub's own in-memory entry is unaffected by the overwrite", activeMergeQuarantineFor(subAD1)?.repoPath === subAD1);
+
+  const clearAD1 = clearMergeQuarantineReporting(subAD1);
+  check("(AD1) clearing sub reports wasQuarantined:true (sub's own raise is genuinely lifted)", clearAD1.wasQuarantined === true);
+  // @decision 182c01cc (round 2, finding 2) — a RELOCATED co-occupant is NOT "kept": X's old file is
+  // genuinely gone (durably moved to a new latch), so latchKept must stay ABSENT here, never true.
+  check("*** THE FIX (AD1, round 2) *** latchKept is ABSENT (a relocation is never \"kept\")", clearAD1.latchKept === undefined);
+  check("*** THE FIX (AD1, MINT) *** stillBlockedCoOccupants names X", Array.isArray(clearAD1.stillBlockedCoOccupants) && clearAD1.stillBlockedCoOccupants.some((c) => c.repoPath === xAD1));
+  const coAD1 = clearAD1.stillBlockedCoOccupants.find((c) => c.repoPath === xAD1);
+  check("*** THE FIX (AD1) *** X's own route names both a repoPath and a 24-hex id form", coAD1?.route?.repoPath === xAD1 && /^[0-9a-f]{24}$/.test(coAD1?.route?.id ?? ""));
+  check("*** THE FIX (AD1, round 2) *** the reason is the RELOCATED clause, never the kept/\"stays on disk\" wording", typeof clearAD1.reason === "string" && clearAD1.reason.includes("RELOCATED") && clearAD1.reason.includes(xAD1) && !clearAD1.reason.includes("stays on disk"));
+  check("(AD1) X is STILL genuinely blocked after sub's own clear", !!activeMergeQuarantineFor(xAD1));
+  check("(AD1) sub's own OLD key file is gone (X was durably relocated off it, not left in place)", !fs.existsSync(subFinalAD1));
+  check("(AD1) X survives under a NEW, independent filename elsewhere on disk", fs.readdirSync(MERGE_QUARANTINE_DIR).some((f) => fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8").includes("x-ad1-token")));
+
+  // The named route is genuinely actionable, not just string-shaped.
+  const clearXByIdAD1 = clearMergeQuarantineLatchFile(coAD1.route.id);
+  check("(AD1) THE NAMED ROUTE WORKS: clearing X by its own reported id lifts it for real", clearXByIdAD1.ok === true && clearXByIdAD1.wasQuarantined === true);
+  check("(AD1) X is now actually unblocked", !activeMergeQuarantineFor(xAD1));
+}
+
+{
+  // --- (AD2) X ALREADY has its own independent pending record (a genuine prior raise, now unresolvable)
+  // BEFORE a SEPARATE, later incident ALSO squats sub's own key file with X's same identity. Measured
+  // live (not assumed): protectOccupantContentBeforeDelete's own atFilenameIdx/atFinalBasenameIdx match
+  // against the RECONCILED target filename, which this fixture's two independent divert events do not
+  // happen to collide on — so this reaches the MINT branch a second time (two independent on-disk
+  // records for the SAME identity X), never a union. (AD1) above already proves the pure first-mint
+  // case; this proves the fix still correctly names X EVEN WHEN X already had unrelated history — the
+  // thing actually under test here, regardless of which of the two reachable sub-branches runs.
+  const xHomeAD2 = freshDir("xAD2-home");
+  enterMergeQuarantine(xHomeAD2, "b", "X's own genuine FIRST raise, while resolvable (AD2)");
+  const parkedXAD2 = path.join(os.tmpdir(), `loom-mqcbp-parked-xad2-${sfx}`);
+  fs.renameSync(xHomeAD2, parkedXAD2);
+  enterMergeQuarantine(xHomeAD2, "b", "X's own SECOND raise, now unresolvable — mints its own pending-divert record (AD2)");
+  check("(AD2 precondition) X now has its own independent PENDING record", listActiveMergeQuarantines().some((e) => e.repoPath === xHomeAD2));
+
+  const subAD2 = freshDir("subAD2");
+  enterMergeQuarantine(subAD2, "b", "sub's own genuine raise (AD2)");
+  const ksubAD2 = canonicalRepoLockKey(subAD2);
+  const subFinalAD2 = path.join(MERGE_QUARANTINE_DIR, `${hashKey(ksubAD2)}.json`);
+  // X's SAME identity, now ALSO squatting sub's own key file — the second-incident shape.
+  fs.writeFileSync(subFinalAD2, JSON.stringify({
+    repoPath: xHomeAD2, branch: "x-ad2-branch-squat", reason: "X's own placeholder, now ALSO occupying sub's own key file (AD2)",
+    enteredAt: Date.now(), tokens: ["x-ad2-token-squat"],
+  }, null, 2) + "\n");
+
+  const clearAD2 = clearMergeQuarantineReporting(subAD2);
+  check("(AD2) clearing sub reports wasQuarantined:true", clearAD2.wasQuarantined === true);
+  // @decision 182c01cc (round 2, finding 2) — same reasoning as (AD1): a relocation is never "kept".
+  check("*** THE FIX (AD2, round 2) *** latchKept is ABSENT", clearAD2.latchKept === undefined);
+  check("*** THE FIX (AD2) *** stillBlockedCoOccupants names X, even though X already had unrelated prior history", Array.isArray(clearAD2.stillBlockedCoOccupants) && clearAD2.stillBlockedCoOccupants.some((c) => c.repoPath === xHomeAD2));
+  check("(AD2) X's own ORIGINAL (first-raise) pending record is untouched — this clear never touched it", !!activeMergeQuarantineFor(xHomeAD2));
+  check("(AD2) X's SQUATTING content is ALSO still enforced somewhere on disk, not silently dropped", fs.readdirSync(MERGE_QUARANTINE_DIR).some((f) => fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8").includes("x-ad2-token-squat")));
+  check("(AD2) sub's own OLD key file is gone (the squat content was durably relocated off it)", !fs.existsSync(subFinalAD2));
+
+  fs.renameSync(parkedXAD2, xHomeAD2); // restore for cleanup
+  clearMergeQuarantineByRecordedPath(xHomeAD2);
+}
+
+{
+  // --- (AD3) THE SAME mechanism, reached via clearMergeQuarantineByRecordedPath (/clear-by-path
+  // {repoPath}) instead of the key-addressed clearMergeQuarantineReporting — AND the triage note's own
+  // wording fix: sub's own identity must NOT be named in the "WILL RE-DIVERT" claim (it is already fully
+  // lifted and will not itself re-divert) — only the OTHER claimant (X here) can.
+  const subAD3 = freshDir("subAD3");
+  enterMergeQuarantine(subAD3, "b", "sub's own genuine raise (AD3)");
+  const ksubAD3 = canonicalRepoLockKey(subAD3);
+  const subFinalAD3 = path.join(MERGE_QUARANTINE_DIR, `${hashKey(ksubAD3)}.json`);
+  const xAD3 = path.join(os.tmpdir(), `loom-mqcbp-xAD3-never-exists-${sfx}`);
+  fs.writeFileSync(subFinalAD3, JSON.stringify({
+    repoPath: xAD3, branch: "x-ad3-branch", reason: "X's own placeholder, occupying sub's own key file (AD3)",
+    enteredAt: Date.now(), tokens: ["x-ad3-token"],
+  }, null, 2) + "\n");
+
+  const clearAD3 = clearMergeQuarantineByRecordedPath(subAD3);
+  // @decision 182c01cc (round 2, finding 2) — this is a PURE relocation (X has no pre-existing record,
+  // sub itself is never kept) — latchKept must stay ABSENT; the OLD "WILL RE-DIVERT ... stays on disk"
+  // wording is false for this shape (X's content lives at a BRAND-NEW name, nothing stays at the old
+  // one), so the reason must be the RELOCATED clause instead.
+  check("(AD3) clearMergeQuarantineByRecordedPath ALSO reaches the SAME fix (identity-addressed route)", clearAD3.wasQuarantined === true && clearAD3.latchKept === undefined);
+  check("*** THE FIX (AD3) *** stillBlockedCoOccupants names X here too", Array.isArray(clearAD3.stillBlockedCoOccupants) && clearAD3.stillBlockedCoOccupants.some((c) => c.repoPath === xAD3));
+  check("*** THE WORDING FIX (AD3, round 2) *** the reason is the RELOCATED clause, names X, and never claims the old file \"stays on disk\"", typeof clearAD3.reason === "string" && clearAD3.reason.includes("RELOCATED") && clearAD3.reason.includes(xAD3) && !clearAD3.reason.includes("stays on disk"));
+  check("(AD3) sub itself is genuinely NOT quarantined after this clear", !activeMergeQuarantineFor(subAD3));
+  // Card 182c01cc, round 2, M8 (CR test-gap): verify the route id clearMergeQuarantineByRecordedPath's
+  // OWN matched-loop fold names is the CORRECT one, not merely a well-formed 24-hex string — a wrong id
+  // (e.g. a stale/mismatched hash) would still pass the regex check above but fail to actually clear X.
+  const coAD3 = clearAD3.stillBlockedCoOccupants.find((c) => c.repoPath === xAD3);
+  const clearXByIdAD3 = clearMergeQuarantineLatchFile(coAD3.route.id);
+  check("*** THE FIX (AD3, M8) *** the fold's own route id is genuinely CORRECT — clearing X by it actually lifts X", clearXByIdAD3.ok === true && clearXByIdAD3.wasQuarantined === true);
+  check("(AD3) X is now actually unblocked", !activeMergeQuarantineFor(xAD3));
+}
+
+{
+  // --- (AE) test gap M2 (CR): the INLINE `foreignPending` branch inside deleteMergeQuarantineLatchByKey
+  // is reached when sub has NO entry of its own at all (`clearedEntry`/`entry` both undefined, so
+  // protectUnincorporatedOccupantBeforeDelete never even runs), and X is ALREADY a genuine PENDING
+  // record (discovered via a real boot, never a direct file overwrite after a raise like (AD1)-(AD3)
+  // above) whose own `sourceFile` happens to equal sub's own key-hash filename.
+  //
+  // DISCOVERED while writing this test (not something the CR named, but caught by it): `entry`/
+  // `clearedEntry` undefined is EXACTLY the precondition that ALSO arms the pre-existing
+  // `contentClaimants` check (`!clearingRepoPath && !clearedEntry`), which independently re-reads
+  // `final`'s raw on-disk bytes and finds X too — so in every real reachable case, `foreignPending`'s
+  // own protect/relocate and `contentClaimants`'s own kept-tracking BOTH fire on the SAME foreign
+  // occupant: X's OLD file genuinely stays on disk (contentClaimants vetoes the unlink — latchKept:true,
+  // referencingRepoPaths names X), WHILE the SAME protect call's own re-point ALSO moves X's in-memory
+  // bookkeeping to a brand-new latch.
+  //
+  // *** ROUND 3 (M1, CR2 80217ba5) *** — round 2's own dedupe (pick RELOCATED, drop KEPT) was ITSELF a
+  // bug: it under-reports. Empirically verified below (a REAL reboot, in a fresh child process, same
+  // LOOM_HOME) across all four possible clear orderings: relocated-ALONE lifts X in-process but
+  // RE-QUARANTINES on reboot (the OLD kept file still durably holds X's own record); kept-ALONE is a
+  // no-op (nothing in memory matches the old file's id anymore, so it only sweeps dead debris without
+  // lifting X); even kept-THEN-relocated re-blocks on reboot (clearing kept first, before anything
+  // references it as a live orphan, strands it on disk — the later relocated-clear never revisits it).
+  // Only relocated-THEN-kept is durable. So X must be named ONCE, with BOTH routes, in that explicit
+  // order — never deduped down to one.
+  const subAE = freshDir("subAE");
+  const ksubAE = canonicalRepoLockKey(subAE);
+  const subHashAE = hashKey(ksubAE);
+  const subFinalAE = path.join(MERGE_QUARANTINE_DIR, `${subHashAE}.json`);
+  const xAE = path.join(os.tmpdir(), `loom-mqcbp-xAE-never-exists-${sfx}`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(subFinalAE, JSON.stringify({
+    repoPath: xAE, branch: "x-ae-branch", reason: "X's own placeholder, occupying sub's own key file (AE)",
+    enteredAt: Date.now(), tokens: ["x-ae-token"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([subAE]); // subAE never raised — X diverts to pending, sourceFile=subHashAE.json
+  check("(AE precondition) X loaded as a PENDING entry (no resolvedKey)", listActiveMergeQuarantines().some((e) => e.repoPath === xAE));
+  check("(AE precondition) sub itself has no entry at all — no active raise ever happened", !activeMergeQuarantineFor(subAE));
+
+  const clearAE = clearMergeQuarantineReporting(subAE);
+  check("*** THE FIX (AE, M2) *** stillBlockedCoOccupants names X", Array.isArray(clearAE.stillBlockedCoOccupants) && clearAE.stillBlockedCoOccupants.some((c) => c.repoPath === xAE));
+  check("(AE) X is still genuinely blocked", !!activeMergeQuarantineFor(xAE));
+  // contentClaimants ALSO fires here (see the note above) — X's OLD file is genuinely kept on disk, so
+  // latchKept IS true for this specific construction, unlike (AD1)-(AD3)'s pure-relocation shapes.
+  check("(AE) latchKept is true (contentClaimants ALSO independently catches X here — the OLD file genuinely survives)", clearAE.latchKept === true);
+  // X must still be named EXACTLY ONCE (one object), never twice with two different routes — round 3
+  // changed WHAT that one object carries, not whether there's one of it.
+  check("(AE, round 3) X is named EXACTLY ONCE in stillBlockedCoOccupants", clearAE.stillBlockedCoOccupants.filter((c) => c.repoPath === xAE).length === 1);
+  const coAE = clearAE.stillBlockedCoOccupants.find((c) => c.repoPath === xAE);
+  // *** THE FIX (AE, round 3, M1) *** — X carries BOTH routes now: `route` (relocated, clear FIRST) and
+  // `alsoClear` (the OLD kept file, clear SECOND) — never deduped down to one.
+  check("*** THE FIX (AE, round 3) *** X carries BOTH routes: route (relocated) and alsoClear (kept)", !!coAE.route && !!coAE.alsoClear && coAE.route.id !== coAE.alsoClear.id);
+  check("(AE, round 3) the reason states the required order explicitly: relocated id FIRST, then kept id", typeof clearAE.reason === "string" && clearAE.reason.includes(coAE.route.id) && clearAE.reason.includes(coAE.alsoClear.id) && /FIRST/.test(clearAE.reason) && /THEN/.test(clearAE.reason));
+
+  // *** THE DURABILITY PROOF (round 3, lesson 203: a real reboot, not reasoning) *** — clearing ONLY the
+  // relocated route lifts X in-process (as before) but does NOT survive a reboot: the kept file still
+  // holds X's own record on disk.
+  check("(AE) clearing the relocated route alone lifts X in-process", clearMergeQuarantineLatchFile(coAE.route.id).wasQuarantined === true);
+  check("(AE) X reads as unblocked in-process after the relocated-only clear", !activeMergeQuarantineFor(xAE));
+  const rebootAfterRelocatedOnly = rebootInChildProcess([subAE, xAE], "AE-relocated-only");
+  check("*** THE FIX (AE, round 3) *** relocated-ONLY does NOT survive a reboot — X re-quarantines (a single step is not durable)", rebootAfterRelocatedOnly.refusals[xAE] === false && rebootAfterRelocatedOnly.activeForThese > 0);
+
+  // Clear the SECOND, required step (the kept id) too, then reboot again — NOW it must be durably gone.
+  const alsoClearResultAE = clearMergeQuarantineLatchFile(coAE.alsoClear.id);
+  check("(AE) the second (kept) clear itself succeeds (ok:true — it may report wasQuarantined:false, a raw-file sweep, which is fine)", alsoClearResultAE.ok === true);
+  const rebootAfterBothSteps = rebootInChildProcess([subAE, xAE], "AE-both-steps");
+  check("*** THE FIX (AE, round 3) *** relocated-THEN-kept (both steps, in order) IS durable — X stays lifted across a reboot", rebootAfterBothSteps.refusals[xAE] === true && rebootAfterBothSteps.activeForThese === 0);
+}
+
+// ===================== (AE2) card 182c01cc round 4, nit 3: the round-3 table/comment claimed all 4
+// orderings were "verified with a real reboot" — AE above (just before this scenario) only asserted 2
+// (relocated-only, relocated-then-kept) with a real reboot. This scenario adds the kept-ALONE ordering,
+// with a real reboot, on an independent fixture (the SAME AE shape, freshly constructed — AE's own X is
+// already durably lifted by the time this runs). =====================
+{
+  const subAE2 = freshDir("subAE2");
+  const ksubAE2 = canonicalRepoLockKey(subAE2);
+  const subHashAE2 = hashKey(ksubAE2);
+  const subFinalAE2 = path.join(MERGE_QUARANTINE_DIR, `${subHashAE2}.json`);
+  const xAE2 = path.join(os.tmpdir(), `loom-mqcbp-xAE2-never-exists-${sfx}`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(subFinalAE2, JSON.stringify({
+    repoPath: xAE2, branch: "x-ae2-branch", reason: "X's own placeholder, occupying sub's own key file (AE2)",
+    enteredAt: Date.now(), tokens: ["x-ae2-token"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([subAE2]);
+  const clearAE2 = clearMergeQuarantineReporting(subAE2);
+  const coAE2 = clearAE2.stillBlockedCoOccupants.find((c) => c.repoPath === xAE2);
+  check("(AE2 precondition) X carries both routes, same shape as AE", !!coAE2?.route && !!coAE2?.alsoClear);
+
+  // KEPT-ALONE: clear only the alsoClear (kept) id — a no-op in-process (nothing in memory matches the
+  // OLD file's id anymore, since X's own bookkeeping already moved to the relocated name) — and a real
+  // reboot must show X is STILL genuinely blocked (nothing was ever durably lifted).
+  const keptAloneResult = clearMergeQuarantineLatchFile(coAE2.alsoClear.id);
+  check("(AE2) clearing the kept id alone is a no-op (wasQuarantined:false — nothing in memory matched it)", keptAloneResult.ok === true && keptAloneResult.wasQuarantined === false);
+  check("(AE2) X still reads as blocked in-process after the kept-alone clear", !!activeMergeQuarantineFor(xAE2));
+  const rebootAfterKeptAlone = rebootInChildProcess([subAE2, xAE2], "AE2-kept-alone");
+  check("*** THE FIX (AE2, round 4) *** kept-ALONE is a no-op — a real reboot confirms X is STILL blocked (never lifted at all)", rebootAfterKeptAlone.refusals[xAE2] === false && rebootAfterKeptAlone.activeForThese > 0);
+}
+
+// ===================== (AE3) card 182c01cc round 4, nit 3: the kept-THEN-relocated ordering, with a
+// real reboot — empirically the one order that LOOKS like it should work (both ids get cleared) but
+// doesn't, because clearing kept first (before anything references it as a live orphan) strands it on
+// disk; the later relocated-clear never revisits it. =====================
+{
+  const subAE3 = freshDir("subAE3");
+  const ksubAE3 = canonicalRepoLockKey(subAE3);
+  const subHashAE3 = hashKey(ksubAE3);
+  const subFinalAE3 = path.join(MERGE_QUARANTINE_DIR, `${subHashAE3}.json`);
+  const xAE3 = path.join(os.tmpdir(), `loom-mqcbp-xAE3-never-exists-${sfx}`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(subFinalAE3, JSON.stringify({
+    repoPath: xAE3, branch: "x-ae3-branch", reason: "X's own placeholder, occupying sub's own key file (AE3)",
+    enteredAt: Date.now(), tokens: ["x-ae3-token"],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([subAE3]);
+  const clearAE3 = clearMergeQuarantineReporting(subAE3);
+  const coAE3 = clearAE3.stillBlockedCoOccupants.find((c) => c.repoPath === xAE3);
+  check("(AE3 precondition) X carries both routes, same shape as AE", !!coAE3?.route && !!coAE3?.alsoClear);
+
+  // KEPT-THEN-RELOCATED: clear the alsoClear (kept) id FIRST, then the route (relocated) id SECOND —
+  // the WRONG order. In-process this can still look like a clean lift (the relocated clear itself
+  // succeeds), but a real reboot must show X re-quarantines — the kept file's own sweep never got a
+  // chance to run after it had anything live still referencing it as an orphan.
+  const keptFirstResult = clearMergeQuarantineLatchFile(coAE3.alsoClear.id);
+  check("(AE3) the kept-first clear is a no-op (nothing in memory matches it yet)", keptFirstResult.ok === true && keptFirstResult.wasQuarantined === false);
+  const relocatedSecondResult = clearMergeQuarantineLatchFile(coAE3.route.id);
+  check("(AE3) the relocated-second clear reports success in-process", relocatedSecondResult.ok === true && relocatedSecondResult.wasQuarantined === true);
+  check("(AE3) X reads as unblocked in-process after both (wrong-order) steps", !activeMergeQuarantineFor(xAE3));
+  const rebootAfterKeptThenRelocated = rebootInChildProcess([subAE3, xAE3], "AE3-kept-then-relocated");
+  check("*** THE FIX (AE3, round 4) *** kept-THEN-relocated is NOT durable — a real reboot confirms X re-quarantines (wrong order)", rebootAfterKeptThenRelocated.refusals[xAE3] === false && rebootAfterKeptThenRelocated.activeForThese > 0);
+}
+
+{
+  // --- (AF) test gap M12 (CR): clearMergeQuarantineLatchFile's own ACTIVE-MATCH branch (the bug this
+  // card's round 2 fixed) must ALSO carry a pure relocation's stillBlockedCoOccupants, cleared BY ID
+  // rather than by repoPath — the exact (AD1) shape, routed through the OTHER clear entry point.
+  const subAF = freshDir("subAF");
+  enterMergeQuarantine(subAF, "b", "sub's own genuine raise (AF)");
+  const idSubAF = quarantineLatchIdFor(subAF); // captured BEFORE the overwrite below, while resolvable
+  const ksubAF = canonicalRepoLockKey(subAF);
+  const subFinalAF = path.join(MERGE_QUARANTINE_DIR, `${hashKey(ksubAF)}.json`);
+  const xAF = path.join(os.tmpdir(), `loom-mqcbp-xAF-never-exists-${sfx}`);
+  fs.writeFileSync(subFinalAF, JSON.stringify({
+    repoPath: xAF, branch: "x-af-branch", reason: "X's own placeholder, occupying sub's own key file (AF)",
+    enteredAt: Date.now(), tokens: ["x-af-token"],
+  }, null, 2) + "\n");
+
+  const clearAF = clearMergeQuarantineLatchFile(idSubAF);
+  check("(AF) clearMergeQuarantineLatchFile clears sub by its own id", clearAF.ok === true && clearAF.wasQuarantined === true && clearAF.liftedRepoPaths.includes(subAF));
+  check("*** THE FIX (AF, M12) *** stillBlockedCoOccupants names X via the active pass-through branch", Array.isArray(clearAF.stillBlockedCoOccupants) && clearAF.stillBlockedCoOccupants.some((c) => c.repoPath === xAF));
+  check("(AF) latchKept is ABSENT (a relocation, never kept)", clearAF.latchKept === undefined);
+  check("(AF) X is still genuinely blocked", !!activeMergeQuarantineFor(xAF));
+
+  clearMergeQuarantineByRecordedPath(xAF); // cleanup
+}
+
+// ===================== (AG) REST-level: /clear and /clear-by-path forward stillBlockedCoOccupants over
+// REAL HTTP, for a PURE relocation (no latchKept) — the shape gateway/server.ts's own conditional spread
+// used to drop entirely (card 182c01cc, round 2) =====================
+{
+  const TMPAG = mkdtempManaged("loom-mqcbp-gw-ag-");
+  const PORTAG = 48300 + (process.pid % 400);
+  const HAG = { host: `127.0.0.1:${PORTAG}`, origin: `http://127.0.0.1:${PORTAG}`, "content-type": "application/json" };
+  const dbAG = new Db(path.join(TMPAG, "loom.db"));
+  const now = new Date().toISOString();
+  const projRepoAG = freshDir("projRepoAG");
+  dbAG.insertProject({
+    id: "projAG", name: "ProjAG", repoPath: projRepoAG, vaultPath: projRepoAG, config: {}, createdAt: now,
+    archivedAt: null, reserved: false, referenceRepos: [], repos: [],
+  });
+  const stubAG = {};
+  const appAG = await buildServer({
+    db: dbAG, pty: stubAG, sessions: stubAG, mcp: stubAG, orchMcp: stubAG, platformMcp: stubAG, auditMcp: stubAG,
+    userAuditMcp: stubAG, setupMcp: stubAG, runMcp: stubAG, control: stubAG, usageStatus: stubAG,
+  });
+  try {
+    // --- (AG1)-(AG3): each uses `appAG.inject` (in-process, no real socket) against a server built
+    // WITHOUT loopbackSecret (this file's own top-of-file note) — these prove the ROUTE HANDLER forwards
+    // the new field for its own payload shape, nothing about transport or auth; route-auth stays covered
+    // by test/loopback-write-guard.mjs's own (Q). (round 3, nit2: reworded from "over real HTTP"/"REST",
+    // which read as a transport/auth claim neither test makes.)
+    // --- (AG1) /clear (project-resolved) ---
+    enterMergeQuarantine(projRepoAG, "b", "sub's own genuine raise (AG1)");
+    const kProjAG = canonicalRepoLockKey(projRepoAG);
+    const projFinalAG = path.join(MERGE_QUARANTINE_DIR, `${hashKey(kProjAG)}.json`);
+    const xAG1 = path.join(os.tmpdir(), `loom-mqcbp-xAG1-never-exists-${sfx}`);
+    fs.writeFileSync(projFinalAG, JSON.stringify({
+      repoPath: xAG1, branch: "x-ag1-branch", reason: "X's own placeholder, occupying sub's own key file (AG1)",
+      enteredAt: Date.now(), tokens: ["x-ag1-token"],
+    }, null, 2) + "\n");
+    const clearAG1 = await appAG.inject({ method: "POST", url: "/internal/merge-quarantine/clear", headers: HAG, payload: { projectId: "projAG" } });
+    check("(AG1) POST /clear → 200", clearAG1.statusCode === 200);
+    const bodyAG1 = clearAG1.json();
+    check("*** THE FIX (AG1, route) *** /clear forwards stillBlockedCoOccupants naming X, even with latchKept ABSENT", Array.isArray(bodyAG1.stillBlockedCoOccupants) && bodyAG1.stillBlockedCoOccupants.some((c) => c.repoPath === xAG1) && bodyAG1.latchKept === undefined);
+    clearMergeQuarantineByRecordedPath(xAG1); // cleanup
+
+    // --- (AG2) /clear-by-path {repoPath} (no project resolution) ---
+    const subAG2 = freshDir("subAG2");
+    enterMergeQuarantine(subAG2, "b", "sub's own genuine raise (AG2)");
+    const kSubAG2 = canonicalRepoLockKey(subAG2);
+    const subFinalAG2 = path.join(MERGE_QUARANTINE_DIR, `${hashKey(kSubAG2)}.json`);
+    const xAG2 = path.join(os.tmpdir(), `loom-mqcbp-xAG2-never-exists-${sfx}`);
+    fs.writeFileSync(subFinalAG2, JSON.stringify({
+      repoPath: xAG2, branch: "x-ag2-branch", reason: "X's own placeholder, occupying sub's own key file (AG2)",
+      enteredAt: Date.now(), tokens: ["x-ag2-token"],
+    }, null, 2) + "\n");
+    const clearAG2 = await appAG.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HAG, payload: { repoPath: subAG2 } });
+    check("(AG2) POST /clear-by-path {repoPath} → 200", clearAG2.statusCode === 200);
+    const bodyAG2 = clearAG2.json();
+    check("*** THE FIX (AG2, route) *** /clear-by-path {repoPath} forwards stillBlockedCoOccupants naming X, even with latchKept ABSENT", Array.isArray(bodyAG2.stillBlockedCoOccupants) && bodyAG2.stillBlockedCoOccupants.some((c) => c.repoPath === xAG2) && bodyAG2.latchKept === undefined);
+
+    // --- (AG3) /clear-by-path {id} (clearMergeQuarantineLatchFile's own active branch, M12) ---
+    const subAG3 = freshDir("subAG3");
+    enterMergeQuarantine(subAG3, "b", "sub's own genuine raise (AG3)");
+    const idSubAG3 = quarantineLatchIdFor(subAG3);
+    const kSubAG3 = canonicalRepoLockKey(subAG3);
+    const subFinalAG3 = path.join(MERGE_QUARANTINE_DIR, `${hashKey(kSubAG3)}.json`);
+    const xAG3 = path.join(os.tmpdir(), `loom-mqcbp-xAG3-never-exists-${sfx}`);
+    fs.writeFileSync(subFinalAG3, JSON.stringify({
+      repoPath: xAG3, branch: "x-ag3-branch", reason: "X's own placeholder, occupying sub's own key file (AG3)",
+      enteredAt: Date.now(), tokens: ["x-ag3-token"],
+    }, null, 2) + "\n");
+    const clearAG3 = await appAG.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HAG, payload: { id: idSubAG3 } });
+    check("(AG3) POST /clear-by-path {id} → 200", clearAG3.statusCode === 200);
+    const bodyAG3 = clearAG3.json();
+    check("*** THE FIX (AG3, route, M12) *** /clear-by-path {id} forwards stillBlockedCoOccupants naming X, even with latchKept ABSENT", Array.isArray(bodyAG3.stillBlockedCoOccupants) && bodyAG3.stillBlockedCoOccupants.some((c) => c.repoPath === xAG3) && bodyAG3.latchKept === undefined);
+    clearMergeQuarantineByRecordedPath(xAG2);
+    clearMergeQuarantineByRecordedPath(xAG3);
+  } finally {
+    await appAG.close();
+    dbAG.close();
+  }
+}
+
+// ===================== (AH) card 182c01cc round 3, m1/M6: clearMergeQuarantineByKey's own PENDING-LOOP
+// fold (deleteMergeQuarantineLatchByKey called per `plan.ownedArmedKeys` member, ~line 3950) IS reachable
+// — a DIFFERENT fold site than the one (AD1)-(AE) already exercise (the OUTER matched-key loop). Manager's
+// exact recipe (CR2 80217ba5): P unresolvable at boot, armed at a SYNTHETIC resolvedKey K (an
+// 883e29bc-shaped degraded dual-arm: a raw latch carrying a pre-set resolvedKey/armedKeys gets ARMED
+// into activeQuarantines under that recorded key even though P itself cannot currently resolve — AND
+// ALSO pushed into pendingUnresolvedQuarantines for P's own (unresolvable) identity); a foreign X record
+// sits at hash(K).json, WRITTEN AFTER BOOT (never scanned into memory — a genuinely fresh clear-time read,
+// not a pre-existing record discovered via a re-point/union, which is what actually produces a MINT,
+// the shape the pre-existing drop below needs). P then becomes resolvable (mkdir) and
+// `clearMergeQuarantine(P)` is called: it dispatches to `clearMergeQuarantineByKey(canonical(P), P)`,
+// which has NO active entry at `canonical(P)` (only P's own pending twin, armed at the DIFFERENT key K)
+// — so the pending loop (where `!entry` makes `tiedToThisEntity` unconditionally true for any
+// same-identity pending record) drops P's own tied pending entry and, processing its
+// `ownedArmedKeys = [K]`, reaches `deleteMergeQuarantineLatchByKey(K, ...)`, which mints a fresh pending
+// divert for the foreign X it finds at `hash(K).json` and folds it into THIS clear's own
+// `stillBlockedCoOccupants` — the SAME fold code (AD1)-(AE) exercise via the OUTER loop, now proven
+// reachable via the PENDING loop too.
+{
+  const pAH = path.join(os.tmpdir(), `loom-mqcbp-pAH-never-exists-yet-${sfx}`); // created later, below
+  const kAH = "loom-mqcbp-AH-synthetic-resolved-key"; // a made-up resolvedKey — never a real canonical key
+  const hashKAH = hashKey(kAH);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "mqcbp-ah-p-synthetic-twin.json"), JSON.stringify({
+    repoPath: pAH, branch: "p-ah-branch", reason: "P — AH, armed at a synthetic resolvedKey K (883e29bc-shaped twin)",
+    enteredAt: Date.now(), tokens: ["p-ah-token"], resolvedKey: kAH, armedKeys: [kAH],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([pAH]); // P diverts to pending AND arms active at K — X's file doesn't exist yet
+  check("(AH precondition) P reads as blocked right after this boot", !!activeMergeQuarantineFor(pAH));
+
+  // X's foreign record, written AFTER boot — never scanned into memory, so the clear-time discovery
+  // below is a genuine fresh MINT (no pre-existing record to re-point onto), which is exactly the shape
+  // the pre-existing drop (below) needs to manifest.
+  const xAH = path.join(os.tmpdir(), `loom-mqcbp-xAH-never-exists-${sfx}`);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKAH}.json`), JSON.stringify({
+    repoPath: xAH, branch: "x-ah-branch", reason: "X — AH, foreign occupant at hash(K).json, written AFTER boot",
+    enteredAt: Date.now(), tokens: ["x-ah-token"],
+  }, null, 2) + "\n");
+  check("(AH precondition) X is NOT yet known to memory before the clear (never scanned)", !activeMergeQuarantineFor(xAH));
+
+  fs.mkdirSync(pAH, { recursive: true }); // P becomes resolvable
+  const clearAH = clearMergeQuarantine(pAH);
+  check("*** THE FIX (AH, round 3, m1/M6) *** the PENDING-LOOP fold names X in stillBlockedCoOccupants", !!clearAH && Array.isArray(clearAH.stillBlockedCoOccupants) && clearAH.stillBlockedCoOccupants.some((c) => c.repoPath === xAH));
+  const coAH = clearAH.stillBlockedCoOccupants.find((c) => c.repoPath === xAH);
+
+  // *** CONTROL S8 *** — see the manual revert proof in this card's own worker_report / decision record:
+  // commenting out this pending loop's own `for (const kc of r.kept) ...`/`for (const rc of r.relocated)
+  // ...` fold lines (merge-quarantine.ts, the `plan.action !== "reduce"` branch) makes THIS check fail —
+  // proving the assertion actually exercises that fold, not a vacuous pass.
+
+  // *** THE PRE-EXISTING, SEPARATELY-CARDED GAP (07e3ad30) — NOT fixed here, asserted as TRUE *** — the
+  // pending-filter's own `.filter()` callback drops P's tied record from `pendingUnresolvedQuarantines`
+  // WITHOUT the foreign mint (X's own brand-new pending-divert entry, minted by this SAME call) ever
+  // landing back in that array for THIS process. So, right here, in-process, X reads as UNBLOCKED even
+  // though the fold above correctly named it and its record genuinely still exists ON DISK. Report
+  // wording must match this truth (X is NOT durably lifted — it only reads that way in this one process)
+  // rather than claim a clean lift.
+  //
+  // ⚠️ WHEN CARD 07e3ad30 LANDS (fixing the drop), these TWO checks' own CONDITIONS must be INVERTED
+  // (drop the `!`) — they will then read as "X STILL reads BLOCKED in-process right after this clear"
+  // (the drop no longer happens, so the fresh mint survives in THIS process too). Do not just delete
+  // them; flip them, or the fix for 07e3ad30 silently loses its own regression coverage here.
+  check("(AH) X reads as UNBLOCKED in-process right after this clear (the pre-existing drop, card 07e3ad30 — NOT fixed on this card; INVERT when 07e3ad30 lands)", !activeMergeQuarantineFor(xAH));
+  check("(AH) listActiveMergeQuarantines() does not carry X either, for the same reason (INVERT when 07e3ad30 lands)", !listActiveMergeQuarantines().some((e) => e.repoPath === xAH));
+
+  // A REAL reboot (fresh child process, same LOOM_HOME) proves the in-process read above is NOT a durable
+  // lift — X's own record genuinely still exists on disk and the NEXT boot re-discovers and re-blocks it.
+  const rebootAH = rebootInChildProcess([pAH, xAH], "AH");
+  check("*** THE TRUTH (AH) *** a real reboot re-blocks X — the in-process 'unblocked' read above was never durable", rebootAH.refusals[xAH] === false && rebootAH.activeForThese > 0);
+
+  // "Name the route that actually works" (manager's own wording): NOT clearing coAH.route.id in THIS
+  // same (contaminated) process — nothing in memory matches it anymore here, so it hits the raw fallback
+  // and reports wasQuarantined:false without touching X at all. The route that actually works is the
+  // SAME id, applied AFTER a fresh boot has re-discovered X from disk (its own next real boot, not this
+  // process) — proven here via one more child process that boots, THEN clears by that exact id.
+  const noopInThisProcess = clearMergeQuarantineLatchFile(coAH.route.id);
+  check("(AH) clearing the fold's own named id in THIS SAME process is a no-op (nothing matches anymore here)", noopInThisProcess.ok === true && noopInThisProcess.wasQuarantined === false);
+  const outFileAH = path.join(os.tmpdir(), `loom-mqcbp-ah-reboot-then-clear-${sfx}.json`);
+  const rebootThenClearScriptAH = `
+    const fsm = (await import("node:fs")).default;
+    const { reenterMergeQuarantinesAtBoot, clearMergeQuarantineLatchFile, activeMergeQuarantineFor } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
+    reenterMergeQuarantinesAtBoot([${JSON.stringify(pAH)}]);
+    const beforeClear = !!activeMergeQuarantineFor(${JSON.stringify(xAH)});
+    const r = clearMergeQuarantineLatchFile(${JSON.stringify(coAH.route.id)});
+    const afterClear = !!activeMergeQuarantineFor(${JSON.stringify(xAH)});
+    fsm.writeFileSync(${JSON.stringify(outFileAH)}, JSON.stringify({ beforeClear, wasQuarantined: r.wasQuarantined, afterClear }));
+  `;
+  execFileSync(process.execPath, ["--input-type=module", "-e", rebootThenClearScriptAH], { env: { ...process.env, LOOM_HOME: loomHome } });
+  const rebootThenClearAH = JSON.parse(fs.readFileSync(outFileAH, "utf8"));
+  fs.rmSync(outFileAH, { force: true });
+  check("(AH) a fresh boot first, THEN clearing the fold's own named id, lifts X in that process", rebootThenClearAH.beforeClear === true && rebootThenClearAH.wasQuarantined === true && rebootThenClearAH.afterClear === false);
+  // *** THE DURABILITY PROOF (round 4, nit) *** — "durably" is a claim about surviving a FURTHER reboot,
+  // never provable from a single process's own in-memory read; a THIRD, genuinely separate boot (same
+  // LOOM_HOME, after the clear above already ran and exited) is what actually backs the word.
+  const rebootAfterAHClear = rebootInChildProcess([pAH, xAH], "AH-after-clear");
+  check("*** THE ROUTE THAT ACTUALLY WORKS (AH) *** a fresh boot first, THEN clearing the fold's own named id, DURABLY lifts X (confirmed by yet another, later reboot)", rebootAfterAHClear.refusals[xAH] === true && rebootAfterAHClear.activeForThese === 0);
+}
+
+// ===================== (AI) card 182c01cc round 3, m5/S21: the kept route's own sourceFile, when it
+// comes from clearMergeQuarantineByKey's own `for (const f of sourceFilesToSweep) { sweepOwnLatchFileUnlessOwnedElsewhere(f) ... }`
+// loop (~line 3996) — a DIFFERENT source than the deleteMergeQuarantineLatchByKey-derived kept entries
+// (AE), which use `finalBasename` instead. =====================
+// R is a SURVIVING entry (armed, via the SAME synthetic-resolvedKey technique as AH, at a key K2) whose
+// OWN latch-file hash is made to EQUAL P's own sourceFile's basename (chosen, not coincidental — both
+// derived from the SAME `hashKey` this file already uses for a real canonicalRepoLockKey). When P (tied
+// to the identity being cleared) is dropped, its OWN sourceFile is swept via sweepOwnLatchFileUnlessOwnedElsewhere
+// — which must recognize R's claim and report `kept:true, referencingRepoPaths:[R]`, with the resulting
+// BlockedCoOccupant's route.id derived from THAT exact sourceFile, not any other.
+{
+  const pAI = path.join(os.tmpdir(), `loom-mqcbp-pAI-never-exists-yet-${sfx}`);
+  const k2AI = "loom-mqcbp-AI-synthetic-resolved-key-for-R"; // R's own synthetic resolvedKey
+  const hashK2AI = hashKey(k2AI); // R's own fresh-write-target hash — chosen to equal P's OWN sourceFile's stem
+  const pSourceFileAI = `${hashK2AI}.json`; // P's own sourceFile, DELIBERATELY set to R's own hash
+  const rAI = path.join(os.tmpdir(), `loom-mqcbp-rAI-never-exists-${sfx}`);
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  // P's own raw latch, written AT pSourceFileAI (R's own hash) — P is armed at an UNRELATED key kAI, never k2AI.
+  const kAI = "loom-mqcbp-AI-synthetic-resolved-key-for-P";
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFileAI), JSON.stringify({
+    repoPath: pAI, branch: "p-ai-branch", reason: "P — AI, own sourceFile deliberately collides with R's own hash",
+    enteredAt: Date.now(), tokens: ["p-ai-token"], resolvedKey: kAI, armedKeys: [kAI],
+  }, null, 2) + "\n");
+  // R's own raw latch, armed at k2AI — an UNRELATED basename on disk (its OWN physical file is irrelevant
+  // to this check; only its claim via armedKeys/quarantineHashForKey matters).
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "mqcbp-ai-r-twin.json"), JSON.stringify({
+    repoPath: rAI, branch: "r-ai-branch", reason: "R — AI, survives, claims pSourceFileAI as its OWN fresh write target",
+    enteredAt: Date.now(), tokens: ["r-ai-token"], resolvedKey: k2AI, armedKeys: [k2AI],
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([pAI, rAI]);
+  check("(AI precondition) P reads as blocked after boot", !!activeMergeQuarantineFor(pAI));
+  check("(AI precondition) R reads as blocked after boot (it SURVIVES — P's clear below never touches R)", !!activeMergeQuarantineFor(rAI));
+
+  fs.mkdirSync(pAI, { recursive: true });
+  const clearAI = clearMergeQuarantine(pAI);
+  check("(AI) R is untouched — still genuinely blocked after clearing P", !!activeMergeQuarantineFor(rAI));
+  check("*** THE FIX (AI, round 3, m5/S21) *** stillBlockedCoOccupants names R via the sourceFilesToSweep loop", !!clearAI && Array.isArray(clearAI.stillBlockedCoOccupants) && clearAI.stillBlockedCoOccupants.some((c) => c.repoPath === rAI));
+  const coAI = clearAI.stillBlockedCoOccupants.find((c) => c.repoPath === rAI);
+  // *** THE ASSERTION (S21) *** — the route's own id is derived from THE REAL sourceFile (pSourceFileAI's
+  // own stem), not any other value. Inline negative control: a bogus 24-hex id (or P/R's OWN unrelated
+  // key hashes) must NOT equal it — proving this assertion actually discriminates rather than passing
+  // vacuously for any well-formed-looking id.
+  check("*** THE FIX (AI, S21) *** the kept route's id equals the REAL sourceFile's own stem (hashK2AI)", coAI.route.id === hashK2AI);
+  check("(AI, S21) *** NEGATIVE CONTROL *** a bogus id does NOT equal it (proves the check above discriminates)", coAI.route.id !== "0".repeat(24) && coAI.route.id !== hashKey(kAI));
+  check("(AI) clearing R by the route the fold named for it genuinely matches R (not a dead/raw-fallback id)", clearMergeQuarantineLatchFile(coAI.route.id).liftedRepoPaths.includes(rAI));
 }
 
 console.log(failures === 0

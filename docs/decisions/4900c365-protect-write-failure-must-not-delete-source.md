@@ -188,10 +188,15 @@ as blocked. All three proven RED on `1fa865f5` (pre-B1-fix) and GREEN after, via
   wrappers) assume the occupant is ALSO re-enforced in memory without checking — it is, as of round 2
   (a self-owned pending record), but that enforcement lives entirely inside this shared tail function;
   do not re-derive or duplicate it at a call site.
-- **(Round 2)** Do not re-add an exclude-set/filtered-sweep parameter to `sweepTmpResidueForHashIfUnreferenced`
-  or a `Set<string>` return to `protectForeignTmpResidueBeforeSweep` "to be safe" — the self-owned pending
-  record this round introduced already makes every reference-aware sweep in this module honour a failed
-  protect's kept file, from any call path; a second, parallel mechanism would only rot independently.
+- **(Round 2)** Do not re-add an exclude-set/filtered-sweep PARAMETER to `sweepTmpResidueForHashIfUnreferenced`
+  or a `Set<string>`-shaped EXCLUSION LIST return to `protectForeignTmpResidueBeforeSweep` "to be safe" —
+  the self-owned pending record this round introduced already makes every reference-aware sweep in this
+  module honour a failed protect's kept file, from any call path; a second, parallel SWEEP-GATING
+  mechanism would only rot independently. **(Amended, card 182c01cc round 3, nit1)** — this bullet is
+  about a sweep-gating mechanism, never about reporting. Card 182c01cc round 2 DID change this function's
+  return to `Array<{repoPath, sourceFile}>` (a list of what it relocated) — that is REPORTING-ONLY, feeding
+  the clear's own `stillBlockedCoOccupants`, and never consulted by any sweep to decide what to skip. The
+  two are not the same change; this bullet does not forbid the reporting one.
 - **(Round 2)** Do not write (or trust) a final-path fixture for this bug shape without an explicit
   `resolvedKey` field confirming the occupant was genuinely ARMED (`armedKeys` non-empty) before the
   clear — an unresolvable repoPath's bare `.json` final with no `resolvedKey` is deferred to
