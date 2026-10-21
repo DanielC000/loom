@@ -3685,13 +3685,14 @@ export class SessionService {
   }
 
   /**
-   * @decision 0368c784 — this check races unless the calling method stays non-`async` with no `await`
-   * between this call and `insertSession`; do not call it from a body that violates that.
+   * @decision 0368c784 — races unless the calling method stays non-`async` with no `await` between this
+   * call and `insertSession`. NO `hasSuccessor` exemption — a halted recycle leaves it permanently true
+   * over a predecessor that is still the real live owner; a live successor already blocks on its own.
    */
   private refuseSecondLiveManager(agentId: string): void {
     const holder = this.db.listAllSessions().find((s) =>
       s.agentId === agentId && s.role === "manager" && (s.processState === "live" || s.processState === "starting") &&
-      !this.db.hasSuccessor(s.id) && this.pty.isAlive(s.id));
+      this.pty.isAlive(s.id));
     if (holder) throw new SecondLiveManagerError(holder.id);
   }
 

@@ -8,8 +8,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `startNew`'s manager-resolved branch and `startManager` — both non-`async` methods, so TypeScript
 // forbids an `await` between the check and the insert; no in-process lock is needed (mirrors
 // `recycleManager`'s own anti-double-recycle guard, which relies on the identical property). Keyed on
-// VERIFIED pty liveness (never raw processState alone, mirroring `liveOtherPlatformLead`) and excludes a
-// recycle predecessor that already has a successor (`hasSuccessor`).
+// VERIFIED pty liveness (never raw processState alone, mirroring `liveOtherPlatformLead`). Card 8e84a403
+// (Code Review): there is deliberately NO `hasSuccessor` exemption — a HALTED recycle leaves
+// `hasSuccessor(predecessor)` permanently true over a predecessor that is the real live owner, so a live
+// successor blocking on its own is the only safe way to cover the coexistence window (see (f2)).
 //
 // Proves:
 //   (a) BASELINE — a fresh agent's first startManager call succeeds.
@@ -22,9 +24,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (e) PHANTOM-LIVE NEGATIVE CONTROL — a session row inserted directly (never actually spawned, so its
 //       pty is NOT alive) does NOT block a fresh start — a phantom row must never permanently lock an
 //       agent out (mirrors startPlatformLead's own stated rationale).
-//   (f) RECYCLE-SUCCESSOR EXEMPTION — recycleManager's predecessor+successor brief-coexistence window is
-//       correctly exempted: a THIRD start attempt during that window is refused naming the SUCCESSOR
-//       (not the predecessor, which is excluded via hasSuccessor).
+//   (f) RECYCLE COEXISTENCE — during the ordinary brief predecessor+successor window (both alive), a
+//       THIRD start attempt is still refused, naming WHICHEVER live manager the scan finds first.
+//   (f2) HALTED RECYCLE — the hole the old `hasSuccessor` exemption used to open: predecessor live
+//       (never stopped), successor exited, a `recycle_ownership_transfer_failed` event filed, and
+//       `hasSuccessor(predecessor)` permanently true — a fresh start is STILL refused, naming the
+//       PREDECESSOR (the genuine live owner).
 //   (g) STOP THEN RETRY — once the holding manager's pty genuinely stops, a fresh start for the same
 //       agent succeeds again (the guard is not a permanent lock).
 //   (h) WORKER NEGATIVE CONTROL — many live "worker"-role sessions under the SAME agentId are entirely
@@ -102,6 +107,7 @@ db.insertAgent({ id: "agentB", projectId: "pMgr", name: "B", startupPrompt: "MGR
 db.insertAgent({ id: "agentC", projectId: "pMgr", name: "C", startupPrompt: "MGR", position: 2, profileId: null });
 db.insertAgent({ id: "agentPhantom", projectId: "pMgr", name: "Phantom", startupPrompt: "MGR", position: 3, profileId: null });
 db.insertAgent({ id: "agentRecycle", projectId: "pMgr", name: "Recycle", startupPrompt: "MGR", position: 4, profileId: null });
+db.insertAgent({ id: "agentHalt", projectId: "pMgr", name: "Halt", startupPrompt: "MGR", position: 9, profileId: null });
 db.insertAgent({ id: "agentStop", projectId: "pMgr", name: "Stop", startupPrompt: "MGR", position: 5, profileId: null });
 db.insertAgent({ id: "agentWorker", projectId: "pMgr", name: "Worker", startupPrompt: "WORKER", position: 6, profileId: null });
 db.insertAgent({ id: "agentWsAudit", projectId: "pMgr", name: "WsAudit", startupPrompt: "WSAUDIT", position: 7, profileId: null });
@@ -161,7 +167,12 @@ try {
   check("(e) a phantom-live row (pty dead) does NOT block a fresh start",
     threwE === null && sessionE?.role === "manager" && sessionE?.processState === "live");
 
-  // ============================ (f) RECYCLE-SUCCESSOR EXEMPTION =======================================
+  // ============================ (f) RECYCLE SUCCESSOR+PREDECESSOR COEXISTENCE ========================
+  // Card 8e84a403 (Code Review): the guard has NO `hasSuccessor` exemption any more — a halted recycle
+  // leaves `hasSuccessor(predecessor)` permanently true over a predecessor that is the real live owner
+  // (see (f2) below), so excluding a row on that basis alone is unsafe. During the ordinary brief
+  // coexistence window BOTH predecessor and successor are alive; a third start is still correctly
+  // refused — it just names WHICHEVER live manager the scan finds first, not specifically the successor.
   const f1 = svc.startManager("agentRecycle");
   check("(f-setup) agentRecycle's first manager is live", f1.processState === "live" && host.isAlive(f1.id));
   const f2 = await svc.recycleManager(f1.id, "handoff — continue from here");
@@ -169,8 +180,35 @@ try {
     f2.id !== f1.id && host.isAlive(f1.id) && host.isAlive(f2.id) && db.hasSuccessor(f1.id) === true);
   let threwF = null;
   try { svc.startManager("agentRecycle"); } catch (e) { threwF = e; }
-  check("(f) a THIRD start during the predecessor+successor coexistence window is refused naming the SUCCESSOR, not the excluded predecessor",
-    threwF instanceof SecondLiveManagerError && threwF.holderSessionId === f2.id);
+  check("(f) a THIRD start during the predecessor+successor coexistence window is refused, naming A live manager for this agent",
+    threwF instanceof SecondLiveManagerError && [f1.id, f2.id].includes(threwF.holderSessionId));
+
+  // ============== (f2) HALTED RECYCLE — the hole the hasSuccessor exemption used to open =============
+  // Mirrors recycleManager's real HALT shape (@decision f1969787): the predecessor is NEVER stopped, the
+  // successor dies before reaching ready, a `recycle_ownership_transfer_failed` event is filed
+  // (workerSessionId: predecessor, managerSessionId: successor — see service.ts's own comment on that
+  // field), and `hasSuccessor(predecessor)` stays true FOREVER (never nulled, unlike the pre-spawn-throw
+  // path). The predecessor is the one genuine live owner; a fresh start must refuse naming IT.
+  const f2pred = svc.startManager("agentHalt");
+  check("(f2-setup) agentHalt's manager is live", f2pred.processState === "live" && host.isAlive(f2pred.id));
+  db.insertSession({
+    id: "f2HaltedSuccessor", projectId: "pMgr", agentId: "agentHalt", engineSessionId: "eng-f2-halted", title: null,
+    cwd: repo, processState: "exited", resumability: "unknown", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null,
+    recycledFrom: f2pred.id,
+  });
+  db.appendEvent({
+    id: "evtF2OwnershipFailed", ts: new Date().toISOString(),
+    managerSessionId: "f2HaltedSuccessor", workerSessionId: f2pred.id, kind: "recycle_ownership_transfer_failed",
+    detail: { recycledFrom: f2pred.id, gen: 1, failedSteps: ["workers"] },
+  });
+  check("(f2-setup) the halted successor is exited, NOT alive, yet hasSuccessor(predecessor) stays true",
+    db.getSession("f2HaltedSuccessor")?.processState === "exited" && host.isAlive("f2HaltedSuccessor") === false &&
+    db.hasSuccessor(f2pred.id) === true);
+  let threwF2 = null;
+  try { svc.startManager("agentHalt"); } catch (e) { threwF2 = e; }
+  check("(f2) a fresh start after a HALTED recycle is refused, naming the PREDECESSOR (the real live owner, not excluded despite hasSuccessor)",
+    threwF2 instanceof SecondLiveManagerError && threwF2.holderSessionId === f2pred.id);
 
   // ============================ (g) STOP THEN RETRY ===================================================
   const g1 = svc.startManager("agentStop");
@@ -214,6 +252,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — startManager/startNew refuse a second live-or-starting manager for the same agent, naming the holder; a phantom-live row (pty dead) never blocks; the recycle predecessor+successor window is correctly exempted (the successor still blocks); a genuinely-stopped holder releases the slot; workers and workspace-auditor are unaffected."
+  ? "\n✅ ALL PASS — startManager/startNew refuse a second live-or-starting manager for the same agent, naming a live holder; a phantom-live row (pty dead) never blocks; the ordinary recycle coexistence window still refuses (naming whichever live manager is found); a HALTED recycle's never-stopped predecessor still blocks despite hasSuccessor staying permanently true; a genuinely-stopped holder releases the slot; workers and workspace-auditor are unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
