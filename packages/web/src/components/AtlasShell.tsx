@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
 import { AtlasTree } from "./AtlasTree";
-import { LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, type NavPage, type ParamPage } from "../nav";
+import { ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, type AtlasHome, type NavPage, type ParamPage } from "../nav";
 import { setAtlasUi } from "../lib/atlasUi";
 import { useActiveProject } from "../lib/activeProject";
 import { api } from "../lib/api";
@@ -34,6 +34,12 @@ const BY_SPECIFICITY: NavPage[] = [...NAV_PAGES].sort((a, b) => b.to.length - a.
 
 function currentPage(pathname: string): NavPage | undefined {
   return BY_SPECIFICITY.find((p) => matchPath({ path: p.to, end: p.end ?? false }, pathname));
+}
+
+// An Atlas-only home node (card fd99b2d7). Its `to` is a literal path disjoint from every NAV_PAGES
+// `to`, so this is a plain lookup, not a precedence contest with `currentPage` above.
+function currentHome(pathname: string): AtlasHome | undefined {
+  return ATLAS_HOMES.find((h) => matchPath({ path: h.to, end: true }, pathname));
 }
 
 // No specificity sort for these: each pattern's FIRST segment is a distinct literal, so at most one
@@ -117,6 +123,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   const page = currentPage(pathname);
   const project = projects.find((p) => p.id === projectId);
   const activeProjectName = project?.name ?? "No project";
+  const home = currentHome(pathname);
   const paramPage = currentParamPage(pathname);
   const paramAddress = useParamAddress(paramPage, activeProjectName);
   // A detail address hangs off a REAL tree node, so that node reads as the landed one even though
@@ -129,15 +136,25 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // hangs off the workspace root, a `scoped` one hangs off the project it is scoped to. So the crumbs
   // read as the path actually taken through the tree, not as a second, independently-maintained idea
   // of the hierarchy.
+  //
+  // A HOME node is the tier head itself, so its trail STOPS at that tier: the Workspace home's
+  // deepest crumb is "Workspace", the project home's is the project's own name. Appending the row's
+  // "Home" label would add a fourth word naming a node that is already the crumb before it.
   const navCrumbs: string[] = ["Workspace"];
-  if (page?.scoped) navCrumbs.push(activeProjectName);
-  if (page) navCrumbs.push(page.label);
+  if (home) {
+    if (home.scoped) navCrumbs.push(activeProjectName);
+  } else {
+    if (page?.scoped) navCrumbs.push(activeProjectName);
+    if (page) navCrumbs.push(page.label);
+  }
 
   // A parameterized address wins when one matched: the two matchers are disjoint (a NAV_PAGES `to`
   // is a literal path, and no literal path is also a PARAM_PAGES pattern), so this is a fallback
   // order, not a precedence contest.
   const crumbs = paramAddress?.crumbs ?? navCrumbs;
-  const heading = paramAddress?.heading ?? page?.label ?? "Workspace";
+  const heading = paramAddress?.heading
+    ?? (home ? (home.scoped ? activeProjectName : "Workspace") : page?.label)
+    ?? "Workspace";
 
   return (
     <div className="loom-atlas" data-testid="atlas-shell">
@@ -210,6 +227,12 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 from the destination exactly as a direct visit to it would. */}
             {LEGACY_REDIRECTS.map((r) => (
               <Route key={r.from} path={r.from} element={r.element} />
+            ))}
+            {/* The two Atlas-only home nodes (P2-1) — the Workspace root and the project node. The
+                classic shell deliberately does NOT mount these; see ATLAS_HOMES' own anchor in
+                src/nav.tsx for why, and why `/` and `/overview` must not be re-pointed at them. */}
+            {ATLAS_HOMES.map((h) => (
+              <Route key={h.to} path={h.to} element={h.element} />
             ))}
             {/* Anything not yet mounted (an address phase 2 still owes, a typo) lands on the frame
                 with an explanation instead of an empty column. */}

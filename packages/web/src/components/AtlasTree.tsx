@@ -16,7 +16,7 @@ import { useMemo, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { Project } from "@loom/shared";
-import { useVisibleNavPages, type NavPage } from "../nav";
+import { ATLAS_HOMES, useVisibleNavPages, type AtlasHome, type NavPage } from "../nav";
 import { NavIcon } from "./navIcons";
 import { Logo } from "./Logo";
 import { SectionLabel } from "./ui";
@@ -66,6 +66,30 @@ function TreeNode({ page, activeTo }: { page: NavPage; activeTo?: string }) {
     </li>
   );
 }
+
+// A tier's own HOME node — the Workspace root and the project node (card fd99b2d7, Atlas P2-1).
+//
+// It is a LEAF row, first in its tier, rather than the tier's heading made clickable. The heading
+// above ("Workspace" / "Projects") names a GROUP, and the open project row is a SELECTOR whose whole
+// contract is that it re-scopes without navigating (card e47df20a) — folding a destination into
+// either would give one control two jobs and make "where am I" ambiguous for the row that already
+// says "what am I scoped to". One extra row buys both tiers the same, honest shape.
+function HomeNode({ home }: { home: AtlasHome }) {
+  return (
+    <li>
+      <NavLink to={home.to} end={false}
+        className={({ isActive }) => `loom-atlas-node${isActive ? " is-active" : ""}`}
+        data-testid={`atlas-home-${home.key}`}>
+        <span className="loom-atlas-twist" aria-hidden />
+        <span className="loom-atlas-ico" aria-hidden><NavIcon to={home.to} /></span>
+        <span className="loom-atlas-lbl">{home.label}</span>
+      </NavLink>
+    </li>
+  );
+}
+
+const WORKSPACE_HOME = ATLAS_HOMES.find((h) => h.key === "workspace")!;
+const PROJECT_HOME = ATLAS_HOMES.find((h) => h.key === "project")!;
 
 // Live, non-companion session count per project — the marker on each project row. The rail chip's
 // dropdown already showed exactly this (components/Sidebar.tsx › RailProjectControl), and it is the
@@ -139,8 +163,12 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
   const liveByProject = useLiveCountsByProject();
 
   // Built once and rendered by whichever branch below owns it, so the empty-workspace path and the
-  // populated path cannot drift into showing different destination sets.
-  const scopedNodes = project.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />);
+  // populated path cannot drift into showing different destination sets. The project HOME leads the
+  // list: it is the node itself, and everything after it is a surface within that node.
+  const scopedNodes = [
+    <HomeNode key={PROJECT_HOME.to} home={PROJECT_HOME} />,
+    ...project.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />),
+  ];
 
   return (
     <nav className="loom-atlas-tree" aria-label="Primary navigation" data-testid="atlas-tree">
@@ -151,6 +179,7 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
       <div className="loom-atlas-treebody">
         <SectionLabel style={{ margin: "0 0 4px", padding: "0 10px" }}>Workspace</SectionLabel>
         <ul className="loom-atlas-nodes">
+          <HomeNode home={WORKSPACE_HOME} />
           {workspace.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />)}
         </ul>
 

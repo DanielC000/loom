@@ -8,6 +8,9 @@
 //      Atlas tree (switch on), in the same browser, against the same build, and the two sets are
 //      compared. Nothing hand-copies NAV_PAGES — which matters because the whole failure mode this
 //      guards is a count going stale, and a hand-copied list in the test would go stale identically.
+//      Since card fd99b2d7 the tree also holds Atlas-ONLY nodes the rail has no equivalent of, so the
+//      claim is "every rail destination has a node, and every extra node is a declared Atlas home"
+//      rather than a bare set equality — see `parseAtlasHomes` below for why that is no weaker.
 //   2. CONTENT IDENTITY. For every one of those destinations, the page's rendered structure is
 //      fingerprinted at the OLD route (switch off) and again after clicking the node (switch on), and
 //      required to match. "The same content the old route rendered" is asserted against the old route
@@ -18,6 +21,9 @@
 // Every absence/equality claim carries a POSITIVE CONTROL: a fingerprint comparison and a
 // zero-console-error count read exactly the same whether the instrument works or is silently broken,
 // so each is first shown firing against a known-bad state on the same page at the same moment.
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "./fixtures/daemon";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
@@ -25,6 +31,31 @@ import { expect, test, type Page } from "./fixtures/daemon";
 // cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own keys.
 const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
+
+// ── The Atlas-only addresses (card fd99b2d7) ───────────────────────────────────────────────────
+// Phase 2 adds tree nodes the classic rail has no equivalent of — the Workspace root and the
+// project node here, the Agents node (P2-2) and the Platform node (P2-4) after them. So the parity
+// claim below is no longer an EQUALITY against the rail; it is "every rail destination still has a
+// node, and every EXTRA node is one `src/nav.tsx` declares as an Atlas home".
+//
+// Parsed out of the real source (same idiom as atlas-legacy-redirects.spec.ts, for the same reason:
+// the e2e tsconfig cannot import a `src/` module), with the filtered row count checked against the
+// declaration's own raw marker count — a regex that quietly stopped matching a row would otherwise
+// return a plausible SUBSET, and a subset would let a stray node through as "declared".
+function parseAtlasHomes(): { paths: string[]; rawMarkers: number; block: string } {
+  const src = readFileSync(NAV_SOURCE, "utf8");
+  const start = src.indexOf("export const ATLAS_HOMES");
+  if (start < 0) throw new Error(`no ATLAS_HOMES declaration found in ${NAV_SOURCE}`);
+  const end = src.indexOf("\n];", start);
+  if (end < 0) throw new Error(`ATLAS_HOMES in ${NAV_SOURCE} has no closing "];"`);
+  const block = src.slice(start, end);
+  const rawMarkers = (block.match(/\bkey:\s*"/g) ?? []).length;
+  const paths = [...block.matchAll(/\bto:\s*"([^"]+)"/g)].map((m) => m[1] ?? "");
+  return { paths, rawMarkers, block };
+}
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
 // navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
@@ -189,8 +220,26 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
     const treeRoutes = await routesFrom(page, TREE_NODES);
 
-    // The parity claim. A missing node and a node for a page that no longer exists both fail here.
-    expect(treeRoutes, "the Atlas tree's nodes do not match the classic rail's destinations").toEqual(railRoutes);
+    // The parity claim, in two halves since phase 2 began adding Atlas-only nodes (card fd99b2d7).
+    //
+    // (a) STRICT, unchanged in strength: every rail destination still has a node. A missing node
+    //     fails here exactly as it did when this was a bare equality.
+    for (const route of railRoutes) {
+      expect(treeRoutes, `the Atlas tree has no node for the classic destination ${route}`).toContain(route);
+    }
+    // (b) Every EXTRA node must be an address src/nav.tsx declares as an Atlas home. This is what
+    //     replaces the equality's other direction — a node pointing at a page that does not exist,
+    //     or a typo'd `to`, still fails, because it is in neither set.
+    const homes = parseAtlasHomes();
+    expect(homes.paths.length, `the ATLAS_HOMES parse found no rows. Block:\n${homes.block}`).toBeGreaterThan(0);
+    expect(homes.paths.length,
+      `the parse returned ${homes.paths.length} row(s) but the declaration contains ${homes.rawMarkers} entries`
+      + ` — the pattern is dropping rows. Block:\n${homes.block}`).toBe(homes.rawMarkers);
+    const extras = treeRoutes.filter((r) => !railRoutes.includes(r));
+    //     Equality, not a subset, in BOTH directions: a declared home that stopped rendering leaves
+    //     `extras` short, and an undeclared node leaves it long.
+    expect(extras.sort(), "the tree's extra nodes are not exactly the declared Atlas home nodes")
+      .toEqual([...homes.paths].sort());
 
     // The tree IS navigation, not a complementary region (the P1-0 review finding this card carries).
     const tree = page.getByTestId("atlas-tree");
@@ -316,6 +365,15 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     const nodes = page.locator(TREE_NODES);
     const total = await nodes.count();
     expect(total, "no tree nodes to tab through").toBeGreaterThan(5);
+
+    // Land on the tree's LAST node before tabbing, so the Enter assertion at the bottom has a real
+    // navigation to observe: the second node is by construction not the last one. Derived rather
+    // than hardcoded — landing on whatever route happens to be node 2 today makes that final
+    // "it navigated somewhere else" control vacuous the moment the tree's order changes (which is
+    // exactly what card fd99b2d7 did when it put a Home node at the head of each tier).
+    const landing = await nodes.last().evaluate((el) => new URL((el as HTMLAnchorElement).href).pathname);
+    await page.goto(loomDaemon.baseURL + landing);
+    await expect(page.getByTestId("atlas-tree")).toBeVisible();
 
     // Start from the document, not from a programmatic focus(): :focus-visible is what carries the
     // ring, and only a real keyboard interaction sets it. Tab until the first node takes focus — the

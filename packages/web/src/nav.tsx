@@ -20,6 +20,8 @@ import Automation from "./pages/Automation";
 import Usage from "./pages/Usage";
 import Platform from "./pages/Platform";
 import Settings from "./pages/Settings";
+import WorkspaceHome from "./pages/WorkspaceHome";
+import ProjectHome from "./pages/ProjectHome";
 
 // The four nav sections. Every destination is grouped under one of these in the Instrument Rail's
 // grouped nav (components/Sidebar.tsx), with hairline separators between groups. Also used to bucket
@@ -173,6 +175,32 @@ export const PARAM_PAGES: ParamPage[] = [
   { to: "/review/:workerId", element: <ReviewPanel />, atlas: { kind: "session", param: "workerId", tab: "Diff" } },
   { to: "/question/:id", element: <QuestionAnswer />, atlas: { kind: "detail", under: "/inbox", param: "id" } },
   { to: "/session/:id", element: <SessionView />, atlas: { kind: "session", param: "id" } },
+];
+
+// ── The Atlas home nodes ───────────────────────────────────────────────────────────────────────
+// The Workspace root and the project node — card fd99b2d7 (Atlas P2-1). The ONLY addresses in this
+// file the classic shell does NOT mount; its three sibling lists above are both-shells by design.
+//
+// @decision fd99b2d7 — never add these to LegacyShell's route table, and never re-point `/` or
+// `/overview` at them inside AtlasShell: the first shows a half-built preview to a user who never
+// opted in, the second breaks phase 1's content-identity contract. Both are P3-switch-over's job.
+//
+// Each node's own tabs are `?tab=` on the SAME path, owned by the page component — not routes, so
+// the frame's crumbs and heading stay a function of the node, not of which tab is showing.
+export type AtlasHome = {
+  /** Stable identity for the tree row's test id and the shell's own address lookup. */
+  key: "workspace" | "project";
+  to: string;
+  /** The tree row's label. */
+  label: string;
+  /** True ⇒ this node IS the active project, so the heading and the deepest crumb are its name. */
+  scoped: boolean;
+  element: ReactNode;
+};
+
+export const ATLAS_HOMES: AtlasHome[] = [
+  { key: "workspace", to: "/home", label: "Home", scoped: false, element: <WorkspaceHome /> },
+  { key: "project", to: "/project", label: "Home", scoped: true, element: <ProjectHome /> },
 ];
 
 // ── The legacy redirects ───────────────────────────────────────────────────────────────────────

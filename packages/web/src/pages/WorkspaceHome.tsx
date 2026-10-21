@@ -1,0 +1,381 @@
+import { useMemo } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { useQueries, useQuery } from "@tanstack/react-query";
+import type { OrchestrationEvent, Project, SessionListItem, UsageLimitsStatus } from "@loom/shared";
+import { api } from "../lib/api";
+import { useActiveProject } from "../lib/activeProject";
+import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
+import { useOpenRequest } from "../components/requests";
+import { AttentionRow, EventRow } from "../components/fleet";
+import { Badge, Button, Dot, Panel } from "../components/ui";
+import {
+  BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs, SlotPanel,
+  type KpiItem,
+} from "../components/atlasHome";
+import {
+  boardRollup, gateLanes, isLiveSession, lastMergeByProject, liveCountsByProject, mergeThroughput,
+  plural, relativeTime, useGateHistoryRecent, useGatesActive,
+} from "../lib/atlasHome";
+import { isCompanionSession } from "../lib/sessions";
+import { color, font, type Tone } from "../theme";
+import { useNavigate } from "react-router-dom";
+
+/** `UsageLimitsStatus` is a discriminated union — every window only exists on the AVAILABLE arm, and
+ *  the unavailable one carries a `reason` instead. Narrowing once here keeps that check at the read
+ *  rather than at each of the four gauges below. */
+type AvailableUsage = Extract<UsageLimitsStatus, { available: true }>;
+
+// THE WORKSPACE ROOT NODE — card fd99b2d7 (Atlas P2-1, the owner-approved round-4 V2 design:
+// Mockups/2026-10-19 UI Overhaul Round 4). Overview is the default landing (full-size KPI tiles over
+// a dashboard band over the project grid); Deck is the same node read board-first, with the readouts
+// shrunk onto the tab row and a standing rail beside the grid.
+//
+// "Scope is depth": this node is the shallowest thing containing every project, so every figure here
+// is cross-project. Nothing on this page reads the active project.
+//
+// ⛔ Composed from EXISTING `api.*` calls only (docs/plans/atlas-ui/02-architecture.md's hard rule),
+// through the cache keys the classic pages already fill — so this node adds no poll Mission Control
+// or the Gates page was not already making.
+
+const TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label: "Deck" }];
+
+export default function WorkspaceHome() {
+  const [params] = useSearchParams();
+  const tab = params.get("tab") === "deck" ? "deck" : "overview";
+  const { projects, setProjectId } = useActiveProject();
+  const navigate = useNavigate();
+
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const usageQ = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: api.usageLimits, refetchInterval: 30_000 });
+  const activeGatesQ = useGatesActive();
+  const historyQ = useGateHistoryRecent();
+  const { items: attention } = useAttention();
+
+  const sessions = sessionsQ.data ?? [];
+  // Companions are standing, human-facing sessions rather than fleet members — the tree's own live
+  // marker excludes them, so these counts do too or the two would disagree on one screen.
+  const fleet = sessions.filter((s) => !isCompanionSession(s));
+  const live = fleet.filter(isLiveSession);
+  const managers = live.filter((s) => s.role === "manager");
+  const workers = live.filter((s) => s.role === "worker");
+  const liveByProject = useMemo(() => liveCountsByProject(sessions), [sessions]);
+  const activeProjects = projects.filter((p) => (liveByProject.get(p.id) ?? 0) > 0);
+
+  const lanes = gateLanes(activeGatesQ.data);
+  const merges = mergeThroughput(historyQ.data?.items);
+  const lastMerge = useMemo(() => lastMergeByProject(historyQ.data?.items), [historyQ.data]);
+  const usage = usageQ.data?.available ? usageQ.data : null;
+  const fiveHour = usage?.fiveHour ?? null;
+
+  // One board read per project, sharing the EXACT ["board", id] entry pages/Board.tsx fills — so a
+  // project card's open-card count is the same number that project's board shows, and opening it
+  // from here is already warm. No refetchInterval: the grid is a glance, and the board page itself
+  // owns the live cadence once you are actually looking at one.
+  const boardQs = useQueries({
+    queries: projects.map((p) => ({ queryKey: ["board", p.id], queryFn: () => api.board(p.id), staleTime: 30_000 })),
+  });
+  const boards = new Map(projects.map((p, i) => [p.id, boardRollup(boardQs[i]?.data?.columns, boardQs[i]?.data?.tasks)]));
+  const openCards = [...boards.values()].reduce((n, b) => n + b.open, 0);
+
+  // The cross-project pulse, from the SAME per-manager event queries Mission Control runs (same keys
+  // ⇒ one shared cache entry, not a second poll of the same endpoint).
+  const eventQs = useQueries({
+    queries: managers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
+  });
+  const events = eventQs
+    .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
+    .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
+  const projectByManager = new Map(managers.map((m) => [m.id, m.projectName]));
+
+  const kpis: KpiItem[] = [
+    {
+      key: "projects", label: "projects", value: projects.length,
+      sub: `${activeProjects.length} active · ${projects.length - activeProjects.length} idle`,
+      popover: (
+        <>
+          {projects.length === 0 && <BandEmpty>No projects yet.</BandEmpty>}
+          {projects.map((p) => (
+            <DataRow key={p.id} label={p.name}
+              tone={(liveByProject.get(p.id) ?? 0) > 0 ? "phosphor" : "muted"}
+              value={(liveByProject.get(p.id) ?? 0) > 0 ? `${liveByProject.get(p.id)} live` : "idle"} />
+          ))}
+        </>
+      ),
+    },
+    {
+      key: "live", label: "live sessions", value: live.length,
+      sub: `${plural(managers.length, "manager")} · ${plural(workers.length, "worker")}`,
+      tone: live.length > 0 ? "phosphor" : "muted",
+      popover: (
+        <>
+          {live.length === 0 && <BandEmpty>Nothing is running.</BandEmpty>}
+          {live.slice(0, 12).map((s) => (
+            <DataRow key={s.id} label={`${s.agentName}${s.role ? ` · ${s.role}` : ""}`}
+              tone={s.busy ? "amber" : "phosphor"} value={s.busy ? "busy" : "idle"} title={s.projectName} />
+          ))}
+          <BandFoot>Live sessions across every project. Workers are dispatched by a manager, never spawned here.</BandFoot>
+        </>
+      ),
+    },
+    {
+      key: "needs", label: "needs you", value: attention.length,
+      tone: attention.length > 0 ? "amber" : "muted",
+      sub: attentionSummary(attention.map((a) => a.kind)),
+      popover: <AttentionList items={attention} cap={8} />,
+    },
+    {
+      key: "gates", label: "gate run·queued", value: `${lanes.running}·${lanes.queued}`,
+      tone: lanes.queued > 0 ? "amber" : lanes.running > 0 ? "phosphor" : "muted",
+      sub: `cap ${lanes.cap} · daemon-wide`,
+      popover: <GateLaneList lanes={lanes} />,
+    },
+    {
+      key: "plan", label: "plan 5h", value: fiveHour ? `${Math.round(fiveHour.utilization)}%` : "—",
+      tone: !fiveHour ? "muted" : fiveHour.utilization >= 95 ? "red" : fiveHour.utilization >= 80 ? "amber" : "phosphor",
+      sub: fiveHour ? `resets ${relativeResets(fiveHour.resetsAt)}` : (usageQ.data && !usageQ.data.available ? usageQ.data.reason : "loading…"),
+      fill: fiveHour ? fiveHour.utilization / 100 : undefined,
+      popover: <PlanUsageDetail usage={usage} />,
+    },
+    {
+      key: "merged", label: "merged today", value: merges.branches,
+      tone: merges.branches > 0 ? "phosphor" : "muted",
+      sub: merges.branches > 0 ? `${relativeTime(merges.lastEndedAt)} · across ${plural(merges.projects, "project")}` : "nothing landed yet",
+      popover: (
+        <>
+          <DayBars series={merges.byDay} label="branches landed per day" />
+          <BandFoot>Branches landed per day, last 14. A batched merge counts every branch it landed.</BandFoot>
+        </>
+      ),
+    },
+  ];
+
+  const needsPanel = (
+    <BandPanel label="Needs you" count={attention.length} action={{ to: "/inbox", label: "Inbox" }}
+      testId="atlas-band-needs" style={{ gridColumn: "span 1" }}>
+      <AttentionList items={attention} cap={6} />
+    </BandPanel>
+  );
+  const gatePanel = (
+    <BandPanel label="Gate lanes" count={`cap ${lanes.cap}`} action={{ to: "/gates", label: "Gates" }} testId="atlas-band-gates">
+      <GateLaneList lanes={lanes} />
+    </BandPanel>
+  );
+  const pulsePanel = (
+    <BandPanel label="Pulse" action={{ to: "/", label: "Mission" }} testId="atlas-band-pulse">
+      {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}
+      {events.slice(0, 40).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
+    </BandPanel>
+  );
+
+  const grid = (
+    <ProjectGrid projects={projects} boards={boards} liveByProject={liveByProject} lastMerge={lastMerge}
+      sessions={fleet} onOpen={(id) => { setProjectId(id); navigate("/project"); }} />
+  );
+
+  return (
+    <div className="loom-atlas-home">
+      <NodeTabs tabs={TABS} active={tab} hrefFor={(k) => (k === "overview" ? "/home" : `/home?tab=${k}`)}>
+        {tab === "deck" && <KpiStrip items={kpis} />}
+      </NodeTabs>
+
+      {tab === "overview" ? (
+        <>
+          <KpiDeck items={kpis} />
+          {/* The four daemon-global fleet controls (clear usage hold / pause / resume / kill all) take
+              this full-width bar under the deck in the approved design — P2-3's card. */}
+          <SlotPanel bar slot="fleet-controls" label="Fleet controls" card="the fleet-controls card (P2-3)"
+            what="Clear usage hold · Pause · Resume · Kill all — daemon-global, every project." />
+          <div className="loom-atlas-band">
+            {needsPanel}
+            <SlotPanel slot="operators" label="Operators" card="the Agents card (P2-2)"
+              what="The cross-project standing operators — Platform Lead and Companion — with their go-live controls." />
+            {gatePanel}
+            <BandPanel label="Plan usage" action={{ to: "/usage", label: "Usage" }} testId="atlas-band-plan">
+              <PlanUsageDetail usage={usage} />
+            </BandPanel>
+            {pulsePanel}
+          </div>
+          <section className="loom-atlas-primary">
+            <div className="loom-atlas-primaryhead">
+              <span className="loom-atlas-primarylbl">Projects</span>
+              <span className="loom-bandcount">{projects.length}</span>
+              <span style={{ flex: 1 }} />
+              <Link to="/projects" className="loom-btn loom-btn-default loom-bandlink">New project <span aria-hidden>↗</span></Link>
+            </div>
+            {grid}
+          </section>
+        </>
+      ) : (
+        <div className="loom-atlas-deck">
+          <section className="loom-atlas-deckmain">
+            <div className="loom-atlas-primaryhead">
+              <span className="loom-atlas-primarylbl">Projects</span>
+              <span className="loom-bandcount">{projects.length}</span>
+              <span style={{ flex: 1 }} />
+              <Link to="/projects" className="loom-btn loom-btn-default loom-bandlink">New project <span aria-hidden>↗</span></Link>
+            </div>
+            {grid}
+            <p className="loom-bandempty" style={{ marginTop: 10 }}>
+              {plural(openCards, "open card")} across {plural(projects.length, "project")}. The reserved Platform home is pinned in the tree, not listed here.
+            </p>
+          </section>
+          <aside className="loom-atlas-deckrail">
+            {needsPanel}
+            {gatePanel}
+            {pulsePanel}
+          </aside>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Shared pieces ──────────────────────────────────────────────────────────────────────────────
+
+/** "2 decisions · 1 merge · 1 push" — the attention queue's own composition, in its own words. */
+function attentionSummary(kinds: string[]): string {
+  if (kinds.length === 0) return "nothing waiting";
+  const counts = new Map<string, number>();
+  for (const k of kinds) counts.set(k.toLowerCase(), (counts.get(k.toLowerCase()) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · ");
+}
+
+/** The attention queue as compact rows, capped so one noisy project cannot make a panel the page.
+ *  Each row keeps its real affordances: a pending Request opens the shared modal (never a navigation
+ *  away from here), everything else deep-links to its own session or diff. */
+export function AttentionList({ items, cap }: { items: ReturnType<typeof useAttention>["items"]; cap: number }) {
+  const navigate = useNavigate();
+  const openRequest = useOpenRequest();
+  if (items.length === 0) return <BandEmpty>Nothing needs you right now.</BandEmpty>;
+  const shown = items.slice(0, cap);
+  return (
+    <>
+      {shown.map((item) => (
+        <AttentionRow key={item.key} item={item}
+          onOpen={item.questionId
+            ? () => openRequest(item.questionId!)
+            : (() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+          onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
+      ))}
+      {items.length > shown.length && (
+        <BandFoot>+{items.length - shown.length} more in the Inbox</BandFoot>
+      )}
+    </>
+  );
+}
+
+/** The semaphore's live occupancy: the lane fill, then a row per run. `cap` is daemon-global, so the
+ *  fill is "how much of the HOST's budget is in use", not this project's own allowance. */
+export function GateLaneList({ lanes }: { lanes: ReturnType<typeof gateLanes> }) {
+  return (
+    <>
+      <MeterRow label={`${lanes.running}·${lanes.queued}`} value={`cap ${lanes.cap}`}
+        ratio={lanes.cap > 0 ? lanes.running / lanes.cap : 0}
+        tone={lanes.queued > 0 ? "amber" : "phosphor"} />
+      {lanes.runs.length === 0 && <BandEmpty>No gate is running or queued.</BandEmpty>}
+      {lanes.runs.map((g) => (
+        <DataRow key={g.id}
+          label={<><Dot tone={g.phase === "running" ? "amber" : "muted"} style={{ marginRight: 6 }} />{g.gateType} <span style={{ color: color.textMuted }}>{g.projectName}</span></>}
+          tone={g.phase === "running" ? "amber" : "muted"}
+          value={g.phase === "running" ? relativeTime(g.since).replace(" ago", "") : `queued${g.queuePosition ? ` ·${g.queuePosition}` : ""}`}
+          title={g.workerLabel ?? g.branch ?? undefined} />
+      ))}
+    </>
+  );
+}
+
+/** The real plan headroom — the daemon's cached OAuth poll, read through the same `["usageLimits"]`
+ *  entry components/fleet.tsx's PlanUsageStrip fills. Every failure mode is a muted line, never an
+ *  error state: the figure is informational and an unavailable one must not look like a fault. */
+export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
+  if (!usage) return <BandEmpty>Plan usage is unavailable on this daemon.</BandEmpty>;
+  // Same thresholds components/fleet.tsx's own `usageTone` uses, and the same ones the CONTEXT
+  // meters read: phosphor < 80% ≤ amber < 95% ≤ red.
+  const t = (u: number): Tone => (u >= 95 ? "red" : u >= 80 ? "amber" : "phosphor");
+  return (
+    <>
+      <MeterRow label="5h session" ratio={usage.fiveHour.utilization / 100}
+        value={`${Math.round(usage.fiveHour.utilization)}%`} tone={t(usage.fiveHour.utilization)} />
+      <MeterRow label="7d weekly" ratio={usage.sevenDay.utilization / 100}
+        value={`${Math.round(usage.sevenDay.utilization)}%`} tone={t(usage.sevenDay.utilization)} />
+      {usage.sevenDayOpus && (
+        <MeterRow label="7d opus" ratio={usage.sevenDayOpus.utilization / 100}
+          value={`${Math.round(usage.sevenDayOpus.utilization)}%`} tone={t(usage.sevenDayOpus.utilization)} />
+      )}
+      {usage.sevenDaySonnet && (
+        <MeterRow label="7d sonnet" ratio={usage.sevenDaySonnet.utilization / 100}
+          value={`${Math.round(usage.sevenDaySonnet.utilization)}%`} tone={t(usage.sevenDaySonnet.utilization)} />
+      )}
+      <BandFoot>5h resets {relativeResets(usage.fiveHour.resetsAt)}.</BandFoot>
+    </>
+  );
+}
+
+/** "in 1h 42m" / "now" / "—" — the countdown grammar components/fleet.tsx's own gauges use. */
+function relativeResets(resetsAt: string | null): string {
+  if (!resetsAt) return "—";
+  const ms = Date.parse(resetsAt) - Date.now();
+  if (!Number.isFinite(ms)) return "—";
+  if (ms <= 0) return "now";
+  const min = Math.floor(ms / 60_000);
+  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
+  if (d > 0) return `in ${d}d ${h}h`;
+  if (h > 0) return `in ${h}h ${m}m`;
+  return `in ${m}m`;
+}
+
+// ── The project grid ───────────────────────────────────────────────────────────────────────────
+// At the Workspace root the project grid stands where the board stands at the project node: the one
+// thing on the page that is a list of the real work, at full size and never summarised away.
+
+function ProjectGrid({ projects, boards, liveByProject, lastMerge, sessions, onOpen }: {
+  projects: Project[];
+  boards: Map<string, ReturnType<typeof boardRollup>>;
+  liveByProject: Map<string, number>;
+  lastMerge: Map<string, string>;
+  sessions: SessionListItem[];
+  onOpen: (projectId: string) => void;
+}) {
+  if (projects.length === 0) {
+    return (
+      <Panel data-testid="atlas-project-grid" style={{ padding: 16 }}>
+        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12.5 }}>
+          No projects yet — create one from the Projects node.
+        </span>
+      </Panel>
+    );
+  }
+  return (
+    <div className="loom-projgrid" data-testid="atlas-project-grid">
+      {projects.map((p) => {
+        const board = boards.get(p.id);
+        const liveCount = liveByProject.get(p.id) ?? 0;
+        const own = sessions.filter((s) => s.projectId === p.id && isLiveSession(s));
+        const mgr = own.filter((s) => s.role === "manager").length;
+        const wrk = own.filter((s) => s.role === "worker").length;
+        const landed = lastMerge.get(p.id);
+        return (
+          // A button, not a link: opening a project both SELECTS it (one ActiveProjectProvider, the
+          // same one the tree writes) and navigates to its node — an anchor would carry only half of
+          // that and leave the page scoped to whatever was active before.
+          <button key={p.id} type="button" className="loom-projcard" data-testid={`atlas-project-card-${p.id}`}
+            title={`Open ${p.name}`} onClick={() => onOpen(p.id)}>
+            <span className="loom-projcard-head">
+              <Dot tone={liveCount > 0 ? "phosphor" : "muted"} glow={liveCount > 0} />
+              <span className="loom-projcard-name">{p.name}</span>
+              {liveCount > 0 && <Badge tone="phosphor">{liveCount}</Badge>}
+            </span>
+            <span className="loom-projcard-meta">
+              {liveCount > 0 ? `${plural(mgr, "manager")} · ${plural(wrk, "worker")}` : "idle"}
+              {board && ` · ${plural(board.open, "open card")}`}
+            </span>
+            {board && <LaneBar lanes={board.lanes} />}
+            <span className="loom-projcard-foot">
+              {landed ? `merged ${relativeTime(landed)}` : p.repoPath ? "no landing recorded yet" : "no repository bound yet"}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
