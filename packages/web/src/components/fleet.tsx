@@ -152,7 +152,25 @@ const DISMISS_INVARIANT =
 // borrowed it.
 const DISMISS_FALLBACK_HINT = "Hide this alert — it comes back only if something new happens.";
 
-export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionRowItem; onOpen?: () => void; onDismiss?: () => void }) {
+/**
+ * `footer` (card c2968651) — a SECOND line under the row's own one-line head, for a kind whose
+ * action does not fit beside the text. A band column is ~300px, and the Atlas Needs-you band wants
+ * a MERGE REQUEST's "Approve & merge" one click away rather than a navigation to /review/:id; that
+ * button plus the row's kind label, text and dismiss cannot share one line at that width, so the
+ * row stacks instead of ellipsising the thing the reader is scanning for. Same two-line grammar the
+ * band's own operator/agent rows already use.
+ *
+ * ⛔ OPT-IN, and that is load-bearing. The classic surfaces (Mission Control, the project Overview)
+ * pass no footer and get the EXACT single-`div` row they render today, children and all — they pull
+ * MERGE REQUEST out of their attention list and render it as the rich Review-queue card instead, so
+ * only Atlas ever renders a merge row through here at all.
+ *
+ * @decision c2968651 — never make the footer unconditional or item-derived. A classic attention row
+ * must stay the one-line shape, with no wrapper element inserted around its children.
+ */
+export function AttentionRow({ item, onOpen, onDismiss, footer }: {
+  item: AttentionRowItem; onOpen?: () => void; onDismiss?: () => void; footer?: ReactNode;
+}) {
   // A pending Request of ANY type (live or orphaned) reads as an answerable ask: a cyan left-edge, a
   // PENDING state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE
   // REQUEST and the red/amber alerts. Orphaned still routes to the same answer page (its own amber
@@ -163,13 +181,8 @@ export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionRowIt
   // (lib/attention.ts) is the one place that distinction lives — App.tsx's collapsed request pill reads
   // the SAME helper, so the two can never drift apart on what counts as answerable.
   const decision = isAnswerableRequest(item);
-  return (
-    // `data-*` hooks (card ed0858dc): an e2e assertion on an attention row has to be scoped to the row it
-    // MEANS — the e2e daemon is shared, so a sibling spec's session renders a byte-identical row and a
-    // text-matched locator would pass against the wrong data. Kind + session id make the scope explicit.
-    <div data-testid="attention-row" data-kind={item.kind} data-session-id={item.sessionId ?? item.workerSessionId ?? ""}
-      style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${color.border}`,
-      borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`, borderRadius: 4, padding: "6px 10px", marginBottom: 6 }}>
+  const head = (
+    <>
       <Dot tone={item.tone} glow={item.tone === "amber"} />
       <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
       {/* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
@@ -193,6 +206,34 @@ export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionRowIt
           title={`${item.dismissHint || DISMISS_FALLBACK_HINT} ${DISMISS_INVARIANT}`}
           style={{ padding: "0 6px", fontSize: 15, lineHeight: 1 }}>×</Button>
       )}
+    </>
+  );
+  // `data-*` hooks (card ed0858dc): an e2e assertion on an attention row has to be scoped to the row it
+  // MEANS — the e2e daemon is shared, so a sibling spec's session renders a byte-identical row and a
+  // text-matched locator would pass against the wrong data. Kind + session id make the scope explicit.
+  const hooks = {
+    "data-testid": "attention-row",
+    "data-kind": item.kind,
+    "data-session-id": item.sessionId ?? item.workerSessionId ?? "",
+  };
+  const frame = {
+    border: `1px solid ${color.border}`,
+    borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`,
+    borderRadius: 4, padding: "6px 10px", marginBottom: 6,
+  };
+  // No footer ⇒ the one-line row, with `head` as the frame's OWN direct flex children: the text's
+  // ellipsis and the `flex: 1` spacer both measure against this element, so wrapping them in an
+  // inner box unconditionally would change every classic row's layout for no reason.
+  if (!footer) {
+    return <div {...hooks} style={{ display: "flex", alignItems: "center", gap: 10, ...frame }}>{head}</div>;
+  }
+  // `flex-start`, not `center`: in a ~300px band column the row text wraps to two or three lines,
+  // and centring leaves the kind pill and the dismiss floating against the middle of that block.
+  // Measured at 1600 — the one-line variant above keeps `center`, where there is nothing to wrap past.
+  return (
+    <div {...hooks} style={{ display: "flex", flexDirection: "column", gap: 6, ...frame }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>{head}</div>
+      {footer}
     </div>
   );
 }

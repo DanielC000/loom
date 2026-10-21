@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useMutation, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
 import { analyzeDiff, riskTone, type DiffAnalysis } from "../lib/diff";
@@ -65,6 +65,83 @@ export function ReviewQueue({ workerIds, showLabel = true }: { workerIds: string
   );
 }
 
+// ── The merge write path, shared by both renderings of it ──────────────────────────────────────
+// Card c2968651 (Atlas P2-1 parity gap a): the Atlas Needs-you band renders a pending review as a
+// compact row rather than as the card below (a band column is ~300px; the card grid is
+// minmax(340px,1fr)), and that row needs the SAME one-click merge. So the mutation, the button's
+// own wording, and the way its three outcomes are read are declared ONCE here and consumed by both
+// — the full card and the compact action — rather than copied into the band.
+//
+// @decision c2968651 — never give the compact band action its own `api.mergeWorker` call, its own
+// outcome branches, or its own button title. One write path, one outcome reader, two renderings:
+// a second copy is one that drifts from the fail-closed gate's real semantics.
+
+/** `POST /api/sessions/:id/merge` — the existing fail-closed daemon merge gate. Invalidates the
+ *  session feed on success, which is what retires the attention row (its worker stops being live). */
+export function useWorkerMerge(workerId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.mergeWorker(workerId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
+  });
+}
+
+export type WorkerMerge = UseMutationResult<Awaited<ReturnType<typeof api.mergeWorker>>, Error, void, unknown>;
+
+/** The button's hover text. One constant because the compact action must not be able to promise
+ *  something different from the card about what the click actually does. */
+const MERGE_TITLE =
+  "Run the build gate and squash-merge without opening the full diff (the same fail-closed gate)";
+
+/**
+ * The merge result, read the one correct way.
+ *
+ * `pending` (merged:null, card 361520a0 Half Four) is a still-RUNNING gate, NOT a rejection — which
+ * is why it is checked BEFORE the `!merged` branch, that one being a genuine refusal only. A
+ * SUCCESS deliberately renders nothing: the row/card retires on its own once the merged worker
+ * leaves the live session feed, and showing a confirmation here would change what the classic
+ * Review queue renders today.
+ */
+export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
+  if (merge.data?.pending) {
+    return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.cyan }}>still running — {merge.data.reason}</span>;
+  }
+  if (merge.data && !merge.data.pending && merge.data.merged === false) {
+    return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>rejected — {merge.data.reason}</span>;
+  }
+  return null;
+}
+
+/**
+ * THE COMPACT VARIANT — the band's second line under a MERGE REQUEST attention row.
+ *
+ * ⛔ Fetch-free, deliberately. The card below reads the branch diff because its whole body IS the
+ * diff analysis; this row shows no diff, so it must not pull one. The Atlas home nodes are composed
+ * only from reads another page already makes (ProjectHome/WorkspaceHome's own notes), and a
+ * per-pending-review diff fetch would be exactly the N-request fan-out those nodes exist without.
+ * `Review →` is still the primary action, so the verification path stays the default and the
+ * one-click merge is the deliberate shortcut — not the thing the eye lands on first.
+ *
+ * @decision c2968651 — do not add a diff read to this row. It would put an N-wide fan-out on a
+ * home node for a summary the row does not render.
+ */
+export function CompactMergeAction({ workerId, onReview }: { workerId: string; onReview: () => void }) {
+  const merge = useWorkerMerge(workerId);
+  return (
+    <div data-testid={`atlas-band-merge-${workerId}`}
+      style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+      <Button variant="primary" onClick={onReview}
+        title="Open the full branch diff before deciding">Review →</Button>
+      <Button variant="default" disabled={merge.isPending} title={MERGE_TITLE}
+        data-testid={`atlas-band-merge-go-${workerId}`}
+        onClick={() => merge.mutate()}>
+        {merge.isPending ? "Merging…" : "Approve & merge"}
+      </Button>
+      <MergeOutcome merge={merge} />
+    </div>
+  );
+}
+
 function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
   workerId: string;
   worker?: SessionListItem;
@@ -73,11 +150,7 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
   error: boolean;
   onReview: () => void;
 }) {
-  const qc = useQueryClient();
-  const merge = useMutation({
-    mutationFn: () => api.mergeWorker(workerId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
-  });
+  const merge = useWorkerMerge(workerId);
 
   const accent = analysis?.highRisk ? color.red : analysis?.mediumRisk ? color.amber : color.phosphor;
   const topRisk = (analysis?.files ?? []).filter((f) => f.risk !== "low").slice(0, 3);
@@ -127,20 +200,12 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
       {/* actions */}
       <div style={{ display: "flex", gap: 8, marginTop: "auto", paddingTop: 4 }}>
         <Button variant="primary" onClick={onReview} style={{ flex: 1 }}>Review →</Button>
-        <Button variant="default" disabled={merge.isPending}
-          title="Run the build gate and squash-merge without opening the full diff (the same fail-closed gate)"
+        <Button variant="default" disabled={merge.isPending} title={MERGE_TITLE}
           onClick={() => merge.mutate()}>
           {merge.isPending ? "Merging…" : "Approve & merge"}
         </Button>
       </div>
-      {/* `pending` (merged:null, card 361520a0 Half Four) is a still-running gate, NOT a rejection —
-          checked BEFORE the `!merged` branch below, which is a genuine refusal only. */}
-      {merge.data?.pending && (
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.cyan }}>still running — {merge.data.reason}</span>
-      )}
-      {merge.data && !merge.data.pending && merge.data.merged === false && (
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>rejected — {merge.data.reason}</span>
-      )}
+      <MergeOutcome merge={merge} />
     </Panel>
   );
 }

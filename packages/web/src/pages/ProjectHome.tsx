@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { contextWindowForModel, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
+import { contextWindowForModel, resolveConfig, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
@@ -79,6 +79,10 @@ export default function ProjectHome() {
   const merges = mergeThroughput(historyQ.data?.items);
   const wc = worstContext(live);
   const ctxPct = wc.ctx > 0 ? Math.round(wc.ratio * 100) : 0;
+  // The threshold the context meters are actually read against, resolved the same way the classic
+  // Overview resolves `gateCommand` — this project's override over the platform defaults, off the
+  // project row this page already holds. No platform layer here, matching that page exactly.
+  const recycleAt = resolveConfig(project?.config).orchestration.recycleAtContextRatio;
   const worstSession = live.find((s) => (s.ctxInputTokens ?? 0) > 0 && s.ctxInputTokens === wc.ctx) ?? null;
 
   // The roster behind the Agents panel below AND the "spawnable" figure on the fleet tile — ONE
@@ -121,7 +125,7 @@ export default function ProjectHome() {
       tone: ctxPct >= 80 ? "amber" : ctxPct >= 95 ? "red" : "phosphor",
       sub: worstSession ? `${worstSession.agentName} · ${plural(worstSession.ctxTurns ?? 0, "turn")}` : "no session reports context",
       fill: wc.ctx > 0 ? wc.ratio : undefined,
-      popover: <ContextList sessions={live} />,
+      popover: <ContextList sessions={live} recycleAt={recycleAt} />,
     },
     {
       key: "gates", label: "gate run·queued", value: `${lanes.running}·${lanes.queued}`,
@@ -274,10 +278,24 @@ function FleetList({ managers, workers }: { managers: SessionListItem[]; workers
   );
 }
 
-/** Context occupancy, worst first — the figure that says who needs recycling before the next gate.
- *  Ratio against each session's OWN model window (`contextWindowForModel`), never one page-level
- *  constant: two sessions in one project can legitimately run different windows. */
-function ContextList({ sessions }: { sessions: SessionListItem[] }) {
+/**
+ * Context occupancy, worst first — the figure that says who needs recycling before the next gate.
+ * Ratio against each session's OWN model window (`contextWindowForModel`), never one page-level
+ * constant: two sessions in one project can legitimately run different windows.
+ *
+ * Card c2968651 (gap c) asked whether the round-4 mockup's pop-over actions belong here. Both of
+ * the two aimed at this tile were REJECTED as writes and resolved as EXITS instead, because neither
+ * has a one-click write path to wire: "Recycle Dev after card" is a manager's `worker_recycle` with
+ * no human REST equivalent at all (`lib/api.ts` has resume/stop and no recycle), and a button named
+ * for a recycle that actually stopped and respawned a session would lie about what the click does;
+ * "Adjust threshold" edits `orchestration.recycleAtContextRatio`, a numeric config field, which is
+ * a form and not a button. So each row carries a link to the session that owns the real controls,
+ * and the footer names the live threshold these meters are read against plus where it is changed.
+ *
+ * @decision c2968651 — do not put a recycle button here. There is no human recycle write path, and
+ * a stop+resume pair wearing that label would misname what it does.
+ */
+function ContextList({ sessions, recycleAt }: { sessions: SessionListItem[]; recycleAt: number }) {
   const rows = sessions
     .filter((s) => (s.ctxInputTokens ?? 0) > 0)
     .map((s) => ({ s, ratio: (s.ctxInputTokens ?? 0) / contextWindowForModel(s.model) }))
@@ -286,11 +304,20 @@ function ContextList({ sessions }: { sessions: SessionListItem[] }) {
   return (
     <>
       {rows.map(({ s, ratio }) => (
-        <MeterRow key={s.id} label={s.agentName} ratio={ratio}
+        <MeterRow key={s.id} label={
+          <Link to={`/session/${s.id}`} className="loom-inlinelink" title={`Open ${s.agentName}'s session`}>{s.agentName}</Link>
+        } ratio={ratio}
           value={`${Math.round(ratio * 100)}% · ${s.ctxTurns ?? 0}t`}
           tone={ratio >= 0.95 ? "red" : ratio >= 0.8 ? "amber" : "phosphor"} />
       ))}
-      <BandFoot>Occupancy against each session's own model window.</BandFoot>
+      <BandFoot>
+        Occupancy against each session's own model window.{" "}
+        {recycleAt > 0
+          ? <>A manager is nudged to hand off at {Math.round(recycleAt * 100)}%</>
+          : <>The recycle nudge is switched off</>}
+        {" — "}
+        <Link to="/settings" className="loom-inlinelink">change it in Settings</Link>.
+      </BandFoot>
     </>
   );
 }

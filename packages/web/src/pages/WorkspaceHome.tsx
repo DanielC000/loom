@@ -13,6 +13,7 @@ import {
   PlanUsageDetail, relativeResets, type KpiItem,
 } from "../components/atlasHome";
 import { FleetControlsBar } from "../components/fleetControls";
+import { CompactMergeAction } from "../components/reviewQueue";
 import { RoleBadge } from "../lib/roleDisplay";
 import { sessionVitals, standingOperators } from "../lib/atlasAgents";
 import {
@@ -253,9 +254,19 @@ function attentionSummary(kinds: string[]): string {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · ");
 }
 
-/** The attention queue as compact rows, capped so one noisy project cannot make a panel the page.
- *  Each row keeps its real affordances: a pending Request opens the shared modal (never a navigation
- *  away from here), everything else deep-links to its own session or diff. */
+/**
+ * The attention queue as compact rows, capped so one noisy project cannot make a panel the page.
+ * Each row keeps its real affordances: a pending Request opens the shared modal (never a navigation
+ * away from here), everything else deep-links to its own session or diff.
+ *
+ * A MERGE REQUEST is the one kind whose action is a WRITE rather than a navigation, so it gets the
+ * row's second line instead (card c2968651, gap a — the decision record is on `CompactMergeAction`).
+ * Its `onOpen` is deliberately dropped: the footer's own `Review →` IS that affordance.
+ *
+ * FOUR mounts read this — the Needs-you band panel and the `needs you` KPI pop-over, at each of the
+ * two levels — so wiring it here puts the action in all four. No classic surface reaches it: Mission
+ * Control and the project Overview both filter MERGE REQUEST out and render the rich card instead.
+ */
 export function AttentionList({ items, cap }: { items: ReturnType<typeof useAttention>["items"]; cap: number }) {
   const navigate = useNavigate();
   const openRequest = useOpenRequest();
@@ -263,13 +274,21 @@ export function AttentionList({ items, cap }: { items: ReturnType<typeof useAtte
   const shown = items.slice(0, cap);
   return (
     <>
-      {shown.map((item) => (
-        <AttentionRow key={item.key} item={item}
-          onOpen={item.questionId
-            ? () => openRequest(item.questionId!)
-            : (() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
-          onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
-      ))}
+      {shown.map((item) => {
+        const workerId = item.kind === "MERGE REQUEST" ? item.workerSessionId : null;
+        const footer = workerId
+          ? <CompactMergeAction workerId={workerId} onReview={() => navigate(`/review/${workerId}`)} />
+          : undefined;
+        return (
+          <AttentionRow key={item.key} item={item} footer={footer}
+            onOpen={footer
+              ? undefined
+              : item.questionId
+                ? () => openRequest(item.questionId!)
+                : (() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+            onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
+        );
+      })}
       {items.length > shown.length && (
         <BandFoot>+{items.length - shown.length} more in the Inbox</BandFoot>
       )}
