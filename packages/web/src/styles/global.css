@@ -366,6 +366,16 @@ body {
   outline-offset: -2px;
 }
 
+/* Board card open target (pages/Board.tsx `Card`, card a6d7a102) — the same phosphor ring, INSET for
+   the same reason as the segments above: a lane's card list is `overflow-y: auto`, which computes the
+   other axis to `auto` as well, so the ring on the first or last card in a lane would be clipped away
+   at a positive offset. Drawn inside the border box, nothing can eat it. */
+.loom-board-open:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
+  border-radius: 3px;
+}
+
 /* Attachment-manifest row (the Requests inbox's attached-files list, card 19b7cf7a): one dense `ls`-like
    row per file. Reads as plain text at rest and lifts to panel-2 on hover, so a whole manifest of 20 rows
    isn't pre-highlighted — the SELECTED row's own phosphor left edge (inline, since it is state, not

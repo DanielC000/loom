@@ -599,7 +599,15 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
         {/* Drag is confined to this grip so a click on the card body opens the detail drawer instead. */}
         <span {...listeners} {...attributes} title="Drag to move"
           style={{ cursor: "grab", color: color.textMuted, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
-        <div onClick={onOpen} title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
+        {/* The card's open target is a real control, not a clickable div (card a6d7a102): the detail
+            dialog had no keyboard way in at all, and with nothing focused when it opened, Esc left a
+            keyboard user at <body> with the whole page to re-Tab through. role=button + Enter/Space is
+            the minimal shape — a <button> element would reset the card's whole type/layout here, and
+            this subtree carries only spans, never a nested link, so no interactive content is buried
+            inside it (see the note in components/taskLinks.tsx on why the card deliberately has none). */}
+        <div role="button" tabIndex={0} className="loom-board-open" onClick={onOpen}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
+          title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
           {/* flexWrap is the phone-density hinge: the priority chip + a held/deferred badge share this
               line with the title. On a TIGHT lane (phone ~200px / the 240px desktop floor) a chip + badge
               starve the title's slice, so the title's 120px flex-basis no longer fits beside them and
@@ -699,12 +707,34 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
   );
 }
 
+// Dialog focus, shared by the three task-detail dialogs below (card a6d7a102). Opening a card moves
+// focus INTO the panel and closing hands it back to the exact card you opened from — without the
+// restore, Esc drops a keyboard user at <body> and they re-Tab from the top of the page to get back
+// to where they were. The PANEL takes focus (tabIndex -1), not the first field: Esc is then the first
+// key the dialog answers, and nothing lands in the title input by accident.
+//
+// Safe across the dialog's own swaps. A done card renders TaskDrawerLoading first and TaskDrawer after
+// it resolves, and `key={drawerTask.id}` remounts the drawer when you follow a link to another card —
+// React runs a commit's cleanups before its effects, so each swap restores to the opener, re-captures
+// it, and focuses the new panel, in that order. `isConnected` guards the case where the board's 4s
+// refetch has since dropped the opener's row.
+function useDialogFocus<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    ref.current?.focus();
+    return () => { if (opener?.isConnected) opener.focus(); };
+  }, []);
+  return ref;
+}
+
 // The modal SHELL both drawer placeholders below share (card 230cb6e3 — it was duplicated verbatim in
 // each): backdrop, Esc-to-close, click-outside-to-close, and the panel geometry matched to TaskDrawer's
 // own, so the dialog never visibly jumps when the real drawer takes its place. Content is centred in a
 // column — for the single-child loading state that renders identically to the row layout it replaces,
 // and the error state's button pair stacks under its message exactly as before.
 function TaskDrawerPlaceholder({ onClose, children }: { onClose: () => void; children: ReactNode }) {
+  const panelRef = useDialogFocus<HTMLDivElement>();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -714,8 +744,13 @@ function TaskDrawerPlaceholder({ onClose, children }: { onClose: () => void; chi
     <div onClick={onClose} role="dialog" aria-modal
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
-      <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(820px, 92vw)", maxWidth: "100%", minHeight: "min(820px, 85vh)", maxHeight: "88vh",
+      <div ref={panelRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}
+        // outline:none on the PANEL only — it is a programmatic focus target, not a control a user
+        // can Tab to, and its own border plus the dimmed backdrop already delimit it. Measured: open
+        // a card from the keyboard without this and Chromium paints its UA ring (`auto` 1px) around
+        // the whole panel, a bright frame the design never specified and that appears on the keyboard
+        // path alone. Nothing a user can reach loses a ring here.
+        style={{ outline: "none", width: "min(820px, 92vw)", maxWidth: "100%", minHeight: "min(820px, 85vh)", maxHeight: "88vh",
           background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
           padding: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
           gap: 10, boxSizing: "border-box" }}>
@@ -868,6 +903,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, links, linksUnavaila
   // link to ANOTHER card (card 1ae4f88c → `to: <id>`), which unmounts this drawer just as thoroughly.
   const [pendingNav, setPendingNav] = useState<{ to: string | null } | null>(null);
   const requestClose = () => { if (dirty) setPendingNav({ to: null }); else onClose(); };
+  const panelRef = useDialogFocus<HTMLDivElement>();
   const requestOpen = (id: string) => { if (dirty) setPendingNav({ to: id }); else onOpenTask(id); };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { if (dirty) setPendingNav({ to: null }); else onClose(); } };
@@ -953,8 +989,9 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, links, linksUnavaila
     <div onClick={requestClose} role="dialog" aria-modal
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
-      <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(820px, 92vw)", maxWidth: "100%",
+      <div ref={panelRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}
+        // outline:none for the same reason as TaskDrawerPlaceholder's panel above — read it there.
+        style={{ outline: "none", width: "min(820px, 92vw)", maxWidth: "100%",
           // Grow toward the viewport height on a large window (the flex:1 description below absorbs the
           // extra room and scrolls internally): floor at min(820px, 85vh) — 820px mirrors the width cap
           // and bounds the height on a huge monitor — and cap at 88vh (with the overlay's 6vh top/bottom
