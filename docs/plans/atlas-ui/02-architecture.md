@@ -62,8 +62,13 @@ tree, breadcrumbs, node tabs — as a new layout **around** the existing page co
   nothing new to invent here, just more of the same mechanism), so a bookmark to `/board` or
   `/actors?tab=skills` keeps working.
 - Cross-cutting chrome (§E of the parity checklist) — Command Palette, banners, toasts, First-run
-  welcome — stays mounted exactly where `App.tsx` mounts it today: outside the node/tab tree, at the
-  shell root. None of it needs to know Atlas exists.
+  welcome — stays **defined** exactly once, in `App.tsx`, outside the node/tab tree, and none of it needs
+  to know Atlas exists. It is **not** a single mount shared by both shells, though: `App.tsx` groups it
+  into `ShellOverlays` / `ShellBanners` and passes those as `overlays`/`banners` **props** into whichever
+  shell is live, and exactly one shell is ever mounted — so toggling the switch unmounts the whole chrome
+  subtree and mounts a fresh one. That remount is harmless today (`useNewAttention` re-seeds its seen-set
+  on remount rather than replaying the backlog — `lib/attention.ts`), and it is pinned by
+  `e2e/atlas-shell-chrome.spec.ts`'s last test (card a045bec3, P1-5) so the claim cannot drift back.
 
 **At the end of phase 1, Atlas is navigable and every single parity-checklist row with a stated Atlas
 home is reachable, functionally identical to today, just reached through the tree instead of the rail.**
