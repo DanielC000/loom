@@ -56,101 +56,136 @@ import { useFormSync } from "../lib/useFormSync";
 import { color, font, tone, type Tone } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 
-// Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
-// Scoped to the header's active project; switching it re-scopes (the editor is keyed by project id).
-// Every field edits the OVERRIDE while showing the EFFECTIVE resolved value as a hint; a blank/inherit
-// field is omitted from the override AND its dot-path is sent as `unset` (card 546034fa: Save MERGES
-// onto the stored override by default via PATCH /api/projects/:id/config — the human/REST path —
-// gateCommand is editable here by design; only the agent MCP path rejects it), so it actually falls back
-// to the platform default rather than surviving the merge. A strict-zod 400 surfaces verbatim.
-export default function Settings() {
-  const { projectId, projects } = useActiveProject();
-  const project = projects.find((p) => p.id === projectId) ?? null;
+// ── The section list ───────────────────────────────────────────────────────────────────────────
+//
+// @decision 595e2a47 — a section's `scope` is the API call its own component MAKES, never what its
+// title suggests; and BOTH shells render from THIS array alone. Never give a section its own read of
+// the Atlas switch, and never add a per-shell section list beside this one.
+//
+// The full section → write-call → read-call → placement table, and the three rows whose placement
+// needed an argument rather than a lookup, are in the record. Declaration order IS the classic page's
+// order (Disk Reclaim deliberately last); `e2e/atlas-settings-scope.spec.ts` parses this block out of
+// the real source to prove every row lands on exactly one Atlas node.
+export type SettingsScope = "project" | "workspace";
 
+export type SettingsSection = {
+  /** Stable identity — the section wrapper's test id, and the spec's join key. Never a label. */
+  key: string;
+  label: string;
+  scope: SettingsScope;
+  /** `project` is the ACTIVE project (null when the workspace holds none); a workspace row ignores it. */
+  render: (project: Project | null) => ReactNode;
+};
+
+export const SETTINGS_SECTIONS: SettingsSection[] = [
+  // Which shell this browser renders (card 757c80dd). WORKSPACE, and first there: it is a per-browser
+  // localStorage preference with no REST write at all (lib/atlasUi.ts) — so it is the one row placed by
+  // an argument rather than by a call, and the argument is that it changes the WHOLE app's chrome, which
+  // is the workspace's business and not any one project's.
+  { key: "interface", label: "Interface", scope: "workspace", render: () => <InterfacePanel /> },
+
+  // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
+  // Scoped to the header's active project; switching it re-scopes (the editor is keyed by project id).
+  // Every field edits the OVERRIDE while showing the EFFECTIVE resolved value as a hint; a blank/inherit
+  // field is omitted from the override AND its dot-path is sent as `unset` (card 546034fa: Save MERGES
+  // onto the stored override by default via PATCH /api/projects/:id/config — the human/REST path —
+  // gateCommand is editable here by design; only the agent MCP path rejects it), so it actually falls back
+  // to the platform default rather than surviving the merge. A strict-zod 400 surfaces verbatim.
+  {
+    key: "project-settings", label: "Project Settings", scope: "project",
+    render: (project) => (project ? (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {/* Repository binding — its OWN structural-PATCH save (the repoPath rebind guard),
+            independent of the project-config Save inside ConfigEditor below. */}
+        <RepoPathEditor key={`repo-${project.id}`} project={project} />
+        <ConfigEditor key={project.id} project={project} />
+      </div>
+    ) : (
+      <Panel>
+        <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
+          No active project. Pick one in the header to edit its config.
+        </p>
+      </Panel>
+    )),
+  },
+
+  // Daemon-global tuning — NOT keyed to the active project (one shared daemon).
+  { key: "global-daemon", label: "Global / Daemon", scope: "workspace", render: () => <GlobalConfigEditor /> },
+
+  // Owner-controlled encrypted credential store (agent-tooling epic, P1) — daemon-global, like the
+  // tuning above. HUMAN-only; there is no agent-facing surface in this phase.
+  { key: "connections", label: "Connections", scope: "workspace", render: () => <ConnectionsPanel /> },
+
+  // Pending bindings (credential auto-provisioning v1 binding UX, card 12dc7fc9 — "Direction B"):
+  // the queue of agent-requested profile→connection grants awaiting the owner's deliberate approval.
+  // A grant is committed only by an explicit Save on the profile's allowlist ("Review & grant" opens
+  // it pre-selected), never a side effect of answering — binding stays an owner-only trust decision.
+  { key: "pending-bindings", label: "Pending bindings", scope: "workspace", render: () => <PendingBindingsPanel /> },
+
+  // Poll-job triggers (agent-tooling epic P3) — daemon-global scheduled polls that wake or spawn a
+  // session on a new item. HUMAN-only, like Connections above (which each job binds).
+  { key: "poll-jobs", label: "Poll Jobs", scope: "workspace", render: () => <PollJobsPanel /> },
+
+  // Capability registry catalog (agent-tooling epic P4 + follow-on): the two BUILTIN capabilities
+  // PLUS owner-added rows, in ONE unified list. HUMAN-only, like Connections/Poll Jobs above — a
+  // capability grant can launch a host process, the same trust posture as gateCommand.
+  { key: "capabilities", label: "Capabilities", scope: "workspace", render: () => <CapabilitiesPanel /> },
+
+  // Owner-declared project links (board card 2349d90c) — the sole gate for the manager↔manager
+  // peer_message cross-project channel. Daemon-global, cross-project (not scoped to the active
+  // project above), HUMAN-only — like Connections/Capabilities, there is no agent MCP path.
+  { key: "project-links", label: "Project Links", scope: "workspace", render: () => <ProjectLinksPanel /> },
+
+  // node_modules reclaim (card 08ac5925) — daemon-global disk housekeeping over card 1008e305's two
+  // human-only loopback routes. Deliberately LAST: it is the only panel on this page whose primary
+  // control permanently DELETES data on this host, and Settings is a page the owner scrolls through
+  // for configuration — an irreversible action sitting above the routine editors invites a misclick.
+  // Discoverability comes from the panel's own live candidate count, not from its position.
+  { key: "disk-reclaim", label: "Disk Reclaim", scope: "workspace", render: () => <NodeModulesReclaimPanel /> },
+];
+
+// The page body, identical for all three mounts — only WHICH rows it is handed differs. The wrapper
+// per row carries a `data-testid` so a spec can assert a section's label INSIDE its own container:
+// several of these labels (Memory, Settings) are also tree-node labels, and a page-wide exact-text
+// locator resolves to the chrome as readily as to the content.
+function SettingsColumn({ sections, project }: { sections: SettingsSection[]; project: Project | null }) {
   return (
     <div style={{ maxWidth: 820, display: "flex", flexDirection: "column", gap: 28 }}>
-      {/* Which shell this browser renders (card 757c80dd). FIRST on the page: it is the only control
-          here that changes the whole app's chrome, and the owner's Atlas review workflow is flipping
-          it back and forth to compare (docs/plans/atlas-ui/). */}
-      <div>
-        <SectionLabel>Interface</SectionLabel>
-        <InterfacePanel />
-      </div>
-
-      <div>
-        <SectionLabel>Project Settings</SectionLabel>
-        {project ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* Repository binding — its OWN structural-PATCH save (the repoPath rebind guard),
-                independent of the project-config Save inside ConfigEditor below. */}
-            <RepoPathEditor key={`repo-${project.id}`} project={project} />
-            <ConfigEditor key={project.id} project={project} />
-          </div>
-        ) : (
-          <Panel>
-            <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
-              No active project. Pick one in the header to edit its config.
-            </p>
-          </Panel>
-        )}
-      </div>
-
-      {/* Daemon-global tuning — NOT keyed to the active project (one shared daemon). */}
-      <div>
-        <SectionLabel>Global / Daemon</SectionLabel>
-        <GlobalConfigEditor />
-      </div>
-
-      {/* Owner-controlled encrypted credential store (agent-tooling epic, P1) — daemon-global, like the
-          tuning above. HUMAN-only; there is no agent-facing surface in this phase. */}
-      <div>
-        <SectionLabel>Connections</SectionLabel>
-        <ConnectionsPanel />
-      </div>
-
-      {/* Pending bindings (credential auto-provisioning v1 binding UX, card 12dc7fc9 — "Direction B"):
-          the queue of agent-requested profile→connection grants awaiting the owner's deliberate approval.
-          A grant is committed only by an explicit Save on the profile's allowlist ("Review & grant" opens
-          it pre-selected), never a side effect of answering — binding stays an owner-only trust decision. */}
-      <div>
-        <SectionLabel>Pending bindings</SectionLabel>
-        <PendingBindingsPanel />
-      </div>
-
-      {/* Poll-job triggers (agent-tooling epic P3) — daemon-global scheduled polls that wake or spawn a
-          session on a new item. HUMAN-only, like Connections above (which each job binds). */}
-      <div>
-        <SectionLabel>Poll Jobs</SectionLabel>
-        <PollJobsPanel />
-      </div>
-
-      {/* Capability registry catalog (agent-tooling epic P4 + follow-on): the two BUILTIN capabilities
-          PLUS owner-added rows, in ONE unified list. HUMAN-only, like Connections/Poll Jobs above — a
-          capability grant can launch a host process, the same trust posture as gateCommand. */}
-      <div>
-        <SectionLabel>Capabilities</SectionLabel>
-        <CapabilitiesPanel />
-      </div>
-
-      {/* Owner-declared project links (board card 2349d90c) — the sole gate for the manager↔manager
-          peer_message cross-project channel. Daemon-global, cross-project (not scoped to the active
-          project above), HUMAN-only — like Connections/Capabilities, there is no agent MCP path. */}
-      <div>
-        <SectionLabel>Project Links</SectionLabel>
-        <ProjectLinksPanel />
-      </div>
-
-      {/* node_modules reclaim (card 08ac5925) — daemon-global disk housekeeping over card 1008e305's two
-          human-only loopback routes. Deliberately LAST: it is the only panel on this page whose primary
-          control permanently DELETES data on this host, and Settings is a page the owner scrolls through
-          for configuration — an irreversible action sitting above the routine editors invites a misclick.
-          Discoverability comes from the panel's own live candidate count, not from its position. */}
-      <div>
-        <SectionLabel>Disk Reclaim</SectionLabel>
-        <NodeModulesReclaimPanel />
-      </div>
+      {sections.map((section) => (
+        <div key={section.key} data-testid={`settings-section-${section.key}`}>
+          <SectionLabel>{section.label}</SectionLabel>
+          {section.render(project)}
+        </div>
+      ))}
     </div>
   );
+}
+
+function useActiveProjectRow(): Project | null {
+  const { projectId, projects } = useActiveProject();
+  return projects.find((p) => p.id === projectId) ?? null;
+}
+
+// `/settings` — one route, two meanings, decided by ONE read of the switch here at the page's own
+// entry. Classic: the whole page, exactly as before. Atlas: this address is the PROJECT tier's
+// Settings node (nav.tsx marks /settings `scoped`), so it carries the project-scoped rows only and
+// the daemon-global ones live on the Workspace tier's own node below.
+//
+// ⛔ A section never reads the switch — placement is the array's job and the array's alone, so a
+// section cannot grow a second, per-shell idea of where it belongs.
+export default function Settings() {
+  const [atlasUi] = useAtlasUi();
+  const project = useActiveProjectRow();
+  const sections = atlasUi ? SETTINGS_SECTIONS.filter((s) => s.scope === "project") : SETTINGS_SECTIONS;
+  return <SettingsColumn sections={sections} project={project} />;
+}
+
+// `/workspace-settings` — the Workspace tier's Settings node (ATLAS_HOMES, card 595e2a47). Atlas-only
+// by construction: the classic shell never mounts ATLAS_HOMES, so this component needs no switch read
+// of its own — being rendered at all already means Atlas is on.
+export function WorkspaceSettings() {
+  const project = useActiveProjectRow();
+  return <SettingsColumn sections={SETTINGS_SECTIONS.filter((s) => s.scope === "workspace")} project={project} />;
 }
 
 // The Atlas UI switch (card 757c80dd; what Atlas is: docs/plans/atlas-ui/02-architecture.md).

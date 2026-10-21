@@ -96,6 +96,11 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   // classic page still renders. Only THIS map — no legacy redirect targets /companion, so naming it in
   // atlas-legacy-redirects.spec.ts's own copy would fail that spec's positive control.
   "/companion": "e2af6ad7 — rebuilt as the Companion node's Chat / Manage / Terminal tabs",
+  // Card 595e2a47 (P2-12): under Atlas, /settings is the PROJECT tier's Settings node and carries
+  // only the project-scoped sections; the daemon-global ones moved to the Workspace tier's own
+  // /workspace-settings node. The classic page still renders both halves in one column. Same
+  // one-map-only reasoning as /companion above — no legacy redirect targets /settings either.
+  "/settings": "595e2a47 — split by scope; the daemon-global sections moved to /workspace-settings",
 };
 
 async function routesFrom(page: Page, selector: string): Promise<string[]> {

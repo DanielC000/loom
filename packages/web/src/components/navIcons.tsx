@@ -43,6 +43,10 @@ const ICONS: Record<string, ReactElement> = {
   "/automation": <G><circle cx="12" cy="12" r="8.5" /><path d="M12 7.4V12l3.1 2" /></G>,
   "/usage": <G><path d="M4 4v16h16" /><rect x="7.5" y="11" width="2.6" height="6" rx=".6" /><rect x="12" y="7.5" width="2.6" height="9.5" rx=".6" /><rect x="16.5" y="13.5" width="2.6" height="3.5" rx=".6" /></G>,
   "/settings": <G><path d="M4 7h9M19 7h1M4 12h4M14 12h6M4 17h11M19 17h1" /><circle cx="15" cy="7" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="17" cy="17" r="2" /></G>,
+  // The Workspace tier's Settings node (card 595e2a47). The SAME sliders glyph as `/settings` above,
+  // for the same reason `/home` and `/project` share one: they are the same kind of node told apart
+  // by depth, and two near-identical slider stacks would read as two different things.
+  "/workspace-settings": <G><path d="M4 7h9M19 7h1M4 12h4M14 12h6M4 17h11M19 17h1" /><circle cx="15" cy="7" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="17" cy="17" r="2" /></G>,
 };
 
 // Fallback glyph for a route with no dedicated icon (a future destination added to nav.tsx before its

@@ -19,7 +19,7 @@ import Companion from "./pages/Companion";
 import Automation from "./pages/Automation";
 import Usage from "./pages/Usage";
 import Platform from "./pages/Platform";
-import Settings from "./pages/Settings";
+import Settings, { WorkspaceSettings } from "./pages/Settings";
 import WorkspaceHome from "./pages/WorkspaceHome";
 import ProjectHome from "./pages/ProjectHome";
 import AgentsNode from "./pages/AgentsNode";
@@ -191,7 +191,7 @@ export const PARAM_PAGES: ParamPage[] = [
 // frame's crumbs and heading stay a function of the node, not of which tab is showing.
 export type AtlasHome = {
   /** Stable identity for the tree row's test id and the shell's own address lookup. */
-  key: "workspace" | "project" | "agents";
+  key: "workspace" | "project" | "agents" | "workspace-settings";
   to: string;
   /** The tree row's label. */
   label: string;
@@ -211,6 +211,14 @@ export const ATLAS_HOMES: AtlasHome[] = [
   { key: "workspace", to: "/home", label: "Home", scoped: false, tierHead: true, element: <WorkspaceHome /> },
   { key: "project", to: "/project", label: "Home", scoped: true, tierHead: true, element: <ProjectHome /> },
   { key: "agents", to: "/agents", label: "Agents", scoped: true, tierHead: false, element: <AgentsNode /> },
+  // The Workspace tier's own Settings node (card 595e2a47, P2-12). `/settings` is `scoped` above, so
+  // under Atlas it is the PROJECT tier's Settings and carries only the rows that write a project's
+  // config; the daemon-global rows need an address on the workspace tier, and this is it. Labelled
+  // "Settings" like its project-tier twin — depth says which one, exactly as it does for "Home".
+  //
+  // Atlas-only, hence ATLAS_HOMES and not NAV_PAGES: a NAV_PAGES entry is mounted by BOTH shells, so
+  // it would put a second Settings row in the classic rail for a user who never opted in.
+  { key: "workspace-settings", to: "/workspace-settings", label: "Settings", scoped: false, tierHead: false, element: <WorkspaceSettings /> },
 ];
 
 // ── The legacy redirects ───────────────────────────────────────────────────────────────────────

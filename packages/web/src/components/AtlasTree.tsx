@@ -98,6 +98,7 @@ function HomeNode({ home, trailing }: { home: AtlasHome; trailing?: ReactNode })
 const WORKSPACE_HOME = ATLAS_HOMES.find((h) => h.key === "workspace")!;
 const PROJECT_HOME = ATLAS_HOMES.find((h) => h.key === "project")!;
 const AGENTS_NODE = ATLAS_HOMES.find((h) => h.key === "agents")!;
+const WORKSPACE_SETTINGS = ATLAS_HOMES.find((h) => h.key === "workspace-settings")!;
 
 // Live, non-companion session count per project — the marker on each project row. The rail chip's
 // dropdown already showed exactly this (components/Sidebar.tsx › RailProjectControl), and it is the
@@ -198,6 +199,12 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
         <ul className="loom-atlas-nodes">
           <HomeNode home={WORKSPACE_HOME} />
           {workspace.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />)}
+          {/* LAST in the tier, and after the derived destinations rather than beside the other
+              Atlas-only nodes: the classic rail already pulls Settings out of its grouped nav into a
+              footer row, so bottom-of-tier is the position a reader of this app already expects it
+              in. Its project-tier twin (`/settings`, a NAV_PAGES destination) is likewise the last
+              scoped row, so the two Settings nodes sit at the foot of their own tiers (card 595e2a47). */}
+          <HomeNode home={WORKSPACE_SETTINGS} />
         </ul>
 
         {/* Plural, and plural even at one project: the label names the kind of node under it, the
