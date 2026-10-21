@@ -13,6 +13,7 @@ import { useStopSession, useForkSession, useEndSession } from "../lib/useSession
 import Board from "./Board";
 import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard, type TerminalTabs } from "../components/TerminalCard";
+import { ManagerTimeline } from "../components/SessionNode";
 import { useSessionQueuesBulk, useSessionWakesBulk, useInvalidateSessionQueueWakesBulk } from "../lib/useSessionQueueWakesBulk";
 import { SessionActions } from "../components/SessionActions";
 import { SpawnControls } from "../components/SpawnControls";
@@ -542,20 +543,6 @@ function SessionCockpit({ session }: { session: SessionListItem }) {
       subPanels={{ queue: true, wakes: true, taskCard: true }}
       tabs={tabs}
     />
-  );
-}
-
-// Relocated from the retired Orchestration page: the manager's own orchestration_events timeline. Polls
-// so it stays live while the manager drills its workers. Mounted only when the Timeline tab is active
-// (single-open cockpit), so it never fans out a query per manager. Reuses the shared EventRow.
-function ManagerTimeline({ managerId }: { managerId: string }) {
-  const events = useQuery({ queryKey: ["orchEvents", managerId], queryFn: () => api.orchestrationEvents(managerId), refetchInterval: 2000, placeholderData: keepPreviousData });
-  const list = events.data ?? [];
-  return (
-    <Panel grid style={{ maxHeight: 440, overflow: "auto" }}>
-      {list.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
-      {list.map((e) => <EventRow key={e.id} e={e} />)}
-    </Panel>
   );
 }
 

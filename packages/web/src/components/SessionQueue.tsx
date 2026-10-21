@@ -1,6 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type QueuedMessage } from "../lib/api";
+import {
+  clearQueueDraft, getQueueDraft, getQueueEditing, isQueueExpanded, pruneQueueDrafts, setQueueDraft,
+  setQueueEditing, setQueueExpanded,
+} from "../lib/queueDrafts";
 import { Button, Dot } from "./ui";
 import { color, font, radius } from "../theme";
 
@@ -66,16 +70,45 @@ export function SessionQueue({
     refetchInterval: 3000,
     enabled: !bulkMode,
   });
-  const [expanded, setExpanded] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  // Drawer + editing row are SEEDED FROM, and written back to, the per-session store (lib/queueDrafts.ts)
+  // rather than being plain component state. The editor's in-progress text lives there too, and all three
+  // are needed: a restored draft that nothing re-opens is a draft the user can never reach again. The
+  // Atlas session node is what made this reachable — its Diff tab is a ROUTE, so a Terminal→Diff hop
+  // unmounts the whole strip (card 525c8ad9 review round 2).
+  const [expanded, setExpandedState] = useState(() => isQueueExpanded(sessionId));
+  const [editingId, setEditingIdState] = useState<string | null>(() => getQueueEditing(sessionId));
+  const setExpanded = (open: boolean) => { setQueueExpanded(sessionId, open); setExpandedState(open); };
+  const setEditingId = (id: string | null) => { setQueueEditing(sessionId, id); setEditingIdState(id); };
   const pending = bulkMode ? bulkPending! : (q.data?.pending ?? []);
 
+  // Reading the queue is the ONLY moment this component learns that an entry is gone — drained at a
+  // turn boundary, re-minted under a fresh id, or deleted from another surface — and none of those
+  // paths goes through the editor. So each read prunes the session's stored drafts down to the ids
+  // actually present; without it the store only ever grows, for the lifetime of the tab.
+  //
+  // Keyed on the id LIST, not the array identity: the 3s poll hands back a fresh array every time, so
+  // depending on `pending` itself would re-run this effect on every tick for no change. It must also
+  // sit above the `pending.length === 0` early return further down — a hook after a conditional return
+  // is a hook that stops running exactly when the list empties, which is when there is most to prune
+  // (and React would reject the reordering anyway).
+  const presentIds = pending.map((m) => m.id);
+  const presentKey = presentIds.join("\u0000");
+  useEffect(() => {
+    if (pruneQueueDrafts(sessionId, presentKey ? presentKey.split("\u0000") : [])) setEditingIdState(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- presentKey IS the list, by value
+  }, [sessionId, presentKey]);
+
   const invalidate = () => (bulkMode ? onMutated?.() : qc.invalidateQueries({ queryKey: ["queue", sessionId] }));
-  const del = useMutation({ mutationFn: (id: string) => api.deleteQueued(sessionId, id), onSettled: invalidate });
+  const del = useMutation({
+    mutationFn: (id: string) => api.deleteQueued(sessionId, id),
+    // A removed entry can never be edited again, so its draft is dead weight — drop it rather than
+    // leaving it to be re-seeded onto whatever entry id the daemon mints next.
+    onSettled: (_r, _e, id) => { clearQueueDraft(sessionId, id); invalidate(); },
+  });
   const reorder = useMutation({ mutationFn: (ids: string[]) => api.reorderQueued(sessionId, ids), onSettled: invalidate });
   const edit = useMutation({
     mutationFn: ({ id, text }: { id: string; text: string }) => api.editQueued(sessionId, id, text),
-    onSuccess: () => { setEditingId(null); invalidate(); },
+    onSuccess: (_r, v) => { clearQueueDraft(sessionId, v.id); setEditingId(null); invalidate(); },
   });
   const mutating = del.isPending || reorder.isPending || edit.isPending;
 
@@ -101,7 +134,7 @@ export function SessionQueue({
           click anywhere on it to expand / collapse the drawer. */}
       <div
         data-testid="queue-ledger-bar"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => setExpanded(!expanded)}
         title={expanded ? "Collapse the queue" : "Expand to reorder / edit / remove queued messages"}
         style={{
           display: "flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none",
@@ -145,13 +178,16 @@ export function SessionQueue({
             return (
               <QueueRow
                 key={m.id}
+                sessionId={sessionId}
                 m={m}
                 canUp={mIdx > 0}
                 canDown={mIdx >= 0 && mIdx < movableIds.length - 1}
                 editing={editingId === m.id}
                 busy={mutating}
                 onEditStart={() => setEditingId(m.id)}
-                onEditCancel={() => setEditingId(null)}
+                // Cancel is a DECISION to discard, so it clears the draft — unlike an unmount, which is
+                // not one and is exactly what the store exists to survive.
+                onEditCancel={() => { clearQueueDraft(sessionId, m.id); setEditingId(null); }}
                 onEditSave={(text) => edit.mutate({ id: m.id, text })}
                 onDelete={() => del.mutate(m.id)}
                 onUp={() => move(m.id, -1)}
@@ -166,8 +202,9 @@ export function SessionQueue({
 }
 
 function QueueRow({
-  m, canUp, canDown, editing, busy, onEditStart, onEditCancel, onEditSave, onDelete, onUp, onDown,
+  sessionId, m, canUp, canDown, editing, busy, onEditStart, onEditCancel, onEditSave, onDelete, onUp, onDown,
 }: {
+  sessionId: string;
   m: QueuedMessage;
   canUp: boolean;
   canDown: boolean;
@@ -200,8 +237,9 @@ function QueueRow({
   const editable = isEditable(m);
 
   if (editing && editable) {
-    // Mounted fresh per edit, so the draft always seeds from the CURRENT text.
-    return <div style={rowStyle}><QueueEditor initial={m.text} busy={busy} onSave={onEditSave} onCancel={onEditCancel} /></div>;
+    // Seeds from the STORE when this entry has an unfinished draft, else from the entry's current
+    // text — so re-opening an editor you were part-way through resumes it rather than discarding it.
+    return <div style={rowStyle}><QueueEditor sessionId={sessionId} entryId={m.id} initial={m.text} busy={busy} onSave={onEditSave} onCancel={onEditCancel} /></div>;
   }
 
   // Mutable rows: the human's own composer turns (amber dot, editable) and Loom's own operational nudges
@@ -228,8 +266,18 @@ function QueueRow({
   );
 }
 
-function QueueEditor({ initial, busy, onSave, onCancel }: { initial: string; busy: boolean; onSave: (text: string) => void; onCancel: () => void }) {
-  const [draft, setDraft] = useState(initial);
+function QueueEditor({ sessionId, entryId, initial, busy, onSave, onCancel }: {
+  sessionId: string;
+  entryId: string;
+  initial: string;
+  busy: boolean;
+  onSave: (text: string) => void;
+  onCancel: () => void;
+}) {
+  // Seeded from the per-session store, falling back to the entry's CURRENT text. The initializer is
+  // lazy, so it runs on mount only — which is what makes this survive an unmount instead of racing one.
+  const [draft, setDraftState] = useState(() => getQueueDraft(sessionId, entryId) ?? initial);
+  const setDraft = (text: string) => { setQueueDraft(sessionId, entryId, text); setDraftState(text); };
   const submit = () => { if (draft.trim()) onSave(draft); };
   return (
     <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 4, alignItems: "stretch" }}>
@@ -237,6 +285,7 @@ function QueueEditor({ initial, busy, onSave, onCancel }: { initial: string; bus
         value={draft}
         autoFocus
         rows={2}
+        data-testid="queue-editor-input"
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }

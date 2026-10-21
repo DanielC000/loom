@@ -8,6 +8,10 @@
 // require the Atlas shell to render structurally the SAME thing at the SAME URL, with only the
 // frame's crumbs and heading added on top. Nothing here hardcodes a page's expected markup.
 //
+// That claim EXPIRES one address at a time as phase 2 rebuilds them, and for those the assertion is
+// INVERTED rather than skipped — see REBUILT_IN_PHASE_2 below, and the positive control that keeps
+// the map from going silent.
+//
 // Every absence/equality claim carries a POSITIVE CONTROL first: a fingerprint comparison and a
 // zero-console-error count read exactly the same whether the instrument works or is silently broken,
 // so each is first shown firing against a known-bad state on the same page at the same moment.
@@ -177,6 +181,26 @@ async function crumbTrail(page: Page): Promise<string[]> {
 const nodeHeading = (page: Page) => page.locator(".loom-atlas-nodehead h1");
 const shortId = (id: string) => id.slice(0, 8);
 
+// ── Addresses PHASE 2 has deliberately REBUILT ─────────────────────────────────────────────────
+// Phase 1's claim is a PARITY claim: the Atlas shell renders the same page the classic shell does at
+// the same URL. That expires, one address at a time, as phase-2 cards rebuild them — and for a
+// rebuilt address the honest assertion is the INVERSE: identity would mean the rebuild never landed.
+//
+// Keyed by the address PATTERN rather than the seeded URL, because the ids are minted per run.
+//
+// ⛔ Add an address here ONLY with the phase-2 card that rebuilds it. An address added to silence a
+// red is a regression being filed as an exemption. Same contract, and the same wording, as
+// atlas-tree.spec.ts's and atlas-legacy-redirects.spec.ts's own copies.
+const REBUILT_IN_PHASE_2: Record<string, string> = {
+  // Card 525c8ad9 (P2-7): /session/:id became the session NODE — the frame's own tab row over the
+  // terminal, the identity de-duplicated into the crumb + node head, and the queue / wakes / bound
+  // task inline below. The classic page still renders its own header row over a bordered card.
+  "/session/:id": "525c8ad9 — rebuilt as the Atlas session node, identity de-duplicated",
+  // Card 525c8ad9 (P2-7): /review/:workerId IS that node's Diff tab now, so it renders the whole node
+  // with the review surface in the pane, not the standalone review page.
+  "/review/:workerId": "525c8ad9 — rebuilt as the worker node's Diff tab",
+};
+
 test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
   test("each parameterized URL renders the classic page verbatim and lands on its own node + tab", async ({ page, loomDaemon }) => {
     // 3 URLs × (an off-shell capture + an on-shell capture), each with a settle loop, plus a terminal
@@ -215,20 +239,45 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     const reviewUrl = `/review/${worker.sessionId}`;
     const questionUrl = `/question/${questionId}`;
     const sessionUrl = `/session/${plain.sessionId}`;
+    // `pattern` is this address's REBUILT_IN_PHASE_2 key; `atlasContent` is the marker to assert under
+    // ATLAS for an address whose content a phase-2 card replaced — the classic marker genuinely is gone
+    // there, so requiring it would be asserting the rebuild did not happen.
     const addresses = [
       {
         url: reviewUrl,
+        pattern: "/review/:workerId",
         content: (p: Page) => p.locator("main").getByText(new RegExp(`worker w:${shortId(worker.sessionId)}`)),
+        atlasContent: (p: Page) => p.getByTestId("session-node-pane-diff").getByRole("button", { name: "Approve & merge" }),
       },
       {
         url: questionUrl,
+        pattern: "/question/:id",
         content: (p: Page) => p.locator("main").getByText(questionTitle),
       },
       {
         url: sessionUrl,
+        pattern: "/session/:id",
         content: (p: Page) => p.getByTestId("tile-identity"),
+        atlasContent: (p: Page) => p.getByTestId("session-node-pane-terminal"),
       },
     ];
+
+    // POSITIVE CONTROL on the carve-out itself: every REBUILT_IN_PHASE_2 key must be an address this
+    // walk actually visits. Without it the map can go SILENT — an address that stops being walked makes
+    // its inverted assertion simply not run, and the spec still reports green for an address nobody
+    // checked either way. (atlas-tree.spec.ts installs the same control for the same reason.)
+    for (const pattern of Object.keys(REBUILT_IN_PHASE_2)) {
+      expect(addresses.map((a) => a.pattern),
+        `REBUILT_IN_PHASE_2 names ${pattern}, which this walk does not visit — its inverted assertion`
+        + " would never run").toContain(pattern);
+    }
+    // …and the inverse: a rebuilt address MUST declare what to look for under Atlas, or its own
+    // "the page still rendered something" leg would have nothing to assert.
+    for (const a of addresses) {
+      if (REBUILT_IN_PHASE_2[a.pattern]) {
+        expect(a.atlasContent, `${a.pattern} is marked rebuilt but names no Atlas content marker`).toBeTruthy();
+      }
+    }
 
     // ── Phase 1: the CLASSIC shell. Capture what each URL renders today. ──
     await page.goto(loomDaemon.baseURL + reviewUrl);
@@ -284,10 +333,14 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     // /question/:id is not a path under /inbox. A SESSION address has no node in the tree until phase
     // 2 builds one, so `null` here is the claim that NOTHING is marked, which is a real assertion:
     // marking the nearest-looking node instead would be a lie the tree told about where you are.
+    //
+    // Card 525c8ad9 (P2-7) moved /session/:id from `belowNode: 0` to 1: the session node has TABS now,
+    // and a session address always ends on the active one — which is what makes /review/:workerId's
+    // own "Diff" crumb read as that same node's tab rather than as a different kind of address.
     const expected: Record<string, { trail: string[]; belowNode: number; node: string | null }> = {
       [reviewUrl]: { trail: ["Workspace", mgr.projectName, workerNode, "Diff"], belowNode: 1, node: null },
       [questionUrl]: { trail: ["Workspace", inboxLabel, questionTitle], belowNode: 1, node: "/inbox" },
-      [sessionUrl]: { trail: ["Workspace", mgr.projectName, plainNode], belowNode: 0, node: null },
+      [sessionUrl]: { trail: ["Workspace", mgr.projectName, plainNode, "Terminal"], belowNode: 1, node: null },
     };
     const expectationFor = (url: string) => {
       const e = expected[url];
@@ -299,7 +352,7 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
       return trail[trail.length - 1 - belowNode];
     };
 
-    for (const { url, content } of addresses) {
+    for (const { url, pattern, content, atlasContent } of addresses) {
       await page.goto(loomDaemon.baseURL + url);
 
       // A FRESH LOAD of the old URL lands inside the Atlas frame — the classic shell is replaced,
@@ -319,12 +372,25 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
       await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(marked ? 1 : 0);
       if (marked) await expect(page.getByTestId(`atlas-node-${marked}`)).toHaveClass(/is-active/);
 
-      // The SAME content, structurally and by its own key marker.
-      await expect(content(page)).toBeVisible();
-      const after = await settledPageSkeleton(page);
-      expect(after, `the ${url} address rendered different content under Atlas than the classic route did.\n`
-        + `--- classic shell ---\n${before.get(url)}\n--- atlas shell ---\n${after}\n`)
-        .toBe(before.get(url));
+      const rebuilt = REBUILT_IN_PHASE_2[pattern];
+      if (rebuilt) {
+        // INVERTED for a rebuilt address: identity would mean the rebuild is not what Atlas renders.
+        // The address must still render its own real content (the Atlas marker), and the CLASSIC
+        // capture must still be non-empty — so this cannot be satisfied by an address that failed to
+        // render under EITHER shell, which is the way an inverted claim usually goes vacuous.
+        await expect(atlasContent!(page)).toBeVisible();
+        expect(before.get(url), `the ${url} address rendered nothing under the classic shell`).toBeTruthy();
+        expect(await settledPageSkeleton(page),
+          `the ${url} address still renders the CLASSIC page under Atlas, but ${rebuilt}`)
+          .not.toBe(before.get(url));
+      } else {
+        // The SAME content, structurally and by its own key marker.
+        await expect(content(page)).toBeVisible();
+        const after = await settledPageSkeleton(page);
+        expect(after, `the ${url} address rendered different content under Atlas than the classic route did.\n`
+          + `--- classic shell ---\n${before.get(url)}\n--- atlas shell ---\n${after}\n`)
+          .toBe(before.get(url));
+      }
     }
 
     await page.waitForLoadState("networkidle");

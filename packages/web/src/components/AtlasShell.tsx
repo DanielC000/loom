@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { matchPath, Route, Routes, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
@@ -6,6 +6,9 @@ import { Badge, Button, Panel, SectionLabel } from "./ui";
 import { AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
 import { ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, type AtlasHome, type NavPage, type ParamPage } from "../nav";
+import { AtlasNodeHeadContext } from "../lib/atlasNodeHead";
+import { activeSessionNodeTab, SESSION_NODE_TAB_LABEL } from "../lib/sessionNodeTabs";
+import { useLatchedSession } from "../lib/useLatchedSession";
 import { setAtlasUi } from "../lib/atlasUi";
 import { useActiveProject } from "../lib/activeProject";
 import { api } from "../lib/api";
@@ -78,14 +81,16 @@ function sessionNodeLabel(s: Pick<SessionListItem, "agentName" | "role" | "id">)
 function useParamAddress(
   current: { page: ParamPage; id: string } | undefined,
   activeProjectName: string,
+  search: string,
 ): NodeAddress | undefined {
   const atlas = current?.page.atlas;
   const id = current?.id ?? "";
 
-  const sessions = useQuery({
-    queryKey: ["allSessions"], queryFn: api.allSessions,
-    enabled: atlas?.kind === "session" && !!id,
-  });
+  // LATCHED (card 525c8ad9 review round 2), not a bare lookup: a merge archives its worker out of
+  // `["allSessions"]` the moment it succeeds, and an un-latched read would drop the heading of the node
+  // the reader is still looking at back to "Session a666fb31" mid-review. Same shared cache entry, so
+  // it still costs no request; `enabled` keeps it off every non-session route exactly as before.
+  const session = useLatchedSession(atlas?.kind === "session" && id ? id : "");
   const question = useQuery({
     queryKey: ["question", id], queryFn: () => api.question(id),
     enabled: atlas?.kind === "detail" && !!id, retry: false,
@@ -94,10 +99,23 @@ function useParamAddress(
   if (!atlas) return undefined;
 
   if (atlas.kind === "session") {
-    const session = (sessions.data ?? []).find((s) => s.id === id);
     const heading = session ? sessionNodeLabel(session) : `Session ${id.slice(0, 8)}`;
+    // The tab crumb is appended ONLY when a tab row is actually going to render under it (card
+    // 525c8ad9 review round 2). Two ways that is true, and one way it is not:
+    //   • the declaration PINS a tab — /review/:workerId IS the worker node's Diff tab, and that
+    //     address renders the node whatever state the session is in (see pages/ReviewPanel.tsx);
+    //   • /session/:id with a LIVE-or-STARTING row, which is the gate SessionView applies before it
+    //     renders the node at all;
+    //   • an exited, archived or unresolved session on /session/:id renders SessionView's ended /
+    //     not-found panel — no tabs — so naming one would be the trail claiming a control that is not
+    //     on the page.
+    const liveish = session?.processState === "live" || session?.processState === "starting";
+    const tab = atlas.tab
+      ?? (liveish
+        ? SESSION_NODE_TAB_LABEL[activeSessionNodeTab(session?.role, new URLSearchParams(search).get("tab"))]
+        : undefined);
     return {
-      crumbs: ["Workspace", ...(session ? [session.projectName] : []), heading, ...(atlas.tab ? [atlas.tab] : [])],
+      crumbs: ["Workspace", ...(session ? [session.projectName] : []), heading, ...(tab ? [tab] : [])],
       heading,
     };
   }
@@ -119,14 +137,18 @@ function useParamAddress(
 }
 
 export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banners?: ReactNode }) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const { projectId, projects } = useActiveProject();
   const page = currentPage(pathname);
   const project = projects.find((p) => p.id === projectId);
   const activeProjectName = project?.name ?? "No project";
   const home = currentHome(pathname);
   const paramPage = currentParamPage(pathname);
-  const paramAddress = useParamAddress(paramPage, activeProjectName);
+  const paramAddress = useParamAddress(paramPage, activeProjectName, search);
+  // The node head's own slot — see lib/atlasNodeHead.ts. Held as state (not a ref) because the node
+  // portaling into it has to RE-RENDER once the element exists; a ref would leave it pointing at null
+  // for the lifetime of the page.
+  const [nodeHeadSlot, setNodeHeadSlot] = useState<HTMLElement | null>(null);
   // A detail address hangs off a REAL tree node, so that node reads as the landed one even though
   // its own path never matches. A session address has no node in the tree yet (phase 2 gives it
   // one), so nothing is highlighted for it — marking some nearby node instead would be a lie.
@@ -216,16 +238,21 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
           </div>
 
           <div className="loom-atlas-nodehead">
-            <h1 style={{ margin: 0, fontFamily: font.head, fontWeight: 600, fontSize: 17, letterSpacing: "0.02em", color: color.text }}>
+            <h1 style={{ margin: 0, fontFamily: font.head, fontWeight: 600, fontSize: 17, letterSpacing: "0.02em",
+              color: color.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heading}
             </h1>
             <Badge tone="cyan">preview</Badge>
+            {/* A node with live state and lifecycle controls fills this; every other node leaves it
+                empty, and `:empty` hides it so it costs no gap. */}
+            <div className="loom-atlas-nodehead-extras" data-testid="atlas-nodehead-extras" ref={setNodeHeadSlot} />
           </div>
         </header>
 
         {banners}
 
         <main className="loom-atlas-content">
+          <AtlasNodeHeadContext.Provider value={nodeHeadSlot}>
           <Routes>
             {/* Each destination's own component, rendered exactly as the legacy shell renders it. */}
             {NAV_PAGES.map((p) => (
@@ -253,6 +280,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 with an explanation instead of an empty column. */}
             <Route path="*" element={<AtlasEmptyNode />} />
           </Routes>
+          </AtlasNodeHeadContext.Provider>
         </main>
       </div>
     </div>

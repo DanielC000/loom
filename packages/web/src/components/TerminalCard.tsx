@@ -1,10 +1,13 @@
 import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem, Wake } from "@loom/shared";
 import { api, type QueuedMessage } from "../lib/api";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import { harnessOf } from "../lib/harnessFields";
 import { isCompanionSession } from "../lib/sessions";
+import { SESSION_NODE_TAB_LABEL, SESSION_NODE_TAB_ORDER, type SessionNodeTab } from "../lib/sessionNodeTabs";
+import { NodeTabs } from "./atlasHome";
 import { HarnessTag } from "./HarnessPicker";
 import { TerminalPane } from "./Terminal";
 import { TranscriptPane } from "./TranscriptPane";
@@ -12,7 +15,7 @@ import { Composer } from "./Composer";
 import { SessionQueue } from "./SessionQueue";
 import { SessionWakes } from "./SessionWakes";
 import { SessionTaskCard } from "./SessionTaskCard";
-import { Panel, Button, StatusPill } from "./ui";
+import { Panel, Button, SectionLabel, StatusPill } from "./ui";
 import { font, color } from "../theme";
 
 // ── <TerminalCard> — the ONE base every live-session terminal card is built on ────────────────────
@@ -40,7 +43,9 @@ import { font, color } from "../theme";
 
 export type TerminalLifecycle = "stop" | "kill" | "none";
 export type TerminalStatusMode = "busy" | "static" | "conn";
-export type TerminalTab = "terminal" | "transcript" | "timeline" | "diff";
+// Aliased, not re-declared: the SAME union the Atlas frame's crumb trail reads (lib/sessionNodeTabs.ts),
+// so a tab added for one surface can never be missing from the other's idea of the set.
+export type TerminalTab = SessionNodeTab;
 
 // The base reads only a small subset off `session`: the default `TileTitle` needs the identity/status
 // quartet (busy/project/agent/role/id) and the taskCard query needs the project/task ids — never a full
@@ -60,6 +65,25 @@ export type TerminalCardSession = Pick<SessionListItem, "id"> &
 export interface TerminalTabs {
   timeline?: ReactNode; // manager-only: the orchestration-events timeline panel
   diff?: ReactNode; // worker-only: the branch-diff panel
+}
+
+/**
+ * The ATLAS SESSION NODE's presentation of this card — a second SKIN over the same body, never a
+ * second body. Absent ⇒ every existing call site renders byte-identically.
+ *
+ * @decision 525c8ad9 — never rebuild this surface beside TerminalCard: the Composer's session key,
+ * the companion watch-only guard and the queue ledger have exactly one mount site, and a parallel
+ * session body is a second place for each of them to be forgotten.
+ */
+export interface TerminalAtlasNode {
+  /** Where the header is portaled to — null until the frame's slot element mounts (first paint). */
+  headerSlot: HTMLElement | null;
+  /** The active tab. An ADDRESS (`?tab=` / `/review/:id`), never local state. */
+  tab: TerminalTab;
+  /** That tab's own href. */
+  hrefFor: (tab: TerminalTab) => string;
+  /** Extra content for the tab row's trailing slot (e.g. a Diff tab's file count). */
+  tabCount?: Partial<Record<TerminalTab, ReactNode>>;
 }
 
 export interface TerminalSubPanels {
@@ -165,6 +189,7 @@ export function TerminalCard({
   statusMode = "busy",
   subPanels,
   tabs,
+  atlasNode,
   renderBody,
   actionsExtra,
 }: {
@@ -191,6 +216,8 @@ export function TerminalCard({
   subPanels?: TerminalSubPanels;
   /** Add a Terminal + Transcript tab bar (+ role-scoped Timeline/Diff when the panel node is passed). */
   tabs?: TerminalTabs;
+  /** Render as the Atlas session node instead of a card (see TerminalAtlasNode). Absent ⇒ unchanged. */
+  atlasNode?: TerminalAtlasNode;
   /** Replace the default session body (TerminalPane + sub-panels) — for raw-shell / companion bodies. */
   renderBody?: (ctx: { maximized: boolean; hug: boolean; heightBudget?: number }) => ReactNode;
   /** Extra buttons appended after the standard action cluster. */
@@ -240,16 +267,22 @@ export function TerminalCard({
   // Role-scoped tab bar (opt-in via `tabs`). Terminal + Transcript are always offered; Timeline/Diff
   // appear only when the caller supplies that panel node. `activeTab` guards against a stale selection
   // (e.g. the "diff" tab if a caller ever stopped passing a diff node) by falling back to "terminal".
+  //
+  // The ORDER and the LABELS come from lib/sessionNodeTabs.ts, which is also what the Atlas frame's
+  // crumb trail reads — so the row a node renders and the tab the trail names it by cannot drift
+  // apart. What stays HERE is the only part this component can answer: which optional panes the
+  // CALLER actually supplied. The role rule that decides that lives in that same file
+  // (`sessionNodeTabsFor`), read by SessionNode.
   const [tab, setTab] = useState<TerminalTab>("terminal");
   const tabDefs: { key: TerminalTab; label: string }[] = tabs
-    ? [
-        { key: "terminal", label: "Terminal" },
-        { key: "transcript", label: "Transcript" },
-        ...(tabs.timeline != null ? ([{ key: "timeline", label: "Timeline" }] as const) : []),
-        ...(tabs.diff != null ? ([{ key: "diff", label: "Diff" }] as const) : []),
-      ]
+    ? SESSION_NODE_TAB_ORDER
+        .filter((key) => (key === "timeline" ? tabs.timeline != null : key === "diff" ? tabs.diff != null : true))
+        .map((key) => ({ key, label: SESSION_NODE_TAB_LABEL[key] }))
     : [];
-  const activeTab: TerminalTab = tabDefs.some((t) => t.key === tab) ? tab : "terminal";
+  // The Atlas node's tab is an ADDRESS, so it supersedes the local state entirely (nothing writes
+  // `tab` there — every tab is a Link). The stale-selection fallback is the same either way.
+  const wantTab = atlasNode ? atlasNode.tab : tab;
+  const activeTab: TerminalTab = tabDefs.some((t) => t.key === wantTab) ? wantTab : "terminal";
 
   // Resolve the board task this session is bound to and render the slim bar in the body, so every call
   // site shows it without re-wiring. Keyed ["tasks", projectId] (staleTime 4000) so React Query DEDUPES
@@ -328,7 +361,8 @@ export function TerminalCard({
       : null;
 
   const header = (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+    <div className={atlasNode ? "loom-atlas-nodehead-row" : undefined}
+      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: atlasNode ? 0 : 4 }}>
       {title ?? <TileTitle s={session} showProject={showProject} />}
       {/* Never compresses — the identity prefix beside it is the element that gives up space (ad3157b9). */}
       <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
@@ -349,17 +383,92 @@ export function TerminalCard({
   // shrink to the grid it actually renders, so the composer sits flush beneath and the card hugs the
   // terminal. HUG is gated to NUMERIC heights only: a STRING height (e.g. "76vh") is a fill-the-space page
   // terminal that keeps the old `flex:1` + `height` fill (no budget). Maximized always fills.
-  const sessionBody = (hugMode: boolean, heightBudget?: number) => (
-    <>
-      {task && <SessionTaskCard task={task} />}
-      {tabs && (
-        <div style={{ marginBottom: 6, display: "flex", gap: 6, flexShrink: 0 }}>
-          {tabDefs.map((t) => (
-            <Button key={t.key} variant={activeTab === t.key ? "primary" : "default"}
-              onClick={() => setTab(t.key)}>{t.label}</Button>
-          ))}
+  // The tab row, in whichever grammar this card wears: the classic button strip, or — for the Atlas
+  // session node — the frame's own underline row of real `<Link>` addresses. Shared by BOTH bodies so
+  // the maximized overlay can never offer a different tab set (or a different way to switch) than the
+  // card it was opened from.
+  const tabBarNode = !tabs ? null : atlasNode ? (
+    <NodeTabs
+      tabs={tabDefs.map((t) => ({ key: t.key, label: t.label, count: atlasNode.tabCount?.[t.key] }))}
+      active={activeTab}
+      hrefFor={(key) => atlasNode.hrefFor(key as TerminalTab)}
+    />
+  ) : (
+    <div style={{ marginBottom: 6, display: "flex", gap: 6, flexShrink: 0 }}>
+      {tabDefs.map((t) => (
+        <Button key={t.key} variant={activeTab === t.key ? "primary" : "default"}
+          onClick={() => setTab(t.key)}>{t.label}</Button>
+      ))}
+    </div>
+  );
+
+  // Every pane here unmounts when it is not the active one. That is safe for the SAME-ROUTE switches
+  // (`?tab=`), where the node itself stays mounted and the inline strips below — composer, queue —
+  // never come down at all.
+  //
+  // ⚠️ It is NOT the whole story, and an earlier version of this comment claimed it was. The Atlas
+  // node's Diff tab is a ROUTE (/review/:workerId), so a Terminal→Diff hop unmounts the ENTIRE node,
+  // strips included. Nothing here protects a draft from that; both drafts survive it because they are
+  // store-backed instead — lib/composerDrafts.ts and lib/queueDrafts.ts. The Diff pane's own
+  // request-changes note needs no such store, because Diff is never the INACTIVE pane of a node the
+  // reader is still on.
+  const diffPane = !tabs || tabs.diff == null || activeTab !== "diff" ? null
+    : atlasNode ? <div data-testid="session-node-pane-diff">{tabs.diff}</div> : tabs.diff;
+
+  // ONE mount site each for the live terminal and the turn Composer, reached from both bodies below.
+  // Factored rather than written out twice on purpose: the companion guard (`readOnly={watchOnly}`) and
+  // the Composer's `key` are invariants this file is the single owner of, and a second literal of
+  // either is a second place for one of them to be forgotten.
+  const terminalPane = (heightBudget?: number) => (
+    <TerminalPane sessionId={session.id} readOnly={watchOnly} resizable={resizable} heightBudget={heightBudget} />
+  );
+  // `key` is LOAD-BEARING, not a list-reconciliation hint (card 14c68c62). The Composer seeds its
+  // draft from the per-session store with a LAZY useState initializer, which runs on MOUNT only — so a
+  // card that stays mounted while `session.id` changes under it (the /session/:id deep-link route
+  // reuses one SessionView element across an id change) would carry session A's unfinished text into
+  // session B, write it INTO B's draft on the next keystroke, and Send it to B. Keying on the id makes
+  // each session its OWN component instance: A's draft is never rendered under B, and every `setDraft`
+  // call is closed over the one id that instance was mounted with, so no keystroke can land under the
+  // wrong session mid-transition. This is the ONLY place a Composer is mounted — keeping the key here
+  // means no call site can forget it.
+  const composerNode = watchOnly ? null : <Composer key={session.id} sessionId={session.id} />;
+
+  // The below-terminal strip — bound task (Atlas only; the card keeps it above the pane), wakes, the
+  // queue ledger, the composer. Observed by the budget measurement (belowRef) so a queued turn / opened
+  // large editor re-measures even when the card is already at its height cap. flexShrink:0 keeps the
+  // composer + strips at natural height — the terminal is the element that gives up space.
+  const belowStrip = (
+    <div ref={belowRef} style={{ flexShrink: 0 }} className={atlasNode ? "loom-atlas-nodesections" : undefined}>
+      {atlasNode && task && (
+        <section className="loom-atlas-nodesec" data-testid="session-node-task">
+          <SectionLabel style={{ margin: 0 }}>Bound task</SectionLabel>
+          <SessionTaskCard task={task} />
+        </section>
+      )}
+      {subPanels?.wakes && (
+        <SessionWakes sessionId={session.id} wakes={subPanels.wakesData} onCancelled={subPanels.onWakeCancelled} />
+      )}
+      {/* The queue ledger is measured on its OWN (queueRef) so it can grow the card without shrinking the
+          terminal. flex-column so the SessionQueue root's marginTop counts in offsetHeight (a plain block
+          wrapper would collapse that margin through its top edge and under-measure the ledger). */}
+      {subPanels?.queue && (
+        <div ref={queueRef} style={{ display: "flex", flexDirection: "column" }}>
+          <SessionQueue sessionId={session.id} pending={subPanels.queueData} onMutated={subPanels.onQueueMutated} />
         </div>
       )}
+      {atlasNode && composerNode ? (
+        <section className="loom-atlas-nodesec" data-testid="session-node-composer">
+          <SectionLabel style={{ margin: 0 }}>Send a turn</SectionLabel>
+          {composerNode}
+        </section>
+      ) : composerNode}
+    </div>
+  );
+
+  const sessionBody = (hugMode: boolean, heightBudget?: number) => (
+    <>
+      {!atlasNode && task && <SessionTaskCard task={task} />}
+      {tabBarNode}
       {/* Terminal (default) OR — with tabs — the active pane. TerminalPane is mounted ONLY on the
           Terminal tab so a card viewing Transcript/Timeline/Diff holds no live pty websocket (single
           live terminal, mirroring the old SessionCockpit). overflow:hidden clips xterm's canvas to the
@@ -368,7 +477,7 @@ export function TerminalCard({
           via its own .xterm-viewport. */}
       {(!tabs || activeTab === "terminal") && (
         <div ref={paneWrapRef} style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
-          <TerminalPane sessionId={session.id} readOnly={watchOnly} resizable={resizable} heightBudget={heightBudget} />
+          {terminalPane(heightBudget)}
         </div>
       )}
       {tabs && activeTab === "transcript" && (
@@ -379,43 +488,45 @@ export function TerminalCard({
         </div>
       )}
       {tabs && activeTab === "timeline" && tabs.timeline}
-      {tabs && activeTab === "diff" && tabs.diff}
-      {/* Below-terminal strip. Observed by the budget measurement (belowRef) so a queued turn / opened
-          large editor re-measures even when the card is already at its height cap. flexShrink:0 keeps the
-          composer + strips at natural height — the terminal is the element that gives up space. */}
-      <div ref={belowRef} style={{ flexShrink: 0 }}>
-        {subPanels?.wakes && (
-          <SessionWakes sessionId={session.id} wakes={subPanels.wakesData} onCancelled={subPanels.onWakeCancelled} />
-        )}
-        {/* The queue ledger is measured on its OWN (queueRef) so it can grow the card without shrinking the
-            terminal. flex-column so the SessionQueue root's marginTop counts in offsetHeight (a plain block
-            wrapper would collapse that margin through its top edge and under-measure the ledger). */}
-        {subPanels?.queue && (
-          <div ref={queueRef} style={{ display: "flex", flexDirection: "column" }}>
-            <SessionQueue sessionId={session.id} pending={subPanels.queueData} onMutated={subPanels.onQueueMutated} />
-          </div>
-        )}
-        {/* `key` is LOAD-BEARING, not a list-reconciliation hint (card 14c68c62). The Composer seeds its
-            draft from the per-session store with a LAZY useState initializer, which runs on MOUNT only —
-            so a card that stays mounted while `session.id` changes under it (the /session/:id deep-link
-            route reuses one SessionView element across an id change) would carry session A's unfinished
-            text into session B, write it INTO B's draft on the next keystroke, and Send it to B. Keying on
-            the id makes each session its OWN component instance: A's draft is never rendered under B, and
-            every `setDraft` call is closed over the one id that instance was mounted with, so no keystroke
-            can land under the wrong session mid-transition. This is the ONLY place a Composer is mounted —
-            keeping the key here means no call site can forget it. */}
-        {!watchOnly && <Composer key={session.id} sessionId={session.id} />}
-      </div>
+      {diffPane}
+      {belowStrip}
     </>
   );
+
+  // The ATLAS session node's body (card 525c8ad9). Same leaf components and the same strip, laid out as
+  // a FLOWING column instead of a fixed-height card: the Atlas content column is what scrolls, so the
+  // terminal takes a bounded box of its own and the review surface below it runs to whatever length the
+  // diff actually has, rather than being squeezed into a card's leftover space.
+  const atlasBody = () => (
+    <>
+      {tabBarNode}
+      <div className="loom-atlas-nodepanes">
+        {(!tabs || activeTab === "terminal") && (
+          <div ref={paneWrapRef} className="loom-atlas-termbox" data-testid="session-node-pane-terminal">
+            {terminalPane()}
+          </div>
+        )}
+        {tabs && activeTab === "transcript" && (
+          <div className="loom-atlas-termbox" data-testid="session-node-pane-transcript">
+            <TranscriptPane sessionId={session.id} />
+          </div>
+        )}
+        {tabs && activeTab === "timeline" && tabs.timeline}
+        {diffPane}
+      </div>
+      {belowStrip}
+    </>
+  );
+
   const body = (maximizedNow: boolean) => {
     const hugMode = !maximizedNow && hug;
     // Prefer the MEASURED leftover space; fall back to the fixed reserve for the first paint (before the
     // layout effect runs). Non-HUG (fill) passes no budget — the pane flexes to fill its slot.
     const heightBudget = hugMode ? (measuredBudget ?? (height as number) - CHROME_RESERVE) : undefined;
-    return renderBody
-      ? renderBody({ maximized: maximizedNow, hug: hugMode, heightBudget })
-      : sessionBody(hugMode, heightBudget);
+    if (renderBody) return renderBody({ maximized: maximizedNow, hug: hugMode, heightBudget });
+    // Maximized is a full-viewport CARD even for the Atlas node: the overlay IS a bounded box, so the
+    // flowing column has nothing left to flow into and the fill body is the right one.
+    return atlasNode && !maximizedNow ? atlasBody() : sessionBody(hugMode, heightBudget);
   };
 
   if (maximizable && maximized) {
@@ -431,6 +542,21 @@ export function TerminalCard({
             {body(true)}
           </Panel>
         </div>
+      </div>
+    );
+  }
+
+  // The ATLAS node is not a card: the frame's crumb bar and `<h1>` are already its chrome, so the Panel
+  // keeps only its layout role (a flow column) and gives up its surface, border and height model — the
+  // content column is what scrolls. Its header goes to the frame's node head instead of sitting inline
+  // one row under the `<h1>` that now carries the same identity. A null slot (the element has not
+  // mounted yet, which is the case for exactly one paint) renders nothing rather than falling back
+  // inline, so the de-duplication can never flicker a second identity onto the screen.
+  if (atlasNode) {
+    return (
+      <div className="loom-atlas-sessionnode" data-testid="session-node">
+        {atlasNode.headerSlot ? createPortal(header, atlasNode.headerSlot) : null}
+        {body(false)}
       </div>
     );
   }

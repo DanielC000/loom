@@ -1291,6 +1291,30 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 12px;
   padding: 10px 16px 12px;
+  /* A session node fills the extras slot with its state + lifecycle cluster (card 525c8ad9), which on
+     a phone needs a second row rather than squeezing the heading to nothing. */
+  flex-wrap: wrap;
+}
+/* The node head's slot. Empty on every node that has no live state of its own — and then it must take
+   neither width nor one of the row's gaps, hence `:empty`. */
+.loom-atlas-nodehead-extras {
+  /* A BASIS, not a bare `flex: 1`: with the heading beside it this row runs out of width long before a
+     phone does, and a shrink-to-nothing slot stacks the state run on top of the controls instead of
+     wrapping below the heading. 280px is the width at which the state run and the control cluster still
+     read as two clusters rather than one jumble. */
+  flex: 1 1 280px;
+  min-width: 0;
+}
+.loom-atlas-nodehead-extras:empty {
+  display: none;
+}
+/* What a node portals into that slot: its own left-hand state run, its controls pinned right. */
+.loom-atlas-nodehead-row {
+  min-width: 0;
+  gap: 12px;
+}
+.loom-atlas-nodehead-row > :first-child {
+  min-width: 0;
 }
 .loom-atlas-content {
   flex: 1;
@@ -1358,6 +1382,59 @@ button.loom-atlas-node.is-branch.is-open {
   margin-left: 6px;
   color: var(--loom-text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* ── Atlas session node (card 525c8ad9 — P2-7, owner decision "B · Inline") ───────────
+   One flowing column: the real pane tabs, the active pane, then the inline strips the owner chose to
+   keep adjacent to the terminal rather than promote to tabs — bound task, wakes, the queue ledger and
+   the composer. The frame's crumb bar and <h1> are the node's chrome, so there is no card wrapper:
+   only the terminal and transcript take a bordered box, because they are the two panes with a fixed
+   viewport rather than a natural length.
+   Why each piece is the way it is: docs/decisions/525c8ad9-atlas-session-node.md. */
+.loom-atlas-sessionnode {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.loom-atlas-nodepanes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+/* The terminal's own viewport. Bounded against the VIEWPORT, not the content, so the strips below it
+   stay reachable with one short scroll on any screen instead of being pushed a page down on a tall
+   one. `overflow: hidden` clips xterm's canvas to the box, the same guarantee the card body makes. */
+.loom-atlas-termbox {
+  height: min(58vh, 640px);
+  min-height: 240px;
+  overflow: hidden;
+  border: 1px solid var(--loom-border);
+  border-radius: var(--loom-radius);
+  background: var(--loom-panel);
+  padding: 6px;
+  box-sizing: border-box;
+}
+.loom-atlas-nodesections {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.loom-atlas-nodesec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+@media (max-width: 820px) {
+  /* A phone has far less height to give the terminal, and the strips below it are the half a reader
+     came for on a narrow screen. */
+  .loom-atlas-termbox {
+    height: min(46vh, 420px);
+  }
 }
 
 /* ── Atlas Companion node (card e2af6ad7) ─────────────────────────────────────────────

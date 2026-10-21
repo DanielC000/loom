@@ -1,9 +1,12 @@
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useAtlasUi } from "../lib/atlasUi";
+import { activeSessionNodeTab } from "../lib/sessionNodeTabs";
 import { useStopSession, useForkSession } from "../lib/useSessionActions";
+import { SessionNode } from "../components/SessionNode";
 import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, SectionLabel, StatusPill } from "../components/ui";
 import { color, font } from "../theme";
@@ -18,6 +21,10 @@ export default function SessionView() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const { setProjectId } = useActiveProject();
+  // The Atlas node's tab is an ADDRESS. Read here and resolved against the session's own role so an
+  // unknown or role-inapplicable `?tab=` lands on Terminal rather than an empty pane.
+  const [search] = useSearchParams();
+  const tabParam = search.get("tab");
 
   // Resolve from the LIVE feed first (the common case — the alert is about a running session), then fall
   // back to a BY-ID archived fetch for an exited session (crash-looped sessions auto-archive on exit) —
@@ -37,8 +44,14 @@ export default function SessionView() {
   const stop = useStopSession();
   const fork = useForkSession();
 
-  const header = (label: string) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+  // Inside the ATLAS frame this row is the THIRD statement of the same identity in a column that has
+  // already given it twice — the crumb trail is the address, and the node head names the session and
+  // carries its state. `← back` is redundant against the entity tree and "SESSION" against the crumb,
+  // so the whole row goes (card 525c8ad9). Under the CLASSIC shell nothing above the page says any of
+  // it, so the row is exactly as load-bearing as it always was and stays untouched.
+  const [atlasOn] = useAtlasUi();
+  const header = (label: string) => atlasOn ? null : (
+    <div data-testid="session-view-header" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
       <Button onClick={() => navigate(-1)}>← back</Button>
       <span style={{ fontFamily: font.head, fontSize: 14, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</span>
       {session && (
@@ -78,7 +91,11 @@ export default function SessionView() {
   }
 
   // LIVE (or starting): the full terminal tile — read the scrollback, message it, Fork or Stop it here.
+  // Under Atlas the same session is the NODE itself (card 525c8ad9): the same terminal, composer, queue,
+  // wakes and bound task, laid out as a flowing node under the frame's own head rather than as a card,
+  // with its tab an address (`?tab=`) instead of a card-local toggle.
   if (session.processState === "live" || session.processState === "starting") {
+    if (atlasOn) return <SessionNode session={session} tab={activeSessionNodeTab(session.role, tabParam)} />;
     return (
       <div>
         {header("Session")}

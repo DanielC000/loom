@@ -96,11 +96,20 @@ check("TerminalCard withholds the Composer for a companion", () => {
     "TerminalCard.tsx must import useIsCompanionSession");
   assert.match(src, /const\s+watchOnly\s*=\s*readOnly\s*\|\|/,
     "TerminalCard must derive a watchOnly flag from readOnly OR the companion guard");
-  assert.match(src, /\{\s*!watchOnly\s*&&\s*<Composer\b/,
+  assert.match(src, /const\s+composerNode\s*=\s*watchOnly\s*\?\s*null\s*:\s*<Composer\b/,
     "the Composer must be gated on watchOnly, NOT the raw readOnly prop — otherwise a companion reached " +
     "via /session/:id or the Overview grid still gets a writable Composer");
   assert.match(src, /<TerminalPane[^>]*readOnly=\{watchOnly\}/,
     "TerminalPane must receive the resolved flag so the two layers stay in step");
+  // Card 525c8ad9 gave TerminalCard a SECOND body (the Atlas session node), so "gated at its mount
+  // site" is only half the claim — there must still be exactly ONE mount site for the gate to cover.
+  // Counting is what makes the gate above un-routable-around: a second literal <Composer> anywhere in
+  // this file would be a second surface the watchOnly check never reached, and the regex above would
+  // keep passing on the first one. Same single-site reasoning the Composer's own `key` comment makes.
+  const composerMounts = (src.match(/<Composer\b/g) ?? []).length;
+  assert.equal(composerMounts, 1,
+    `TerminalCard mounts <Composer> ${composerMounts} times — it must mount it exactly once, behind the ` +
+    "watchOnly gate above, however many bodies the card grows");
 });
 
 // The guard must not be defeatable by simply not passing `role` — assert the store lookup is keyed on the

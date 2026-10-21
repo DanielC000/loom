@@ -17,6 +17,7 @@ const navSrc = read("../src/nav.tsx");
 const appSrc = read("../src/App.tsx");
 const overviewSrc = read("../src/pages/Overview.tsx");
 const terminalCardSrc = read("../src/components/TerminalCard.tsx");
+const tabsSrc = read("../src/lib/sessionNodeTabs.ts");
 const missionControlSrc = read("../src/pages/MissionControl.tsx");
 const paletteSrc = read("../src/components/CommandPalette.tsx");
 
@@ -60,9 +61,31 @@ check("the relocated views are role-scoped tabs in the session cockpit", () => {
   assert.match(overviewSrc, /session\.role === "worker"[\s\S]*?diff:\s*<WorkerDiffPanel/,
     "the Diff panel must be worker-scoped in SessionCockpit");
   assert.ok(overviewSrc.includes("tabs={tabs}"), "SessionCockpit must pass the role-scoped tabs to <TerminalCard>");
-  // The Timeline/Diff tab labels now live in the shared base (lifted out of the inline cockpit).
-  assert.ok(terminalCardSrc.includes('label: "Timeline"'), "TerminalCard must define the Timeline tab");
-  assert.ok(terminalCardSrc.includes('label: "Diff"'), "TerminalCard must define the Diff tab");
+  // The Timeline/Diff tab labels were lifted OUT of the inline cockpit by card bde7957f, and card
+  // 525c8ad9 lifted them one level further — out of TerminalCard too, into lib/sessionNodeTabs.ts, so
+  // the Atlas frame's crumb trail names a tab by the SAME string the tab row renders. The claim this
+  // check makes is unchanged in strength: the labels have ONE home, and the surfaces that show them
+  // READ it rather than re-spelling it. Re-spelling is the regression, wherever it reappears.
+  assert.match(tabsSrc, /SESSION_NODE_TAB_LABEL[\s\S]*?timeline:\s*"Timeline"/,
+    "lib/sessionNodeTabs.ts must define the Timeline tab's label");
+  assert.match(tabsSrc, /SESSION_NODE_TAB_LABEL[\s\S]*?diff:\s*"Diff"/,
+    "lib/sessionNodeTabs.ts must define the Diff tab's label");
+  // A LABEL existing is not the same claim as the tab being OFFERED — the old `label: "Timeline"`
+  // literal inside TerminalCard's tabDefs happened to assert both at once, and splitting the
+  // declaration split the claim too. `SESSION_NODE_TAB_ORDER` is what TerminalCard maps over, so a
+  // tab dropped from it would vanish from every surface while its label sat here looking healthy.
+  const order = tabsSrc.match(/SESSION_NODE_TAB_ORDER[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? "";
+  assert.notEqual(order, "", "lib/sessionNodeTabs.ts must declare SESSION_NODE_TAB_ORDER as a literal array");
+  for (const key of ["timeline", "diff"]) {
+    assert.ok(order.includes(`"${key}"`),
+      `SESSION_NODE_TAB_ORDER must still offer the ${key} tab — a label alone does not put it on the row`);
+  }
+  assert.ok(terminalCardSrc.includes("SESSION_NODE_TAB_LABEL[key]"),
+    "TerminalCard must build its tab labels FROM lib/sessionNodeTabs.ts, not re-spell them");
+  for (const src of [[overviewSrc, "Overview.tsx"], [terminalCardSrc, "TerminalCard.tsx"]]) {
+    assert.ok(!src[0].includes('label: "Timeline"') && !src[0].includes('label: "Diff"'),
+      `${src[1]} must not re-spell a tab label — they belong to lib/sessionNodeTabs.ts`);
+  }
 });
 
 check("Mission Control still owns the global kill/pause/resume cluster (unchanged by this move)", () => {
