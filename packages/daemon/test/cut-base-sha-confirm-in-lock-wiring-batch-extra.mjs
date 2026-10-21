@@ -41,6 +41,7 @@ import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-cbsilw-be-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -120,7 +121,14 @@ try {
       },
     });
 
-    const batch = await sessionsB.mergeBatchTracked(mgrId, [workerGoodId, workerGood2Id]);
+    // Card 426f9bdb: awaits the real settle rather than taking a possible `{settled:false}` first result
+    // as final — mirrors cut-base-sha-confirm-and-batch.mjs scenario (2)'s own fix. Deliberately NOT
+    // forced to a tiny `syncAttachBudgetMs` here (see cut-base-sha-confirm-in-lock-wiring-solo.mjs's own
+    // comment for why that's unsafe for a fast, NEVER_CACHED outcome under a stubbed runGate).
+    const batch = await awaitTrackedSettle(
+      () => sessionsB.mergeBatchTracked(mgrId, [workerGoodId, workerGood2Id]),
+      { label: "(e) mergeBatchTracked", timeoutMs: 60_000 },
+    );
     check("(e) the batch settled", batch.settled === true && batch.ok === true);
     check("(e) the batch gate DID run for real (advisory passed clean for both candidates)", batchGateCalls === 1);
     const landedIds = (batch.value?.landed ?? []).map((l) => l.workerSessionId);
@@ -182,7 +190,11 @@ try {
       syncAttachBudgetMs: 60_000, runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
     });
 
-    const batch = await sessions.mergeBatchTracked(mgrId, [workerGoodId, workerLegacyId]);
+    // Card 426f9bdb: awaits the real settle (see scenario (e)'s own comment above for why no forced budget).
+    const batch = await awaitTrackedSettle(
+      () => sessions.mergeBatchTracked(mgrId, [workerGoodId, workerLegacyId]),
+      { label: "(i) mergeBatchTracked", timeoutMs: 60_000 },
+    );
     check("(i) the batch gate DID run for real", gateCalls === 1);
     check("(i) the batch settled", batch.settled === true && batch.ok === true);
     const landedIdsI = (batch.value?.landed ?? []).map((l) => l.workerSessionId);

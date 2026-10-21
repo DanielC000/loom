@@ -46,6 +46,7 @@ import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-cbsilw-b-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -139,7 +140,14 @@ try {
       syncAttachBudgetMs: 60_000, batchFfGitFactory, runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
     });
 
-    const batch = await sessions.mergeBatchTracked(mgrId, [workerProbeId, workerGoodId]);
+    // Card 426f9bdb: awaits the real settle rather than taking a possible `{settled:false}` first result
+    // as final — mirrors cut-base-sha-confirm-and-batch.mjs scenario (2)'s own fix. Deliberately NOT
+    // forced to a tiny `syncAttachBudgetMs` here (see cut-base-sha-confirm-in-lock-wiring-solo.mjs's own
+    // comment for why that's unsafe for a fast, NEVER_CACHED outcome under a stubbed runGate).
+    const batch = await awaitTrackedSettle(
+      () => sessions.mergeBatchTracked(mgrId, [workerProbeId, workerGoodId]),
+      { label: "(f) mergeBatchTracked", timeoutMs: 60_000 },
+    );
     // 2 real gate runs, not 1: ONE for the batch's own assembled-tree gate (covering "good"'s landing —
     // proves gap v, the advisory fell through instead of pulling "probe" to stranded fallback), and a
     // SECOND for the solo re-gate `runFallback` dispatches for the in-lock-dropped "probe" candidate
@@ -237,7 +245,11 @@ try {
       syncAttachBudgetMs: 60_000, batchFfGitFactory, runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
     });
 
-    const batch = await sessions.mergeBatchTracked(mgrId, [workerGoodId, workerStrayId]);
+    // Card 426f9bdb: awaits the real settle (see scenario (f)'s own comment above for why no forced budget).
+    const batch = await awaitTrackedSettle(
+      () => sessions.mergeBatchTracked(mgrId, [workerGoodId, workerStrayId]),
+      { label: "(g) mergeBatchTracked", timeoutMs: 60_000 },
+    );
     check("(g) the batch gate DID run for real (the advisory's OWN probe failed and fell through, never pulling stray to stranded fallback on an inconclusive read)", gateCalls === 1);
     check("(g) the batch settled", batch.settled === true && batch.ok === true);
     const landedIdsG = (batch.value?.landed ?? []).map((l) => l.workerSessionId);

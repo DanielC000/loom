@@ -32,6 +32,7 @@ import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-cbscvc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -93,7 +94,13 @@ const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
 });
 
 try {
-  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  // Card 426f9bdb: awaits the real settle rather than taking a possible `{settled:false}` first result
+  // as final. Deliberately NOT forced to a tiny `syncAttachBudgetMs` (see cut-base-sha-confirm-in-lock-
+  // wiring-solo.mjs's own comment for why that's unsafe for a fast, NEVER_CACHED outcome).
+  const r1 = await awaitTrackedSettle(
+    () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
+    { label: "(1) confirmWorkerMergeTracked r1", timeoutMs: 60_000 },
+  );
   check("(1) op 1 settled, NOT merged, refused BEFORE any gate lane (the advisory pre-gate check)", r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 0);
   check("(1) op 1's result carries forkPointDiverged:true", r1.ok && r1.value.forkPointDiverged === true);
   // DIRECT classifyOutcome proof (not inferred from cache behavior): the retained peek, within
@@ -102,7 +109,10 @@ try {
 
   // (2) sanity: while canonical is STILL diverted, a re-call is refused again, still no gate lane — the
   // REAL condition is still the blocker here, not yet proof either way about the cache.
-  const rStillDiverted = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const rStillDiverted = await awaitTrackedSettle(
+    () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
+    { label: "(2) confirmWorkerMergeTracked rStillDiverted", timeoutMs: 60_000 },
+  );
   check("(2) a re-call while STILL diverted is refused again, still no gate lane", rStillDiverted.settled === true && rStillDiverted.ok && rStillDiverted.value.merged === false && rStillDiverted.value.forkPointDiverged === true && gateCalls === 0);
 
   // Fix the REAL condition: canonical checkout returns to the default branch, where c1 genuinely is an
@@ -110,7 +120,10 @@ try {
   execFileSync("git", ["checkout", "-q", defaultBranch], { cwd: repo });
   check("(setup) canonical is back where c1 IS an ancestor", git(repo, "rev-parse HEAD") === c1);
 
-  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const r2 = await awaitTrackedSettle(
+    () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
+    { label: "(3) confirmWorkerMergeTracked r2", timeoutMs: 60_000 },
+  );
   check("(3) card 0eaaa693: after the real condition is fixed, the re-call does NOT replay the stale forkPointDiverged refusal — it genuinely re-attempts (gate runs for real)", gateCalls === 1 && r2.cacheHit === undefined);
   check("(3) op 2 actually merges (the worktree had real, mergeable work all along — only the divergence ever stood in the way)", r2.settled === true && r2.ok && r2.value.merged === true);
   check("(3) the feature file actually landed on the default branch", fs.existsSync(path.join(repo, "feature.txt")));

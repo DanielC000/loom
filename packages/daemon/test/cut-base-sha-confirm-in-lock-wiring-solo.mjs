@@ -51,6 +51,7 @@ import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-cbsilw-s-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -142,7 +143,15 @@ try {
       syncAttachBudgetMs: 60_000, soloMergeGitFactory, runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
     });
 
-    const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    // Card 426f9bdb: awaits the real settle rather than taking a possible `{settled:false}` first result
+    // as final — mirrors cut-base-sha-confirm-and-batch.mjs's own fix; see that file's scenario (1) for
+    // why this is deliberately NOT forced to a tiny `syncAttachBudgetMs` (a fast, NEVER_CACHED_OUTCOMES
+    // refusal can settle faster than a forced-tiny-budget poll round-trip, causing a mint storm instead
+    // of a clean pending-then-settled sequence).
+    const r = await awaitTrackedSettle(
+      () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
+      { label: "(d) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+    );
     check("(d) the gate DID run for real (the advisory's OWN probe failed and fell through, never refusing on an inconclusive read)", gateCalls === 1);
     check("(d) op settled, NOT merged", r.settled === true && r.ok && r.value.merged === false);
     check("(d) classified forkPointDiverged BY THE IN-LOCK CHECK (proves mergeBranch actually received worker.cutBaseSha — if it had received undefined, this would land cleanly instead)",
@@ -190,7 +199,11 @@ try {
       syncAttachBudgetMs: 60_000, soloMergeGitFactory, runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
     });
 
-    const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    // Card 426f9bdb: awaits the real settle (see scenario (d)'s own comment above for why no forced budget).
+    const r1 = await awaitTrackedSettle(
+      () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
+      { label: "(1 in-lock) confirmWorkerMergeTracked r1", timeoutMs: 60_000 },
+    );
     check("(1 in-lock) the gate ran (the ADVISORY's own merge-base call succeeded cleanly)", gateCalls === 1);
     check("(1 in-lock) exactly one simulated merge-base failure occurred (the IN-LOCK call)", mbFails === 1);
     check("(1 in-lock) r1 refused, classified forkPointUnverified (NEVER forkPointDiverged) by a transient in-lock probe failure",
@@ -199,7 +212,10 @@ try {
       /could not verify/i.test(r1.value.reason ?? "") && !/cannot be cleared by recycling/i.test(r1.value.reason ?? ""));
     check("(1 in-lock) canonical repo untouched by the refused squash", git(repo, "rev-parse HEAD") === c1);
 
-    const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const r2 = await awaitTrackedSettle(
+      () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
+      { label: "(3) confirmWorkerMergeTracked r2", timeoutMs: 60_000 },
+    );
     check("(3) r2 (transient cleared, nothing else moved — SAME identity as r1) genuinely re-attempts and merges, NOT a cached replay of r1's stale refusal",
       r2.settled === true && r2.ok && r2.value.merged === true && r2.cacheHit === undefined);
     check("(3) exactly 2 real gate runs total (r1 + r2) — r2 was a genuine re-attempt, not served from cache", gateCalls === 2);
@@ -253,7 +269,11 @@ try {
       syncAttachBudgetMs: 60_000, soloMergeGitFactory, runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
     });
 
-    const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    // Card 426f9bdb: awaits the real settle (see scenario (d)'s own comment above for why no forced budget).
+    const r = await awaitTrackedSettle(
+      () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
+      { label: "(h) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+    );
     check("(h) the gate ran (the ADVISORY's own rev-parse HEAD call succeeded cleanly)", gateCalls === 1);
     check("(h) exactly one simulated rev-parse HEAD failure occurred (the IN-LOCK call)", rpFails === 1);
     check("(h) refused, classified forkPointUnverified (NEVER forkPointDiverged) — the in-lock check's OWN target-tip read failed, not checkCutBaseAncestry's merge-base call",

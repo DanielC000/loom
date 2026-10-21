@@ -32,7 +32,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       host speed, not the code under test, and reddened the gate under real contention. Fixed by
 //       forcing the degrade DETERMINISTICALLY on every run (`syncAttachBudgetMs: 1`, the same seam
 //       batch-merge-divert-unverified-nudge-text.mjs/batch-merge-gate-history.mjs already use for this)
-//       and polling the SAME closure via `awaitBatchSettle` (re-attaches to the in-flight op rather than
+//       and polling the SAME closure via `awaitTrackedSettle` (re-attaches to the in-flight op rather than
 //       re-running it) until it genuinely settles, bounded with `performance.now()` (monotonic, never
 //       `Date.now()`) so a clock adjustment can't silently turn a real wedge into a hang. Verified via a
 //       real RED/GREEN cycle: the bare pre-fix call (`await sessionsBatch.mergeBatchTracked(...)`, no
@@ -63,6 +63,7 @@ import { execSync, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -130,33 +131,14 @@ function stopSeamPty(sessionId) {
 // never a test failure. Scenario (2) below used to assert `batch.settled === true` on the FIRST result,
 // which measures the host's speed, not the code — the exact flake the manager's gate run caught.
 //
-// Re-calling the SAME closure RE-ATTACHES to the in-flight op (`PendingOpRegistry.attach` dedupes by
-// key) instead of re-running it, so this is a condition wait on genuine settlement, bounded so a real
-// wedge throws loudly and names the op — never a blind sleep, and never a fabricated value for the
-// unsettled case. Deliberately NOT a call to the shared `_settle-tracked.mjs` helper (which this file
-// could otherwise reuse) — this helper uses `performance.now()` (monotonic) for its deadline instead of
-// that helper's own `Date.now()`, so a system-clock adjustment mid-wait can never silently defeat the
-// bound and turn a genuine wedge into a hang; `_settle-tracked.mjs` is a widely-shared file this card has
-// no reason to touch, and its own `Date.now()` deadline is an orthogonal, pre-existing choice.
-async function awaitBatchSettle(callFn, { label = "mergeBatchTracked", timeoutMs = 120_000 } = {}) {
-  const deadline = performance.now() + timeoutMs;
-  let r = await callFn();
-  let lastOpId = r.op?.opId;
-  while (!r.settled) {
-    if (performance.now() > deadline) {
-      throw new Error(`${label} did not settle within ${timeoutMs}ms (last op: ${JSON.stringify(r.op)})`);
-    }
-    r = await callFn();
-    // Mirrors `_settle-tracked.mjs`'s own RE-MINT GUARD: a re-poll that mints a SECOND op instead of
-    // re-attaching to the first would silently race two real batches — detect it and throw loudly rather
-    // than let it surface as an unrelated later assertion failure.
-    if (!r.settled && r.op?.opId !== undefined && lastOpId !== undefined && r.op.opId !== lastOpId) {
-      throw new Error(`${label}: re-poll minted a fresh op ${r.op.opId} instead of re-attaching to ${lastOpId} (the op settled between polls and its identity moved)`);
-    }
-    if (!r.settled) lastOpId = r.op?.opId;
-  }
-  return r;
-}
+// Card 426f9bdb: the fix generalizes to EVERY real tracked confirm/batch call in this file (and its
+// cut-base-sha-confirm-in-lock-wiring-*.mjs / cut-base-sha-confirm-verdict-cache.mjs siblings) — scenario
+// (1) and (3) below had the SAME unguarded bare-await shape, just never caught red before this card's
+// own n=1 sighting on scenario (3). All now go through the shared `awaitTrackedSettle` helper
+// (`_settle-tracked-monotonic.mjs`) imported above, instead of this file's own former local
+// `awaitBatchSettle` — see that shared helper's own header for why it DROPS the local function's
+// cross-poll re-mint guard (a real false-positive against scenario (1)'s own fast, gateless confirm,
+// found while wiring this up) rather than carrying it forward unmodified.
 
 const allRepos = [];
 const allWorktrees = [];
@@ -198,7 +180,27 @@ try {
     check("(1 setup) c1 is NOT an ancestor of atlas (the cross-lineage precondition)",
       (() => { try { execFileSync("git", ["merge-base", "--is-ancestor", c1, atlasTip], { cwd: repo }); return false; } catch { return true; } })());
 
-    const merge = await svc.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id);
+    // Card 426f9bdb: awaits the REAL settle rather than taking a possible `{settled:false}` first result
+    // as final (the actual flake class). Deliberately NOT forced to a tiny `syncAttachBudgetMs` the way
+    // scenario (2)'s own `mergeBatchTracked` call is — this file's `host` is a REAL SeamHost (unlike the
+    // bare `ptyStub` the cut-base-sha-confirm-in-lock-wiring-*.mjs siblings use), so confirmWorkerMerge's
+    // own merge-rejection notification push genuinely drives SeamHost's real submit/retry/give-up
+    // machinery (~10s per attempt, since `write()` is an inert no-op that never confirms). A forced tiny
+    // budget here was tried and PROVEN UNSAFE by a real run: this outcome (fork-point-diverged) is a
+    // `NEVER_CACHED_OUTCOMES` entry that settles in low milliseconds — far faster than this helper's own
+    // call-await-call round-trip — so a forced-pending FIRST result's real op is typically already
+    // SETTLED by the time of the SECOND poll, and confirmWorkerMergeTracked's own verdict handling does
+    // NOT replay that just-settled refusal; it genuinely re-mints a FRESH real attempt instead (correct
+    // production behavior for this outcome, not a bug) — which ALSO pushes its own ~10s notification
+    // retry. Forcing the budget turned this into an unbounded mint storm that never stabilizes into
+    // "same op observed pending twice in a row," observed to still be running past a 60s deadline with 8+
+    // real merge-rejection cycles logged. `awaitTrackedSettle` at the DEFAULT budget still fully fixes the
+    // reported incident (a `{settled:false}` first result now polls to the real settle instead of being
+    // asserted on directly) without that self-inflicted hazard.
+    const merge = await awaitTrackedSettle(
+      () => svc.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id),
+      { label: "(1) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+    );
     check("(1) the real confirm settles (not a throw)", merge.settled === true && merge.ok === true);
     check("(1) refused — merged:false", merge.value?.merged === false);
     check("(1) classified forkPointDiverged (never branchDiverted) — proves the ADVISORY check read a REAL session's cutBaseSha (NOT the separate in-lock mergeBranch wiring — see cut-base-sha-confirm-in-lock-wiring-solo.mjs)",
@@ -285,12 +287,12 @@ try {
     // batch-merge-gate-history.mjs already use for this exact purpose) FORCES the real
     // `mergeBatchTracked` call below to degrade to `{settled:false, op}` on EVERY run, deterministically
     // — never relying on ambient host speed to happen to reproduce the manager's gate failure. This
-    // turns the flake into a permanent, always-exercised regression test for the awaitBatchSettle
+    // turns the flake into a permanent, always-exercised regression test for the awaitTrackedSettle
     // re-attach path below, rather than a one-off manual demonstration. A separate SessionService
     // instance (same shared `db`/`host`) — spawning stays on `svc`, only this merge call needs the
     // forced-tiny budget; mirrors scenario (4)'s own `sessionsReplace`/`sessionsControl` split.
     const sessionsBatch = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: 1 });
-    const batch = await awaitBatchSettle(
+    const batch = await awaitTrackedSettle(
       () => sessionsBatch.mergeBatchTracked(`${P}-mgr1`, [goodWorker.id, good2Worker.id, strayWorker.id]),
       { label: "(2) mergeBatchTracked", timeoutMs: 180_000 },
     );
@@ -340,7 +342,16 @@ try {
       lastError: null, role: "worker", parentSessionId: `${P}-mgr1`, taskId: null, worktreePath, branch });
     check("(3 setup) the legacy worker's cutBaseSha reads null", db.getSession(workerId)?.cutBaseSha == null);
 
-    const merge = await svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId);
+    // Card 426f9bdb: this is the call site that went RED in production (gen 432's verify-on-main,
+    // 0ac7e119) — `svc.confirmWorkerMergeTracked` returned `{settled:false}` under LOOM_DEV=1
+    // LOOM_SUPERVISED=1 host contention, and the bare await took that as the final result instead of
+    // waiting for the real settle. `awaitTrackedSettle` fixes exactly that — now polls to the real settle
+    // instead. Deliberately NOT forced to a tiny `syncAttachBudgetMs` (see scenario (1)'s own comment for
+    // why that's unsafe for a fast, gateless confirm on this file's real SeamHost).
+    const merge = await awaitTrackedSettle(
+      () => svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId),
+      { label: "(3) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+    );
     check("(3) the legacy worker's branch lands normally (grandfathered, never refused)",
       merge.settled === true && merge.ok === true && merge.value?.merged === true);
     check("(3) the file actually landed", fs.existsSync(path.join(repo, "legacy-work.txt")));
@@ -416,7 +427,12 @@ try {
 
     // POSITIVE: no factory override at all — the advisory and in-lock checks both run through
     // production's REAL canonicalGit, which disables replace refs. Refused PRE-GATE; the gate never runs.
-    const merge = await sessionsReplace.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id);
+    // Card 426f9bdb: awaits the real settle (see scenario (1)'s own comment for why this is deliberately
+    // NOT forced to a tiny `syncAttachBudgetMs` — the same fast, pre-gate-refusal + real-SeamHost shape).
+    const merge = await awaitTrackedSettle(
+      () => sessionsReplace.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id),
+      { label: "(4) confirmWorkerMergeTracked (positive)", timeoutMs: 60_000 },
+    );
     check("(4) WITH real canonicalGit, the advisory correctly refuses PRE-GATE (gateCalls stays 0 — the forgery never fools it)", gateCalls === 0);
     check("(4) classified forkPointDiverged", merge.settled === true && merge.ok && merge.value?.merged === false && merge.value?.forkPointDiverged === true);
     const rejected4 = db.listEventsForWorker(worker.id).filter((e) => e.kind === "merge_rejected");
@@ -435,7 +451,10 @@ try {
       syncAttachBudgetMs: 60_000, soloMergeGitFactory: (p) => simpleGit(p),
       runGate: async () => { gateCallsControl++; return { passed: true, steps: [] }; },
     });
-    await sessionsControl.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id);
+    await awaitTrackedSettle(
+      () => sessionsControl.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id),
+      { label: "(4 control) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+    );
     check("(4 control) WITH a plain, replace-honoring git wrapper (this.boundedGit's own shape), the advisory is FOOLED and falls through to a REAL gate run (gateCallsControl === 1, not 0) — RED exactly where the positive case was green",
       gateCallsControl === 1);
     stopSeamPty(worker.id);
