@@ -55,8 +55,15 @@ export default function Platform() {
       {viewAs === "developer"
         ? <PlatformView key={developerEdition.kind} edition={developerEdition} />
         // previewOnly: the underlying Getting-Started agent on a dev install is never upgraded to the
-        // Lead (§1c), so this preview must not let the operator spawn button mint a stray role:"platform"
-        // session against it — see PlatformView's own AgentControl for the disabled state.
+        // Lead (§1c), and this preview resolves a DIFFERENT home than the Developer view above, so it is
+        // the only Platform-page route to that home's agents.
+        //
+        // @decision b472645a — this holds every write that acts on the previewed home's own agents,
+        // schedules or sessions: both spawns, both Stops, the prompt editors, the cadence form, run
+        // history's Resume, the session tiles. Never re-narrow it to the operator spawn.
+        //
+        // It does NOT hold the board's card CRUD, Findings' Adopt/Dismiss or guided setup — those are
+        // DECIDED exemptions with their reasons in the record, not gaps.
         : <PlatformView key={endUserEdition.kind} edition={endUserEdition} previewOnly />}
     </div>
   );

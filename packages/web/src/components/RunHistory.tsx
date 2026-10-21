@@ -45,8 +45,12 @@ const DEFAULT_VISIBLE = 12;
 // full unpaginated archived set.
 const RUN_HISTORY_ARCHIVE_LIMIT = 300;
 
-export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFindings = false }:
-  { reservedProjectId: string; sessions: SessionListItem[]; role: SessionRole; emptyLabel: string; showFindings?: boolean }) {
+// @decision b472645a — `previewOnly` must hold the Resume button: resuming un-archives and RESPAWNS the
+// previewed home's own session, so a dev install's End-user preview could act on the never-upgraded agent
+// through run history even with every go-live control held.
+export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFindings = false, previewOnly = false }:
+  { reservedProjectId: string; sessions: SessionListItem[]; role: SessionRole; emptyLabel: string;
+    showFindings?: boolean; previewOnly?: boolean }) {
   const archived = useQuery({
     queryKey: ["archive", reservedProjectId, RUN_HISTORY_ARCHIVE_LIMIT],
     queryFn: () => api.archivedSessions(reservedProjectId, { limit: RUN_HISTORY_ARCHIVE_LIMIT }),
@@ -77,7 +81,8 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {visible.map((run) => (
         <RunRow key={run.id} run={run} schedules={schedules.data ?? []} tasks={board.data?.tasks ?? []}
-          showFindings={showFindings} open={openId === run.id} onToggle={() => toggle(run.id)} />
+          showFindings={showFindings} open={openId === run.id} onToggle={() => toggle(run.id)}
+          previewOnly={previewOnly} />
       ))}
       {runs.length > DEFAULT_VISIBLE && (
         <button onClick={() => setShowAll((v) => !v)}
@@ -95,8 +100,9 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
 // cards), with the transcript expanding inline when open. The trigger + findings come from this run's
 // orchestrationEvents (the session id IS the managerSessionId those events are keyed by). Refetch only
 // while live.
-function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
-  { run: SessionListItem; schedules: Schedule[]; tasks: BoardTask[]; showFindings: boolean; open: boolean; onToggle: () => void }) {
+function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOnly }:
+  { run: SessionListItem; schedules: Schedule[]; tasks: BoardTask[]; showFindings: boolean; open: boolean;
+    onToggle: () => void; previewOnly: boolean }) {
   const qc = useQueryClient();
   const live = !run.archivedAt && run.processState === "live";
   // On-demand human resume of a non-live run (distinct from a manual Spawn, which always mints a FRESH
@@ -156,9 +162,11 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
         {showFindings && <Chip label="filed" value={findings.length} tone={findings.length ? "phosphor" : "muted"} />}
         <span style={{ flex: 1 }} />
         {canResume && (
-          <Button variant="ghost" disabled={resumeM.isPending}
+          <Button variant="ghost" disabled={previewOnly || resumeM.isPending}
             onClick={(e) => { e.stopPropagation(); resumeM.mutate(); }}
-            title="Resume this exited session (brings it back live)"
+            title={previewOnly
+              ? "Preview only on a dev install — acting here is disabled"
+              : "Resume this exited session (brings it back live)"}
             style={{ padding: "2px 8px", fontSize: 11, color: color.cyan, borderColor: color.border }}>
             {resumeM.isPending ? "resuming…" : "Resume"}
           </Button>

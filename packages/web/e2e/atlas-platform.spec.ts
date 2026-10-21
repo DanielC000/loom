@@ -45,6 +45,39 @@ async function pinProject(page: Page, projectId: string) {
   }, [PROJECT_KEY, projectId] as const);
 }
 
+// lib/Platform.tsx's own persisted toggle key. Seeded so a preview test lands ALREADY in the End-user
+// view rather than clicking across — a click would also need the Developer view's queries to settle
+// first, and an intercepting route (below) is registered before the first navigation.
+const VIEW_AS_KEY = "loom.platformViewAs";
+async function seedViewAsEndUser(page: Page) {
+  await page.addInitScript((key) => {
+    try { localStorage.setItem(key, "enduser"); } catch { /* storage unavailable — assertions will say so */ }
+  }, VIEW_AS_KEY);
+}
+
+/**
+ * Record — and BLOCK — every mutating `/api/` request the page attempts (card b472645a).
+ *
+ * `route.abort()` rather than a fulfil: the recorded path IS the evidence, and nothing must reach the
+ * daemon (the fixture's no-spawn guard forbids a real claude spawn, so a control that still fires has to
+ * be stopped in the browser, not answered). GETs `fallback()` to the next handler, which is why this must
+ * be registered AFTER `serveDevPlatformHome` — Playwright runs route handlers LIFO, so the catcher sees
+ * every request first and the home mock still gets its own GET.
+ */
+async function blockMutations(page: Page): Promise<string[]> {
+  const sent: string[] = [];
+  await page.route("**/*", async (route) => {
+    const req = route.request();
+    const { pathname } = new URL(req.url());
+    if (req.method() !== "GET" && pathname.startsWith("/api/")) {
+      sent.push(`${req.method()} ${pathname}`);
+      return route.abort();
+    }
+    return route.fallback();
+  });
+  return sent;
+}
+
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
 // Names/titles go into regexes below, and the daemon hands back what it STORED rather than what was
@@ -591,6 +624,252 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await expect(page.getByRole("button", { name: /^start platform$/i })).toBeDisabled();
     await expect(page.getByText(/Preview only on a dev install/i).first()).toBeVisible();
   });
+
+  // ── 8. card b472645a — the preview sends NO request, from ANY control, under BOTH shells ───────────
+  //
+  // Tests 1 and 7 read the operator spawn's DISABLED attribute. That is necessary and not sufficient:
+  // seven further controls were measured FIRING real requests in this exact preview — the auditor spawn,
+  // both prompt editors (via the button AND the textarea's own Ctrl/Cmd+Enter), the cadence create, and
+  // the Stop buttons. A disabled-attribute assertion cannot see any of them, so these tests assert the
+  // ONE property that covers every control at once: with every mutating request intercepted and aborted,
+  // the recorded count must be ZERO after clicking each one.
+  //
+  // ⚠️ The aborting route is what makes this safe to run on the fixture at all — the no-spawn guard
+  // forbids a real claude spawn, so a control that DOES fire must never reach the daemon. It also means
+  // a FAILURE here is observed as a recorded request, never as a side effect.
+  for (const atlas of [true, false]) {
+    const shell = atlas ? "switch ON" : "switch OFF";
+
+    test(`${shell}: no control in the dev End-user preview sends a request`, async ({ page, loomDaemon }) => {
+      const home = await serveDevPlatformHome(page, loomDaemon);
+      if (atlas) await seedAtlasOn(page);
+      await seedViewAsEndUser(page);
+      const sent = await blockMutations(page);
+      await page.goto(`${loomDaemon.baseURL}/platform`);
+
+      // Provably the right shell AND the right view — every zero below is worthless if this page is the
+      // real end-user edition (no previewOnly) or the Developer view (different controls entirely).
+      await expect(page.getByTestId("atlas-shell")).toHaveCount(atlas ? 1 : 0);
+      await expect(viewAs(page, "End-user")).toHaveAttribute("aria-pressed", "true");
+      await expect(page.getByText(/your cross-project workspace agent/i).first()).toBeVisible();
+
+      // (a) Both go-live cards. The operator's disabled state is tests 1/7's reading; the AUDITOR's is
+      // new — `endUserEdition.auditorCreateOnly` makes its edition gate ignore `live` entirely, so
+      // before this card it was enabled unconditionally and really spawned.
+      await expect(page.getByRole("button", { name: /^start platform$/i })).toBeDisabled();
+      await expect(page.getByRole("button", { name: /review my workspace/i })).toBeDisabled();
+
+      // (b) Both prompt editors — the Save button AND the textarea's own Ctrl/Cmd+Enter save path. The
+      // field is read-only, so `fill` cannot even make a draft: both legs assert that too, because a
+      // typed-but-unsavable draft would still be a draft the user could lose.
+      const expanders = page.getByRole("button", { name: /startup prompt/i });
+      await expect(expanders).toHaveCount(2);
+      for (let i = 0; i < 2; i++) {
+        await expanders.nth(i).click();
+        const ta = page.locator("textarea").first();
+        await expect(ta).toBeVisible();
+        const before = await ta.inputValue();
+        await ta.pressSequentially("mutation-probe");
+        expect(await ta.inputValue(), "a read-only prompt field must not accept typing").toBe(before);
+        await expect(page.getByRole("button", { name: /^save prompt$/i })).toBeDisabled();
+        await ta.press("Control+Enter");
+        await expanders.nth(i).click();
+      }
+
+      // (c) The cadence form, NO-SCHEDULE state — the only control that renders is "Schedule". Phase B
+      // below seeds a real schedule so the other four (Save / Enable / Disable / Remove) are exercised
+      // too, rather than left to the structural pin alone.
+      if (atlas) await openTab(page, "Cadence");
+      await expect(page.getByText(/^Run automatically$/)).toBeVisible();
+      await expect(page.getByRole("button", { name: /^schedule$/i })).toBeDisabled();
+      if (atlas) await openTab(page, "Home");
+
+      // Clicking a disabled button records nothing by construction, so the assertion so far rests on the
+      // disabled attributes. `force` dispatches the click anyway — past the disabled attribute, straight
+      // at the handler — so a control that is merely STYLED disabled, or whose handler is still wired,
+      // is caught here rather than passing on appearance.
+      for (const name of [/^start platform$/i, /review my workspace/i, /^schedule$/i]) {
+        const b = page.getByRole("button", { name });
+        if (await b.count()) await b.first().click({ force: true }).catch(() => { /* a held control may refuse */ });
+      }
+
+      expect(sent, "the dev End-user preview must send NO mutating request").toEqual([]);
+
+      // ── PHASE B — the controls that need pre-existing STATE to render at all ──
+      // Run History's RESUME (the round-2 Code Review's Critical: it un-archives AND respawns the
+      // previewed home's own session) needs an EXITED run; the cadence form's Save / Enable / Remove
+      // need an existing schedule. Neither is live, so neither disturbs the spawn readings above.
+      const operator = home.agents.find((a) => a.name === "Platform")!;
+      const auditor = home.agents.find((a) => a.name === "Workspace Auditor")!;
+      const tag = `b472645a-${atlas ? "atlas" : "classic"}-${Date.now()}`;
+      // `enabled: false` deliberately — the fixture boots LOOM_SCHEDULER_ENABLED=0 so nothing can fire,
+      // and a disabled row keeps that true even if that ever changes.
+      const schedule = await seedWorkspaceAuditorSchedule(loomDaemon, auditor.id, `cad-${tag}`);
+      try {
+        await loomDaemon.seedLiveSession({ project: home.project, agentId: operator.id, role: "platform",
+          id: `exited-op-${tag}`, processState: "exited" });
+        await loomDaemon.seedLiveSession({ project: home.project, agentId: auditor.id, role: "workspace-auditor",
+          id: `exited-aud-${tag}`, processState: "exited" });
+        await page.reload();
+        await expect(viewAs(page, "End-user")).toHaveAttribute("aria-pressed", "true");
+
+        // Resume, in BOTH history sections. The end-user edition renders history EXPANDED, so these need
+        // no disclosure click — which is exactly why the gap mattered.
+        if (atlas) await openTab(page, "History");
+        const resumes = page.getByRole("button", { name: /^resume$/i });
+        // A FLOOR, not an exact count: the two rows seeded above are the minimum, and the daemon is
+        // shared across this file's tests, so an earlier test's exited row legitimately adds more.
+        // Pinning an exact number here would make this assertion depend on declaration order.
+        await expect.poll(() => resumes.count(), { message: "both seeded exited runs should offer Resume" })
+          .toBeGreaterThanOrEqual(2);
+        for (let i = 0; i < await resumes.count(); i++) {
+          await expect(resumes.nth(i)).toBeDisabled();
+          await resumes.nth(i).click({ force: true }).catch(() => { /* held */ });
+        }
+        expect(sent, "Resume must not respawn the previewed home's session").toEqual([]);
+
+        // The cadence form's other three controls, now that a schedule exists.
+        if (atlas) await openTab(page, "Cadence");
+        // ⚠️ Save is dirty-gated as well as held, so `toBeDisabled` on it ALONE would pass even with no
+        // gate at all (nothing has edited the cron). The load-bearing assertion is that the FIELD is
+        // read-only, which is also what makes Save unreachable — read it the same way the prompt editor's
+        // leg does, by typing and reading the value back.
+        const cron = page.getByPlaceholder("0 9 * * *").first();
+        await expect(cron).toBeVisible();
+        const cronBefore = await cron.inputValue();
+        await cron.pressSequentially("5");
+        expect(await cron.inputValue(), "a read-only cron field must not accept typing").toBe(cronBefore);
+        await expect(page.getByRole("button", { name: /^save$/i })).toBeDisabled();
+        // These two are NOT dirty-gated, so their disabled reading is load-bearing on its own.
+        await expect(page.getByRole("button", { name: /^enable$|^disable$/i })).toBeDisabled();
+        await expect(page.getByRole("button", { name: /^remove$/i })).toBeDisabled();
+        for (const name of [/^save$/i, /^enable$|^disable$/i, /^remove$/i]) {
+          await page.getByRole("button", { name }).first().click({ force: true }).catch(() => { /* held */ });
+        }
+        expect(sent, "no cadence control in the preview may reach the daemon").toEqual([]);
+        if (atlas) await openTab(page, "Home");
+
+        // ── PHASE C — Stop needs a LIVE session. Seeded LAST, because a live operator session flips the
+        // spawn button's own label to "Live" and disables it via the edition's singleton gate, which
+        // would have masked every spawn reading above (measured; it cost a full red run).
+        await loomDaemon.seedLiveSession({ project: home.project, agentId: operator.id, role: "platform",
+          id: `live-op-${tag}` });
+        await page.reload();
+        await expect(viewAs(page, "End-user")).toHaveAttribute("aria-pressed", "true");
+
+        const stops = page.getByRole("button", { name: /^stop$/i });
+        // The agent card's Stop. The session TILE's own lifecycle button is GONE in a preview
+        // (`lifecycle="none"`), which is why this is a count of 1 and not 2 — that absence is the gate.
+        await expect(stops).toHaveCount(1);
+        await expect(stops.first()).toBeDisabled();
+        await stops.first().click({ force: true }).catch(() => { /* held */ });
+
+        expect(sent, "no Stop in the preview may reach the daemon either").toEqual([]);
+      } finally {
+        // Schedules are a DAEMON-GLOBAL store shared with every other spec on this worker's daemon — a
+        // leftover row would surface on the Schedules page in an unrelated spec.
+        await deleteSchedule(loomDaemon, schedule.id);
+      }
+    });
+  }
+
+  // ── 9. THE CONTRAST CASE for test 8 — the same controls on a REAL end-user install DO fire ────────
+  //
+  // Without this, test 8 is satisfied by a gate that disabled the shipping UI too: "zero requests" is
+  // also what a broken page produces. Same aborting counter, same clicks, opposite expectation — so the
+  // pair proves the gate discriminates on `previewOnly` rather than on the control being dead.
+  // ⚠️ Run under BOTH shells. The gate is threaded once PER LAYOUT, so an over-gate is per-layout too:
+  // a mount that passed `previewOnly` unconditionally would disable the SHIPPING end-user surface on
+  // that one layout, and a classic-only contrast test would never see it. The preview legs above already
+  // run per shell; this is their missing twin on the other side of the contrast.
+  for (const atlas of [false, true]) {
+  const shellLabel = atlas ? "switch ON" : "switch OFF";
+  test(`${shellLabel}: the same controls on a REAL end-user install DO send their requests`, async ({ page, loomDaemon }) => {
+    const home = await readSetupHome(loomDaemon);
+    const operator = home.agents.find((a) => a.name === "Platform")!;
+    const auditor = home.agents.find((a) => a.name === "Workspace Auditor")!;
+    const tag = `contrast-${Date.now()}`;
+    // The same pre-existing state Phase B of test 8 seeds, so the two tests exercise the SAME control
+    // set and the comparison is like-for-like rather than "the preview had more controls".
+    const schedule = await seedWorkspaceAuditorSchedule(loomDaemon, auditor.id, `cad-${tag}`);
+    try {
+      await loomDaemon.seedLiveSession({ project: home.project, agentId: operator.id, role: "platform",
+        id: `exited-op-${tag}`, processState: "exited" });
+      await loomDaemon.seedLiveSession({ project: home.project, agentId: auditor.id, role: "workspace-auditor",
+        id: `live-aud-${tag}` });
+
+      if (atlas) await seedAtlasOn(page);
+      const sent = await blockMutations(page);
+      await page.goto(`${loomDaemon.baseURL}/platform`);
+      // No mock ⇒ the shipping edition, with no preview toggle at all. The shell is asserted too: this
+      // test's whole value is that it reads the OTHER layout from the one a classic-only run would.
+      await expect(page.getByTestId("atlas-shell")).toHaveCount(atlas ? 1 : 0);
+      await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
+      await expect(page.getByText(/your cross-project workspace agent/i).first()).toBeVisible();
+
+      await page.getByRole("button", { name: /^start platform$/i }).click();
+      await page.getByRole("button", { name: /review my workspace/i }).click();
+
+      const expander = page.getByRole("button", { name: /startup prompt/i }).first();
+      await expander.click();
+      const ta = page.locator("textarea").first();
+      await ta.fill("contrast-case-edit");
+      await page.getByRole("button", { name: /^save prompt$/i }).first().click();
+      // The Ctrl/Cmd+Enter save path too. The preview leg asserts this SECOND trigger silent; without
+      // the same keystroke here, "silent" would also be satisfied by a shortcut that never worked.
+      await ta.fill("contrast-case-edit-via-shortcut");
+      await ta.press("Control+Enter");
+
+      if (atlas) await openTab(page, "Cadence");
+      await expect(page.getByText(/^Run automatically$/)).toBeVisible();
+      // Save is dirty-gated, so the cron must actually change first — and that the field ACCEPTS this
+      // edit is itself the contrast to the preview leg, where the same `fill` cannot change it.
+      const cron = page.getByPlaceholder("0 9 * * *").first();
+      await cron.fill("0 10 * * *");
+      expect(await cron.inputValue(), "the shipping cron field must be editable").toBe("0 10 * * *");
+      await page.getByRole("button", { name: /^save$/i }).first().click();
+      await page.getByRole("button", { name: /^enable$|^disable$/i }).first().click();
+      // Remove LAST of the three, because it is what un-renders them and brings "Schedule" back — which
+      // is the ONLY way this leg can reach the create path at all. ⚠️ Without that, seeding a schedule
+      // up front means `POST /api/schedules` never renders on the shipping side, and the preview leg's
+      // "Schedule is disabled" would have no contrast: an over-gate of the real edition's create button
+      // would pass both tests.
+      await page.getByRole("button", { name: /^remove$/i }).first().click();
+      // The aborted DELETE leaves the row in place, so drive the create path from a fresh page instead
+      // of depending on the removal having landed.
+      await deleteSchedule(loomDaemon, schedule.id);
+      await page.reload();
+      if (atlas) await openTab(page, "Cadence");
+      const createBtn = page.getByRole("button", { name: /^schedule$/i });
+      await expect(createBtn).toBeVisible();
+      await expect(createBtn).toBeEnabled();
+      await createBtn.click();
+
+      if (atlas) await openTab(page, "History");
+      await page.getByRole("button", { name: /^resume$/i }).first().click();
+      if (atlas) await openTab(page, "Home");
+      await page.getByRole("button", { name: /^stop$/i }).first().click();
+
+      // Each write path test 8 asserts SILENT must appear here — as PATHS, not just a count, so a page
+      // that fired one request six times would not satisfy it. This is what keeps test 8 from being
+      // satisfied by a gate that disabled the shipping UI too.
+      const has = (re: RegExp) => sent.some((r) => re.test(r));
+      await expect.poll(() => sent.length, { message: "the shipping controls should have fired" }).toBeGreaterThanOrEqual(8);
+      expect(sent.filter((r) => /^POST \/api\/agents\/[^/]+\/sessions$/.test(r)).length,
+        `both spawns should have fired — got ${sent}`).toBeGreaterThanOrEqual(2);
+      // TWO prompt saves: the button AND the Ctrl/Cmd+Enter shortcut, matching the preview leg's pair.
+      expect(sent.filter((r) => /^POST \/api\/agents\/[^/]+$/.test(r)).length,
+        `prompt save via BOTH the button and Ctrl+Enter expected — got ${sent}`).toBeGreaterThanOrEqual(2);
+      expect(has(/^POST \/api\/schedules$/), `cadence CREATE missing from ${sent}`).toBe(true);
+      expect(has(/^POST \/api\/schedules\/[^/]+$/), `cadence save/toggle missing from ${sent}`).toBe(true);
+      expect(has(/^DELETE \/api\/schedules\/[^/]+$/), `cadence remove missing from ${sent}`).toBe(true);
+      expect(has(/^POST \/api\/sessions\/[^/]+\/resume$/), `run-history Resume missing from ${sent}`).toBe(true);
+      expect(has(/^POST \/api\/sessions\/[^/]+\/stop$/), `Stop missing from ${sent}`).toBe(true);
+    } finally {
+      await deleteSchedule(loomDaemon, schedule.id);
+    }
+  });
+  }
 });
 
 // ── Direct REST helpers. The fixture patches Node's global fetch to attach the loopback token to every
@@ -608,6 +887,28 @@ async function seedSuggestion(d: LoomDaemon, label: string, prompt: string): Pro
   // suggestion id of `undefined` and a mystery red further down.
   if (!body.id) throw new Error(`preset suggestion was deduped rather than created: ${JSON.stringify(body)}`);
   return { id: body.id };
+}
+
+/**
+ * A real `kind:"workspace-auditor"` schedule on the reserved home's auditor, so the cadence form renders
+ * its Save / Enable-Disable / Remove controls (they exist only once a schedule does — which is why a
+ * button-by-button gate would have missed them on a home with none).
+ *
+ * `enabled: false` deliberately: the fixture boots LOOM_SCHEDULER_ENABLED=0 so nothing can fire anyway,
+ * and a disabled row keeps that true independently of that env default.
+ */
+async function seedWorkspaceAuditorSchedule(d: LoomDaemon, agentId: string, name: string): Promise<{ id: string }> {
+  const res = await fetch(`${d.baseURL}/api/schedules`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, agentId, cron: "0 9 * * *", enabled: false, kind: "workspace-auditor" }),
+  });
+  if (!res.ok) throw new Error(`POST /api/schedules -> ${res.status}: ${await res.text()}`);
+  return (await res.json()) as { id: string };
+}
+
+/** Cleanup for the above. 404 is the state this wants (the test's own Remove click may have landed). */
+async function deleteSchedule(d: LoomDaemon, id: string) {
+  await fetch(`${d.baseURL}/api/schedules/${id}`, { method: "DELETE" }).catch(() => {});
 }
 
 async function dismissSuggestion(d: LoomDaemon, id: string) {

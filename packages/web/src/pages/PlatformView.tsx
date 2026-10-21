@@ -55,6 +55,10 @@ import {
 // switch is read HERE, once, for the sole purpose of choosing a layout; everything either layout needs
 // arrives as a prop.
 //
+// @decision b472645a — in the dev End-user PREVIEW (`previewOnly`) every control THIS file owns must send
+// NO request: both spawns, both Stops, both prompt editors, the whole cadence form, and the session tiles.
+// Do not re-narrow that to the operator spawn, and do not gate it by reading the toggle anywhere below.
+//
 // HARD INVARIANT: the spawn role never comes from the edition-preview toggle in Platform.tsx — so that
 // toggle stays a PURE CLIENT-SIDE VIEW SWITCH. This shell receives only the edition config; it never
 // reads the toggle's persisted key or browser storage. So a dev previewing the End-user surface mounts
@@ -64,6 +68,12 @@ import {
 // agent's CURRENT bound profile (`operatorSpawnRole` below), since the end-user operator's real role can
 // differ from the edition's default (a customized, not-yet-upgraded agent is still "setup"). That
 // resolution reads profile data, never the toggle — the invariant above is untouched.
+// The ONE wording for every preview-held control, so the tooltip and the caption can't drift apart.
+// "acting", not "spawning": the gate covers the spawns, the Stops, the prompt editors, the cadence form
+// and the session tiles — naming only the spawn would under-describe what is actually held.
+const PREVIEW_DISABLED_TITLE = "Preview only on a dev install — acting here is disabled";
+const PREVIEW_DISABLED_NOTE = "Preview only on a dev install — acting here is disabled.";
+
 export function PlatformView({ edition, previewOnly = false }: { edition: PlatformEdition; previewOnly?: boolean }) {
   // Which LAYOUT renders the resolved sections — nothing else. Read before any early return so the hook
   // order is identical in both, and read here rather than in a layout so the two layouts stay pure
@@ -187,10 +197,10 @@ function ClassicPlatformLayout({
         // CLASSIC PLACEMENT: the end-user single-cadence form rides in the auditor card's footer. The
         // Atlas layout puts it on its own Cadence tab instead (the approved round-4 placement), which is
         // why the footer is a prop rather than something the section decides for itself.
-        auditorFooter={edition.auditorScheduleVariant === "single-form" && auditor ? <AuditorScheduleInline agent={auditor} /> : undefined} />
+        auditorFooter={edition.auditorScheduleVariant === "single-form" && auditor ? <AuditorScheduleInline agent={auditor} previewOnly={previewOnly} /> : undefined} />
 
       {/* --- 2. Live sessions — the dev GRID of all live, or the end-user's two SINGLE-session wrappers --- */}
-      <PlatformSessionsSection edition={edition} homeSessions={homeSessions}
+      <PlatformSessionsSection edition={edition} previewOnly={previewOnly} homeSessions={homeSessions}
         operatorLive={operatorLive} auditorLive={auditorLive} />
 
       {/* --- 3. Auditor cadence — the DEV multi-row LIST variant (a separate section). The end-user
@@ -200,7 +210,7 @@ function ClassicPlatformLayout({
       )}
 
       {/* --- 4. Run history for each role — dev collapses (CollapsibleHistory), end-user expands. --- */}
-      <PlatformHistorySections edition={edition} project={project} homeSessions={homeSessions} />
+      <PlatformHistorySections edition={edition} previewOnly={previewOnly} project={project} homeSessions={homeSessions} />
 
       {/* --- 5. The reserved-home board (reused Board component) --- */}
       <PlatformBoardSection edition={edition} project={project} />
@@ -292,7 +302,7 @@ function AtlasPlatformLayout({
                 operatorSpawnRole={operatorSpawnRole} operatorRoleUnknown={operatorRoleUnknown}
                 operatorLive={operatorLive} auditorLive={auditorLive} liveCountFor={liveCountFor}
                 auditorFooter={undefined} />
-              <PlatformSessionsSection edition={edition} homeSessions={homeSessions}
+              <PlatformSessionsSection edition={edition} previewOnly={previewOnly} homeSessions={homeSessions}
                 operatorLive={operatorLive} auditorLive={auditorLive} />
             </div>
           ),
@@ -300,8 +310,8 @@ function AtlasPlatformLayout({
           // `auditorScheduleVariant` fork — the tab changed where it lives, not what it is.
           cadence: edition.auditorScheduleVariant === "list"
             ? <AuditorCadenceListSection edition={edition} auditor={auditor} />
-            : <AuditorCadenceFormSection edition={edition} auditor={auditor} />,
-          history: <PlatformHistorySections edition={edition} project={project} homeSessions={homeSessions} />,
+            : <AuditorCadenceFormSection edition={edition} previewOnly={previewOnly} auditor={auditor} />,
+          history: <PlatformHistorySections edition={edition} previewOnly={previewOnly} project={project} homeSessions={homeSessions} />,
           board: <PlatformBoardSection edition={edition} project={project} />,
           findings: <PlatformFindings edition={edition} projectId={project.id} />,
         }}
@@ -375,17 +385,20 @@ function PlatformAgentsSection({
         <AgentControl edition={edition} agent={operator} role={operatorSpawnRole} card={edition.copy.operatorCard}
           session={operatorLive} liveCount={liveCountFor(operator?.id)} showLiveCount={!edition.operatorSingleton}
           gate={operatorSpawnDisabled} previewDisabled={previewOnly} roleUnknown={operatorRoleUnknown} />
+        {/* The auditor card takes previewDisabled too. It was the hole this card closed: `auditorCreateOnly`
+            makes auditorSpawnDisabled() ignore `live` entirely, so without this the preview's "Review my
+            workspace" was enabled unconditionally and really spawned against the previewed home's auditor. */}
         <AgentControl edition={edition} agent={auditor} role={edition.auditorRole} card={edition.copy.auditorCard}
           session={auditorLive} liveCount={liveCountFor(auditor?.id)} showLiveCount={false}
-          gate={auditorSpawnDisabled} footer={auditorFooter} />
+          gate={auditorSpawnDisabled} previewDisabled={previewOnly} footer={auditorFooter} />
       </div>
     </section>
   );
 }
 
 // The dev GRID of every live platform session, or the end-user's two single-session sections.
-function PlatformSessionsSection({ edition, homeSessions, operatorLive, auditorLive }:
-  Pick<PlatformSurface, "edition" | "homeSessions" | "operatorLive" | "auditorLive">) {
+function PlatformSessionsSection({ edition, previewOnly, homeSessions, operatorLive, auditorLive }:
+  Pick<PlatformSurface, "edition" | "previewOnly" | "homeSessions" | "operatorLive" | "auditorLive">) {
   if (edition.sessionLayout === "grid") {
     return (
       <section>
@@ -393,7 +406,7 @@ function PlatformSessionsSection({ edition, homeSessions, operatorLive, auditorL
           {edition.copy.sessionsLabel}
           <span style={{ color: color.textMuted, fontWeight: 400 }}>({homeSessions.filter((s) => s.processState === "live").length} live)</span>
         </SectionLabel>
-        <PlatformSessions sessions={homeSessions} emptyLabel={edition.copy.sessionsEmpty} />
+        <PlatformSessions sessions={homeSessions} emptyLabel={edition.copy.sessionsEmpty} previewOnly={previewOnly} />
       </section>
     );
   }
@@ -404,20 +417,25 @@ function PlatformSessionsSection({ edition, homeSessions, operatorLive, auditorL
           {edition.copy.operatorSessionLabel}
           {operatorLive && <StatusPill tone={operatorLive.busy ? "amber" : "phosphor"} glow={operatorLive.busy} label={operatorLive.busy ? "busy" : "idle"} />}
         </SectionLabel>
-        <SingleSession session={operatorLive} empty={edition.copy.operatorSessionEmpty} />
+        <SingleSession session={operatorLive} empty={edition.copy.operatorSessionEmpty} previewOnly={previewOnly} />
       </section>
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {edition.copy.auditorSessionLabel}
           {auditorLive && <StatusPill tone={auditorLive.busy ? "amber" : "phosphor"} glow={auditorLive.busy} label={auditorLive.busy ? "busy" : "idle"} />}
         </SectionLabel>
-        <SingleSession session={auditorLive} empty={edition.copy.auditorSessionEmpty} stopTitle={edition.copy.auditorCard.stopTitle} />
+        <SingleSession session={auditorLive} empty={edition.copy.auditorSessionEmpty}
+          stopTitle={edition.copy.auditorCard.stopTitle} previewOnly={previewOnly} />
       </section>
     </>
   );
 }
 
 // Auditor cadence, VARIANT LIST (dev) as its own section — both layouts render it in this shape.
+//
+// Takes NO previewOnly, deliberately: `previewOnly` is passed on the END-USER mount only (pinned by
+// test/platform-edition.mjs), and that edition's variant is "single-form" — so this leaf is unreachable
+// in a preview and a gate here would be dead code no test could ever exercise.
 function AuditorCadenceListSection({ edition, auditor }: Pick<PlatformSurface, "edition" | "auditor">) {
   return (
     <section>
@@ -431,29 +449,35 @@ function AuditorCadenceListSection({ edition, auditor }: Pick<PlatformSurface, "
 // classic layout renders the same form inside the auditor card's footer instead, so this wrapper exists
 // purely to give that variant a section heading of its own once it is no longer inside a card. The
 // missing-agent state mirrors AuditorScheduleList's, so an unseeded auditor reads the same either way.
-function AuditorCadenceFormSection({ edition, auditor }: Pick<PlatformSurface, "edition" | "auditor">) {
+function AuditorCadenceFormSection({ edition, previewOnly, auditor }:
+  Pick<PlatformSurface, "edition" | "previewOnly" | "auditor">) {
   return (
     <section>
       <SectionLabel>{edition.copy.auditorScheduleLabel}</SectionLabel>
       {auditor
-        ? <Panel style={{ padding: 12, maxWidth: 620 }}><AuditorScheduleInline agent={auditor} /></Panel>
+        ? <Panel style={{ padding: 12, maxWidth: 620 }}><AuditorScheduleInline agent={auditor} previewOnly={previewOnly} /></Panel>
         : <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>No Auditor agent — cannot schedule.</span></Panel>}
     </section>
   );
 }
 
 // Run history for each role — dev collapses (CollapsibleHistory), end-user expands.
-function PlatformHistorySections({ edition, project, homeSessions }:
-  Pick<PlatformSurface, "edition" | "project" | "homeSessions">) {
+//
+// Each run row carries a RESUME button, which un-archives and respawns that run — a write against the
+// previewed home's own session, and the end-user edition renders these sections EXPANDED, so it is
+// reachable without even a disclosure click. Both mounts take the gate.
+function PlatformHistorySections({ edition, previewOnly, project, homeSessions }:
+  Pick<PlatformSurface, "edition" | "previewOnly" | "project" | "homeSessions">) {
   return (
     <>
       <HistorySection collapsed={edition.historyCollapsed} copy={edition.copy.operatorHistory}>
         <RunHistory reservedProjectId={project.id} sessions={homeSessions} role={edition.operatorRole}
-          emptyLabel={edition.copy.operatorHistory.empty} />
+          emptyLabel={edition.copy.operatorHistory.empty} previewOnly={previewOnly} />
       </HistorySection>
       <HistorySection collapsed={edition.historyCollapsed} copy={edition.copy.auditorHistory}>
         <RunHistory reservedProjectId={project.id} sessions={homeSessions} role={edition.auditorRole}
-          emptyLabel={edition.copy.auditorHistory.empty} showFindings={edition.auditorHistoryShowFindings} />
+          emptyLabel={edition.copy.auditorHistory.empty} showFindings={edition.auditorHistoryShowFindings}
+          previewOnly={previewOnly} />
       </HistorySection>
     </>
   );
@@ -461,6 +485,18 @@ function PlatformHistorySections({ edition, project, homeSessions }:
 
 // The reserved home's OWN board (the reused Board component, pointed at this project by id — never the
 // header's active project, which is what makes a Platform board show platform cards).
+//
+// Takes NO previewOnly, by decision (b472645a), on this ground: card CRUD writes TASKS, and a task is
+// not one of the previewed home's agents/schedules/sessions, which is the criterion the gate draws its
+// line on. ⛔ NOT because the board is reachable elsewhere — a RESERVED home is not selectable in the
+// project picker (`db.ts` listProjects filters `reserved = 0`), so on a dev install this preview is the
+// ONLY UI route to it. That reachability argument was wrong and has been removed; don't reintroduce it.
+//
+// ⚠️ NAMED RESIDUAL: Board's subtree includes `components/requests.tsx`, whose answer/dismiss/credential
+// actions and NudgeMgr `sendInput` WOULD act on a session. Unreachable today only because no role the
+// setup home hosts on a dev install registers `question_ask` — see the record for the verified check and
+// the follow-up trigger. PlatformFindings' Adopt/Dismiss (daemon-GLOBAL suggestion store, not
+// home-scoped) and GuidedSetupLauncher (edition-agnostic; creates a NEW project) are separate decisions.
 function PlatformBoardSection({ edition, project }: Pick<PlatformSurface, "edition" | "project">) {
   return (
     <section>
@@ -491,6 +527,10 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
   // f437d4e9 C5: true only for a DEV install's "View as: End-user" preview (Platform.tsx) — the
   // underlying agent there is never upgraded to the Lead (§1c), so the spawn button is disabled rather
   // than minting a stray role:"platform" session against it.
+  //
+  // @decision b472645a — this flag now holds EVERY write on the card (spawn, Stop, the prompt editor),
+  // not just the spawn: the preview reaches a DIFFERENT home than the Developer view, so it is the only
+  // Platform-page route to these agents. Never re-narrow it to the spawn button alone.
   previewDisabled?: boolean;
   // f437d4e9 C5 round 3 (M2): true only for the OPERATOR card, while `role` is still a genuinely
   // unresolved guess (profiles not loaded yet) — resolveOperatorSpawnRole's own `spawnDisabled`. Holds
@@ -517,7 +557,7 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
   const live = session?.processState === "live";
   const spawnDisabled = !!previewDisabled || !!roleUnknown || gate(edition, { live, pending: spawn.isPending });
   const spawnLabel = spawn.isPending ? card.spawn.pending : live ? card.spawn.live : card.spawn.idle;
-  const spawnTitle = previewDisabled ? "Preview only on a dev install — spawning here is disabled"
+  const spawnTitle = previewDisabled ? PREVIEW_DISABLED_TITLE
     : roleUnknown ? "Loading agent profile — please wait"
     : live ? card.title.live : card.title.idle;
   return (
@@ -538,14 +578,17 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
           {spawnLabel}
         </Button>
         {live && (
-          <Button variant="danger" disabled={stop.isPending} title={card.stopTitle}
+          <Button variant="danger" disabled={!!previewDisabled || stop.isPending}
+            title={previewDisabled ? PREVIEW_DISABLED_TITLE : card.stopTitle}
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
-      {previewDisabled && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>Preview only on a dev install — spawning here is disabled.</span>}
+      {previewDisabled && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>{PREVIEW_DISABLED_NOTE}</span>}
       {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
-      {/* View / edit this reserved-home agent's startup prompt (the spawn kickoff). */}
-      <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={[edition.homeQueryKey]} />
+      {/* View / edit this reserved-home agent's startup prompt (the spawn kickoff). Readable in a preview,
+          never writable — the editor's own Ctrl/Cmd+Enter is a save trigger the buttons don't cover. */}
+      <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={[edition.homeQueryKey]}
+        readOnly={!!previewDisabled} />
       {footer}
     </Panel>
   );
@@ -555,22 +598,25 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
 // Dead/exited rows are dropped (the live set only) — mirrors the Terminals grid, scoped to the reserved
 // project. Each tile is the shared PlatformSessionTile (status + PresetPrompts + Stop + maximize, NO Fork —
 // forking would mint a second ELEVATED session off-screen; spawn fresh from the Agents controls instead).
-function PlatformSessions({ sessions, emptyLabel }: { sessions: SessionListItem[]; emptyLabel: string }) {
+function PlatformSessions({ sessions, emptyLabel, previewOnly }:
+  { sessions: SessionListItem[]; emptyLabel: string; previewOnly: boolean }) {
   const live = sessions.filter((s) => s.processState === "live");
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>{emptyLabel}</p>;
   const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
   return (
     <div style={grid}>
-      {live.map((s) => <PlatformSessionTile key={s.id} session={s} height={440} />)}
+      {live.map((s) => <PlatformSessionTile key={s.id} session={s} height={440} previewOnly={previewOnly} />)}
     </div>
   );
 }
 
 // The END-USER single live-session wrapper (operator OR auditor). Uses the shared PlatformSessionTile — NO
 // Fork (forking would mint a second setup/auditor session). Empty state prompts the go-live control above.
-function SingleSession({ session, empty, stopTitle }: { session?: SessionListItem; empty: string; stopTitle?: string }) {
+function SingleSession({ session, empty, stopTitle, previewOnly }:
+  { session?: SessionListItem; empty: string; stopTitle?: string; previewOnly: boolean }) {
   if (!session) return <p style={{ color: color.textMuted, marginTop: 0 }}>{empty}</p>;
-  return <PlatformSessionTile session={session} height={480} maxWidth={920} stopTitle={stopTitle} />;
+  return <PlatformSessionTile session={session} height={480} maxWidth={920} stopTitle={stopTitle}
+    previewOnly={previewOnly} />;
 }
 
 // One role's run history — collapsed behind a disclosure (dev) or an always-expanded section (end-user).
@@ -666,13 +712,18 @@ function AuditorScheduleRow({ s, onToggle, onRemove, busy }:
 // Auditor can't be targeted there). Looks up THIS agent's existing kind:"workspace-auditor" schedule and
 // lets the user create / edit-cron / enable-disable / remove a SINGLE cadence. A fired schedule boots a
 // fresh suggest-only Auditor run via startWorkspaceAuditor (role locked server-side) — human-only REST. ──
-function AuditorScheduleInline({ agent }: { agent: Agent }) {
+function AuditorScheduleInline({ agent, previewOnly }: { agent: Agent; previewOnly: boolean }) {
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
   const existing = (schedules.data ?? []).find((s) => s.agentId === agent.id && s.kind === "workspace-auditor");
-  return <AuditorScheduleInlineForm key={existing?.id ?? "new"} agentId={agent.id} existing={existing} />;
+  return <AuditorScheduleInlineForm key={existing?.id ?? "new"} agentId={agent.id} existing={existing}
+    previewOnly={previewOnly} />;
 }
 
-function AuditorScheduleInlineForm({ agentId, existing }: { agentId: string; existing?: Schedule }) {
+// @decision b472645a — gate the COMPONENT, never the one visible button: Schedule/Save/Enable/Disable/
+// Remove are five mutations whose rendering is conditional, so whichever ones a given home happens not to
+// show today are exactly the ones a button-by-button gate silently misses.
+function AuditorScheduleInlineForm({ agentId, existing, previewOnly }:
+  { agentId: string; existing?: Schedule; previewOnly: boolean }) {
   const qc = useQueryClient();
   const [cron, setCron] = useState(existing?.cron ?? "0 9 * * *");
   const invalidate = () => qc.invalidateQueries({ queryKey: ["schedules"] });
@@ -683,8 +734,17 @@ function AuditorScheduleInlineForm({ agentId, existing }: { agentId: string; exi
   const toggle = useMutation({ mutationFn: () => api.updateSchedule(existing!.id, { enabled: !existing!.enabled }), onSuccess: invalidate });
   const remove = useMutation({ mutationFn: () => api.deleteSchedule(existing!.id), onSuccess: invalidate });
 
+  // `held` is read by each control AND by the <fieldset> that wraps them (below). The fieldset is what
+  // makes the inheritance claim true, and the claim is specifically this: a FORM CONTROL added there
+  // later is inert, because a disabled fieldset disables the form controls it contains. It does NOT
+  // cover a non-form-control write — a plain `<div onClick>`, an anchor, a drag handler — so a new write
+  // of that shape still has to read `held` itself. The per-control `disabled={held || …}` flags stay on
+  // top, deliberately: they are what the structural pin can read, and they keep each control's own
+  // reason for being disabled visible at the call site. `dirty` folds it in too, so Save can never light
+  // up on a field that cannot be edited.
+  const held = previewOnly;
   const cronValid = looksLikeCron(cron);
-  const dirty = !!existing && cron.trim() !== existing.cron;
+  const dirty = !held && !!existing && cron.trim() !== existing.cron;
   const err = (create.error ?? save.error) as Error | null;
 
   return (
@@ -698,19 +758,26 @@ function AuditorScheduleInlineForm({ agentId, existing }: { agentId: string; exi
         Reading transcripts costs tokens, so favour a sparse cadence. Schedules run only while the
         scheduler is enabled (Settings › Scheduler).
       </p>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" spellCheck={false} style={{ width: 150 }} />
+      {/* A DISABLED FIELDSET, not just disabled buttons: it disables every form control it contains, so a
+          control added here later is inert in a preview even if whoever adds it never reads `held`. The
+          per-control flags stay on top (see `held`'s own note). `border:none`/`padding:0`/`margin:0` keep
+          the UA's default fieldset chrome from changing this row's appearance at all. */}
+      <fieldset disabled={held} style={{ border: "none", padding: 0, margin: 0, minInlineSize: 0,
+        display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" spellCheck={false}
+          readOnly={held} disabled={held} style={{ width: 150 }} />
         <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 10 }}>min hour dom mon dow</span>
         {existing ? (
           <>
-            <Button variant="primary" disabled={!cronValid || !dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : "Save"}</Button>
-            <Button disabled={toggle.isPending} onClick={() => toggle.mutate()} title={existing.enabled ? "Pause this cadence (stops firing)" : "Resume this cadence"}>{existing.enabled ? "Disable" : "Enable"}</Button>
-            <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>Remove</Button>
+            <Button variant="primary" disabled={held || !cronValid || !dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : "Save"}</Button>
+            <Button disabled={held || toggle.isPending} onClick={() => toggle.mutate()} title={held ? PREVIEW_DISABLED_TITLE : existing.enabled ? "Pause this cadence (stops firing)" : "Resume this cadence"}>{existing.enabled ? "Disable" : "Enable"}</Button>
+            <Button variant="danger" disabled={held || remove.isPending} onClick={() => remove.mutate()}>Remove</Button>
           </>
         ) : (
-          <Button variant="primary" disabled={!cronValid || create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Scheduling…" : "Schedule"}</Button>
+          <Button variant="primary" disabled={held || !cronValid || create.isPending} title={held ? PREVIEW_DISABLED_TITLE : undefined} onClick={() => create.mutate()}>{create.isPending ? "Scheduling…" : "Schedule"}</Button>
         )}
-      </div>
+      </fieldset>
+      {held && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>{PREVIEW_DISABLED_NOTE}</span>}
       {!cronValid && cron.trim().length > 0 && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
       {existing && <span style={{ color: color.textDim, fontFamily: font.mono, fontSize: 11 }}>next · {fmt(existing.nextFireAt)}</span>}
       {err && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{err.message.includes("400") ? "Daemon rejected the cron expression." : err.message}</span>}

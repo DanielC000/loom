@@ -20,14 +20,24 @@ import { errorText } from "../lib/loopbackCredential";
 // `homeKey` is the parent's home query key (["platformHome"] / ["setupHome"]) — invalidated on save so the
 // agent list the page renders from picks up the new prompt. Key this component by agent id at the call site
 // so switching agents re-seeds the draft.
-export function AgentPromptEditor({ agent, homeKey }: { agent: Agent; homeKey: readonly unknown[] }) {
+//
+// @decision b472645a — `readOnly` must hold the TEXTAREA, not just Save: the textarea's own Ctrl/Cmd+Enter
+// handler is a second, independent save trigger, so a button-only gate still sends the request.
+export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
+  { agent: Agent; homeKey: readonly unknown[];
+    // True in a dev install's "View as: End-user" preview (PlatformView's `previewOnly`). The prompt stays
+    // fully READABLE — expanding and reading it is the whole point of a preview — but nothing can be typed
+    // or saved, so there is no draft to lose and no trigger left to fire.
+    readOnly?: boolean }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(agent.startupPrompt);
   // The persisted baseline the draft is diffed against. Bumped on a successful save so `dirty` clears
   // immediately, before the invalidated home query round-trips back.
   const [saved, setSaved] = useState(agent.startupPrompt);
-  const dirty = draft !== saved;
+  // `readOnly` kills every write trigger at the source, so `dirty` can never go true in a preview and
+  // each disabled check below reads it rather than re-testing the flag.
+  const dirty = !readOnly && draft !== saved;
 
   const save = useMutation({
     mutationFn: () => api.updateAgent(agent.id, { startupPrompt: draft }),
@@ -70,8 +80,8 @@ export function AgentPromptEditor({ agent, homeKey }: { agent: Agent; homeKey: r
             Injected as the first turn of this agent's NEXT new session (never on resume). Editing it does not
             touch a live session.
           </p>
-          <textarea value={draft} rows={10} spellCheck={false}
-            onChange={(e) => setDraft(e.target.value)}
+          <textarea value={draft} rows={10} spellCheck={false} readOnly={readOnly}
+            onChange={(e) => { if (!readOnly) setDraft(e.target.value); }}
             onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && dirty && !save.isPending) { e.preventDefault(); save.mutate(); } }}
             placeholder="The kickoff prompt this agent boots with…"
             className="loom-field" style={textareaStyle} />
@@ -81,9 +91,11 @@ export function AgentPromptEditor({ agent, homeKey }: { agent: Agent; homeKey: r
             </Button>
             <Button disabled={!dirty || save.isPending} onClick={() => setDraft(saved)}
               title="Discard unsaved edits">Revert</Button>
-            {dirty
-              ? <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>unsaved changes</span>
-              : <span style={{ color: color.phosphor, fontSize: 11, fontFamily: font.mono }}>saved</span>}
+            {readOnly
+              ? <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>read-only in this preview</span>
+              : dirty
+                ? <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>unsaved changes</span>
+                : <span style={{ color: color.phosphor, fontSize: 11, fontFamily: font.mono }}>saved</span>}
             <span style={{ flex: 1 }} />
             {save.isError && (
               <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono, textAlign: "right" }}>

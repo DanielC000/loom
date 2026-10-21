@@ -22,13 +22,18 @@ import { TerminalCard } from "./TerminalCard";
 // stay unchanged. The per-spot differences remain props: tile `height`, an optional `maxWidth` (the
 // single-session end-user tiles cap their width), and the Stop button's `title` (the Auditor names
 // "this Auditor run").
+// @decision b472645a — in a dev install's End-user PREVIEW this tile must send NO request: the terminal
+// is watch-only, the lifecycle button is gone, and the queue/wakes sub-panels (which write to the
+// previewed home's own session) are not mounted. Never gate this by changing TerminalCard itself.
 export function PlatformSessionTile({
   session, height, maxWidth, stopTitle = "Stop this session — graceful Ctrl-C, clean and resumable",
+  previewOnly = false,
 }: {
   session: SessionListItem;
   height: number | string;
   maxWidth?: number | string;
   stopTitle?: string;
+  previewOnly?: boolean;
 }) {
   const stop = useStopSession();
 
@@ -38,13 +43,18 @@ export function PlatformSessionTile({
       height={height}
       maxWidth={maxWidth}
       offerFork={false}
-      lifecycle="stop"
+      // Both are props TerminalCard ALREADY has, chosen deliberately over a new flag: the shared card is
+      // mounted by /terminals, Overview, SessionView and Companion, and none of them changes behaviour here.
+      readOnly={previewOnly}
+      lifecycle={previewOnly ? "none" : "stop"}
       onStop={() => stop.mutate(session.id)}
       stopPending={stop.isPending}
       stopTitle={stopTitle}
       maximizable
       statusMode="busy"
-      subPanels={{ queue: true, wakes: true, taskCard: true }}
+      // The bound-task BAR is read-only, but SessionQueue and SessionWakes each carry their own writes
+      // against this session, so the whole set is withheld rather than picked apart.
+      subPanels={previewOnly ? undefined : { queue: true, wakes: true, taskCard: true }}
     />
   );
 }

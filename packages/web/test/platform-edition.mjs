@@ -12,7 +12,12 @@
 // use for assertions that aren't extractable pure functions. Run standalone:
 //   node --experimental-strip-types packages/web/test/platform-edition.mjs
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+// The api read/write classifier is an AST walk, not a pattern match — see its own note below for the
+// defect that forced it. `typescript` is already a dev dependency of this package (it builds it).
+import ts from "typescript";
 import {
   developerEdition, endUserEdition,
   operatorSpawnDisabled, auditorSpawnDisabled, resolveOperatorSpawnRole,
@@ -20,6 +25,31 @@ import {
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
+
+// Extract the real attribute text of every `<Tag …>` mount in `src` (section 7 proves it works).
+//
+// Written as a scanner rather than a regex because a flat `<Tag[^>]*?/>` is WRONG on this file: some
+// mounts carry a NESTED element inside a brace expression (`auditorFooter={… <AuditorScheduleInline … /> …}`),
+// so a character class stops at the inner tag and silently inspects a TRUNCATED mount — passing or
+// failing depending on where the attribute being looked for happens to sit. Tracking brace depth and
+// stopping at the first depth-0 `>` consumes the whole opening tag, nested elements included, so a
+// per-mount assertion is exact and immune to attribute order.
+function mountAttrs(src, tag) {
+  const out = [];
+  const re = new RegExp(`<${tag}(?=[\\s/>])`, "g");
+  for (let m = re.exec(src); m !== null; m = re.exec(src)) {
+    let depth = 0;
+    let i = m.index + m[0].length;
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (c === "{") depth++;
+      else if (c === "}") depth--;
+      else if (c === ">" && depth === 0) break;
+    }
+    out.push(src.slice(m.index, i + 1));
+  }
+  return out;
+}
 
 // ── 1. Singleton-vs-multi + create-only gating — BOTH editions, BOTH ways. ────────────────────────────
 //
@@ -244,20 +274,19 @@ check("BOTH layouts render the ONE shared agents section — neither builds its 
 // underlying Getting-Started agent there is never upgraded to the Lead, so a click would mint a stray
 // role:"platform" session on it. Count-equality against the mount count is what makes a dropped or
 // hardcoded hop on EITHER layout fail here rather than only in whichever layout a test happened to walk.
+// ⚠️ This check USED to be a whole-file count of `previewOnly={previewOnly}` against the
+// `<PlatformAgentsSection>` mount count, because that spelling was unique to those mounts. Card
+// b472645a broke that premise: SEVERAL component kinds now thread the same attribute, so a whole-file
+// count can be satisfied by the wrong mounts entirely — e.g. two session-section hops standing in for
+// two missing agents-section hops. It is now PER MOUNT, via `mountAttrs` (section 7), which extracts a
+// mount's real attribute text instead of counting occurrences anywhere in the file.
 check("EVERY <PlatformAgentsSection> mount threads previewOnly — no layout may hardcode it", () => {
-  // COUNT EQUALITY, deliberately, instead of parsing each mount's attribute list. A `<Section …/>`
-  // regex cannot be written correctly here with a flat character class: one of these mounts contains a
-  // NESTED element (`auditorFooter={… <AuditorScheduleInline … /> …}`), so `[^>]*?/>` stops at the inner
-  // tag and silently inspects a TRUNCATED mount — it passed only because `previewOnly` happened to sit
-  // before the nested tag, and would have flipped to a false FAIL on a prop reorder. `previewOnly=
-  // {previewOnly}` is unique to these mounts (AgentControl's own hop spells it `previewDisabled=
-  // {previewOnly}`), so counting is both exact and immune to attribute order.
-  const mounts = (shellSrc.match(/<PlatformAgentsSection\b/g) ?? []).length;
-  const threaded = (shellSrc.match(/previewOnly=\{previewOnly\}/g) ?? []).length;
-  assert.ok(mounts >= 2, `expected at least two <PlatformAgentsSection> mounts, found ${mounts}`);
-  assert.equal(threaded, mounts,
-    `${mounts} <PlatformAgentsSection> mount(s) but ${threaded} previewOnly={previewOnly} hop(s)`
-    + ` — a layout is hardcoding or dropping it`);
+  const mounts = mountAttrs(shellSrc, "PlatformAgentsSection");
+  assert.ok(mounts.length >= 2, `expected at least two <PlatformAgentsSection> mounts, found ${mounts.length}`);
+  for (const mount of mounts) {
+    assert.match(mount, /\bpreviewOnly=\{previewOnly\}/,
+      `a <PlatformAgentsSection> mount is hardcoding or dropping previewOnly: ${mount.slice(0, 160)}…`);
+  }
 });
 
 check("the Atlas findings surface drives NO spawn/stop REST and reads no browser storage or toggle key", () => {
@@ -273,6 +302,709 @@ check("the Atlas findings surface takes the RESOLVED edition as a prop, never an
   assert.ok(!findingsSrc.includes("developerEdition"), "PlatformFindings.tsx must not import developerEdition");
   assert.ok(!findingsSrc.includes("endUserEdition"), "PlatformFindings.tsx must not import endUserEdition");
   assert.ok(/edition:\s*PlatformEdition/.test(findingsSrc), "PlatformFindings.tsx must take `edition: PlatformEdition` as a prop");
+});
+
+// ── 7. card b472645a — the dev End-user PREVIEW is READ-ONLY for everything PlatformView owns.
+//
+// @decision b472645a — the gate covers both spawns, both Stops, both prompt editors, the whole cadence
+// form and the session tiles; measured, before the fix, as EIGHT live controls in the preview. These are
+// SOURCE-TEXT checks (same shape as sections 3-6) and they are the only thing standing between a future
+// refactor and a silently re-opened trust boundary, because the gate is a prop thread: every hop is a
+// place it can be dropped on ONE layout and stay green on every test that walks the other.
+const promptEditorSrc = readFileSync(new URL("../src/components/AgentPromptEditor.tsx", import.meta.url), "utf8");
+const sessionTileSrc = readFileSync(new URL("../src/components/PlatformSessionTile.tsx", import.meta.url), "utf8");
+const terminalCardSrc = readFileSync(new URL("../src/components/TerminalCard.tsx", import.meta.url), "utf8");
+const runHistorySrc = readFileSync(new URL("../src/components/RunHistory.tsx", import.meta.url), "utf8");
+
+// POSITIVE CONTROL on `mountAttrs` itself, BEFORE anything relies on it. A scanner that returned
+// truncated (or empty) attribute text would make every per-mount assertion below pass vacuously, and a
+// vacuous pass here reads exactly like a real one.
+check("mountAttrs extracts a WHOLE mount, nested element included, and stops at its own tag end", () => {
+  const mounts = mountAttrs(shellSrc, "PlatformAgentsSection");
+  assert.ok(mounts.length >= 2, `expected >=2 mounts to control on, found ${mounts.length}`);
+  // (a) it does not truncate: the classic mount's nested auditorFooter element must be INSIDE the text.
+  const withNested = mounts.filter((m) => m.includes("<AuditorScheduleInline"));
+  assert.equal(withNested.length, 1,
+    "exactly one <PlatformAgentsSection> mount should carry the nested <AuditorScheduleInline> footer"
+    + ` — found ${withNested.length}, so the scanner is truncating or the layouts changed`);
+  // (b) it does not over-run: no mount may swallow the sibling element that follows it.
+  for (const m of mounts) {
+    assert.ok(!m.includes("<PlatformSessionsSection"),
+      `a <PlatformAgentsSection> mount ran past its own tag end into the next element: ${m.slice(-120)}`);
+    assert.ok(m.trimEnd().endsWith("/>") || m.trimEnd().endsWith(">"),
+      "an extracted mount must end at a real tag close");
+  }
+});
+
+// Every component the gate is threaded THROUGH, and the exact attribute each mount must carry. `min` is
+// an ANTI-VACUITY FLOOR, not an expected count: it only exists so a renamed/removed component can't make
+// "every mount carries it" true by matching zero mounts. A third layout raises the real count and still
+// passes the floor, while the per-mount assertion keeps catching a dropped hop on ANY layout.
+const GATE_THREAD = [
+  { tag: "AgentControl", attr: /\bpreviewDisabled=\{previewOnly\}/, min: 2,
+    why: "both go-live cards — the auditor one was the hole this card closed" },
+  { tag: "PlatformAgentsSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "once per layout" },
+  { tag: "PlatformSessionsSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "once per layout" },
+  { tag: "AuditorCadenceFormSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1, why: "the Atlas Cadence tab" },
+  { tag: "AuditorScheduleInline", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2,
+    why: "the classic auditor-card footer AND the Atlas cadence section" },
+  { tag: "PlatformSessions", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1, why: "the dev session grid" },
+  { tag: "SingleSession", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "the end-user operator + auditor wrappers" },
+  { tag: "PlatformSessionTile", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "the grid tile + the single-session tile" },
+  { tag: "AgentPromptEditor", attr: /\breadOnly=\{!!previewDisabled\}/, min: 1, why: "inside AgentControl, one per card" },
+  { tag: "PlatformHistorySections", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "once per layout" },
+  { tag: "RunHistory", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2,
+    why: "the operator AND auditor histories — each run row carries a Resume that respawns the session" },
+];
+
+for (const { tag, attr, min, why } of GATE_THREAD) {
+  check(`EVERY <${tag}> mount carries the preview gate (${why})`, () => {
+    const mounts = mountAttrs(shellSrc, tag);
+    assert.ok(mounts.length >= min,
+      `expected at least ${min} <${tag}> mount(s) in PlatformView.tsx, found ${mounts.length}`
+      + " — renamed or removed? this check cannot pass vacuously");
+    for (const mount of mounts) {
+      assert.match(mount, attr,
+        `a <${tag}> mount is dropping or hardcoding the preview gate: ${mount.slice(0, 200)}…`);
+    }
+  });
+}
+
+check("the operator AND auditor Stop buttons are held by previewDisabled, not just the spawns", () => {
+  // One shared AgentControl renders both cards' Stop, so this is a single expression — but it is the one
+  // the pre-b472645a code was missing, and a `disabled={stop.isPending}` regression reads as a tidy-up.
+  assert.match(shellSrc, /disabled=\{!!previewDisabled \|\| stop\.isPending\}/,
+    "AgentControl's Stop button must OR in previewDisabled");
+});
+
+check("the preview copy says ACTING, not spawning, and both sites read ONE constant", () => {
+  // The gate now holds far more than the spawn, so a caption naming only spawning under-describes what
+  // is actually held. Two call sites (tooltip + caption) read the same pair of constants so they cannot drift.
+  assert.match(shellSrc, /const PREVIEW_DISABLED_TITLE = "[^"]*acting here is disabled"/);
+  assert.match(shellSrc, /const PREVIEW_DISABLED_NOTE = "[^"]*acting here is disabled\."/);
+  assert.ok(!/Preview only on a dev install — spawning/.test(shellSrc),
+    "the old spawn-only wording must be gone — it now understates the gate");
+});
+
+check("AgentPromptEditor's readOnly holds the TEXTAREA, so Ctrl/Cmd+Enter cannot save either", () => {
+  // MEASURED on the e2e fixture: the textarea's own onKeyDown is a SECOND, independent save trigger, so a
+  // disabled Save button alone still let the preview send POST /api/agents/:id. It is gated via `dirty`,
+  // which folds readOnly in — hence both assertions, not just the readOnly attribute.
+  assert.match(promptEditorSrc, /\breadOnly\?\s*:\s*boolean/, "AgentPromptEditor must accept a readOnly prop");
+  // mountAttrs, not a `<textarea[^>]*>` regex: the element's own `onChange={(e) => …}` contains a `>`,
+  // so a negated character class stops at the fat arrow and reads a truncated attribute list.
+  const textareas = mountAttrs(promptEditorSrc, "textarea");
+  assert.equal(textareas.length, 1, `expected one <textarea> in AgentPromptEditor.tsx, found ${textareas.length}`);
+  assert.match(textareas[0], /\breadOnly=\{readOnly\}/,
+    "the textarea itself must be readOnly — not just the Save button");
+  assert.match(promptEditorSrc, /const dirty = !readOnly && draft !== saved/,
+    "dirty must fold in readOnly — it is what gates the Ctrl/Cmd+Enter save path");
+  assert.match(promptEditorSrc, /e\.key === "Enter" && \(e\.metaKey \|\| e\.ctrlKey\) && dirty/,
+    "the Ctrl/Cmd+Enter handler must still be gated on dirty, or the fold above buys nothing");
+});
+
+check("RunHistory's Resume button is held by previewOnly, and the row receives the flag", () => {
+  // The Code Review's Critical. Both legs matter: the ROW must get the flag (it is a separate component
+  // from RunHistory itself), and the BUTTON must OR it in.
+  assert.match(runHistorySrc, /\bpreviewOnly\?\s*:\s*boolean/, "RunHistory must accept a previewOnly prop");
+  const rows = mountAttrs(runHistorySrc, "RunRow");
+  assert.ok(rows.length >= 1, `expected a <RunRow> mount in RunHistory.tsx, found ${rows.length}`);
+  for (const row of rows) {
+    assert.match(row, /\bpreviewOnly=\{previewOnly\}/, `a <RunRow> mount drops the gate: ${row.slice(0, 160)}…`);
+  }
+  assert.match(runHistorySrc, /disabled=\{previewOnly \|\| resumeM\.isPending\}/,
+    "the Resume button must OR in previewOnly");
+});
+
+check("PlatformSessionTile gates through TerminalCard's EXISTING props — the shared card is untouched", () => {
+  // Deliberate: TerminalCard is mounted by /terminals, Overview, SessionView and Companion. Gating by
+  // adding a flag THERE would put this trust boundary in four unrelated surfaces' path.
+  assert.match(sessionTileSrc, /\breadOnly=\{previewOnly\}/, "the tile must pass readOnly through");
+  assert.match(sessionTileSrc, /\blifecycle=\{previewOnly \? "none" : "stop"\}/,
+    "the tile must drop the lifecycle button in a preview");
+  assert.match(sessionTileSrc, /\bsubPanels=\{previewOnly \? undefined :/,
+    "the queue/wakes sub-panels write to the previewed home's session — withhold the whole set");
+  assert.ok(!terminalCardSrc.includes("previewOnly"),
+    "TerminalCard.tsx must NOT learn about previewOnly — that is the point of reusing readOnly/lifecycle");
+});
+
+check("the cadence form gates the COMPONENT behind one derived flag, not its individual buttons", () => {
+  // Save / Enable / Disable / Remove render ONLY when a schedule already exists, so on a home with none
+  // they are exactly the mutations a per-button gate leaves open. `held` + a readOnly field is the whole
+  // surface; `dirty` folds it in so Save can never light up on a field that cannot be edited.
+  assert.match(shellSrc, /const held = previewOnly;/, "AuditorScheduleInlineForm must derive one `held` flag");
+  assert.match(shellSrc, /const dirty = !held && !!existing/, "dirty must fold in `held`");
+  // Again mountAttrs rather than `<Input[^>]*>`: `onChange={(e) => setCron(…)}` carries a `>`.
+  const crons = mountAttrs(shellSrc, "Input");
+  const heldCron = crons.filter((m) => /\breadOnly=\{held\}/.test(m) && /\bdisabled=\{held\}/.test(m));
+  assert.equal(heldCron.length, 1,
+    `expected exactly one cron <Input> held by \`held\`, found ${heldCron.length} of ${crons.length} <Input> mount(s)`
+    + " — the single-form variant's field is the one that renders in a preview");
+  const heldGates = (shellSrc.match(/disabled=\{held \|\| /g) ?? []).length;
+  assert.ok(heldGates >= 4,
+    `expected >=4 cadence buttons gated by \`held\` (Schedule/Save/Enable-Disable/Remove), found ${heldGates}`);
+  // ⭐ The per-control flags alone do NOT make "a new control inherits the gate" true — that claim needs
+  // a DISABLED FIELDSET, which disables every form control it contains whether or not its author
+  // remembered the flag. Pinned because the comment next to `held` asserts exactly this property.
+  // Filtered rather than counted: `mountAttrs` is a text scanner, so a COMMENT that mentions `<fieldset>`
+  // (the one next to `held` does) is indistinguishable from a real mount to it.
+  const heldFieldsets = mountAttrs(shellSrc, "fieldset").filter((m) => /\bdisabled=\{held\}/.test(m));
+  assert.equal(heldFieldsets.length, 1,
+    `expected exactly one <fieldset disabled={held}> in PlatformView.tsx, found ${heldFieldsets.length}`
+    + " — that wrapper is what a cadence control added later inherits the gate from");
+});
+
+// ⭐⭐ THE TRANSITIVE WRITE SWEEP — the only check here that doesn't rot, and the one that must be
+// TRANSITIVE rather than file-local.
+//
+// 🔴 WHY: the first version of this sweep read PlatformView.tsx + AgentPromptEditor.tsx only, and a Code
+// Review then found Run History's "Resume" (`components/RunHistory.tsx`) firing `POST /api/sessions/:id/
+// resume` in the preview — un-archiving and RESPAWNING the previewed home's session. A file-local sweep
+// cannot see that by construction: the control lives in a leaf the shell renders but does not itself
+// contain. So the sweep now walks every LOCAL module transitively reachable from PlatformView.tsx and
+// enumerates every write in each one.
+//
+// Three kinds of write are looked for, because a mutation does not have to look like `useMutation({`:
+//   1. `useMutation(` in every shape — `const x = useMutation({`, destructured `const { mutate } = …`,
+//      and the generic form `useMutation<T>(`;
+//   2. a CUSTOM HOOK that wraps one — `use*Session` / `use*Mutation` (e.g. `useStopSession()`), which is
+//      how PlatformSessionTile's stop is spelled and which no `useMutation` pattern would ever match;
+//   3. a RAW `api.<write>(` call, for a write issued outside any mutation at all;
+//   4. a request that bypasses the client — a bare `fetch(` or `navigator.sendBeacon(`;
+//   5. a module boundary the walk cannot follow statically — `lazy(` or a dynamic `import(`.
+//
+// The write MEMBERS of `api` are DERIVED by an AST walk over api.ts, fail-closed (see
+// `classifyApiMembers`) — never hand-listed here. ⚠️ That makes a new write MEMBER in scope the moment
+// it exists; it does NOT make every write api.ts can expose in scope. A write exported BESIDE the `api`
+// object (`restartCompanionSession`) is in no object the classifier walks and matches no `api.<write>(`
+// call — what covers that is the separate assertion that this graph's only VALUE import from lib/api is
+// `{ api }`. The record lists the shapes nothing here catches at all.
+const apiSrc = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+
+// 🔴 FAIL-CLOSED, and it has to be. The first version of this derivation asked "does the body call a
+// known WRITE helper?" — which a Code Review measured as missing 49 of 117 write members (42%), because
+// api.ts has write helpers that list did not name (`delErr`, `putErr`, `patch`) AND members that
+// delegate to a bespoke per-route function instead of a helper at all (`updateTaskReq`,
+// `provisionCompanionReq`, `patchProject`). A planted `api.updateTask(` call stayed GREEN.
+//
+// Inverted: a member is a READ only if its body calls one of the three READ helpers; EVERYTHING ELSE is
+// a write. A new helper, a bespoke request function, an unrecognised shape — all now land on the write
+// side, which is the side that fails loudly rather than the side that goes quiet.
+const API_READ_HELPERS = new Set(["get", "getOrNull", "getErr"]);
+
+// 🔴 AN AST WALK, NOT A REGEX — and the reason is a defect the regex version actually had.
+//
+// Two regex classifiers preceded this one and BOTH were wrong, in ways no amount of pattern-tightening
+// fixes, because the question "does this member issue a read?" is about CALL STRUCTURE:
+//   • `\b(?:get|getOrNull|getErr)\s*[<(]` matches a METHOD call too. `r.headers.get("content-type")` is
+//     not a request — but it made `vaultRawBlob`, `vaultRawHead` and `questionAttachmentBlob` classify
+//     as READS when each in fact calls `guardedFetch` and NO read helper at all. All three were
+//     genuinely outside the sweep, and a planted `guardedFetch(url,{method:"POST"})` beside a
+//     `r.headers.get(` would have gone green.
+//   • a member's text had to be sliced by line arithmetic, which swallowed the NEXT member's leading
+//     comment (that is how a real `del<>` read as a read), and comment-stripping it back out was a
+//     patch on the wrong layer — a trailing SAME-LINE comment mentioning `get()` defeated it anyway.
+// An AST has no windows, no comment bleed, and distinguishes `get(…)` from `x.get(…)` structurally.
+//
+// Measured, same api.ts: the open-polarity windowed regex found 67 of 121 writes (missed 45%); the
+// fail-closed regex found 118 (missed exactly the three above); the AST finds 121 / 93 reads / 214
+// members, and claims no write the fail-closed regex called a read.
+
+/** Module-level function-ish declarations in api.ts, by name → node. The helper universe. */
+function apiDeclaredFunctions(sf) {
+  const declared = new Map();
+  for (const st of sf.statements) {
+    if (ts.isFunctionDeclaration(st) && st.name) declared.set(st.name.text, st);
+    if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (ts.isIdentifier(d.name) && d.initializer
+          && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) {
+          declared.set(d.name.text, d.initializer);
+        }
+      }
+    }
+  }
+  return declared;
+}
+
+/**
+ * Calls inside a subtree, split by SHAPE: a BARE call (`get(…)`) names a function in scope; a METHOD
+ * call (`r.headers.get(…)`) names a property on some object and says nothing about helpers. Keeping
+ * them apart is the whole point of using an AST here.
+ */
+function callsIn(node) {
+  const bare = [];
+  const methods = [];
+  (function walk(n) {
+    if (ts.isCallExpression(n)) {
+      if (ts.isIdentifier(n.expression)) bare.push(n.expression.text);
+      else if (ts.isPropertyAccessExpression(n.expression)) methods.push(n.expression.name.text);
+    }
+    ts.forEachChild(n, walk);
+  })(node);
+  return { bare, methods };
+}
+
+/**
+ * Which declared helpers actually ISSUE a request — a fixpoint, so a member delegating to
+ * `updateTaskReq` (which calls `guardedFetch`) is caught without naming it here. Derived rather than
+ * listed because the list is exactly what went stale last time.
+ *
+ * This is also why a pure formatter like `errorMessageFrom` does NOT count: it never reaches a fetch,
+ * so a genuine read that calls it is still classified a read and the polarity control stays meaningful.
+ */
+function requestShapedHelpers(declared) {
+  const shaped = new Set();
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [name, node] of declared) {
+      if (shaped.has(name)) continue;
+      const { bare, methods } = callsIn(node);
+      if (bare.includes("fetch") || bare.includes("guardedFetch") || methods.includes("sendBeacon")
+        || bare.some((b) => shaped.has(b))) { shaped.add(name); changed = true; }
+    }
+  }
+  return shaped;
+}
+
+/**
+ * Classify EVERY property of the `api` object, FAIL-CLOSED: a member is a READ only when it makes a
+ * BARE call to a read helper AND makes no other request-shaped call. Anything else — an unrecognised
+ * helper, a bespoke per-route function, a bare `fetch`, a `sendBeacon`, a shorthand member with no
+ * calls at all — is a WRITE, which is the side that fails loudly.
+ */
+function classifyApiMembers(src, fileName) {
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const declared = apiDeclaredFunctions(sf);
+  const shaped = requestShapedHelpers(declared);
+
+  let obj = null;
+  for (const st of sf.statements) {
+    if (!ts.isVariableStatement(st)) continue;
+    for (const d of st.declarationList.declarations) {
+      if (ts.isIdentifier(d.name) && d.name.text === "api" && d.initializer
+        && ts.isObjectLiteralExpression(d.initializer)) obj = d.initializer;
+    }
+  }
+  assert.ok(obj, "api.ts must declare `export const api = { … }` as an object literal");
+
+  const reads = new Set();
+  const writes = new Set();
+  const shorthand = new Set();
+  for (const p of obj.properties) {
+    const name = p.name && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : "<computed>";
+    if (ts.isShorthandPropertyAssignment(p)) shorthand.add(name);
+    const { bare, methods } = callsIn(p);
+    const readCalls = bare.filter((b) => API_READ_HELPERS.has(b));
+    const otherRequests = bare
+      .filter((b) => !API_READ_HELPERS.has(b) && (shaped.has(b) || b === "fetch"))
+      .concat(methods.filter((m) => m === "sendBeacon"));
+    (readCalls.length > 0 && otherRequests.length === 0 ? reads : writes).add(name);
+  }
+  return { total: obj.properties.length, reads, writes, shorthand, declared, shaped };
+}
+
+const API_MEMBERS = classifyApiMembers(apiSrc, "api.ts");
+const API_WRITE_MEMBERS = API_MEMBERS.writes;
+
+check("every api.ts member classifies as read or write, fail-CLOSED (unknown shape ⇒ write)", () => {
+  // The read helpers must actually exist AND must themselves reach a request, or "calls a read helper"
+  // is a test for nothing: every member would fall to the write side — safe, but no longer discriminating.
+  for (const h of API_READ_HELPERS) {
+    assert.ok(API_MEMBERS.declared.has(h), `api.ts must declare a read helper \`${h}\``);
+    assert.ok(API_MEMBERS.shaped.has(h), `read helper \`${h}\` must itself reach a request`);
+  }
+  assert.ok(API_MEMBERS.total >= 150,
+    `the AST found only ${API_MEMBERS.total} api propert(ies) — the object lookup is broken`);
+  assert.ok(API_MEMBERS.writes.size >= 100,
+    `derived only ${API_MEMBERS.writes.size} write member(s) — fail-closed should yield most of them`);
+
+  // ⚠️ `reads + writes === total` is TRUE BY CONSTRUCTION here (every property lands in exactly one
+  // set), so it is NOT evidence that the parse saw every member — the previous version asserted it as
+  // if it were. A member the parse never sees simply lowers `total` too, and the sum still holds; that
+  // is exactly how a planted SHORTHAND member (`updateTaskReq,`) stayed green, absorbed into a
+  // neighbour's text slice while `total` sat unchanged at 214.
+  //
+  // The real check is an INDEPENDENT count. The AST counts object properties; this regex counts
+  // member-shaped LINES, the way the retired classifier did. They must agree — and a shorthand member
+  // is precisely the case where they do not, because the AST sees it and the line pattern does not.
+  const lineCount = (apiObjectText(apiSrc).match(/^ {2}[A-Za-z0-9_]+\s*[:,]/gm) ?? []).length;
+  assert.equal(API_MEMBERS.total, lineCount,
+    `the AST sees ${API_MEMBERS.total} api properties but a line scan sees ${lineCount} —`
+    + " they must agree. A mismatch means one method is blind to a member shape the other sees"
+    + " (a shorthand member, a computed key, a quoted key), and the blind one may be the sweep's.");
+  // Fail-closed covers a shorthand member too: it has no calls, so it cannot be a read.
+  for (const name of API_MEMBERS.shorthand) {
+    assert.ok(API_MEMBERS.writes.has(name),
+      `the shorthand member \`${name}\` must classify as a WRITE — it makes no read call`);
+  }
+
+  for (const known of ["updateTask", "deleteAgent", "dismissQuestion", "mergeWorker", "updateProfile",
+    "startSession", "stopSession", "resumeSession", "updateAgent", "createSchedule", "deleteSchedule",
+    "sendInput", "createTask", "deleteVaultFile"]) {
+    assert.ok(API_MEMBERS.writes.has(known), `api.${known} must classify as a WRITE`);
+  }
+  // Polarity control: without this, "classify everything as a write" would pass every assertion above.
+  for (const read of ["platformHome", "setupHome", "allSessions", "profiles", "schedules", "board",
+    "archivedSessions", "projects", "gitLog"]) {
+    assert.ok(API_MEMBERS.reads.has(read), `api.${read} is a READ — it must not classify as a write`);
+  }
+
+  // 🔴 THE THREE THE REGEX GOT WRONG, pinned by name. Each calls `guardedFetch` and NO read helper, and
+  // each classified as a READ purely because its body also calls `r.headers.get("content-type")` — a
+  // METHOD call the old pattern could not tell from the `get(…)` helper. All three were outside the
+  // sweep entirely. This is the regression pin for that whole class, and it is also why the retired
+  // `deepestReadHit > 300` assertion had to go: its own specimen was `vaultRawBlob`, so the assertion
+  // was encoding the defect rather than guarding against it.
+  for (const wasMisread of ["vaultRawBlob", "vaultRawHead", "questionAttachmentBlob"]) {
+    assert.ok(API_MEMBERS.writes.has(wasMisread),
+      `api.${wasMisread} must classify as a WRITE — it calls guardedFetch and no read helper, so a read`
+      + " verdict means method calls are being counted as helper calls again");
+  }
+});
+
+/** The `api` object literal's own source text — for the independent line count above only. */
+function apiObjectText(src) {
+  const decl = src.indexOf("export const api = {");
+  const start = src.indexOf("{", decl);
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(start, i + 1);
+  }
+  throw new Error("api.ts: unbalanced braces in the api object");
+}
+
+// Where the walk STOPS. Each entry is a decision, with its reason, about a whole subtree — so the sweep
+// stays a list of decisions rather than a list of every file in the app. A boundary file's own writes are
+// covered by its reason; the walk does not descend past it.
+//
+// ⚠️ `pages/Schedules.tsx` is the one entry that is NOT a "we decided not to gate this" — it is reached
+// only because PlatformView imports the pure helper `looksLikeCron` from it. Import reachability is not
+// render reachability, and that distinction is checked below rather than asserted in prose.
+const SWEEP_BOUNDARIES = new Map(Object.entries({
+  "components/PlatformSessionTile.tsx":
+    "GATED AT THIS BOUNDARY — in a preview the tile passes readOnly + lifecycle=\"none\" + no subPanels"
+    + " (each asserted by its own check above), so neither its own stop nor anything in TerminalCard's"
+    + " subtree (Composer stdin, SessionQueue, SessionWakes, PresetPrompts, useSessionActions) is"
+    + " reachable. The props ARE the gate; that is why they are pinned and not just commented.",
+  // 🔴 The ground here was WRONG until round 3, and wrong in the direction that matters. It used to read
+  // "the same board is reachable at /board, so a gate here contains nothing" — FALSE: a RESERVED home is
+  // not selectable in the project picker (`db.ts` listProjects filters `reserved = 0`; see
+  // `lib/activeProject.tsx`'s own note), so on a dev install this preview is the ONLY UI route to the
+  // setup home's board. The decision did not change; its justification did.
+  "pages/Board.tsx":
+    "UNGATED by decision b472645a on R2's CRITERION, not on reachability: card CRUD writes TASKS, and a"
+    + " task is not one of the previewed home's agents/schedules/sessions. ⚠️ NAMED RESIDUAL: this"
+    + " subtree includes components/requests.tsx, whose answer/dismiss/credential actions and NudgeMgr's"
+    + " sendInput WOULD act on a session. They are unreachable today only because no role the setup home"
+    + " hosts on a DEV install registers question_ask — see the record for the verified reason and the"
+    + " follow-up trigger.",
+  "pages/PlatformFindings.tsx":
+    "UNGATED by decision b472645a — the preset-suggestion store is daemon-GLOBAL, not home-scoped, so"
+    + " Adopt/Dismiss here is identical to doing it from any composer popover.",
+  "components/SetupWizard.tsx":
+    "UNGATED by decision b472645a — guided setup is edition-agnostic, present identically in the Developer"
+    + " view, and it creates a NEW project rather than touching the previewed home.",
+  "pages/Schedules.tsx":
+    "NOT RENDERED — imported solely for the pure helper `looksLikeCron`. Its own schedule CRUD belongs to"
+    + " the Schedules PAGE, which this shell never mounts. Checked, not assumed (see the import check).",
+  "lib/api.ts":
+    "THE API CLIENT ITSELF — its internal `api.<write>(` occurrences are those members' own"
+    + " implementations and a couple of library helpers, not controls a preview can click.",
+}));
+
+check("Schedules.tsx is imported for a PURE HELPER only — the one boundary that is a fact, not a decision", () => {
+  // The whole Schedules page sits in the import graph because of one named helper. If someone later
+  // imports a COMPONENT from it and renders it here, that page's own schedule CRUD becomes genuinely
+  // reachable from this shell and the boundary's reason silently becomes false. Pinning the import list
+  // is what turns that from prose into a check.
+  const imports = [...shellSrc.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\/Schedules"/g)];
+  assert.equal(imports.length, 1, "expected exactly one import from ./Schedules in PlatformView.tsx");
+  const named = imports[0][1].split(",").map((s) => s.trim()).filter(Boolean).sort();
+  assert.deepEqual(named, ["looksLikeCron"],
+    `PlatformView.tsx imports ${named.join(", ")} from ./Schedules — if that now includes a component,`
+    + " the SWEEP_BOUNDARIES reason for pages/Schedules.tsx ('NOT RENDERED') is no longer true:"
+    + " either stop rendering it or move that subtree out of the boundary list and gate its writes.");
+});
+
+/** Every LOCAL module transitively reachable from PlatformView.tsx, stopping at SWEEP_BOUNDARIES. */
+function transitiveLocalModules(entryRel) {
+  const srcDir = fileURLToPath(new URL("../src/", import.meta.url));
+  const rel = (abs) => path.relative(srcDir, abs).split(path.sep).join("/");
+  const resolveLocal = (fromAbs, spec) => {
+    if (!spec.startsWith(".")) return null; // a package import — not ours to sweep
+    const base = path.resolve(path.dirname(fromAbs), spec);
+    for (const c of [`${base}.tsx`, `${base}.ts`, path.join(base, "index.tsx"), path.join(base, "index.ts")]) {
+      if (existsSync(c)) return c;
+    }
+    return null;
+  };
+  const seen = new Set();
+  const out = [];
+  (function walk(abs) {
+    if (seen.has(abs)) return;
+    seen.add(abs);
+    out.push(rel(abs));
+    if (SWEEP_BOUNDARIES.has(rel(abs))) return; // a decided boundary — do not descend
+    for (const spec of moduleSpecifiers(readFileSync(abs, "utf8"))) {
+      if (!spec.startsWith(".")) continue; // a package import — not ours to sweep
+      const next = resolveLocal(abs, spec);
+      // ⚠️ An UNRESOLVABLE relative specifier used to be skipped in silence, which is the same failure
+      // as a skipped module: a real local import the walk never follows, and nothing to show it. A
+      // relative specifier that does not resolve means the resolver's extension/index candidates have
+      // fallen behind the tree, so fail loudly instead of quietly sweeping less.
+      assert.ok(next, `${rel(abs)} imports "${spec}", which this walk could not resolve to a file —`
+        + " the sweep would silently skip that module and everything under it");
+      walk(next);
+    }
+  })(path.join(srcDir, entryRel));
+  return out;
+}
+
+/**
+ * Every module specifier a file imports/exports from, plus its dynamic `import("…")` targets.
+ *
+ * ⚠️ NO CHARACTER WINDOW. The previous version matched `import[\s\S]{0,400}?from "…"`, which silently
+ * SKIPS a module whose import clause is longer than the window — a long named-import list is ordinary in
+ * this tree, and a skipped module is a whole subtree dropped out of the sweep with nothing to show it.
+ * This walks from each `import`/`export` keyword to its own terminating specifier instead, so clause
+ * length is irrelevant.
+ */
+function moduleSpecifiers(src) {
+  const specs = [];
+  // Static: `import … from "x"`, `export … from "x"`, and the bare side-effect form `import "x"`.
+  for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)\b/g)) {
+    const from = m.index + m[0].length;
+    // The clause ends at the first `from "…"` / `from '…'`, or (bare import) at an immediate string.
+    const rest = src.slice(from);
+    // The clause ends at the NEXT `import`/`export` statement, and at nothing else. ⚠️ An earlier
+    // version also terminated on `const|let|var|function|class|type|interface`, which broke on this
+    // repo's own multi-line named imports: `import {\n  type PlatformEdition, …\n} from "./x"` was cut
+    // at its `type` line, dropping `./platformEdition` — and with it that module's whole subtree. Caught
+    // by the reference-scan differential below, not by reading the regex.
+    const end = rest.search(/\n[ \t]*(?:import|export)\b/);
+    const clause = end >= 0 ? rest.slice(0, end) : rest;
+    const named = /^\s*["']([^"']+)["']/.exec(clause) ?? /\bfrom\s*["']([^"']+)["']/.exec(clause);
+    if (named) specs.push(named[1]);
+  }
+  // Dynamic: `import("x")` and `lazy(() => import("x"))` both resolve a real module at runtime.
+  for (const m of src.matchAll(/\bimport\s*\(\s*["']([^"']+)["']/g)) specs.push(m[1]);
+  return specs;
+}
+
+/** Every write site in one module, keyed `<file>::<enclosing fn>.<token>`, deduped by source offset. */
+function writeSites(relFile, src) {
+  const fns = [...src.matchAll(/\bfunction\s+([A-Za-z0-9_]+)\s*\(/g)].map((m) => ({ i: m.index, name: m[1] }));
+  const scopeAt = (i) => (fns.filter((f) => f.i < i).pop()?.name ?? "<module>");
+  const byOffset = new Map(); // offset -> key, so overlapping patterns can't double-count one site
+  const add = (i, token) => { if (!byOffset.has(i)) byOffset.set(i, `${relFile}::${scopeAt(i)}.${token}`); };
+
+  // (1) useMutation in every shape, named or destructured, plain or generic.
+  for (const m of src.matchAll(/(?:const\s+(?:([A-Za-z0-9_]+)|\{[^}]*\})\s*=\s*)?\buseMutation\s*[<(]/g)) {
+    add(m.index, m[1] ? m[1] : "useMutation");
+  }
+  // (2) a custom hook wrapping a mutation. `useMutation` itself matches this shape, so (1)'s offsets
+  // already claimed those — hence the offset dedupe rather than a negative lookahead.
+  for (const m of src.matchAll(/(?:const\s+(?:([A-Za-z0-9_]+)|\{[^}]*\})\s*=\s*)?\b(use[A-Za-z0-9_]*(?:Session|Mutation)[A-Za-z0-9_]*)\s*\(/g)) {
+    add(m.index, m[1] ? `${m[1]}=${m[2]}` : m[2]);
+  }
+  // (3) a raw write through the api client, wherever it sits.
+  for (const m of src.matchAll(/\bapi\.([A-Za-z0-9_]+)\s*\(/g)) {
+    if (API_WRITE_MEMBERS.has(m[1])) add(m.index, `api.${m[1]}`);
+  }
+  // (4) a request that BYPASSES the api client entirely. `api.*` is the convention, not a constraint —
+  // a bare `fetch` or a `sendBeacon` is just as much a write, and neither would match anything above.
+  for (const m of src.matchAll(/(?<!\w)fetch\s*\(/g)) add(m.index, "fetch");
+  for (const m of src.matchAll(/\bnavigator\s*\.\s*sendBeacon\s*\(/g)) add(m.index, "sendBeacon");
+  // (5) a module boundary the WALK cannot follow statically to a known file — `lazy(() => import(x))`
+  // or a dynamic `import(x)` whose target this sweep did resolve is fine, but the SITE is still recorded
+  // so a decision exists about the subtree it pulls in.
+  for (const m of src.matchAll(/\blazy\s*\(/g)) add(m.index, "lazy");
+  for (const m of src.matchAll(/\bimport\s*\(/g)) add(m.index, "dynamic-import");
+  // Two sites in one function can legitimately share a key — `save` and `toggle` both call
+  // api.updateSchedule. Suffix the repeats in SOURCE ORDER (`…#2`, `…#3`) rather than collapsing them:
+  // collapsing would let a THIRD such call be added with no entry and no failure, which is the whole
+  // property this sweep exists to provide.
+  const ordered = [...byOffset.keys()].sort((a, b) => a - b).map((i) => byOffset.get(i));
+  const seenCount = new Map();
+  return ordered.map((key) => {
+    const n = (seenCount.get(key) ?? 0) + 1;
+    seenCount.set(key, n);
+    return n === 1 ? key : `${key}#${n}`;
+  });
+}
+
+// Every write site in the ENUMERATED (non-boundary) part of the graph, each with its decision. A site
+// here is reachable from the preview, so every entry must say what holds it — or why nothing needs to.
+const WRITE_SITE_DECISIONS = new Map(Object.entries({
+  // ── pages/PlatformView.tsx — the shell's own controls ──
+  "pages/PlatformView.tsx::AgentControl.spawn": "GATED — previewDisabled (the original f437d4e9 C5 gate)",
+  "pages/PlatformView.tsx::AgentControl.api.startSession": "the spawn mutation's own call",
+  "pages/PlatformView.tsx::AgentControl.stop": "GATED — previewDisabled (b472645a)",
+  "pages/PlatformView.tsx::AgentControl.api.stopSession": "the stop mutation's own call",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.create": "GATED — `held` + the disabled fieldset",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.save": "GATED — `held` + the disabled fieldset",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.toggle": "GATED — `held` + the disabled fieldset",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.remove": "GATED — `held` + the disabled fieldset",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.api.createSchedule": "that form's create call",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.api.updateSchedule": "that form's save call",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.api.updateSchedule#2": "that form's enable/disable call",
+  "pages/PlatformView.tsx::AuditorScheduleInlineForm.api.deleteSchedule": "that form's remove call",
+  "pages/PlatformView.tsx::AuditorScheduleList.create": "UNGATED by decision b472645a — the dev LIST"
+    + " variant, unreachable in a preview (previewOnly rides the end-user mount only, and that edition's"
+    + " auditorScheduleVariant is single-form), so a gate here would be dead code no test can exercise",
+  "pages/PlatformView.tsx::AuditorScheduleList.toggle": "UNGATED — same dev LIST variant",
+  "pages/PlatformView.tsx::AuditorScheduleList.remove": "UNGATED — same dev LIST variant",
+  "pages/PlatformView.tsx::AuditorScheduleList.api.createSchedule": "that list's create call",
+  "pages/PlatformView.tsx::AuditorScheduleList.api.updateSchedule": "that list's toggle call",
+  "pages/PlatformView.tsx::AuditorScheduleList.api.deleteSchedule": "that list's remove call",
+  // ── components/AgentPromptEditor.tsx ──
+  "components/AgentPromptEditor.tsx::AgentPromptEditor.save":
+    "GATED — readOnly, which holds the TEXTAREA so the Ctrl/Cmd+Enter path cannot fire either",
+  "components/AgentPromptEditor.tsx::AgentPromptEditor.api.updateAgent": "that editor's save call",
+  // ── components/RunHistory.tsx — the Code Review's Critical finding ──
+  "components/RunHistory.tsx::RunRow.resumeM":
+    "GATED — previewOnly (b472645a round 2). Resume un-archives AND respawns the previewed home's own"
+    + " session, and the end-user edition renders history EXPANDED, so it needed no disclosure click.",
+  "components/RunHistory.tsx::RunRow.api.resumeSession": "that Resume button's call",
+  // ── lib/loopbackCredential.ts — in the graph, but not for this ──
+  "lib/loopbackCredential.ts::verifyLoopbackToken.fetch":
+    "NOT REACHABLE FROM THIS GRAPH — a bare POST probe that tests whether a pasted loopback credential"
+    + " passes the human-only write guard (@decision 093981dd: never verify one with a GET). The swept"
+    + " modules import ONLY `errorText` from this file, never `verifyLoopbackToken`, and the credential"
+    + " UI that does call it is not part of the Platform surface. Checked, not assumed — see the"
+    + " import-symbol check below.",
+}));
+
+check("the import parser finds every LOCAL specifier a trivial reference scan does", () => {
+  // ⚠️ HONEST SCOPE. The clause parser takes no character window, because a window silently SKIPS a
+  // module whose import clause is longer than it — and a skipped module is a whole subtree dropped from
+  // the sweep with nothing to show it. But reintroducing a window would NOT fail anything today: the
+  // longest clause-to-`from` distance in this graph is 123 chars, and it sits in `pages/Board.tsx`,
+  // which is a BOUNDARY the walk never descends into. So the hazard here is LATENT, not live, and a
+  // "revert it and watch it go red" control does not exist for it yet.
+  //
+  // This is that control's replacement, and unlike a window-sized assertion it fires the moment any
+  // swept module's clause grows past whatever window someone reintroduces: a DIFFERENTIAL against a
+  // trivially-correct reference scan (`from "<relative>"` anywhere in the file, no windowing possible).
+  // The parser must find at least everything the reference finds.
+  const modules = transitiveLocalModules("pages/PlatformView.tsx");
+  let compared = 0;
+  for (const rel of modules) {
+    const src = readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), "utf8");
+    const reference = [...src.matchAll(/\bfrom\s*["'](\.[^"']*)["']/g)].map((m) => m[1]).sort();
+    const parsed = moduleSpecifiers(src).filter((s) => s.startsWith(".")).sort();
+    for (const spec of reference) {
+      assert.ok(parsed.includes(spec),
+        `${rel}: the import parser MISSED the local specifier "${spec}" that a plain scan finds —`
+        + " a character window has been reintroduced, and that silently drops a subtree");
+    }
+    compared += reference.length;
+  }
+  // Anti-vacuity: comparing zero specifiers would pass for nothing.
+  assert.ok(compared >= 40, `only ${compared} local specifier(s) compared — the reference scan is broken`);
+});
+
+check("the swept graph imports only the `api` object from lib/api — never a write exported beside it", () => {
+  // 🔴 A WRITE CAN BE EXPORTED FROM api.ts WITHOUT BEING A MEMBER OF `api`. `restartCompanionSession`
+  // (api.ts ~:1396) is exactly that: an exported async function that issues a write and belongs to no
+  // object the classifier walks. The `api.<write>(` pattern cannot see a call to it, and neither can the
+  // member classification — so the sweep's whole api-side coverage rests on the graph reaching writes
+  // ONLY through the `api` object.
+  //
+  // That is a real property, not a hope, so it is asserted: every swept module's VALUE imports from
+  // lib/api must be exactly `api`. A type-only import is irrelevant (it emits nothing) and is allowed.
+  const modules = transitiveLocalModules("pages/PlatformView.tsx");
+  let importers = 0;
+  for (const rel of modules) {
+    if (SWEEP_BOUNDARIES.has(rel)) continue;
+    const src = readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), "utf8");
+    for (const m of src.matchAll(/import\s+(type\s+)?\{([^}]*)\}\s*from\s*["'][^"']*\/api["']/g)) {
+      if (m[1]) continue; // `import type { … }` — erased at compile time, cannot call anything
+      const named = m[2].split(",").map((s) => s.trim()).filter(Boolean)
+        .filter((s) => !s.startsWith("type ")); // inline `type X` specifiers, same reasoning
+      importers++;
+      assert.deepEqual(named, ["api"],
+        `${rel} imports ${named.join(", ")} as VALUES from lib/api — only the \`api\` object is swept.`
+        + " A write exported beside it (e.g. restartCompanionSession) is invisible to this sweep, so"
+        + " importing one here needs its own decision, not a silent pass.");
+    }
+  }
+  assert.ok(importers >= 3,
+    `only ${importers} lib/api value-import(s) found across the swept graph — the scan is broken`);
+});
+
+check("the swept graph imports only `errorText` from loopbackCredential — never its POST probe", () => {
+  // The companion check to that write-site entry. `lib/loopbackCredential.ts` is genuinely IN the swept
+  // graph (three Platform modules import its error formatter), so its credential-probe POST shows up in
+  // the sweep. The entry's claim is that nothing here can CALL it — which is a claim about the imported
+  // SYMBOLS, so assert those rather than restating it in prose. Deliberately NOT a boundary: keeping the
+  // module swept means a NEW write added to it still needs its own decision.
+  const modules = transitiveLocalModules("pages/PlatformView.tsx");
+  const importers = [];
+  for (const rel of modules) {
+    if (SWEEP_BOUNDARIES.has(rel)) continue;
+    const src = readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), "utf8");
+    for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'][^"']*loopbackCredential["']/g)) {
+      importers.push({ rel, named: m[1].split(",").map((s) => s.trim()).filter(Boolean) });
+    }
+  }
+  assert.ok(importers.length >= 1,
+    "expected at least one swept module to import from loopbackCredential — if none does, this check"
+    + " and its write-site entry are both stale and should go");
+  for (const { rel, named } of importers) {
+    assert.deepEqual(named, ["errorText"],
+      `${rel} imports ${named.join(", ")} from loopbackCredential — only \`errorText\` is accounted for.`
+      + " Importing verifyLoopbackToken here would make its POST genuinely reachable from the preview.");
+  }
+});
+
+check("the transitive write sweep: every write reachable from PlatformView is decided", () => {
+  const modules = transitiveLocalModules("pages/PlatformView.tsx");
+  // Anti-vacuity on the WALK itself, before trusting anything it found: a broken resolver returns just
+  // the entry file, and a one-file graph would make the rest of this check pass while sweeping nothing.
+  assert.ok(modules.length >= 15,
+    `the transitive walk reached only ${modules.length} module(s) — the import resolver is broken`);
+  assert.ok(modules.includes("components/RunHistory.tsx"),
+    "the walk must reach components/RunHistory.tsx — the leaf whose Resume button this sweep exists to catch");
+  for (const boundary of SWEEP_BOUNDARIES.keys()) {
+    assert.ok(modules.includes(boundary),
+      `SWEEP_BOUNDARIES names ${boundary}, which the walk never reaches — drop the entry or fix the path`);
+  }
+
+  const found = [];
+  for (const rel of modules) {
+    if (SWEEP_BOUNDARIES.has(rel)) continue; // covered wholesale by its reason
+    const abs = fileURLToPath(new URL(`../src/${rel}`, import.meta.url));
+    found.push(...writeSites(rel, readFileSync(abs, "utf8")));
+  }
+  assert.ok(found.length >= 20, `the sweep found only ${found.length} write site(s) — a pattern is broken`);
+  // Keys are unique by construction (`writeSites` suffixes repeats), so this is not a duplicate check —
+  // it is an anti-regression check on THAT, since a future edit to the keying could silently collapse
+  // two sites back into one and take a whole write out of scope without failing anything else.
+  assert.equal(new Set(found).size, found.length,
+    `the keying collapsed two write sites into one — repeats must be suffixed, not merged: ${found.join(", ")}`);
+
+  const unlisted = found.filter((k) => !WRITE_SITE_DECISIONS.has(k));
+  assert.deepEqual(unlisted, [],
+    `WRITE(S) reachable from the Platform preview with no decision recorded:\n  ${unlisted.join("\n  ")}\n`
+    + "Either thread the preview gate through it (see @decision b472645a) and add it to"
+    + " WRITE_SITE_DECISIONS with that reason, or — if a whole subtree is deliberately ungated — add that"
+    + " subtree's root to SWEEP_BOUNDARIES with its reason. Do NOT add it to a list alone.");
+  const stale = [...WRITE_SITE_DECISIONS.keys()].filter((k) => !found.includes(k));
+  assert.deepEqual(stale, [],
+    `WRITE_SITE_DECISIONS names site(s) that no longer exist: ${stale.join(", ")} — drop the entries.`);
+});
+
+check("the gate is never derived from the toggle below Platform.tsx — 8adccd37 still holds", () => {
+  // Gating is COMPATIBLE with @decision 8adccd37 only while it stays a boolean handed DOWN. The moment a
+  // leaf reads the toggle's key (or storage) to decide, the toggle has been wired into a write path.
+  for (const [name, src] of [["PlatformView.tsx", shellSrc], ["AgentPromptEditor.tsx", promptEditorSrc],
+    ["PlatformSessionTile.tsx", sessionTileSrc]]) {
+    assert.ok(!src.includes("loom.platformViewAs"), `${name} must not reference the preview toggle key`);
+    assert.ok(!src.includes("localStorage"), `${name} must not read browser storage`);
+  }
 });
 
 console.log(`\n${pass} passed`);

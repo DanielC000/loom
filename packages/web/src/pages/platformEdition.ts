@@ -214,8 +214,10 @@ export const endUserEdition: PlatformEdition = {
   // f437d4e9 C5: the shipping end-user operator now runs as the full Platform Lead (role "platform"),
   // not the narrower Setup Assistant — matches the daemon's seed/migration (setup/seed.ts). On a DEV
   // install's "View as: End-user" preview, the underlying Getting-Started agent is deliberately NEVER
-  // upgraded (§1c) and stays role "setup" — Platform.tsx passes `previewOnly` so PlatformView disables
-  // the spawn button there rather than letting this static role mint a stray session on that agent.
+  // upgraded (§1c) and stays role "setup", so Platform.tsx passes `previewOnly`.
+  //
+  // @decision b472645a — that flag holds EVERY write the shell renders, not just the spawn button this
+  // comment used to name. The preview is read-only; do not describe it as a spawn-only hold.
   operatorRole: "platform",
   auditorRole: "workspace-auditor",
   operatorName: "Platform",
