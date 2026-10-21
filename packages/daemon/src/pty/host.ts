@@ -3189,6 +3189,10 @@ interface Live {
   // because it must survive a give-up (the give-up branch doesn't clear it) so `requeueGiveUpOrigin` can
   // stamp an accurate `writtenAt` onto `ambiguousDispatches` for the generation that just gave up.
   currentGenFirstWrittenAt: number | null;
+  // @decision 2ff893f3 — stamped ONCE inside submit() itself; unlike `currentGenFirstWrittenAt`, never
+  // touched by `flushComposer`'s re-entry into `fireEnterAndVerify` (attempt:1 there overwrites that
+  // field). The field a per-generation AGE bound must read instead.
+  generationStartedAt: number | null;
   // Card 4a0af485: logicalId → a cheap content signature (never the full text — see the field's own
   // memory-safety note below) for every generation that has EVER given up and is still awaiting a possible
   // late confirmation, keyed by `QueuedMessage.logicalId` (NOT `submitGeneration` — a logicalId survives a
@@ -6432,7 +6436,7 @@ export class PtyHost {
       giveUpOrigin: null,
       giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
-      currentGenFirstWrittenAt: null,
+      currentGenFirstWrittenAt: null, generationStartedAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       giveUpRecoveryFiredAt: [],
@@ -6736,7 +6740,7 @@ export class PtyHost {
       giveUpOrigin: null,
       giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
-      currentGenFirstWrittenAt: null,
+      currentGenFirstWrittenAt: null, generationStartedAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       giveUpRecoveryFiredAt: [],
@@ -8002,7 +8006,7 @@ export class PtyHost {
       giveUpOrigin: null,
       giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
-      currentGenFirstWrittenAt: null,
+      currentGenFirstWrittenAt: null, generationStartedAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       giveUpRecoveryFiredAt: [],
@@ -11995,6 +11999,9 @@ export class PtyHost {
     // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
     // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
     const gen = ++live.submitGeneration;
+    // @decision 2ff893f3 — the ONLY site that sets this; never touched by a retry or by
+    // flushComposer's re-entry into fireEnterAndVerify — see the field's own doc.
+    live.generationStartedAt = Date.now();
     // @decision 7a64f16b — the ONLY site that sets this (see its own field doc for why).
     live.lastWriteGeneration = gen;
     // Card c2c750a9: record THIS generation's own (gen, text) into the composer-accumulation window —
@@ -14609,6 +14616,20 @@ export class PtyHost {
     if (!live) return undefined;
     if (live.enterConfirmed || live.currentGenFirstWrittenAt === null) return null;
     return Date.now() - live.currentGenFirstWrittenAt;
+  }
+
+  /** Milliseconds since the CURRENT generation's submit() call began (`Live.generationStartedAt`), for
+   *  as long as it remains unconfirmed (`!Live.enterConfirmed`); `undefined` if the session isn't live,
+   *  `null` if nothing is currently outstanding.
+   *
+   * @decision 2ff893f3 — a SEPARATE reading from `getPendingConfirmMs`, never reset by `flushComposer`'s
+   *  re-entry into `fireEnterAndVerify` — the one that field's own clock is vulnerable to.
+   */
+  getUnconfirmedGenerationAgeMs(sessionId: string): number | null | undefined {
+    const live = this.live.get(sessionId);
+    if (!live) return undefined;
+    if (live.enterConfirmed || live.generationStartedAt === null) return null;
+    return Date.now() - live.generationStartedAt;
   }
 
   /** The most recent occurrence of this session's `[loom:prompt-mismatch]` notice being identified as a

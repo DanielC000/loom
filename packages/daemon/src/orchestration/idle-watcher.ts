@@ -4,6 +4,7 @@ import type { OrchestrationEventKind, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import type { QueueSource, TurnRoute, QueuedMessageKind } from "../pty/host.js";
+import type { IdleWorkerNotifyOutcome } from "../sessions/service.js";
 import { computeBoardDelta, formatBoardDeltaDigest } from "./board-read.js";
 import { requestAnsweredTriggerNotice } from "./deferred-trigger-notice.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
@@ -70,7 +71,7 @@ export interface IdleWatcherDeps {
    * reintroduce board card 99efaab3's exact false alarm ("did NOT call worker_report" for a worker whose
    * report is merely queued) — this keeps it single-sourced.
    */
-  notifyIdleWorker: (workerSessionId: string) => void;
+  notifyIdleWorker: (workerSessionId: string) => IdleWorkerNotifyOutcome | void;
   /**
    * SessionService.isWorkerGenuinelyStranded (CR blocker #2 fold-in) — single-sources the SAME
    * reconciliation `notifyIdleWorker` uses, exposed as a pure predicate so the manager loop's OWN idle
@@ -986,7 +987,10 @@ export class IdleWatcher {
       const idleForMin = (nowMs - idleSinceMs) / 60_000;
       if (idleForMin < idleWorkerMin) continue;
 
-      this.deps.notifyIdleWorker(w.id);
+      // @decision 2ff893f3 — ONLY "suppressed-mid-first-turn" skips the stamp, never a plain "none" —
+      // a pre-existing "none" kind (not-stranded/parked-gate/…) keeps its old unconditional pacing.
+      const outcome = this.deps.notifyIdleWorker(w.id);
+      if (outcome === "suppressed-mid-first-turn") { this.logSkipIfChanged(w.id, "worker-notice-suppressed"); continue; }
       db.recordIdleNudge(w.id, nowIso); // stamp last_idle_nudge_at (paces the re-nudge; unanswered unused for workers)
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] re-nudged idle-unreported worker ${w.id} (~${Math.round(idleForMin)}m idle)`);

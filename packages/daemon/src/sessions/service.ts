@@ -1818,7 +1818,9 @@ function pastBrokenSpawnHoldoff(pty: PtyHost, w: Pick<Session, "id" | "turnSeq">
 /** Code Review ad92070b (on card b03e636c) — what `notifyManagerOfIdleWorker` actually sent, so a
  *  caller (the kickoff-confirm timer) can record an escalation marker ONLY on a real "broken-spawn"
  *  send, never on a silent no-op or a differently-worded notice. */
-type IdleWorkerNotifyOutcome = "broken-spawn" | "never-completed" | "sent-other" | "none";
+// @decision 2ff893f3 — `suppressed-mid-first-turn` must stay its OWN distinct value — never collapse
+// it back into "none", or tickIdleWorkers can no longer tell it apart from a pre-existing "none" kind.
+export type IdleWorkerNotifyOutcome = "broken-spawn" | "never-completed" | "sent-other" | "none" | "suppressed-mid-first-turn";
 
 /**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
@@ -2218,6 +2220,12 @@ let warnedMissingHasAmbiguousMatch = false;
  * instead of sitting silently "no reply owed" indefinitely.
  */
 const BACKGROUND_PARK_STALE_MINUTES = 20;
+
+/**
+ * @decision 2ff893f3 — do not lower this casually: it is how long a worker can read "fresh" after
+ * actually dying, not the re-check cadence itself (that's the IdleWatcher's own tick interval).
+ */
+const MID_FIRST_TURN_FRESH_OUTPUT_MS = 30_000;
 
 /** Card e79e2956: minimum byte length of a sender's OWN prior peer_message text before a literal-prefix
  *  match against a new send is trusted as a genuine "growing resend" rather than coincidence (e.g. two
@@ -13579,6 +13587,24 @@ export class SessionService {
    * - check peekPendingMerge's daemon-owned state before the report-derived
    *   branches; no stale-escalation sibling needed.
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
+   *
+   * @decision 2ff893f3
+   *
+   * - `mid-first-turn` — turnSeq still 0, a genuinely-unconfirmed current generation
+   *   (`pty.getPendingConfirmMs` non-null), fresh real engine output
+   *   (`pty.getLastOutputAt` within `MID_FIRST_TURN_FRESH_OUTPUT_MS`), AND that unconfirmed
+   *   generation is still younger than this project's `stuckWorkerMinutes` (BusyWorkerWatcher's
+   *   own staleness leash, read the SAME way, via `resolveConfig` — never hard-coded) — the
+   *   busy-false edge this worker is actually mid-first-turn, not finished-and-unreported.
+   * - `mid-first-turn-stale` — the SAME unconfirmed+fresh-output shape, but that unconfirmed
+   *   generation has now outlived `stuckWorkerMinutes`. CR Major (round 2): the bare
+   *   turnSeq/getPendingConfirmMs/getLastOutputAt signals never age out on their own — a hung or
+   *   looping turn (a ticking spinner repaint, or a genuinely lost UserPromptSubmit with the
+   *   engine still producing SOME output) would be suppressed FOREVER, strictly worse than the
+   *   pre-card behavior (which at least sent an overclaiming notice). `BusyWorkerWatcher` can't
+   *   catch this either — it only watches `busy:true` rows (busy-worker-watcher.ts), and this
+   *   worker's `busy` is already false (that's why it's HERE). So THIS classifier owns bounding
+   *   its own suppression, never a second watcher.
    */
   private classifyIdleWorker(workerSessionId: string):
     | { kind: "not-evaluable" | "not-stranded" | "broken-spawn" | "stranded" }
@@ -13588,7 +13614,9 @@ export class SessionService {
     | { kind: "parked-background-stale"; status: string; minutesSinceReport: number }
     | { kind: "parked-gate" }
     | { kind: "parked-gate-stale"; minutesSinceStart: number; idleMs: number }
-    | { kind: "parked-merge"; opId: string; gatePhase: "queued" | "running" | null } {
+    | { kind: "parked-merge"; opId: string; gatePhase: "queued" | "running" | null }
+    | { kind: "mid-first-turn" }
+    | { kind: "mid-first-turn-stale"; minutesUnconfirmed: number } {
     // TASKLESS is intentionally out of scope for THIS classifier (CR-flagged asymmetry, card 2514e6e1-
     // follow-up): every kind below `broken-spawn` reconciles via BOARD-COLUMN state (a task's active/
     // review/parked lane) — meaningless for a worker with no card. A taskless worker's OWN broken-spawn
@@ -13712,6 +13740,41 @@ export class SessionService {
     // (the ORIGINAL WAKE GUARD case: e.g. never reported at all, but self-parked anyway), so it's not a
     // stall the manager needs to act on; a worker with no report AND no wake is genuinely stranded.
     if (pendingWakes.length > 0) return { kind: "not-stranded" };
+    // @decision 2ff893f3 — never gate this on turnSeq-increment ORDERING against the busy-clear edge; a
+    // real Stop sets `enterConfirmed` before it clears busy, so `getUnconfirmedGenerationAgeMs` reads
+    // null (race-free) for a genuine first-turn end even while turnSeq is still 0 at this exact instant.
+    // @decision 2ff893f3 — `?.` is load-bearing, not defensive style: a minimal test-double `pty` that
+    // predates this card implements neither getter, and an unguarded call throws instead of falling
+    // through to the pre-existing `stranded` classification (see 10 real specimens on the card body).
+    // CR round 3 (M1): reads `getUnconfirmedGenerationAgeMs`, NEVER `getPendingConfirmMs` — see that
+    // getter's own doc for why.
+    if ((w.turnSeq ?? 0) === 0) {
+      const unconfirmedAgeMs = this.pty.getUnconfirmedGenerationAgeMs?.(workerSessionId);
+      if (unconfirmedAgeMs != null) {
+        const lastOutputAt = this.pty.getLastOutputAt?.(workerSessionId);
+        const outputFresh = lastOutputAt != null && Date.now() - lastOutputAt < MID_FIRST_TURN_FRESH_OUTPUT_MS;
+        // @decision 2ff893f3 — bound this by age (parity with BusyWorkerWatcher's own
+        // `stuckWorkerMinutes`, via resolveConfig, never hard-coded) — fresh output alone never ages
+        // out, so an unbounded version of this check would hide a hung/looping turn forever.
+        if (outputFresh) {
+          const project = this.db.getProject(w.projectId);
+          // CR round 3 (M3): stuckWorkerMinutes===0 means NO suppression (fail toward notifying) — 0ms
+          // is never > a real elapsed age, so this naturally always takes the `-stale` branch below with
+          // no separate special case.
+          const stuckWorkerMs = project ? resolveConfig(project.config).orchestration.stuckWorkerMinutes * 60_000 : null;
+          if (stuckWorkerMs != null && unconfirmedAgeMs < stuckWorkerMs) {
+            return { kind: "mid-first-turn" };
+          }
+          if (stuckWorkerMs != null) {
+            // Math.max(1, ...): never report "~0min" — a bound of 0 (or a freshly-crossed real bound)
+            // can read as 0 full minutes elapsed while still being genuinely past the bound.
+            return { kind: "mid-first-turn-stale", minutesUnconfirmed: Math.max(1, Math.round(unconfirmedAgeMs / 60_000)) };
+          }
+          // project unresolved (defensive — shouldn't happen for a real worker): fall through to
+          // `stranded` below rather than suppress on an unbounded basis.
+        }
+      }
+    }
     return { kind: "stranded" };
   }
 
@@ -13721,7 +13784,10 @@ export class SessionService {
    * worth calling unreported" (IdleWatcher's manager-loop message) single-sources the SAME check instead
    * of re-deriving a narrower/drifted copy — see classifyIdleWorker's doc for the false-alarm history
    * that guards against. A broken-spawn worker counts as stranded too (it genuinely never reported, just
-   * for a distinct reason).
+   * for a distinct reason). `mid-first-turn`/`mid-first-turn-stale` are deliberately NOT in this allowlist
+   * (CR round 3, N1), following the same precedent as `parked-gate-stale`/`parked-merge` — each already
+   * has its own real, delivered notice via `notifyManagerOfIdleWorker`, so counting it here too would
+   * double-surface the SAME worker to the manager through two independent paths.
    */
   isWorkerGenuinelyStranded(workerSessionId: string): boolean {
     const cls = this.classifyIdleWorker(workerSessionId);
@@ -13801,6 +13867,17 @@ export class SessionService {
     // so a gate-running worker costs its manager zero turns while the gate is legitimately still going.
     // Only parked-gate-stale (below) escalates.
     if (cls.kind === "not-evaluable" || cls.kind === "not-stranded" || cls.kind === "parked-gate") return "none";
+    // @decision 2ff893f3 — a DISTINCT outcome, never "none": tickIdleWorkers must be able to skip its
+    // own re-nudge-pacing stamp for THIS kind only, leaving every "none" kind's pacing untouched.
+    if (cls.kind === "mid-first-turn") return "suppressed-mid-first-turn";
+    // @decision 2ff893f3 — past the bound, a REAL `sent-other` notice fires (never "none", never the
+    // old "finished a turn" claim) so it re-paces at the ordinary idle cadence, same desync shape as
+    // the taskless path's already-honest `buildNeverCompletedTurnMsg` (6651bf24) just above.
+    if (cls.kind === "mid-first-turn-stale") {
+      const msg = `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) — its current turn's Enter has been unconfirmed by the engine for ~${cls.minutesUnconfirmed}min, while it is producing output Loom cannot attribute to turn progress (a busy desync: no UserPromptSubmit/Stop hook has landed for this generation). Check its transcript for a named artifact before acting: worker_transcript ${workerSessionId}. worker_flush ${workerSessionId} may help disambiguate a stranded composer.`;
+      try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
+      return "sent-other";
+    }
 
     if (cls.kind === "broken-spawn") {
       try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
