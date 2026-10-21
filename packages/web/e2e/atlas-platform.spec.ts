@@ -113,6 +113,39 @@ async function openTab(page: Page, name: string) {
 const viewAs = (page: Page, label: string) =>
   page.getByRole("group", { name: "Preview edition" }).getByRole("button", { name: label });
 
+// ── Scopes: WHERE a text assertion is allowed to look ───────────────────────────────────────────
+//
+// 🔴 A bare `page.getByText("<word>", {exact:true})` is unsafe on this page for TWO independent
+// reasons, and the fix differs per reason:
+//
+//   1. EVERY PANEL IS MOUNTED (inactive ones carry `hidden`, card c07ff42a round 2), so a string the
+//      active panel shows may ALSO sit in a hidden panel's DOM. ⇒ a PRESENCE check must name its
+//      panel, or it is a strict-mode violation waiting on whichever string collides next.
+//   2. THE NAV CHROME RENDERS NODE LABELS AS EXACT TEXT. `AtlasTree` draws one
+//      `<span class="loom-atlas-lbl">` per node from `NAV_PAGES`/`ATLAS_HOMES` in src/nav.tsx — so
+//      every nav LABEL is a live exact-text match anywhere on the page. That is what broke this spec:
+//      P2-2 added an `ATLAS_HOMES` node labelled **"Agents"**, which is also this page's dev-edition
+//      section label, and `getByText("Agents", {exact:true})` began resolving to two elements.
+//
+// ⇒ `panel()` for PRESENCE (reason 1, and it happens to fix reason 2 as well).
+// ⇒ `content()` where an ABSENCE has to survive reason 2 — see its own note below.
+//
+// ⛔ Do NOT reach for `.first()` to settle either one: it silences the violation by reading whichever
+// element the DOM happened to order first, which is the chrome exactly as often as the panel.
+const panel = (page: Page, tabKey: string) => page.getByTestId(`platform-panel-${tabKey}`);
+
+// The content column, excluding the nav chrome. In BOTH shells the chrome is a SIBLING of `<main>`
+// (`AtlasTree` beside `.loom-atlas-main` in components/AtlasShell.tsx; `Sidebar` beside `<main>` in
+// App.tsx), so this scope spans every panel while owning none of the tree's/rail's own labels.
+//
+// ⚠️ ABSENCE ASSERTIONS STAY PAGE-WIDE BY DEFAULT — scoping an absence narrows the very thing it is
+// trying to rule out, which is this spec's own standing rule. `content()` is the ONE deliberate
+// exception, and only for a string the CHROME legitimately renders in BOTH editions: a page-wide
+// "Agents" is absent from nowhere, because the tree node is there whichever edition is in view, so
+// the page-wide form would assert something false rather than something strong. `content()` keeps
+// the claim as broad as it can honestly be — every panel, no chrome — instead of shrinking it to one.
+const content = (page: Page) => page.locator("main");
+
 test.describe("Atlas Platform node (card c07ff42a)", () => {
   // ── 1. The edition toggle flips every forked element, both directions ──────────────────────────────
   test("switch ON: the View-as toggle flips each dev-only and end-user-only element, both ways", async ({ page, loomDaemon }) => {
@@ -131,7 +164,9 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await expect(page.getByText(/the management layer above all projects/i)).toBeVisible();
     await expect(page.getByText(/your cross-project workspace agent/i)).toHaveCount(0);
 
-    await expect(page.getByText("Agents", { exact: true })).toBeVisible();
+    // The section label, read INSIDE the Home panel. Page-wide this also matches the Atlas tree's own
+    // "Agents" node (src/nav.tsx `ATLAS_HOMES`) — see the scope note above.
+    await expect(panel(page, "home").getByText("Agents", { exact: true })).toBeVisible();
     await expect(page.getByText("Assistants", { exact: true })).toHaveCount(0);
 
     await expect(page.getByRole("button", { name: /^spawn lead$/i })).toBeVisible();
@@ -141,27 +176,28 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await expect(page.getByRole("button", { name: /review my workspace/i })).toHaveCount(0);
 
     // The dev GRID layout's own live-count span; the end-user SPLIT layout has no such span and instead
-    // names its two single-session sections.
-    await expect(page.getByText(/^\(\d+ live\)$/)).toBeVisible();
+    // names its two single-session sections. (The tree's project row also carries a live count, but as a
+    // bare number — `AtlasTree`'s `.loom-atlas-live` — so it cannot match this "(N live)" shape.)
+    await expect(panel(page, "home").getByText(/^\(\d+ live\)$/)).toBeVisible();
     await expect(page.getByText("Operator session", { exact: true })).toHaveCount(0);
 
     await openTab(page, "Cadence");
-    await expect(page.getByRole("button", { name: /^add cadence$/i })).toBeVisible();
+    await expect(panel(page, "cadence").getByRole("button", { name: /^add cadence$/i })).toBeVisible();
     await expect(page.getByText(/^Run automatically$/)).toHaveCount(0);
 
     await openTab(page, "History");
     // Dev COLLAPSES each history behind a disclosure button; the end-user edition renders them as plain
     // expanded sections, so the *role* differs, not just the label.
-    await expect(page.getByRole("button", { name: /lead history/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /auditor history/i })).toBeVisible();
+    await expect(panel(page, "history").getByRole("button", { name: /lead history/i })).toBeVisible();
+    await expect(panel(page, "history").getByRole("button", { name: /auditor history/i })).toBeVisible();
     await expect(page.getByText(/every operator session — when it ran/i)).toHaveCount(0);
 
     await openTab(page, "Board");
-    await expect(page.getByText(/Auditor findings \+ manager escalations/i)).toBeVisible();
+    await expect(panel(page, "board").getByText(/Auditor findings \+ manager escalations/i)).toBeVisible();
     await expect(page.getByText(/your setup checklist \+ Auditor suggestions/i)).toHaveCount(0);
 
     await openTab(page, "Findings");
-    await expect(page.getByText(/every finding the Auditor has filed/i)).toBeVisible();
+    await expect(panel(page, "findings").getByText(/every finding the Auditor has filed/i)).toBeVisible();
     await expect(page.getByText(/every improvement the Auditor has suggested/i)).toHaveCount(0);
 
     // ── THE FLIP ──
@@ -184,8 +220,18 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // switch-OFF test asserts VISIBLE on the classic page, read here against the same edition's copy.
     await expect(page.getByText(/^Platform\s*Platform\s*your cross-project workspace agent/)).toHaveCount(0);
 
-    await expect(page.getByText("Assistants", { exact: true })).toBeVisible();
-    await expect(page.getByText("Agents", { exact: true })).toHaveCount(0);
+    await expect(panel(page, "home").getByText("Assistants", { exact: true })).toBeVisible();
+    // ⚠️ `content()`, not page-wide: the Atlas tree's own "Agents" node renders in BOTH editions, so a
+    // page-wide absence here asserts something FALSE rather than something strong. This still spans
+    // every panel — it only declines to read the nav chrome. See the scope note at the top.
+    //
+    // POSITIVE CONTROL on the scope, immediately before relying on it: a `toHaveCount(0)` inside a
+    // scope that resolved to NOTHING passes for the wrong reason, and reads identically to a real
+    // absence. This pins that `main` is present and is the populated content column, so the next line
+    // is measuring the string rather than an empty subtree.
+    await expect(content(page)).toBeVisible();
+    await expect(content(page).getByText(/your cross-project workspace agent/i)).toBeVisible();
+    await expect(content(page).getByText("Agents", { exact: true })).toHaveCount(0);
 
     await expect(page.getByRole("button", { name: /^start platform$/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /^spawn lead$/i })).toHaveCount(0);
@@ -193,8 +239,8 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await expect(page.getByRole("button", { name: /review my workspace/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /^spawn auditor$/i })).toHaveCount(0);
 
-    await expect(page.getByText("Operator session", { exact: true })).toBeVisible();
-    await expect(page.getByText("Auditor session", { exact: true })).toBeVisible();
+    await expect(panel(page, "home").getByText("Operator session", { exact: true })).toBeVisible();
+    await expect(panel(page, "home").getByText("Auditor session", { exact: true })).toBeVisible();
     await expect(page.getByText(/^\(\d+ live\)$/)).toHaveCount(0);
 
     // 🔴 THE TRUST BOUNDARY, asserted here and nowhere else: previewing the end-user edition from a dev
@@ -206,20 +252,20 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await expect(page.getByText(/Preview only on a dev install/i).first()).toBeVisible();
 
     await openTab(page, "Cadence");
-    await expect(page.getByText(/^Run automatically$/)).toBeVisible();
+    await expect(panel(page, "cadence").getByText(/^Run automatically$/)).toBeVisible();
     await expect(page.getByRole("button", { name: /^add cadence$/i })).toHaveCount(0);
 
     await openTab(page, "History");
-    await expect(page.getByText(/every operator session — when it ran/i)).toBeVisible();
+    await expect(panel(page, "history").getByText(/every operator session — when it ran/i)).toBeVisible();
     await expect(page.getByRole("button", { name: /lead history/i })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /auditor history/i })).toHaveCount(0);
 
     await openTab(page, "Board");
-    await expect(page.getByText(/your setup checklist \+ Auditor suggestions/i)).toBeVisible();
+    await expect(panel(page, "board").getByText(/your setup checklist \+ Auditor suggestions/i)).toBeVisible();
     await expect(page.getByText(/Auditor findings \+ manager escalations/i)).toHaveCount(0);
 
     await openTab(page, "Findings");
-    await expect(page.getByText(/every improvement the Auditor has suggested/i)).toBeVisible();
+    await expect(panel(page, "findings").getByText(/every improvement the Auditor has suggested/i)).toBeVisible();
     await expect(page.getByText(/every finding the Auditor has filed/i)).toHaveCount(0);
 
     // ── AND BACK: the dev set returns, the end-user set is gone. Without this leg the flip above could
@@ -229,17 +275,17 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // Same URL-held-tab behaviour as the first flip — walk back to Home before reading Home's markers.
     await openTab(page, "Home");
     await expect(page.getByText(/the management layer above all projects/i)).toBeVisible();
-    await expect(page.getByText("Agents", { exact: true })).toBeVisible();
+    await expect(panel(page, "home").getByText("Agents", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: /^spawn lead$/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /^spawn auditor$/i })).toBeVisible();
-    await expect(page.getByText(/^\(\d+ live\)$/)).toBeVisible();
+    await expect(panel(page, "home").getByText(/^\(\d+ live\)$/)).toBeVisible();
     await expect(page.getByText(/your cross-project workspace agent/i)).toHaveCount(0);
     await expect(page.getByText("Assistants", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /^start platform$/i })).toHaveCount(0);
     await expect(page.getByText(/Preview only on a dev install/i)).toHaveCount(0);
 
     await openTab(page, "Cadence");
-    await expect(page.getByRole("button", { name: /^add cadence$/i })).toBeVisible();
+    await expect(panel(page, "cadence").getByRole("button", { name: /^add cadence$/i })).toBeVisible();
     await expect(page.getByText(/^Run automatically$/)).toHaveCount(0);
   });
 
@@ -299,18 +345,19 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
       await expect(tab(page, "Findings")).toHaveAttribute("aria-selected", "true");
 
-      const row = (label: string) => page.locator("div").filter({ hasText: new RegExp(escapeRe(label)) }).last();
+      const findings = panel(page, "findings");
+      const row = (label: string) => findings.locator("div").filter({ hasText: new RegExp(escapeRe(label)) }).last();
 
       // ── BEFORE: both suggestions are offered, and no preset carries either label yet. ──
-      await expect(page.getByText(toAdopt, { exact: true })).toBeVisible();
-      await expect(page.getByText(toDismiss, { exact: true })).toBeVisible();
+      await expect(findings.getByText(toAdopt, { exact: true })).toBeVisible();
+      await expect(findings.getByText(toDismiss, { exact: true })).toBeVisible();
       expect(await presetLabels(loomDaemon)).not.toContain(toAdopt);
 
       // ── DISMISS: that row leaves, the other stays (so the click is scoped to its own row), and no
       //    preset was minted. ──
       await row(toDismiss).getByRole("button", { name: "Dismiss" }).click();
       await expect(page.getByText(toDismiss, { exact: true })).toHaveCount(0);
-      await expect(page.getByText(toAdopt, { exact: true })).toBeVisible();
+      await expect(findings.getByText(toAdopt, { exact: true })).toBeVisible();
       expect(await presetLabels(loomDaemon)).not.toContain(toDismiss);
 
       // ── ADOPT: the row leaves AND a real preset now exists under that label — the write, read back
@@ -327,7 +374,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       // state: another test in this file seeds findings onto the same worker daemon, and an assertion
       // that only holds in declaration order is a trap for whoever reorders them.)
       await expect(page.getByText(/^Suggested presets$/)).toHaveCount(0);
-      await expect(page.getByText(/every improvement the Auditor has suggested/i)).toBeVisible();
+      await expect(findings.getByText(/every improvement the Auditor has suggested/i)).toBeVisible();
     } finally {
       // Preset prompts + suggestions are a DAEMON-GLOBAL store shared with every other spec on this
       // worker (the composer-preset specs read the same list), so anything seeded here is cleaned up
@@ -487,20 +534,24 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // first test asserts the complement under Atlas. `.first()` because the wrapper around this label
     // and its paragraph matches the same leading text.
     const classicHeading = /^Platform\s*Platform\s*your cross-project workspace agent/;
-    await expect(page.getByText(classicHeading).first()).toBeVisible();
+    await expect(content(page).getByText(classicHeading).first()).toBeVisible();
 
     // The distinguishing property of the single-column stack: sections that Atlas puts on SEPARATE tabs
     // are all on screen AT ONCE here. Checking them together is what makes this a stack assertion rather
     // than five independent "a section exists" ones.
-    await expect(page.getByText("Assistants", { exact: true })).toBeVisible();
-    await expect(page.getByText("Operator session", { exact: true })).toBeVisible();
-    await expect(page.getByText("Auditor session", { exact: true })).toBeVisible();
-    await expect(page.getByText(/your setup checklist \+ Auditor suggestions/i)).toBeVisible();
+    //
+    // Scoped to `content()` for the same reason the Atlas legs are scoped, in the other shell: the
+    // classic `Sidebar` rail draws the SAME `NAV_PAGES` labels as exact text, so an unscoped presence
+    // check here is one label rename away from the strict-mode violation that broke this spec.
+    await expect(content(page).getByText("Assistants", { exact: true })).toBeVisible();
+    await expect(content(page).getByText("Operator session", { exact: true })).toBeVisible();
+    await expect(content(page).getByText("Auditor session", { exact: true })).toBeVisible();
+    await expect(content(page).getByText(/your setup checklist \+ Auditor suggestions/i)).toBeVisible();
     // The end-user cadence form still rides in the auditor card — the classic placement, which the Atlas
     // layout moves to its own tab. Visible here means that move did not leak back into this page. (There
     // is deliberately no "Auditor schedule" SECTION on this edition: that heading belongs to the dev
     // list variant, and in Atlas to the Cadence tab that now hosts both.)
-    await expect(page.getByText(/^Run automatically$/)).toBeVisible();
+    await expect(content(page).getByText(/^Run automatically$/)).toBeVisible();
 
     // And the REAL end-user edition leaves the operator spawnable — the contrast case for the first
     // test's `previewOnly` disabled reading. Asserted, never clicked (the fixture forbids a real spawn).
