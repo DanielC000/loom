@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { contextWindowForModel, type Agent, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
+import { contextWindowForModel, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
@@ -12,10 +12,12 @@ import { HarnessMixProvider } from "../components/HarnessPicker";
 import Board from "./Board";
 import { Panel } from "../components/ui";
 import {
-  BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs, SlotPanel,
+  BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs,
   type KpiItem,
 } from "../components/atlasHome";
+import { AgentRosterRow, RosterEmpty, WorkersDispatchedNote } from "../components/atlasAgents";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
+import { splitRoster } from "../lib/atlasAgents";
 import {
   boardRollup, gateLanes, isLiveSession, mergeThroughput, plural, relativeTime,
   useGateHistoryRecent, useGatesActive,
@@ -79,11 +81,10 @@ export default function ProjectHome() {
   const ctxPct = wc.ctx > 0 ? Math.round(wc.ratio * 100) : 0;
   const worstSession = live.find((s) => (s.ctxInputTokens ?? 0) > 0 && s.ctxInputTokens === wc.ctx) ?? null;
 
-  // Spawnable = the agents a human may start by hand. Workers are Loom-DRIVEN (a manager dispatches
-  // them onto isolated worktree branches), so they are excluded here for the same reason the classic
-  // Overview's spawn grid excludes them — never because they cannot be counted.
-  const roleOf = (a: Agent) => profilesQ.data?.find((p) => p.id === a.profileId)?.role ?? null;
-  const spawnable = (agentsQ.data ?? []).filter((a) => roleOf(a) !== "worker");
+  // The roster behind the Agents panel below AND the "spawnable" figure on the fleet tile — ONE
+  // derivation (lib/atlasAgents.ts), off the three reads this page already makes, so the count in
+  // the KPI sub-line and the rows in the panel can never disagree about who is spawnable.
+  const roster = splitRoster(agentsQ.data, profilesQ.data, sessionsQ.data);
 
   const eventQs = useQueries({
     queries: liveManagers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
@@ -112,7 +113,7 @@ export default function ProjectHome() {
     {
       key: "fleet", label: "mgr · workers", value: `${liveManagers.length}/${workers.filter(isLiveSession).length}`,
       tone: liveManagers.length > 0 ? "phosphor" : "muted",
-      sub: `${live.length} live · ${spawnable.length} spawnable`,
+      sub: `${live.length} live · ${roster.spawnable.length} spawnable`,
       popover: <FleetList managers={managers} workers={workers} />,
     },
     {
@@ -157,6 +158,19 @@ export default function ProjectHome() {
       <AttentionList items={projAttention} cap={6} />
     </BandPanel>
   );
+  // THE ANSWER TO "how are the spawnable agents spawned for projects?" (card 939922ee, round 4) —
+  // the spawn controls are ON the page you land on, second in the band, not behind a navigation.
+  // Same rows, same guard, same split button as the Agents node and the tree's quick-spawn: one
+  // roster component (components/atlasAgents.tsx) renders all three.
+  const agentsPanel = (
+    <BandPanel label="Agents" count={roster.spawnable.length}
+      action={{ to: "/agents", label: "All" }} testId="atlas-band-agents">
+      {roster.spawnable.length === 0
+        ? <RosterEmpty workers={roster.workers} />
+        : roster.spawnable.map((entry) => <AgentRosterRow key={entry.agent.id} entry={entry} />)}
+      <WorkersDispatchedNote workers={roster.workers} />
+    </BandPanel>
+  );
   const fleetPanel = (
     <BandPanel label="Fleet" count={`${live.length} live`}
       action={{ to: "/terminals", label: "Terminals" }} testId="atlas-band-fleet">
@@ -195,8 +209,7 @@ export default function ProjectHome() {
             <KpiDeck items={kpis} />
             <div className="loom-atlas-band">
               {needsPanel}
-              <SlotPanel slot="agents" label="Agents" card="the Agents card (P2-2)"
-                what={`The ${spawnable.length || "project"}-agent roster with its spawn controls and the manager go-live guard.`} />
+              {agentsPanel}
               {fleetPanel}
               {gatePanel}
               {pulsePanel}
@@ -224,8 +237,11 @@ export default function ProjectHome() {
               </div>
               <Board projectId={projectId} />
             </section>
+            {/* Agents rides the Deck's rail too. The Deck is a tab a reader can sit on all day, and
+                the one thing this card exists to fix is spawn controls being a navigation away. */}
             <aside className="loom-atlas-deckrail">
               {needsPanel}
+              {agentsPanel}
               {fleetPanel}
               {pulsePanel}
             </aside>

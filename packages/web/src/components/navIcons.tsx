@@ -23,6 +23,10 @@ const ICONS: Record<string, ReactElement> = {
   // in the tree rather than by two near-identical house outlines.
   "/home": <G><path d="M4 10.5 12 4l8 6.5V19a1.4 1.4 0 0 1-1.4 1.4H5.4A1.4 1.4 0 0 1 4 19v-8.5Z" /><path d="M9.6 20.4v-6h4.8v6" /></G>,
   "/project": <G><path d="M4 10.5 12 4l8 6.5V19a1.4 1.4 0 0 1-1.4 1.4H5.4A1.4 1.4 0 0 1 4 19v-8.5Z" /><path d="M9.6 20.4v-6h4.8v6" /></G>,
+  // The Agents node (card c6160c7d). Deliberately NOT /actors' two-people glyph: Actors is where a
+  // rig is DEFINED, Agents is where one is STARTED, and two near-identical figures in one tree
+  // would read as the same destination twice. A single figure with a play mark says "start this".
+  "/agents": <G><circle cx="10" cy="7.6" r="3.2" /><path d="M3.8 19.4a6.2 6.2 0 0 1 10.3-4.6" /><path d="M15.8 14.2l4.4 2.8-4.4 2.8v-5.6Z" /></G>,
   "/": <G sw={1.7}><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3.4" /><path d="M12 1.6V4M12 20v2.4M1.6 12H4M20 12h2.4" /></G>,
   "/overview": <G sw={1.7}><rect x="3.5" y="3.5" width="7" height="7" rx="1.2" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.2" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.2" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.2" /></G>,
   "/platform": <G><path d="M12 3.4 3.4 8l8.6 4.6L20.6 8 12 3.4Z" /><path d="M3.4 12.4 12 17l8.6-4.6" /><path d="M3.4 16.4 12 21l8.6-4.6" /></G>,

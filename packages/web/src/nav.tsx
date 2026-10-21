@@ -22,6 +22,7 @@ import Platform from "./pages/Platform";
 import Settings from "./pages/Settings";
 import WorkspaceHome from "./pages/WorkspaceHome";
 import ProjectHome from "./pages/ProjectHome";
+import AgentsNode from "./pages/AgentsNode";
 
 // The four nav sections. Every destination is grouped under one of these in the Instrument Rail's
 // grouped nav (components/Sidebar.tsx), with hairline separators between groups. Also used to bucket
@@ -177,30 +178,39 @@ export const PARAM_PAGES: ParamPage[] = [
   { to: "/session/:id", element: <SessionView />, atlas: { kind: "session", param: "id" } },
 ];
 
-// ── The Atlas home nodes ───────────────────────────────────────────────────────────────────────
-// The Workspace root and the project node — card fd99b2d7 (Atlas P2-1). The ONLY addresses in this
-// file the classic shell does NOT mount; its three sibling lists above are both-shells by design.
+// ── The Atlas-only nodes ───────────────────────────────────────────────────────────────────────
+// The Workspace root and the project node — card fd99b2d7 (Atlas P2-1) — joined by the Agents node
+// (card c6160c7d, P2-2). The ONLY addresses in this file the classic shell does NOT mount; its
+// three sibling lists above are both-shells by design.
 //
 // @decision fd99b2d7 — never add these to LegacyShell's route table, and never re-point `/` or
 // `/overview` at them inside AtlasShell: the first shows a half-built preview to a user who never
 // opted in, the second breaks phase 1's content-identity contract. Both are P3-switch-over's job.
 //
-// Each node's own tabs are `?tab=` on the SAME path, owned by the page component — not routes, so
-// the frame's crumbs and heading stay a function of the node, not of which tab is showing.
+// A node's own tabs are `?tab=` on the SAME path, owned by the page component — not routes, so the
+// frame's crumbs and heading stay a function of the node, not of which tab is showing.
 export type AtlasHome = {
   /** Stable identity for the tree row's test id and the shell's own address lookup. */
-  key: "workspace" | "project";
+  key: "workspace" | "project" | "agents";
   to: string;
   /** The tree row's label. */
   label: string;
-  /** True ⇒ this node IS the active project, so the heading and the deepest crumb are its name. */
+  /** True ⇒ the node hangs under the active project, in the tree and in the crumb trail. */
   scoped: boolean;
+  /**
+   * True ⇒ this node IS its tier's head, so the trail STOPS at the tier and the heading is the
+   * tier's own name (the workspace, or the active project). False ⇒ an ordinary node WITHIN the
+   * tier, whose own `label` is the deepest crumb and the heading — exactly as a NAV_PAGES
+   * destination's is, because that is exactly what it is to a reader.
+   */
+  tierHead: boolean;
   element: ReactNode;
 };
 
 export const ATLAS_HOMES: AtlasHome[] = [
-  { key: "workspace", to: "/home", label: "Home", scoped: false, element: <WorkspaceHome /> },
-  { key: "project", to: "/project", label: "Home", scoped: true, element: <ProjectHome /> },
+  { key: "workspace", to: "/home", label: "Home", scoped: false, tierHead: true, element: <WorkspaceHome /> },
+  { key: "project", to: "/project", label: "Home", scoped: true, tierHead: true, element: <ProjectHome /> },
+  { key: "agents", to: "/agents", label: "Agents", scoped: true, tierHead: false, element: <AgentsNode /> },
 ];
 
 // ── The legacy redirects ───────────────────────────────────────────────────────────────────────

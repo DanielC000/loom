@@ -17,6 +17,7 @@ import { NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { Project } from "@loom/shared";
 import { ATLAS_HOMES, useVisibleNavPages, type AtlasHome, type NavPage } from "../nav";
+import { AgentsQuickSpawn } from "./atlasAgents";
 import { NavIcon } from "./navIcons";
 import { Logo } from "./Logo";
 import { SectionLabel } from "./ui";
@@ -67,16 +68,21 @@ function TreeNode({ page, activeTo }: { page: NavPage; activeTo?: string }) {
   );
 }
 
-// A tier's own HOME node — the Workspace root and the project node (card fd99b2d7, Atlas P2-1).
+// An Atlas-only node — a tier's own HOME (the Workspace root and the project node, card fd99b2d7)
+// or a node within a tier (the Agents node, card c6160c7d).
 //
-// It is a LEAF row, first in its tier, rather than the tier's heading made clickable. The heading
-// above ("Workspace" / "Projects") names a GROUP, and the open project row is a SELECTOR whose whole
-// contract is that it re-scopes without navigating (card e47df20a) — folding a destination into
-// either would give one control two jobs and make "where am I" ambiguous for the row that already
-// says "what am I scoped to". One extra row buys both tiers the same, honest shape.
-function HomeNode({ home }: { home: AtlasHome }) {
+// A home is a LEAF row, first in its tier, rather than the tier's heading made clickable. The
+// heading above ("Workspace" / "Projects") names a GROUP, and the open project row is a SELECTOR
+// whose whole contract is that it re-scopes without navigating (card e47df20a) — folding a
+// destination into either would give one control two jobs and make "where am I" ambiguous for the
+// row that already says "what am I scoped to". One extra row buys both tiers the same, honest shape.
+//
+// `trailing` rides OUTSIDE the NavLink, as a sibling in the same row: a button nested inside an
+// anchor is invalid HTML and unreachable by the keyboard, which is exactly what the quick-spawn `＋`
+// must not be.
+function HomeNode({ home, trailing }: { home: AtlasHome; trailing?: ReactNode }) {
   return (
-    <li>
+    <li className={trailing ? "loom-atlas-noderow" : undefined}>
       <NavLink to={home.to} end={false}
         className={({ isActive }) => `loom-atlas-node${isActive ? " is-active" : ""}`}
         data-testid={`atlas-home-${home.key}`}>
@@ -84,12 +90,14 @@ function HomeNode({ home }: { home: AtlasHome }) {
         <span className="loom-atlas-ico" aria-hidden><NavIcon to={home.to} /></span>
         <span className="loom-atlas-lbl">{home.label}</span>
       </NavLink>
+      {trailing}
     </li>
   );
 }
 
 const WORKSPACE_HOME = ATLAS_HOMES.find((h) => h.key === "workspace")!;
 const PROJECT_HOME = ATLAS_HOMES.find((h) => h.key === "project")!;
+const AGENTS_NODE = ATLAS_HOMES.find((h) => h.key === "agents")!;
 
 // Live, non-companion session count per project — the marker on each project row. The rail chip's
 // dropdown already showed exactly this (components/Sidebar.tsx › RailProjectControl), and it is the
@@ -165,8 +173,17 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
   // Built once and rendered by whichever branch below owns it, so the empty-workspace path and the
   // populated path cannot drift into showing different destination sets. The project HOME leads the
   // list: it is the node itself, and everything after it is a surface within that node.
+  //
+  // Agents sits directly under it, ahead of the NAV_PAGES destinations: it is the node that answers
+  // "what can I start here", which is the first thing a reader wants from a project they have just
+  // scoped to, and grouping the Atlas-only nodes together keeps the derived destinations below in
+  // their own declaration order (card c6160c7d).
   const scopedNodes = [
     <HomeNode key={PROJECT_HOME.to} home={PROJECT_HOME} />,
+    <HomeNode key={AGENTS_NODE.to} home={AGENTS_NODE}
+      trailing={projectId
+        ? <AgentsQuickSpawn projectId={projectId} projectName={projects.find((p) => p.id === projectId)?.name} />
+        : undefined} />,
     ...project.map((p) => <TreeNode key={p.to} page={p} activeTo={activeTo} />),
   ];
 

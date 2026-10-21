@@ -137,12 +137,15 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // read as the path actually taken through the tree, not as a second, independently-maintained idea
   // of the hierarchy.
   //
-  // A HOME node is the tier head itself, so its trail STOPS at that tier: the Workspace home's
-  // deepest crumb is "Workspace", the project home's is the project's own name. Appending the row's
-  // "Home" label would add a fourth word naming a node that is already the crumb before it.
+  // A TIER-HEAD node is the tier itself, so its trail STOPS there: the Workspace home's deepest
+  // crumb is "Workspace", the project home's is the project's own name. Appending the row's "Home"
+  // label would add a fourth word naming a node that is already the crumb before it. An Atlas-only
+  // node that is NOT its tier's head (the Agents node, card c6160c7d) names itself last, exactly as
+  // a NAV_PAGES destination at the same depth does.
   const navCrumbs: string[] = ["Workspace"];
   if (home) {
     if (home.scoped) navCrumbs.push(activeProjectName);
+    if (!home.tierHead) navCrumbs.push(home.label);
   } else {
     if (page?.scoped) navCrumbs.push(activeProjectName);
     if (page) navCrumbs.push(page.label);
@@ -153,7 +156,9 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // order, not a precedence contest.
   const crumbs = paramAddress?.crumbs ?? navCrumbs;
   const heading = paramAddress?.heading
-    ?? (home ? (home.scoped ? activeProjectName : "Workspace") : page?.label)
+    ?? (home
+      ? (home.tierHead ? (home.scoped ? activeProjectName : "Workspace") : home.label)
+      : page?.label)
     ?? "Workspace";
 
   return (
@@ -228,9 +233,9 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {LEGACY_REDIRECTS.map((r) => (
               <Route key={r.from} path={r.from} element={r.element} />
             ))}
-            {/* The two Atlas-only home nodes (P2-1) — the Workspace root and the project node. The
-                classic shell deliberately does NOT mount these; see ATLAS_HOMES' own anchor in
-                src/nav.tsx for why, and why `/` and `/overview` must not be re-pointed at them. */}
+            {/* The Atlas-only nodes (P2-1's two home nodes, P2-2's Agents node). The classic shell
+                deliberately does NOT mount these; see ATLAS_HOMES' own anchor in src/nav.tsx for
+                why, and why `/` and `/overview` must not be re-pointed at them. */}
             {ATLAS_HOMES.map((h) => (
               <Route key={h.to} path={h.to} element={h.element} />
             ))}

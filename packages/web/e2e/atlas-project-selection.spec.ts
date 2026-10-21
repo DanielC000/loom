@@ -86,7 +86,13 @@ test.describe("Atlas project selection (card e47df20a)", () => {
     // its count to the row's accessible name ("<project> 1"), exactly as the rail chip's own
     // dropdown rows do — so an exact match would resolve for one project and not the other for a
     // reason that has nothing to do with selection.
-    const row = (name: string) => tree.getByRole("button", { name: new RegExp(escapeRe(name)) });
+    //
+    // Scoped to `button.loom-atlas-node` — the project TIER's own row shape — rather than to any
+    // button in the tree: card c6160c7d added a quick-spawn `＋` whose accessible name also names
+    // the active project ("Spawn an agent in <project>"), so a bare role+name lookup resolves two
+    // elements. This locator says what the test always meant by "the project row".
+    const row = (name: string) =>
+      tree.locator("button.loom-atlas-node.is-branch").filter({ hasText: new RegExp(escapeRe(name)) });
     // `atlas-project-node` marks the OPEN row only, so this locator IS "the project you are under".
     const openProject = page.getByTestId("atlas-project-node");
     const crumbs = page.getByTestId("atlas-breadcrumb");

@@ -107,9 +107,13 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(lanes(page)).toHaveCount(7);
     await expect(embed.locator(".loom-grid").filter({ hasText: "Inbox" }).getByText(seeded.inboxCard, { exact: true })).toBeVisible();
 
-    // ── The P2-2/P2-3 slots are declared, not silently absent: the owner comparing Atlas against
-    //        the live app must be able to tell "not built yet" from "deliberately dropped".
-    await expect(page.getByTestId("atlas-slot-agents")).toBeVisible();
+    // ── The band's second column is REAL, not a declared slot. P2-1 put a placeholder here so the
+    //        owner comparing Atlas against the live app could tell "not built yet" from
+    //        "deliberately dropped"; card c6160c7d filled it, so the placeholder's absence is now
+    //        the correct state and the panel's presence is what this row asserts. (The remaining
+    //        slot, P2-3's fleet-controls bar, lives on the WORKSPACE node, not this one.)
+    await expect(page.getByTestId("atlas-band-agents")).toBeVisible();
+    await expect(page.getByTestId("atlas-slot-agents")).toHaveCount(0);
   });
 
   test("switch ON: every KPI pop-over opens and closes, at both levels", async ({ page, loomDaemon }) => {

@@ -1488,11 +1488,15 @@ button.loom-kpi.is-open {
 }
 
 /* ── Dashboard band ────────────────────────────────────────────────────────────────────
-   "Needs you" is the widest column, deliberately: it is the one panel whose rows carry
-   inline action buttons, so it must not be the column that gives up width first. */
+   The two widest columns are the two whose rows carry inline ACTION CONTROLS, so neither
+   is the column that gives up width first: "Needs you" (its attention rows), and the
+   second column — Agents at a project, Operators at the workspace root — whose rows carry
+   a role badge, a live pill AND a split button on one 28px line. Measured at 1600 (card
+   c6160c7d): at a flat 1fr the agent NAME was left ~90px and "Orchestrator" ellipsised to
+   eight characters, which is the one word on that row a reader is actually scanning for. */
 .loom-atlas-band {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1.25fr) repeat(3, minmax(0, 1fr));
   gap: 10px;
   align-items: stretch;
 }
@@ -1758,6 +1762,257 @@ button.loom-kpi.is-open {
   }
 }
 
+/* ── Atlas agent roster (card c6160c7d — P2-2) ─────────────────────────────────────────
+   One roster, three widths: a ~250px band column, a quick-spawn dialog, and the Agents
+   node's own grid. Identity sits ABOVE the controls in every one of them — a 250px column
+   cannot hold a name and a split button on one line without the button losing its label —
+   so the three read as the same component at different sizes, not as three layouts.
+   Structure only; every colour, font and radius is the token the rest of the app reads. */
+.loom-agentrow {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--loom-border);
+}
+.loom-agentrow:last-of-type {
+  border-bottom: none;
+}
+.loom-agentrow-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+/* The role badge and the live pill are fixed-size FACTS — only the name gives up width. Both are
+   bare <span>s from the kit (no class of their own), so they are addressed as the head's own span
+   children; the flex spacer between them carries an inline `flex: 1`, which wins over this. Without
+   it a ~250px band column wrapped "◆ MANAGER" onto two lines and made the row twice as tall. */
+.loom-agentrow-head > span:not(.loom-agentrow-meta),
+.loom-workerrig > span:not(.loom-workerrig-rig) {
+  flex: none;
+  white-space: nowrap;
+}
+.loom-agentrow-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--loom-font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--loom-text);
+}
+.loom-agentrow-meta {
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--loom-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loom-agentrow-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* The spawn-role menu hangs off the split button with `position: absolute`; without a
+     positioned ancestor here it would resolve against the page instead of the row. */
+  position: relative;
+}
+.loom-agentrow-err {
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--loom-red);
+}
+
+/* The "workers are dispatched" line. Sticky ONLY inside a band panel's own scroll: that is
+   where the roster can grow past the panel and carry this sentence out of view, which is
+   precisely when "where did Dev go?" gets asked. On the node page it is an ordinary line —
+   sticking it there would pin it to the content column's scrollport instead. */
+.loom-agentnote {
+  margin: 8px 0 0;
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--loom-text-muted);
+}
+.loom-bandbody > .loom-agentnote {
+  position: sticky;
+  bottom: -8px;
+  margin-bottom: -8px;
+  padding: 6px 0 8px;
+  background: var(--loom-panel);
+  border-top: 1px solid var(--loom-border);
+}
+.loom-agentnote strong {
+  color: var(--loom-text-dim);
+  font-weight: 600;
+}
+.loom-agentnote-names {
+  color: var(--loom-text-dim);
+}
+
+/* The Agents node's own full-size roster. */
+.loom-agentgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+  align-items: start;
+}
+/* The node head's count carries a project NAME, so it shrinks and ellipsises instead of pushing
+   the head's own button out of the column — unlike the band's bare-number counts. */
+.loom-agentscount {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.loom-agentcard {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 12px 12px;
+}
+.loom-agentsplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.loom-workerrig {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--loom-border);
+}
+.loom-workerrig:last-of-type {
+  border-bottom: none;
+}
+.loom-workerrig-rig {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  color: var(--loom-text-muted);
+}
+
+/* "What a spawn does" — a term column against a definition column, so the four facts read
+   as a reference rather than as four sentences of prose. */
+.loom-spawnterm {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+  padding: 5px 0;
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.loom-spawnterm-t {
+  color: var(--loom-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9.5px;
+  padding-top: 3px;
+}
+.loom-spawnterm-d {
+  color: var(--loom-text-dim);
+  min-width: 0;
+}
+.loom-spawnterm-d strong {
+  color: var(--loom-text);
+  font-weight: 600;
+}
+
+/* The Workspace root's standing-operator rows — a status read, so no control cluster. */
+.loom-operrow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--loom-border);
+}
+.loom-operrow:last-of-type {
+  border-bottom: none;
+}
+.loom-operrow-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.loom-inlinelink {
+  flex: none;
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  color: var(--loom-cyan);
+  text-decoration: none;
+}
+.loom-inlinelink:hover {
+  text-decoration: underline;
+}
+
+/* The tree's quick-spawn `＋`. The row becomes a flex pair so the button is a SIBLING of the
+   NavLink, never nested inside it — a button inside an anchor is invalid and unreachable by
+   keyboard. Visible at rest (dim), lifting on hover/focus: it is the control that answers
+   "how do I spawn?", so it cannot be a hover-only secret. */
+.loom-atlas-noderow {
+  display: flex;
+  align-items: center;
+}
+.loom-atlas-noderow > .loom-atlas-node {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.loom-atlas-plus {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--loom-border);
+  border-radius: var(--loom-radius-sm);
+  color: var(--loom-text-muted);
+  font-family: var(--loom-font-mono);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 80ms linear,
+    border-color 80ms linear;
+}
+.loom-atlas-plus:hover {
+  color: var(--loom-phosphor);
+  border-color: var(--loom-border-strong);
+}
+.loom-atlas-plus:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: 1px;
+}
+
+@media (max-width: 820px) {
+  /* One column: at phone width the two node panels are read in sequence, not compared. */
+  .loom-agentsplit {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* The band panel's height cap is released at this width (see the rule above), so the
+     roster no longer scrolls inside it and the sticky treatment has nothing to stick to. */
+  .loom-bandbody > .loom-agentnote {
+    position: static;
+    margin-bottom: 0;
+  }
+}
+
 /* Honor reduced-motion: drop the cosmetic hover/active transitions + the mic pulse + overlay entrance. */
 @media (prefers-reduced-motion: reduce) {
   .loom-btn,
@@ -1781,7 +2036,9 @@ button.loom-kpi.is-open {
   .loom-atlas-twist,
   /* The Atlas home nodes' own hover fades (card fd99b2d7) — the KPI tiles and the project cards. */
   .loom-kpi,
-  .loom-projcard {
+  .loom-projcard,
+  /* The Atlas tree's quick-spawn `＋` (card c6160c7d). */
+  .loom-atlas-plus {
     transition: none;
   }
   .loom-mic-pulse {

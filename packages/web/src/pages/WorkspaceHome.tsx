@@ -7,11 +7,13 @@ import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { useOpenRequest } from "../components/requests";
 import { AttentionRow, EventRow } from "../components/fleet";
-import { Badge, Button, Dot, Panel } from "../components/ui";
+import { Badge, Button, Dot, Panel, StatusPill } from "../components/ui";
 import {
   BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs, SlotPanel,
   type KpiItem,
 } from "../components/atlasHome";
+import { RoleBadge } from "../lib/roleDisplay";
+import { sessionVitals, standingOperators } from "../lib/atlasAgents";
 import {
   boardRollup, gateLanes, isLiveSession, lastMergeByProject, liveCountsByProject, mergeThroughput,
   plural, relativeTime, useGateHistoryRecent, useGatesActive,
@@ -59,6 +61,8 @@ export default function WorkspaceHome() {
   const managers = live.filter((s) => s.role === "manager");
   const workers = live.filter((s) => s.role === "worker");
   const liveByProject = useMemo(() => liveCountsByProject(sessions), [sessions]);
+  // Off the FULL session list, not `fleet`: these are exactly the rows the fleet filter removes.
+  const operators = useMemo(() => standingOperators(sessions), [sessions]);
   const activeProjects = projects.filter((p) => (liveByProject.get(p.id) ?? 0) > 0);
 
   const lanes = gateLanes(activeGatesQ.data);
@@ -155,6 +159,18 @@ export default function WorkspaceHome() {
       <AttentionList items={attention} cap={6} />
     </BandPanel>
   );
+  // The standing, cross-project operators — the complement of the fleet counts above, which
+  // deliberately exclude them (card c6160c7d).
+  //
+  // @decision c6160c7d — a READOUT. Never put a second go-live control for the Platform Lead or
+  // the Companion here: each is a singleton whose spawn is gated by its own surface's rules, and a
+  // second copy of that gating is one that drifts.
+  const operatorsPanel = (
+    <BandPanel label="Operators" count={operators.length} action={{ to: "/platform", label: "Platform" }}
+      testId="atlas-band-operators">
+      <OperatorList operators={operators} />
+    </BandPanel>
+  );
   const gatePanel = (
     <BandPanel label="Gate lanes" count={`cap ${lanes.cap}`} action={{ to: "/gates", label: "Gates" }} testId="atlas-band-gates">
       <GateLaneList lanes={lanes} />
@@ -187,8 +203,7 @@ export default function WorkspaceHome() {
             what="Clear usage hold · Pause · Resume · Kill all — daemon-global, every project." />
           <div className="loom-atlas-band">
             {needsPanel}
-            <SlotPanel slot="operators" label="Operators" card="the Agents card (P2-2)"
-              what="The cross-project standing operators — Platform Lead and Companion — with their go-live controls." />
+            {operatorsPanel}
             {gatePanel}
             <BandPanel label="Plan usage" action={{ to: "/usage", label: "Usage" }} testId="atlas-band-plan">
               <PlanUsageDetail usage={usage} />
@@ -221,6 +236,7 @@ export default function WorkspaceHome() {
           </section>
           <aside className="loom-atlas-deckrail">
             {needsPanel}
+            {operatorsPanel}
             {gatePanel}
             {pulsePanel}
           </aside>
@@ -260,6 +276,51 @@ export function AttentionList({ items, cap }: { items: ReturnType<typeof useAtte
       {items.length > shown.length && (
         <BandFoot>+{items.length - shown.length} more in the Inbox</BandFoot>
       )}
+    </>
+  );
+}
+
+/**
+ * The standing operators, as a status read with a way out to the surface that owns each one.
+ *
+ * Deliberately NOT a second place to start or stop one: a Platform Lead's spawn is gated by the
+ * install's edition and a singleton rule that live on the Platform node, and a Companion is
+ * provisioned by a wizard, not a split button. The exits carry the reader to the real control
+ * rather than this panel carrying a second, thinner copy of the gating around it.
+ */
+function OperatorList({ operators }: { operators: ReturnType<typeof standingOperators> }) {
+  if (operators.length === 0) {
+    return (
+      <>
+        <BandEmpty>No standing operator is running.</BandEmpty>
+        <BandFoot>
+          Start the Platform Lead from the <Link to="/platform" className="loom-inlinelink">Platform</Link> node,
+          or provision a companion from <Link to="/companion" className="loom-inlinelink">Companion</Link>.
+        </BandFoot>
+      </>
+    );
+  }
+  return (
+    <>
+      {operators.map(({ session, role, home }) => (
+        <div key={session.id} className="loom-operrow" data-testid={`atlas-operator-${session.id}`}>
+          <div className="loom-agentrow-head">
+            <RoleBadge role={role} />
+            <strong className="loom-agentrow-name" title={session.agentName}>{session.agentName}</strong>
+            <span style={{ flex: 1 }} />
+            <StatusPill tone={session.busy ? "amber" : "phosphor"} glow={session.busy}
+              label={session.busy ? "busy" : "live"} />
+          </div>
+          <div className="loom-operrow-foot">
+            <span className="loom-agentrow-meta">{sessionVitals(session) || session.projectName}</span>
+            <span style={{ flex: 1 }} />
+            <Link to={home.to} className="loom-inlinelink" title={`Manage this operator on ${home.label}`}>
+              {home.label} <span aria-hidden>↗</span>
+            </Link>
+          </div>
+        </div>
+      ))}
+      <BandFoot>Cross-project operators. Their controls live on the surface that owns each one.</BandFoot>
     </>
   );
 }
