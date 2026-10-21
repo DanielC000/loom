@@ -91,6 +91,11 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   // Card c07ff42a (P2-4): the Platform node became a five-tab node (Home / Cadence / History / Board /
   // Findings) carrying both editions, replacing the single-column stack the classic page still renders.
   "/platform": "c07ff42a — rebuilt as the five-tab Platform node",
+  // Card e2af6ad7 (P2-6): the Companion node carries its three modes (Chat / Manage / Terminal) on its
+  // own `?tab=`, with Manage's twelve sections on a nested `?sec=`, replacing the one bordered card the
+  // classic page still renders. Only THIS map — no legacy redirect targets /companion, so naming it in
+  // atlas-legacy-redirects.spec.ts's own copy would fail that spec's positive control.
+  "/companion": "e2af6ad7 — rebuilt as the Companion node's Chat / Manage / Terminal tabs",
 };
 
 async function routesFrom(page: Page, selector: string): Promise<string[]> {

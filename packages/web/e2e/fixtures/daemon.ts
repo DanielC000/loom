@@ -276,6 +276,16 @@ export interface LoomDaemon {
     memoryContent?: string;
     reminderLabel?: string;
     reminderPrompt?: string;
+    /**
+     * (card e2af6ad7) Register a canned, no-process pty for this companion's session — which also makes
+     * its row LIVE — so the Companion page's own read-only Terminal genuinely ATTACHES. Without it the
+     * seeded session is `exited`/`dead`, the terminal's `/ws/term` socket never opens, and
+     * TerminalPane's stdin write is gated on `readyState === OPEN`: a spec asserting "typing put no
+     * stdin frame on the wire" would then pass whether or not the watch-only guard works at all. Either
+     * key alone is enough, same contract as {@link LoomDaemon.seedLiveSession}'s own pair.
+     */
+    ptyGeometry?: { cols: number; rows: number };
+    ptyBytes?: string;
   }) => Promise<SeededCompanion>;
   /**
    * Seed browsable companion conversation HISTORY (card 59e8e0c9: the conversation-history browser e2e) via
@@ -709,7 +719,11 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       const memoryName = opts.memoryName ?? "user-preferences";
       const reminderLabel = opts.reminderLabel ?? "Morning check-in";
       await apiPost(baseURL, "/internal/test/seed", {
-        companionSessions: [{ id: sessionId, projectId: project.id, agentId: agent.id }],
+        companionSessions: [{
+          id: sessionId, projectId: project.id, agentId: agent.id,
+          ...(opts.ptyGeometry ? { ptyGeometry: opts.ptyGeometry } : {}),
+          ...(typeof opts.ptyBytes === "string" ? { ptyBytes: opts.ptyBytes } : {}),
+        }],
         companionConfigs: [{
           sessionId, enabled: true, name,
           // Card e8282e02: a fresh token PER CALL by default — the shared constant this used to default

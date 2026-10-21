@@ -3406,7 +3406,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // spec's GLOBAL "no live sessions" empty-state (e.g. the Usage page's Live-occupancy plane). Sets
         // archived_at (db.archiveSession); an unknown id is a harmless no-op.
         archiveSessions?: string[];
-        companionSessions?: { id?: string; projectId: string; agentId: string; title?: string }[];
+        companionSessions?: {
+          id?: string; projectId: string; agentId: string; title?: string;
+          // (card e2af6ad7) A LIVE companion session with a canned, no-process pty — the only way an e2e
+          // spec can prove the Companion Terminal's watch-only guarantee from the Companion page itself.
+          // The default `exited`/`dead` row below leaves the terminal's `/ws/term` attach closed, and
+          // TerminalPane's stdin write is gated on `socket.readyState === OPEN` — so a spec asserting
+          // "typing put NO stdin frame on the wire" against a dead row passes whether or not the
+          // read-only guard works at all. With the socket genuinely OPEN, a broken guard DOES emit.
+          // Either key alone registers the entry, exactly as `liveSessions[]`'s own pair does.
+          ptyGeometry?: { cols: number; rows: number };
+          ptyBytes?: string;
+        }[];
         companionConfigs?: {
           sessionId: string; enabled?: boolean; name?: string; botToken?: string; channel?: string;
           allowedChatId?: string; chatScope?: "dm" | "group";
@@ -3575,12 +3586,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         if (!project) return reply.code(400).send({ error: `companionSessions[]: no project ${s.projectId}` });
         const id = typeof s.id === "string" && s.id ? s.id : randomUUID();
         const now = new Date().toISOString();
+        // A canned pty entry also makes the row LIVE: a session the terminal can genuinely attach to but
+        // whose DB row still says `exited` would be two different stories about the same session, and the
+        // page chrome reads the row. Asking for replay is asking for a live session.
+        const canned = !!s.ptyGeometry || typeof s.ptyBytes === "string";
         const row: Session = {
           id, projectId: s.projectId, agentId: s.agentId, engineSessionId: null,
-          title: s.title ?? null, cwd: project.repoPath, processState: "exited", resumability: "dead",
+          title: s.title ?? null, cwd: project.repoPath,
+          processState: canned ? "live" : "exited", resumability: canned ? "resumable" : "dead",
           busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
         };
         deps.db.insertSession(row);
+        if (canned) {
+          deps.pty.seedCanned({
+            id, cwd: project.repoPath,
+            geometry: s.ptyGeometry ?? resolveConfig(project.config).pty,
+            bytes: Buffer.from(s.ptyBytes ?? "", "utf8"),
+          });
+        }
         companionSessionIds.push(id);
       }
       // Companion config row: same upsert the real (human-only) config writer uses, but skipping the

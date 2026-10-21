@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { resolveConfig, type CompanionConfigMasked, type CompanionBinding, type CompanionCapabilityGrant, type Project } from "@loom/shared";
 import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
@@ -13,9 +14,16 @@ import {
   reminderTitle, humanCron, reminderNextFireAt,
   type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
-import { Panel, Button, Input, Select, SectionLabel, Badge, StatusPill, Chip, Dot } from "../components/ui";
+import {
+  COMPANION_MANAGE_GROUPS, COMPANION_MANAGE_SECTIONS, COMPANION_MODES, manageSectionsInGroup,
+  resolveCompanionMode, resolveManageGroup,
+  type CompanionManageGroup, type CompanionManageSectionKey, type CompanionMode,
+} from "../lib/companionManage";
+import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, StatusPill, Chip, Dot } from "../components/ui";
+import { NodeTabs } from "../components/atlasHome";
 import { CompanionChatPanel } from "../components/CompanionChat";
 import { TerminalCard } from "../components/TerminalCard";
+import { useAtlasUi } from "../lib/atlasUi";
 import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
 import { color, font, radius } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
@@ -61,6 +69,10 @@ interface CompanionRow { sessionId: string; config?: CompanionConfigMasked; bind
 
 export default function Companion() {
   const qc = useQueryClient();
+  // Which LAYOUT renders the resolved companions — nothing else, and read here ONCE so neither layout
+  // ever consults the switch itself (same posture as PlatformView's own layout split, card c07ff42a).
+  // Everything either layout needs arrives as a prop.
+  const [atlasOn] = useAtlasUi();
 
   const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
@@ -156,40 +168,126 @@ export default function Companion() {
   // Show the create form when the owner opted in (creating) OR there's simply no companion to show yet.
   const showCreate = creating || (!selected && !loading);
 
+  // Everything either layout renders, resolved once here and spread into whichever one the switch
+  // selected — so the two can never disagree about which companion is in focus or what it may do.
+  const surface: CompanionSurface = {
+    companions, alertingIds, selected, showCreate,
+    onCreate: (name) => provision.mutate(name),
+    createPending: provision.isPending,
+    createError: provision.error as CompanionProvisionError | null,
+    // Cancel is offered only when there's a companion to return to (the additional-companion flow); when
+    // the create box IS the page (no companion yet) there's nothing to cancel back to.
+    onCancelCreate: selected ? () => { setCreating(false); provision.reset(); } : undefined,
+    onSelect: setSelectedId,
+    onNew: () => { setCreating(true); provision.reset(); },
+    onChanged: invalidateAll,
+    // A delete drops the focus back to the first remaining companion (or the create box if it was the last).
+    onDeleted: () => { setSelectedId(null); invalidateAll(); },
+  };
+  return atlasOn ? <AtlasCompanionLayout {...surface} /> : <ClassicCompanionLayout {...surface} />;
+}
+
+/** Everything a layout renders, resolved by the page above. A layout derives nothing of its own. */
+interface CompanionSurface {
+  companions: CompanionRow[];
+  alertingIds: ReadonlySet<string>;
+  /** The companion in focus, or null while the list is still loading / there are none. */
+  selected: CompanionRow | null;
+  /** True ⇒ the create box replaces the focused companion (opted in, or there is nothing to show yet). */
+  showCreate: boolean;
+  onCreate: (name: string) => void;
+  createPending: boolean;
+  createError: CompanionProvisionError | null;
+  onCancelCreate?: () => void;
+  onSelect: (sessionId: string) => void;
+  onNew: () => void;
+  onChanged: () => void;
+  onDeleted: () => void;
+}
+
+// ── The CLASSIC layout — today's page, unchanged ────────────────────────────────────────────────
+// One bordered card holding the switcher and the focused companion's own Chat/Manage/Terminal switch
+// (CompanionDetail, which owns its mode as React state). Untouched until phase 3 of the Atlas plan.
+function ClassicCompanionLayout({
+  companions, alertingIds, selected, showCreate, onCreate, createPending, createError, onCancelCreate,
+  onSelect, onNew, onChanged, onDeleted,
+}: CompanionSurface) {
   return (
     <div style={{ maxWidth: 1180 }}>
       <Panel style={{ display: "flex", flexDirection: "column", minHeight: "72vh", padding: 14 }}>
         {showCreate ? (
-          <CompanionCreate
-            onCreate={(name) => provision.mutate(name)}
-            pending={provision.isPending}
-            error={provision.error as CompanionProvisionError | null}
-            // Cancel is offered only when there's a companion to return to (the additional-companion flow); when
-            // the create box IS the page (no companion yet) there's nothing to cancel back to.
-            onCancel={selected ? () => { setCreating(false); provision.reset(); } : undefined}
-          />
+          <CompanionCreate onCreate={onCreate} pending={createPending} error={createError} onCancel={onCancelCreate} />
         ) : selected ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, minHeight: 0 }}>
             <CompanionSwitcher
               companions={companions}
               alertingIds={alertingIds}
               selectedId={selected.sessionId}
-              onSelect={setSelectedId}
-              onNew={() => { setCreating(true); provision.reset(); }}
+              onSelect={onSelect}
+              onNew={onNew}
             />
             <CompanionDetail
               key={selected.sessionId}
               companion={selected}
               label={companionDisplayName(selected.config)}
-              onChanged={invalidateAll}
-              // A delete drops the focus back to the first remaining companion (or the create box if it was the last).
-              onDeleted={() => { setSelectedId(null); invalidateAll(); }}
+              onChanged={onChanged}
+              onDeleted={onDeleted}
             />
           </div>
         ) : (
           <p style={{ color: color.textMuted, padding: 12 }}>Loading…</p>
         )}
       </Panel>
+    </div>
+  );
+}
+
+// ── The ATLAS layout — the Companion tree node ──────────────────────────────────────────────────
+// Card e2af6ad7 (Atlas build plan P2-6). The node's own tab row carries the three modes; Manage's
+// twelve sections become four sub-sections under it. The Atlas frame already renders "Companion" as
+// the page's one <h1>, so there is no card wrapper and no repeated heading here — the content column
+// IS the node.
+//
+// @decision e2af6ad7 — a mode is a TAB on this node's own path (`?tab=`), never a tree node of its
+// own and never React state: it has to survive a reload and be linkable, and the companion picker
+// above it is shared by all three.
+function AtlasCompanionLayout({
+  companions, alertingIds, selected, showCreate, onCreate, createPending, createError, onCancelCreate,
+  onSelect, onNew, onChanged, onDeleted,
+}: CompanionSurface) {
+  return (
+    <div className="loom-companion-node">
+      {showCreate ? (
+        <CompanionCreate onCreate={onCreate} pending={createPending} error={createError} onCancel={onCancelCreate} />
+      ) : selected ? (
+        <>
+          {/* Who is in focus, and the picker for changing that, on ONE row. The classic card keeps them
+              on two, but there the picker sits inside a bordered panel that gives the row a reason to
+              exist; in the Atlas column a lone "+ New companion" button reads as an empty band above
+              the content. The switcher's own trailing spacer still pushes that button to the right. */}
+          <div className="loom-companion-ident">
+            <CompanionIdentity companion={selected} label={companionDisplayName(selected.config)} />
+            <div className="loom-companion-switch">
+              <CompanionSwitcher
+                companions={companions}
+                alertingIds={alertingIds}
+                selectedId={selected.sessionId}
+                onSelect={onSelect}
+                onNew={onNew}
+              />
+            </div>
+          </div>
+          <AtlasCompanionDetail
+            key={selected.sessionId}
+            companion={selected}
+            label={companionDisplayName(selected.config)}
+            onChanged={onChanged}
+            onDeleted={onDeleted}
+          />
+        </>
+      ) : (
+        <p style={{ color: color.textMuted }}>Loading…</p>
+      )}
     </div>
   );
 }
@@ -531,7 +629,8 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
 }
 
 // ── Detail: chat surface (default face) + config editor + access + pairing ───────
-type CompanionMode = "chat" | "manage" | "terminal";
+// `CompanionMode` is declared once, in lib/companionManage.ts, so the classic switch below and the Atlas
+// node tabs can never offer a different set of modes.
 
 function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   companion: CompanionRow; label: string; onChanged: () => void; onDeleted: () => void;
@@ -547,12 +646,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: 1, minHeight: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</strong>
-        {companion.config
-          ? <Badge tone={companion.config.enabled ? "phosphor" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
-          : <Badge tone="cyan">binding only</Badge>}
-        {companion.config?.envPinned && <Badge tone="amber">pinned by env</Badge>}
-        {companion.config && companion.bindings.length === 0 && <Badge tone="amber">not reachable — no binding</Badge>}
+        <CompanionIdentity companion={companion} label={label} />
         <span style={{ flex: 1 }} />
         <ModeToggle mode={mode} onMode={setMode} />
       </div>
@@ -568,20 +662,14 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           <CompanionTerminal sessionId={companion.sessionId} />
         </div>
       ) : (
+        // One column, every section, in COMPANION_MANAGE_SECTIONS' own order — which IS this column's
+        // historical order. The Fragment wrappers render no DOM, so the twelve sections are still the
+        // twelve direct children of this flex column they have always been.
         <div role="tabpanel" id="companion-panel-manage" aria-labelledby="companion-tab-manage"
           style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <ConfigSection companion={companion} onChanged={onChanged} />
-          <ProactiveHomeSection sessionId={companion.sessionId} />
-          <VoiceProvisioningSection />
-          <ChannelsSection companion={companion} onChanged={onChanged} />
-          <PersonaSection sessionId={companion.sessionId} />
-          <SkillsSection sessionId={companion.sessionId} />
-          <MemorySection sessionId={companion.sessionId} />
-          <RemindersSection sessionId={companion.sessionId} />
-          <RestrictToolsSection sessionId={companion.sessionId} />
-          <CapabilityGrantsSection sessionId={companion.sessionId} companionName={label} />
-          <PairingSection sessionId={companion.sessionId} />
-          <DeleteCompanionSection companion={companion} label={label} onDeleted={onDeleted} />
+          {COMPANION_MANAGE_SECTIONS.map((s) => (
+            <Fragment key={s.key}>{manageSection(s.key, { companion, label, onChanged, onDeleted })}</Fragment>
+          ))}
         </div>
       )}
     </div>
@@ -618,6 +706,174 @@ function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: Compani
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// The focused companion's name and the four state badges that qualify it — rendered by BOTH layouts, so
+// a new badge lands on the classic page and the Atlas node together. A Fragment, so each layout owns its
+// own row: the classic one pushes the mode switch to the right of these, the Atlas node does not.
+//
+// The name is NOT redundant with the Atlas node's own <h1>, which reads "Companion" (the destination),
+// never this companion's name — and the switcher above hides its picker entirely when there is only one
+// companion, so without this the single-companion case would show its name nowhere at all.
+function CompanionIdentity({ companion, label }: { companion: CompanionRow; label: string }) {
+  return (
+    <>
+      <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</strong>
+      {companion.config
+        ? <Badge tone={companion.config.enabled ? "phosphor" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
+        : <Badge tone="cyan">binding only</Badge>}
+      {companion.config?.envPinned && <Badge tone="amber">pinned by env</Badge>}
+      {companion.config && companion.bindings.length === 0 && <Badge tone="amber">not reachable — no binding</Badge>}
+    </>
+  );
+}
+
+/** What every Manage section needs. Resolved by whichever layout is rendering; a section derives nothing. */
+interface ManageContext {
+  companion: CompanionRow;
+  label: string;
+  onChanged: () => void;
+  onDeleted: () => void;
+}
+
+// The ONE place a Manage section key becomes a component. Both layouts go through it, so a section can
+// never reach the classic column and miss an Atlas group (or the reverse) — the failure that would
+// otherwise be invisible, since each layout renders only under its own Atlas-switch state.
+//
+// Every section here is the component the classic page has always rendered, with the props it has always
+// received. That is what keeps each control's gating, confirm step and human-only posture identical in
+// both layouts rather than re-stated in two places — capability grants and lead mode above all.
+function manageSection(key: CompanionManageSectionKey, ctx: ManageContext): ReactNode {
+  const { companion, label, onChanged, onDeleted } = ctx;
+  switch (key) {
+    case "config": return <ConfigSection companion={companion} onChanged={onChanged} />;
+    case "home": return <ProactiveHomeSection sessionId={companion.sessionId} />;
+    case "voice": return <VoiceProvisioningSection />;
+    case "channels": return <ChannelsSection companion={companion} onChanged={onChanged} />;
+    case "persona": return <PersonaSection sessionId={companion.sessionId} />;
+    case "skills": return <SkillsSection sessionId={companion.sessionId} />;
+    case "memory": return <MemorySection sessionId={companion.sessionId} />;
+    case "reminders": return <RemindersSection sessionId={companion.sessionId} />;
+    case "restricted-tools": return <RestrictToolsSection sessionId={companion.sessionId} />;
+    case "capabilities": return <CapabilityGrantsSection sessionId={companion.sessionId} companionName={label} />;
+    case "pairing": return <PairingSection sessionId={companion.sessionId} />;
+    case "delete": return <DeleteCompanionSection companion={companion} label={label} onDeleted={onDeleted} />;
+  }
+}
+
+// ── The Atlas Companion node: the three modes as node tabs ──────────────────────────────────────
+// Card e2af6ad7. Same three modes the classic ModeToggle offers, same components under them — what
+// changed is that a mode is now an address (`?tab=`), so it is linkable and survives a reload.
+//
+// ⛔ Chat and Manage STAY MOUNTED; the inactive one is HIDDEN, never unmounted. Both hold unsaved user
+// input (a composer draft; form state in nine of the twelve Manage sections) and a tab click is not
+// consent to discard it. `hidden` — not a `display:none` style — is also what keeps a hidden panel out
+// of the accessibility tree and the tab order, so a keyboard user can never reach a capability-grant
+// control on a panel they are not looking at. ⛔ Never put an inline `display` on those wrappers: an
+// author `display` out-specifies the UA's `[hidden]` rule and would silently un-hide them, which is why
+// the chat pane's own flex column sits on an INNER div rather than on the wrapper.
+//
+// @decision e2af6ad7 — the Terminal panel is the deliberate exception and mounts only while active: it
+// is read-only, so there is no draft to protect, and mounting it costs a live xterm + pty attach on
+// every visit to this node. The classic page already unmounts it on a mode switch.
+function AtlasCompanionDetail({ companion, label, onChanged, onDeleted }: {
+  companion: CompanionRow; label: string; onChanged: () => void; onDeleted: () => void;
+}) {
+  const [params] = useSearchParams();
+  const mode = resolveCompanionMode(params.get("tab"));
+  // Carried across the mode links so Chat → Manage returns to the section you left. Inert outside
+  // Manage, and deliberately NOT React state: a "last section" the URL doesn't carry is a surprise on
+  // reload and unshareable in a link.
+  const sec = params.get("sec");
+  const armed = isArmedInApp(companion.bindings, companion.sessionId);
+
+  const hrefFor = (key: string) => {
+    const next = new URLSearchParams();
+    // Chat is canonical, so its address is the bare node path — the same shape the other Atlas nodes
+    // give their first tab.
+    if (key !== "chat") next.set("tab", key);
+    if (sec) next.set("sec", sec);
+    const query = next.toString();
+    return query ? `/companion?${query}` : "/companion";
+  };
+
+  return (
+    <>
+      <NodeTabs tabs={COMPANION_MODES} active={mode} hrefFor={hrefFor} />
+
+      <div hidden={mode !== "chat"} data-testid="companion-mode-panel-chat">
+        {/* A definite height is what lets the message list scroll inside the pane rather than growing the
+            node's own column — the same budget the classic card's own 72vh gave it, less the Atlas
+            frame's crumb bar and tab row. */}
+        <div style={{ display: "flex", flexDirection: "column", minHeight: "64vh" }}>
+          {/* `visible` re-pins a bottom-pinned reader when this panel comes back. While hidden the pane is
+              display:none, so its scrollHeight is 0 and the autoscroll effect parks scrollTop at 0 —
+              without this, returning to Chat after a message arrived landed you at the TOP of the
+              conversation with no unread badge to explain it. */}
+          <CompanionChatPanel sessionId={companion.sessionId} title={label} armed={armed} visible={mode === "chat"} />
+        </div>
+      </div>
+
+      <div hidden={mode !== "manage"} data-testid="companion-mode-panel-manage">
+        <AtlasManagePanel companion={companion} label={label} onChanged={onChanged} onDeleted={onDeleted} />
+      </div>
+
+      {mode === "terminal" && (
+        <div data-testid="companion-mode-panel-terminal" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <CompanionTerminal sessionId={companion.sessionId} />
+        </div>
+      )}
+    </>
+  );
+}
+
+// Manage's twelve sections as four sub-sections — card e2af6ad7's §J.1 answer to "none of the ten Manage
+// sections has ever been placed individually". Grouped by what they govern (lib/companionManage.ts), on
+// `?sec=` so a section is as linkable as a mode.
+//
+// All four panels stay mounted for the same reason the modes do: nine of the twelve sections hold form
+// state. The cost — twelve sections' queries polling at once — is exactly what the classic column
+// already does, so it is the status quo rather than a new one.
+function AtlasManagePanel({ companion, label, onChanged, onDeleted }: ManageContext) {
+  const [params, setParams] = useSearchParams();
+  const group = resolveManageGroup(params.get("sec"));
+  // Built from the CURRENT params so `?tab=manage` survives the write; `replace` keeps sub-section
+  // switches out of the history stack, so Back leaves the node rather than walking back through them.
+  const setGroup = (next: CompanionManageGroup) => {
+    const merged = new URLSearchParams(params);
+    merged.set("sec", next);
+    setParams(merged, { replace: true });
+  };
+  const ctx: ManageContext = { companion, label, onChanged, onDeleted };
+
+  return (
+    <div className="loom-companion-manage">
+      <div className="loom-companion-manage-head">
+        <Segmented value={group} onChange={setGroup} items={COMPANION_MANAGE_GROUPS} ariaLabel="Companion manage sections" />
+        {/* One line saying what the chosen group decides. Only the active group's line is rendered — a
+            caption per panel would stack four of them into a paragraph nobody reads. */}
+        <p className="loom-companion-manage-blurb">
+          {COMPANION_MANAGE_GROUPS.find((g) => g.key === group)?.blurb}
+        </p>
+      </div>
+
+      {COMPANION_MANAGE_GROUPS.map((g) => (
+        <div key={g.key} hidden={g.key !== group} data-testid={`companion-manage-panel-${g.key}`}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            {/* One addressable wrapper per section, so "which sub-section is this control in?" is an
+                exact question. A section's own prose legitimately NAMES a sibling section (the run
+                config's pointer at Delete companion, for one), so a text-only check cannot tell a
+                heading from a cross-reference — it reads a mention as a misplacement. The classic
+                column deliberately does NOT get these wrappers: it renders the sections as its own
+                direct children and must stay byte-identical. */}
+            {manageSectionsInGroup(g.key).map((key) => (
+              <div key={key} data-testid={`companion-section-${key}`}>{manageSection(key, ctx)}</div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -726,7 +982,12 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
           <p style={{ ...hint, margin: 0 }}>
             The proactive <strong style={{ color: color.text }}>home</strong> is per-companion — manage it under{" "}
             <strong style={{ color: color.text }}>Proactive home</strong> below in this Manage tab. To remove the
-            whole companion, use <strong style={{ color: color.text }}>Delete companion</strong> at the bottom of this tab.
+            whole companion, use the <strong style={{ color: color.text }}>Delete companion</strong> section.
+            {/* Named, not LOCATED: "at the bottom of this tab" was true of the classic single column and
+                false on the Atlas node, where Delete sits under Trust (card e2af6ad7). A section cannot
+                know which layout is rendering it — that is the whole point of the layout split — so the
+                pointer has to be true in both. "Proactive home below" survives: it is in this same
+                sub-section either way. */}
           </p>
         </>
       ) : (

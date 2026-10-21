@@ -1360,6 +1360,87 @@ button.loom-atlas-node.is-branch.is-open {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── Atlas Companion node (card e2af6ad7) ─────────────────────────────────────────────
+   The node column itself: the companion picker, the Chat/Manage/Terminal tab row, then the
+   active panel. No card wrapper — the Atlas frame's own crumb bar and <h1> are the chrome,
+   and a bordered panel around the whole column would read as a second one. */
+.loom-companion-node {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  /* The chat column reads as prose, so it keeps a measure rather than running to a wide
+     viewport's full width. Manage's forms and the pty pane inherit the same bound, which is
+     what keeps the three modes feeling like one surface instead of three widths. */
+  max-width: 1180px;
+}
+/* Who is in focus, then the picker, on one row. The picker takes the slack so its own trailing
+   "+ New companion" lands at the right edge; below ~560px it wraps to its own line instead of
+   crushing the companion's name. */
+.loom-companion-ident {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.loom-companion-switch {
+  display: flex;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.loom-companion-switch > * {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The chat pane's history rail + conversation column (components/CompanionChat.tsx). Side by side on a
+   real screen; STACKED below the narrow breakpoint, where a 232px non-shrinking rail otherwise left the
+   message column a few characters wide and pushed the connection pill past the right edge (measured at
+   420px — a defect the classic page has too, not one Atlas introduced). Both shells render this pane,
+   so both get the fix. */
+.loom-companion-chatsplit {
+  display: flex;
+  min-width: 0;
+}
+.loom-companion-histrail {
+  width: 232px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+@media (max-width: 820px) {
+  .loom-companion-chatsplit {
+    flex-direction: column;
+  }
+  .loom-companion-histrail {
+    width: auto;
+    flex-shrink: 1;
+    /* Capped so the rail can never push the live conversation off the bottom of a phone screen; its own
+       list already scrolls inside this. */
+    max-height: 24vh;
+  }
+}
+
+/* Manage's four sub-sections. The row is indented from the node tabs above it and carries no
+   underline of its own, so the node's own tab row stays the louder of the two — one glance
+   says which mode you are in, a second says which part of it. */
+.loom-companion-manage {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.loom-companion-manage-head {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.loom-companion-manage-blurb {
+  margin: 0;
+  max-width: 68ch;
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--loom-text-muted);
+}
+
 /* ── KPI deck ──────────────────────────────────────────────────────────────────────────
    Six readouts, full size. auto-fit rather than a fixed six, so the deck folds 6 → 3 → 2
    on its own as the column narrows and no breakpoint has to know the count. */

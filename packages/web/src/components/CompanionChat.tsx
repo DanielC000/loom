@@ -85,8 +85,16 @@ const BOTTOM_SLACK_PX = 80;
 // mechanics never engage. Capped, not fixed, so a short conversation still collapses to its content.
 const SCROLL_MAX_HEIGHT = "62vh";
 
-export function CompanionChat({ sessionId, title, armed, onConversationArchived }: {
+export function CompanionChat({ sessionId, title, armed, visible = true, onConversationArchived }: {
   sessionId: string; title?: string; armed?: boolean;
+  // FALSE ⇒ mounted but hidden (the Atlas Companion node keeps this pane mounted across a mode switch
+  // so the composer draft survives). Flipping back to true re-pins a reader who was at the live edge.
+  // Default true ⇒ the classic page behaves exactly as before.
+  //
+  // @decision e2af6ad7 — never replace this with a save/restore of scrollTop around the hide: the
+  // browser already restores it correctly, and doing so would also drag a scrolled-up reader to the
+  // bottom. Only the at-bottom case is broken, and only a re-pin fixes it.
+  visible?: boolean;
   // Fires when a "/new"/"/reset" archives the current conversation (a live `cleared` frame). The
   // history-browser parent uses it to refetch the conversation list so the just-archived one appears.
   onConversationArchived?: () => void;
@@ -452,6 +460,14 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     const el = scrollRef.current;
     if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [awaitingReply, replyTimedOut]);
+
+  // Re-pin on becoming visible again — see the `visible` prop's own note for the measured failure this
+  // fixes. The effect above cannot do this job: it ran while the pane was display:none, where every
+  // scroll measurement reads 0, so its `scrollTop = scrollHeight` wrote 0 to 0 and changed nothing.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (visible && el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [visible]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -984,7 +1000,11 @@ function notice(t: "amber" | "muted" | "red"): CSSProperties {
 // the rail is hidden entirely, so a fresh single-conversation companion reads exactly as it did before this
 // feature — the live chat sits in the same tree slot whether the rail shows or not, so gaining history never
 // tears down and re-opens the live WebSocket.
-export function CompanionChatPanel({ sessionId, title, armed }: { sessionId: string; title?: string; armed?: boolean }) {
+export function CompanionChatPanel({ sessionId, title, armed, visible = true }: {
+  sessionId: string; title?: string; armed?: boolean;
+  /** Passed straight through to the live chat — see CompanionChat's own `visible` note. */
+  visible?: boolean;
+}) {
   const qc = useQueryClient();
   const convos = useQuery({
     queryKey: ["companionConversations", sessionId],
@@ -1009,13 +1029,18 @@ export function CompanionChatPanel({ sessionId, title, armed }: { sessionId: str
   }, [viewingSeq, convos.data]);
 
   return (
-    <div style={{ display: "flex", gap: hasHistory ? 14 : 0, flex: 1, minHeight: 0 }}>
+    // The split STACKS below the narrow breakpoint (styles/global.css). The rail is a fixed 232px that
+    // does not shrink, so beside it a phone-width viewport left the message column a few characters wide
+    // and pushed the connection pill off the right edge — measured at 420px, on the classic page too.
+    // ⛔ Don't put `flex-direction` back on this element inline: an author style out-specifies the media
+    // query and the stack silently stops happening.
+    <div className="loom-companion-chatsplit" style={{ gap: hasHistory ? 14 : 0, flex: 1, minHeight: 0 }}>
       {hasHistory && (
         <ConversationHistoryRail past={past} viewingSeq={viewingSeq} onSelect={setViewingSeq} />
       )}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
         {viewingSeq === null ? (
-          <CompanionChat sessionId={sessionId} title={title} armed={armed} onConversationArchived={onArchived} />
+          <CompanionChat sessionId={sessionId} title={title} armed={armed} visible={visible} onConversationArchived={onArchived} />
         ) : (
           <PastConversationView sessionId={sessionId} seq={viewingSeq} title={title ?? "Companion"} onBack={() => setViewingSeq(null)} />
         )}
@@ -1031,7 +1056,10 @@ function ConversationHistoryRail({ past, viewingSeq, onSelect }: {
   onSelect: (seq: number | null) => void;
 }) {
   return (
-    <aside aria-label="Conversation history" style={{ width: 232, flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0, gap: 8 }}>
+    // ⛔ `width`/`flex-shrink` live in the class, NOT inline: the narrow-viewport rule has to override
+    // both to let the rail become a short strip above the conversation, and an inline value would win.
+    <aside aria-label="Conversation history" className="loom-companion-histrail"
+      style={{ display: "flex", flexDirection: "column", minHeight: 0, gap: 8 }}>
       <SectionLabel style={{ margin: 0 }}>History</SectionLabel>
       <div style={{ overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column", gap: 6, paddingRight: 2 }}>
         <HistoryRow
