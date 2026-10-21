@@ -7,6 +7,7 @@
 // behind it are derived once, in one place, and cannot disagree.
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import type { UsageLimitsStatus } from "@loom/shared";
 import { Button, Panel, SectionLabel } from "./ui";
 import { useDismissable } from "../lib/useDismissable";
 import type { BoardLane } from "../lib/atlasHome";
@@ -297,4 +298,55 @@ export function DayBars({ series, label }: { series: { day: string; branches: nu
 /** The mono caption used under a panel body — a footer fact, not a second heading. */
 export function BandFoot({ children }: { children: ReactNode }) {
   return <div className="loom-bandfoot" style={{ fontFamily: font.mono }}>{children}</div>;
+}
+
+// ── Plan usage ─────────────────────────────────────────────────────────────────────────────────
+// Lives in the kit rather than on the Workspace node (card 7b893d54) because TWO surfaces read it
+// now: that node's plan tile + band panel, and the fleet-controls pop-over, where the headroom
+// figures are the context that makes "clear usage hold" a judgement rather than a guess. Still
+// fetch-free — the caller hands it a finished value, same as everything else here.
+
+/** `UsageLimitsStatus` is a discriminated union — every window only exists on the AVAILABLE arm, and
+ *  the unavailable one carries a `reason` instead. Narrowing once at the read keeps that check off
+ *  each of the four gauges below. */
+export type AvailableUsage = Extract<UsageLimitsStatus, { available: true }>;
+
+/** The real plan headroom — the daemon's cached OAuth poll, read through the same `["usageLimits"]`
+ *  entry components/fleet.tsx's PlanUsageStrip fills. Every failure mode is a muted line, never an
+ *  error state: the figure is informational and an unavailable one must not look like a fault. */
+export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
+  if (!usage) return <BandEmpty>Plan usage is unavailable on this daemon.</BandEmpty>;
+  // Same thresholds components/fleet.tsx's own `usageTone` uses, and the same ones the CONTEXT
+  // meters read: phosphor < 80% ≤ amber < 95% ≤ red.
+  const t = (u: number): Tone => (u >= 95 ? "red" : u >= 80 ? "amber" : "phosphor");
+  return (
+    <>
+      <MeterRow label="5h session" ratio={usage.fiveHour.utilization / 100}
+        value={`${Math.round(usage.fiveHour.utilization)}%`} tone={t(usage.fiveHour.utilization)} />
+      <MeterRow label="7d weekly" ratio={usage.sevenDay.utilization / 100}
+        value={`${Math.round(usage.sevenDay.utilization)}%`} tone={t(usage.sevenDay.utilization)} />
+      {usage.sevenDayOpus && (
+        <MeterRow label="7d opus" ratio={usage.sevenDayOpus.utilization / 100}
+          value={`${Math.round(usage.sevenDayOpus.utilization)}%`} tone={t(usage.sevenDayOpus.utilization)} />
+      )}
+      {usage.sevenDaySonnet && (
+        <MeterRow label="7d sonnet" ratio={usage.sevenDaySonnet.utilization / 100}
+          value={`${Math.round(usage.sevenDaySonnet.utilization)}%`} tone={t(usage.sevenDaySonnet.utilization)} />
+      )}
+      <BandFoot>5h resets {relativeResets(usage.fiveHour.resetsAt)}.</BandFoot>
+    </>
+  );
+}
+
+/** "in 1h 42m" / "now" / "—" — the countdown grammar components/fleet.tsx's own gauges use. */
+export function relativeResets(resetsAt: string | null): string {
+  if (!resetsAt) return "—";
+  const ms = Date.parse(resetsAt) - Date.now();
+  if (!Number.isFinite(ms)) return "—";
+  if (ms <= 0) return "now";
+  const min = Math.floor(ms / 60_000);
+  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
+  if (d > 0) return `in ${d}d ${h}h`;
+  if (h > 0) return `in ${h}h ${m}m`;
+  return `in ${m}m`;
 }

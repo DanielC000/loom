@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
 import { AtlasTree } from "./AtlasTree";
+import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
 import { ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, type AtlasHome, type NavPage, type ParamPage } from "../nav";
 import { setAtlasUi } from "../lib/atlasUi";
 import { useActiveProject } from "../lib/activeProject";
@@ -131,6 +132,11 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // one), so nothing is highlighted for it — marking some nearby node instead would be a lie.
   const paramAtlas = paramPage?.page.atlas;
   const activeNodeTo = paramAtlas?.kind === "detail" ? paramAtlas.under : undefined;
+  // The peripheral half of the fleet-controls chip (card 7b893d54): a paused fleet changes what every
+  // other node's emptiness MEANS, so the frame itself carries a marker rather than leaving the state to
+  // a chip the reader has to look at. Same shared `["orchStatus"]` entry the chip reads — one
+  // derivation (useOrchestrationPaused), so the bar and the chip cannot disagree on one screen.
+  const orchestrationPaused = useOrchestrationPaused();
 
   // The trail mirrors the tree's own depth rule (AtlasTree's splitByDepth): a god-eye destination
   // hangs off the workspace root, a `scoped` one hangs off the project it is scoped to. So the crumbs
@@ -167,7 +173,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
       <AtlasTree activeTo={activeNodeTo} />
 
       <div className="loom-atlas-main">
-        <header className="loom-atlas-topbar">
+        <header className={`loom-atlas-topbar${orchestrationPaused ? " is-paused" : ""}`}>
           <div className="loom-atlas-crumbs">
             <nav aria-label="Breadcrumb" data-testid="atlas-breadcrumb" style={{ minWidth: 0 }}>
               <ol style={{ display: "flex", alignItems: "center", gap: 8, listStyle: "none", margin: 0, padding: 0,
@@ -195,6 +201,10 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
               </ol>
             </nav>
             <span style={{ flex: 1 }} />
+            {/* The daemon-global fleet state, on EVERY node, and the controls behind it (card
+                7b893d54). The Workspace root carries the same cluster as a full-width bar; this is the
+                mount that makes a paused fleet discoverable without navigating to the root. */}
+            <OrchestrationChip />
             {/* The way back. Settings is a tree node now, so this is no longer the ONLY exit — but it
                 stays: it is one click from anywhere, and a preview whose exit is buried in a settings
                 page is a preview people stop trying. */}

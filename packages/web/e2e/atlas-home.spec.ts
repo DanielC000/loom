@@ -110,8 +110,9 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     // ── The band's second column is REAL, not a declared slot. P2-1 put a placeholder here so the
     //        owner comparing Atlas against the live app could tell "not built yet" from
     //        "deliberately dropped"; card c6160c7d filled it, so the placeholder's absence is now
-    //        the correct state and the panel's presence is what this row asserts. (The remaining
-    //        slot, P2-3's fleet-controls bar, lives on the WORKSPACE node, not this one.)
+    //        the correct state and the panel's presence is what this row asserts. (The other
+    //        placeholder, P2-3's fleet-controls bar, lives on the WORKSPACE node — asserted the
+    //        same way in the workspace-node test below, now that card 7b893d54 has filled it.)
     await expect(page.getByTestId("atlas-band-agents")).toBeVisible();
     await expect(page.getByTestId("atlas-slot-agents")).toHaveCount(0);
   });
@@ -216,6 +217,14 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(tree.getByTestId("atlas-home-project")).not.toHaveClass(/is-active/);
     // The trail stops at the tier — "Workspace", not "Workspace / Home".
     await expect(page.locator(".loom-atlas-nodehead h1")).toHaveText("Workspace");
+
+    // ── P2-1's LAST declared slot is now REAL. Same rule as the Agents panel on the project node:
+    //        card 7b893d54 filled the fleet-controls placeholder, so the bar's presence AND the
+    //        slot's absence are both the correct state. The pair is falsifiable in both directions —
+    //        reverting that card restores a SlotPanel rendering exactly this test id, which is what
+    //        the failure state actually looks like.
+    await expect(page.getByTestId("atlas-fleet-controls-bar")).toBeVisible();
+    await expect(page.getByTestId("atlas-slot-fleet-controls")).toHaveCount(0);
 
     // The grid is the workspace node's primary surface, and it carries this project's REAL board
     // figure — the same 3 the project node's own tile reads, from the same shared cache entry.

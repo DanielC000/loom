@@ -1432,7 +1432,11 @@ button.loom-kpi.is-open {
 
 /* The breakdown. Hangs from the tile, inside the content column's own scroll — the shell's
    topbar is above it in paint order, so a scrolled deck never pushes a panel over the crumbs. */
-.loom-kpi-pop {
+/* The pop-over chrome is shared with the fleet-controls chip (card 7b893d54) rather than copied —
+   two definitions of one panel is two things to keep in visual step. `.loom-orch-pop` only adds the
+   width it needs for a four-control cluster. */
+.loom-kpi-pop,
+.loom-orch-pop {
   position: absolute;
   top: calc(100% + 6px);
   z-index: 60;
@@ -1442,6 +1446,12 @@ button.loom-kpi.is-open {
   border-top: 2px solid var(--loom-phosphor);
   border-radius: var(--loom-radius);
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
+}
+.loom-orch-pop {
+  /* Right-anchored to the chip — in CSS rather than inline, so the narrow-viewport rule below can
+     actually win. The KPI tiles set their own edge inline because theirs varies per tile. */
+  right: 0;
+  width: min(430px, 90vw);
 }
 .loom-kpi-pophead {
   display: flex;
@@ -1567,6 +1577,86 @@ button.loom-kpi.is-open {
   font-size: 10.5px;
   line-height: 1.6;
   color: var(--loom-text-muted);
+}
+
+/* ── Fleet controls (card 7b893d54) ─────────────────────────────────────────────────────
+   One cluster, two mounts: a full-width bar at the Workspace root and a crumb-bar chip whose
+   pop-over holds the same cluster. See components/fleetControls.tsx. */
+.loom-fleetbar {
+  /* NOT a band column: the band's fixed 320px would leave a single control row in a tall box. */
+  height: auto;
+  padding: 9px 12px;
+}
+.loom-fleetbar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  row-gap: 8px;
+  flex-wrap: wrap;
+}
+.loom-fleetbar-note {
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  color: var(--loom-text-muted);
+  white-space: nowrap;
+}
+.loom-fleetctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  row-gap: 6px;
+  flex-wrap: wrap;
+}
+/* In the pop-over the cluster is a block under the gauges, not a trailing inline run. */
+.loom-fleetctl.is-pop {
+  margin-top: 12px;
+}
+.loom-fleetctl-ask {
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  color: var(--loom-red);
+  white-space: nowrap;
+}
+
+.loom-orch-slot {
+  position: relative;
+  flex: none;
+}
+.loom-orchchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  color: var(--loom-text-muted);
+  background: transparent;
+  border: 1px solid var(--loom-border);
+  border-radius: var(--loom-radius-sm);
+  padding: 2px 8px;
+  white-space: nowrap;
+  transition: border-color 120ms cubic-bezier(0.22, 0.61, 0.36, 1), color 120ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.loom-orchchip:hover {
+  border-color: var(--loom-border-strong);
+  color: var(--loom-text-dim);
+}
+.loom-orchchip:focus-visible {
+  outline: 2px solid var(--loom-cyan);
+  outline-offset: 2px;
+}
+/* PAUSED is a state you must not be able to miss from any node — hence both the chip's own colour
+   and the frame's inset below, which reads without being looked at. */
+.loom-orchchip.is-paused {
+  color: var(--loom-red);
+  border-color: rgba(255, 92, 92, 0.5);
+  background: rgba(255, 92, 92, 0.08);
+}
+.loom-atlas-topbar.is-paused {
+  box-shadow: inset 0 2px 0 var(--loom-red);
+}
+@media (prefers-reduced-motion: reduce) {
+  .loom-orchchip { transition: none; }
 }
 
 /* ── Rows shared by the panels and the pop-overs ───────────────────────────────────────── */
@@ -1756,6 +1846,23 @@ button.loom-kpi.is-open {
     left: 0;
     right: auto;
     width: min(380px, calc(100vw - 48px));
+  }
+  /* The fleet-controls chip (card 7b893d54) needs the OPPOSITE treatment to a KPI tile, which is why
+     it cannot simply inherit the rule above: the chip sits mid-row in the crumb bar, so LEFT-anchoring
+     runs the panel off the right edge and right-anchoring runs it off the left (measured: a 372px
+     panel at a slot spanning 120–197px in a 420px viewport leaves the viewport either way). At this
+     width it stops hanging off the chip at all and spans the crumb row instead — `top:calc(100% + 6px)`
+     then resolves against that row, so a row that wraps still pushes the panel below itself. */
+  .loom-atlas-crumbs {
+    position: relative;
+  }
+  .loom-orch-slot {
+    position: static;
+  }
+  .loom-orch-pop {
+    left: 16px;
+    right: 16px;
+    width: auto;
   }
   .loom-kpistrip {
     margin-left: 0;

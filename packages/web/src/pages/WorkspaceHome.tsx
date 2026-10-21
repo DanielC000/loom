@@ -9,9 +9,10 @@ import { useOpenRequest } from "../components/requests";
 import { AttentionRow, EventRow } from "../components/fleet";
 import { Badge, Button, Dot, Panel, StatusPill } from "../components/ui";
 import {
-  BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs, SlotPanel,
-  type KpiItem,
+  BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs,
+  PlanUsageDetail, relativeResets, type KpiItem,
 } from "../components/atlasHome";
+import { FleetControlsBar } from "../components/fleetControls";
 import { RoleBadge } from "../lib/roleDisplay";
 import { sessionVitals, standingOperators } from "../lib/atlasAgents";
 import {
@@ -21,11 +22,6 @@ import {
 import { isCompanionSession } from "../lib/sessions";
 import { color, font, type Tone } from "../theme";
 import { useNavigate } from "react-router-dom";
-
-/** `UsageLimitsStatus` is a discriminated union — every window only exists on the AVAILABLE arm, and
- *  the unavailable one carries a `reason` instead. Narrowing once here keeps that check at the read
- *  rather than at each of the four gauges below. */
-type AvailableUsage = Extract<UsageLimitsStatus, { available: true }>;
 
 // THE WORKSPACE ROOT NODE — card fd99b2d7 (Atlas P2-1, the owner-approved round-4 V2 design:
 // Mockups/2026-10-19 UI Overhaul Round 4). Overview is the default landing (full-size KPI tiles over
@@ -198,9 +194,10 @@ export default function WorkspaceHome() {
         <>
           <KpiDeck items={kpis} />
           {/* The four daemon-global fleet controls (clear usage hold / pause / resume / kill all) take
-              this full-width bar under the deck in the approved design — P2-3's card. */}
-          <SlotPanel bar slot="fleet-controls" label="Fleet controls" card="the fleet-controls card (P2-3)"
-            what="Clear usage hold · Pause · Resume · Kill all — daemon-global, every project." />
+              this full-width bar under the deck in the approved design — card 7b893d54. The Deck tab
+              deliberately does NOT carry it: that tab's whole trade is vertical room for the board, and
+              the crumb-bar chip already reaches these controls from every node including this one. */}
+          <FleetControlsBar />
           <div className="loom-atlas-band">
             {needsPanel}
             {operatorsPanel}
@@ -343,46 +340,6 @@ export function GateLaneList({ lanes }: { lanes: ReturnType<typeof gateLanes> })
       ))}
     </>
   );
-}
-
-/** The real plan headroom — the daemon's cached OAuth poll, read through the same `["usageLimits"]`
- *  entry components/fleet.tsx's PlanUsageStrip fills. Every failure mode is a muted line, never an
- *  error state: the figure is informational and an unavailable one must not look like a fault. */
-export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
-  if (!usage) return <BandEmpty>Plan usage is unavailable on this daemon.</BandEmpty>;
-  // Same thresholds components/fleet.tsx's own `usageTone` uses, and the same ones the CONTEXT
-  // meters read: phosphor < 80% ≤ amber < 95% ≤ red.
-  const t = (u: number): Tone => (u >= 95 ? "red" : u >= 80 ? "amber" : "phosphor");
-  return (
-    <>
-      <MeterRow label="5h session" ratio={usage.fiveHour.utilization / 100}
-        value={`${Math.round(usage.fiveHour.utilization)}%`} tone={t(usage.fiveHour.utilization)} />
-      <MeterRow label="7d weekly" ratio={usage.sevenDay.utilization / 100}
-        value={`${Math.round(usage.sevenDay.utilization)}%`} tone={t(usage.sevenDay.utilization)} />
-      {usage.sevenDayOpus && (
-        <MeterRow label="7d opus" ratio={usage.sevenDayOpus.utilization / 100}
-          value={`${Math.round(usage.sevenDayOpus.utilization)}%`} tone={t(usage.sevenDayOpus.utilization)} />
-      )}
-      {usage.sevenDaySonnet && (
-        <MeterRow label="7d sonnet" ratio={usage.sevenDaySonnet.utilization / 100}
-          value={`${Math.round(usage.sevenDaySonnet.utilization)}%`} tone={t(usage.sevenDaySonnet.utilization)} />
-      )}
-      <BandFoot>5h resets {relativeResets(usage.fiveHour.resetsAt)}.</BandFoot>
-    </>
-  );
-}
-
-/** "in 1h 42m" / "now" / "—" — the countdown grammar components/fleet.tsx's own gauges use. */
-function relativeResets(resetsAt: string | null): string {
-  if (!resetsAt) return "—";
-  const ms = Date.parse(resetsAt) - Date.now();
-  if (!Number.isFinite(ms)) return "—";
-  if (ms <= 0) return "now";
-  const min = Math.floor(ms / 60_000);
-  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
-  if (d > 0) return `in ${d}d ${h}h`;
-  if (h > 0) return `in ${h}h ${m}m`;
-  return `in ${m}m`;
 }
 
 // ── The project grid ───────────────────────────────────────────────────────────────────────────

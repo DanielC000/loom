@@ -14,6 +14,7 @@ import { archivedOnlyProjects, ARCHIVED_ONLY_CAP, resolveAttentionProjectId, typ
 import { ReviewQueue } from "../components/reviewQueue";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import { AuditReplayPanel } from "../components/auditReplay";
+import { ClearUsageHoldButton } from "../components/fleetControls";
 
 // Attention severity ranking — surfaces the REVIEW/decision bottleneck at the top of the queue. Merge
 // requests already live in the dedicated Review queue above; among the rest, a pending human Request (any
@@ -387,21 +388,8 @@ function InactiveFleet({ projects }: { projects: ArchivedOnlyProject[] }) {
   );
 }
 
-// Global usage-hold override: drop the awareness latch (~/.loom/tmp/claude-usage.json) so new
-// worker_spawn is unblocked WITHOUT touching any session — for a transient overload with real
-// headroom (the plan-usage strip above shows the real account figures). HUMAN-only; mirrors the
-// per-session "clear rate limit" but global. Shows a transient "✓ unblocked" on success; alerts on error.
-function ClearUsageHoldButton({ onCleared }: { onCleared: () => void }) {
-  const [done, setDone] = useState(false);
-  const clear = useMutation({
-    mutationFn: () => api.clearUsageHold(),
-    onSuccess: () => { setDone(true); onCleared(); window.setTimeout(() => setDone(false), 4000); },
-  });
-  return (
-    <Button variant="default" disabled={clear.isPending}
-      title="Clear the GLOBAL usage hold (the worker_spawn block) without touching any session — for a transient overload"
-      onClick={() => clear.mutate()}>
-      {done ? "✓ hold cleared" : clear.isPending ? "Clearing…" : "Clear usage hold"}
-    </Button>
-  );
-}
+// The global usage-hold override moved to components/fleetControls.tsx with card 7b893d54 — this page
+// and Atlas's two fleet-control mounts now render ONE implementation of it. Mission Control keeps its
+// own pause/resume/kill mutations above, deliberately: packages/web/test/orchestration-page-removed.mjs
+// pins those three `api.*` names and the literal "Kill all" in THIS file's source text, so lifting them
+// out is a behaviourally perfect refactor that still goes red.
