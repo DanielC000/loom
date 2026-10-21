@@ -38,6 +38,11 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-orch-tool-gating-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 311394b9 — (E) below asserts `daemon_restart` is always-registered, but its registration is
+// gated on isSupervised() (@decision 81331b0e), read live from process.env, not just a peer/deploy gate.
+// This file never exercises the unsupervised polarity, so pin supervised deterministically rather than
+// leaning on the ambient env (unset on a real npm install / ubuntu CI, "1" under this owner's daemon:stable).
+process.env.LOOM_SUPERVISED = "1";
 
 const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();

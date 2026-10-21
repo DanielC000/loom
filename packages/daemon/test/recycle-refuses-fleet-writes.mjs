@@ -92,6 +92,12 @@ process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS = "20";
 process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_POLL_MS = "10";
 process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS = "3600000";
 process.env.LOOM_MCP_READY_TIMEOUT_MS = "25";
+// Card 311394b9 — daemon_restart's REGISTRATION (not just its call-time refusal) is gated on
+// isSupervised() (@decision 81331b0e), read LIVE from process.env on every buildServer() call. Default
+// this file to the unsupervised/ambient-unset state rather than whatever happens to be inherited (agent
+// shells under daemon:stable default it to "1"; a real npm install and ubuntu CI run with it unset) —
+// PART C / PART C-HALTED pin "1" locally, around only the assertions that need it, and restore it after.
+delete process.env.LOOM_SUPERVISED;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -397,12 +403,21 @@ try {
     const m1 = sessions.startManager(`${P}-mgr`);
     const wakes = new WakeService({ db, pty: host, resume: () => { throw new Error("resume not used in this test"); }, enqueueDurable: () => ({ delivered: false }) });
 
+    // ---- card 311394b9: daemon_restart's registration is gated on isSupervised(), re-read live on every
+    // buildServer() call — assert BOTH polarities explicitly rather than leaning on the ambient env. ----
+    {
+      const toolsUnsupervised = (await (await mcpClientFor(db, sessions, host, m1.id)).client.listTools()).tools.map((t) => t.name);
+      check("(C unsupervised) daemon_restart is ABSENT from tools/list when LOOM_SUPERVISED is unset",
+        !toolsUnsupervised.includes("daemon_restart"));
+    }
+    process.env.LOOM_SUPERVISED = "1"; // pin for the call-time assertions below; restored at the end of this block
+
     // ---- pre-recycle sanity: ordinary (non-superseded) calls reach past the new guards ----
     const { call: callPre } = await mcpClientFor(db, sessions, host, m1.id);
     const gateCancelPre = await callPre("gate_cancel", { opId: "nonexistent-op" });
     check("(C pre) gate_cancel reaches its own 'not_found' logic pre-recycle (not refused)", gateCancelPre.outcome === "not_found");
     const daemonRestartPre = await callPre("daemon_restart", { reason: "pre" });
-    check("(C pre) daemon_restart reaches its own 'not supervised' refusal pre-recycle (not the retirement error)",
+    check("(C pre) daemon_restart reaches its own supervisor-liveness refusal pre-recycle (not the retirement error)",
       typeof daemonRestartPre.error === "string" && /restart supervisor/.test(daemonRestartPre.error) && !RETIRED_RE.test(daemonRestartPre.error));
     const deployPre = await callPre("deploy", { reason: "pre" });
     check("(C pre) deploy reaches its own run/rate-limit logic pre-recycle (not the retirement error)", !RETIRED_RE.test(deployPre.error ?? ""));
@@ -442,6 +457,7 @@ try {
       typeof questionAskPost.error === "string" && RETIRED_RE.test(questionAskPost.error));
     check("(C5) no NEW question was actually filed by the refused call",
       db.listQuestionsForSession(m1.id).length === questionsBefore);
+    delete process.env.LOOM_SUPERVISED; // restore the file's deterministic default for everything after this block
   }
 
   // ======================================================================================
@@ -463,6 +479,7 @@ try {
     check("(C-halted setup) h1 is NOT superseded while genuinely halted", isSupersededByRecycle(db, h1.id) === false);
     void h2;
 
+    process.env.LOOM_SUPERVISED = "1"; // daemon_restart is only REGISTERED when supervised (@decision 81331b0e) — pin so the call below actually reaches its halted-carve-out logic rather than throwing "tool not found"
     const { call: callHalted } = await mcpClientFor(db, sessions, host, h1.id);
     const gc = await callHalted("gate_cancel", { opId: "nonexistent-op" });
     check("(C-halted) gate_cancel does NOT return the retirement error while halted", !RETIRED_RE.test(gc.error ?? ""));
@@ -470,6 +487,7 @@ try {
     check("(C-halted) daemon_restart does NOT return the retirement error while halted", !RETIRED_RE.test(dr.error ?? ""));
     const dp = await callHalted("deploy", { reason: "halted" });
     check("(C-halted) deploy does NOT return the retirement error while halted", !RETIRED_RE.test(dp.error ?? ""));
+    delete process.env.LOOM_SUPERVISED; // restore the file's deterministic default
     const { call: callTasksHalted } = await taskMcpClientFor(db, wakes, h1.id);
     const wk = await callTasksHalted("wake_me", { delaySeconds: 30, note: "halted" });
     check("(C-halted) wake_me succeeds (NOT refused) while halted", typeof wk.wakeId === "string");
