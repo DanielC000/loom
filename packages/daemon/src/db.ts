@@ -518,6 +518,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- Card b866ab64: for a REVIEW spawn only, the sha this worker's branch was actually forked from (the
   -- reviewed branch's tip at spawn time) — see Session.reviewBaseSha's doc. NULL on every non-review spawn.
   review_base_sha TEXT,
+  -- @decision 0eaaa693 — the worker's recorded cut base (fork point); see Session.cutBaseSha's doc.
+  -- Nullable, no DEFAULT: NULL on every legacy row, grandfathered (never enforced) at merge time.
+  cut_base_sha TEXT,
   gen INTEGER DEFAULT 0,
   recycled_from TEXT,
   -- @decision 08c81809 — durable "settle in flight" marker, set on the PREDECESSOR row only (never
@@ -1881,6 +1884,9 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // Card b866ab64: review-spawn fork-point sha — see Session.reviewBaseSha's doc. Nullable, no DEFAULT:
   // NULL on every legacy/non-review row, which must keep comparing against mainline HEAD as before.
   review_base_sha: "TEXT",
+  // Card 0eaaa693: worker's recorded cut base (fork point) — see Session.cutBaseSha's doc. Nullable, no
+  // DEFAULT: NULL on every legacy row, grandfathered (never enforced) at merge time.
+  cut_base_sha: "TEXT",
   // Multi-repo epic (49136451) phase 2: which project.repos entry this worker's worktree was cut from,
   // stamped once at spawn/recycle (mirrors Task.repo_key's own nullable/no-DEFAULT shape — see Session's
   // repoKey doc). Nullable, no DEFAULT: NULL means "primary", so every legacy row backfills to the exact
@@ -6138,12 +6144,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,harness,parent_session_id,task_id,worktree_path,branch,review_base_sha,repo_key,gen,recycled_from,
+         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,harness,parent_session_id,task_id,worktree_path,branch,review_base_sha,cut_base_sha,repo_key,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline,scheduled_spawn,forced_plain)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@harness,@parentSessionId,@taskId,@worktreePath,@branch,@reviewBaseSha,@repoKey,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@harness,@parentSessionId,@taskId,@worktreePath,@branch,@reviewBaseSha,@cutBaseSha,@repoKey,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline,@scheduledSpawn,@forcedPlain)`,
     ).run({
       ...s,
@@ -6174,6 +6180,7 @@ export class Db {
       worktreePath: s.worktreePath ?? null,
       branch: s.branch ?? null,
       reviewBaseSha: s.reviewBaseSha ?? null,
+      cutBaseSha: s.cutBaseSha ?? null,
       repoKey: s.repoKey ?? null,
       gen: s.gen ?? 0,
       recycledFrom: s.recycledFrom ?? null,
@@ -10123,6 +10130,7 @@ function toSession(r0: unknown): Session {
     worktreePath: (r.worktree_path as string) ?? null,
     branch: (r.branch as string) ?? null,
     reviewBaseSha: (r.review_base_sha as string) ?? null,
+    cutBaseSha: (r.cut_base_sha as string) ?? null,
     repoKey: (r.repo_key as string | null) ?? null,
     gen: (r.gen as number) ?? 0,
     recycledFrom: (r.recycled_from as string) ?? null,

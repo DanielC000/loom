@@ -31,6 +31,12 @@ export type PendingOpOutcome = string;
  *  @decision b801bad0 — "branch-diverted"/"ff-unverified": a batch fast-forward refusal describing the
  *  CANONICAL CHECKOUT at fast-forward time, not the resolved candidate branches — like "squash-refused", a
  *  branch-keyed cache key can't see a restored checkout, so a cached replay would be stale. Never cache either.
+ *  @decision 0eaaa693 — "fork-point-diverged": this worker's recorded cut base is not an ancestor of the
+ *  canonical target — a real verdict about the CANONICAL CHECKOUT's current lineage, not a fact about the
+ *  branch's own content; a branch-keyed cache key can't see the checkout move back. Never cache or replay.
+ *  @decision 0eaaa693 (round 3) — "fork-point-unverified": the PROBE itself failed (transient git error),
+ *  not a confirmed fact — identity can stay IDENTICAL across a re-call (nothing really moved), so a
+ *  branch/main-tip-keyed cache can't tell "still broken" from "blip now cleared". Never cache or replay.
  *  @decision 7e5b23e7 — "quarantined": a refusal about the CANONICAL REPO being quarantined, not the
  *  branch — a branch-keyed cache key can't see a human's later quarantine-clear, so a cached replay
  *  would serve the stale refusal forever. Never cache or replay it.
@@ -51,7 +57,7 @@ export type PendingOpOutcome = string;
  *  @decision 62c4953a — "canonical-index-lock-present": same reasoning as "quarantined" — a refusal about
  *  the canonical repo's `.git/index.lock`, not the branch; a human removing it must see a fresh
  *  re-confirm, never a stale cached refusal from before it was removed. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission"]);
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

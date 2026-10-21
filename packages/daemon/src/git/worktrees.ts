@@ -75,6 +75,20 @@ export interface WorktreeInfo {
    * reviewed tip, or boot-reconcile reads the author's real unmerged work as 0-ahead.
    */
   forkedFromReviewed: boolean;
+  /**
+   * True whenever this call genuinely advanced the branch's cut base to `mainSha` — a fresh `-b` cut
+   * (always; `mainSha` is real mainline's HEAD at cut time regardless of `forkFrom`), OR a reuse/reattach
+   * whose {@link recutStaleReusedBranch} actually ran its 0-ahead `reset --hard` onto `mainSha`. False for
+   * a retained >0-ahead recovery branch (left untouched, or merge-forwarded by {@link resolveStaleBase} —
+   * forwarding only catches the SAME lineage up to newer commits, it never changes the TRUE original fork
+   * point). A caller must stamp `Session.cutBaseSha = mainSha` only when this is true; otherwise it must
+   * preserve whatever `cutBaseSha` was already recorded for this worktree (carried forward, never
+   * silently overwritten with the reuse-time HEAD).
+   *
+   * @decision 0eaaa693 — never derive a cut base from the branch's own current ancestry; once a union
+   * merge has run that ancestry is already polluted by the injected target tip.
+   */
+  cutBaseAdvanced: boolean;
 }
 
 /** {@link WorktreeInfo.reusedDirtyWorktree} — a bounded summary of a reused worktree's leftover uncommitted work. */
@@ -768,7 +782,7 @@ export function mayRecutOntoMain(aheadRaw: string): boolean {
 // recovery flow relies on branch reuse being preserved; this is load-bearing.
 async function recutStaleReusedBranch(
   repoPath: string, worktreePath: string, branch: string, deps: BoundedGitDeps = {},
-): Promise<DiscardedOnRecutInfo | undefined> {
+): Promise<{ recut: boolean; discardedOnRecut?: DiscardedOnRecutInfo }> {
   const { git: repoGit, timeoutMs: repoTimeoutMs } = boundedGit(repoPath, deps);
   const mainSha = (await withTimeout(repoGit.raw(["rev-parse", "HEAD"]), repoTimeoutMs, "git rev-parse HEAD")).trim();
   const aheadRaw = await withTimeout(
@@ -777,13 +791,15 @@ async function recutStaleReusedBranch(
   // FAIL SAFE: only re-cut a PROVABLY-empty branch (0 ahead). A recovery branch (>0 ahead) OR a malformed/
   // unparseable count (NaN) → leave the branch EXACTLY as-is; never let a bad count fall through to the
   // DESTRUCTIVE reset below (the `|| 0`-treats-NaN-as-0 data-loss footgun). See {@link mayRecutOntoMain}.
-  if (!mayRecutOntoMain(aheadRaw)) return undefined;
+  if (!mayRecutOntoMain(aheadRaw)) return { recut: false };
   // Snapshot what's about to be destroyed BEFORE the reset — see this function's own doc above.
   const discardedOnRecut = await captureDiscardedOnRecut(worktreePath, deps);
   // Empty/stale branch → re-cut its pointer + checkout onto current main (SHA, never a branch name).
   const { git: wtGit, timeoutMs: wtTimeoutMs } = boundedGit(worktreePath, deps);
   await withTimeout(wtGit.raw(["reset", "--hard", mainSha]), wtTimeoutMs, "git reset --hard");
-  return discardedOnRecut;
+  // @decision 0eaaa693 — `recut:true` here is what later licenses WorktreeInfo.cutBaseAdvanced: this
+  // branch's tip was just reset to mainSha, so its cut base genuinely advances to it.
+  return { recut: true, discardedOnRecut };
 }
 
 /** Cap on {@link ReusedDirtyWorktreeInfo.statusSummary} (and its {@link DiscardedOnRecutInfo} twin) —
@@ -1102,7 +1118,7 @@ export async function createWorktree(
     // branch this is exactly the DESTRUCTIVE step — recutStaleReusedBranch snapshots what it's about to
     // discard BEFORE the reset (the only moment it's still there), so it can still be reported below even
     // though detectReusedDirtyWorktree's own post-recut read (next) will find it already gone.
-    const discardedOnRecut = await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
+    const { recut: dirReuseRecut, discardedOnRecut } = await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
     // Board card 2250836c: surface (never clean) any real leftover uncommitted work on this reused
     // worktree — read-only, runs after the recut above so it reports the ACTUAL post-recut state.
     const reusedDirtyWorktree = await detectReusedDirtyWorktree(worktreePath, gitDeps);
@@ -1127,6 +1143,9 @@ export async function createWorktree(
     firePhase("done");
     return {
       worktreePath, branch, mainSha, forkedFromReviewed: false, // reuse path — forkFrom was never consulted
+      // @decision 0eaaa693 — advances the cut base ONLY when a real 0-ahead recut just reset this
+      // branch onto mainSha; a retained >0-ahead recovery branch (dirReuseRecut:false) must not.
+      cutBaseAdvanced: dirReuseRecut,
       ...(discardedOnRecut ? { discardedOnRecut } : {}),
       ...(reusedDirtyWorktree ? { reusedDirtyWorktree } : {}),
       ...(staleBase ? { staleBase } : {}),
@@ -1207,6 +1226,7 @@ export async function createWorktree(
     return exists;
   });
   let staleBase: StaleBaseInfo | undefined;
+  let reattachRecut = false;
   if (branchExists) {
     // Re-attached an existing branch at its old tip → same re-cut: empty/stale → current main; a
     // recovery branch (unmerged work) → untouched. This worktree dir did NOT exist a moment ago (the
@@ -1215,7 +1235,7 @@ export async function createWorktree(
     // its `discardedOnRecut` return is intentionally not surfaced on this path (see {@link
     // WorktreeInfo.reusedDirtyWorktree}'s own doc: "a reattached-branch-only worktree (always a clean
     // fresh checkout)" — the same reasoning applies here).
-    await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
+    ({ recut: reattachRecut } = await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps));
     // Card 5150fdc2 parts 1+3 — same detect+auto-forward as the dir-exists reuse path above, BEFORE
     // provisionWorktreeDeps below so a package.json/lockfile change the forward brings in is what
     // actually gets installed. `forwarded` is unused here (unlike the dir-exists path above) — this
@@ -1231,10 +1251,13 @@ export async function createWorktree(
   // forkFrom given); a reattach (branchExists true) never consulted forkFrom at all. See
   // WorktreeInfo.forkedFromReviewed's own doc for why a caller must gate reviewBaseSha stamping on this.
   const forkedFromReviewed = !branchExists && !!forkFrom;
+  // @decision 0eaaa693 — a fresh `-b` cut always advances the cut base (branchExists false); a reattach
+  // advances it only when recutStaleReusedBranch actually ran its reset (reattachRecut).
+  const cutBaseAdvanced = !branchExists || reattachRecut;
   firePhase("done");
   return staleBase
-    ? { worktreePath, branch, mainSha, staleBase, forkedFromReviewed }
-    : { worktreePath, branch, mainSha, forkedFromReviewed };
+    ? { worktreePath, branch, mainSha, staleBase, forkedFromReviewed, cutBaseAdvanced }
+    : { worktreePath, branch, mainSha, forkedFromReviewed, cutBaseAdvanced };
   } // end doCut
 }
 
@@ -8282,8 +8305,11 @@ export async function verifyReviewedTipChain(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-  expectAlreadyLanded?: boolean,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean }> {
+  // @decision 0eaaa693 (round 5) — typed `string | null`, never `| undefined` (the `= null` default is
+  // what excludes `undefined` — TS1016 forbids a bare required param after these optional ones): an
+  // omitting caller now gets the SAME logged legacy/grandfathered path as explicit `null`, never a silent skip.
+  expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -8301,7 +8327,7 @@ export async function mergeBranch(
     return await withCanonicalIndexLock(repoPath, async () => {
       const pauseToken = pauseVaultAutoCommit(repoPath);
       try {
-        return await mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded);
+        return await mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId, expectedBranchTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, cutBaseSha);
       } finally {
         resumeVaultAutoCommit(repoPath, pauseToken);
       }
@@ -8462,14 +8488,68 @@ export function describeLockGiveUp(removal: LockRemovalResult & { removed: false
   }
 }
 
+/** {@link checkCutBaseAncestry}'s outcome. */
+export interface CutBaseAncestryCheck {
+  ok: boolean;
+  /** True when `cutBaseSha` was null/absent — a legacy worker. GRANDFATHERED: the caller must land as
+   *  before this check existed, never refuse, but should mark its own result/event with
+   *  `cutBaseUnknown: true` and log one line. See docs/decisions/0eaaa693-fork-point-ancestry-check.md,
+   *  "Legacy branches", for why no best-effort backfill is attempted instead. */
+  unknown?: boolean;
+  /** Set only when `ok === false` — the sha that failed the ancestry check, for the refusal message. */
+  cutBaseSha?: string;
+  /** @decision 0eaaa693 (round 3) — true iff `ok === false` because `git merge-base` ITSELF threw, never
+   *  because it ran and resolved to a real non-ancestor. Callers must branch on this before treating
+   *  `ok: false` as a confirmed divergence (conflating the two was a real CR-found bug). */
+  probeFailed?: boolean;
+  /** Set only when `probeFailed` is true — the real underlying git error's message, for an honest
+   *  "could not verify" refusal (never the divergence remedy). */
+  probeError?: string;
+}
+
+/**
+ * Checks whether `cutBaseSha` (the worker branch's RECORDED cut base — the canonical repo's HEAD at the
+ * moment this worker's worktree was cut, captured ONCE before the worker's first commit or any
+ * `mergeMainIntoWorktree` union merge ever ran) is an ancestor of `targetTip` (the canonical repo's live
+ * target tip — the caller must read this FRESH, immediately before calling, never pass in a stale value).
+ * Both shas are FIXED, pre-existing commits: this never walks the worker branch's OWN (possibly
+ * union-merge-polluted) history, which is why it doesn't false-positive on a branch that has union-merged
+ * main any number of times — a union merge only ever ADDS commits ahead of the branch's own tip, it
+ * cannot move or rewrite `cutBaseSha`. See docs/decisions/0eaaa693-fork-point-ancestry-check.md for the
+ * full mechanism, the grandfathering of a null `cutBaseSha`, and why the naive alternative (walking the
+ * branch's current ancestry) is unsafe.
+ *
+ * Compares `merge-base` OUTPUT to `cutBaseSha` directly, never `merge-base --is-ancestor`'s exit status
+ * (mirrors `isAncestorCommit`, `mainline-watch.ts`): simple-git's `raw()` resolves that subcommand's
+ * non-zero "not an ancestor" exit as a SUCCESS with empty output. Fail-closed on a real git failure too
+ * (an unresolvable sha, a timeout) — both read as `ok: false`.
+ *
+ * @decision 0eaaa693 — never derive this check's inputs from the branch's own current ancestry.
+ */
+export async function checkCutBaseAncestry(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, cutBaseSha: string | null | undefined, targetTip: string,
+): Promise<CutBaseAncestryCheck> {
+  if (!cutBaseSha) return { ok: true, unknown: true };
+  try {
+    const out = (await withTimeout(
+      git.raw(["merge-base", cutBaseSha, targetTip]), timeoutMs, "git merge-base (cut-base ancestry check)",
+    )).trim();
+    return out === cutBaseSha ? { ok: true } : { ok: false, cutBaseSha };
+  } catch (e) {
+    return { ok: false, cutBaseSha, probeFailed: true, probeError: (e as Error).message };
+  }
+}
+
 // `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
 // merge-danger-window.ts) — a caller with no op identity handy (a test, or any future caller) just gets an
 // unattributed window entry (repo/branch only), never a functional difference in what this function does.
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string, expectedBranchTip?: string, expectedMainlineBranch?: string, expectedMainlineRef?: string,
-  expectAlreadyLanded?: boolean,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean }> {
+  // @decision 0eaaa693 (round 5) — same required-`string | null` posture as {@link mergeBranch}'s own
+  // param; see that signature's comment for why `= null` (not a bare `?`) is what achieves it here.
+  expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -8540,6 +8620,46 @@ async function mergeBranchLocked(
       return {
         ok: false, branchDiverted: true, observedBranch: pre.branch,
         reason: `canonical repo is checked out on "${pre.branch ?? "(detached)"}", not the expected mainline branch "${expectedMainlineBranch}" — something diverted the checkout (a human REST GitWriter checkout/branch create, the Platform Lead's own git_checkout/git_create_branch, or a stray manual checkout) since this project's mainline baseline was established. Check out "${expectedMainlineBranch}" again in the canonical repo and re-confirm; if "${pre.branch ?? "(detached)"}" is actually a deliberate mainline rename, ask the owner to reset this project's mainline baseline first (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only). Canonical repo and worktree are untouched; nothing was squashed. This refusal is never cached.`,
+      };
+    }
+  }
+  // @decision 0eaaa693 — refuse a landing whose fork point is off the current mainline. Reads the
+  // canonical target tip FRESH, right here under the lock, rather than reusing an earlier-computed sha —
+  // nothing between here and the squash below can move the target again once this read happens.
+  if (cutBaseSha !== undefined) {
+    let cutBaseTargetTip: string;
+    try {
+      cutBaseTargetTip = (await withTimeout(
+        git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, cut-base ancestry check)",
+      )).trim();
+    } catch (e) {
+      // @decision 0eaaa693 (round 5) — a transient read failure, never a confirmed divergence: same
+      // `forkPointUnverified` outcome as a failed `checkCutBaseAncestry` probe, not the generic
+      // merge-failed fallthrough's "squash was attempted... Re-task a rebase" (wrong on both counts here).
+      return {
+        ok: false, forkPointUnverified: true,
+        reason: `could not verify the canonical target tip before honoring this merge's cut-base check (git error: ${(e as Error).message}) — canonical repo and worktree are untouched; nothing was squashed. This looks like a transient git/host condition, not a confirmed divergence — re-confirm to re-check. This refusal is never cached.`,
+      };
+    }
+    const ancestry = await checkCutBaseAncestry(git, timeoutMs, cutBaseSha, cutBaseTargetTip);
+    if (ancestry.unknown) {
+      // eslint-disable-next-line no-console
+      console.warn(`[merge] ${branch}: no recorded cut base (legacy worker) — landing without the fork-point ancestry check`);
+    } else if (ancestry.probeFailed) {
+      // @decision 0eaaa693 (round 3) — a TRANSIENT git failure, never the divergence remedy: fail closed
+      // (nothing lands on an unverified check) but say so honestly — a plain re-confirm is the right next
+      // step, not a recycle/fresh-worker dispatch.
+      return {
+        ok: false, forkPointUnverified: true,
+        reason: `could not verify this worker's fork point against the current mainline target (git error: ${ancestry.probeError ?? "unknown"}) — canonical repo and worktree are untouched; nothing was squashed. This looks like a transient git/host condition, not a confirmed divergence — re-confirm to re-check. This refusal is never cached.`,
+      };
+    } else if (!ancestry.ok) {
+      return {
+        ok: false, forkPointDiverged: true,
+        // @decision 0eaaa693 — a recycle/rebase of THIS worker can NEVER clear this refusal: recycleWorker
+        // carries the SAME recorded cutBaseSha forward (Session.cutBaseSha's own doc), and a rebase never
+        // re-derives it. Say so explicitly, and name only the remedies that actually work.
+        reason: `this worker's branch was cut from ${ancestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${cutBaseTargetTip.slice(0, 8)}) — the canonical checkout moved to a different lineage while this worker was unmerged. Canonical repo and worktree are untouched; nothing was squashed. This cannot be cleared by recycling or rebasing this worker. Remedy: either switch the canonical checkout back to the branch this worker was cut from, or re-dispatch the work on a fresh worker cut from the current mainline (e.g. cherry-pick these commits there). This refusal is never cached.`,
       };
     }
   }

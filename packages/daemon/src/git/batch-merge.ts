@@ -2,7 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
-import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, type MergeEmptyKind } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, type MergeEmptyKind } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
@@ -91,6 +91,10 @@ export interface BatchCandidate {
   /** Card bbccf470: the branch tip the caller VERIFIED (the reviewed-tip check). When set, assembly cherry-picks exactly this sha and never re-reads the branch ref,
    *  so a commit added after the check cannot ride into the batch; it is stripped from the landed/dropped rows. */
   tip?: string;
+  /** @decision 0eaaa693 — this candidate's own `Session.cutBaseSha`, threaded through so {@link
+   *  landBranchCommitsIndividually} can run the fork-point ancestry check before cherry-picking. REQUIRED
+   *  (round 5) — null (grandfathered, never refused) must be an explicit caller choice, not an omission. */
+  cutBaseSha: string | null;
 }
 
 export interface BatchLandedBranch extends BatchCandidate {
@@ -193,6 +197,13 @@ interface LandResult {
    *  taskId) — mainline, the canonical checkout, and its index are never touched here.
    *  @decision 0d372516 — never conflate this with `quarantined`; their callers react differently. */
   rollbackUnverified?: boolean;
+  /** @decision 0eaaa693 — true iff `ok:false` because this candidate's recorded cut base is not an
+   *  ancestor of the batch's current HEAD — a normal per-candidate DROP, never an abort of the batch. */
+  forkPointDiverged?: boolean;
+  /** @decision 0eaaa693 (round 3) — true iff `ok:false` because the ancestry probe itself THREW (a
+   *  transient git error), never a confirmed divergence — a normal per-candidate DROP with its own
+   *  honest "could not verify, re-confirm" wording, never the divergence remedy. */
+  forkPointUnverified?: boolean;
 }
 
 /**
@@ -288,7 +299,9 @@ async function landedTreeDivergesFromExpected(
  * `reset --hard` is safe without the canonical path's own dirty-tree preconditions.
  */
 async function landBranchCommitsIndividually(
-  repoPath: string, batchWorktreePath: string, branch: string, deps: BatchGitDeps, pinnedTip?: string,
+  // @decision 0eaaa693 (round 5) — same required-`string | null` posture as {@link mergeBranch}'s own
+  // param (worktrees.ts) — `= null` (not a bare `?`) excludes `undefined` from the type.
+  repoPath: string, batchWorktreePath: string, branch: string, deps: BatchGitDeps, pinnedTip?: string, cutBaseSha: string | null = null,
 ): Promise<LandResult> {
   // QUARANTINE CHECK — must run before any git call, ALWAYS against the CANONICAL repo (never the
   // ephemeral batch worktree path — see merge-quarantine.ts's own doc for why). A batch's own candidates
@@ -315,6 +328,33 @@ async function landBranchCommitsIndividually(
     )).trim();
   } catch (e) {
     return { ok: false, reason: `failed to read batch worktree HEAD: ${(e as Error).message}` };
+  }
+
+  // @decision 0eaaa693 — refuse (drop) a candidate whose fork point is off the batch's current lineage,
+  // BEFORE the naive merge-base below (which — once cherry-picked commits already pollute the branch's
+  // own history — would otherwise classify a cross-lineage candidate as a safe, ordinary ancestor).
+  if (cutBaseSha !== undefined) {
+    const ancestry = await checkCutBaseAncestry(git, timeoutMs, cutBaseSha, batchHeadBefore);
+    if (ancestry.unknown) {
+      // eslint-disable-next-line no-console
+      console.warn(`[batch-merge] ${branch}: no recorded cut base (legacy worker) — landing without the fork-point ancestry check`);
+    } else if (ancestry.probeFailed) {
+      // @decision 0eaaa693 (round 3) — a TRANSIENT git failure, never the divergence remedy: drop this
+      // candidate (fail closed, nothing lands unverified) with its own honest wording — a re-confirm is
+      // the right remedy here, not a recycle/fresh-worker dispatch.
+      return {
+        ok: false, forkPointUnverified: true,
+        reason: `${branch}: could not verify this worker's fork point against the current batch lineage (git error: ${ancestry.probeError ?? "unknown"}) — this looks like a transient git/host condition, not a confirmed divergence; re-confirm to re-check.`,
+      };
+    } else if (!ancestry.ok) {
+      return {
+        ok: false, forkPointDiverged: true,
+        // @decision 0eaaa693 — same correction as the solo path (worktrees.ts): a recycle/rebase of THIS
+        // worker can never clear this — recycleWorker carries the SAME recorded cutBaseSha forward, and a
+        // rebase never re-derives it.
+        reason: `${branch}: this worker's branch was cut from ${ancestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current batch lineage (${batchHeadBefore.slice(0, 8)}) — the canonical checkout moved to a different lineage while this worker was unmerged. This cannot be cleared by recycling or rebasing this worker. Remedy: either switch the canonical checkout back to the branch this worker was cut from, or re-dispatch the work on a fresh worker cut from the current mainline (e.g. cherry-pick these commits there).`,
+      };
+    }
   }
 
   let mergeBase: string;
@@ -808,7 +848,7 @@ export async function assembleBatchBranches(
     : candidates;
   for (const cWithTip of orderedCandidates) {
     const { tip: pinnedTip, ...c } = cWithTip;
-    const r = await landBranchCommitsIndividually(repoPath, batchWorktreePath, c.branch, deps, pinnedTip);
+    const r = await landBranchCommitsIndividually(repoPath, batchWorktreePath, c.branch, deps, pinnedTip, c.cutBaseSha);
     if (!r.ok) {
       dropped.push({ ...c, reason: r.reason ?? "batch land failed", conflict: !!r.conflict });
       // A quarantining candidate STOPS assembly outright, never just a per-candidate drop: an unconfirmed

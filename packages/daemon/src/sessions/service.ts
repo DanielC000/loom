@@ -30,11 +30,11 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
-import { boundedSimpleGit, isNotAGitRepositoryError, withTimeout } from "../git/bounded.js";
+import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -857,6 +857,14 @@ type ConfirmMergeResult = {
   branchDiverted?: boolean;
   observedBranch?: string | null;
   unverified?: boolean;
+  /** @decision 0eaaa693 — this worker's recorded `cutBaseSha` is not an ancestor of the canonical target
+   *  tip; refused before the squash, `NEVER_CACHED_OUTCOMES`. Distinct from `branchDiverted` (checkout
+   *  identity, not worker-branch ancestry) — NOT clearable by recycling or rebasing this worker. */
+  forkPointDiverged?: boolean;
+  /** @decision 0eaaa693 (round 3) — the fork-point ancestry PROBE itself failed (a transient git error),
+   *  never a confirmed divergence; distinct classification (`"fork-point-unverified"`,
+   *  `NEVER_CACHED_OUTCOMES`) with its own honest "could not verify, re-confirm" wording. */
+  forkPointUnverified?: boolean;
   /** @decision 8c3d6c04 — a pre-squash union-merge failure caused by a TRANSIENT git-child condition, never
    *  a real content conflict; classified `"union-merge-transient"`, in `NEVER_CACHED_OUTCOMES` — the hang
    *  clearing is invisible to a branch-keyed cache. Never set alongside `conflict`/`quarantined`. */
@@ -8417,6 +8425,24 @@ export class SessionService {
   }
 
   /**
+   * The cut base to carry forward when THIS `createWorktree` call did NOT itself advance it (a
+   * reuse/reattach that left a recovery branch untouched, or merge-forwarded it — see
+   * `WorktreeInfo.cutBaseAdvanced`'s own doc). Looks up every OTHER session row (live or archived) ever
+   * bound to this exact `worktreePath` — the same scope `listSessionsAtWorktreePath` already uses for
+   * GC/reclaim decisions — and returns the most recently created one's own recorded `cutBaseSha`, or
+   * `null` when none carried one (a first-ever cut, or a legacy worktree predating this field).
+   *
+   * @decision 0eaaa693 — never derive this value from a live git read; only a prior SESSION's own
+   * recorded `cutBaseSha` is trustworthy here.
+   */
+  private priorCutBaseShaForWorktree(worktreePath: string, excludeSessionId: string): string | null {
+    const siblings = this.db.listSessionsAtWorktreePath(worktreePath, excludeSessionId)
+      .filter((s) => s.cutBaseSha)
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return siblings[0]?.cutBaseSha ?? null;
+  }
+
+  /**
    * Spawn a WORKER for a manager (phase-2 §A2/§A5): create an isolated git worktree+branch,
    * start a real worker `claude` in it (the existing spawn path — workers get loom-tasks scoped
    * to their own session→project, NOT the orchestration surface), and move the task to
@@ -8714,7 +8740,11 @@ export class SessionService {
         : false);
       // @decision a5d9c458 — clear any stale wedged-worktree tracking for this exact path BEFORE createWorktree can claim it.
       releaseWorktreePathClaim = this.reclaimWedgedWorktreePathForSpawn(project.id, taskId ?? claimKey, targetRepo.key).release;
-      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase, forkedFromReviewed } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
+      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase, forkedFromReviewed, mainSha: cutBaseMainSha, cutBaseAdvanced } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
+      // @decision 0eaaa693 — a retained (non-recut) reuse must carry forward the prior cut base, never
+      // overwrite it with the reuse-time HEAD. See WorktreeInfo.cutBaseAdvanced's own doc for the rule.
+      const workerId = randomUUID();
+      const cutBaseSha = cutBaseAdvanced ? cutBaseMainSha : this.priorCutBaseShaForWorktree(worktreePath, workerId);
       // Card 088afc94 (P4 wiring): register this worktree with codescape's fleet daemon — fire-and-forget,
       // NEVER blocks the spawn. DELIBERATELY pinned to `project.repoPath` (the primary), NOT
       // `targetRepo.path` — Codescape indexes ONE graph per project regardless of which repo a given task
@@ -8725,7 +8755,7 @@ export class SessionService {
 
       const now = new Date().toISOString();
       const worker: Session = {
-        id: randomUUID(),
+        id: workerId,
         projectId: manager.projectId,
         agentId: workerAgent.id, // the RESOLVED agent (opts.agentId may have been a name/slug — bind to the real id)
         // A revive's fork id is PRE-ASSIGNED (--session-id) and persisted up front, exactly as forkSession does
@@ -8759,6 +8789,7 @@ export class SessionService {
         // @decision 37fe091c — gated on `forkedFromReviewed`, not merely `reviewForkFrom` being set: an
         // aliased taskId/reviewOf* silently takes the reuse/reattach path (forkFrom never consulted).
         reviewBaseSha: reviewBaseShaToStamp(forkedFromReviewed, reviewForkFrom?.headSha),
+        cutBaseSha, // the worker's recorded fork point — see Session.cutBaseSha's doc
         repoKey: targetRepo.key === "primary" ? null : targetRepo.key, // stamped once — see Session.repoKey's doc
       };
       this.db.insertSession(worker);
@@ -14082,6 +14113,7 @@ export class SessionService {
         worktreePath,
         branch,
         reviewBaseSha: old.reviewBaseSha ?? null, // SAME worktree ⇒ SAME fork point — carried forward like repoKey
+        cutBaseSha: old.cutBaseSha ?? null, // SAME worktree ⇒ SAME cut base — carried forward like reviewBaseSha
         repoKey: old.repoKey ?? null, // SAME worktree, SAME repo — carried forward like browserTesting/skills
         gen: newGen,
         recycledFrom: old.id,
@@ -17474,6 +17506,31 @@ export class SessionService {
       }
     }
 
+    // ADVISORY PRE-GATE (card 0eaaa693, cost-saving only — never authoritative): the SAME
+    // checkCutBaseAncestry the squash will re-run, in-lock, run here UNLOCKED against a fresh (but not
+    // re-verified-at-squash-time) read of the canonical target tip — so a worker whose recorded cut base
+    // has already diverted off the current mainline is refused BEFORE a full build/DoD gate burns a lane
+    // on a landing that is going to be refused anyway. The canonical checkout's target can still move
+    // between this read and the lock, so this is purely a shortcut; the in-lock check inside
+    // mergeBranchLocked stays the sole authority. A read failure here fails OPEN (falls through to the
+    // gate/lock, which re-checks for real) rather than refusing on an inconclusive probe.
+    if (worker.cutBaseSha) {
+      try {
+        const advisoryGit = (this.soloMergeGitFactory ?? canonicalGit)(repoPath, this.gitOpMs ?? 15_000);
+        const advisoryTip = (await advisoryGit.raw(["rev-parse", "HEAD"])).trim();
+        const advisoryAncestry = await checkCutBaseAncestry(advisoryGit, this.gitOpMs ?? 15_000, worker.cutBaseSha, advisoryTip);
+        // @decision 0eaaa693 (round 3) — `probeFailed` (the merge-base call itself threw) is NEVER a
+        // confirmed divergence: fall through silently, same as any other advisory read failure, rather
+        // than refusing a transient git hiccup as an unreachable "re-dispatch, recycling can't clear it".
+        if (!advisoryAncestry.unknown && !advisoryAncestry.probeFailed && !advisoryAncestry.ok) {
+          const why = `this worker's branch was cut from ${advisoryAncestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${advisoryTip.slice(0, 8)}) — the canonical checkout moved to a different lineage while this worker was unmerged. Canonical repo and worktree are untouched; nothing was squashed; no gate was run. This cannot be cleared by recycling or rebasing this worker. Remedy: either switch the canonical checkout back to the branch this worker was cut from, or re-dispatch the work on a fresh worker cut from the current mainline (e.g. cherry-pick these commits there).`;
+          const { suppressed, sha } = await rejectNotify("fork_point_diverged", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}`);
+          evt("merge_rejected", { reason: "fork_point_diverged", sha, phase: "advisory-pre-gate", ...(suppressed ? { suppressed: true } : {}) });
+          return { merged: false, reason: why, detailText: why, notified: !suppressed, opId: thisOpId, gateRan: false, forkPointDiverged: true };
+        }
+      } catch { /* advisory only — any probe error falls through to the authoritative in-lock check */ }
+    }
+
     // REVIEWED-TIP REFUSAL (card bbccf470): the branch must still be the tip the manager reviewed (plus Loom's own union-merge advances — see `reviewedTipVerdict`).
     // Checked at TWO points, both via the one resolver: here (BEFORE everything that touches the branch or a gate lane — in particular before the union-merge below) and
     // again right before the squash, against the PINNED landing tip, so a commit made while this op waited in the gate queue cannot land either. Skipped for a branch that
@@ -19766,7 +19823,7 @@ export class SessionService {
     // landed-content-diverged refusal just below, inside mergeBranch) already logs its own event or
     // mutates nothing, so firing here keeps a pre-squash crash indistinguishable from review-only.
     evt("merge_landing_started", {});
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
     if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip, managerSessionId, workerSessionId, taskId); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
@@ -19843,6 +19900,24 @@ export class SessionService {
           ...(merge.divertedSha ? { divertedSha: merge.divertedSha } : {}), ...(suppressed ? { suppressed: true } : {}),
         });
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, branchDiverted: merge.branchDiverted, unverified: merge.unverified, observedBranch: merge.observedBranch ?? null, divertedSha: merge.divertedSha };
+      }
+      // @decision 0eaaa693 — refused BEFORE the squash (`merge.reason` carries the full remedy text);
+      // never cached, never `branchDiverted` (ancestry, not checkout identity). NOT clearable by
+      // recycling/rebasing this worker — recycleWorker carries the SAME cutBaseSha forward.
+      if (merge.forkPointDiverged) {
+        const why = merge.reason ?? "this worker's branch was cut from a lineage the canonical checkout has since diverted away from";
+        const { suppressed, sha } = await rejectNotify("fork_point_diverged", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}`);
+        evt("merge_rejected", { reason: "fork_point_diverged", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText: why, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, forkPointDiverged: true };
+      }
+      // @decision 0eaaa693 (round 3) — the fork-point PROBE itself failed (never a confirmed divergence):
+      // a distinct classification + wording from forkPointDiverged above, so a transient git hiccup is
+      // never told "recycling/rebasing can't clear this" — it genuinely can, a re-confirm re-checks fresh.
+      if (merge.forkPointUnverified) {
+        const why = merge.reason ?? "could not verify this worker's fork point against the current mainline target";
+        const { suppressed, sha } = await rejectNotify("fork_point_unverified", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}`);
+        evt("merge_rejected", { reason: "fork_point_unverified", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText: why, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, forkPointUnverified: true };
       }
       // Card 8d8fa497 — mergeBranch/mergeBranchLocked now set `quarantined:true` on every quarantine it
       // raises or finds during the squash/commit step itself (git/worktrees.ts), the same way the
@@ -20021,7 +20096,7 @@ export class SessionService {
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
     // @decision cc9bce38 — pin finalize to the tip the squash landed (the landing pin, else mergeBranchLocked's frozen resolve); a late worker commit retains the branch.
     const soloTipGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId: owner, workerSessionId, taskId, branch, landedTip: expectedTipForLanding(landingPin) ?? merge.landedTip, landedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
-    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, expectedBranchTip: soloTipGuard.expectedBranchTip, onBranchRetained: soloTipGuard.onBranchRetained, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}) });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, expectedBranchTip: soloTipGuard.expectedBranchTip, onBranchRetained: soloTipGuard.onBranchRetained, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}), ...(worker.cutBaseSha == null ? { cutBaseUnknown: true } : {}) });
     // Card 6f13746c: the counter line for the merge result / [loom:merge-done] (read AFTER the landing was recorded, at the squash above).
     const mergeGateNote = this.mergeGateNoteFor(project.id, { gatedLanding: !gateDisabled, periodic: mergeGateDecision.cadence !== "every", inertSkip }, worker.repoKey ?? "primary");
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
@@ -20393,6 +20468,9 @@ export class SessionService {
     gateSkipped?: "already-landed";
     /** Card 293d418e: the commit that INTRODUCED the branch's content (`findIntroducingSquashCommit`) — shown in the `[loom:already-merged]`/result text and stamped as `merge_done.landedSha` ONLY; never persisted, verified or pinned. */
     attributedSha?: string;
+    /** @decision 0eaaa693 — forwarded verbatim into {@link finalizeMerge}: this candidate carried no
+     *  recorded `cutBaseSha` (a legacy worker), stamped on `merge_done`. */
+    cutBaseUnknown?: boolean;
   }): Promise<ConfirmMergeResult> {
     // Card 42daa283: an ALREADY_MERGED-style finish must never delete a HELD branch (its late commit was never landed) — refuse up front,
     // BEFORE the worker is hard-stopped or anything is announced. The held branch is released only by a real new squash (Green path) or its
@@ -20543,7 +20621,7 @@ export class SessionService {
    */
   async mergeBatchTracked(managerSessionId: string, workerSessionIds: string[]): Promise<AttachResult<MergeBatchResult>> {
     if (workerSessionIds.length === 0) return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: "no worker session ids given" } };
-    interface Candidate { workerSessionId: string; taskId: string | null; branch: string; taskTitle: string | null; repoKey: string | null; }
+    interface Candidate { workerSessionId: string; taskId: string | null; branch: string; taskTitle: string | null; repoKey: string | null; cutBaseSha: string | null; }
     let repoPath: string | undefined;
     let projectId: string | undefined;
     const resolved: Candidate[] = [];
@@ -20561,7 +20639,7 @@ export class SessionService {
         return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: `worker ${workerSessionId} targets a different repo (${repo.path}) than the rest of this batch (${repoPath}) — batch candidates must share one repo` } };
       }
       const task = worker.taskId ? this.db.getTask(worker.taskId) : undefined;
-      resolved.push({ workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch, taskTitle: task?.title ?? null, repoKey: worker.repoKey ?? null });
+      resolved.push({ workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch, taskTitle: task?.title ?? null, repoKey: worker.repoKey ?? null, cutBaseSha: worker.cutBaseSha ?? null });
     }
     if (!repoPath || !projectId) return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: "could not resolve a shared repo for this batch" } };
     const finalRepoPath = repoPath;
@@ -20611,18 +20689,38 @@ export class SessionService {
     // STRANDED-WORK BACKSTOP (mirrors confirmWorkerMerge's own pre-gate check): a worker whose real commits
     // sit on some OTHER self-created branch would squash NOTHING into the batch — pull it out to the
     // fallback path up front rather than silently wasting a batch slot on an empty diff.
+    // `strandedFallback` ALSO collects an ADVISORY cut-base-ancestry pull (card 0eaaa693, below) — both are
+    // "pulled before assembly, never a fallback failure of their own" shapes, reported the same way.
     const candidates: Candidate[] = [];
     const strandedFallback: { workerSessionId: string; reason: string }[] = [];
     // @decision 641cc62c — REVERSE-direction check: a worker_spawn already in flight for this candidate's
     // task, one that just claimed its worktree, or a DIFFERENT live session now holding it, pulls ONLY
     // this ONE candidate out to its own fallback/drop — never fails the whole batch.
     const spawnConflictFallback: { workerSessionId: string; reason: string }[] = [];
+    // ADVISORY PRE-GATE (card 0eaaa693, candidate filtering — cost-saving only, mirrors confirmWorkerMerge's
+    // own advisory check): read the canonical HEAD ONCE, UNLOCKED, before the loop below — a candidate
+    // whose recorded cut base has already diverted off it is pulled out before it occupies a batch slot or
+    // feeds its diff into gate/test-selection. Never authoritative: the canonical checkout's target can
+    // still move before assembly's own in-lock check runs per candidate, which stays the sole authority. A
+    // read failure here fails OPEN (no candidate pulled).
+    let advisoryBatchTip: string | undefined;
+    const advisoryBatchGit = (this.batchFfGitFactory ?? canonicalGit)(finalRepoPath, this.gitOpMs ?? 15_000);
+    try { advisoryBatchTip = (await advisoryBatchGit.raw(["rev-parse", "HEAD"])).trim(); } catch { /* advisory only */ }
     for (const r of resolved) {
       if (retainedOutstanding.has(r.workerSessionId) || reviewMoved.has(r.workerSessionId)) { candidates.push(r); continue; } // held / review-moved: no stranded check, no fallback
       const worker = this.db.getSession(r.workerSessionId)!;
       const worktreePath = worker.worktreePath ?? worker.cwd;
       const spawnConflict = this.spawnMintConflict(r.taskId, worktreePath, r.workerSessionId);
       if (spawnConflict) { spawnConflictFallback.push({ workerSessionId: r.workerSessionId, reason: this.spawnMintConflictReason(r.taskId!, spawnConflict) }); continue; }
+      if (advisoryBatchTip && r.cutBaseSha) {
+        const ancestry = await checkCutBaseAncestry(advisoryBatchGit, this.gitOpMs ?? 15_000, r.cutBaseSha, advisoryBatchTip);
+        // @decision 0eaaa693 (round 3) — same probeFailed-vs-confirmed split as the solo advisory: a
+        // transient git hiccup must fall through, never be pulled to fallback as an unreachable divergence.
+        if (!ancestry.unknown && !ancestry.probeFailed && !ancestry.ok) {
+          strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `this worker's branch was cut from ${ancestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${advisoryBatchTip.slice(0, 8)}) — this cannot be cleared by recycling or rebasing this worker; switch the canonical checkout back to the branch this worker was cut from, or re-dispatch the work on a fresh worker cut from current mainline` });
+          continue;
+        }
+      }
       const stranded = await detectStrandedWork(finalRepoPath, worktreePath, r.branch, { timeoutMs: this.gitOpMs });
       if (stranded.stranded) { strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `stranded work on '${stranded.branch}' — refusing the empty batch slot; re-point the branch then re-confirm` }); continue; }
       candidates.push(r);
@@ -21265,7 +21363,10 @@ export class SessionService {
 
           // @decision 641cc62c — liveChosenAtMint (not the outer liveChosen): a late-detected spawn
           // conflict must actually exclude that candidate from the real assembly, not just skip marking it.
-          const batchCandidates: BatchCandidate[] = liveChosenAtMint.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle, ...(verifiedTip.has(c.workerSessionId) ? { tip: verifiedTip.get(c.workerSessionId)! } : {}) }));
+          // @decision 0eaaa693 (round 5) — `?? null`: BatchCandidate.cutBaseSha is now REQUIRED
+          // (`string | null`, never `| undefined`), while Session.cutBaseSha stays optional in its own
+          // shared type; this is the one coercion site that bridges the two.
+          const batchCandidates: BatchCandidate[] = liveChosenAtMint.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle, cutBaseSha: c.cutBaseSha ?? null, ...(verifiedTip.has(c.workerSessionId) ? { tip: verifiedTip.get(c.workerSessionId)! } : {}) }));
           // @decision c24dd48a — release the held repo guard in THIS `finally` (every exit after a passing gate), never inline after it;
           //  scoped to end at the squash, not the outer `finally` (finalize never moves main's HEAD).
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
@@ -21583,6 +21684,9 @@ export class SessionService {
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
               mergedVerification, suppressNotify: true,
               expectedBranchTip: lb.assembledTip,
+              // @decision 0eaaa693 — stamp cutBaseUnknown on this candidate's own merge_done when it
+              // carried no recorded cut base (a legacy worker) — the fork-point check was grandfathered.
+              ...(lb.cutBaseSha == null ? { cutBaseUnknown: true } : {}),
               onBranchRetained: (live, phase, reason) => { lateRetained = noteRetained(phase, live, reason); },
               onWorktreeRetainedDirty: (info) => {
                 dirtyRetained = info;
@@ -23446,7 +23550,7 @@ export class SessionService {
         // @decision c30952c1 — `worktreeGoneLandingUnconfirmed` classifies distinctly too, same reasoning:
         // the cause (a transient lookup glitch, or the worktree still being gone) is checked fresh on a
         // re-call, never replayed from cache.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
@@ -25096,6 +25200,9 @@ export class SessionService {
     gateSkipped?: "already-landed";
     /** Card 293d418e: `merge_done.landedSha` reports this (the introducing commit) instead of `mergedSha` when set; see {@link finishAlreadyMerged}'s own doc. */
     attributedSha?: string;
+    /** @decision 0eaaa693 — stamped onto `merge_done` when this landing's worker carried no recorded
+     *  `cutBaseSha` (a legacy worker) — the fork-point ancestry check was grandfathered, not enforced. */
+    cutBaseUnknown?: boolean;
     /**
      * Card 42daa283 — the branch tip the caller's landing was built from (a batch landing states `assembledTip`;
      * every other caller omits it, byte-identical to before). When present, finalize re-reads the live tip (the
@@ -25237,7 +25344,7 @@ export class SessionService {
         const mergeDoneSeq = this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(),
           managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-          taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}) },
+          taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}), ...(args.cutBaseUnknown ? { cutBaseUnknown: true } : {}) },
         });
         args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
         // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`

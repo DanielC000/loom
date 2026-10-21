@@ -791,6 +791,15 @@ export interface Session {
    */
   reviewBaseSha?: string | null;
   /**
+   * This worker's branch's recorded CUT BASE (fork point) — see `WorktreeInfo.cutBaseAdvanced`'s doc
+   * (`git/worktrees.ts`) for how it's derived, and `docs/decisions/0eaaa693-fork-point-ancestry-check.md`
+   * for why it's a separate field from `reviewBaseSha` above.
+   *
+   * @decision 0eaaa693 — null/absent is GRANDFATHERED at merge time (lands as before, `cutBaseUnknown:
+   * true` on the result/event), never enforced against data never captured.
+   */
+  cutBaseSha?: string | null;
+  /**
    * Multi-repo epic (49136451) phase 2: which `project.repos` entry this worker's worktree was cut
    * from, stamped ONCE at spawn/recycle time (never re-derived from `task.repoKey` afterward) — the
    * worktree is physically rooted in ONE repo, so every later op on it (gate, merge, finalize,
