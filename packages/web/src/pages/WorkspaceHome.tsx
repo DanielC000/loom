@@ -266,6 +266,7 @@ function attentionSummary(kinds: string[]): string {
  * FOUR mounts read this — the Needs-you band panel and the `needs you` KPI pop-over, at each of the
  * two levels — so wiring it here puts the action in all four. No classic surface reaches it: Mission
  * Control and the project Overview both filter MERGE REQUEST out and render the rich card instead.
+ * `compact` (card d0d430d4) rides on that same fact — this is the only Atlas-side AttentionRow caller.
  */
 export function AttentionList({ items, cap }: { items: ReturnType<typeof useAttention>["items"]; cap: number }) {
   const navigate = useNavigate();
@@ -280,7 +281,7 @@ export function AttentionList({ items, cap }: { items: ReturnType<typeof useAtte
           ? <CompactMergeAction workerId={workerId} onReview={() => navigate(`/review/${workerId}`)} />
           : undefined;
         return (
-          <AttentionRow key={item.key} item={item} footer={footer}
+          <AttentionRow key={item.key} item={item} footer={footer} compact
             onOpen={footer
               ? undefined
               : item.questionId

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
@@ -168,8 +168,8 @@ const DISMISS_FALLBACK_HINT = "Hide this alert — it comes back only if somethi
  * @decision c2968651 — never make the footer unconditional or item-derived. A classic attention row
  * must stay the one-line shape, with no wrapper element inserted around its children.
  */
-export function AttentionRow({ item, onOpen, onDismiss, footer }: {
-  item: AttentionRowItem; onOpen?: () => void; onDismiss?: () => void; footer?: ReactNode;
+export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
+  item: AttentionRowItem; onOpen?: () => void; onDismiss?: () => void; footer?: ReactNode; compact?: boolean;
 }) {
   // A pending Request of ANY type (live or orphaned) reads as an answerable ask: a cyan left-edge, a
   // PENDING state chip, and an "Answer →" (not the generic "Open") — distinct from the phosphor MERGE
@@ -181,31 +181,48 @@ export function AttentionRow({ item, onOpen, onDismiss, footer }: {
   // (lib/attention.ts) is the one place that distinction lives — App.tsx's collapsed request pill reads
   // the SAME helper, so the two can never drift apart on what counts as answerable.
   const decision = isAnswerableRequest(item);
+  // The row's parts, each named once and composed differently per shape below. Hoisting them is what
+  // lets the `compact` band shape re-order the SAME children without a second copy of any of them —
+  // and a fragment adds no DOM node, so the classic `head` below renders the element sequence it
+  // always did, attributes and inline styles included.
+  const dot = <Dot tone={item.tone} glow={item.tone === "amber"} />;
+  const kindLabel = (
+    <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
+  );
+  const textBase = { fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" } as const;
+  /* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
+     (the isolation-gap `reason` strings run to a paragraph each) — so hover reveals `hoverText` when
+     a kind supplies it, else the full untruncated `text`. `text` still has to stand alone: a reader
+     who never hovers must get the whole actionable point from the row itself. */
+  const textSpan = (extra?: CSSProperties) => (
+    <span data-testid="attention-row-text" title={item.hoverText || item.text}
+      style={extra ? { ...textBase, ...extra } : textBase}>{item.text}</span>
+  );
+  const stateChip = decision && <DecisionStateChip q={{ state: "pending", answeredAt: null }} now={0} />;
+  const clearRateLimit = item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />;
+  const snooze = item.staleQuestionId && <SnoozeButton questionId={item.staleQuestionId} />;
+  const openButton = onOpen && <Button variant={decision ? "primary" : "default"} onClick={onOpen}>{decision ? "Answer →" : "Open"}</Button>;
+  /* Dismiss — passed whenever item.dismissKey is set, which since card 611e76ba is every kind the
+     attention queue builds (owner ruling 2026-10-12: everything shown here must be hideable). The
+     hover title is assembled from TWO halves: the item's own `dismissHint` names what makes THIS
+     kind come back, and DISMISS_INVARIANT below states what dismissing does NOT do. The invariant
+     is appended here, once, rather than restated by 18 builders that could each drift from it. */
+  const dismissButton = onDismiss && (
+    <Button variant="ghost" onClick={onDismiss} aria-label="Dismiss this alert"
+      title={`${item.dismissHint || DISMISS_FALLBACK_HINT} ${DISMISS_INVARIANT}`}
+      style={{ padding: "0 6px", fontSize: 15, lineHeight: 1 }}>×</Button>
+  );
   const head = (
     <>
-      <Dot tone={item.tone} glow={item.tone === "amber"} />
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
-      {/* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
-          (the isolation-gap `reason` strings run to a paragraph each) — so hover reveals `hoverText` when
-          a kind supplies it, else the full untruncated `text`. `text` still has to stand alone: a reader
-          who never hovers must get the whole actionable point from the row itself. */}
-      <span data-testid="attention-row-text" title={item.hoverText || item.text}
-        style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" }}>{item.text}</span>
+      {dot}
+      {kindLabel}
+      {textSpan()}
       <span style={{ flex: 1 }} />
-      {decision && <DecisionStateChip q={{ state: "pending", answeredAt: null }} now={0} />}
-      {item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />}
-      {item.staleQuestionId && <SnoozeButton questionId={item.staleQuestionId} />}
-      {onOpen && <Button variant={decision ? "primary" : "default"} onClick={onOpen}>{decision ? "Answer →" : "Open"}</Button>}
-      {/* Dismiss — passed whenever item.dismissKey is set, which since card 611e76ba is every kind the
-          attention queue builds (owner ruling 2026-10-12: everything shown here must be hideable). The
-          hover title is assembled from TWO halves: the item's own `dismissHint` names what makes THIS
-          kind come back, and DISMISS_INVARIANT below states what dismissing does NOT do. The invariant
-          is appended here, once, rather than restated by 18 builders that could each drift from it. */}
-      {onDismiss && (
-        <Button variant="ghost" onClick={onDismiss} aria-label="Dismiss this alert"
-          title={`${item.dismissHint || DISMISS_FALLBACK_HINT} ${DISMISS_INVARIANT}`}
-          style={{ padding: "0 6px", fontSize: 15, lineHeight: 1 }}>×</Button>
-      )}
+      {stateChip}
+      {clearRateLimit}
+      {snooze}
+      {openButton}
+      {dismissButton}
     </>
   );
   // `data-*` hooks (card ed0858dc): an e2e assertion on an attention row has to be scoped to the row it
@@ -221,15 +238,55 @@ export function AttentionRow({ item, onOpen, onDismiss, footer }: {
     borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`,
     borderRadius: 4, padding: "6px 10px", marginBottom: 6,
   };
+  // ── The BAND shape (card d0d430d4) ───────────────────────────────────────────────────────────
+  // The one-line shape below cannot hold this row's fixed parts in a ~300px band column. Before this
+  // card, on /home at 1600×1000: the action's box ended 21px past the band body's right edge, and the
+  // text collapsed to 0px wide and 486px tall — one character per line — which pushed the merge rows
+  // below the panel's fold at 420px. The band stacks instead: a head line carrying the title, then a
+  // right-aligned action line. Same two-line grammar the band's own operator/agent rows use.
+  //
+  // @decision d0d430d4 — OPT-IN. The classic surfaces (Mission Control, the project Overview, the
+  // merge-gate escalation) must keep the one-line shape below, with `head` as the frame's own direct
+  // flex children and no wrapper element inserted around them.
+  if (compact) {
+    // `nowrap` is what stops the 0px/486px collapse; `wrap` guarantees the title drops to its own
+    // full-width line rather than being squeezed to nothing (also the long-kind net); `flex: 1 1 80px`
+    // — not `auto` — is what keeps it ON the head line, so the row stays two lines. The × rides the
+    // head line because dismissing is a VIEW action on the ROW (see DISMISS_INVARIANT), not a sibling
+    // of its answer. Each was reverted alone and re-measured; the record has which leg each one moves.
+    const actions = [stateChip, clearRateLimit, snooze, openButton].filter(Boolean);
+    return (
+      <div {...hooks} style={{ display: "flex", flexDirection: "column", gap: 6, ...frame }}>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, rowGap: 4, minWidth: 0 }}>
+          {dot}
+          {kindLabel}
+          {textSpan({ whiteSpace: "nowrap", flex: "1 1 80px", minWidth: 0 })}
+          {dismissButton}
+        </div>
+        {actions.length > 0 && (
+          <div data-testid="attention-row-actions"
+            style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 8, rowGap: 6 }}>
+            {stateChip}
+            {clearRateLimit}
+            {snooze}
+            {openButton}
+          </div>
+        )}
+        {footer}
+      </div>
+    );
+  }
   // No footer ⇒ the one-line row, with `head` as the frame's OWN direct flex children: the text's
   // ellipsis and the `flex: 1` spacer both measure against this element, so wrapping them in an
   // inner box unconditionally would change every classic row's layout for no reason.
   if (!footer) {
     return <div {...hooks} style={{ display: "flex", alignItems: "center", gap: 10, ...frame }}>{head}</div>;
   }
-  // `flex-start`, not `center`: in a ~300px band column the row text wraps to two or three lines,
-  // and centring leaves the kind pill and the dismiss floating against the middle of that block.
-  // Measured at 1600 — the one-line variant above keeps `center`, where there is nothing to wrap past.
+  // A footer with no `compact` — the generic slot shape. `flex-start`, not `center`: a footer exists
+  // because the row's action did not fit beside its text, which means the text may wrap, and centring
+  // would leave the kind pill floating against the middle of that block. No caller takes this path
+  // today (the band passes `compact`, which stacks the actions as well), so it is the shape a FUTURE
+  // non-band footer caller gets, not dead code for the band.
   return (
     <div {...hooks} style={{ display: "flex", flexDirection: "column", gap: 6, ...frame }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>{head}</div>
