@@ -23,6 +23,7 @@ import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil, deferred } from "./_wait.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 const noReap = async () => ({ killedPids: [] });
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgord-home-${Date.now()}-${process.pid}`);
@@ -353,8 +354,22 @@ try {
     const f1 = await addWorker(db, P, "f1", { "src/f1.ts": "export const f1 = 1;\n" });
     const f2 = await addWorker(db, P, "f2", { "src/f2.ts": "export const f2 = 2;\n" });
     ctx.gate.pass = false;
-    const r = await ctx.sessions.mergeBatchTracked(P.mgrId, [f1.workerId, f2.workerId]);
-    const v = r.settled && r.ok ? r.value : undefined;
+    // @decision 2d57e1c7 — card 2d57e1c7 (full-gate flake, op e0a9731e): a bare single `await` here
+    // asserted `r.settled===true` on the FIRST result, which measures how fast THIS host's real batch
+    // assembly + gate call happened to run, not the code under test — `mergeBatchTracked`'s documented
+    // `{settled:false, op}` async-degrade path (orchestration/pending-ops.ts) is a SUPPORTED outcome
+    // whenever `syncAttachBudgetMs` elapses before the real work finishes, which a loaded host (two
+    // overlapping full gates, per the card) makes far more likely to hit even at this service's already
+    // generous 60s budget. `awaitTrackedSettle` re-calls the SAME closure until it genuinely settles
+    // (`PendingOpRegistry.attach` dedupes by key — card `f944d4e4` — so a re-call re-attaches to the
+    // in-flight op instead of re-running assembly), bounded with `performance.now()` so a real wedge
+    // still throws loudly instead of hanging. Same fix shape already proven for this exact degrade on
+    // `cut-base-sha-confirm-and-batch.mjs` scenario (2).
+    const r = await awaitTrackedSettle(
+      () => ctx.sessions.mergeBatchTracked(P.mgrId, [f1.workerId, f2.workerId]),
+      { label: "merge-gate-interval (BF): the failing batch gate" },
+    );
+    const v = r.ok ? r.value : undefined;
     check("(BF) K=2 at N=1 is due (0+2>1): the batch gate ran and FAILED ⇒ ok:false, nothing landed by the batch", v?.ok === false && v.landed.length === 0 && ctx.gate.calls >= 1);
     const s = db.getMergeGateState(P.projId);
     const batchRow = s.recent.find((e) => e.candidates === 2);

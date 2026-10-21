@@ -90,15 +90,75 @@ try {
   // 5s (not the original 50ms) so it survives the capture's own ~560-630ms real latency below — a
   // witness that already died on its own timer before the await settles would flip this from "a LIVE
   // registered root" into "a dead one", changing which branch of the real tripwire/filter this exercises.
-  witnessChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" });
-  const witnessPid = witnessChild.pid;
-  // @decision 85ae7768 (CR 85360986, MAJOR) — await + assert BEFORE reaping, same reasoning as
-  // dev-server-teardown.mjs: the capture is async while reapOrphanedDescendants reads the registry
-  // synchronously, so reaping immediately races the capture and almost always loses.
-  const capturedCreationTime = await awaitRootCreationCapture(witnessPid);
+  //
+  // @decision 2d57e1c7 — card 2d57e1c7 (full-gate flake, op e0a9731e): under real gate contention, the
+  // witness's OWN diagnostic capture can itself fail to even complete — spawning its powershell.exe/CIM
+  // helper competes with every OTHER concurrent reap-capture across overlapping gates/lanes for the same
+  // process-table headroom. `_guard.mjs`'s own capture chain turns that kind of INFRASTRUCTURE failure
+  // into a resolved `null` (same shape as a genuine verification rejection — see `CAPTURE_STATS.failed`,
+  // which only the infra-failure path increments), so a bare `typeof === number` check on the FIRST
+  // attempt can't tell "the filter genuinely has nothing to arm" from "we never got a clean chance to
+  // ask". ⚠️ Manager review correction: retrying on ANY null (as a first pass did) would mask exactly
+  // the regression class this witness exists for — a filter that intermittently REJECTS a valid capture
+  // would then pass whenever any one of several attempts happened to succeed. So ONLY an infra failure
+  // (`captureStats.failed` advanced during the attempt) or a thrown rejection is retried; a genuine
+  // verification rejection (row/ppid/slack check ran and said no, with NO infra failure) fails
+  // IMMEDIATELY — no retry, loud diagnostic, same break-the-loop shape as a successful capture.
+  // Deterministic RED/GREEN proof (no real host load, two independent controls): a scratch repro
+  // injecting N synthetic powershell.exe spawn failures reproduced the resolved-null INFRA shape on a
+  // single attempt (RED pre-fix), and the bounded retry recovered once the injected failures were
+  // exhausted (GREEN) while still failing loudly, not vacuously, once injected failures exceeded the
+  // retry bound. A second repro forced a genuine VERIFICATION rejection (no infra failure at all) on the
+  // first attempt, via the real `resolveVerifiedRootCreationTime` ppid-mismatch branch — confirmed this
+  // fails immediately, is never retried into green, and exits the loop on attempt 1. Non-win32 never
+  // arms a capture at all (`armRootCreationTime` returns early there), so the loop is skipped entirely
+  // off-platform and a single witness is spawned directly.
+  const WITNESS_CAPTURE_ATTEMPTS = 3;
+  let capturedCreationTime = null;
+  let witnessPid = null;
   if (process.platform === "win32") {
+    const captureStats = globalThis.__LOOM_TEST_CAPTURE_STATS__;
+    const attemptLog = [];
+    for (let attempt = 1; attempt <= WITNESS_CAPTURE_ATTEMPTS; attempt++) {
+      const candidate = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" });
+      const candidatePid = candidate.pid;
+      const failedBefore = captureStats.failed;
+      let result = null;
+      try {
+        // @decision 85ae7768 (CR 85360986, MAJOR) — await + assert BEFORE reaping, same reasoning as
+        // dev-server-teardown.mjs: the capture is async while reapOrphanedDescendants reads the registry
+        // synchronously, so reaping immediately races the capture and almost always loses.
+        result = await awaitRootCreationCapture(candidatePid);
+      } catch (err) {
+        attemptLog.push(`attempt ${attempt}/${WITNESS_CAPTURE_ATTEMPTS} pid=${candidatePid}: REJECTED (infra — retrying) — ${err?.message ?? err}`);
+        try { candidate.kill(); } catch { /* already gone */ }
+        continue;
+      }
+      if (typeof result === "number" && result > 0) {
+        capturedCreationTime = result;
+        witnessPid = candidatePid;
+        witnessChild = candidate;
+        break;
+      }
+      const infra = captureStats.failed > failedBefore;
+      try { candidate.kill(); } catch { /* already gone */ }
+      if (!infra) {
+        // Genuine verification rejection — the filter ran and said no. This is the exact regression
+        // this witness protects against, so it must NEVER be masked by a retry: fail immediately.
+        attemptLog.push(`attempt ${attempt}/${WITNESS_CAPTURE_ATTEMPTS} pid=${candidatePid}: resolved ${result === null ? "null" : result} — VERIFICATION REJECTED (row/ppid/slack check ran and said no; NOT retrying)`);
+        break;
+      }
+      attemptLog.push(`attempt ${attempt}/${WITNESS_CAPTURE_ATTEMPTS} pid=${candidatePid}: resolved ${result === null ? "null" : result} — capture attempt FAILED (infra; retrying)`);
+    }
+    if (capturedCreationTime == null) {
+      console.log(`witness capture never armed:\n  ${attemptLog.join("\n  ")}`);
+    }
     check("witness: creationTime is armed before reap (the filter this card protects)",
       typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+  }
+  if (witnessPid == null) {
+    witnessChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" });
+    witnessPid = witnessChild.pid;
   }
   reapOrphanedDescendants(witnessPid);
 
