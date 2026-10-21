@@ -151,8 +151,9 @@ this worker was cut from, or (b) re-dispatch the work on a FRESH worker cut from
 
 ## Round 4 — test coverage notes
 
-Round 3's own in-lock-wiring test (`packages/daemon/test/cut-base-sha-confirm-in-lock-wiring.mjs`,
-scenario (e)) claimed to prove the batch in-lock wiring (`cutBaseSha: c.cutBaseSha` reaching
+Round 3's own in-lock-wiring test (`packages/daemon/test/cut-base-sha-confirm-in-lock-wiring-batch-extra.mjs`,
+scenario (e) — split out of the original combined `cut-base-sha-confirm-in-lock-wiring.mjs` by card
+d10f1f92) claimed to prove the batch in-lock wiring (`cutBaseSha: c.cutBaseSha` reaching
 `batchCandidates`, `sessions/service.ts`) by moving canonical main mid-gate. A round-4 diagnosis (a
 standalone harness reproducing the exact setup) showed this claim was false: the candidates' batch
 worktree is cut from the pre-gate tip, so their cutBaseSha ancestry check passes cleanly inside assembly
@@ -203,8 +204,8 @@ Besides the "untestable" refutation and the two null-case/wording fixes above:
   SAME honest "could not verify, re-confirm" outcome `checkCutBaseAncestry`'s own probe failure gets — it
   used to return a plain `{ok:false, reason}` that fell through to the generic merge-failed branch's
   "squash was attempted... Re-task a rebase" wording (both false and misdirecting here, since nothing was
-  ever squashed and a rebase touches nothing relevant). Test: `cut-base-sha-confirm-in-lock-wiring.mjs`
-  scenario (h).
+  ever squashed and a rebase touches nothing relevant). Test:
+  `cut-base-sha-confirm-in-lock-wiring-solo.mjs` scenario (h).
 - The REATTACH spawn path (worktree dir removed via `git worktree remove`, branch retained) carries the
   prior worker's `cutBaseSha` forward too, through `createWorktree`'s OTHER `cutBaseAdvanced:false` route
   (`!branchExists || reattachRecut`) — previously tested only via the dir-still-present reuse route. Test:
@@ -212,7 +213,7 @@ Besides the "untestable" refutation and the two null-case/wording fixes above:
 - The batch-assembly `cutBaseUnknown` stamp (`finishAlreadyMerged`'s call inside the per-candidate landing
   loop, `sessions/service.ts`) is now tested in BOTH directions — a legacy candidate's own `merge_done`
   carries it, an ordinary candidate's own `merge_done` landing alongside it does NOT. Test:
-  `cut-base-sha-confirm-in-lock-wiring.mjs` scenario (i); `cut-base-sha-confirm-in-lock-wiring.mjs`
+  `cut-base-sha-confirm-in-lock-wiring-batch-extra.mjs` scenario (i); `cut-base-sha-confirm-in-lock-wiring-batch.mjs`
   scenarios (f)/(g) also gained the "good candidate carries no stamp" negative assertion.
 - `mergeBranch`/`mergeBranchLocked` (`git/worktrees.ts`) and `landBranchCommitsIndividually`/
   `BatchCandidate.cutBaseSha` (`git/batch-merge.ts`) all now type `cutBaseSha` as REQUIRED `string | null`

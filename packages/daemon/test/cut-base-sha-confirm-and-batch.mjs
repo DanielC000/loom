@@ -9,7 +9,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `worker.cutBaseSha` into `mergeBranch`, service.ts ~19818; building `batchCandidates` with
 // `cutBaseSha: c.cutBaseSha`, ~21346) — reverting either would stay GREEN here, since the advisory
 // already decides the outcome before the in-lock wiring is ever consulted. See
-// cut-base-sha-confirm-in-lock-wiring.mjs for a test that isolates and actually proves THAT wiring.
+// cut-base-sha-confirm-in-lock-wiring-solo.mjs / cut-base-sha-confirm-in-lock-wiring-batch.mjs /
+// cut-base-sha-confirm-in-lock-wiring-batch-extra.mjs (split three ways by card d10f1f92, each under its
+// own per-file gate budget) for tests that isolate and actually prove THAT wiring.
 //
 //   (1) a confirm-level refusal through the REAL `worker_merge_confirm` path
 //       (confirmWorkerMergeTracked -> confirmWorkerMerge) — proves the ADVISORY check reads a REAL
@@ -199,7 +201,7 @@ try {
     const merge = await svc.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id);
     check("(1) the real confirm settles (not a throw)", merge.settled === true && merge.ok === true);
     check("(1) refused — merged:false", merge.value?.merged === false);
-    check("(1) classified forkPointDiverged (never branchDiverted) — proves the ADVISORY check read a REAL session's cutBaseSha (NOT the separate in-lock mergeBranch wiring — see cut-base-sha-confirm-in-lock-wiring.mjs)",
+    check("(1) classified forkPointDiverged (never branchDiverted) — proves the ADVISORY check read a REAL session's cutBaseSha (NOT the separate in-lock mergeBranch wiring — see cut-base-sha-confirm-in-lock-wiring-solo.mjs)",
       merge.value?.forkPointDiverged === true && !merge.value?.branchDiverted);
     check("(1) the refusal says recycling/rebasing can NEVER clear it (the round-2 remedy fix)",
       /cannot be cleared by recycling/i.test(merge.value?.reason ?? merge.value?.detailText ?? ""));
@@ -293,7 +295,7 @@ try {
       { label: "(2) mergeBatchTracked", timeoutMs: 180_000 },
     );
     check("(2) the real batch settles", batch.settled === true && batch.ok === true);
-    check("(2) BOTH good candidates landed via the REAL batch assembly path (batch.value.landed) — consistent with correct `batchCandidates` wiring, but does NOT isolate it (they'd land the same way even if cutBaseSha were dropped — see cut-base-sha-confirm-in-lock-wiring.mjs for that)",
+    check("(2) BOTH good candidates landed via the REAL batch assembly path (batch.value.landed) — consistent with correct `batchCandidates` wiring, but does NOT isolate it (they'd land the same way even if cutBaseSha were dropped — see cut-base-sha-confirm-in-lock-wiring-batch.mjs for that)",
       (batch.value?.landed ?? []).some((l) => l.workerSessionId === goodWorker.id) && (batch.value?.landed ?? []).some((l) => l.workerSessionId === good2Worker.id));
     const strayFallback = (batch.value?.fallback ?? []).find((f) => f.workerSessionId === strayWorker.id);
     check("(2) the STRAY candidate was pulled to fallback BEFORE assembly (the advisory pre-filter, card 0eaaa693) — proves the ADVISORY read a REAL session's cutBaseSha and refused it",
