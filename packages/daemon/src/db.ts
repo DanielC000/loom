@@ -5074,9 +5074,12 @@ export class Db {
     for (const sid of sessionIds) this.notifySessionChanged(sid);
     return { sessionIds };
   }
-  /** Count of an agent's sessions still in processState 'live' — the agent-delete guard ("stop the fleet first"). */
+  /** Count of an agent's sessions still live or starting — the agent-delete guard ("stop the fleet
+   *  first").
+   *  @decision 0368c784 — widened from 'live'-only to also count 'starting' (mirrors the live/starting
+   *  check used at db.ts:9502, mcp-config-gc.ts, scratch-gc.ts, service.ts's worktree scan). */
   countLiveSessionsForAgent(id: string): number {
-    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE agent_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE agent_id = ? AND process_state IN ('live', 'starting')").get(id) as { c: number }).c;
   }
 
   // --- api keys (Agent Runs R1: project-scoped, hashed-at-rest, human-managed) -------------------

@@ -2476,6 +2476,16 @@ export class CodexForkUnsupportedError extends Error {
   }
 }
 
+/** Card 0368c784: `startNew`/`startManager` refusing a second live-or-starting manager for the same
+ *  agent — thrown by `refuseSecondLiveManager`. `holderSessionId` names the session already holding
+ *  the slot, so a caller can surface it without re-parsing the message text. */
+export class SecondLiveManagerError extends Error {
+  constructor(public readonly holderSessionId: string) {
+    super(`a live or starting manager session already exists for this agent (${holderSessionId}) — stop it, or recycle it, before starting another`);
+    this.name = "SecondLiveManagerError";
+  }
+}
+
 // @decision ad131671 — card 15806f81: forkSession's own singleton refusal, mirrored on
 // MANAGER_SESSION_BARRED_ERROR's shape (a plain message string, checked by equality at the REST route).
 export const SETUP_SESSION_FORK_BARRED_ERROR =
@@ -3675,6 +3685,17 @@ export class SessionService {
   }
 
   /**
+   * @decision 0368c784 — this check races unless the calling method stays non-`async` with no `await`
+   * between this call and `insertSession`; do not call it from a body that violates that.
+   */
+  private refuseSecondLiveManager(agentId: string): void {
+    const holder = this.db.listAllSessions().find((s) =>
+      s.agentId === agentId && s.role === "manager" && (s.processState === "live" || s.processState === "starting") &&
+      !this.db.hasSuccessor(s.id) && this.pty.isAlive(s.id));
+    if (holder) throw new SecondLiveManagerError(holder.id);
+  }
+
+  /**
    * Start a NEW session in an agent — injects the agent startup prompt once. `opts.forcePlain` (P3
    * web "Spawn → force plain") overrides any profile-conferred role to spawn a role-null session.
    * `opts.companionName` (companion provision only) bakes the companion's given name into its startup
@@ -3698,6 +3719,9 @@ export class SessionService {
     // @decision 37e15c26 — round 2: a role-omitted "+New"/poll/webhook spawn can ALSO resolve role==="manager"
     // via a Profile — refuse it here too, at the same resolved-role chokepoint startManager now uses.
     this.refuseManagerIntoReservedHome(role, project);
+    // Card 0368c784: same resolved-role chokepoint as the line above — a role-omitted spawn resolving
+    // to "manager" via a Profile must be refused here too, not just startManager's explicit callers.
+    if (role === "manager") this.refuseSecondLiveManager(agentId);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3847,6 +3871,9 @@ export class SessionService {
     // @decision 37e15c26 — round 2: refuse at the RESOLVED role, not the explicit-role call site, so
     // startNew's profile-derived manager role is covered too. See the shared helper's own doc.
     this.refuseManagerIntoReservedHome(role, project);
+    // Card 0368c784: explicit-role manager spawn — role is always "manager" here, so this runs
+    // unconditionally (the same chokepoint startNew's profile-derived branch also calls).
+    this.refuseSecondLiveManager(agentId);
 
     const now = new Date().toISOString();
     const session: Session = {

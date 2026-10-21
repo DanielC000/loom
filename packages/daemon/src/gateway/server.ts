@@ -25,7 +25,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -6057,40 +6057,48 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // mints one (the public keyed POST /api/runs trigger is R3). Refuse it the way platform/auditor are
     // role-locked, so role="run" can never be created via this surface.
     if (role === "run") { reply.code(400); return { error: "the 'run' session kind is not human-spawnable; Agent Runs are started internally (R3 adds the keyed trigger)" }; }
-    // @decision acd3c688 — this route is the ONE human-REST session-start call site; it passes
-    // spawnHumanAuthorized:true into every explicit-role start* below to bypass the grant-carryover check.
-    if (role === "manager") return deps.sessions.startManager(id, undefined, { spawnHumanAuthorized: true });
-    if (role === "platform") return deps.sessions.startPlatformLead(id, { spawnHumanAuthorized: true });
-    // P5: spawn the read-and-file-only Platform Auditor. HUMAN-REST only (like startPlatformLead) — the
-    // session role is locked to "auditor" via callerRole, regardless of the agent's profile role.
-    if (role === "auditor") return deps.sessions.startAuditor(id, undefined, { spawnHumanAuthorized: true });
-    // End-User Platform tier B5: spawn the de-privileged, user-facing Workspace Auditor on the curated
-    // loom-user-audit MCP surface. HUMAN-REST only (like startAuditor/startSetup) — the session role is
-    // locked to "workspace-auditor" via callerRole regardless of the agent's profile role. CREATE-ONLY
-    // (NOT a singleton — gotcha #9): each "Review my workspace" click spawns a fresh ephemeral run.
-    if (role === "workspace-auditor") return deps.sessions.startWorkspaceAuditor(id, undefined, { spawnHumanAuthorized: true });
-    // Setup Assistant E1-5: spawn the SINGLETON, ungated Setup Assistant on the curated loom-setup MCP
-    // surface. HUMAN-REST only (like startPlatformLead/startAuditor) — the session role is locked to
-    // "setup" via callerRole regardless of the agent's profile role; a live setup session is reused.
-    if (role === "setup") return deps.sessions.startSetup(id, { spawnHumanAuthorized: true });
-    // Bucket 2b "Elevated Operator": spawn the CREATE-ONLY, own-workspace-confined Operator on the
-    // curated loom-operator MCP surface. HUMAN-REST only (like setup/workspace-auditor) — the session
-    // role is locked to "operator" via callerRole regardless of the agent's profile role. FLAG-GATED:
-    // 403s (does not spawn) unless platform.operatorEnabled is on (read LIVE — the same isOperatorEnabled
-    // helper the router's own resolveRole uses), so a disabled install can never mint the surface even
-    // via a direct REST call.
-    if (role === "operator") {
-      if (!isOperatorEnabled(deps.db)) {
-        reply.code(403);
-        return { error: "the Elevated Operator is disabled — enable it in Settings first (platform.operatorEnabled)" };
+    // Card 0368c784: startManager/startNew can now throw SecondLiveManagerError (a second live-or-
+    // starting manager for this agent) — map it to an honest 409 naming the holder, same pattern as the
+    // /resume and /fork routes' own MANAGER_SESSION_BARRED_ERROR handling just below.
+    try {
+      // @decision acd3c688 — this route is the ONE human-REST session-start call site; it passes
+      // spawnHumanAuthorized:true into every explicit-role start* below to bypass the grant-carryover check.
+      if (role === "manager") return deps.sessions.startManager(id, undefined, { spawnHumanAuthorized: true });
+      if (role === "platform") return deps.sessions.startPlatformLead(id, { spawnHumanAuthorized: true });
+      // P5: spawn the read-and-file-only Platform Auditor. HUMAN-REST only (like startPlatformLead) — the
+      // session role is locked to "auditor" via callerRole, regardless of the agent's profile role.
+      if (role === "auditor") return deps.sessions.startAuditor(id, undefined, { spawnHumanAuthorized: true });
+      // End-User Platform tier B5: spawn the de-privileged, user-facing Workspace Auditor on the curated
+      // loom-user-audit MCP surface. HUMAN-REST only (like startAuditor/startSetup) — the session role is
+      // locked to "workspace-auditor" via callerRole regardless of the agent's profile role. CREATE-ONLY
+      // (NOT a singleton — gotcha #9): each "Review my workspace" click spawns a fresh ephemeral run.
+      if (role === "workspace-auditor") return deps.sessions.startWorkspaceAuditor(id, undefined, { spawnHumanAuthorized: true });
+      // Setup Assistant E1-5: spawn the SINGLETON, ungated Setup Assistant on the curated loom-setup MCP
+      // surface. HUMAN-REST only (like startPlatformLead/startAuditor) — the session role is locked to
+      // "setup" via callerRole regardless of the agent's profile role; a live setup session is reused.
+      if (role === "setup") return deps.sessions.startSetup(id, { spawnHumanAuthorized: true });
+      // Bucket 2b "Elevated Operator": spawn the CREATE-ONLY, own-workspace-confined Operator on the
+      // curated loom-operator MCP surface. HUMAN-REST only (like setup/workspace-auditor) — the session
+      // role is locked to "operator" via callerRole regardless of the agent's profile role. FLAG-GATED:
+      // 403s (does not spawn) unless platform.operatorEnabled is on (read LIVE — the same isOperatorEnabled
+      // helper the router's own resolveRole uses), so a disabled install can never mint the surface even
+      // via a direct REST call.
+      if (role === "operator") {
+        if (!isOperatorEnabled(deps.db)) {
+          reply.code(403);
+          return { error: "the Elevated Operator is disabled — enable it in Settings first (platform.operatorEnabled)" };
+        }
+        return deps.sessions.startOperator(id, { spawnHumanAuthorized: true });
       }
-      return deps.sessions.startOperator(id, { spawnHumanAuthorized: true });
+      // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in an agent with a
+      // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
+      // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
+      if (role === "plain") return deps.sessions.startNew(id, { forcePlain: true });
+      return deps.sessions.startNew(id);
+    } catch (e) {
+      if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
+      throw e;
     }
-    // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in an agent with a
-    // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
-    // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
-    if (role === "plain") return deps.sessions.startNew(id, { forcePlain: true });
-    return deps.sessions.startNew(id);
   });
   // Manual (human) resume from the UI — the ONE resume path allowed to force-resurrect a RECYCLED
   // session (allowSuperseded). The automatic paths (wake / rate-limit / boot) cannot; only the user

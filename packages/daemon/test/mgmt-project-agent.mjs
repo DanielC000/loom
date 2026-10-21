@@ -163,6 +163,17 @@ try {
   check("D: nothing removed (project/agent/session all survive the live block)",
     !!db.getProject("pLive") && !!db.getAgent("aLive") && !!db.getSession("sLive"));
 
+  // Card 0368c784: countLiveSessionsForAgent widened from 'live'-only to also count 'starting' — a
+  // session still in its (near-instantaneous, but not guaranteed-zero) starting window must block an
+  // agent delete exactly like a live one, not just a bare "live" row.
+  db.insertAgent(mkAgent("aStarting", "pLive"));
+  db.insertSession(mkSession("sStarting", "pLive", "aStarting", { processState: "starting" }));
+  const lagStarting = await app.inject({ method: "DELETE", url: "/api/agents/aStarting" });
+  check("D: delete agent with a STARTING (not yet live) session → 400 (stop the fleet first)",
+    lagStarting.statusCode === 400 && /stop the fleet first/.test(JSON.parse(lagStarting.body).error));
+  check("D: the starting agent/session both survive the block",
+    !!db.getAgent("aStarting") && !!db.getSession("sStarting"));
+
   // ════════ E. CASCADE — deleteProject (rows + on-disk snapshots) + deleteAgent ════════
   // Build a fully-populated project: 2 agents, sessions under each, tasks, schedules, an api key + run.
   // card 629e2d11: the PROJECT id must be UUID-shaped — deleteProjectArchives/deleteProjectWorkDir's
