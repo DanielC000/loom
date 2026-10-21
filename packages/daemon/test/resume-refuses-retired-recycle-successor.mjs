@@ -185,7 +185,12 @@ try {
 
   // A plain, ORDINARY manager (M3) — never recycled, never retired — that simply exits normally and gets
   // auto-archived. This is the POSITIVE CONTROL: archived is the NORMAL state of every stopped session.
-  const m3 = sessions1.startManager(`${P}-mgr`);
+  // Its own claim is about an ordinary manager's archive/retire behavior, not about this specific agent —
+  // so it gets its OWN agent rather than reusing `${P}-mgr`, which still has a LIVE manager (M1, never
+  // stopped — the sanctioned predecessor/successor coexistence window M2 never exits) and would now be
+  // refused a second live manager by card 0368c784's refuseSecondLiveManager.
+  db1.insertAgent({ id: `${P}-mgr3`, projectId: P, name: "Mgr3", startupPrompt: "MGR3", position: 1, profileId: null });
+  const m3 = sessions1.startManager(`${P}-mgr3`);
   host1.deliverHook(m3.id, { hook_event_name: "SessionStart", session_id: "eng-m3" });
   writeFakeTranscript(m3.cwd, "eng-m3");
   host1.handles.get(m3.id).kill(); // real onExit fires -> archiveOnExit

@@ -279,6 +279,10 @@ try {
 
   // (D negative control) an UNRELATED recycleManager failure reason is NOT given this actionable rewrite —
   // proves the rewrite is keyed on the exact MANAGER_SESSION_BARRED_ERROR text, not a blanket catch-all.
+  // mD is done being asserted on above — kill it first (card 0368c784's refuseSecondLiveManager now
+  // refuses a second live manager for the SAME agent, and this control's claim is about recycle_me's
+  // error text, not about two live managers coexisting).
+  host.handles.get(mD.id).kill();
   db.updateProject("pD", { repoPath: repoD }); // un-bar pD so the barred-project branch can't fire instead
   const mD2 = sessions.startManager("pD-mgr");
   host.deliverHook(mD2.id, { hook_event_name: "SessionStart", session_id: "eng-mD2" });

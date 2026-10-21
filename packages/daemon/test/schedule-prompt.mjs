@@ -163,10 +163,12 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   db.insertAgent({ id: "agentWsa", projectId: "pS", name: "Wsa", startupPrompt: "AGENT_WSA_DOCTRINE", position: 2, profileId: null });
 
   class SeamHost extends createSeamHost(PtyHost) {
-    constructor(events) { super(events); this.capture = []; }
+    constructor(events) { super(events); this.capture = []; this.handles = new Map(); }
     createPty(opts) {
       this.capture.push(opts);
-      return super.createPty(opts);
+      const pty = super.createPty(opts);
+      this.handles.set(opts.sessionId, pty);
+      return pty;
     }
   }
   const events = {
@@ -196,9 +198,19 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   const mgrPrompt = (sid) => stripVolatileDeployNote(optsFor(sid).startupPrompt);
 
   // ===== MANAGER: unset variants are byte-identical to each other =====
-  const mOmitted = mgrPrompt(svc.startManager("agentMgr").id);
-  const mNull = mgrPrompt(svc.startManager("agentMgr", null).id);
-  const mUndef = mgrPrompt(svc.startManager("agentMgr", undefined).id);
+  // These are three back-to-back startManager("agentMgr", …) calls purely to compare composed prompt
+  // text — card 0368c784's refuseSecondLiveManager now refuses a second live manager for the same agent,
+  // so each prior one is killed (real onExit -> processState "exited", pty no longer alive) before the
+  // next is minted; the composed-prompt claim under test is unaffected either way.
+  const mOmittedId = svc.startManager("agentMgr").id;
+  const mOmitted = mgrPrompt(mOmittedId);
+  host.handles.get(mOmittedId).kill();
+  const mNullId = svc.startManager("agentMgr", null).id;
+  const mNull = mgrPrompt(mNullId);
+  host.handles.get(mNullId).kill();
+  const mUndefId = svc.startManager("agentMgr", undefined).id;
+  const mUndef = mgrPrompt(mUndefId);
+  host.handles.get(mUndefId).kill();
   check("(3) manager: omitted prompt === explicit null (byte-identical)", mOmitted === mNull);
   check("(3) manager: omitted prompt === explicit undefined (byte-identical)", mOmitted === mUndef);
   check("(3) manager: unset composed prompt carries no 'Scheduled task' block", !mOmitted.includes("Scheduled task"));
