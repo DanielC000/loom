@@ -492,6 +492,17 @@ const apiSrc = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8
 // side, which is the side that fails loudly rather than the side that goes quiet.
 const API_READ_HELPERS = new Set(["get", "getOrNull", "getErr"]);
 
+// card 66b9e590: the "other calls" side of the read verdict (below, in classifyApiMembers) was ITSELF
+// fail-OPEN — it only recognised a bare call to a declared+shaped helper or bare `fetch`, so a request
+// helper imported from elsewhere, a METHOD-form `window.fetch(`/`globalThis.fetch(`, or a `new
+// WebSocket`/`new EventSource` all silently passed as "no other call" and left a read verdict standing.
+// Inverted the same way as the read helpers above: a member's OTHER calls must each be a bare read
+// helper, a global named here, or a declared api.ts function the fixpoint below proves request-free —
+// anything else (including a method named `fetch`, or either of those two constructors) is a write.
+// This allowlist is reasoned, not inferred: these two globals are the only non-declared bare calls the
+// current read members actually make (see decision b472645a's record for the measurement).
+const PURE_GLOBALS = new Set(["encodeURIComponent", "String"]);
+
 // 🔴 AN AST WALK, NOT A REGEX — and the reason is a defect the regex version actually had.
 //
 // Two regex classifiers preceded this one and BOTH were wrong, in ways no amount of pattern-tightening
@@ -528,21 +539,30 @@ function apiDeclaredFunctions(sf) {
 }
 
 /**
- * Calls inside a subtree, split by SHAPE: a BARE call (`get(…)`) names a function in scope; a METHOD
- * call (`r.headers.get(…)`) names a property on some object and says nothing about helpers. Keeping
- * them apart is the whole point of using an AST here.
+ * Calls (and constructions) inside a subtree, split by SHAPE: a BARE call (`get(…)`) names a function
+ * in scope; a METHOD call (`r.headers.get(…)` or `window.fetch(…)`) names a property on some object and
+ * says nothing about helpers ON ITS OWN — but its RECEIVER does, which is why each method call carries
+ * its receiver's identifier text (`null` when the receiver isn't a bare identifier, e.g. `a.b.get(…)`);
+ * a `new X(…)` construction (`new WebSocket(…)`) is neither. Keeping them apart is the whole point of
+ * using an AST here.
  */
 function callsIn(node) {
   const bare = [];
   const methods = [];
+  const news = [];
   (function walk(n) {
     if (ts.isCallExpression(n)) {
       if (ts.isIdentifier(n.expression)) bare.push(n.expression.text);
-      else if (ts.isPropertyAccessExpression(n.expression)) methods.push(n.expression.name.text);
+      else if (ts.isPropertyAccessExpression(n.expression)) {
+        const receiver = ts.isIdentifier(n.expression.expression) ? n.expression.expression.text : null;
+        methods.push({ receiver, name: n.expression.name.text });
+      }
+    } else if (ts.isNewExpression(n) && ts.isIdentifier(n.expression)) {
+      news.push(n.expression.text);
     }
     ts.forEachChild(n, walk);
   })(node);
-  return { bare, methods };
+  return { bare, methods, news };
 }
 
 /**
@@ -552,6 +572,14 @@ function callsIn(node) {
  *
  * This is also why a pure formatter like `errorMessageFrom` does NOT count: it never reaches a fetch,
  * so a genuine read that calls it is still classified a read and the polarity control stays meaningful.
+ *
+ * 🔴 card 66b9e590 follow-up: a declared helper that performs its request as a METHOD call — e.g.
+ * `restartCompanionSession` calling `api.stopSession(…)` — was previously invisible to this fixpoint
+ * (it only ever walked BARE calls, plus the one method name `sendBeacon`), so it landed in `declared \
+ * shaped` (`pureHelpers`, in classifyApiMembers below) even though it genuinely issues requests. EVERY
+ * `api` member issues a request by construction (that is what this whole file classifies), so a method
+ * call whose receiver is the bare identifier `api` is request-shaped on its own, with no need to know
+ * which member it names.
  */
 function requestShapedHelpers(declared) {
   const shaped = new Set();
@@ -560,7 +588,8 @@ function requestShapedHelpers(declared) {
     for (const [name, node] of declared) {
       if (shaped.has(name)) continue;
       const { bare, methods } = callsIn(node);
-      if (bare.includes("fetch") || bare.includes("guardedFetch") || methods.includes("sendBeacon")
+      if (bare.includes("fetch") || bare.includes("guardedFetch")
+        || methods.some((m) => m.receiver === "api" || m.name === "fetch" || m.name === "sendBeacon")
         || bare.some((b) => shaped.has(b))) { shaped.add(name); changed = true; }
     }
   }
@@ -568,15 +597,23 @@ function requestShapedHelpers(declared) {
 }
 
 /**
- * Classify EVERY property of the `api` object, FAIL-CLOSED: a member is a READ only when it makes a
- * BARE call to a read helper AND makes no other request-shaped call. Anything else — an unrecognised
- * helper, a bespoke per-route function, a bare `fetch`, a `sendBeacon`, a shorthand member with no
- * calls at all — is a WRITE, which is the side that fails loudly.
+ * Classify EVERY property of the `api` object, FAIL-CLOSED on BOTH sides of the verdict: a member is a
+ * READ only when it makes a BARE call to a read helper, AND every OTHER call it makes is either a BARE
+ * call to a global in `PURE_GLOBALS` or to a declared api.ts function the fixpoint below proves
+ * request-free (`declared` minus `shaped`) — never a function merely "not recognised as a writer", which
+ * is the open-polarity shape card 66b9e590 closed. Any other bare call, any METHOD call named `fetch` or
+ * `sendBeacon`, or a `new WebSocket`/`new EventSource` construction, makes it a WRITE — an unrecognised
+ * helper, an imported request helper, a bespoke per-route function, a shorthand member with no calls at
+ * all, all land on the write side, which is the side that fails loudly.
  */
 function classifyApiMembers(src, fileName) {
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const declared = apiDeclaredFunctions(sf);
   const shaped = requestShapedHelpers(declared);
+  // Request-free by the SAME fixpoint that proves the read helpers themselves request-shaped (see the
+  // check below) — disjoint from `shaped` by construction, so a helper that reaches a request can never
+  // land here no matter how deep the delegation chain.
+  const pureHelpers = new Set([...declared.keys()].filter((n) => !shaped.has(n)));
 
   let obj = null;
   for (const st of sf.statements) {
@@ -594,14 +631,16 @@ function classifyApiMembers(src, fileName) {
   for (const p of obj.properties) {
     const name = p.name && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : "<computed>";
     if (ts.isShorthandPropertyAssignment(p)) shorthand.add(name);
-    const { bare, methods } = callsIn(p);
+    const { bare, methods, news } = callsIn(p);
     const readCalls = bare.filter((b) => API_READ_HELPERS.has(b));
     const otherRequests = bare
-      .filter((b) => !API_READ_HELPERS.has(b) && (shaped.has(b) || b === "fetch"))
-      .concat(methods.filter((m) => m === "sendBeacon"));
+      .filter((b) => !API_READ_HELPERS.has(b) && !pureHelpers.has(b) && !PURE_GLOBALS.has(b))
+      .concat(methods.filter((m) => m.name === "sendBeacon" || m.name === "fetch" || m.receiver === "api")
+        .map((m) => m.name))
+      .concat(news.filter((n) => n === "WebSocket" || n === "EventSource"));
     (readCalls.length > 0 && otherRequests.length === 0 ? reads : writes).add(name);
   }
-  return { total: obj.properties.length, reads, writes, shorthand, declared, shaped };
+  return { total: obj.properties.length, reads, writes, shorthand, declared, shaped, pureHelpers };
 }
 
 const API_MEMBERS = classifyApiMembers(apiSrc, "api.ts");
@@ -661,6 +700,95 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
       `api.${wasMisread} must classify as a WRITE — it calls guardedFetch and no read helper, so a read`
       + " verdict means method calls are being counted as helper calls again");
   }
+});
+
+// card 66b9e590 closed the "other calls" side's fail-open gaps (an imported helper, method-form fetch,
+// new WebSocket/EventSource). None of today's real reads/writes actually exercise any of those three
+// shapes (re-measured against this exact api.ts before writing the fix), so the exact count is unchanged
+// from before that fix — pinned exactly, not just by the >= thresholds above, so a FUTURE api.ts change
+// that newly crosses one of those shapes is visible as a count change here rather than silently absorbed.
+check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix (93 reads / 121 writes / 214 members)", () => {
+  assert.equal(API_MEMBERS.total, 214, `api.ts now has ${API_MEMBERS.total} members, not 214`);
+  assert.equal(API_MEMBERS.reads.size, 93, `api.ts now has ${API_MEMBERS.reads.size} reads, not 93`);
+  assert.equal(API_MEMBERS.writes.size, 121, `api.ts now has ${API_MEMBERS.writes.size} writes, not 121`);
+});
+
+// ── card 66b9e590 — planted negative controls proving the "other calls" side is now fail-closed. ─────
+// Each is a MINIMAL, self-contained api.ts-SHAPED fixture (its own get/getOrNull/getErr/guardedFetch
+// declarations, so it drives the SAME fixpoint the real file does) with one planted member calling
+// get(...) plus exactly one additional call — one of the three named fail-open shapes this card closes,
+// or (d) an arbitrary unlisted one, proving the verdict is fail-closed rather than a patched list of
+// three. Each must classify as a WRITE. Measured directly against the pre-fix logic before writing these
+// as assertions: all four read as READ under it (RED) and WRITE under the fix (GREEN); the baseline
+// fixture with no extra call reads as READ under both, so a control fails because of what it adds, not
+// because the fixture itself can't read.
+function fixtureWithPlantedMember(extra, { withImport = false } = {}) {
+  const importLine = withImport ? 'import { importedHelper } from "./elsewhere";\n' : "";
+  return `${importLine}function guardedFetch(url) { return fetch(url); }
+function get(url) { return guardedFetch(url); }
+function getOrNull(url) { return guardedFetch(url); }
+function getErr(url) { return guardedFetch(url); }
+export const api = {
+  planted: () => { get("/x"); ${extra} },
+};
+`;
+}
+
+check("the planted-member fixture itself classifies as a READ with no extra call (the controls' baseline)", () => {
+  const { reads } = classifyApiMembers(fixtureWithPlantedMember(""), "fixture-baseline.ts");
+  assert.ok(reads.has("planted"), "get(...) alone, with nothing else, must still classify as a READ");
+});
+
+check("planted control (a): get(...) + an IMPORTED request helper classifies as a WRITE", () => {
+  const src = fixtureWithPlantedMember("importedHelper();", { withImport: true });
+  assert.ok(classifyApiMembers(src, "fixture-a.ts").writes.has("planted"),
+    "a read also calling a helper imported from another module must be a WRITE");
+});
+
+check("planted control (b): get(...) + window.fetch(...) classifies as a WRITE", () => {
+  const src = fixtureWithPlantedMember('window.fetch("/x");');
+  assert.ok(classifyApiMembers(src, "fixture-b.ts").writes.has("planted"),
+    "a read also calling method-form fetch (window.fetch/globalThis.fetch) must be a WRITE");
+});
+
+check("planted control (c): get(...) + new EventSource(...) classifies as a WRITE", () => {
+  const src = fixtureWithPlantedMember('new EventSource("/x");');
+  assert.ok(classifyApiMembers(src, "fixture-c.ts").writes.has("planted"),
+    "a read also opening a new EventSource (or, same shape, WebSocket) must be a WRITE");
+});
+
+check("planted control (d): get(...) + a NEW, unlisted bare function classifies as a WRITE"
+  + " (the fail-closed proof)", () => {
+  const src = fixtureWithPlantedMember("someFutureHelperNobodyHasSeen();");
+  assert.ok(classifyApiMembers(src, "fixture-d.ts").writes.has("planted"),
+    "a read calling ANY bare function outside the reasoned allowlist must be a WRITE — not just the"
+    + " three named shapes above, or this is a patched list rather than a fail-closed verdict");
+});
+
+// 🔴 planted control (e) — the fixpoint's OWN residual (named in decision b472645a's not-caught list
+// until this follow-up closed it): a DECLARED helper that performs its request as a METHOD call on the
+// bare identifier `api` (exactly how `restartCompanionSession` calls `api.stopSession(…)`) used to be
+// invisible to `requestShapedHelpers`'s bare-call-only walk, so it landed in `pureHelpers` and a read
+// calling it stayed misclassified as a read. Unlike (a)-(d), the extra call here is INDIRECT — through
+// a sibling declared helper the planted member calls — so it proves the fixpoint itself closed the gap,
+// not just the per-member allowlist.
+check("planted control (e): get(...) + a declared helper calling api.updateTask(...) classifies as a WRITE", () => {
+  const src = `function guardedFetch(url) { return fetch(url); }
+function get(url) { return guardedFetch(url); }
+function getOrNull(url) { return guardedFetch(url); }
+function getErr(url) { return guardedFetch(url); }
+function helperCallingApi() { return api.updateTask("x"); }
+export const api = {
+  planted: () => { get("/x"); helperCallingApi(); },
+};
+`;
+  const result = classifyApiMembers(src, "fixture-e.ts");
+  assert.ok(result.shaped.has("helperCallingApi"),
+    "a declared helper calling api.<x>(...) must itself be request-shaped — every api member issues a"
+    + " request, so the receiver name alone is enough");
+  assert.ok(result.writes.has("planted"),
+    "a read calling a helper that itself calls api.updateTask(...) must be a WRITE — the helper is not"
+    + " request-free just because the fixpoint never saw a bare fetch/guardedFetch call inside it");
 });
 
 /** The `api` object literal's own source text — for the independent line count above only. */
