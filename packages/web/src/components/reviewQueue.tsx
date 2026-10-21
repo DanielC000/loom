@@ -97,10 +97,11 @@ const MERGE_TITLE =
  * The merge result, read the one correct way.
  *
  * `pending` (merged:null, card 361520a0 Half Four) is a still-RUNNING gate, NOT a rejection — which
- * is why it is checked BEFORE the `!merged` branch, that one being a genuine refusal only. A
- * SUCCESS deliberately renders nothing: the row/card retires on its own once the merged worker
- * leaves the live session feed, and showing a confirmation here would change what the classic
- * Review queue renders today.
+ * is why it is checked BEFORE the `!merged` branch, that one being a genuine refusal only.
+ *
+ * @decision c2182f9d — keep the success line in THIS shared reader, and keep it bare (`merged`: no
+ * subject, no reason). A per-rendering confirmation drifts from the gate's real semantics, and
+ * `api.mergeWorker`'s declared response carries no subject while the green path sets no `reason`.
  */
 export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
   if (merge.data?.pending) {
@@ -108,6 +109,9 @@ export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
   }
   if (merge.data && !merge.data.pending && merge.data.merged === false) {
     return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>rejected — {merge.data.reason}</span>;
+  }
+  if (merge.data && !merge.data.pending && merge.data.merged === true) {
+    return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.phosphor }}>merged</span>;
   }
   return null;
 }
