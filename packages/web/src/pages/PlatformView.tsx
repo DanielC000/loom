@@ -1,16 +1,19 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, SessionListItem, SessionRole, Schedule } from "@loom/shared";
+import type { Agent, Project, SessionListItem, SessionRole, Schedule } from "@loom/shared";
 import { api } from "../lib/api";
 import Board from "./Board";
 import { PlatformSessionTile } from "../components/PlatformSessionTile";
 import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { RunHistory } from "../components/RunHistory";
 import { CollapsibleHistory } from "../components/CollapsibleHistory";
-import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
+import { Panel, Button, Input, SectionLabel, Segmented, StatusPill, Badge } from "../components/ui";
 import { SetupWizard } from "../components/SetupWizard";
 import { LogoMark } from "../components/Logo";
 import { looksLikeCron } from "./Schedules";
+import { useAtlasUi } from "../lib/atlasUi";
+import { PlatformFindings } from "./PlatformFindings";
 import { color, font } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 import { roleDisplay } from "../lib/roleDisplay";
@@ -40,6 +43,18 @@ import {
 // Everything reuses EXISTING REST: discovery is read-only (api.platformHome / api.setupHome); spawn =
 // startSession(edition role), stop = stopSession, cadence = createSchedule. No new write/elevated surface.
 //
+// TWO LAYOUTS, ONE SHELL (card c07ff42a, Atlas build plan P2-4). The five sections above are rendered by
+// whichever layout the Atlas-UI switch selects: `ClassicPlatformLayout` stacks all five down one column
+// (today's page, unchanged), `AtlasPlatformLayout` places them on the approved round-4 node tabs
+// (Home / Cadence / History / Board / Findings). The split is DELIBERATELY the last step: the edition
+// resolution, the agent/session/role derivation and every leaf component above it are shared, so a layout
+// receives values that are ALREADY resolved and cannot re-derive what an edition may show. Adding a
+// third layout, or changing what one shows, must not mean re-deriving any of that.
+//
+// ⛔ Do not let a layout read the Atlas switch, the edition-preview toggle, or the home query itself. The
+// switch is read HERE, once, for the sole purpose of choosing a layout; everything either layout needs
+// arrives as a prop.
+//
 // HARD INVARIANT: the spawn role never comes from the edition-preview toggle in Platform.tsx — so that
 // toggle stays a PURE CLIENT-SIDE VIEW SWITCH. This shell receives only the edition config; it never
 // reads the toggle's persisted key or browser storage. So a dev previewing the End-user surface mounts
@@ -50,6 +65,12 @@ import {
 // differ from the edition's default (a customized, not-yet-upgraded agent is still "setup"). That
 // resolution reads profile data, never the toggle — the invariant above is untouched.
 export function PlatformView({ edition, previewOnly = false }: { edition: PlatformEdition; previewOnly?: boolean }) {
+  // Which LAYOUT renders the resolved sections — nothing else. Read before any early return so the hook
+  // order is identical in both, and read here rather than in a layout so the two layouts stay pure
+  // presentation (see the TWO LAYOUTS note above). This is the Atlas display switch (lib/atlasUi.ts), a
+  // different thing entirely from the edition-preview toggle in Platform.tsx: it cannot influence which
+  // EDITION mounts, and the edition — which does decide roles and endpoints — never reaches it.
+  const [atlasOn] = useAtlasUi();
   // Map the edition's home key → the real (api-free config stays clean) read-only discovery fn. Same query
   // key as useVisibleNavPages / Platform.tsx → one shared, cached fetch.
   const load = edition.homeQueryKey === "platformHome" ? api.platformHome : api.setupHome;
@@ -109,6 +130,38 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
   const operatorLive = liveFor(operator?.id);
   const auditorLive = liveFor(auditor?.id);
 
+  // Everything either layout renders, resolved once here and spread into whichever one the switch
+  // selected — so the two can never disagree about what this edition resolved to.
+  const surface: PlatformSurface = {
+    edition, previewOnly, project, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
+    homeSessions, operatorLive, auditorLive, liveCountFor, wizardOpen, setWizardOpen,
+  };
+  return atlasOn ? <AtlasPlatformLayout {...surface} /> : <ClassicPlatformLayout {...surface} />;
+}
+
+/** Everything a layout renders, resolved by the shell above. A layout derives nothing of its own. */
+interface PlatformSurface {
+  edition: PlatformEdition;
+  previewOnly: boolean;
+  project: Project;
+  operator?: Agent;
+  auditor?: Agent;
+  operatorSpawnRole: PlatformSpawnRole;
+  operatorRoleUnknown: boolean;
+  homeSessions: SessionListItem[];
+  operatorLive?: SessionListItem;
+  auditorLive?: SessionListItem;
+  liveCountFor: (agentId?: string) => number;
+  wizardOpen: boolean;
+  setWizardOpen: (open: boolean) => void;
+}
+
+// ── LAYOUT A — today's page. All five sections stacked down one column, in this order. The sections are
+// the shared components below, so this layout and the Atlas one can only differ in PLACEMENT. ──
+function ClassicPlatformLayout({
+  edition, previewOnly, project, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
+  homeSessions, operatorLive, auditorLive, liveCountFor, wizardOpen, setWizardOpen,
+}: PlatformSurface) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div>
@@ -124,78 +177,276 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
         </p>
       </div>
 
-      {/* --- Guided setup launcher (onboarding Entry A): stand up a NEW project + a templated team in a few
-             guided steps. A peer to handing the operator agent the reins above — this is the do-it-yourself
-             fast path. Opens the SetupWizard overlay; it spawns no agent. --- */}
-      <Panel style={{
-        display: "flex", alignItems: "center", gap: 16, padding: "16px 18px",
-        background: `radial-gradient(560px 180px at 12% -40%, ${color.phosphorDim}, transparent 70%), ${color.panel}`,
-      }}>
-        <span style={{ color: color.phosphor, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: font.head, fontSize: 14, color: color.text }}>New project from a template</div>
-          <div style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textMuted, marginTop: 3, lineHeight: 1.5 }}>
-            Pick a workflow template, point Loom at a repo, and get a ready-to-run team plus a starter board card — in four quick steps.
-          </div>
-        </div>
-        <Button variant="primary" onClick={() => setWizardOpen(true)} style={{ padding: "6px 14px", fontSize: 13, flexShrink: 0 }}>
-          Start guided setup →
-        </Button>
-      </Panel>
+      <GuidedSetupLauncher onStart={() => setWizardOpen(true)} />
       <SetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
 
       {/* --- 1. Agent go-live controls (operator + auditor) --- */}
-      <section>
-        <SectionLabel>{edition.copy.agentsLabel}</SectionLabel>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
-          <AgentControl edition={edition} agent={operator} role={operatorSpawnRole} card={edition.copy.operatorCard}
-            session={operatorLive} liveCount={liveCountFor(operator?.id)} showLiveCount={!edition.operatorSingleton}
-            gate={operatorSpawnDisabled} previewDisabled={previewOnly} roleUnknown={operatorRoleUnknown} />
-          <AgentControl edition={edition} agent={auditor} role={edition.auditorRole} card={edition.copy.auditorCard}
-            session={auditorLive} liveCount={liveCountFor(auditor?.id)} showLiveCount={false}
-            gate={auditorSpawnDisabled}
-            footer={edition.auditorScheduleVariant === "single-form" && auditor ? <AuditorScheduleInline agent={auditor} /> : undefined} />
-        </div>
-      </section>
+      <PlatformAgentsSection edition={edition} previewOnly={previewOnly} operator={operator} auditor={auditor}
+        operatorSpawnRole={operatorSpawnRole} operatorRoleUnknown={operatorRoleUnknown}
+        operatorLive={operatorLive} auditorLive={auditorLive} liveCountFor={liveCountFor}
+        // CLASSIC PLACEMENT: the end-user single-cadence form rides in the auditor card's footer. The
+        // Atlas layout puts it on its own Cadence tab instead (the approved round-4 placement), which is
+        // why the footer is a prop rather than something the section decides for itself.
+        auditorFooter={edition.auditorScheduleVariant === "single-form" && auditor ? <AuditorScheduleInline agent={auditor} /> : undefined} />
 
       {/* --- 2. Live sessions — the dev GRID of all live, or the end-user's two SINGLE-session wrappers --- */}
-      {edition.sessionLayout === "grid" ? (
-        <section>
-          <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {edition.copy.sessionsLabel}
-            <span style={{ color: color.textMuted, fontWeight: 400 }}>({homeSessions.filter((s) => s.processState === "live").length} live)</span>
-          </SectionLabel>
-          <PlatformSessions sessions={homeSessions} emptyLabel={edition.copy.sessionsEmpty} />
-        </section>
-      ) : (
-        <>
-          <section>
-            <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {edition.copy.operatorSessionLabel}
-              {operatorLive && <StatusPill tone={operatorLive.busy ? "amber" : "phosphor"} glow={operatorLive.busy} label={operatorLive.busy ? "busy" : "idle"} />}
-            </SectionLabel>
-            <SingleSession session={operatorLive} empty={edition.copy.operatorSessionEmpty} />
-          </section>
-          <section>
-            <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {edition.copy.auditorSessionLabel}
-              {auditorLive && <StatusPill tone={auditorLive.busy ? "amber" : "phosphor"} glow={auditorLive.busy} label={auditorLive.busy ? "busy" : "idle"} />}
-            </SectionLabel>
-            <SingleSession session={auditorLive} empty={edition.copy.auditorSessionEmpty} stopTitle={edition.copy.auditorCard.stopTitle} />
-          </section>
-        </>
-      )}
+      <PlatformSessionsSection edition={edition} homeSessions={homeSessions}
+        operatorLive={operatorLive} auditorLive={auditorLive} />
 
       {/* --- 3. Auditor cadence — the DEV multi-row LIST variant (a separate section). The end-user
               single-form variant lives INSIDE the auditor card (footer, above). --- */}
       {edition.auditorScheduleVariant === "list" && (
-        <section>
-          <SectionLabel>{edition.copy.auditorScheduleLabel}</SectionLabel>
-          <AuditorScheduleList auditorId={auditor?.id} />
-        </section>
+        <AuditorCadenceListSection edition={edition} auditor={auditor} />
       )}
 
       {/* --- 4. Run history for each role — dev collapses (CollapsibleHistory), end-user expands. --- */}
+      <PlatformHistorySections edition={edition} project={project} homeSessions={homeSessions} />
+
+      {/* --- 5. The reserved-home board (reused Board component) --- */}
+      <PlatformBoardSection edition={edition} project={project} />
+    </div>
+  );
+}
+
+// ── LAYOUT B — the Atlas Platform node (card c07ff42a). The SAME five sections, placed on the approved
+// round-4 tabs instead of stacked. Nothing is rebuilt: each tab renders the shared section components
+// above, so a section's behavior is identical to the classic page by construction.
+//
+// Two placements genuinely move, both per the approved design:
+//   • The end-user single-cadence form leaves the auditor card's footer for the Cadence tab, so BOTH
+//     cadence variants live in the same place and the tab is never empty in one edition.
+//   • Findings become a tab of their own (PlatformFindings) — in the classic page the auditor's findings
+//     are reachable only as chips on an individual expanded run row, and its pending preset suggestions
+//     only through a live session's composer popover.
+//
+// The "View as" edition toggle is NOT here: it lives one level up in Platform.tsx, above whichever layout
+// mounts, which is exactly the "segmented control at the top of the node" the design calls for — and
+// keeping it there is what keeps it unable to reach a spawn/role path (see Platform.tsx's HARD INVARIANT).
+type PlatformTab = "home" | "cadence" | "history" | "board" | "findings";
+
+// Tab LABELS stay the same words in both editions, deliberately, even where the section heading inside
+// does not ("Board" vs "Your board"): a navigation vocabulary that shifts under you as the view changes
+// costs more than it explains. The edition's own wording lives on the heading inside each tab.
+const PLATFORM_TABS: { key: PlatformTab; label: string }[] = [
+  { key: "home", label: "Home" },
+  { key: "cadence", label: "Cadence" },
+  { key: "history", label: "History" },
+  { key: "board", label: "Board" },
+  { key: "findings", label: "Findings" },
+];
+
+const PLATFORM_TAB_KEYS = new Set<string>(PLATFORM_TABS.map((t) => t.key));
+
+function AtlasPlatformLayout({
+  edition, previewOnly, project, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
+  homeSessions, operatorLive, auditorLive, liveCountFor, wizardOpen, setWizardOpen,
+}: PlatformSurface) {
+  // `?tab=` keeps a chosen tab linkable and survives a reload, the same mechanism Actors / Repository /
+  // Automation already use for their own sub-tabs. Home is the canonical tab, so its URL carries no
+  // query; an unknown value falls back to Home rather than rendering nothing.
+  const [params, setParams] = useSearchParams();
+  const raw = params.get("tab") ?? "";
+  const tab: PlatformTab = PLATFORM_TAB_KEYS.has(raw) ? (raw as PlatformTab) : "home";
+  // `replace` keeps tab switches out of the history stack (a back press leaves the node, not the tab) —
+  // and building the params fresh drops a consumed `?task=` deep link rather than carrying it onto a tab
+  // that has no board to open it on.
+  const setTab = (t: PlatformTab) => setParams(t === "home" ? {} : { tab: t }, { replace: true });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* The node head already renders "Platform" as the page's one <h1>, so this strip names the home it
+          resolved to and what it is for — never the word again, which would read as a second heading. */}
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <Badge tone="cyan">{project.name}</Badge>
+          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11 }}>
+            {edition.copy.header.mutedSpan}
+          </span>
+        </div>
+        <p style={{ color: color.textMuted, fontSize: 11, margin: "6px 0 0", fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
+          {edition.copy.header.paragraph}
+        </p>
+      </div>
+
+      <Segmented value={tab} onChange={setTab} items={PLATFORM_TABS} ariaLabel="Platform node tabs" />
+
+      {/* ⛔ EVERY PANEL STAYS MOUNTED; the inactive ones are HIDDEN, never unmounted.
+          Unmounting a tab destroys the local React state inside it with no warning and no undo — a
+          half-written agent startup prompt (AgentPromptEditor's own useState), a typed-but-unsaved cron
+          expression, a composer draft on a live session tile. The owner's standing rule is that a user's
+          unfinished input is never destroyed, and a tab click is not consent to discard it.
+          `hidden` (not a `display:none` style) is what keeps the hidden panels out of BOTH the
+          accessibility tree and the tab order, so a keyboard or screen-reader user never reaches a
+          control on a panel they are not looking at. ⛔ Don't give these wrappers an inline `display` —
+          an author `display` out-specifies the UA's `[hidden]` rule and would silently un-hide them.
+          Cost, stated: all five panels' queries poll at once. That is exactly what the CLASSIC layout
+          already does (it renders all five sections in one column), so this is the status quo, not a
+          new cost — and it is the reason the classic page never had this bug to begin with. */}
+      <Panels tab={tab}>
+        {{
+          home: (
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <GuidedSetupLauncher onStart={() => setWizardOpen(true)} />
+              <SetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
+              <PlatformAgentsSection edition={edition} previewOnly={previewOnly} operator={operator} auditor={auditor}
+                operatorSpawnRole={operatorSpawnRole} operatorRoleUnknown={operatorRoleUnknown}
+                operatorLive={operatorLive} auditorLive={auditorLive} liveCountFor={liveCountFor}
+                auditorFooter={undefined} />
+              <PlatformSessionsSection edition={edition} homeSessions={homeSessions}
+                operatorLive={operatorLive} auditorLive={auditorLive} />
+            </div>
+          ),
+          // BOTH cadence variants, in one place. Which one renders is still the edition's own
+          // `auditorScheduleVariant` fork — the tab changed where it lives, not what it is.
+          cadence: edition.auditorScheduleVariant === "list"
+            ? <AuditorCadenceListSection edition={edition} auditor={auditor} />
+            : <AuditorCadenceFormSection edition={edition} auditor={auditor} />,
+          history: <PlatformHistorySections edition={edition} project={project} homeSessions={homeSessions} />,
+          board: <PlatformBoardSection edition={edition} project={project} />,
+          findings: <PlatformFindings edition={edition} projectId={project.id} />,
+        }}
+      </Panels>
+    </div>
+  );
+}
+
+// The five node panels, all mounted, all but one `hidden` — see the note at the call site for why
+// unmounting is not an option here.
+//
+// Deliberately NO `role="tabpanel"`: the shared `Segmented` control emits no `id` on its tabs, so there
+// is nothing for a panel to be `aria-labelledby`/`aria-controls`-associated with, and the app's other
+// `?tab=` surfaces (Actors, Repository, Automation) don't claim the role either. A tabpanel role with no
+// association is a worse answer than none — it promises a relationship to AT that isn't there. Wiring it
+// properly means giving `Segmented` ids, which is a shared-primitive change and its own card.
+function Panels({ tab, children }: { tab: PlatformTab; children: Record<PlatformTab, ReactNode> }) {
+  return (
+    <>
+      {PLATFORM_TABS.map((t) => (
+        <div key={t.key} hidden={t.key !== tab} data-testid={`platform-panel-${t.key}`}>
+          {children[t.key]}
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ── The shared sections. Each is rendered by BOTH layouts, so a change here lands on the classic page
+// and the Atlas node together and the two cannot drift. None of them reads a query of its own beyond the
+// leaf components they already wrap; every value they render arrives as a prop. ──
+
+// Guided setup launcher (onboarding Entry A): stand up a NEW project + a templated team in a few guided
+// steps. A peer to handing the operator agent the reins — this is the do-it-yourself fast path. The
+// SetupWizard overlay itself is mounted by the layout (it is an overlay, not part of this panel); this is
+// only its trigger, and it spawns no agent.
+function GuidedSetupLauncher({ onStart }: { onStart: () => void }) {
+  return (
+    <Panel style={{
+      // Wraps rather than squeezes: below ~560px the three-across row crushed the copy column to a few
+      // characters per line while the button kept its width, so the panel's own words broke before its
+      // call to action did. `minWidth` on the copy is what forces the button onto the next line first.
+      display: "flex", alignItems: "center", gap: 16, padding: "16px 18px", flexWrap: "wrap",
+      background: `radial-gradient(560px 180px at 12% -40%, ${color.phosphorDim}, transparent 70%), ${color.panel}`,
+    }}>
+      <span style={{ color: color.phosphor, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
+      <div style={{ flex: 1, minWidth: 220 }}>
+        <div style={{ fontFamily: font.head, fontSize: 14, color: color.text }}>New project from a template</div>
+        <div style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textMuted, marginTop: 3, lineHeight: 1.5 }}>
+          Pick a workflow template, point Loom at a repo, and get a ready-to-run team plus a starter board card — in four quick steps.
+        </div>
+      </div>
+      <Button variant="primary" onClick={onStart} style={{ padding: "6px 14px", fontSize: 13, flexShrink: 0 }}>
+        Start guided setup →
+      </Button>
+    </Panel>
+  );
+}
+
+// The operator + auditor go-live cards. Every gating prop is passed through from the resolved surface —
+// the section itself decides nothing about who may spawn what.
+function PlatformAgentsSection({
+  edition, previewOnly, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
+  operatorLive, auditorLive, liveCountFor, auditorFooter,
+}: Pick<PlatformSurface, "edition" | "previewOnly" | "operator" | "auditor" | "operatorSpawnRole"
+  | "operatorRoleUnknown" | "operatorLive" | "auditorLive" | "liveCountFor"> & { auditorFooter?: ReactNode }) {
+  return (
+    <section>
+      <SectionLabel>{edition.copy.agentsLabel}</SectionLabel>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
+        <AgentControl edition={edition} agent={operator} role={operatorSpawnRole} card={edition.copy.operatorCard}
+          session={operatorLive} liveCount={liveCountFor(operator?.id)} showLiveCount={!edition.operatorSingleton}
+          gate={operatorSpawnDisabled} previewDisabled={previewOnly} roleUnknown={operatorRoleUnknown} />
+        <AgentControl edition={edition} agent={auditor} role={edition.auditorRole} card={edition.copy.auditorCard}
+          session={auditorLive} liveCount={liveCountFor(auditor?.id)} showLiveCount={false}
+          gate={auditorSpawnDisabled} footer={auditorFooter} />
+      </div>
+    </section>
+  );
+}
+
+// The dev GRID of every live platform session, or the end-user's two single-session sections.
+function PlatformSessionsSection({ edition, homeSessions, operatorLive, auditorLive }:
+  Pick<PlatformSurface, "edition" | "homeSessions" | "operatorLive" | "auditorLive">) {
+  if (edition.sessionLayout === "grid") {
+    return (
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {edition.copy.sessionsLabel}
+          <span style={{ color: color.textMuted, fontWeight: 400 }}>({homeSessions.filter((s) => s.processState === "live").length} live)</span>
+        </SectionLabel>
+        <PlatformSessions sessions={homeSessions} emptyLabel={edition.copy.sessionsEmpty} />
+      </section>
+    );
+  }
+  return (
+    <>
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {edition.copy.operatorSessionLabel}
+          {operatorLive && <StatusPill tone={operatorLive.busy ? "amber" : "phosphor"} glow={operatorLive.busy} label={operatorLive.busy ? "busy" : "idle"} />}
+        </SectionLabel>
+        <SingleSession session={operatorLive} empty={edition.copy.operatorSessionEmpty} />
+      </section>
+      <section>
+        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {edition.copy.auditorSessionLabel}
+          {auditorLive && <StatusPill tone={auditorLive.busy ? "amber" : "phosphor"} glow={auditorLive.busy} label={auditorLive.busy ? "busy" : "idle"} />}
+        </SectionLabel>
+        <SingleSession session={auditorLive} empty={edition.copy.auditorSessionEmpty} stopTitle={edition.copy.auditorCard.stopTitle} />
+      </section>
+    </>
+  );
+}
+
+// Auditor cadence, VARIANT LIST (dev) as its own section — both layouts render it in this shape.
+function AuditorCadenceListSection({ edition, auditor }: Pick<PlatformSurface, "edition" | "auditor">) {
+  return (
+    <section>
+      <SectionLabel>{edition.copy.auditorScheduleLabel}</SectionLabel>
+      <AuditorScheduleList auditorId={auditor?.id} />
+    </section>
+  );
+}
+
+// Auditor cadence, VARIANT SINGLE-FORM (end-user) as its own section — the Atlas Cadence tab only. The
+// classic layout renders the same form inside the auditor card's footer instead, so this wrapper exists
+// purely to give that variant a section heading of its own once it is no longer inside a card. The
+// missing-agent state mirrors AuditorScheduleList's, so an unseeded auditor reads the same either way.
+function AuditorCadenceFormSection({ edition, auditor }: Pick<PlatformSurface, "edition" | "auditor">) {
+  return (
+    <section>
+      <SectionLabel>{edition.copy.auditorScheduleLabel}</SectionLabel>
+      {auditor
+        ? <Panel style={{ padding: 12, maxWidth: 620 }}><AuditorScheduleInline agent={auditor} /></Panel>
+        : <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>No Auditor agent — cannot schedule.</span></Panel>}
+    </section>
+  );
+}
+
+// Run history for each role — dev collapses (CollapsibleHistory), end-user expands.
+function PlatformHistorySections({ edition, project, homeSessions }:
+  Pick<PlatformSurface, "edition" | "project" | "homeSessions">) {
+  return (
+    <>
       <HistorySection collapsed={edition.historyCollapsed} copy={edition.copy.operatorHistory}>
         <RunHistory reservedProjectId={project.id} sessions={homeSessions} role={edition.operatorRole}
           emptyLabel={edition.copy.operatorHistory.empty} />
@@ -204,18 +455,23 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
         <RunHistory reservedProjectId={project.id} sessions={homeSessions} role={edition.auditorRole}
           emptyLabel={edition.copy.auditorHistory.empty} showFindings={edition.auditorHistoryShowFindings} />
       </HistorySection>
+    </>
+  );
+}
 
-      {/* --- 5. The reserved-home board (reused Board component) --- */}
-      <section>
-        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {edition.copy.board.label}
-          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
-            {edition.copy.board.hint}
-          </span>
-        </SectionLabel>
-        <Board projectId={project.id} />
-      </section>
-    </div>
+// The reserved home's OWN board (the reused Board component, pointed at this project by id — never the
+// header's active project, which is what makes a Platform board show platform cards).
+function PlatformBoardSection({ edition, project }: Pick<PlatformSurface, "edition" | "project">) {
+  return (
+    <section>
+      <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {edition.copy.board.label}
+        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+          {edition.copy.board.hint}
+        </span>
+      </SectionLabel>
+      <Board projectId={project.id} />
+    </section>
   );
 }
 
@@ -375,7 +631,10 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
           onRemove={() => remove.mutate(s.id)} busy={toggle.isPending || remove.isPending} />)}
         {mine.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No auditor schedule yet.</span>}
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {/* Wraps at a phone width — unwrapped, the cron field and the field-order hint squeezed the button
+          until its label clipped to "Add", which is the one control in the row that must stay readable.
+          (The single-form variant's own row already wraps; this matches it.) */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" spellCheck={false} style={{ width: 160 }} />
         <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 10 }}>min hour dom mon dow</span>
         <Button variant="primary" disabled={!cronValid || create.isPending} onClick={() => create.mutate()}>
@@ -390,7 +649,7 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
 function AuditorScheduleRow({ s, onToggle, onRemove, busy }:
   { s: Schedule; onToggle: (enabled: boolean) => void; onRemove: () => void; busy: boolean }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim,
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: 12, color: color.textDim,
       border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 8px" }}>
       <span style={{ color: color.cyan }}>{s.cron}</span>
       <span style={{ fontSize: 10, color: s.kind === "auditor" ? color.phosphor : color.amber }}>kind:{s.kind}</span>

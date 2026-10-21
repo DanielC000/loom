@@ -24,6 +24,16 @@ export type PlatformSpawnRole = "platform" | "auditor" | "setup" | "workspace-au
 
 export type PlatformEditionKind = "developer" | "enduser";
 
+// The orchestration-event kind each edition's auditor files its findings as. These are the daemon's OWN
+// two emit sites (sessions/service.ts): the Platform Auditor files `audit_finding` onto the reserved
+// Platform board, and the de-privileged workspace auditor files `workspace_audit_suggestion` onto the
+// user's own home. So the KIND already scopes a findings read to the right reserved home — a consumer
+// never has to join the events against a session list to keep one edition's findings out of the other's.
+// Spelled as a local literal union rather than importing OrchestrationEventKind, to keep this module's
+// "no imports at all" property (see the JSX-FREE note above); both members are real kinds, which
+// TypeScript checks at the api.orchestrationEventsByKinds call site.
+export type PlatformFindingKind = "audit_finding" | "workspace_audit_suggestion";
+
 // One agent card's copy — the operator (Lead / Platform) and the auditor (Auditor / Workspace Auditor).
 // TONE is NOT here (it reads from roleDisplay(role).tone in the shell); only the display LABEL + text.
 export interface AgentCardCopy {
@@ -58,6 +68,11 @@ export interface PlatformEditionCopy {
   operatorHistory: HistoryCopy;
   auditorHistory: HistoryCopy;
   board: { label: string; hint: string };
+  // The findings readout's own copy. Only the Atlas Platform node renders a dedicated findings surface
+  // (the classic layout shows findings inline on each auditor run row — RunHistory's `showFindings`), so
+  // this pack is read there; it lives here with the rest of the copy so neither layout owns a second
+  // vocabulary for the same data.
+  findings: { label: string; hint: string; empty: string };
 }
 
 export interface PlatformEdition {
@@ -78,6 +93,7 @@ export interface PlatformEdition {
   historyCollapsed: boolean; // dev true (CollapsibleHistory) | enduser false (expanded)
   auditorScheduleVariant: "list" | "single-form"; // dev multi-row list | enduser single edit-cron form
   auditorHistoryShowFindings: boolean; // dev true | enduser false
+  findingEventKind: PlatformFindingKind; // dev "audit_finding" | enduser "workspace_audit_suggestion"
   copy: PlatformEditionCopy;
 }
 
@@ -128,6 +144,7 @@ export const developerEdition: PlatformEdition = {
   historyCollapsed: true,
   auditorScheduleVariant: "list",
   auditorHistoryShowFindings: true,
+  findingEventKind: "audit_finding",
   copy: {
     errorText: "No reserved “Loom Platform” project found — the platform layer may not be seeded yet.",
     header: {
@@ -182,6 +199,11 @@ export const developerEdition: PlatformEdition = {
       label: "Board",
       hint: "Auditor findings + manager escalations — triage by dragging cards",
     },
+    findings: {
+      label: "Auditor findings",
+      hint: "every finding the Auditor has filed, newest first — open one to triage it on the board",
+      empty: "No findings filed yet — the Auditor hasn’t found anything to report.",
+    },
   },
 };
 
@@ -204,6 +226,7 @@ export const endUserEdition: PlatformEdition = {
   historyCollapsed: false,
   auditorScheduleVariant: "single-form",
   auditorHistoryShowFindings: false,
+  findingEventKind: "workspace_audit_suggestion",
   copy: {
     errorText: "No reserved “Platform” project found — the home may not be seeded yet.",
     header: {
@@ -262,6 +285,11 @@ export const endUserEdition: PlatformEdition = {
     board: {
       label: "Your board",
       hint: "your setup checklist + Auditor suggestions — triage by dragging cards",
+    },
+    findings: {
+      label: "Workspace suggestions",
+      hint: "every improvement the Auditor has suggested, newest first — open one to act on it on your board",
+      empty: "No suggestions yet — run a workspace review and they’ll land here.",
     },
   },
 };

@@ -70,10 +70,15 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
     { key: "enduser", label: "End-user" },
   ];
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+    // Wraps rather than squeezes: the trailing caption is long, and at a phone width an unwrapped row
+    // shrank the control itself until `overflow:hidden` clipped the second option off the screen — a
+    // two-option switch that only ever shows one option reads as a label, so there was nothing left to
+    // tell you it could be changed. The control keeps its intrinsic width (`flexShrink: 0`) and the
+    // caption takes the next line instead.
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
       <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>View as</span>
       <div role="group" aria-label="Preview edition"
-        style={{ display: "inline-flex", border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, overflow: "hidden" }}>
+        style={{ display: "inline-flex", flexShrink: 0, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, overflow: "hidden" }}>
         {options.map((o) => {
           const active = value === o.key;
           return (

@@ -13,7 +13,10 @@ import { color, font, radius } from "../theme";
 // no MCP path. Dismiss (outside-click / Esc) + the bottom-right sparkle trigger are owned by the Composer.
 
 const PRESETS_KEY = ["presetPrompts"] as const;
-const SUGGESTIONS_KEY = ["presetPromptSuggestions"] as const;
+// EXPORTED alongside SuggestionRow (card c07ff42a): the Atlas Platform node's Findings tab reads the
+// pending suggestions itself, and must share THIS cache entry — the row's own mutations invalidate this
+// exact key, so a second literal there would leave the list stale after an Adopt/Dismiss.
+export const SUGGESTIONS_KEY = ["presetPromptSuggestions"] as const;
 
 // This overlay's surface, shared with the composer's corner icon cluster — which floats ABOVE the
 // overlay (see TRIGGER_CLUSTER_RESERVE below) and wears this same colour as a chip so it reads as the
@@ -100,7 +103,13 @@ function SuggestionsSection() {
   );
 }
 
-function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggestion }) {
+// EXPORTED so the Atlas Platform node's Findings tab renders the SAME Adopt/Dismiss row rather than a
+// second copy of it (card c07ff42a). The adopt/dismiss mutations, the 409 stale-row recovery and the
+// both-keys invalidation below are the trust-boundary-relevant part — a second implementation of them
+// would be a second place for that recovery to drift. The row is self-contained (it owns its own
+// mutations and error state) and carries no popover-specific layout, so it drops into a wider surface
+// unchanged; only the container around it differs.
+export function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggestion }) {
   const qc = useQueryClient();
   const [err, setErr] = useState<string | null>(null);
 

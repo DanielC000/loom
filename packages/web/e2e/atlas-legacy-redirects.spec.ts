@@ -31,6 +31,21 @@ const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
+// ── Destinations PHASE 2 has deliberately rebuilt (keyed by the redirect's TARGET path) ──────────
+// The skeleton equality below is a PHASE-1 contract: phase 1 mounts every destination verbatim under
+// both shells, so landing on identical content is what proves a redirect reaches the same page it
+// always did. Where a phase-2 card has rebuilt that page behind the switch, the equality inverts —
+// a redirect into a rebuilt destination SHOULD land on different content, and sameness would mean the
+// rebuild is not what the Atlas shell serves.
+//
+// Everything else about such a row is still asserted unchanged: it redirects, to the same URL, into
+// the Atlas frame rather than the catch-all, marking the right node with the right crumbs. Only the
+// page-content comparison flips. ⛔ Add a path here ONLY with the phase-2 card that rebuilds it.
+const REBUILT_IN_PHASE_2: Record<string, string> = {
+  // Card c07ff42a (P2-4) — /setup is the redirect that lands here.
+  "/platform": "c07ff42a — rebuilt as the five-tab Platform node",
+};
+
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
 // navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
 async function seedAtlasOn(page: Page) {
@@ -298,6 +313,14 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       .toContainEqual({ from: "/git", to: "/repository?tab=git" });
     // Every target must be a real tree address, or the derivation below is comparing nothing.
     for (const r of rows) expect(pathOf(r.to), `${r.from} redirects to a relative/empty path`).toMatch(/^\//);
+    // POSITIVE CONTROL on the carve-out: every REBUILT_IN_PHASE_2 path must be some row's target.
+    // Otherwise the map goes SILENT — a redirect retargeted away from a rebuilt destination leaves its
+    // inverted assertion unreachable, and this test passes without ever checking that destination.
+    const targets = rows.map((r) => pathOf(r.to));
+    for (const path of Object.keys(REBUILT_IN_PHASE_2)) {
+      expect(targets, `REBUILT_IN_PHASE_2 names ${path}, which no declared redirect targets —`
+        + ` its inverted assertion would never run`).toContain(path);
+    }
 
     // A project must exist and be PINNED: a `scoped` destination's crumb names the active project,
     // and the fixture daemon is shared, so the auto-resolved "first project" is not stable.
@@ -372,11 +395,20 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
           `${r.from} → ${r.to} selected the wrong sub-tab`).toHaveText(new RegExp(`^${tab}$`, "i"));
       }
 
-      // ── The same PAGE: structurally what the classic redirect landed on. ──
+      // ── The same PAGE: structurally what the classic redirect landed on — unless a phase-2 card
+      //    has rebuilt that destination, in which case the claim inverts (see REBUILT_IN_PHASE_2). ──
       const after = await settledPageSkeleton(page, api);
-      expect(after, `${r.from} rendered different content under Atlas than the classic redirect did.\n`
-        + `--- classic shell ---\n${classic.get(r.from)?.skeleton}\n--- atlas shell ---\n${after}\n`)
-        .toBe(classic.get(r.from)?.skeleton);
+      const rebuilt = REBUILT_IN_PHASE_2[pathOf(r.to)];
+      if (rebuilt) {
+        expect(classic.get(r.from)?.skeleton,
+          `${r.from} rendered nothing under the classic shell`).toBeTruthy();
+        expect(after, `${r.from} still lands on the CLASSIC ${pathOf(r.to)} page, but ${rebuilt}`)
+          .not.toBe(classic.get(r.from)?.skeleton);
+      } else {
+        expect(after, `${r.from} rendered different content under Atlas than the classic redirect did.\n`
+          + `--- classic shell ---\n${classic.get(r.from)?.skeleton}\n--- atlas shell ---\n${after}\n`)
+          .toBe(classic.get(r.from)?.skeleton);
+      }
     }
 
     await page.waitForLoadState("networkidle");

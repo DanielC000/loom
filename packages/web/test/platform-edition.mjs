@@ -206,4 +206,73 @@ check("the operator's spawn role trusts resolvedLead.role directly, with no prof
     "PlatformView.tsx must read resolvedLead?.role for the operator's spawn role");
 });
 
+// ── 6. card c07ff42a (Atlas P2-4) — the shell now drives TWO LAYOUTS (the classic stack and the Atlas
+// node tabs) off the SAME resolved values. These pin the properties that make that split safe, i.e. that
+// a layout is presentation only: it cannot decide an edition, re-derive what an edition may show, or
+// stand up a second spawn surface. SOURCE-TEXT checks, same shape as sections 3-5 above. ──────────────
+const findingsSrc = readFileSync(new URL("../src/pages/PlatformFindings.tsx", import.meta.url), "utf8");
+
+check("the findings event kind is FORKED per edition — the kind is what scopes a read to one home", () => {
+  // Each kind has exactly one daemon emit site (sessions/service.ts), so the kind alone keeps the dev
+  // Platform board's findings out of the end-user home's and vice versa.
+  assert.equal(developerEdition.findingEventKind, "audit_finding");
+  assert.equal(endUserEdition.findingEventKind, "workspace_audit_suggestion");
+});
+
+check("the Atlas switch is read ONCE, in the shell — never inside a layout or a section", () => {
+  // One call, at the top of PlatformView, purely to pick a layout. A second one would mean some section
+  // had started branching on the display switch, which is how a layout fork becomes a behavior fork.
+  const calls = [...shellSrc.matchAll(/useAtlasUi\(/g)].length;
+  assert.equal(calls, 1, `expected exactly one useAtlasUi() call in PlatformView.tsx, found ${calls}`);
+  assert.ok(!findingsSrc.includes("useAtlasUi"), "PlatformFindings.tsx must not read the Atlas switch");
+});
+
+check("BOTH layouts render the ONE shared agents section — neither builds its own spawn card", () => {
+  // The gating props (previewDisabled / roleUnknown / gate) reach AgentControl through exactly ONE
+  // <AgentControl> pair, inside PlatformAgentsSection. If a layout grew its own <AgentControl>, that
+  // thread could be dropped on one layout and not the other — so the count is the guard.
+  const controls = [...shellSrc.matchAll(/<AgentControl\b/g)].length;
+  assert.equal(controls, 2, `expected exactly 2 <AgentControl> mounts (operator + auditor), found ${controls}`);
+  const sections = [...shellSrc.matchAll(/<PlatformAgentsSection\b/g)].length;
+  assert.equal(sections, 2, `both layouts must render <PlatformAgentsSection>, found ${sections} mount(s)`);
+});
+
+// The section is shared, but `previewOnly` is handed to it once PER LAYOUT — so the thread is only as
+// strong as its WEAKEST mount, and a single mount regressed to `previewOnly={false}` stays green on
+// every other check in this file and in the e2e suite that exercises the OTHER layout. What it would
+// actually do is re-enable "Start Platform" in a dev install's End-user preview, against §1c: the
+// underlying Getting-Started agent there is never upgraded to the Lead, so a click would mint a stray
+// role:"platform" session on it. Count-equality against the mount count is what makes a dropped or
+// hardcoded hop on EITHER layout fail here rather than only in whichever layout a test happened to walk.
+check("EVERY <PlatformAgentsSection> mount threads previewOnly — no layout may hardcode it", () => {
+  // COUNT EQUALITY, deliberately, instead of parsing each mount's attribute list. A `<Section …/>`
+  // regex cannot be written correctly here with a flat character class: one of these mounts contains a
+  // NESTED element (`auditorFooter={… <AuditorScheduleInline … /> …}`), so `[^>]*?/>` stops at the inner
+  // tag and silently inspects a TRUNCATED mount — it passed only because `previewOnly` happened to sit
+  // before the nested tag, and would have flipped to a false FAIL on a prop reorder. `previewOnly=
+  // {previewOnly}` is unique to these mounts (AgentControl's own hop spells it `previewDisabled=
+  // {previewOnly}`), so counting is both exact and immune to attribute order.
+  const mounts = (shellSrc.match(/<PlatformAgentsSection\b/g) ?? []).length;
+  const threaded = (shellSrc.match(/previewOnly=\{previewOnly\}/g) ?? []).length;
+  assert.ok(mounts >= 2, `expected at least two <PlatformAgentsSection> mounts, found ${mounts}`);
+  assert.equal(threaded, mounts,
+    `${mounts} <PlatformAgentsSection> mount(s) but ${threaded} previewOnly={previewOnly} hop(s)`
+    + ` — a layout is hardcoding or dropping it`);
+});
+
+check("the Atlas findings surface drives NO spawn/stop REST and reads no browser storage or toggle key", () => {
+  assert.ok(!findingsSrc.includes("api.startSession"), "PlatformFindings.tsx must not call api.startSession");
+  assert.ok(!findingsSrc.includes("api.stopSession"), "PlatformFindings.tsx must not call api.stopSession");
+  assert.ok(!findingsSrc.includes("localStorage"), "PlatformFindings.tsx must not touch localStorage");
+  assert.ok(!findingsSrc.includes("loom.platformViewAs"), "PlatformFindings.tsx must not reference the toggle key");
+});
+
+check("the Atlas findings surface takes the RESOLVED edition as a prop, never an edition literal", () => {
+  // Importing developerEdition/endUserEdition here would be a SECOND place that decides which edition is
+  // in view — the one decision Platform.tsx owns, gated on the real server signal.
+  assert.ok(!findingsSrc.includes("developerEdition"), "PlatformFindings.tsx must not import developerEdition");
+  assert.ok(!findingsSrc.includes("endUserEdition"), "PlatformFindings.tsx must not import endUserEdition");
+  assert.ok(/edition:\s*PlatformEdition/.test(findingsSrc), "PlatformFindings.tsx must take `edition: PlatformEdition` as a prop");
+});
+
 console.log(`\n${pass} passed`);

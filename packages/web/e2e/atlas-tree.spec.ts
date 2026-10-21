@@ -14,7 +14,8 @@
 //   2. CONTENT IDENTITY. For every one of those destinations, the page's rendered structure is
 //      fingerprinted at the OLD route (switch off) and again after clicking the node (switch on), and
 //      required to match. "The same content the old route rendered" is asserted against the old route
-//      itself, not against a marker someone decided was characteristic of it.
+//      itself, not against a marker someone decided was characteristic of it. A destination a PHASE-2
+//      card has deliberately rebuilt asserts the INVERSE instead — see REBUILT_IN_PHASE_2 below.
 //   3. KEYBOARD. Tab reaches the nodes in document order, Enter activates one, and the focused node
 //      carries a real computed focus ring.
 //
@@ -71,6 +72,26 @@ async function seedAtlasOn(page: Page) {
 // is a <button> with no href, so it is excluded by construction rather than by a filter.
 const RAIL_LINKS = "a.loom-rail-item, a.loom-rail-statrow";
 const TREE_NODES = "a.loom-atlas-node";
+
+// ── Destinations PHASE 2 has deliberately rebuilt ──────────────────────────────────────────────
+// Claim 2 above ("the same content the old route rendered") is a PHASE-1 contract: phase 1 mounts
+// every destination's existing component verbatim, so content identity is exactly what proves nothing
+// was rebuilt. Phase 2 then rebuilds specific destinations behind the same switch, and for those the
+// identity check inverts — it is the DIFFERENCE that is now correct, and an equality would mean the
+// rebuild never reached the Atlas shell.
+//
+// So a rebuilt destination is not skipped: its row below asserts the opposite, and every frame check
+// (it navigated, the heading filled, exactly one node is active) still runs on it. Keeping the
+// assertion rather than the exclusion is what stops this set from quietly becoming "the destinations
+// we no longer check".
+//
+// ⛔ Add a route here ONLY with the phase-2 card that rebuilds it. A route added to silence a red is a
+// regression being filed as an exemption.
+const REBUILT_IN_PHASE_2: Record<string, string> = {
+  // Card c07ff42a (P2-4): the Platform node became a five-tab node (Home / Cadence / History / Board /
+  // Findings) carrying both editions, replacing the single-column stack the classic page still renders.
+  "/platform": "c07ff42a — rebuilt as the five-tab Platform node",
+};
 
 async function routesFrom(page: Page, selector: string): Promise<string[]> {
   const hrefs = await page.locator(selector).evaluateAll((els) =>
@@ -273,6 +294,15 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
 
     await assertSkeletonInstrumentFires(page);
 
+    // POSITIVE CONTROL on the carve-out itself: every REBUILT_IN_PHASE_2 route must actually be one
+    // this walk visits. Without it the map can go SILENT — a route that stops being collected (a rail
+    // selector change, a destination moving) makes its inverted row simply not run, and the test still
+    // passes, reporting green for a destination nobody checked either way.
+    for (const route of Object.keys(REBUILT_IN_PHASE_2)) {
+      expect(routes, `REBUILT_IN_PHASE_2 names ${route}, which this walk does not visit —`
+        + ` its inverted assertion would never run`).toContain(route);
+    }
+
     const before = new Map<string, string>();
     for (const route of routes) {
       await page.goto(loomDaemon.baseURL + route);
@@ -307,9 +337,19 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         { message: `clicking the ${route} node did not navigate` }).toBe(route);
       const after = await settledPageSkeleton(page);
 
-      expect(after, `the ${route} node rendered different content than the ${route} route did.\n`
-        + `--- classic shell ---\n${before.get(route)}\n--- atlas shell ---\n${after}\n`)
-        .toBe(before.get(route));
+      const rebuilt = REBUILT_IN_PHASE_2[route];
+      if (rebuilt) {
+        // Inverted for a rebuilt destination: identity here would mean the rebuild is not actually
+        // what the Atlas shell renders. The classic capture must still be non-empty, so this cannot
+        // be satisfied by a route that failed to render under EITHER shell.
+        expect(before.get(route), `the ${route} route rendered nothing under the classic shell`).toBeTruthy();
+        expect(after, `the ${route} node still renders the CLASSIC page, but ${rebuilt}`)
+          .not.toBe(before.get(route));
+      } else {
+        expect(after, `the ${route} node rendered different content than the ${route} route did.\n`
+          + `--- classic shell ---\n${before.get(route)}\n--- atlas shell ---\n${after}\n`)
+          .toBe(before.get(route));
+      }
 
       // EXERCISED, not merely rendered: the content column actually changed from the last node. Only
       // meaningful where the two pages are distinguishable at all, which the control above establishes
