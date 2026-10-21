@@ -3998,9 +3998,12 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   const sourceFilesToSweep: string[] = [];
-  pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => {
+  // @decision 07e3ad30 — never reassign this array via `.filter(cb)` here: the "remove" branch's own
+  // protect call can push a fresh entry onto it mid-callback, and `.filter`'s reassigned return value
+  // silently drops anything pushed past its own length snapshot. See the decision record.
+  for (const p of [...pendingUnresolvedQuarantines]) {
     const plan = pendingPlan.get(p);
-    if (!plan) return true;
+    if (!plan) continue;
 
     if (plan.action === "reduce") {
       const overlapTokens = p.entry.tokens.filter((t) => entry!.tokens.includes(t));
@@ -4031,7 +4034,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // byte-identical to pre-fix; a non-empty overlap must never be split back into per-token calls.
       if (overlapTokens.length > 0) rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set(overlapTokens));
       candidateTokens.push(...overlapTokens);
-      return true; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched
+      continue; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched; nothing to splice
     }
 
     candidateTokens.push(...p.entry.tokens);
@@ -4039,7 +4042,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too.
     // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the PRE-PASS above,
     // against the then-still-unmutated map — never recomputed here against a map an EARLIER tied twin's
-    // own processing (in THIS SAME filter) may have already mutated.
+    // own processing (in THIS SAME loop) may have already mutated.
 
     // A repeated deleteMergeQuarantineLatchByKey call on a key an earlier twin already deleted is
     // intentional and idempotent here: its own unlink tolerates ENOENT.
@@ -4052,8 +4055,21 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, rc.sourceFile);
     }
     sourceFilesToSweep.push(p.sourceFile);
-    return false;
-  });
+    // @decision 07e3ad30 — resolve `p`'s own CURRENT index fresh, right now, never a precomputed one —
+    // a push from the protect calls above lands at the tail and must never be disturbed by this splice.
+    // See the decision record for why `p`'s own wrapper is never itself replaced-by-index by this.
+    const idx = pendingUnresolvedQuarantines.indexOf(p);
+    if (idx !== -1) {
+      pendingUnresolvedQuarantines.splice(idx, 1);
+    } else {
+      // Not a silent skip: `p` is already absent from the live array by some other path, so there is no
+      // stale copy left behind to worry about — but per the invariant argued above this is NOT expected
+      // to ever fire in production. Surfaced loudly rather than swallowed, so a future regression that
+      // DOES make it fire is seen rather than silently papered over by a no-op.
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] expected to remove ${p.entry.repoPath}'s own tied pending twin (${p.sourceFile}) from pendingUnresolvedQuarantines after lifting its armed keys, but it was already absent from the live array by the time this ran — nothing stale was left behind, but this was not expected; investigate if seen.`);
+    }
+  }
   // @decision 883e29bc (round 4) — sweep each removed entry's own sourceFile via
   // sweepOwnLatchFileUnlessOwnedElsewhere (never a bare unlink): it can be the SAME physical path a
   // different, surviving repo's fresh raise now owns (reusing the freed key).

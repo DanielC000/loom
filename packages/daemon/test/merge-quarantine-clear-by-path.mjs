@@ -28,7 +28,7 @@ const {
   enterMergeQuarantine, activeMergeQuarantineFor, listActiveMergeQuarantines, clearMergeQuarantine,
   quarantineLatchIdFor, quarantineLatchFileIdsFor, clearMergeQuarantineReporting, clearMergeQuarantineLatchFile,
   clearMergeQuarantineByRecordedPath, partitionQuarantinesByRegistration, reenterMergeQuarantinesAtBoot,
-  assertRepoNotQuarantined, MERGE_QUARANTINE_DIR,
+  assertRepoNotQuarantined, MERGE_QUARANTINE_DIR, setActiveQuarantineTestOnly, reenterMergeQuarantinesAtBootTestOnly,
 } = await import(mergeQuarantineModuleUrl);
 const repoLockModuleUrl = pathToFileURL(path.join(distGitDir, "repo-lock.js")).href;
 const { canonicalRepoLockKey } = await import(repoLockModuleUrl);
@@ -2113,52 +2113,37 @@ function hashKey(key) {
   // ...` fold lines (merge-quarantine.ts, the `plan.action !== "reduce"` branch) makes THIS check fail —
   // proving the assertion actually exercises that fold, not a vacuous pass.
 
-  // *** THE PRE-EXISTING, SEPARATELY-CARDED GAP (07e3ad30) — NOT fixed here, asserted as TRUE *** — the
-  // pending-filter's own `.filter()` callback drops P's tied record from `pendingUnresolvedQuarantines`
-  // WITHOUT the foreign mint (X's own brand-new pending-divert entry, minted by this SAME call) ever
-  // landing back in that array for THIS process. So, right here, in-process, X reads as UNBLOCKED even
-  // though the fold above correctly named it and its record genuinely still exists ON DISK. Report
-  // wording must match this truth (X is NOT durably lifted — it only reads that way in this one process)
-  // rather than claim a clean lift.
-  //
-  // ⚠️ WHEN CARD 07e3ad30 LANDS (fixing the drop), these TWO checks' own CONDITIONS must be INVERTED
-  // (drop the `!`) — they will then read as "X STILL reads BLOCKED in-process right after this clear"
-  // (the drop no longer happens, so the fresh mint survives in THIS process too). Do not just delete
-  // them; flip them, or the fix for 07e3ad30 silently loses its own regression coverage here.
-  check("(AH) X reads as UNBLOCKED in-process right after this clear (the pre-existing drop, card 07e3ad30 — NOT fixed on this card; INVERT when 07e3ad30 lands)", !activeMergeQuarantineFor(xAH));
-  check("(AH) listActiveMergeQuarantines() does not carry X either, for the same reason (INVERT when 07e3ad30 lands)", !listActiveMergeQuarantines().some((e) => e.repoPath === xAH));
+  // *** THE FIX (card 07e3ad30) *** — these TWO checks are INVERTED from this scenario's pre-fix form
+  // (dropped the `!`, per that scenario's own prior instruction to flip rather than delete). Before the
+  // fix, the pending-filter's own `.filter()` callback dropped P's tied record from
+  // `pendingUnresolvedQuarantines` WITHOUT the foreign mint (X's own brand-new pending-divert entry,
+  // minted by this SAME call) ever landing back in that array for THIS process, so X read as UNBLOCKED
+  // in-process even though its record genuinely survived on disk. Firsthand, on pre-fix main: the clear
+  // leaves X's content durably relocated to a fresh `pending-<hash>.json` file (the OLD `hash(K).json` is
+  // gone — its content moved, not destroyed) and a real reboot already re-blocked X correctly — this was
+  // always an IN-MEMORY-ONLY drop, never a durable file loss. See the decision record for the firsthand
+  // disk/reboot evidence. The fix (the in-place splice replacing the `.filter()` reassignment) makes the
+  // push survive in THIS process too, so X now reads BLOCKED immediately, with no reboot required.
+  check("*** THE FIX (AH) *** X reads as BLOCKED in-process right after this clear (the push survives)", !!activeMergeQuarantineFor(xAH));
+  check("*** THE FIX (AH) *** listActiveMergeQuarantines() carries X too", listActiveMergeQuarantines().some((e) => e.repoPath === xAH));
 
-  // A REAL reboot (fresh child process, same LOOM_HOME) proves the in-process read above is NOT a durable
-  // lift — X's own record genuinely still exists on disk and the NEXT boot re-discovers and re-blocks it.
+  // A REAL reboot (fresh child process, same LOOM_HOME) still proves durability independently of the
+  // in-process read above (lesson 203 — never let one process's own memory stand in for "durable").
   const rebootAH = rebootInChildProcess([pAH, xAH], "AH");
-  check("*** THE TRUTH (AH) *** a real reboot re-blocks X — the in-process 'unblocked' read above was never durable", rebootAH.refusals[xAH] === false && rebootAH.activeForThese > 0);
+  check("*** THE DURABILITY PROOF (AH) *** a real reboot still blocks X", rebootAH.refusals[xAH] === false && rebootAH.activeForThese > 0);
 
-  // "Name the route that actually works" (manager's own wording): NOT clearing coAH.route.id in THIS
-  // same (contaminated) process — nothing in memory matches it anymore here, so it hits the raw fallback
-  // and reports wasQuarantined:false without touching X at all. The route that actually works is the
-  // SAME id, applied AFTER a fresh boot has re-discovered X from disk (its own next real boot, not this
-  // process) — proven here via one more child process that boots, THEN clears by that exact id.
-  const noopInThisProcess = clearMergeQuarantineLatchFile(coAH.route.id);
-  check("(AH) clearing the fold's own named id in THIS SAME process is a no-op (nothing matches anymore here)", noopInThisProcess.ok === true && noopInThisProcess.wasQuarantined === false);
-  const outFileAH = path.join(os.tmpdir(), `loom-mqcbp-ah-reboot-then-clear-${sfx}.json`);
-  const rebootThenClearScriptAH = `
-    const fsm = (await import("node:fs")).default;
-    const { reenterMergeQuarantinesAtBoot, clearMergeQuarantineLatchFile, activeMergeQuarantineFor } = await import(${JSON.stringify(mergeQuarantineModuleUrl)});
-    reenterMergeQuarantinesAtBoot([${JSON.stringify(pAH)}]);
-    const beforeClear = !!activeMergeQuarantineFor(${JSON.stringify(xAH)});
-    const r = clearMergeQuarantineLatchFile(${JSON.stringify(coAH.route.id)});
-    const afterClear = !!activeMergeQuarantineFor(${JSON.stringify(xAH)});
-    fsm.writeFileSync(${JSON.stringify(outFileAH)}, JSON.stringify({ beforeClear, wasQuarantined: r.wasQuarantined, afterClear }));
-  `;
-  execFileSync(process.execPath, ["--input-type=module", "-e", rebootThenClearScriptAH], { env: { ...process.env, LOOM_HOME: loomHome } });
-  const rebootThenClearAH = JSON.parse(fs.readFileSync(outFileAH, "utf8"));
-  fs.rmSync(outFileAH, { force: true });
-  check("(AH) a fresh boot first, THEN clearing the fold's own named id, lifts X in that process", rebootThenClearAH.beforeClear === true && rebootThenClearAH.wasQuarantined === true && rebootThenClearAH.afterClear === false);
-  // *** THE DURABILITY PROOF (round 4, nit) *** — "durably" is a claim about surviving a FURTHER reboot,
-  // never provable from a single process's own in-memory read; a THIRD, genuinely separate boot (same
-  // LOOM_HOME, after the clear above already ran and exited) is what actually backs the word.
+  // "Name the route that actually works" — post-fix, clearing `coAH.route.id` DIRECTLY in THIS SAME
+  // process (no reboot needed first) now genuinely lifts X, since the fold's own push survived into
+  // memory. Pre-fix, this same call used to be a no-op here (nothing in memory matched the id until a
+  // fresh boot re-discovered X from disk) — see git history for that prior shape.
+  const directClearAH = clearMergeQuarantineLatchFile(coAH.route.id);
+  check("*** THE ROUTE THAT ACTUALLY WORKS (AH) *** clearing the fold's own named id DIRECTLY, in this same process, genuinely lifts X", directClearAH.ok === true && directClearAH.wasQuarantined === true && directClearAH.liftedRepoPaths.includes(xAH));
+  check("(AH) X reads unblocked in-process right after that direct clear", !activeMergeQuarantineFor(xAH));
+  // *** THE DURABILITY PROOF (round 4, nit; still required post-fix) *** — "durably" is a claim about
+  // surviving a FURTHER reboot, never provable from a single process's own in-memory read; a SECOND,
+  // genuinely separate boot (same LOOM_HOME, after the direct clear above already ran) is what backs it.
   const rebootAfterAHClear = rebootInChildProcess([pAH, xAH], "AH-after-clear");
-  check("*** THE ROUTE THAT ACTUALLY WORKS (AH) *** a fresh boot first, THEN clearing the fold's own named id, DURABLY lifts X (confirmed by yet another, later reboot)", rebootAfterAHClear.refusals[xAH] === true && rebootAfterAHClear.activeForThese === 0);
+  check("*** THE DURABILITY PROOF (AH) *** the direct clear DURABLY lifts X (confirmed by yet another, later reboot)", rebootAfterAHClear.refusals[xAH] === true && rebootAfterAHClear.activeForThese === 0);
 }
 
 // ===================== (AI) card 182c01cc round 3, m5/S21: the kept route's own sourceFile, when it
@@ -2208,7 +2193,215 @@ function hashKey(key) {
   check("(AI) clearing R by the route the fold named for it genuinely matches R (not a dead/raw-fallback id)", clearMergeQuarantineLatchFile(coAI.route.id).liftedRepoPaths.includes(rAI));
 }
 
+// ===================== (AJ) card 07e3ad30: the PENDING-LOOP's own push-during-iteration must survive —
+// interleaved reduce+remove, with unrelated pending entries both BEFORE and AFTER the removed one in the
+// array. =====================
+// W is a REAL active entry at y's own real key (kY), tokens {w-token}. FOUR pending twins coexist, in this
+// exact array order: (1) `beforeAJ` — a wholly UNRELATED identity/token, injected FIRST, must survive
+// untouched. (2) `qRemoveAJ` — SAME identity as y, tokens {w-token} (a full subset of W's tokens, so it
+// takes the "remove" branch), armed (via `setActiveQuarantineTestOnly`, the SAME object reference also
+// injected into pending — mirroring 883e29bc's own diverted-pending shape) at a SYNTHETIC key `kForeignAJ`
+// where a FOREIGN occupant `xAJ`'s own real latch sits, written to disk AFTER every boot/inject call below
+// (never scanned into memory, so the clear-time discovery is a genuine fresh MINT — same technique as AH).
+// (3) `qReduceAJ` — SAME identity as y, tokens {w-token, private-token}, armedKeys [kY] (tied to W via the
+// armedKeys-overlap branch, card 64119847) — NOT a token subset of W's, so it takes the "reduce" branch,
+// surviving with {private-token} alone. (4) `afterAJ` — another wholly UNRELATED identity/token, injected
+// LAST, must survive untouched. Clearing y exercises the remove branch's own protect-call push (xAJ's
+// mint) interleaved, in ONE pending-loop pass, with a reduce — the exact combination card 07e3ad30's own
+// approval asked to be tested, never exercised by (AH) alone (which has no active `entry` and so can never
+// reach the "reduce" gate at all — see `clearMergeQuarantineByKey`'s own `entry &&` guard).
+//
+// ⚠️ LABELLING (Code Review 46d6e471): on a revert of ONLY the source fix, measured, only this scenario's
+// own two "X reads BLOCKED"/"carries X" checks go RED — the interleaved-reduce, Before/After-survive, and
+// stillBlockedCoOccupants-names-X checks below all still PASS pre-fix too (a single remove's own drop
+// never disturbs anything else in the array). So those are SAFETY checks (they'd catch a DIFFERENT kind of
+// regression — a fix that broke the reduce/survival contract while "fixing" the push) — the push survival
+// pair is this scenario's actual regression witness. See (AK) below for the scenario whose checks actually
+// DO regress on a revert beyond the push-survival pair: two sequential "remove" twins, where the fix's own
+// index-after-protect-calls re-resolution is what the splice logic depends on.
+{
+  const yAJ = freshDir("ajY");
+  const kYAJ = canonicalRepoLockKey(yAJ);
+  const kForeignAJ = "loom-mqcbp-AJ-synthetic-foreign-key";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(kYAJ)}.json`), JSON.stringify({
+    repoPath: yAJ, branch: "w-aj-branch", reason: "W — AJ, y's own real active entry", enteredAt: Date.now(), tokens: ["w-aj-token"],
+  }, null, 2) + "\n");
+
+  const beforeAJ = path.join(os.tmpdir(), `loom-mqcbp-beforeAJ-unrelated-${sfx}`);
+  reenterMergeQuarantinesAtBootTestOnly([], [{
+    entry: { repoPath: beforeAJ, branch: "before-aj-branch", reason: "Before — AJ, wholly unrelated, must survive untouched", enteredAt: Date.now(), tokens: ["before-aj-token"] },
+    sourceFile: "pending-aj-before-test.json",
+  }]);
+
+  const xAJ = path.join(os.tmpdir(), `loom-mqcbp-xAJ-never-exists-${sfx}`);
+  const qRemoveEntryAJ = {
+    repoPath: yAJ, branch: "q-remove-aj-branch", reason: "Q_remove — AJ, tied to y, armed at the synthetic foreign key",
+    enteredAt: Date.now(), tokens: ["w-aj-token"], armedKeys: [kForeignAJ],
+  };
+  setActiveQuarantineTestOnly(kForeignAJ, qRemoveEntryAJ); // ARMED — entryStillOwnsKey needs this, not just the armedKeys field
+  reenterMergeQuarantinesAtBootTestOnly([], [{ entry: qRemoveEntryAJ, sourceFile: "pending-aj-remove-test.json" }]);
+
+  const qReduceEntryAJ = {
+    repoPath: yAJ, branch: "q-reduce-aj-branch", reason: "Q_reduce — AJ, tied to y via armedKeys-overlap, holds a private token",
+    enteredAt: Date.now(), tokens: ["w-aj-token", "private-aj-token"], armedKeys: [kYAJ],
+  };
+  reenterMergeQuarantinesAtBootTestOnly([], [{ entry: qReduceEntryAJ, sourceFile: "pending-aj-reduce-test.json" }]);
+
+  const afterAJ = path.join(os.tmpdir(), `loom-mqcbp-afterAJ-unrelated-${sfx}`);
+  reenterMergeQuarantinesAtBootTestOnly([], [{
+    entry: { repoPath: afterAJ, branch: "after-aj-branch", reason: "After — AJ, wholly unrelated, must survive untouched", enteredAt: Date.now(), tokens: ["after-aj-token"] },
+    sourceFile: "pending-aj-after-test.json",
+  }]);
+
+  reenterMergeQuarantinesAtBootTestOnly([yAJ], []); // the real scan — arms W at kYAJ from its own real latch file
+
+  check("(AJ precondition) W active with w-aj-token", listActiveMergeQuarantines().some((e) => e.repoPath === yAJ && e.tokens.includes("w-aj-token")));
+  check("(AJ precondition) Before present, untouched", listActiveMergeQuarantines().some((e) => e.repoPath === beforeAJ && e.tokens.includes("before-aj-token")));
+  check("(AJ precondition) After present, untouched", listActiveMergeQuarantines().some((e) => e.repoPath === afterAJ && e.tokens.includes("after-aj-token")));
+  check("(AJ precondition) Q_reduce present with BOTH tokens (not yet reduced)", listActiveMergeQuarantines().some((e) => e.repoPath === yAJ && e.tokens.includes("private-aj-token") && e.tokens.includes("w-aj-token")));
+  check("(AJ precondition) X unknown to memory before the clear (never scanned)", !activeMergeQuarantineFor(xAJ));
+
+  // X's foreign record, written AFTER every boot/inject call above — never scanned into memory, so the
+  // clear-time discovery below is a genuine fresh MINT (same technique as (AH)).
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(kForeignAJ)}.json`), JSON.stringify({
+    repoPath: xAJ, branch: "x-aj-branch", reason: "X — AJ, foreign occupant at hash(kForeignAJ).json, written AFTER every inject call",
+    enteredAt: Date.now(), tokens: ["x-aj-token"],
+  }, null, 2) + "\n");
+
+  const clearAJ = clearMergeQuarantine(yAJ);
+
+  // *** THE FIX (AJ, card 07e3ad30) *** — X's fresh mint (pushed by the remove branch's own protect call,
+  // mid-iteration) must survive IN-PROCESS, right here, not just on disk / after a reboot.
+  check("*** THE FIX (AJ) *** X reads as BLOCKED in-process right after this clear (the push survives)", !!activeMergeQuarantineFor(xAJ));
+  check("*** THE FIX (AJ) *** listActiveMergeQuarantines() carries X too", listActiveMergeQuarantines().some((e) => e.repoPath === xAJ));
+  // (condition 4) the clear's own response still names X as still blocked (182c01cc's stillBlockedCoOccupants).
+  check("*** THE FIX (AJ) *** the clear's response names X in stillBlockedCoOccupants", !!clearAJ && Array.isArray(clearAJ.stillBlockedCoOccupants) && clearAJ.stillBlockedCoOccupants.some((c) => c.repoPath === xAJ));
+
+  // The intended removals actually happened: W's own token is genuinely gone (not just hidden) — no
+  // surviving entry anywhere still carries it.
+  check("(AJ) W's own w-aj-token is actually gone from every surviving entry (not just hidden)", !listActiveMergeQuarantines().some((e) => e.tokens.includes("w-aj-token")));
+  // Q_reduce survived, reduced to ONLY its own private token (the interleaved "reduce" branch, mirroring
+  // card 64119847's own mechanism-level check) — y itself is therefore STILL blocked, via Q_reduce alone.
+  const reducedAJ = listActiveMergeQuarantines().find((e) => e.repoPath === yAJ && e.tokens.includes("private-aj-token"));
+  check("*** THE FIX (AJ, interleaved reduce) *** Q_reduce survived, reduced to EXACTLY {private-aj-token}", !!reducedAJ && JSON.stringify([...reducedAJ.tokens].sort()) === JSON.stringify(["private-aj-token"]));
+  check("(AJ) y is still blocked for real merge admission, via Q_reduce's surviving private token", assertRepoNotQuarantined(yAJ).ok === false);
+
+  // Nothing else was removed: Before and After, wholly unrelated to y, must still be present with their
+  // OWN original tokens — proving the fix's splice touches only the entries it means to.
+  check("(AJ) Before is STILL present, untouched, after the clear", listActiveMergeQuarantines().some((e) => e.repoPath === beforeAJ && e.tokens.includes("before-aj-token")));
+  check("(AJ) After is STILL present, untouched, after the clear", listActiveMergeQuarantines().some((e) => e.repoPath === afterAJ && e.tokens.includes("after-aj-token")));
+
+  // A REAL reboot (fresh child process, same LOOM_HOME) proves X's own durable record — not just the
+  // in-process read above — genuinely survives (card 07e3ad30's own firsthand finding: the file was never
+  // destroyed; only the in-process read was wrong). Before/After were pure in-memory test-only injections
+  // (never durably written), so only yAJ/xAJ are meaningful to reboot-check here.
+  const rebootAJ = rebootInChildProcess([yAJ, xAJ], "AJ");
+  check("*** THE DURABILITY PROOF (AJ) *** a real reboot still blocks X", rebootAJ.refusals[xAJ] === false && rebootAJ.activeForThese > 0);
+  check("(AJ) a real reboot still blocks y too (Q_reduce's own private token persisted)", rebootAJ.refusals[yAJ] === false);
+}
+
+// ===================== (AK) card 07e3ad30, Code Review 46d6e471 — TWO sequential "remove" twins in ONE
+// pending-loop pass: Q1's own push must not disturb Q2's own splice, and Q2's own index must be resolved
+// AFTER the array has already shrunk (by Q1's removal) and grown (by Q1's own push) — the actual
+// interleaving the fix's `indexOf`-at-removal-time design is FOR, never exercised by (AJ) alone (which has
+// only ONE remove). =====================
+// W is a REAL active entry at y's own real key, tokens {w-token}. Pending twins, in this exact array
+// order: (1) `q1AK` — SAME identity as y, tokens {w-token} (a subset, so "remove"), armed at a SYNTHETIC
+// key `kForeign1AK` where a foreign `x1AK`'s own real latch sits (written AFTER every inject/boot call — a
+// genuine fresh mint). (2) `q2AK` — same shape, armed at a DIFFERENT synthetic key `kForeign2AK` where a
+// SECOND foreign `x2AK`'s own real latch sits. (3) `uAK` — a wholly unrelated pending entry, injected LAST.
+// Processing q1AK first: its own protect call pushes x1AK's mint onto the array's tail, then q1AK's own
+// slot (still at its ORIGINAL index — nothing has shifted yet) is spliced out. Processing q2AK next (from
+// the snapshot, regardless of the live array's own current shape): its own protect call pushes x2AK's mint
+// onto the (now longer) tail, then q2AK's own CURRENT index is resolved fresh — it has SHIFTED DOWN BY ONE
+// from where it started, because q1AK's own earlier splice shifted everything after it. A stale/precomputed
+// index here would splice the WRONG slot (or hit uAK, corrupting it) — only a fresh `indexOf` lookup at
+// splice time gets this right. Code Review 46d6e471 measured: on a revert of ONLY the source fix, just the
+// "X1/X2 blocked in-process" checks go RED; every other check below still passes pre-fix (q1AK/q2AK's own
+// removal and uAK's own survival never depended on the push-loss bug at all — only the two FRESH mints do).
+{
+  const yAK = freshDir("akY");
+  const kYAK = canonicalRepoLockKey(yAK);
+  const kForeign1AK = "loom-mqcbp-AK-synthetic-foreign-key-1";
+  const kForeign2AK = "loom-mqcbp-AK-synthetic-foreign-key-2";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(kYAK)}.json`), JSON.stringify({
+    repoPath: yAK, branch: "w-ak-branch", reason: "W — AK, y's own real active entry", enteredAt: Date.now(), tokens: ["w-ak-token"],
+  }, null, 2) + "\n");
+
+  const q1EntryAK = {
+    repoPath: yAK, branch: "q1-ak-branch", reason: "Q1 — AK, tied to y, armed at the first synthetic foreign key",
+    enteredAt: Date.now(), tokens: ["w-ak-token"], armedKeys: [kForeign1AK],
+  };
+  setActiveQuarantineTestOnly(kForeign1AK, q1EntryAK);
+  reenterMergeQuarantinesAtBootTestOnly([], [{ entry: q1EntryAK, sourceFile: "pending-ak-q1-test.json" }]);
+
+  const q2EntryAK = {
+    repoPath: yAK, branch: "q2-ak-branch", reason: "Q2 — AK, tied to y, armed at the second synthetic foreign key",
+    enteredAt: Date.now(), tokens: ["w-ak-token"], armedKeys: [kForeign2AK],
+  };
+  setActiveQuarantineTestOnly(kForeign2AK, q2EntryAK);
+  reenterMergeQuarantinesAtBootTestOnly([], [{ entry: q2EntryAK, sourceFile: "pending-ak-q2-test.json" }]);
+
+  const uAK = path.join(os.tmpdir(), `loom-mqcbp-uAK-unrelated-${sfx}`);
+  reenterMergeQuarantinesAtBootTestOnly([], [{
+    entry: { repoPath: uAK, branch: "u-ak-branch", reason: "U — AK, wholly unrelated, injected after both removes, must survive untouched", enteredAt: Date.now(), tokens: ["u-ak-token"] },
+    sourceFile: "pending-ak-u-test.json",
+  }]);
+
+  reenterMergeQuarantinesAtBootTestOnly([yAK], []); // the real scan — arms W at kYAK from its own real latch file
+
+  const x1AK = path.join(os.tmpdir(), `loom-mqcbp-x1AK-never-exists-${sfx}`);
+  const x2AK = path.join(os.tmpdir(), `loom-mqcbp-x2AK-never-exists-${sfx}`);
+  check("(AK precondition) W active with w-ak-token", listActiveMergeQuarantines().some((e) => e.repoPath === yAK && e.tokens.includes("w-ak-token")));
+  check("(AK precondition) U present, untouched", listActiveMergeQuarantines().some((e) => e.repoPath === uAK && e.tokens.includes("u-ak-token")));
+  check("(AK precondition) X1/X2 unknown to memory before the clear (never scanned)", !activeMergeQuarantineFor(x1AK) && !activeMergeQuarantineFor(x2AK));
+
+  // X1/X2's foreign records, written AFTER every inject/boot call above — never scanned into memory, so
+  // the clear-time discovery below is a genuine fresh MINT for each (same technique as (AH)/(AJ)).
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(kForeign1AK)}.json`), JSON.stringify({
+    repoPath: x1AK, branch: "x1-ak-branch", reason: "X1 — AK, foreign occupant at hash(kForeign1AK).json",
+    enteredAt: Date.now(), tokens: ["x1-ak-token"],
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(kForeign2AK)}.json`), JSON.stringify({
+    repoPath: x2AK, branch: "x2-ak-branch", reason: "X2 — AK, foreign occupant at hash(kForeign2AK).json",
+    enteredAt: Date.now(), tokens: ["x2-ak-token"],
+  }, null, 2) + "\n");
+
+  // Capture console.error during the clear — asserting the fix's own "expected to remove ... but it was
+  // already absent" log NEVER fires, i.e. every `indexOf` lookup this call makes finds its own wrapper
+  // exactly where expected (Code Review 46d6e471's explicit ask).
+  const capturedErrorsAK = [];
+  const realConsoleErrorAK = console.error;
+  console.error = (...args) => { capturedErrorsAK.push(String(args[0] ?? "")); realConsoleErrorAK(...args); };
+  let clearAK;
+  try {
+    clearAK = clearMergeQuarantine(yAK);
+  } finally {
+    console.error = realConsoleErrorAK;
+  }
+  check("(AK) the fix's own 'expected to remove ... already absent' log never fired", !capturedErrorsAK.some((l) => l.includes("expected to remove") && l.includes("already absent")));
+
+  // *** THE FIX (AK, card 07e3ad30) *** — BOTH fresh mints survive IN-PROCESS, right here.
+  check("*** THE FIX (AK) *** X1 reads as BLOCKED in-process right after this clear", !!activeMergeQuarantineFor(x1AK));
+  check("*** THE FIX (AK) *** X2 reads as BLOCKED in-process right after this clear", !!activeMergeQuarantineFor(x2AK));
+  check("(AK) listActiveMergeQuarantines() carries BOTH X1 and X2", listActiveMergeQuarantines().some((e) => e.repoPath === x1AK) && listActiveMergeQuarantines().some((e) => e.repoPath === x2AK));
+  check("(AK) the clear's response names BOTH X1 and X2 in stillBlockedCoOccupants", !!clearAK && Array.isArray(clearAK.stillBlockedCoOccupants) && clearAK.stillBlockedCoOccupants.some((c) => c.repoPath === x1AK) && clearAK.stillBlockedCoOccupants.some((c) => c.repoPath === x2AK));
+
+  // Q1, Q2, W all removed — y's own token is genuinely gone (no reduce twin this time to keep it alive).
+  check("(AK) y's own w-ak-token is gone from every surviving entry", !listActiveMergeQuarantines().some((e) => e.tokens.includes("w-ak-token")));
+  check("(AK) y itself is fully UNblocked (W/Q1/Q2 all lifted, nothing survives to hold it)", assertRepoNotQuarantined(yAK).ok === true);
+  // U, injected AFTER both removes, must still be present with its own original token.
+  check("(AK) U is STILL present, untouched, after the clear", listActiveMergeQuarantines().some((e) => e.repoPath === uAK && e.tokens.includes("u-ak-token")));
+
+  // A REAL reboot proves X1/X2's own durable records survive and y stays unblocked.
+  const rebootAK = rebootInChildProcess([yAK, x1AK, x2AK], "AK");
+  check("*** THE DURABILITY PROOF (AK) *** a real reboot still blocks BOTH X1 and X2", rebootAK.refusals[x1AK] === false && rebootAK.refusals[x2AK] === false && rebootAK.activeForThese > 0);
+  check("(AK) a real reboot confirms y stays unblocked", rebootAK.refusals[yAK] === true);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it. Card 9cabd143: (Y) the sweep never deletes a filename a SURVIVING entry has since legitimately reclaimed as its own live physical latch (proven across a real restart, in a separate child process), (Z1)/(Z1-route) close the SAME gap at clearMergeQuarantineLatchFile's raw-fallback bypass site (over both the function and the real HTTP route), now reporting `latchKept`/`referencingRepoPaths` instead of a bare `ok:true` when a file survives. Round 2 (Code Review d37fd1aa): (Z2) is RE-POINTED — clearing a PENDING entry by id deletes its OWN file even when an unrelated entry's `orphanLatchFiles` merely lists it (check 1 alone must never protect an entry's own file; only genuine ownership, check 2, may), proven to stick across a real child-process restart and to agree with `/clear`/`/clear-by-path {repoPath}`; (AA) proves check (2)'s PENDING-ownership half is genuinely reachable (not just defensive) via the ordinary orphan-reference sweep; (AB) proves check (2)'s ACTIVE-ownership half also covers an entry's TRUE current write target (`quarantinePathFor`), not only its own (possibly stale, post-drift) `armedKeys`."
+  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it. Card 9cabd143: (Y) the sweep never deletes a filename a SURVIVING entry has since legitimately reclaimed as its own live physical latch (proven across a real restart, in a separate child process), (Z1)/(Z1-route) close the SAME gap at clearMergeQuarantineLatchFile's raw-fallback bypass site (over both the function and the real HTTP route), now reporting `latchKept`/`referencingRepoPaths` instead of a bare `ok:true` when a file survives. Round 2 (Code Review d37fd1aa): (Z2) is RE-POINTED — clearing a PENDING entry by id deletes its OWN file even when an unrelated entry's `orphanLatchFiles` merely lists it (check 1 alone must never protect an entry's own file; only genuine ownership, check 2, may), proven to stick across a real child-process restart and to agree with `/clear`/`/clear-by-path {repoPath}`; (AA) proves check (2)'s PENDING-ownership half is genuinely reachable (not just defensive) via the ordinary orphan-reference sweep; (AB) proves check (2)'s ACTIVE-ownership half also covers an entry's TRUE current write target (`quarantinePathFor`), not only its own (possibly stale, post-drift) `armedKeys`. Card 07e3ad30: (AJ) clearMergeQuarantineByKey's own pending-loop no longer loses a mid-iteration protect-call push to a `.filter()` reassignment — a foreign occupant's fresh mint, triggered by the remove branch, now survives IN-PROCESS (not just after a reboot), interleaved in one pass with an unrelated reduce and two wholly-unrelated pending entries that must (and do) survive untouched. (AK), added per Code Review 46d6e471: TWO sequential remove twins in one pass — the second twin's own splice index is correctly re-resolved after the array has both shrunk (the first twin's own removal) and grown (the first twin's own push) in between, with no stale-index corruption of the unrelated entry injected after both, and the fix's own defensive 'already absent' log never fires."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
