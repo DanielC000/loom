@@ -99,6 +99,10 @@ try {
   const seedResult = await batch([seed1, seed2]);
   check("seed: the first batch lands normally", seedResult.ok === true && seedResult.landed?.length === 2);
   check("seed: the watermark is now stored at branch MAIN", watermark()?.branch === MAIN);
+  // @decision 2a6a292a round 8 (C5) — a batch landing's own trust write (`advanceMainlineWatermarkForBatch`)
+  // is architecturally identical to the already-tested SOLO advance's, but was previously undocumented as
+  // untested here (round 7's own gap) — reusing this already-passing seed landing instead of a new fixture.
+  check("(C5) the batch landing also stamps the branch's own trust record, not just W", db.getMainlineBranchTrust(P.projId, "primary", MAIN) === watermark()?.sha);
 
   // ── (W1) the stored watermark is now TRUSTED for the pin: a branch that doesn't exist disagrees with the
   //        live checkout, and the batch REFUSES rather than silently proceeding ──────────────────────────

@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { DB_PATH, DAEMON_TEST_DIR, questionAttachmentDir } from "./paths.js";
 import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
 import { worktreeIdentityKey } from "./git/worktrees.js";
-import { parseMainlineWatermark, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX } from "./git/mainline-watch.js";
+import { parseMainlineWatermark, mainlineWatermarkKey, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX, MAINLINE_BRANCH_TRUST_PREFIX, mainlineBranchTrustKey, type MainlineWatermark } from "./git/mainline-watch.js";
 // `secretEnvelopeByteLength` (card 82b22817) is the ONE deliberate exception to this file never touching
 // crypto: it derives a SIZE from the ciphertext's own structure, never decrypts, never sees plaintext —
 // see toQuestion's own comment at `credentialByteLength` for why this stays consistent with "this layer
@@ -3516,6 +3516,9 @@ export class Db {
       // @decision c013e8a5 — the divert-episode/defer-streak keys ride along with W+marker on every exit, never left as orphans.
       this.deleteMeta(`${MAINLINE_DIVERT_EPISODE_PREFIX}${id}:${repoKey}`);
       this.deleteMeta(`${MAINLINE_DEFER_STREAK_PREFIX}${id}:${repoKey}`);
+      // @decision 2a6a292a round 6 — every per-BRANCH trust record for this (project, repoKey) is wiped
+      // too: a rebind means the old repoPath's branches no longer apply, same "clears it like W" posture.
+      for (const row of this.listMetaByPrefix(`${MAINLINE_BRANCH_TRUST_PREFIX}${id}:${repoKey}:`)) this.deleteMeta(row.key);
       const what = to === undefined ? "repo registry entry removed: mainline baseline reset" : "repo rebound: mainline baseline reset";
       this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "mainline_moved_outside_loom", detail: {
         projectId: id, repoKey, source: "rebind", severity: unread ? "high" : "low", reset: true, fromPath: from, toPath: to ?? null,
@@ -3525,16 +3528,20 @@ export class Db {
     }
   }
   /**
-   * @decision 2a6a292a round 3 — the ONLY exit for a persistent branch-mismatch alert caused by a
-   * deliberate in-place mainline rename (no repoPath change happens on a rename, so
-   * {@link resetMainlineBaselinesForRepoChange} never fires for it): a human-only reset of W.
+   * Shared first half of {@link resetMainlineWatermark}/{@link repointMainlineWatermark}: read the current
+   * W + boot-alert marker, then purge W and every related per-(project,repoKey) key (the marker, the
+   * divert-episode and defer-streak streaks) — never leave one behind as an orphan of the other (mirrors
+   * {@link resetMainlineBaselinesForRepoChange}'s own purge list). Returns what was there BEFORE the purge
+   * so a caller can still cite it on the audit event it appends afterward.
    */
-  resetMainlineWatermark(projectId: string, repoKey: string): { reset: boolean } {
-    const wKey = `mainline-watermark:${projectId}:${repoKey}`;
+  private purgeMainlineWatermarkState(projectId: string, repoKey: string): {
+    hadAnything: boolean; previousWatermark: MainlineWatermark | null; previousWatermarkRaw?: string; unread: Record<string, unknown> | null;
+  } {
+    const wKey = mainlineWatermarkKey(projectId, repoKey);
     const aKey = `mainline-boot-alerted:${projectId}:${repoKey}`;
     const rawW = this.getMeta(wKey);
     const rawMarker = this.getMeta(aKey);
-    if (rawW === undefined && rawMarker === undefined) return { reset: false };
+    const hadAnything = rawW !== undefined || rawMarker !== undefined;
     // @decision c013e8a5 — the erased watermark itself is the only trace a reset adopted a stray branch; carry it on the event, mirroring the rebind event's fromPath/toPath.
     const previousWatermark = parseMainlineWatermark(rawW);
     // @decision c013e8a5 round 2 — a PRESENT-but-unparseable row (rawW !== undefined, parse failed) still
@@ -3546,14 +3553,63 @@ export class Db {
     this.deleteMeta(aKey);
     this.deleteMeta(`${MAINLINE_DIVERT_EPISODE_PREFIX}${projectId}:${repoKey}`);
     this.deleteMeta(`${MAINLINE_DEFER_STREAK_PREFIX}${projectId}:${repoKey}`);
+    return { hadAnything, previousWatermark, previousWatermarkRaw, unread };
+  }
+
+  /**
+   * @decision 2a6a292a round 3 — the ONLY exit for a persistent branch-mismatch alert caused by a
+   * deliberate in-place mainline rename (no repoPath change happens on a rename, so
+   * {@link resetMainlineBaselinesForRepoChange} never fires for it): a human-only reset of W.
+   *
+   * @decision 2a6a292a round 7 (M2) — `adopt` (optional `{branch, sha}`, the caller's own live git read)
+   * also re-stamps that branch's trust record, closing the dead end where a reset left the just-adopted
+   * branch's own "no trusted baseline" refusal standing for the next `project_checkout_branch` call.
+   */
+  resetMainlineWatermark(projectId: string, repoKey: string, adopt?: { branch: string; sha: string }): { reset: boolean } {
+    const { hadAnything, previousWatermark, previousWatermarkRaw, unread } = this.purgeMainlineWatermarkState(projectId, repoKey);
+    if (adopt) this.setMainlineBranchTrust(projectId, repoKey, adopt.branch, adopt.sha);
+    if (!hadAnything && !adopt) return { reset: false };
     this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "mainline_moved_outside_loom", detail: {
       projectId, repoKey, source: "human-reset", severity: unread ? "high" : "low", reset: true,
       reason: unread ? "mainline watermark reset by a human; an unread mainline alert was discarded by the reset" : "mainline watermark reset by a human",
       ...(previousWatermark ? { previousWatermark } : {}),
       ...(previousWatermarkRaw !== undefined ? { previousWatermarkRaw } : {}),
       ...(unread ? { discardedAlert: { branch: unread.branch, from: unread.from, to: unread.to, evidence: unread.evidence, suspectShas: unread.suspectShas } } : {}),
+      ...(adopt ? { adoptedTrust: adopt } : {}),
     } });
     return { reset: true };
+  }
+
+  /**
+   * @decision 2a6a292a round 4 — a manager-initiated `project_checkout_branch` success STAMPS W to
+   * `{branch, sha}` (unlike {@link resetMainlineWatermark}, which only ever deletes); see that record's
+   * "manager-checkout" section for why this is still a trusted-signal act, not an absorbed divert.
+   */
+  repointMainlineWatermark(projectId: string, repoKey: string, branch: string, sha: string, actorSessionId: string): void {
+    const { previousWatermark, previousWatermarkRaw, unread } = this.purgeMainlineWatermarkState(projectId, repoKey);
+    this.setMeta(mainlineWatermarkKey(projectId, repoKey), JSON.stringify({ branch, sha } satisfies MainlineWatermark));
+    // @decision 2a6a292a round 6 — refresh this branch's OWN trust record to the just-verified tip; see
+    // mainlineBranchTrustKey's own doc for why this is kept separate from W.
+    this.setMainlineBranchTrust(projectId, repoKey, branch, sha);
+    this.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: actorSessionId, kind: "mainline_moved_outside_loom", detail: {
+      projectId, repoKey, source: "manager-checkout", severity: "low", reset: true,
+      reason: `mainline watermark re-pointed to "${branch}" by a manager-initiated project_checkout_branch`,
+      newWatermark: { branch, sha },
+      ...(previousWatermark ? { previousWatermark } : {}),
+      ...(previousWatermarkRaw !== undefined ? { previousWatermarkRaw } : {}),
+      ...(unread ? { discardedAlert: { branch: unread.branch, from: unread.from, to: unread.to, evidence: unread.evidence, suspectShas: unread.suspectShas } } : {}),
+    } });
+  }
+  /** @decision 2a6a292a round 6 — read a (project, repoKey, branch)'s own last-trusted sha, or `null`
+   *  when none has ever been recorded for it (never seeded, or purged by a rebind). */
+  getMainlineBranchTrust(projectId: string, repoKey: string, branch: string): string | null {
+    const raw = this.getMeta(mainlineBranchTrustKey(projectId, repoKey, branch));
+    return raw !== undefined && /^[0-9a-f]{40,64}$/.test(raw) ? raw : null;
+  }
+  /** @decision 2a6a292a round 6 — write/refresh a (project, repoKey, branch)'s own last-trusted sha. Every
+   *  caller is a site that just independently verified `sha` as a clean baseline for `branch`. */
+  setMainlineBranchTrust(projectId: string, repoKey: string, branch: string, sha: string): void {
+    this.setMeta(mainlineBranchTrustKey(projectId, repoKey, branch), sha);
   }
   /** Whether `repoKey` names a repo of `project` ("primary" always does) — the validation the human REST
    *  mainline-watermark-reset route needs before calling {@link resetMainlineWatermark}; mirrors
@@ -3580,6 +3636,34 @@ export class Db {
          ORDER BY seq DESC LIMIT 10`,
     ).all(projectId, repoKey, from, to, branch, blockedByFrom, blockedByTo, sinceTs ?? "") as { detail_json: string }[];
     return rows.some((r) => { try { const d = JSON.parse(r.detail_json) as { evidence?: unknown }; return Array.isArray(d.evidence) && d.evidence.includes("branch-diverted"); } catch { return false; } });
+  }
+  /** @decision 2a6a292a round 7 (m4) — dedupe a repeated `refuseIfTargetBranchUntrusted` refusal: two
+   *  genuinely concurrent calls can both observe no alert marker yet and both reach this check, so a
+   *  retry on the SAME (branch, from, to) this exact `source` already filed must not re-file/re-nudge.
+   *  @decision 2a6a292a round 8 — `sinceTs` scopes the dedupe to events newer than the last human reset
+   *  (see {@link lastHumanResetTs}); see that record's round-8 section for why an unscoped dedupe under-alerts. */
+  hasManagerCheckoutRefusalEvent(projectId: string, repoKey: string, branch: string, from: string, to: string, sinceTs?: string): boolean {
+    const row = this.db.prepare(
+      `SELECT 1 FROM orchestration_events WHERE kind = 'mainline_moved_outside_loom'
+         AND json_extract(detail_json,'$.projectId') = ? AND json_extract(detail_json,'$.repoKey') = ?
+         AND json_extract(detail_json,'$.branch') = ? AND json_extract(detail_json,'$.from') = ? AND json_extract(detail_json,'$.to') = ?
+         AND json_extract(detail_json,'$.source') = 'manager-checkout-precheck'
+         AND ts >= ?
+         LIMIT 1`,
+    ).get(projectId, repoKey, branch, from, to, sinceTs ?? "");
+    return !!row;
+  }
+  /** @decision 2a6a292a round 8 — the last `source:"human-reset"` event's own `ts` for (projectId,
+   *  repoKey), or `null` if none was ever filed. Feeds {@link hasManagerCheckoutRefusalEvent}'s `sinceTs`
+   *  so the m4 dedupe never matches an episode the owner has already reset away. */
+  lastHumanResetTs(projectId: string, repoKey: string): string | null {
+    const row = this.db.prepare(
+      `SELECT ts FROM orchestration_events WHERE kind = 'mainline_moved_outside_loom'
+         AND json_extract(detail_json,'$.projectId') = ? AND json_extract(detail_json,'$.repoKey') = ?
+         AND json_extract(detail_json,'$.source') = 'human-reset'
+         ORDER BY seq DESC LIMIT 1`,
+    ).get(projectId, repoKey) as { ts: string } | undefined;
+    return row?.ts ?? null;
   }
   /** Replace a project's config override (Pillar C project_configure / PATCH config). */
   setProjectConfig(id: string, config: ProjectConfigOverride): void {

@@ -1230,6 +1230,14 @@ reads it as "live" — but the running process never picked the rebuild up, so n
 that code yet. Confirm both facts before calling something live: the artifact was rebuilt, AND the
 serving process has restarted since that rebuild.
 
+**If your orchestration surface lets you switch which branch your own project's canonical checkout
+targets (e.g. a `project_checkout_branch` tool), remember what that means for THIS project
+specifically: switching the checkout changes what the NEXT deploy/restart from that checkout actually
+builds.** Treat a checkout switch as a deliberate, auditable act — not a casual toggle — exactly because
+of the "runs its own deployed instance" property this whole section is about: a switch made for one
+reason (comparing a side branch) silently becomes the source for the NEXT rebuild too, for any project
+self-hosted this way.
+
 ## A restart/redeploy note other sessions will read
 
 Some orchestration platforms include a shared restart or redeploy path that resumes, or otherwise

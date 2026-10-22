@@ -27,10 +27,18 @@ import { enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReaso
 // checkout/commit and ESPECIALLY push (outward-facing, network, irreversible) are reachable from the
 // human REST path AND — as a deliberate, role-gated trust elevation (Platform Manager P3) — from the
 // PLATFORM MCP, whose tools are gated strictly to role==="platform" (the human-equivalent Lead, a
-// human-created-only session). NO git-write tool is exposed on the loom-tasks or orchestration
-// (manager/worker) MCP servers — an ordinary agent must never checkout/commit/push. The platform tools
-// REUSE this class verbatim, so its bounds/timeouts/identity guarantees hold there too. The REST
-// endpoints in gateway/server.ts and the platform git tools in mcp/platform.ts call into here.
+// human-created-only session). commit/push/createBranch are NEVER exposed on the loom-tasks or
+// orchestration (manager/worker) MCP servers — an ordinary agent must never commit/push/create a branch.
+// `checkout` (switch to an EXISTING branch, never create one) is the ONE deliberate exception — also
+// reachable from the orchestration MCP's manager surface, scoped to the caller's OWN project
+// (`project_checkout_branch`, mcp/orchestration.ts — never the worker surface).
+//
+// @decision 2a6a292a round 4 — see that record's "manager-checkout" section for the full rationale.
+//
+// Every caller REUSES this class verbatim, so its bounds/timeouts/identity guarantees hold everywhere.
+// The REST endpoints in gateway/server.ts, the platform git tools in mcp/platform.ts, and the operator
+// git tools in mcp/operator.ts (codex parity surface) call in too — four callers total, as of the
+// decision record's round 11.
 
 /**
  * Per-op ceiling. Every git write runs BOUNDED + NON-INTERACTIVE: this repo has been bitten twice by
@@ -46,6 +54,30 @@ import { enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReaso
  */
 const GIT_LOCAL_TIMEOUT_MS = 15_000;
 const GIT_PUSH_TIMEOUT_MS = 45_000;
+
+/** Conservative branch-name charset: must start alnum, each later char is alnum/dot/underscore/dash, or a
+ *  slash immediately followed by alnum — rejects "//" ", a leading/trailing slash, and (by construction,
+ *  since none of these characters are in the allowed set) "@", "{", "}", "~", "^", ":", "?", "*", "[", "\\",
+ *  spaces and control characters. */
+const SAFE_BRANCH_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]|\/[A-Za-z0-9])*$/;
+
+/**
+ * @decision 2a6a292a round 10 — pre-git shape validation; no git-argument-level mitigation exists for
+ * "-"/"@{-1}"/"-bsneaky" (verified: neither `--no-guess` nor a trailing `--` stops them). Callers accepting
+ * an untrusted branch name MUST call this before any git call. See the decision record's round-10 section.
+ *
+ * Returns the reason a name is unsafe, or `null` when it is a plain branch name. Deliberately does NOT
+ * reject a name merely because it looks like `<remote>/<name>` (e.g. "origin/evil") — see the record for why.
+ */
+export function unsafeBranchNameReason(name: string): string | null {
+  if (!name) return "a branch name is required";
+  if (name.startsWith("-")) return `"${name}" starts with "-" — it could be parsed as a git command-line option, not a branch name`;
+  if (name.includes("@{")) return `"${name}" contains "@{" — that is revision/reflog shorthand (e.g. the previous-branch shortcut "@{-1}"), never a plain branch name`;
+  if (name.includes("..")) return `"${name}" contains ".." — that is range syntax, never a plain branch name`;
+  if (/^refs\//i.test(name)) return `"${name}" starts with "refs/" — pass a short branch name (e.g. "main"), not a full ref path`;
+  if (!SAFE_BRANCH_NAME_RE.test(name)) return `"${name}" contains characters outside the conservative branch-name charset (letters, digits, ".", "_", "-", and "/" between segments)`;
+  return null;
+}
 /** Hard floor (1s) for any threaded git-write timeout — never let a misconfig fail-fast every op. */
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
 
@@ -403,8 +435,17 @@ export class GitWriter {
    * itself get silently clobbered by one. See that lock's own doc for the full corruption history and why
    * this is safe from deadlock (this method never runs while a merge already holds the lock, because
    * nothing on the merge path calls into `GitWriter`).
+   *
+   * `opts.precondition` (card 4fabafd1, round 2 of the Code Review): an OPTIONAL check run INSIDE the
+   * lock, AFTER it is acquired, immediately BEFORE the real `git checkout` spawns — the one place a
+   * caller's own live-state refusal checks can run atomically with the mutation they're protecting,
+   * closing the TOCTOU window a courtesy pre-check taken before this call can only narrow. A refusal
+   * (`{ok:false,error}`) aborts before `git checkout` ever runs — nothing is touched. Every existing
+   * caller omits it and is byte-identical. `branch`+`sha` on success are both read inside the SAME lock,
+   * right after the checkout itself, so a caller needing the landed sha (not just the branch name) never
+   * has to re-read it outside the lock in a second, separately-racy step.
    */
-  async checkout(branch: string): Promise<GitWriteResult<{ branch: string }>> {
+  async checkout(branch: string, opts?: { precondition?: () => Promise<{ ok: true } | { ok: false; error: string }> }): Promise<GitWriteResult<{ branch: string; sha: string | null }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
     const target = branch.trim();
     const homeRefusal = await this.refuseIfOperationalHome();
@@ -415,6 +456,10 @@ export class GitWriter {
     try {
       return await withCanonicalIndexLock(this.repoPath, () =>
         this.withVaultPauseLease(async () => {
+          if (opts?.precondition) {
+            const pre = await opts.precondition();
+            if (!pre.ok) return pre;
+          }
           const git = this.gitLocal(this.localMs);
           // @decision d8bb2074 — kill-confirmed (killableCanonicalRaw), not a bare withTimeout race: an
           // orphaned checkout child must never survive past the lock releasing, and the repo is re-checked
@@ -424,7 +469,10 @@ export class GitWriter {
             if (confirmed && raisedToken) clearMergeQuarantineByToken(this.repoPath, raisedToken);
           };
           try {
-            await killableCanonicalRaw(this.repoPath, ["checkout", target], this.localMs, "git checkout", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
+            // @decision 2a6a292a round 10 — `--no-guess` disables git's own DWIM (a plain checkout of a
+            // non-existent local name silently tracking a same-named remote ref); verified safe/additive
+            // for every caller. See the decision record's round-10 section for the full repro + proof.
+            await killableCanonicalRaw(this.repoPath, ["checkout", "--no-guess", target], this.localMs, "git checkout", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             if (treeDeathUnconfirmed(e)) {
               raisedToken = enterMergeQuarantine(this.repoPath, target, unconfirmedKillReason(`git checkout could not be confirmed dead after a kill: ${(e as Error).message}`));
@@ -432,7 +480,13 @@ export class GitWriter {
             throw e;
           }
           const current = (await withTimeout(git.branchLocal(), this.localMs, "git branch")).current;
-          return { ok: true, branch: current };
+          // @decision 2a6a292a round 6 (N1) — the checkout itself already happened above; a timeout/
+          // error reading its sha must never surface as ok:false for a mutation that succeeded. Every
+          // existing caller already treats `sha` as informational, so `null` is a safe, additive widening.
+          let sha: string | null;
+          try { sha = (await withTimeout(git.revparse(["HEAD"]), this.localMs, "git rev-parse HEAD")).trim(); }
+          catch { sha = null; }
+          return { ok: true, branch: current, sha };
         }),
         // @decision 62c4953a (round 2 scope) — opts in: checkout writes the canonical index.
         { checkIndexLock: true },
@@ -456,7 +510,16 @@ export class GitWriter {
    * `{ok:true, sha, subject}` — a false success pointing at a sha that isn't even reachable from the
    * branch it thinks it merged onto. Same corruption family as `commit()`/`checkout()` above.
    */
-  async createBranch(name: string): Promise<GitWriteResult<{ branch: string }>> {
+  /**
+   * `opts.startPoint` (card 4fabafd1 round 6) — branch off this EXACT sha/ref instead of current HEAD
+   * (`checkout -b <name> <startPoint>`); every pre-existing caller omits it and keeps branching off HEAD,
+   * byte-identical. `opts.precondition` mirrors {@link checkout}'s own: an optional check run INSIDE the
+   * lock, immediately before the real `git checkout -b` spawns — its success value may now ALSO carry a
+   * `startPoint` (card 4fabafd1 round 7, n2), which OVERRIDES `opts.startPoint` for the actual spawn: a
+   * caller branching off a value it reads AGAIN inside the lock (e.g. a watermark that could move between
+   * the outer courtesy read and lock admission) must spawn against the freshest read, not the stale one.
+   */
+  async createBranch(name: string, opts?: { startPoint?: string; precondition?: () => Promise<{ ok: true; startPoint?: string } | { ok: false; error: string }> }): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
     const target = name.trim();
     const homeRefusal = await this.refuseIfOperationalHome();
@@ -466,13 +529,20 @@ export class GitWriter {
     try {
       return await withCanonicalIndexLock(this.repoPath, () =>
         this.withVaultPauseLease(async () => {
+          let startPoint = opts?.startPoint;
+          if (opts?.precondition) {
+            const pre = await opts.precondition();
+            if (!pre.ok) return pre;
+            if (pre.startPoint) startPoint = pre.startPoint;
+          }
           // @decision d8bb2074 — same kill-confirm + per-call re-check treatment as checkout() above.
           let raisedToken: string | undefined;
           const onTreeDeathSettled = (confirmed: boolean): void => {
             if (confirmed && raisedToken) clearMergeQuarantineByToken(this.repoPath, raisedToken);
           };
+          const args = startPoint ? ["checkout", "-b", target, startPoint] : ["checkout", "-b", target];
           try {
-            await killableCanonicalRaw(this.repoPath, ["checkout", "-b", target], this.localMs, "git checkout -b", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
+            await killableCanonicalRaw(this.repoPath, args, this.localMs, "git checkout -b", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             if (treeDeathUnconfirmed(e)) {
               raisedToken = enterMergeQuarantine(this.repoPath, target, unconfirmedKillReason(`git checkout -b could not be confirmed dead after a kill: ${(e as Error).message}`));

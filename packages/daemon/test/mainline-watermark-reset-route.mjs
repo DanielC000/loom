@@ -12,11 +12,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (F)/(G) round 2 (card c013e8a5): an unparseable row carries a bounded raw excerpt (previousWatermarkRaw,
 //       truncated to 200 chars) instead of previousWatermark, so a corrupt row's content isn't erased with
 //       no trace at all.
+//   (H) round 8 — the REST route's OWN live-HEAD `adopt` derivation (gateway/server.ts), against a REAL
+//       git repo (every other scenario's `repoPathStub` is a non-git stub, so `readMainlineHead` always
+//       throws there and `adopt` is never exercised): the route reads the canonical checkout's live
+//       {branch, tip} and passes it through to `resetMainlineWatermark`, which stamps that branch's own
+//       trust record as a byproduct. Proven RED by temporarily removing the route's `adopt` pass-through.
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject).
 // Run: 1) build (pnpm build), 2) node test/mainline-watermark-reset-route.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,6 +48,10 @@ const MW = await import("../dist/git/mainline-watch.js");
 const now = new Date().toISOString();
 const repoPathStub = path.join(os.tmpdir(), `loom-mw-reset-route-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repoPathStub, { recursive: true });
+// (H)'s REAL git repo — created up front (mirrors repoPathStub above) so it's reachable by the outer
+// cleanup `finally` regardless of where inside the inner try it's first used.
+const realRepo = path.join(os.tmpdir(), `loom-mw-reset-route-real-${Date.now()}-${process.pid}`);
+fs.mkdirSync(realRepo, { recursive: true });
 
 try {
   const db = new Db(path.join(tmpHome, "mwreset.db"));
@@ -116,14 +127,37 @@ try {
     check("(c013e8a5 r2) (G) a long corrupt row still resets cleanly", resG.statusCode === 200 && resG.json().reset === true);
     const evG = mwEvents().slice(countBeforeG);
     check("(c013e8a5 r2) (G) previousWatermarkRaw is truncated to 200 chars, never the whole 250-char row", evG.length === 1 && evG[0].detail.previousWatermarkRaw === longCorruptRaw.slice(0, 200) && evG[0].detail.previousWatermarkRaw.length === 200);
+
+    // ── (H) round 8 — the REST route's OWN live-HEAD `adopt` derivation, against a REAL git repo (every
+    //     scenario above uses `repoPathStub`, a non-git directory where `readMainlineHead` always throws
+    //     and `adopt` is never exercised) ──
+    const IDENT_H = { GIT_AUTHOR_NAME: "mwr", GIT_AUTHOR_EMAIL: "mwr@loom", GIT_COMMITTER_NAME: "mwr", GIT_COMMITTER_EMAIL: "mwr@loom" };
+    const gitH = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...IDENT_H }, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    fs.writeFileSync(path.join(realRepo, "README.md"), "# mwr\n");
+    gitH(realRepo, "init", "-q");
+    gitH(realRepo, "config", "core.autocrlf", "false");
+    gitH(realRepo, "config", "user.email", "mwr@loom");
+    gitH(realRepo, "config", "user.name", "mwr");
+    commitAll(realRepo, "init", "-c user.email=mwr@loom -c user.name=mwr");
+    const realBranch = gitH(realRepo, "rev-parse", "--abbrev-ref", "HEAD");
+    const realTip = gitH(realRepo, "rev-parse", "HEAD");
+    db.insertProject({ id: "pResetAdopt", name: "ResetAdopt", repoPath: realRepo, vaultPath: realRepo, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [] });
+    const adoptWKey = MW.mainlineWatermarkKey("pResetAdopt", "primary");
+    // Something present to reset ⇒ {reset:true} — the point here is the trust side-effect, not W itself.
+    db.setMeta(adoptWKey, JSON.stringify({ branch: "renamed-main", sha: "a".repeat(40) }));
+    const resH = await app.inject({ method: "POST", url: "/api/projects/pResetAdopt/mainline-watermark/reset" });
+    check("(H) 200 with {reset:true}", resH.statusCode === 200 && resH.json().reset === true);
+    check("(H) the REST route's own live-HEAD read stamped the checked-out branch's trust record (adopt)", db.getMainlineBranchTrust("pResetAdopt", "primary", realBranch) === realTip);
+    const evH = db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === "pResetAdopt");
+    check("(H) the filed event carries adoptedTrust {branch, sha} matching the live read", evH.some((e) => e.detail.adoptedTrust?.branch === realBranch && e.detail.adoptedTrust?.sha === realTip));
   } finally {
     db.close();
   }
 } finally {
-  for (const d of [tmpHome, repoPathStub]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
+  for (const d of [tmpHome, repoPathStub, realRepo]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the human-only mainline-watermark reset route clears W + an undelivered marker, audits a human-reset event (HIGH when it discards an unread alert, previousWatermark/previousWatermarkRaw carrying the erased row), is a clean no-op when there is nothing to reset, and refuses an unknown project or repoKey."
+  ? "\n✅ ALL PASS — the human-only mainline-watermark reset route clears W + an undelivered marker, audits a human-reset event (HIGH when it discards an unread alert, previousWatermark/previousWatermarkRaw carrying the erased row), is a clean no-op when there is nothing to reset, refuses an unknown project or repoKey, and (against a REAL git repo) derives its own live-HEAD adopt and stamps that branch's trust record as a byproduct."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

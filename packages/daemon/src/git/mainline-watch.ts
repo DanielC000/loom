@@ -21,6 +21,12 @@ export const MAINLINE_WATERMARK_PREFIX = "mainline-watermark:";
 
 export const mainlineWatermarkKey = (projectId: string, repoKey: string): string => `${MAINLINE_WATERMARK_PREFIX}${projectId}:${repoKey}`;
 
+/** @decision 2a6a292a round 6 — a PER-BRANCH trust record: the last W-OBSERVED tip for that branch (not
+ *  "last-known-good" — `store()` also runs after a landing-path alert/unverifiable verdict, per
+ *  `4fa36502`'s STORE/RETAIN rule). A switch classifies the TARGET branch against ITS OWN record. */
+export const MAINLINE_BRANCH_TRUST_PREFIX = "mainline-branch-trust:";
+export const mainlineBranchTrustKey = (projectId: string, repoKey: string, branch: string): string => `${MAINLINE_BRANCH_TRUST_PREFIX}${projectId}:${repoKey}:${branch}`;
+
 export interface MainlineWatermark { branch: string; sha: string }
 
 export function parseMainlineWatermark(raw: string | undefined): MainlineWatermark | null {
@@ -69,7 +75,9 @@ export interface MainlineFacts {
   loomTipsDeadline?: boolean;
 }
 
-export type MainlineEvidence = "reflog-raw-write" | "loom-branch-reachable" | "rewind-raw-write" | "watermark-missing";
+// @decision 2a6a292a round 10 — three prior members were DEAD (round 9 removed their only filer);
+// dropped rather than left to rot. See the decision record's round-10 section before reintroducing any.
+export type MainlineEvidence = "reflog-raw-write" | "loom-branch-reachable" | "rewind-raw-write" | "watermark-missing" | "untrusted-tip-mismatch" | "remote-tracking-shadow";
 
 /** Reason text on the event a POSITIVELY-missing watermark files (alert-class: a mainline commit never becomes unresolvable in normal operation). */
 export const MAINLINE_WATERMARK_MISSING_REASON = "watermark commit no longer resolvable (possible reflog expire/prune or force-rewrite)";

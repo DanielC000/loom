@@ -35,8 +35,9 @@ import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateR
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout } from "../git/bounded.js";
-import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert,isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
+import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert, type MainlineEvidence, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
+import { GitWriter, unsafeBranchNameReason } from "../git/writer.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
@@ -379,6 +380,36 @@ export interface PendingMergeOpNotice {
   branchCount: number | null;
   ageMs: number;
 }
+
+/** {@link SessionService.liveGateOpsForRepoPath}'s result: the ANY-gateType twin of
+ *  {@link PendingMergeOpNotice} (card 4fabafd1) — `project_checkout_branch`'s own refusal check, which
+ *  must also see a worker's own `run_gate` self-check (gateType `"worker"`), not just a merge/batch op.
+ *  Deliberately drops `kind`/`branchCount` — neither concept applies to a non-merge gate. */
+export interface LiveGateOpNotice {
+  opId: string;
+  projectId: string;
+  gateType: GateType;
+  phase: "queued" | "running" | "pending";
+  ageMs: number;
+}
+
+/** {@link SessionService.checkoutProjectBranch}'s result (Code Review round 2, card 4fabafd1 — dropped
+ *  the round-1 `liveWorkersOnOldBase` field: an UNMERGED worker branch is now a hard refusal instead, see
+ *  {@link SessionService.listUnmergedWorkerBranches}, so there is never a live-on-old-base worker left to
+ *  report on a success result). `noop:true` = the named branch was already checked out AND the watermark
+ *  already agreed — the checks still ran and passed, but nothing was mutated (round-2 Code Review
+ *  decision (c)). **Round 8 (MAJOR #2):** when the branch was already checked out but W DISAGREED (a
+ *  prior call's checkout succeeded, then it failed on a later check and never re-pointed), this now
+ *  re-points W after re-validating the full precondition in-lock and reports `noop:false` — a real state
+ *  change, even though no new `git checkout` ran. `previousBranch` is `null` only when no watermark
+ *  existed yet to report.
+ *  `created:true` (round 6) marks a success reached via `create:true` — {@link
+ *  SessionService.createProjectBranch} — never set alongside `noop`.
+ *  On refusal: `unmergedWorkers` is set only for the BLOCKER-2 refusal; `liveGateOps` only for the
+ *  live/queued-gate refusal — never both on the same result (each is its own distinct precondition). */
+export type CheckoutProjectBranchResult =
+  | { ok: true; noop: boolean; branch: string; sha: string; repoKey: string; previousBranch: string | null; created?: boolean }
+  | { ok: false; error: string; refused?: true; liveGateOps?: LiveGateOpNotice[]; unmergedWorkers?: { workerSessionId: string; taskId: string | null; branch: string }[] };
 
 /** {@link SessionService.gateQueueForManager}'s result: the resolved cap plus every live gate run, split
  *  into running/queued so a manager reads queue depth and admission order without counting entries itself.
@@ -2929,6 +2960,29 @@ export class SessionService {
    * finally once the row is live (the liveHolder guard then owns exclusion) or on any failure.
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
+  /** @decision 2a6a292a round 4 — a per-repo refcount around every fresh `createWorktree` cut; a courtesy
+   *  pre-check only (the real exclusion is `createWorktree`'s own lock) — see that record's
+   *  "manager-checkout" section. */
+  private readonly cuttingWorktreeRepoPaths = new Map<string, number>();
+  private normRepoPathForCutTracking(repoPath: string): string {
+    const r = path.resolve(repoPath);
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  }
+  private markCuttingWorktree(repoPath: string): void {
+    const k = this.normRepoPathForCutTracking(repoPath);
+    this.cuttingWorktreeRepoPaths.set(k, (this.cuttingWorktreeRepoPaths.get(k) ?? 0) + 1);
+  }
+  private unmarkCuttingWorktree(repoPath: string): void {
+    const k = this.normRepoPathForCutTracking(repoPath);
+    const n = (this.cuttingWorktreeRepoPaths.get(k) ?? 0) - 1;
+    if (n > 0) this.cuttingWorktreeRepoPaths.set(k, n); else this.cuttingWorktreeRepoPaths.delete(k);
+  }
+  /** Whether a fresh worktree cut is CURRENTLY in flight against `repoPath` — see
+   *  {@link cuttingWorktreeRepoPaths}'s own doc for what this is (a courtesy signal) and is not (the
+   *  actual safety guarantee). */
+  isWorktreeCuttingInFlight(repoPath: string): boolean {
+    return (this.cuttingWorktreeRepoPaths.get(this.normRepoPathForCutTracking(repoPath)) ?? 0) > 0;
+  }
   // @decision a5d9c458 — the worktree-PATH analogue of inFlightSpawnTaskIds: lets the staleKnowledge
   // live-claim guard see an in-flight spawn before its session row exists. See the decision record for
   // why a session-row-only check isn't enough and who fills/releases this.
@@ -6073,7 +6127,10 @@ export class SessionService {
    * all-dropped batch's fallback window it lists BOTH the batch row and each candidate's own solo op.
    * Multi-repo project caveat: rows/entries carry no repoKey, so a match is per PROJECT (any of its repos).
    */
-  pendingMergeOpsForRepoPath(repoPath: string): PendingMergeOpNotice[] {
+  /** Shared path-containment resolver for {@link pendingMergeOpsForRepoPath}/{@link liveGateOpsForRepoPath}
+   *  (card 4fabafd1 extracted this out — both need the identical "which project(s) register a repo
+   *  containing this path" answer; only what they then filter FOR differs). */
+  private projectIdsContainingPath(repoPath: string): Set<string> {
     const norm = (p: string): string => {
       const r = path.resolve(p);
       return process.platform === "win32" ? r.toLowerCase() : r;
@@ -6088,6 +6145,11 @@ export class SessionService {
       const roots = [p.repoPath, ...(p.repos ?? []).map((r) => r.path)].filter((r): r is string => !!r);
       if (roots.some(contains)) projectIds.add(p.id);
     }
+    return projectIds;
+  }
+
+  pendingMergeOpsForRepoPath(repoPath: string): PendingMergeOpNotice[] {
+    const projectIds = this.projectIdsContainingPath(repoPath);
     if (projectIds.size === 0) return [];
     const now = Date.now();
     const out = new Map<string, PendingMergeOpNotice>();
@@ -6112,6 +6174,628 @@ export class SessionService {
       });
     }
     return [...out.values()].sort((a, b) => b.ageMs - a.ageMs);
+  }
+
+  /**
+   * Card 4fabafd1: the ANY-gateType twin `project_checkout_branch`'s hard refusal needs — a merge/batch op
+   * (gateType `"merge"`) is NOT the only thing a canonical-checkout switch can invalidate. A worker's own
+   * `run_gate` self-check (gateType `"worker"`) runs `mergeMainIntoWorktree`'s union-merge against
+   * whatever is CURRENTLY checked out in the canonical repo BEFORE every gate (git/worktrees.ts,
+   * `mergeMainIntoWorktree`) — that read is NOT lock-protected (only a canonical-index MUTATION is), so a
+   * switch mid-gate can make that run's whole multi-minute result describe a union against a branch
+   * nobody intended, wasted the instant the mismatch is caught at landing time. `pendingMergeOpsForRepoPath`
+   * deliberately stays merge-only (every existing caller — `git_commit`'s PENDING-MERGE GUARD — keeps its
+   * own narrower refusal unchanged); this is a NEW, separate query, not a generalization of that one.
+   */
+  liveGateOpsForRepoPath(repoPath: string): LiveGateOpNotice[] {
+    const projectIds = this.projectIdsContainingPath(repoPath);
+    if (projectIds.size === 0) return [];
+    const now = Date.now();
+    const out = new Map<string, LiveGateOpNotice>();
+    const rowsByOpId = new Map(this.db.listPendingGateOps().filter((r) => r.state === "pending").map((r) => [r.opId, r]));
+    for (const e of this.gateSemaphore.snapshot().entries) {
+      if (!projectIds.has(e.projectId) || !e.opId) continue;
+      const row = rowsByOpId.get(e.opId);
+      out.set(e.opId, { opId: e.opId, projectId: e.projectId, gateType: e.gateType, phase: e.phase, ageMs: row ? now - Date.parse(row.startedAt) : now - e.since });
+    }
+    for (const row of rowsByOpId.values()) {
+      if (out.has(row.opId) || !row.projectId || !projectIds.has(row.projectId)) continue;
+      if (this.db.getSession(row.ownerSessionId)?.processState !== "live") continue;
+      const gateType: GateType = row.kind === "gate" ? "worker" : row.kind;
+      out.set(row.opId, { opId: row.opId, projectId: row.projectId, gateType, phase: "pending", ageMs: now - Date.parse(row.startedAt) });
+    }
+    return [...out.values()].sort((a, b) => b.ageMs - a.ageMs);
+  }
+
+  /** A `canonicalGit()` instance (`core.useReplaceRefs=false` + merge-driver guarding, `git/bounded.ts`)
+   *  for a TRUST read that decides `project_checkout_branch`'s own switch/create outcome — distinct from
+   *  {@link boundedGit} above, which stays the plain, unprotected construction this file's OTHER
+   *  (non-trust-deciding) worktree GC/size/ahead-count probes use. Keeps `canonical-git-helper-guard.
+   *  mjs`'s allowlist reason for this file accurate: with every trust read routed through here instead,
+   *  the only remaining bare `boundedGit()` call sites in this file really are exactly what that
+   *  allowlist entry says they are.
+   *  @decision 2a6a292a round 11 (CR8, item 3). */
+  private canonicalReadGit(repoPath: string, timeoutMs: number): SimpleGit {
+    return canonicalGit(repoPath, timeoutMs);
+  }
+
+  /** Pure, synchronous, no I/O: does any path-prefix of `branch` (including its own full name) case-fold
+   *  to any path-prefix of an EXISTING branch's name (including ITS own full name), while differing from
+   *  it in exact case? `existingBranches` is the caller's own already-fetched `for-each-ref` listing — this
+   *  never issues its own git read, so a caller sharing one listing across several checks (an exact-name
+   *  check, this one, …) pays for it once. On a case-insensitive filesystem (Windows/NTFS) this is a real
+   *  on-disk collision risk regardless of which side is the shorter/directory segment: "FEAT" vs a packed
+   *  "feat" (both full names), "FEAT/x" vs a loose "feat/y" (candidate's own leaf segment vs an existing
+   *  branch's directory segment — `D2`), and "feat" vs a requested "FEAT/x" (the reverse: an existing LEAF
+   *  branch colliding with a directory the create would need) are all the SAME shape. Same-case matches
+   *  (`cp === ep`) are deliberately never reported — an ordinary exact match is the caller's own, separate
+   *  concern. Returns the FIRST collision found (existing branch's full name, its own exact-cased
+   *  colliding segment, and the requested name's own exact-cased colliding segment), or `null`.
+   *  @decision 2a6a292a round 12 (seventh CR, CR8 MAJOR 1 / D2, MINOR 4). */
+  private static findCaseFoldPrefixCollision(existingBranches: string[], branch: string): { existingBranch: string; existingSegment: string; requestedSegment: string } | null {
+    const prefixesOf = (name: string): string[] => {
+      const segs = name.split("/");
+      const out: string[] = [];
+      for (let i = 1; i <= segs.length; i++) out.push(segs.slice(0, i).join("/"));
+      return out;
+    };
+    const candidatePrefixes = prefixesOf(branch);
+    for (const existing of existingBranches) {
+      for (const ep of prefixesOf(existing)) {
+        for (const cp of candidatePrefixes) {
+          if (cp.toLowerCase() === ep.toLowerCase() && cp !== ep) return { existingBranch: existing, existingSegment: ep, requestedSegment: cp };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** CREATE-path only (never the switch path — see this record's round 11 "Do not" for why): refuses
+   *  when the requested name case-insensitively STARTS WITH a configured remote's name (`git remote`)
+   *  followed by "/", e.g. `create:true` on "origin/main" OR "Origin/main" — creating that LOCAL branch
+   *  would shadow that remote's own tracking-ref namespace for every ordinary `git log`/`git rebase`
+   *  against it the owner runs by hand afterward. Checked against EVERY remote's FULL name (never just
+   *  its first path segment — round 11 missed a multi-segment remote name like "a/b", where branch
+   *  "a/b/c" shadows `refs/remotes/a/b/c` but "a" alone is not itself a configured remote), and
+   *  case-insensitively (round 11 missed "Origin/main" against a lowercase "origin" remote). A bare name
+   *  with no "/" (e.g. "origin" itself) is not this shape at all — nothing it could shadow — so it is left
+   *  alone. Switching to an ALREADY-EXISTING branch of this shape stays allowed
+   *  (`refuseIfTargetBranchUntrusted` already governs that path on its own trust terms); this is a
+   *  create-only footgun guard, not a name-SHAPE rule — `unsafeBranchNameReason` deliberately does not
+   *  reject a `"<remote>/<name>"`-shaped name either, for the same reason.
+   *  @decision 2a6a292a round 11 (CR8, item 5); round 12 (CR8 MINOR 3) widens the match. */
+  private async refuseIfCreateNameShadowsRemote(repoPath: string, branch: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!branch.includes("/")) return { ok: true };
+    const ms = this.mainlineGitMs();
+    let remotes: string[];
+    try {
+      const raw = await withTimeout(this.canonicalReadGit(repoPath, ms).raw(["remote"]), ms, "git remote (create: remote-name shadow check)");
+      remotes = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+    } catch (e) {
+      return { ok: false, error: `refusing: could not read this repo's configured remotes (${(e as Error).message}) — refusing until this is resolved` };
+    }
+    const lowerBranch = branch.toLowerCase();
+    const matchedRemote = remotes.find((R) => lowerBranch.startsWith(`${R.toLowerCase()}/`));
+    if (!matchedRemote) return { ok: true };
+    return {
+      ok: false,
+      error: `refusing: "${branch}" starts with "${matchedRemote}/" (case-insensitively) — "${matchedRemote}" is a configured remote's name, and creating this LOCAL branch would shadow that remote's own tracking-ref namespace for an ordinary "git log"/"git rebase" against it the owner runs by hand; pick a name that doesn't start with a remote's name, under any case, or (without create) switch to it if it already exists`,
+    };
+  }
+
+  /**
+   * **ROUND 6 (Code Review round 3, BLOCKER B1):** verify the SWITCH TARGET's own per-branch trust
+   * record (`Db.getMainlineBranchTrust`), not W's current branch — checking only W's branch left the
+   * TARGET's tip adopted unvetted on a switch, which is exactly how B1 laundered a raw commit onto a
+   * branch that simply wasn't checked out at the time (an "away, tamper, switch back" shape no
+   * source-only check can ever see, since source and target can differ).
+   *
+   * A branch that does NOT exist as a local ref is now a HARD refusal, decided HERE, BEFORE any git
+   * mutation — never deferred to `GitWriter.checkout()`'s own unknown-branch handling (round 10; see "Do
+   * not" below for why). A branch that DOES exist but has NO trust record refuses with the create/adopt
+   * remedy (design round 3, point 2). An EXACT match between the live tip and the trust record ⇒
+   * `{ok:true}` — the ONLY way to reach `ok:true`, so `classifiedTip` is always a real sha on success.
+   *
+   * @decision 2a6a292a round 6 — see the decision record's "manager-checkout" round-3 section.
+   * @decision 2a6a292a round 7 — (n1) success returns `classifiedTip` for a later in-lock comparison;
+   * (m4) `hasManagerCheckoutRefusalEvent` dedupes the event/nudge.
+   * @decision 2a6a292a round 9 — a forged `Loom-Worker-Branch:` trailer survived every git-derived check
+   * rounds 7/8 layered on top of this gate; adopt ONLY on an EXACT trust-record match, never a
+   * git-derived fact. See the decision record's round-9 section.
+   * @decision 2a6a292a round 10 (sixth CR, CRITICAL #1) — a non-existent local branch is now refused
+   * directly here (never `{ok:true}`), and a same-named remote-tracking ref existing when no local one
+   * does is itself alert-worthy (the exact shape git's own checkout DWIM used to launder). See the
+   * decision record's round-10 section.
+   */
+  private async refuseIfTargetBranchUntrusted(a: { projectId: string; repoKey: string; repoPath: string; branch: string; managerSessionId: string; taskId: string | null }): Promise<{ ok: true; classifiedTip: string } | { ok: false; error: string }> {
+    const ms = this.mainlineGitMs();
+    // @decision 2a6a292a round 12 (CR8 MINOR 4 / "(C)") — no longer resolves via `rev-parse`, which a
+    // case-insensitive filesystem can satisfy from a DIFFERENTLY-cased ref; `for-each-ref` enumerates
+    // every ref's true casing instead, compared in JS via `===`, never a second git resolution.
+    // @decision 2a6a292a round 13 (CR9 MAJOR) — `%(refname:short)` shortens ambiguously (e.g. to
+    // `heads/<name>` beside a same-named tag), silently breaking the `a.branch === name` comparison below.
+    // `%(refname:lstrip=2)` is never ambiguity-dependent. See the decision record's round-13 section.
+    let existingBranches: { name: string; sha: string }[];
+    try {
+      const raw = await withTimeout(this.canonicalReadGit(a.repoPath, ms).raw(["for-each-ref", "--format=%(objectname) %(refname:lstrip=2)", "refs/heads/"]), ms, "git for-each-ref (target branch existence)");
+      existingBranches = raw.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => { const i = l.indexOf(" "); return { sha: l.slice(0, i), name: l.slice(i + 1) }; });
+    } catch (e) {
+      return { ok: false, error: `could not verify branch "${a.branch}" exists (${(e as Error).message}) — refusing until this is resolved` };
+    }
+    const exact = existingBranches.find((b) => b.name === a.branch);
+    if (!exact) {
+      // @decision 2a6a292a round 11 (CR8, item 1); round 12 widens from a full-name-only check to any
+      // PATH-PREFIX collision (MAJOR 1 / D2) — see findCaseFoldPrefixCollision's own doc.
+      const collision = SessionService.findCaseFoldPrefixCollision(existingBranches.map((b) => b.name), a.branch);
+      if (collision) {
+        const fullNameMatch = collision.requestedSegment === a.branch && collision.existingSegment === collision.existingBranch;
+        return {
+          ok: false,
+          error: fullNameMatch
+            ? `refusing: no branch named exactly "${a.branch}" exists, but "${collision.existingBranch}" does, differing only in case — git's own ref stores resolve case inconsistently, so a case-insensitive filesystem (e.g. Windows/NTFS) would silently alias "${a.branch}" onto it if ever adopted or created under that case; use the exact existing name "${collision.existingBranch}" to switch to it, or create:true a genuinely different name`
+            : `refusing: "${a.branch}"'s own path component "${collision.requestedSegment}" differs only in case from branch "${collision.existingBranch}"'s path component "${collision.existingSegment}" — a case-insensitive filesystem (e.g. Windows/NTFS) would alias the two, corrupting ref storage for both; pick a name whose path components don't collide with an existing branch's, under any case`,
+        };
+      }
+      // @decision 2a6a292a round 10 — never defer to GitWriter.checkout()'s own unknown-branch handling
+      // (git's own remote-tracking DWIM used to reach it before this precondition ever ran). See the
+      // decision record's round-10 section.
+      let shadowRefs: { ref: string; sha: string }[] = [];
+      try {
+        // @decision 2a6a292a round 12 (CR8 MAJOR 2) — round 11's `/${branch}` SUFFIX match over-matched
+        // `refs/remotes/origin/hotfix/zzz` as a shadow of a switch to "zzz", filing a FALSE alert that
+        // blocked the whole project. Matched EXACTLY now: `refs/remotes/<R>/<branch>` per remote R.
+        const remotesRaw = await withTimeout(this.canonicalReadGit(a.repoPath, ms).raw(["remote"]), ms, "git remote (remote-tracking shadow check)");
+        const remotes = remotesRaw.split("\n").map((l) => l.trim()).filter(Boolean);
+        if (remotes.length > 0) {
+          const refsRaw = await withTimeout(this.canonicalReadGit(a.repoPath, ms).raw(["for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes/"]), ms, "git for-each-ref (remote-tracking shadow check)");
+          const refShaByFullRef = new Map<string, string>();
+          for (const line of refsRaw.split("\n").map((l) => l.trim()).filter(Boolean)) {
+            const i = line.indexOf(" ");
+            refShaByFullRef.set(line.slice(i + 1), line.slice(0, i));
+          }
+          for (const R of remotes) {
+            const ref = `refs/remotes/${R}/${a.branch}`;
+            const sha = refShaByFullRef.get(ref);
+            if (sha) shadowRefs.push({ ref, sha });
+          }
+        }
+      } catch { /* a read failure here is not itself evidence — fall through to the ordinary refusal below */ }
+      if (shadowRefs.length > 0) {
+        const evidence: MainlineEvidence[] = ["remote-tracking-shadow"];
+        const suspectShas = shadowRefs.map((r) => r.sha);
+        // @decision 2a6a292a round 10 — no real trust record exists for a branch that was never local;
+        // `from` is a documented null-sha sentinel, never a real trusted baseline — a dedupe/history reader
+        // must not mistake it for one.
+        const alreadyFiled = this.fileManagerCheckoutRefusalEvent(a, "0".repeat(40), shadowRefs[0]!.sha, evidence, suspectShas);
+        return {
+          ok: false,
+          error: `refusing: no local branch "${a.branch}" exists, but a remote-tracking ref (${shadowRefs.map((r) => r.ref).join(", ")}) does — refusing rather than let git silently create a local branch tracking it (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity); create "${a.branch}" explicitly with create:true, or check it out and land on it yourself first`,
+        };
+      }
+      return { ok: false, error: `refusing: no local branch "${a.branch}" exists (refs/heads/${a.branch} does not resolve) — create one with project_checkout_branch's create:true, or create it yourself first` };
+    }
+    const liveTip = exact.sha;
+    const trustedSha = this.db.getMainlineBranchTrust(a.projectId, a.repoKey, a.branch);
+    if (!trustedSha) {
+      return {
+        ok: false,
+        error: `refusing: branch "${a.branch}" has no trusted baseline on record — create a NEW branch instead with project_checkout_branch's create:true (stamped at the current trusted tip), or ask the owner to check out "${a.branch}" THEMSELVES first and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before`,
+      };
+    }
+    if (liveTip === trustedSha) return { ok: true, classifiedTip: liveTip };
+    // @decision 2a6a292a round 9 — no classifier, no further git-derived fact: ANY tip other than an EXACT
+    // match to the trust record is refused outright. Do not reintroduce readMainlineFacts/
+    // classifyMainlineMove (or any new git-derived signal) here — see this record's round-9 "Do not".
+    const evidence: MainlineEvidence[] = ["untrusted-tip-mismatch"];
+    const suspectShas = [liveTip];
+    const alreadyFiled = this.fileManagerCheckoutRefusalEvent(a, trustedSha, liveTip, evidence, suspectShas);
+    // @decision 2a6a292a round 8 — text no longer unconditionally claims THIS call filed the event: a
+    // deduped retry (within the SAME, not-yet-reset episode) files nothing new, and saying so plainly beats
+    // a stale claim the m4 fix above was built to stop making.
+    return {
+      ok: false,
+      error: `refusing: branch "${a.branch}"'s live tip (${liveTip.slice(0, 8)}) does not match its own trusted baseline (${trustedSha.slice(0, 8)}) exactly — only an EXACT match to the trust record is adopted, never a descendant or any other move (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity) — ask the owner to review it, check out "${a.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before — before retrying`,
+    };
+  }
+
+  /** Shared event-filing helper for {@link refuseIfTargetBranchUntrusted}'s two refusal shapes (an
+   *  exact-match failure, and the round-10 remote-tracking-shadow case) — ONE dedupe/append/nudge
+   *  implementation, reusing round 8's m4 dedupe (scoped to events newer than the last human reset) for
+   *  both. Returns whether the event was already on file (so the caller's own error text can say so).
+   *  @decision 2a6a292a round 10 — factored out so the shadow case doesn't duplicate the m4 dedupe logic. */
+  private fileManagerCheckoutRefusalEvent(a: { projectId: string; repoKey: string; branch: string; managerSessionId: string; taskId: string | null }, from: string, to: string, evidence: MainlineEvidence[], suspectShas: string[]): boolean {
+    const sinceTs = this.db.lastHumanResetTs(a.projectId, a.repoKey) ?? undefined;
+    const alreadyFiled = this.db.hasManagerCheckoutRefusalEvent(a.projectId, a.repoKey, a.branch, from, to, sinceTs);
+    if (!alreadyFiled) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId, taskId: a.taskId, kind: "mainline_moved_outside_loom",
+        detail: {
+          projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, from, to, severity: "high",
+          evidence, suspectShas, rawReflogMessages: [], source: "manager-checkout-precheck",
+          reason: evidence.includes("remote-tracking-shadow")
+            ? `project_checkout_branch refused: branch "${a.branch}" has no local ref, but a remote-tracking ref with that name exists — refusing rather than risk git's own branch-DWIM creating a local one from it`
+            : `project_checkout_branch refused: branch "${a.branch}"'s live tip ${to.slice(0, 8)} does not EXACTLY match its own trusted baseline ${from.slice(0, 8)} — no other tip is accepted`,
+        },
+      });
+      try {
+        this.db.setMeta(mainlineBootAlertKey(a.projectId, a.repoKey), JSON.stringify({ branch: a.branch, from, to, evidence, suspectShas, expectedBranch: a.branch, source: "landing", nudgedAt: null } satisfies MainlineBootAlert));
+        this.enqueueDurableMessage(a.managerSessionId, mainlineMovedNudgeText({ branch: a.branch, repoKey: a.repoKey, from, to, evidence, suspectShas, atBoot: false }), { sender: "system", taskId: a.taskId, kind: "warning" });
+      } catch { /* the durable event above is the record; a failed nudge must not matter */ }
+    }
+    return alreadyFiled;
+  }
+
+  /** "A manager must never be able to clear the owner's alarm": while ANY mainline alert marker for
+   *  (project, repoKey) still exists (delivered or not), `project_checkout_branch` refuses outright.
+   *  @decision 2a6a292a round 4 (CR blocker 1b). **Round 6 (S3):** excludes `first-sight-declined` —
+   *  that marker is purely informational (`recordFirstSightDeclined` stamps `nudgedAt` immediately,
+   *  never meant to be delivered), so gating on its mere existence refused the tool it exists to unblock. */
+  private hasUnresolvedMainlineAlert(projectId: string, repoKey: string): boolean {
+    const alert = parseMainlineBootAlert(this.db.getMeta(mainlineBootAlertKey(projectId, repoKey)));
+    return !!alert && !alert.evidence.includes("first-sight-declined");
+  }
+
+  /** Refuse on ANY TRACKED change (staged or unstaged); untracked files do NOT block (`git checkout`
+   *  never touches them regardless of which branch ends up checked out, so they carry none of the
+   *  "silently carried across branches" risk this closes — that risk is specifically a tracked
+   *  modification surviving the switch unmodified).
+   *  @decision 2a6a292a round 4 (CR should-fix 5). */
+  private async canonicalTreeHasTrackedChanges(repoPath: string): Promise<{ dirty: boolean; detail?: string }> {
+    const ms = this.mainlineGitMs();
+    const out = (await withTimeout(this.canonicalReadGit(repoPath, ms).raw(["status", "--porcelain"]), ms, "git status --porcelain")).trim();
+    if (!out) return { dirty: false };
+    const tracked = out.split("\n").filter((l) => !l.startsWith("??"));
+    if (tracked.length === 0) return { dirty: false };
+    return { dirty: true, detail: tracked.slice(0, 5).join("; ") };
+  }
+
+  /** Every worker branch THIS PROJECT has that is not yet PROVEN merged, live or exited: a worker cut
+   *  from the OLD base lands its branch's history into whatever is checked out at confirm time, so
+   *  landing it AFTER a switch would squash the old branch's commits into the NEW base — backwards from
+   *  what this tool's docs used to claim before this round. A branch already deleted (cleaned up
+   *  post-merge) is skipped — nothing left to import. Scope is per-PROJECT, not narrowed to `repoKey` —
+   *  matches {@link liveGateOpsForRepoPath}'s own documented over-refusal posture; see the decision
+   *  record for why.
+   *  @decision 2a6a292a round 4 (CR blocker 2); round 6 (S1) scopes candidates to LIVE or worktree-still-
+   *  on-disk (a cleaned-up exited worker can never land again, so it blocked this tool forever) and reads
+   *  branch existence via ONE `for-each-ref` call instead of a per-candidate spawn. */
+  private async listUnmergedWorkerBranches(projectId: string, repoPath: string): Promise<{ workerSessionId: string; taskId: string | null; branch: string }[]> {
+    const out: { workerSessionId: string; taskId: string | null; branch: string }[] = [];
+    const candidates = this.db.listAllSessions().filter((s) =>
+      s.role === "worker" && s.projectId === projectId && s.branch &&
+      (s.processState === "live" || (!!s.worktreePath && fs.existsSync(s.worktreePath))),
+    );
+    if (candidates.length === 0) return out;
+    let existingBranches: Set<string> | null;
+    try {
+      const ms = this.mainlineGitMs();
+      const raw = await withTimeout(this.canonicalReadGit(repoPath, ms).raw(["for-each-ref", "--format=%(refname:short)", "refs/heads/"]), ms, "git for-each-ref");
+      existingBranches = new Set(raw.split("\n").map((l) => l.trim()).filter(Boolean));
+    } catch {
+      existingBranches = null; // fail closed: can't confirm gone ⇒ treat every candidate as still existing
+    }
+    for (const s of candidates) {
+      const branch = s.branch as string;
+      if (existingBranches && !existingBranches.has(branch)) continue;
+      let merged: Awaited<ReturnType<typeof getTaskMergedInfo>> = null;
+      if (s.taskId) {
+        try { merged = await getTaskMergedInfo(repoPath, s.taskId, { timeoutMs: this.gitOpMs }); } catch { merged = null; }
+      }
+      if (!merged) out.push({ workerSessionId: s.id, taskId: s.taskId ?? null, branch });
+    }
+    return out;
+  }
+
+  /** The SIX checks `project_checkout_branch` runs TWICE: once as a courtesy pre-check (fast, outside
+   *  the lock, for a clean early error) and once again as `GitWriter.checkout()`'s own `precondition`
+   *  (inside the canonical-index lock, immediately before the real `git checkout` spawns) — the
+   *  unresolved-alert check, the live-gate check, the worktree-cut check, the unmerged-worker check, the
+   *  clean-tree check, and the TARGET branch's own trust classification. Order is cheapest-first.
+   *  @decision 2a6a292a round 4 (CR should-fix 3); round 6 widens the last check from W's current branch
+   *  to the SWITCH TARGET (`a.branch`) — see {@link refuseIfTargetBranchUntrusted}.
+   *  @decision 2a6a292a round 7 (m3) — the unresolved-alert check ({@link hasUnresolvedMainlineAlert})
+   *  moves IN HERE from a single outer-only call in `checkoutProjectBranch`, so it now runs inside the
+   *  lock too, closing the same TOCTOU window the other five checks already close. */
+  private async checkoutProjectBranchPrecondition(a: { projectId: string; repoKey: string; repoPath: string; branch: string; managerSessionId: string; taskId: string | null }): Promise<
+    // @decision 2a6a292a round 11 (CR8, item 2) — tightened from `string | null`: `refuseIfTargetBranchUntrusted`
+    // never returns a null classifiedTip on success, so a null here was always unreachable dead code —
+    // see the decision record's round-11 section for what this type change forces callers to delete.
+    { ok: true; classifiedTip: string } | { ok: false; error: string; refused: true; liveGateOps?: LiveGateOpNotice[]; unmergedWorkers?: { workerSessionId: string; taskId: string | null; branch: string }[] }
+  > {
+    if (this.hasUnresolvedMainlineAlert(a.projectId, a.repoKey)) {
+      return { ok: false, refused: true, error: `refusing: an unresolved mainline alert already exists for this repo — ask the owner to review it and use the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) before retrying; a manager cannot silently clear it` };
+    }
+    const liveGates = this.liveGateOpsForRepoPath(a.repoPath);
+    if (liveGates.length > 0) {
+      return {
+        ok: false, refused: true, liveGateOps: liveGates,
+        error: `refusing: ${liveGates.length} live/queued gate op(s) on this project's repo(s) would be invalidated by a checkout switch — wait for gate_queue to show them clear and retry`,
+      };
+    }
+    if (this.isWorktreeCuttingInFlight(a.repoPath)) {
+      return { ok: false, refused: true, error: "refusing: a worktree is currently being cut against this repo (a worker_spawn or batch assembly is in flight) — wait for it to finish and retry" };
+    }
+    const unmergedWorkers = await this.listUnmergedWorkerBranches(a.projectId, a.repoPath);
+    if (unmergedWorkers.length > 0) {
+      return {
+        ok: false, refused: true, unmergedWorkers,
+        // @decision 2a6a292a round 6 (S1) — the remedy must be TRUE: worker_stop explicitly RETAINS the
+        // worktree, and no manager tool deletes one, so "recycle-and-discard" (no such mechanism exists)
+        // is gone; this now names the one real manager-reachable path plus the honest human fallback.
+        error: `refusing: ${unmergedWorkers.length} worker branch(es) in this project are not yet proven merged — land them (worker_merge_confirm), or ask the owner to remove the worktree/branch by hand (worker_stop retains it; no manager tool deletes a worktree). A worker cut from the OLD base would otherwise land its branch's history into whatever is checked out AFTER this switch.`,
+      };
+    }
+    const dirty = await this.canonicalTreeHasTrackedChanges(a.repoPath);
+    if (dirty.dirty) {
+      return { ok: false, refused: true, error: `refusing: the canonical repo has tracked changes (${dirty.detail}) that a checkout would silently carry across branches — clean or commit them first` };
+    }
+    const trust = await this.refuseIfTargetBranchUntrusted(a);
+    if (!trust.ok) return { ok: false, refused: true, error: trust.error };
+    return { ok: true, classifiedTip: trust.classifiedTip };
+  }
+
+  /** `create:true`'s backing path: create a BRAND NEW branch at the CURRENT mainline watermark's OWN
+   *  sha (never current HEAD, which may have moved past W, and never a caller-supplied start point),
+   *  switch to it, and stamp its trust record. Covers "build it on its own branch, compare, switch back"
+   *  without adopting an unvetted tip. Shares the live-gate/cut/unmerged-worker/dirty-tree precondition
+   *  an ordinary switch runs (no branch-trust check — nothing to classify yet for a brand-new name), run
+   *  once outside the lock and once again inside `GitWriter.createBranch()`'s own in-lock hook.
+   *
+   *  @decision 2a6a292a round 6 — design point 3 of the decision record's "manager-checkout" section. */
+  private async createProjectBranch(managerSessionId: string, a: { projectId: string; repoKey: string; repoPath: string; branch: string }): Promise<CheckoutProjectBranchResult> {
+    const { projectId, repoKey, repoPath, branch } = a;
+    if (branch.startsWith("loom/")) {
+      return { ok: false, error: `refusing: "${branch}" starts with Loom's own reserved worker-branch prefix ("loom/") — pick a different name` };
+    }
+    const ms = this.mainlineGitMs();
+    try {
+      await withTimeout(this.canonicalReadGit(repoPath, ms).raw(["check-ref-format", "--branch", branch]), ms, "git check-ref-format --branch");
+    } catch (e) {
+      return { ok: false, error: `refusing: "${branch}" is not a valid git branch name (git check-ref-format --branch rejected it: ${(e as Error).message})` };
+    }
+    // @decision 2a6a292a round 11 (CR8, item 1); round 12 widens from an exact-full-name-only check to
+    // any PATH-PREFIX collision (MAJOR 1 / D2) — see findCaseFoldPrefixCollision's own doc. ONE
+    // `for-each-ref` read serves both the ordinary exact-name check and the case-fold check.
+    // @decision 2a6a292a round 13 (CR9 MAJOR) — same `%(refname:short)` ambiguous-shortening fix as
+    // refuseIfTargetBranchUntrusted's own read (a same-named tag hid a real collision here too). See the
+    // decision record's round-13 section.
+    const checkExistingNameCollision = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+      let names: string[];
+      try {
+        const raw = await withTimeout(this.canonicalReadGit(repoPath, ms).raw(["for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"]), ms, "git for-each-ref (create: branch-name collision check)");
+        names = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+      } catch (e) {
+        return { ok: false, error: `refusing: could not verify whether a branch named "${branch}" (or a case-variant of it) already exists (${(e as Error).message}) — refusing until this is resolved` };
+      }
+      if (names.includes(branch)) {
+        return { ok: false, error: `refusing: branch "${branch}" already exists — call project_checkout_branch WITHOUT create to switch to it (subject to its own trust check), or pick a different name` };
+      }
+      const collision = SessionService.findCaseFoldPrefixCollision(names, branch);
+      if (!collision) return { ok: true };
+      const fullNameMatch = collision.requestedSegment === branch && collision.existingSegment === collision.existingBranch;
+      return {
+        ok: false,
+        error: fullNameMatch
+          ? `refusing: a branch named "${collision.existingBranch}" already exists, differing from "${branch}" only in case — packed-ref lookups are case-sensitive but a case-insensitive filesystem (e.g. Windows/NTFS) would silently alias "${branch}" onto it once created; call project_checkout_branch WITHOUT create using the exact existing name "${collision.existingBranch}" to switch to it instead, or pick a genuinely different name`
+          : `refusing: "${branch}"'s own path component "${collision.requestedSegment}" differs only in case from existing branch "${collision.existingBranch}"'s path component "${collision.existingSegment}" — a case-insensitive filesystem (e.g. Windows/NTFS) would alias the two, corrupting ref storage for both; pick a name whose path components don't collide with an existing branch's, under any case`,
+      };
+    };
+    // @decision 2a6a292a round 7 (m3) — the unresolved-alert check now runs here too (see
+    // checkoutProjectBranchPrecondition's identical addition), not just once in checkoutProjectBranch.
+    const nonCreatePrecondition = async (): Promise<{ ok: true } | { ok: false; error: string; refused?: true; liveGateOps?: LiveGateOpNotice[]; unmergedWorkers?: { workerSessionId: string; taskId: string | null; branch: string }[] }> => {
+      if (this.hasUnresolvedMainlineAlert(projectId, repoKey)) {
+        return { ok: false, refused: true, error: `refusing: an unresolved mainline alert already exists for this repo — ask the owner to review it and use the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) before retrying; a manager cannot silently clear it` };
+      }
+      const liveGates = this.liveGateOpsForRepoPath(repoPath);
+      if (liveGates.length > 0) {
+        return { ok: false, refused: true, liveGateOps: liveGates, error: `refusing: ${liveGates.length} live/queued gate op(s) on this project's repo(s) would be invalidated by a checkout switch — wait for gate_queue to show them clear and retry` };
+      }
+      if (this.isWorktreeCuttingInFlight(repoPath)) {
+        return { ok: false, refused: true, error: "refusing: a worktree is currently being cut against this repo (a worker_spawn or batch assembly is in flight) — wait for it to finish and retry" };
+      }
+      const unmergedWorkers = await this.listUnmergedWorkerBranches(projectId, repoPath);
+      if (unmergedWorkers.length > 0) {
+        return { ok: false, refused: true, unmergedWorkers, error: `refusing: ${unmergedWorkers.length} worker branch(es) in this project are not yet proven merged — land them (worker_merge_confirm), or ask the owner to remove the worktree/branch by hand (worker_stop retains it; no manager tool deletes a worktree).` };
+      }
+      const dirty = await this.canonicalTreeHasTrackedChanges(repoPath);
+      if (dirty.dirty) {
+        return { ok: false, refused: true, error: `refusing: the canonical repo has tracked changes (${dirty.detail}) that a checkout would silently carry across branches — clean or commit them first` };
+      }
+      return { ok: true };
+    };
+    const preCheck = await nonCreatePrecondition();
+    if (!preCheck.ok) return preCheck;
+    const w = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(projectId, repoKey)));
+    if (!w) {
+      return { ok: false, error: "refusing: no established mainline watermark to branch from yet — a real Loom landing (or a human checkout plus the human-only reset route) must establish one first" };
+    }
+    const nameCollision = await checkExistingNameCollision();
+    if (!nameCollision.ok) return nameCollision;
+    // @decision 2a6a292a round 11 (CR8, item 5) — CREATE-path only; see refuseIfCreateNameShadowsRemote's
+    // own doc for why the switch path is deliberately unaffected.
+    const remoteShadow = await this.refuseIfCreateNameShadowsRemote(repoPath, branch);
+    if (!remoteShadow.ok) return remoteShadow;
+    // @decision 2a6a292a round 7 (n2) — `freshStartSha` is overwritten INSIDE the lock, right before the
+    // real spawn: W can move between this outer read and lock admission, and the stale `w.sha` must never
+    // be what's actually branched off or repointed onto (the outer `w` still gates the fast early refusal).
+    let freshStartSha = w.sha;
+    // @decision 2a6a292a round 7 (same fix as checkoutProjectBranch's own) — preserve the structured
+    // refusal (refused/liveGateOps/unmergedWorkers) that `GitWriter.createBranch()`'s plain `{ok:false,
+    // error}` precondition type would otherwise silently drop.
+    let structuredInLockRefusal: CheckoutProjectBranchResult | null = null;
+    const writer = new GitWriter(repoPath, { gitLocalMs: this.gitOpMs, gitPushMs: this.gitOpMs });
+    const result = await writer.createBranch(branch, {
+      startPoint: w.sha,
+      precondition: async () => {
+        const re = await nonCreatePrecondition();
+        if (!re.ok) { structuredInLockRefusal = re; return { ok: false, error: re.error }; }
+        const nc = await checkExistingNameCollision();
+        if (!nc.ok) { structuredInLockRefusal = nc; return { ok: false, error: nc.error }; }
+        const rs = await this.refuseIfCreateNameShadowsRemote(repoPath, branch);
+        if (!rs.ok) { structuredInLockRefusal = rs; return { ok: false, error: rs.error }; }
+        const freshW = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(projectId, repoKey)));
+        if (!freshW) return { ok: false, error: "refusing: the mainline watermark was cleared while this create was being admitted — no established baseline left to branch from; retry" };
+        freshStartSha = freshW.sha;
+        return { ok: true, startPoint: freshW.sha };
+      },
+    });
+    if (!result.ok) return structuredInLockRefusal ?? { ok: false, error: result.error };
+    this.db.repointMainlineWatermark(projectId, repoKey, branch, freshStartSha, managerSessionId);
+    return { ok: true, noop: false, branch, sha: freshStartSha, repoKey, previousBranch: w.branch, created: true };
+  }
+
+  /**
+   * `project_checkout_branch`'s backing implementation. A manager-initiated checkout switch, as a single
+   * deliberate act: switch to an EXISTING local branch (never create one, unless `create:true` — see
+   * {@link createProjectBranch}), then re-point this (project, repoKey)'s mainline watermark to the
+   * resulting `{branch, sha}` — UNLESS the named branch is already checked out, in which case this is a
+   * no-op (Code Review round 2, decision (c)): no checkout, no re-point, just a report of the current,
+   * unchanged watermark, after the SAME checks below still ran and passed (a same-branch call is exactly
+   * the laundering case BLOCKER 1 closes, so those checks are never skipped just because nothing would
+   * otherwise move).
+   *
+   * HARD refusals (no acknowledge override), via {@link checkoutProjectBranchPrecondition}: any
+   * live/queued gate of ANY type on this project's repo(s), a worktree cut in flight, an unmerged worker
+   * branch, a dirty tracked tree, or the SWITCH TARGET's own trust record failing classification (round 6
+   * — see {@link refuseIfTargetBranchUntrusted}) or simply not existing yet (use `create:true`). Also
+   * hard-refuses, before any of those, while ANY mainline alert for this (project, repoKey) is unresolved
+   * ({@link hasUnresolvedMainlineAlert}) — a manager must never be able to silently clear the owner's
+   * alarm as a side effect of this tool's own purge.
+   *
+   * The precondition is run ONCE as a courtesy pre-check (fast, outside the lock) and ONCE AGAIN inside
+   * `GitWriter.checkout()`'s own `precondition` hook — admitted through the SAME canonical-index lock the
+   * real mutation runs under, closing the TOCTOU window the outside-only check could only narrow. Reserved/
+   * operational homes are refused by `GitWriter.checkout()` itself, reused verbatim here — not
+   * re-implemented. `branch`/`sha` on success are read by `GitWriter.checkout()` INSIDE that same lock,
+   * right after the real checkout spawns — the repoint write below is the one piece that stays OUTSIDE
+   * it (`GitWriter` deliberately has no `Db` dependency); it runs with NO intervening `await`, so nothing
+   * else in this process can interleave between the lock releasing and this write.
+   *
+   * @decision 2a6a292a round 4 — see that record's "manager-checkout" section for the full design + the
+   * Code-Review-round-2 corrections (watermark laundering, unmerged-worker landings, the in-lock move);
+   * round 6 adds the per-branch trust record, `create:true`, and the S1-S3/N1 Code Review fixes.
+   */
+  async checkoutProjectBranch(managerSessionId: string, args: { branch: string; repoKey?: string | null; create?: boolean }): Promise<CheckoutProjectBranchResult> {
+    const branch = args.branch?.trim();
+    if (!branch) return { ok: false, error: "branch name required" };
+    // @decision 2a6a292a round 10 — validated BEFORE any repo/git read, for BOTH create and non-create
+    // (this is their shared entry point). See unsafeBranchNameReason's own doc + the round-10 section.
+    const nameReason = unsafeBranchNameReason(branch);
+    if (nameReason) return { ok: false, error: `refusing: ${nameReason}` };
+    const projectId = this.db.getSession(managerSessionId)?.projectId;
+    if (!projectId) return { ok: false, error: "no project for this session" };
+    const project = this.db.getProject(projectId);
+    if (!project) return { ok: false, error: "project not found" };
+    let resolvedRepo: ResolvedRepo;
+    try {
+      resolvedRepo = resolveRepoByKey(project, args.repoKey ?? null);
+    } catch (e) {
+      if (e instanceof UnknownRepoKeyError) return { ok: false, error: e.message };
+      throw e;
+    }
+    const { path: repoPath, key: repoKey } = resolvedRepo;
+    // Fail fast on Loom's own reserved/operational home, BEFORE any of this method's own git reads below
+    // (which assume a real, readable repo) — the SAME path-relation guard GitWriter.checkout() itself
+    // uses, reused here (not re-derived) so this refuses with the identical error, up front, rather than
+    // letting an unrelated git read throw past it first.
+    if (isLoomHomeOrAncestor(repoPath)) return { ok: false, error: OPERATIONAL_HOME_GIT_WRITE_ERROR };
+    // @decision 2a6a292a round 7 (m3) — the unresolved-alert check used to live ONLY here, outside any
+    // lock, run once. It now lives inside checkoutProjectBranchPrecondition/nonCreatePrecondition instead
+    // (both already run twice — courtesy pre-check + in-lock), so it gets the same TOCTOU closure.
+    try {
+      if (args.create) return await this.createProjectBranch(managerSessionId, { projectId, repoKey, repoPath, branch });
+      const preCheck = await this.checkoutProjectBranchPrecondition({ projectId, repoKey, repoPath, branch, managerSessionId, taskId: null });
+      if (!preCheck.ok) return preCheck;
+      // (c) the named branch is already checked out — there is nothing to SWITCH. When W already agrees
+      // with it too, this is a genuine no-op: nothing is mutated. When it disagrees, a PRIOR call already
+      // moved the canonical checkout for real and then failed on a LATER check (sha:null, the classified-
+      // tip mismatch, GitWriter reporting a different branch than requested) — W is stuck on the old
+      // branch with no other way to recover but to re-point it here.
+      // @decision 2a6a292a round 8 (MAJOR #2) — re-run the full precondition in-lock before repointing,
+      // rather than trust the stale courtesy pre-check above or silently report a stale W as untouched.
+      const currentHead = await readMainlineHead(repoPath, this.mainlineGitMs());
+      const oldWatermark = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(projectId, repoKey)));
+      if (currentHead && currentHead.branch === branch) {
+        if (oldWatermark && oldWatermark.branch === branch) {
+          return { ok: true, noop: true, branch, sha: currentHead.tip, repoKey, previousBranch: oldWatermark.branch };
+        }
+        let fixupRefusal: CheckoutProjectBranchResult | null = null;
+        let fixupSha: string | null = null;
+        await withCanonicalIndexLock(repoPath, async () => {
+          const re = await this.checkoutProjectBranchPrecondition({ projectId, repoKey, repoPath, branch, managerSessionId, taskId: null });
+          if (!re.ok) { fixupRefusal = re; return; }
+          const freshHead = await readMainlineHead(repoPath, this.mainlineGitMs());
+          if (!freshHead || freshHead.branch !== branch) {
+            fixupRefusal = { ok: false, error: `refusing: the canonical checkout is no longer on "${branch}" (it moved again between the outer read and this lock) — the mainline watermark was NOT re-pointed; retry` };
+            return;
+          }
+          // @decision 2a6a292a round 11 (CR8, item 2) — `re.classifiedTip` is now typed `string` (never
+          // `null`) on success, so the old `!== null &&` guard here was dead code; removed, not merely
+          // skipped, so a future null can't silently disable this comparison again.
+          if (re.classifiedTip !== freshHead.tip) {
+            fixupRefusal = { ok: false, error: `refusing: the checked-out sha ${freshHead.tip} does not match ${re.classifiedTip} — the sha classified clean moments earlier inside the same lock — the mainline watermark was NOT re-pointed; retry` };
+            return;
+          }
+          this.db.repointMainlineWatermark(projectId, repoKey, branch, freshHead.tip, managerSessionId);
+          fixupSha = freshHead.tip;
+        });
+        if (fixupRefusal) return fixupRefusal;
+        if (fixupSha === null) return { ok: false, error: "project_checkout_branch failed unexpectedly: the watermark fixup produced no sha" };
+        return { ok: true, noop: false, branch, sha: fixupSha, repoKey, previousBranch: oldWatermark?.branch ?? null };
+      }
+      // @decision 2a6a292a round 7 (n1) — captured from the IN-LOCK precondition call specifically (the
+      // outer `preCheck` above is a courtesy pre-check, not what the mutation is actually admitted under).
+      let classifiedTipAtAdmission: string | null = null;
+      // @decision 2a6a292a round 7 (found via the M3-i fix) — the IN-LOCK precondition's refusal used to
+      // lose `refused`/`liveGateOps`/`unmergedWorkers` through GitWriter.checkout()'s plain `{ok:false,
+      // error}` precondition type; captured here and restored below instead.
+      let structuredInLockRefusal: CheckoutProjectBranchResult | null = null;
+      const writer = new GitWriter(repoPath, { gitLocalMs: this.gitOpMs, gitPushMs: this.gitOpMs });
+      const result = await writer.checkout(branch, {
+        precondition: async () => {
+          const re = await this.checkoutProjectBranchPrecondition({ projectId, repoKey, repoPath, branch, managerSessionId, taskId: null });
+          if (!re.ok) { structuredInLockRefusal = re; return { ok: false, error: re.error }; }
+          classifiedTipAtAdmission = re.classifiedTip;
+          return { ok: true };
+        },
+      });
+      if (!result.ok) return structuredInLockRefusal ?? { ok: false, error: result.error };
+      if (result.branch !== branch) {
+        return { ok: false, error: `git checkout reported branch "${result.branch}", not the requested "${branch}" — the mainline watermark was NOT re-pointed; check the repo by hand, and if "${result.branch}" is actually correct, re-run project_checkout_branch naming it directly` };
+      }
+      // @decision 2a6a292a round 6 (N1) — a sha that could not be confirmed (GitWriter.checkout()'s own
+      // rev-parse timed out/errored AFTER the checkout already succeeded) must never be repointed onto:
+      // there is nothing trustworthy to stamp W or the branch's trust record with.
+      if (result.sha === null) {
+        return { ok: false, error: `checkout to "${branch}" succeeded, but its sha could not be confirmed (git rev-parse HEAD failed) — the mainline watermark was NOT re-pointed; check the repo by hand and re-run project_checkout_branch to retry` };
+      }
+      // @decision 2a6a292a round 7 (n1) — the landed sha must match the sha classified clean moments
+      // earlier inside the SAME lock; repointing onto an unverified sha is the laundering this record
+      // exists to prevent, so refuse rather than trust the two reads implicitly agree.
+      // @decision 2a6a292a round 11 (CR8, item 2) — the dead `!== null &&` guard is removed (always a
+      // real string here); a mismatch is direct evidence of a concurrent ref write, so it now files the
+      // same HIGH event every other refusal in this gate files, instead of a plain, un-filed error.
+      if (classifiedTipAtAdmission !== result.sha) {
+        // Non-null assertion: `result.ok` above is only ever true once the `precondition` callback has
+        // run and assigned a real string here — the early `!result.ok` return makes any other path
+        // unreachable, so this is provably safe, not an unchecked cast.
+        const alreadyFiled = this.fileManagerCheckoutRefusalEvent(
+          { projectId, repoKey, branch: result.branch, managerSessionId, taskId: null },
+          classifiedTipAtAdmission!, result.sha, ["untrusted-tip-mismatch"], [result.sha],
+        );
+        // @decision 2a6a292a round 12 (CR8 MINOR 5) — the remedy must name the human-reset route, not
+        // "re-run project_checkout_branch": the alert just filed above now blocks exactly that retry via
+        // hasUnresolvedMainlineAlert, so suggesting a bare retry would be a dead end.
+        return { ok: false, error: `checkout to "${branch}" landed on ${result.sha}, which does not match ${classifiedTipAtAdmission} — the sha classified clean moments earlier inside the same lock, direct evidence of a concurrent ref write (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity) — the mainline watermark was NOT re-pointed; check the repo by hand, then ask the owner to review the alert and use the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) before retrying — a bare retry is refused by the alert just filed` };
+      }
+      this.db.repointMainlineWatermark(projectId, repoKey, result.branch, result.sha, managerSessionId);
+      return { ok: true, noop: false, branch: result.branch, sha: result.sha, repoKey, previousBranch: oldWatermark?.branch ?? null };
+    } catch (e) {
+      // Defensive, fail-closed catch-all: every refusal above is structured, but a precondition check's
+      // own git read (status/rev-parse/the classify machinery) can still throw on a genuinely unreadable
+      // repo — never let that surface as an uncaught rejection past the MCP tool boundary.
+      return { ok: false, error: `project_checkout_branch failed unexpectedly: ${e instanceof Error ? e.message : String(e)}` };
+    }
   }
 
   /** Shapes one {@link GateIntentRow} into its wire form ({@link GateIntentEntry}) — shared by
@@ -8776,7 +9460,16 @@ export class SessionService {
         : false);
       // @decision a5d9c458 — clear any stale wedged-worktree tracking for this exact path BEFORE createWorktree can claim it.
       releaseWorktreePathClaim = this.reclaimWedgedWorktreePathForSpawn(project.id, taskId ?? claimKey, targetRepo.key).release;
-      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase, forkedFromReviewed, mainSha: cutBaseMainSha, cutBaseAdvanced } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
+      // @decision 2a6a292a round 4 — bracket the fresh-cut window so project_checkout_branch's own
+      // courtesy pre-check can see a spawn-in-flight; see cuttingWorktreeRepoPaths' own doc.
+      this.markCuttingWorktree(targetRepo.path);
+      let cutResult: Awaited<ReturnType<typeof createWorktree>>;
+      try {
+        cutResult = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
+      } finally {
+        this.unmarkCuttingWorktree(targetRepo.path);
+      }
+      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase, forkedFromReviewed, mainSha: cutBaseMainSha, cutBaseAdvanced } = cutResult;
       // @decision 0eaaa693 — a retained (non-recut) reuse must carry forward the prior cut base, never
       // overwrite it with the reuse-time HEAD. See WorktreeInfo.cutBaseAdvanced's own doc for the rule.
       const workerId = randomUUID();
@@ -21177,7 +21870,13 @@ export class SessionService {
           const worktreeCutStartMs = Date.now();
           // @decision a5d9c458 — same pre-claim clearing as the worker spawn call site.
           releaseBatchWorktreePathClaim = this.reclaimWedgedWorktreePathForSpawn(finalProjectId, batchTaskId).release;
-          const wt = await createWorktree(finalRepoPath, finalProjectId, batchTaskId);
+          this.markCuttingWorktree(finalRepoPath);
+          let wt: Awaited<ReturnType<typeof createWorktree>>;
+          try {
+            wt = await createWorktree(finalRepoPath, finalProjectId, batchTaskId);
+          } finally {
+            this.unmarkCuttingWorktree(finalRepoPath);
+          }
           batchWorktreePath = wt.worktreePath;
           const worktreeCutMs = Date.now() - worktreeCutStartMs;
 
@@ -22234,7 +22933,9 @@ export class SessionService {
       const alertKey = mainlineBootAlertKey(a.projectId, a.repoKey);
       // @decision 4fa36502 — ONE predicate for every marker delete (`dropBootAlert`): a marker goes only once DELIVERED, or when this check's baseline IS the marker's own `from` (a true re-detection / undo). An undelivered one is an alert no manager has read; W moving must never drop it.
       const dropBootAlert = (sameBaseline?: string): void => { const m = parseMainlineBootAlert(this.db.getMeta(alertKey)); if (m && (m.nudgedAt || (sameBaseline !== undefined && m.from === sameBaseline))) this.db.deleteMeta(alertKey); };
-      const store = (): void => { if (this.db.getMeta(key) === rawW) { this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); dropBootAlert(); } };
+      // @decision 2a6a292a round 6 — every store() also refreshes this branch's own trust record: the
+      // tripwire classified this tip clean (or it's true first sight), so it's as trustworthy as W itself.
+      const store = (): void => { if (this.db.getMeta(key) === rawW) { this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); this.db.setMainlineBranchTrust(a.projectId, a.repoKey, head.branch, head.tip); dropBootAlert(); } };
       const boot = a.source === "boot";
       // @decision 4fa36502 — TRUE first sight only: no watermark has EVER been stamped for this (project, repoKey).
       // @decision 787dd2a7 — a LANDING-path first sight never stores here; seeding defers to
@@ -22562,6 +23263,8 @@ export class SessionService {
       // it before them (the old ordering) told a manager a seed happened on a pass that then skipped it.
       seedStray?.();
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
+      // @decision 2a6a292a round 6 — refresh this branch's own trust record alongside W.
+      this.db.setMainlineBranchTrust(projectId, repoKey, head.branch, head.tip);
     } catch (err) {
       console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -22602,6 +23305,8 @@ export class SessionService {
       // @decision c013e8a5 round 2 — same reorder as the solo twin: notice only after both guards pass.
       seedStray?.();
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
+      // @decision 2a6a292a round 6 — refresh this branch's own trust record alongside W.
+      this.db.setMainlineBranchTrust(projectId, repoKey, head.branch, batchHeadSha);
     } catch (err) {
       console.warn(`[mainline-watch] batch watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }

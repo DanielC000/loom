@@ -64,6 +64,7 @@ import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-
 import { clearClaudeRateLimit, readClaudeUsageState } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter, gitError } from "../git/writer.js";
+import { readMainlineHead } from "../git/mainline-watch.js";
 import { bootstrapProjectDir, resolveProjectInitTarget, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached, resolveWorkerBranchInfo } from "../git/worktrees.js";
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
@@ -4898,7 +4899,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!p) return reply.code(404).send({ error: "project not found" });
     const repoKey = ((req.body ?? {}) as { repoKey?: string }).repoKey ?? "primary";
     if (!deps.db.projectHasRepoKey(p, repoKey)) return reply.code(404).send({ error: "repo not found" });
-    return deps.db.resetMainlineWatermark(p.id, repoKey);
+    // @decision 2a6a292a round 7 (M2) — read the canonical checkout's LIVE head (the human is expected to
+    // have already checked it out) and pass it as `adopt`, so the reset ALSO re-stamps that branch's own
+    // trust record. Best-effort: a failed/null read (detached HEAD) just means no adopt, never a failure.
+    let adopt: { branch: string; sha: string } | undefined;
+    try {
+      let repoPath = p.repoPath;
+      if (repoKey !== "primary") { const r = resolveRepoByKey(p, repoKey); repoPath = r.path; }
+      const head = await readMainlineHead(repoPath, gitWriteTimeouts.gitLocalMs);
+      if (head) adopt = { branch: head.branch, sha: head.tip };
+    } catch { /* best-effort — see doc above */ }
+    return deps.db.resetMainlineWatermark(p.id, repoKey, adopt);
   });
 
   // --- REST: create / bind ---

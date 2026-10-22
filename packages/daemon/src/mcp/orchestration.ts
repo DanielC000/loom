@@ -4557,6 +4557,105 @@ export class OrchestrationMcpRouter {
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);
 
+    // @decision 2a6a292a round 4 — manager-only, OWN project only (server-derived from managerSessionId,
+    // never a projectId argument); never registered on the worker router. See that decision record's
+    // "manager-checkout" section for the full trust-boundary rationale and what this reuses/refuses.
+    server.registerTool(
+      "project_checkout_branch",
+      {
+        description:
+          "Switch YOUR OWN project's canonical repo to an EXISTING local branch — e.g. to build something " +
+          "on its own branch and compare before switching back — then re-point this (project, repoKey)'s " +
+          "mainline watermark to the resulting {branch, sha}, so a subsequent worker_merge_confirm/" +
+          "merge_batch lands against the NEW branch instead of refusing with branchDiverted. Does NOT " +
+          "touch any remote. `repoKey` (optional — null/omitted/\"primary\" for the project's primary " +
+          "repo, else a key from your own project's repo registry) targets one registered repo; an " +
+          "unknown key is rejected with {error}. " +
+          "Pass `create:true` to make a BRAND NEW branch instead of switching to an existing one — it is " +
+          "created at the CURRENT trusted tip (never a caller-chosen start point, never plain HEAD if that " +
+          "has drifted unverified past it), switched to, and its own trust record is stamped immediately, " +
+          "so you never need a human to \"adopt\" a fresh branch before using it. Refuses a name that " +
+          "already exists, an invalid git branch name, or one starting with Loom's own reserved \"loom/\" " +
+          "worker-branch prefix. Returns {ok:true, noop:false, created:true, branch, sha, repoKey, " +
+          "previousBranch} on success — `create` and `branch` targeting an EXISTING branch never mix. " +
+          "WITHOUT `create`: calling this on the branch ALREADY checked out is a TRUE no-op ONLY when this " +
+          "project's mainline watermark already agrees with it too — {ok:true, noop:true, branch, sha, " +
+          "repoKey, previousBranch}, no checkout, no re-point. If the watermark DISAGREES (a prior call " +
+          "already moved the real checkout, then failed on a later check), this re-validates every refusal " +
+          "below in-lock and, once they all pass, RE-POINTS the watermark to the current checkout — " +
+          "{ok:true, noop:false, ...}, same as an ordinary switch, just with no new `git checkout` spawned. " +
+          "Every refusal below still applies first either way, since a same-branch call is exactly the " +
+          "laundering shape they close. An EXISTING branch with no trusted baseline on record is refused " +
+          "outright (create it with `create:true`, or ask the owner to check out the branch THEMSELVES " +
+          "first and only then call the human-only reset route below — it reads whatever is CURRENTLY " +
+          "checked out, so checkout must come BEFORE the reset call, never after). " +
+          "A branch name must be a PLAIN branch name — no leading \"-\" (could be parsed as a git option), " +
+          "no \"@{\" (revision/reflog shorthand, e.g. \"@{-1}\" for the previous branch), no \"..\", no " +
+          "\"refs/\" prefix, and no character outside a conservative charset (letters, digits, \".\", \"_\", " +
+          "\"-\", and \"/\" between segments); rejected before any git read or write, for both `create` and " +
+          "non-`create`. Existence/collision checks never resolve the name via git (a case-insensitive " +
+          "filesystem, e.g. Windows/NTFS, can silently resolve a request through a DIFFERENTLY-cased ref); " +
+          "they compare against the real, case-sensitive branch listing instead. ANY path-PREFIX of the " +
+          "requested name that case-folds to a path-prefix of an EXISTING branch's name, while differing " +
+          "from it in exact case, is refused and names the real existing branch — this covers a full-name " +
+          "collision (\"FEAT\" vs an existing \"feat\"), the candidate's own leaf colliding with an " +
+          "existing branch's directory segment (\"FEAT/x\" vs an existing \"feat/y\"), and the reverse. " +
+          "`create:true` ALSO refuses a name that case-insensitively starts with a configured remote's " +
+          "FULL name followed by \"/\" (e.g. \"origin/main\" or \"Origin/main\" against remote \"origin\"; " +
+          "\"a/b/c\" against a multi-segment remote named \"a/b\") — it would shadow that remote's own " +
+          "tracking-ref namespace; switching to such a branch if it already exists is unaffected. A " +
+          "remote-tracking shadow on the SWITCH path (no local ref, but `refs/remotes/<remote>/<branch>` " +
+          "exists for some configured remote) is matched EXACTLY per remote, never by a loose \"ends with " +
+          "/<branch>\" suffix — a differently-named branch under the same remote (e.g. " +
+          "`refs/remotes/origin/hotfix/zzz` when switching to \"zzz\") is NOT a shadow and refuses " +
+          "ordinarily, with no alert filed. " +
+          "HARD REFUSALS, no override, scoped to your WHOLE project (coarser than this one repoKey — " +
+          "over-refusal is intentional): (1) an unresolved mainline alert already exists for this repo — " +
+          "you cannot silently clear the owner's alarm as a side effect of this call; ask the owner to " +
+          "review and use the human-only reset route first. (2) WITHOUT `create`, the branch does not " +
+          "exist as a LOCAL ref at all — refused directly here, NEVER deferred to the underlying checkout " +
+          "(a same-named remote-tracking ref existing when no local one does is itself a HARD refusal with " +
+          "a HIGH-severity event filed — that exact shape is what git's own checkout DWIM used to silently " +
+          "launder before this tool closed it). (3) the SWITCH TARGET's own LIVE TIP does not EXACTLY " +
+          "match its own trust record's sha — ANY other tip is refused, including a " +
+          "descendant commit that carries what LOOKS like a Loom merge trailer (that text is unauthenticated " +
+          "and can be forged — e.g. `branch -f`/`branch -D`+recreate, a forged `update-ref -m` message, or " +
+          "a plain commit on the branch while it's parked, each onto a tip carrying a planted trailer), a " +
+          "rewind/divergence, or a non-ancestor move — checked on " +
+          "the TARGET branch regardless of what's currently checked out (so tampering a branch while it's " +
+          "away, then switching back to it later, is still caught), refused with a HIGH-severity event " +
+          "filed and the same human-only reset route named. Only an EXACT match adopts; no other " +
+          "git-derived fact is consulted. The trust record this compares against is written by SEVERAL " +
+          "things, not just this tool: a real Loom landing on that branch, the human-only reset route's " +
+          "own `adopt`, and ALSO the shared mainline tripwire's own boot/landing check — which reads git " +
+          "content (reflog/trailers) and is itself forgeable by the same class of attacker this tool " +
+          "defends against (tracked separately, card f683a5ad) — it is NOT an unconditionally-safe, " +
+          "Loom-only record. " +
+          "(4) any worker branch " +
+          "in this project not yet PROVEN merged that is either LIVE or whose worktree still exists on " +
+          "disk (an EXITED worker whose worktree was already removed is excluded — card 0eaaa693's " +
+          "merge-time fork-point backstop is the net for that case, not this tool) — landing it after a " +
+          "switch would squash its history into whichever branch ends up checked out; land it " +
+          "(worker_merge_confirm), or ask the owner to remove its worktree/branch by hand — worker_stop " +
+          "retains it; no manager tool deletes a worktree (returns `unmergedWorkers`). (5) any live/queued gate of ANY kind " +
+          "(merge/batch, deploy, or a worker's own run_gate self-check) on this project's repo(s) — check " +
+          "gate_queue and retry once clear (returns `liveGateOps`). (6) a worktree currently being CUT (a " +
+          "worker_spawn or batch assembly in flight). (7) the canonical repo has tracked changes " +
+          "(untracked files do not block). Without `create`, Loom's own reserved/operational home is " +
+          "refused by the underlying checkout itself; an invalid name is refused by this tool's own " +
+          "pre-git validation above, never by git. " +
+          "On success, returns {ok:true, noop, created?, branch, sha, repoKey, previousBranch} — no field " +
+          "reports on other live workers: an unmerged one is now a hard refusal (4) above, not a " +
+          "success-time notice. On refusal, returns {error, refused:true, liveGateOps?, unmergedWorkers?} " +
+          "for any of the seven hard refusals above (dirty tree included — it refuses the same way), or " +
+          "just {error} for an invalid name (rejected by this tool's own validation, before any git call), " +
+          "Loom's reserved/operational home, or an ordinary create-path failure (an already-existing name, " +
+          "or no established watermark yet to branch from).",
+        inputSchema: strictShape({ branch: z.string(), repoKey: z.string().nullable().optional(), create: z.boolean().optional() }),
+      },
+      async ({ branch, repoKey, create }) => ok(await sessions.checkoutProjectBranch(managerSessionId, { branch, repoKey, create })),
+    );
+
     // @decision 753d9911 — never add a `projectId` argument to `gate_history`; the project is resolved
     // server-side from the caller's own session, so no argument shape can name a different project.
     //
