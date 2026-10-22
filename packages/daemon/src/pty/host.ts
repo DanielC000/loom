@@ -9290,7 +9290,19 @@ export class PtyHost {
               //
               // See the guard this feeds, just before `mismatchText` is composed/delivered, for the
               // termination argument it establishes.
-              const intendedIsOwnMismatchNotice = intended.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG);
+              //
+              // Card 84a0b357 — strip a leading possible-duplicate tag BEFORE this check, same reason as
+              // the `submittedText` strip in the paste-recovery tripwire path, same file (card 78e4b3f2):
+              // a notice that gave up once
+              // and was requeued is re-wrapped by `annotatedMessageText`/`framePossibleDuplicate` with
+              // `[loom:possible-duplicate root:…]` PREPENDED ahead of its own tag, so a raw `startsWith`
+              // against `intended` silently misses it — the guard never fires for exactly the redelivery
+              // path a degraded-confirmation session routes every notice through, letting that notice's
+              // own re-arm mint a fresh notice forever (the self-sustaining loop observed on session
+              // `e56c4e44`). `stripPossibleDuplicateFrame` is a no-op when no tag is present, so the
+              // untagged case (the ordinary, first-delivery case) is byte-identical to before.
+              const strippedForLoopBreaker = stripPossibleDuplicateFrame(intended);
+              const intendedIsOwnMismatchNotice = strippedForLoopBreaker.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || strippedForLoopBreaker.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG) || strippedForLoopBreaker.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG);
               let i = 0;
               const max = Math.min(reported.length, intended.length);
               while (i < max && reported[i] === intended[i]) i++;

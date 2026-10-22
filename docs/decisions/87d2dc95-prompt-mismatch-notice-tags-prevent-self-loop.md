@@ -15,6 +15,7 @@ Card 87d2dc95 DoD-4 (the wording of the minted `handlePromptMismatchUnresolved` 
 - Do not test `PROMPT_MISMATCH_NOTICE_TAG` alone with `startsWith` and assume it also recognizes `-unresolved` notices — it's a strict prefix test and the two tags diverge after the shared prefix; check both tags via `intendedIsOwnMismatchNotice`.
 - Do not hardcode a second literal for either notice family at a new mint site — import the constant, so mint and recognition sites can't silently drift apart.
 - Do not word the recipient notice as a causal verdict ("most likely never reached it") — state only what is known; a causal claim overclaims a mechanism Loom cannot see.
+- Do not test `intended` against any of the three notice tags without first stripping a leading possible-duplicate tag (`stripPossibleDuplicateFrame`) — card `84a0b357`: a notice that gave up once and was requeued is re-wrapped by `annotatedMessageText`/`framePossibleDuplicate` with `[loom:possible-duplicate root:…]` PREPENDED ahead of its own tag, which a raw `startsWith` silently misses, letting a redelivered notice bypass this loop-breaker entirely and mint a fresh notice forever under a degraded-confirmation session. Same class of bug, same fix shape, as `78e4b3f2`'s own `submittedText` strip in the paste-recovery tripwire path (host.ts) — this record's own loop-breaker never got the equivalent treatment until now.
 
 ## Source
 
