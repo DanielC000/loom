@@ -5504,7 +5504,38 @@ export class OrchestrationMcpRouter {
           "collapses both signals into one legible verdict: `\"stale\"` (skillStoreStaleness.stale — the " +
           "store itself needs a restart/adopt, checked first), `\"uncommitted\"` (store is in sync but the " +
           "shipped asset it synced from is NOT committed — the exact gap this card closes), `\"clean\"` (in " +
-          "sync and committed), or `\"undetermined\"` (git status couldn't be read — never read as clean).",
+          "sync and committed), or `\"undetermined\"` (git status couldn't be read — never read as clean). " +
+          "`scratchRootBytes`/`scratchRootOverCeiling` (card 9775559c) are the shared per-session scratch " +
+          "root's (`~/.loom/tmp/scratch`) total on-disk footprint and whether it exceeds the WARN-only " +
+          "ceiling in `sessions/scratch-gc.ts` — nothing is ever evicted on account of either, and it's a " +
+          "fresh, uncached recursive walk on every call (this surface is called on-demand, never polled " +
+          "on a fixed interval). `scratchGcSweep` (card 1a686bad) is the boot GC's own last-sweep outcome " +
+          "as a four-state record (`not-started`/`in-progress`/`completed`/`failed`, with `scanned`/" +
+          "`reaped`/`wedged` counts once settled) — lets you tell a sweep that scanned everything and " +
+          "genuinely reaped 0 apart from one that threw and was silently swallowed, previously " +
+          "indistinguishable. `scratchLargestDirs` (card 0e701396) names the largest individual scratch " +
+          "dirs (`sessions/scratch-largest-dirs.ts` for the count) — the missing half `scratchRootBytes`/" +
+          "`scratchRootOverCeiling` can't give you: WHICH dir is driving it. Each entry carries `{id, " +
+          "bytes, ageDays, resumability}`; `resumability` is the SAME classification the real GC sweep " +
+          "uses (`\"no-row\"`/`\"live\"`/`\"no-engine-id\"`/`\"resumable\"`/`\"unresumable\"`) — a " +
+          "`\"resumable\"` dir can be arbitrarily large and arbitrarily old and will NEVER be reaped by " +
+          "the sweep, by design; only a human deleting it removes it. Cached, background-refreshed on a " +
+          "throttle (never a fresh walk on THIS read, unlike `scratchRootBytes` above) — may read `[]` " +
+          "before the first background refresh has landed, an honest \"not computed yet\", never " +
+          "fabricated. `projectsWorkRootBytes`/`projectsWorkRootOverCeiling`/`projectsWorkRootTruncated` " +
+          "(card 5eace211) are the analogous fleet-wide figure for the Loom-managed PER-PROJECT work root " +
+          "— summed across every KNOWN project's own work dir (active and archived), scoped away from an " +
+          "unrelated bystander directory under the same root. `overCeiling` is PER-PROJECT (any single " +
+          "project exceeding its own ceiling), not a check on the summed total; `truncated:true` means " +
+          "the walk hit its own entry/time bound for at least one project, so the figure is a genuine " +
+          "partial sum, never the complete one. Like `scratchLargestDirs`, this is a cached, background-" +
+          "refreshed figure (never a fresh walk on this read) — may read `0`/`false` before the first " +
+          "refresh has landed. `staleWorktreeLeftovers` (card ad34efb5) counts renamed-aside stale " +
+          "worktree dirs (`<path>.stale-<ts>`) under `WORKTREES_DIR` that were never auto-deleted and " +
+          "that no session row names, so nothing else would surface them — `{count, oldestStaleSinceMs}` " +
+          "(`oldestStaleSinceMs` is `null` when `count` is 0). COUNT-ONLY, deliberately: this field is " +
+          "read on every call, so it never measures byte totals — see `GET /api/worktrees/stale-" +
+          "leftovers` for that, called deliberately rather than on this hot path.",
         inputSchema: strictShape({}),
       },
       async () => ok(buildServedStatus(db)),
