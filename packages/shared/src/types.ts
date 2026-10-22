@@ -2036,7 +2036,11 @@ export type OrchestrationEventKind =
   // EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS: the
   // delivery itself still files its own ordinary event_trigger_fired/poll_fired/wake-nudge activity
   // record at the (redirected) live id, so no orchestration decision or activity tally needs this one.
-  | "wake_target_redirected";
+  | "wake_target_redirected"
+  // @decision b8196f51 — a SPAWN-mode delivery refused for a live holder (0368c784's
+  // `SecondLiveManagerError`) is redirected to that holder as a message, never dropped or stalled.
+  // `detail`: { source: "event-trigger" | "webhook" | "poll", agentId }.
+  | "spawn_target_redirected";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -2096,6 +2100,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   process_survived_kill: true,
   trust_lock_degraded: true,
   wake_target_redirected: true,
+  spawn_target_redirected: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

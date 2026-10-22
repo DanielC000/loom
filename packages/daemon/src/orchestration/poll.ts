@@ -6,6 +6,7 @@ import type { AuthenticatedRequestResult } from "../connections/request.js";
 import type { OrchestrationControl } from "./control.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 import { formatPollItemsBlock } from "./poll-format.js";
+import { SecondLiveManagerError } from "../sessions/service.js";
 
 /** The slice of PtyHost PollService needs (mirrors WakePty, minus companion-route capture — a poll fire
  *  is never companion-origin). */
@@ -309,8 +310,28 @@ export class PollService {
       return { sessionId };
     }
 
-    const session = (await this.deps.spawn(job.agentId!, `New item(s) detected by a poll job.\n\n${block}`)) as { id: string };
-    return { sessionId: session.id };
+    try {
+      const session = (await this.deps.spawn(job.agentId!, `New item(s) detected by a poll job.\n\n${block}`)) as { id: string };
+      return { sessionId: session.id };
+    } catch (e) {
+      // @decision b8196f51 — redirect a refused spawn (a live holder already exists) to that holder as
+      // a message instead of letting the throw stall the cursor forever. Any other throw is rethrown.
+      if (!(e instanceof SecondLiveManagerError)) throw e;
+      const holderSessionId = e.holderSessionId;
+      const text = `[loom:poll] New item(s) detected by a poll job.\n\n${block}`;
+      if (this.deps.enqueueDurableNudge) {
+        const role = this.deps.db.getSession(holderSessionId)?.role ?? null;
+        this.deps.enqueueDurableNudge(holderSessionId, role, text, null, { kind: "agent" });
+      } else {
+        this.deps.enqueueDurable(holderSessionId, text, { kind: "agent" });
+      }
+      this.deps.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: holderSessionId,
+        kind: "spawn_target_redirected",
+        detail: { source: "poll", agentId: job.agentId! },
+      });
+      return { sessionId: holderSessionId };
+    }
   }
 
   private emit(

@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { Db, WebhookEndpointRow } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
-import type { SessionService } from "../sessions/service.js";
+import { SecondLiveManagerError, type SessionService } from "../sessions/service.js";
 import { decryptWebhookSecret } from "./store.js";
 import { verifyWebhookSignature, webhookDeliveryRetentionMs, type WebhookHeaders } from "./verify.js";
 import { formatWebhookEventBlock } from "./format.js";
@@ -131,7 +131,29 @@ async function fireWebhookTarget(deps: WebhookIngressDeps, endpoint: WebhookEndp
       });
     });
   } else {
-    deps.sessions.startNew(endpoint.agentId!, { kickoffPrompt: kickoff });
+    try {
+      deps.sessions.startNew(endpoint.agentId!, { kickoffPrompt: kickoff });
+    } catch (e) {
+      // @decision b8196f51 — redirect a refused spawn (a live holder already exists) to that holder as
+      // a message instead of letting the throw drop the payload. Any other throw is rethrown unchanged.
+      if (!(e instanceof SecondLiveManagerError)) throw e;
+      const holderSessionId = e.holderSessionId;
+      const role = deps.db.getSession(holderSessionId)?.role ?? null;
+      await new Promise<void>((resolve, reject) => {
+        deps.sessions.enqueueDurableNudge(holderSessionId, role, kickoff, null, {
+          kind: "agent",
+          onOutcome: (outcome) => {
+            if (outcome.dispatched) resolve();
+            else reject(new Error(`enqueueDurableNudge never dispatched the redirected spawn-mode webhook nudge for session ${holderSessionId}`));
+          },
+        });
+      });
+      deps.db.appendEvent?.({
+        id: randomUUID(), ts: nowIso, managerSessionId: holderSessionId,
+        kind: "spawn_target_redirected",
+        detail: { source: "webhook", agentId: endpoint.agentId! },
+      });
+    }
   }
   // @decision 72c58b1c — best-effort, deliberately OUTSIDE the failure that undoes the dedupe row: a
   // failure here (SQLITE_BUSY, a closed db) must never make an already-successful fire look like it failed.
