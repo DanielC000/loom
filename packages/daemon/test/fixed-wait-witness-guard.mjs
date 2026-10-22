@@ -374,6 +374,26 @@ async function resolveBaseRef(repoPath, resolveMainlineBranchFn) {
 }
 
 /**
+ * Card 36ac80c3 — resolve HEAD's own current commit sha, to hand to `diffBranchFn` as `deps.resolvedTip`
+ * (see `main` below). `diffBranch`'s `branch` argument is resolved via `resolveBranchTip`'s EXACT
+ * `refs/heads/<branch>` lookup (@decision 56c10535) — "HEAD" is never a real branch name, so passing it
+ * as that argument always throws `could not resolve HEAD's current tip`. `resolvedTip` is the supported
+ * way to bypass that internal resolution entirely (see `DiffBranchDeps.resolvedTip`'s own doc comment:
+ * "`branch` is then display-only"). Injectable `execFileSyncFn` mirrors `listUntrackedTestFiles`'s own DI
+ * shape. Returns `null` (never throws) on any git failure — the caller folds that into the same
+ * loud-fail path as any other diff-resolution failure (see `main`).
+ */
+export function resolveCurrentHeadSha(repoRoot, execFileSyncFn = execFileSync) {
+  try {
+    const out = execFileSyncFn("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
+    const sha = out.trim();
+    return sha || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Card 40643460 — THE POPULATION-VISIBILITY CHECK. This guard diffs COMMITTED `HEAD` against the
  * merge-base (see `main` below); an UNTRACKED file (created but never `git add`ed) contributes nothing
  * to that diff and is therefore invisible to the scan — a brand-new test file with a genuinely
@@ -493,13 +513,26 @@ async function main() {
     process.exit(0);
   }
 
+  // Card 36ac80c3: hand diffBranchFn HEAD's own already-resolved commit sha via `deps.resolvedTip`, so it
+  // never has to resolve "HEAD" as a BRANCH name (it isn't one — see resolveCurrentHeadSha's own doc
+  // comment above).
+  const headSha = resolveCurrentHeadSha(REPO_ROOT);
   let diffResult;
   try {
-    diffResult = await diffBranchFn(REPO_ROOT, "HEAD", base, { includePatch: true, pathGlob: TEST_GLOB });
+    if (!headSha) throw new Error("could not resolve HEAD's current commit (git rev-parse HEAD failed)");
+    diffResult = await diffBranchFn(REPO_ROOT, "HEAD", base, { includePatch: true, pathGlob: TEST_GLOB }, { resolvedTip: headSha });
   } catch (e) {
-    check(`fixed-wait-witness-guard: SKIPPED — diff against "${base}" failed (${e.message}). Not a pass on the merits, just nothing to diff.`, true);
-    console.log("\n✅ ALL PASS (skipped — see note above).");
-    process.exit(0);
+    // Card 36ac80c3: once a mainline base HAS resolved, a diff failure is NEVER a legitimate skip — this
+    // guard's own header states Loom's own worktrees always share the canonical repo's `.git`, so a
+    // mainline base and HEAD's own tip are always resolvable there. A failure here (a corrupted checkout,
+    // a real git/infra bug) must fail loudly instead of silently passing as a clean scan — recording a
+    // SKIP as a PASS here is exactly the bug that left this guard's core diff scan OFF on every checkout
+    // since 7e40e5ce. The genuine no-base skip above (a shallow/no-origin checkout, e.g. GitHub CI's
+    // default `actions/checkout`) is unaffected — only this narrower "base resolved but the diff itself
+    // still failed" case changes.
+    check(`fixed-wait-witness-guard: diff against "${base}" failed although a mainline base resolved (${e.message}) — this is a FAILURE, not a skip.`, false);
+    console.log(`\n❌ ${failures} FAILURE(S).`);
+    process.exit(1);
   }
 
   const addedByFile = parseAddedLineNumbers(diffResult.patch);
