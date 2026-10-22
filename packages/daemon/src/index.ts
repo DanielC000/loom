@@ -839,6 +839,9 @@ async function main(): Promise<void> {
       { connection: job.connectionId, path: job.path, method: job.method },
     ),
     resume: (id) => sessions.resume(id),
+    // Card af165ec7: resolve/redirect a stale wake target to its live superseding manager — see
+    // PollServiceDeps.resolveWakeTarget's own doc.
+    resolveWakeTarget: (id) => sessions.resolveWakeDeliveryTarget(id),
     spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
     intervalMs: pollIntervalMs,
     // Card 61a012ce: durable fire dispatch — see PollServiceDeps.enqueueDurable's own doc.
@@ -854,6 +857,9 @@ async function main(): Promise<void> {
   const eventTriggers = new EventTriggerService({
     db, pty, control,
     resume: (id) => sessions.resume(id),
+    // Card af165ec7: resolve/redirect a stale wake target to its live superseding manager — see
+    // EventTriggerServiceDeps.resolveWakeTarget's own doc.
+    resolveWakeTarget: (id) => sessions.resolveWakeDeliveryTarget(id),
     spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
     // Card 90b9e904: MCP-seen-gated + durable dispatch — see EventTriggerServiceDeps.enqueueDurableNudge's own doc.
     enqueueDurableNudge: (id, role, text, taskId, opts) => sessions.enqueueDurableNudge(id, role, text, taskId, opts),

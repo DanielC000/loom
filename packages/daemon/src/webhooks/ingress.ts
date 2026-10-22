@@ -11,6 +11,7 @@
  * onRequest hook (gateway/server.ts) never reads an Authorization header at all for a Tier-2 route, so a
  * Tier-1 gateway token has no code path that could matter on this route in the first place.
  */
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { Db, WebhookEndpointRow } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -39,12 +40,22 @@ export interface WebhookIngressDb {
   /** Card a21f5c9e — the wake-mode target's role, so `fireWebhookTarget` can pass it to
    *  `SessionService.enqueueDurableNudge` (it needs to know whether to gate on `waitForMcpSeen`). */
   getSession: Db["getSession"];
+  /** Card af165ec7 — OPTIONAL: files the durable `wake_target_redirected` record when `resolveWakeTarget`
+   *  redirects. Additive like `resolveWakeTarget` itself — no existing test double is forced to add it. */
+  appendEvent?: Db["appendEvent"];
 }
 
 export interface WebhookIngressDeps {
   db: WebhookIngressDb;
   sessions: Pick<SessionService, "startNew" | "resume" | "enqueueDurableNudge">;
   pty: Pick<PtyHost, "isAlive">;
+  /** Card af165ec7: resolve the ACTUAL delivery target before resuming — redirects to a live manager
+   *  that has superseded a stale, non-recycled wake-mode `targetSessionId` instead of resuming (and now
+   *  being refused for) it. ABSENT (every existing test double) falls back to the pre-af165ec7 bare
+   *  isAlive+resume check below, byte-identical. Prod-wired to SessionService.resolveWakeDeliveryTarget.
+   *  Kept OUTSIDE the `sessions` Pick above (not widened onto it) so no existing test double that builds
+   *  its own `sessions` stub is forced to implement a method it never needed. */
+  resolveWakeTarget?: (sessionId: string) => { sessionId: string; redirectedFrom?: string };
   /** Envelope key file override — test seam only (mirrors connections/store.ts's `keyPath`). */
   keyPath?: string;
   /** Injectable per-endpoint spawn-rate limiter — test seam (mirrors createRemoteRateLimiter's own shape
@@ -83,8 +94,26 @@ export const REPLAY_COOLDOWN_MS = 60_000;
  *  here no longer means the same thing it used to — see the decision record for the full rule. */
 async function fireWebhookTarget(deps: WebhookIngressDeps, endpoint: WebhookEndpointRow, kickoff: string, nowIso: string): Promise<void> {
   if (endpoint.mode === "wake") {
-    const sessionId = endpoint.targetSessionId!;
-    if (!deps.pty.isAlive(sessionId)) await deps.sessions.resume(sessionId);
+    const configuredSessionId = endpoint.targetSessionId!;
+    let sessionId = configuredSessionId;
+    // Card af165ec7: the ALIVE check stays `deps.pty` (never SessionService's own internal pty) — a
+    // test double that stubs `deps.pty` independently (to skip resume() without a real spawn) must keep
+    // working unchanged; resolveWakeTarget only runs once THIS check has already said not-alive.
+    if (!deps.pty.isAlive(sessionId)) {
+      if (deps.resolveWakeTarget) {
+        const resolved = deps.resolveWakeTarget(sessionId);
+        sessionId = resolved.sessionId;
+        if (resolved.redirectedFrom) {
+          deps.db.appendEvent?.({
+            id: randomUUID(), ts: nowIso, managerSessionId: sessionId,
+            kind: "wake_target_redirected",
+            detail: { source: "webhook", originalTargetId: resolved.redirectedFrom },
+          });
+        }
+      } else {
+        await deps.sessions.resume(sessionId);
+      }
+    }
     const role = deps.db.getSession(sessionId)?.role ?? null;
     await new Promise<void>((resolve, reject) => {
       deps.sessions.enqueueDurableNudge(sessionId, role, kickoff, null, {

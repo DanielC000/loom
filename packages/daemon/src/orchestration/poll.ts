@@ -42,6 +42,11 @@ export interface PollServiceDeps {
   control: OrchestrationControl;
   /** Re-spawn a stopped-but-resumable wake-mode target. Prod-wired to SessionService.resume. */
   resume: (sessionId: string) => unknown;
+  /** Card af165ec7: resolve the ACTUAL delivery target before resuming — redirects to a live manager
+   *  that has superseded a stale, non-recycled `targetSessionId` instead of resuming (and now being
+   *  refused for) it. ABSENT (every existing test double) falls back to the pre-af165ec7 bare
+   *  isAlive+resume check below, byte-identical. Prod-wired to SessionService.resolveWakeDeliveryTarget. */
+  resolveWakeTarget?: (sessionId: string) => { sessionId: string; redirectedFrom?: string };
   /**
    * Card 61a012ce: dispatch a wake-mode fire's nudge DURABLY instead of via a bare `pty.enqueueStdin` —
    * `tick()` commits the poll cursor once `fire()` returns without throwing, but a HELD (busy target)
@@ -265,8 +270,28 @@ export class PollService {
       // predecessor (which `settleRecycleHandoff`'s ready branch hard-stops, carrying nothing, once it
       // settles — silently losing the item). A missing row (job deleted mid-fetch, a pre-existing and
       // out-of-scope edge case) falls back to the stale snapshot, unchanged from before this fix.
-      const sessionId = this.deps.db.getPollJob(job.id)?.sessionId ?? job.sessionId!;
-      if (!this.deps.pty.isAlive(sessionId)) await this.deps.resume(sessionId); // throws → caller's backoff path
+      const rereadSessionId = this.deps.db.getPollJob(job.id)?.sessionId ?? job.sessionId!;
+      let sessionId = rereadSessionId;
+      // Card af165ec7: the ALIVE check stays `deps.pty` (never SessionService's own internal pty) — a
+      // test double that stubs `deps.pty` independently (to skip resume() without a real spawn) must
+      // keep working unchanged; resolveWakeTarget only runs once THIS check has already said not-alive.
+      // Orthogonal to the recycle re-read above: that catches a mid-fetch RECYCLE, this catches a
+      // non-recycled fresh replacement — both can apply to the SAME fire, in either order.
+      if (!this.deps.pty.isAlive(sessionId)) {
+        if (this.deps.resolveWakeTarget) {
+          const resolved = this.deps.resolveWakeTarget(sessionId);
+          sessionId = resolved.sessionId;
+          if (resolved.redirectedFrom) {
+            this.deps.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId,
+              kind: "wake_target_redirected",
+              detail: { source: "poll", originalTargetId: resolved.redirectedFrom },
+            });
+          }
+        } else {
+          await this.deps.resume(sessionId); // throws → caller's backoff path
+        }
+      }
       // kind:"agent" — a poll-triggered nudge carries a specific external item the target must reason
       // about as its own turn, never mashed with anything else queued behind it.
       // Card 61a012ce: DURABLE dispatch (was a bare `pty.enqueueStdin`) — see `enqueueDurable`'s doc.

@@ -29,6 +29,11 @@ export interface EventTriggerServiceDeps {
   control: OrchestrationControl;
   /** Re-spawn a stopped-but-resumable wake-mode target. Prod-wired to SessionService.resume. */
   resume: (sessionId: string) => unknown;
+  /** Card af165ec7: resolve the ACTUAL delivery target before resuming — redirects to a live manager
+   *  that has superseded a stale, non-recycled `targetSessionId` instead of resuming (and now being
+   *  refused for) it. ABSENT (every existing test double) falls back to the pre-af165ec7 bare
+   *  isAlive+resume check below, byte-identical. Prod-wired to SessionService.resolveWakeDeliveryTarget. */
+  resolveWakeTarget?: (sessionId: string) => { sessionId: string; redirectedFrom?: string };
   /**
    * OPTIONAL: dispatch a wake-mode fire's nudge through `SessionService.enqueueDurableNudge` (MCP-seen-
    * gated + durable) instead of the bare `pty.enqueueStdin` `fire()` used to call directly — card 90b9e904,
@@ -177,8 +182,26 @@ export class EventTriggerService {
     const block = formatEventTriggerBlock(capped, trigger.eventKind, overflow);
 
     if (trigger.mode === "wake") {
-      const sessionId = trigger.targetSessionId!;
-      if (!this.deps.pty.isAlive(sessionId)) await this.deps.resume(sessionId);
+      const configuredSessionId = trigger.targetSessionId!;
+      let sessionId = configuredSessionId;
+      // Card af165ec7: the ALIVE check stays `deps.pty` (never SessionService's own internal pty) — a
+      // test double that stubs `deps.pty` independently (to skip resume() without a real spawn) must
+      // keep working unchanged; resolveWakeTarget only runs once THIS check has already said not-alive.
+      if (!this.deps.pty.isAlive(sessionId)) {
+        if (this.deps.resolveWakeTarget) {
+          const resolved = this.deps.resolveWakeTarget(sessionId);
+          sessionId = resolved.sessionId;
+          if (resolved.redirectedFrom) {
+            this.deps.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId,
+              kind: "wake_target_redirected",
+              detail: { source: "event-trigger", originalTargetId: resolved.redirectedFrom },
+            });
+          }
+        } else {
+          await this.deps.resume(sessionId);
+        }
+      }
       // kind:"agent" — a trigger-driven nudge is its own turn, never mashed with anything else queued.
       // Card 90b9e904: MCP-seen-gated + durable dispatch via the injected enqueueDurableNudge (see its own
       // doc) when wired (production); ABSENT falls back to the pre-90b9e904 raw enqueueStdin, unchanged.

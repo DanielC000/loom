@@ -192,7 +192,7 @@ process.env.LOOM_READY_FALLBACK_ABSOLUTE_CEILING_MS = "200";
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
-const { SessionService } = await import("../dist/sessions/service.js");
+const { SessionService, SecondLiveManagerError } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const { runBootRecoveryPrefix } = await import("../dist/sessions/boot-backstop.js");
@@ -829,7 +829,12 @@ try {
     host.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-d" });
     writeFakeTranscript(m1.cwd, "eng-m1-d");
     const m2 = await sessions.recycleManager(m1.id, "handoff — an ORDINARY recycle, no halt");
-    void m2;
+    // M2 must reach real ready BEFORE it's later killed (below) — a successor killed before ever
+    // reaching SessionStart hits reconcileNeverStartedRecycleSuccessor's own onExit reclaim, which
+    // UNLINKS recycledFrom outright and would silently defeat this scenario's "M2 killed, M1 STILL
+    // superseded" precondition before isSupersededByRecycle is ever exercised against it.
+    host.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: "eng-m2-d" });
+    writeFakeTranscript(m2.cwd, "eng-m2-d");
     check("(D pre) no halt event exists for this lineage", !hasEvent(db, m1.id, "recycle_ownership_transfer_failed"));
     check("(D pre) hasSuccessor(M1) is true", db.hasSuccessor(m1.id) === true);
 
@@ -839,10 +844,27 @@ try {
     host.handles.get(m1.id).kill();
     check("(D setup) M1 is confirmed not alive", host.isAlive(m1.id) === false);
 
+    // af165ec7 variant — SUCCESSOR LIVE: refuseSecondLiveManagerUnlessHaltedPartner's own scan finds M2
+    // first and, since this lineage never halted (isSanctionedHaltedPartner is false — requires a
+    // CURRENT, unresolved halt event, 386e4eb5's own id+gen match), the NEW, more specific
+    // SecondLiveManagerError fires before isSupersededByRecycle's older check is ever reached.
     let thrown;
     try { sessions.resume(m1.id); } catch (e) { thrown = e; }
-    check("(D) FIX IS SCOPED: an ORDINARY (non-halted) recycled predecessor is STILL refused by resume()",
-      !!thrown && /recycled.*successor exists/.test(thrown.message));
+    check("(D) successor LIVE: resume() refuses via the NEW SecondLiveManagerError, naming M2",
+      !!thrown && thrown instanceof SecondLiveManagerError && thrown.holderSessionId === m2.id);
+
+    // Code Review f643b83a MINOR: the check above alone no longer PINS isSupersededByRecycle's own older
+    // "recycled — successor exists" refusal — disabling that refusal entirely still passed it, since the
+    // new check fires first regardless of whether the old one even exists. Kill the successor too, so the
+    // live-manager scan finds NOBODY and genuinely falls through to isSupersededByRecycle — THIS is what
+    // proves the older refusal is still the one deciding it once nothing live masks it.
+    host.handles.get(m2.id).kill();
+    check("(D setup 2) M2 is confirmed not alive either", host.isAlive(m2.id) === false);
+    let thrown2;
+    try { sessions.resume(m1.id); } catch (e) { thrown2 = e; }
+    check("(D) FIX IS SCOPED: with NO live holder at all, isSupersededByRecycle's OLDER refusal still fires",
+      !!thrown2 && !(thrown2 instanceof SecondLiveManagerError)
+      && thrown2.message === "session was recycled — a successor exists; only a manual (human) resume may force it");
   }
 
   // ==================== (E) FIX 386e4eb5 — CRASH PATH: the still-matching lineage IS a crash-recovery candidate ====================
@@ -1728,7 +1750,11 @@ try {
     check("(H) R2: M1 stays superseded/excluded going forward (a different successor than its halt event named, same as R1)", isSupersededByRecycle(db2, m1.id) === true);
     let h2Thrown;
     try { sessions2.resume(m1.id); } catch (e) { h2Thrown = e; }
-    check("(H) R2: resume() still refuses M1 directly", !!h2Thrown && /recycled.*successor exists/.test(h2Thrown.message));
+    // af165ec7 variant — SUCCESSOR LIVE: M1's CURRENT successor (S2) does not match the stale halt event
+    // (which named dead S1), so isSanctionedHaltedPartner correctly exempts nothing here; the NEW
+    // second-live-manager check (naming S2) fires before isSupersededByRecycle's older message is ever
+    // reached.
+    check("(H) R2 successor LIVE: resume() refuses via the NEW SecondLiveManagerError, naming S2", !!h2Thrown && h2Thrown instanceof SecondLiveManagerError && h2Thrown.holderSessionId === s2.id);
 
     // Code Review 1f3951a5 Minor: the PRIOR end-state check ("M1 stays exited") was VACUOUS — nothing above
     // ever gives the crash-recovery resume path a chance to actually touch M1 (recoverCrashOrphanedWorkers/
@@ -1742,6 +1768,32 @@ try {
     check("(H) R2 FIX: the REAL crash-recovery resume attempt leaves M1 untouched — not live", host2.isAlive(m1.id) === false);
     check("(H) R2 FIX: ONLY the new successor ends up live — M1 stays exited, now genuinely exercised (not vacuous)", db2.getSession(m1.id)?.processState === "exited");
     check("(H) R2: M1 was never even attempted (excluded candidate), so it cannot appear in managersFailed either", !managersFailed.includes(m1.id));
+
+    // Code Review f643b83a MINOR: the live-successor check above no longer PINS isSupersededByRecycle's
+    // own older "recycled — successor exists" refusal — disabling that refusal entirely still passed it,
+    // since the new check fires first regardless of whether the old one even exists. Kill S2 too (all
+    // crash-recovery work above is already done; S2's continued liveness from here on is not load-bearing
+    // for anything else in this scenario), so the live-manager scan finds NOBODY and genuinely falls
+    // through to isSupersededByRecycle — THIS is what proves the older refusal is still the one deciding
+    // it once nothing live masks it.
+    check("(H) R2 pre-kill: S2 is still live going into this variant", host2.isAlive(s2.id) === true);
+    // host2's own `events` (from makeBoot()) carries no onExit wiring — this scenario never needed a
+    // real kill()-driven exit before now. Wire it (mirrors (F4)'s identical pattern above) BEFORE the
+    // kill below, or the fake pty's real onExit callback throws reaching for an absent events.onExit.
+    host2.events.onExit = (id, code, info) => {
+      db2.setProcessState(id, "exited");
+      db2.setBusy(id, false);
+      const exited = db2.getSession(id);
+      if (exited) sessions2.archiveOnExit(exited);
+      if (exited) sessions2.reconcileNeverStartedRecycleSuccessor(id, info.intended);
+    };
+    host2.handles.get(s2.id).kill();
+    check("(H) R2 setup: S2 is confirmed not alive either", host2.isAlive(s2.id) === false);
+    let h2Thrown2;
+    try { sessions2.resume(m1.id); } catch (e) { h2Thrown2 = e; }
+    check("(H) R2 FIX IS SCOPED: with NO live holder at all, isSupersededByRecycle's OLDER refusal still fires",
+      !!h2Thrown2 && !(h2Thrown2 instanceof SecondLiveManagerError)
+      && h2Thrown2.message === "session was recycled — a successor exists; only a manual (human) resume may force it");
   }
 
   // ==================== (M) card 0d4effab — RESTART-IN-THE-GAP: the recovered branch's nudge survives a

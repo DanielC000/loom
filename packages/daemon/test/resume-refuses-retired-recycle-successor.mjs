@@ -60,7 +60,7 @@ process.env.LOOM_MCP_READY_TIMEOUT_MS = "25";
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
-const { SessionService } = await import("../dist/sessions/service.js");
+const { SessionService, SecondLiveManagerError } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const { EventTriggerService } = await import("../dist/orchestration/event-triggers.js");
@@ -165,6 +165,11 @@ const fireWakeTrigger = async (db, host, sessions, triggerId, targetSessionId, e
   return capture;
 };
 const isRetiredRefusal = (err) => !!err && /administratively retired/.test(err.message);
+// @decision af165ec7 — resume() now refuses a second live manager UNCONDITIONALLY, right after the
+// isAlive short-circuit, BEFORE the retirement-marker check below it. Whenever M1 (the live predecessor)
+// is still live, an automatic/human resume attempt at M2 (its retired successor, same agent) now hits
+// THIS check first, not the retirement one — see tests (1)/(B1)/(3) below for where this matters.
+const isSecondLiveManagerRefusal = (err, holderId) => err instanceof SecondLiveManagerError && err.holderSessionId === holderId;
 
 try {
   // ==================== Build M1 -> recycle to M2 -> M2 never reaches ready, restart, retire M2 ====================
@@ -223,7 +228,10 @@ try {
   {
     const capture = await fireWakeTrigger(db2, host2, sessions2, "trig-m2", m2.id, m1.id);
     check("(1) FIX: the retired M2 is NOT resumed by the event-trigger wake door (refused, absorbed by per-trigger isolation)", host2.isAlive(m2.id) === false);
-    check("(1) FIX: the refusal is SPECIFICALLY the administratively-retired one (M1) — not merely some throw", isRetiredRefusal(capture.lastError));
+    // af165ec7: this harness's fireWakeTrigger wires NO resolveWakeTarget (bare resume() path), and M1
+    // is still live for M2's own agent — resume()'s unconditional second-live-manager check now fires
+    // BEFORE the retirement-marker check it used to reach first, so the refusal reason changes here.
+    check("(1) FIX: the refusal now names M1 as the live holder (af165ec7 runs before the retirement check)", isSecondLiveManagerRefusal(capture.lastError, m1.id));
     check("(1) FIX: nothing was enqueued to M2", host2.getPending(m2.id).length === 0);
   }
 
@@ -235,7 +243,8 @@ try {
 
     const capture = await fireWakeTrigger(db2, host2, sessions2, "trig-m2-restored", m2.id, m1.id);
     check("(B1) FIX: the marker ALONE still refuses M2 even after archivedAt is cleared (the exact bypass Code Review reproduced)", host2.isAlive(m2.id) === false);
-    check("(B1) FIX: the refusal is still the administratively-retired one", isRetiredRefusal(capture.lastError));
+    // af165ec7: same reasoning as (1) above — M1 is still live, so the second-live-manager check fires first.
+    check("(B1) FIX: the refusal still names M1 as the live holder", isSecondLiveManagerRefusal(capture.lastError, m1.id));
   }
 
   // ==================== (2) POSITIVE CONTROL: the SAME door still resumes an ordinary archived manager ====================
@@ -246,10 +255,25 @@ try {
     check("(2) CONTROL: M3's own archivedAt is cleared by the successful resume (ordinary resume() behavior, unchanged)", db2.getSession(m3.id)?.archivedAt == null);
   }
 
-  // ==================== (3) HUMAN OVERRIDE IS ONE-TIME: allowSuperseded succeeds + self-heals, but the marker is never cleared, so the NEXT ordinary exit is refused again ====================
+  // ==================== (3) HUMAN OVERRIDE IS ONE-TIME *and* now gated on stopping the live sibling
+  // first (af165ec7): allowSuperseded overrides recycle-RETIREMENT bookkeeping, never "accept two live
+  // managers" — resuming M2 while M1 (same agent) is still live is refused exactly like any other
+  // second-live-manager attempt, allowSuperseded or not. Reversible: stop M1 first, then the SAME
+  // allowSuperseded resume succeeds + self-heals, but the marker is never cleared, so the NEXT ordinary
+  // exit is refused again — by the ORIGINAL retirement check, reachable again once M1 is out of the way.
+  // ====================
   {
+    let blockedByM1;
+    try { sessions2.resume(m2.id, { allowSuperseded: true }); } catch (e) { blockedByM1 = e; }
+    check("(3 pre) af165ec7: allowSuperseded does NOT bypass the second-live-manager refusal while M1 is live", isSecondLiveManagerRefusal(blockedByM1, m1.id));
+    check("(3 pre) M2 was NOT resumed by the refused attempt", host2.isAlive(m2.id) === false);
+
+    // Reversible: stop the live sibling first (mirrors the real REST /resume 409's own "stop it first" guidance).
+    host2.handles.get(m1.id).kill();
+    check("(3 pre) M1 is now genuinely not alive", host2.isAlive(m1.id) === false);
+
     const resumed = sessions2.resume(m2.id, { allowSuperseded: true });
-    check("(3) FIX: a human's allowSuperseded resume of the retired M2 succeeds", !!resumed && host2.isAlive(m2.id) === true);
+    check("(3) FIX: with M1 stopped, a human's allowSuperseded resume of the retired M2 succeeds", !!resumed && host2.isAlive(m2.id) === true);
     check("(3) FIX: M2's resumability self-heals to \"resumable\" on the successful resume (M3: fixes a latent worktree-GC isLive hazard)", db2.getSession(m2.id)?.resumability === "resumable");
     check("(3) FIX: M2's archivedAt is cleared", db2.getSession(m2.id)?.archivedAt == null);
     check("(3) FIX: the recycle_successor_retired marker is STILL present — a human revival never clears it", db2.hasWorkerEventKind(m2.id, "recycle_successor_retired"));
@@ -261,7 +285,7 @@ try {
 
     const capture = await fireWakeTrigger(db2, host2, sessions2, "trig-m2-again", m2.id, m1.id);
     check("(3) FIX: M2 is REFUSED again by the SAME automatic door on its next exit — the allowSuperseded override was ONE-TIME, never a permanent lift (mirrors hasSuccessor's own sibling guard)", host2.isAlive(m2.id) === false);
-    check("(3) FIX: the refusal is still the administratively-retired one, even though resumability is now \"resumable\" — the guard is marker-only", isRetiredRefusal(capture.lastError));
+    check("(3) FIX: with M1 no longer live, the refusal reaches the ORIGINAL administratively-retired check again, even though resumability is now \"resumable\" — the guard is marker-only", isRetiredRefusal(capture.lastError));
   }
 } catch (e) {
   console.error("UNCAUGHT:", e);

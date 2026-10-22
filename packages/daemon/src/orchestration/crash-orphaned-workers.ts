@@ -225,6 +225,22 @@ export function isSupersededByRecycle(db: Db, sessionId: string): boolean {
 }
 
 /**
+ * `resume()`'s own second-live-manager check exempts EXACTLY this one pairing: `a` and `b` are the two
+ * still-UNRECONCILED halves of ONE halted recycle lineage, right now — keyed on the SAME durable marker
+ * `isSupersededByRecycle` already uses, so a RECONCILED or ORDINARY (never-halted) pair gets none (an
+ * ordinary pair structurally can't have both halves live anyway: `settleRecycleHandoff` stops the
+ * predecessor the instant the successor reaches ready, or reclaims the fleet back if the successor dies
+ * first; a RESOLVED halt stops the predecessor too, via `recycle_reattempt`'s own `resolved` branch).
+ * Checked BOTH directions (either could be the one calling `resume()`).
+ *
+ * @decision af165ec7 — never a chain walk: `currentHaltedSuccessor`/`getSuccessor` only ever follow ONE
+ * direct hop, so a third session anywhere else in the lineage is never exempted by this function.
+ */
+export function isSanctionedHaltedPartner(db: Db, a: Session, b: Session): boolean {
+  return currentHaltedSuccessor(db, a.id)?.id === b.id || currentHaltedSuccessor(db, b.id)?.id === a.id;
+}
+
+/**
  * @decision 92c20eb9 — shared refusal text for BOTH spawnWorker and callerSupersededError, so the
  * wording can't drift between the two chokepoints; never re-checks isSupersededByRecycle itself.
  */

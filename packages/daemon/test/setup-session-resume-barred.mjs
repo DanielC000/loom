@@ -95,6 +95,10 @@ db.insertAgent({ id: "agentC", projectId: "pHome", name: "C", startupPrompt: "SE
 db.insertAgent({ id: "agentD1", projectId: "pHome", name: "D1", startupPrompt: "SETUP", position: 3, profileId: null });
 db.insertAgent({ id: "agentD2", projectId: "pHome", name: "D2", startupPrompt: "SETUP", position: 4, profileId: null });
 db.insertAgent({ id: "agentE", projectId: "pMgrE", name: "E", startupPrompt: "MGR", position: 5, profileId: null });
+// af165ec7: a SEPARATE agent for exitedE — resume()'s own second-live-manager check (unconditional for
+// role==="manager") would otherwise refuse exitedE as soon as liveE (same agent) is genuinely live; (E)'s
+// whole point is the SETUP-specific role-gate, not a collision with that unrelated, later check.
+db.insertAgent({ id: "agentE2", projectId: "pMgrE", name: "E2", startupPrompt: "MGR", position: 6, profileId: null });
 
 class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.spawned = []; }
@@ -198,10 +202,13 @@ try {
   // ==================== (E) resume() a manager row is UNAFFECTED (role-gate control) ====================
   seedSession("liveE", "agentE", "manager", "live", "eng-liveE", "pMgrE");
   svc.resume("liveE");
-  seedSession("exitedE", "agentE", "manager", "exited", "eng-exitedE", "pMgrE");
+  // af165ec7: a DIFFERENT agent (agentE2) — this (E) case is a role-gate control for the SETUP-specific
+  // sibling check only; resume()'s own unrelated second-live-manager check is exercised elsewhere
+  // (second-live-manager-refusal.mjs), not here.
+  seedSession("exitedE", "agentE2", "manager", "exited", "eng-exitedE", "pMgrE");
   let errE, resE;
   try { resE = svc.resume("exitedE"); } catch (e) { errE = e; }
-  check("(E) CONTROL: resuming a manager sibling while another manager is live is UNAFFECTED by this check", !errE && resE?.id === "exitedE" && resE?.role === "manager");
+  check("(E) CONTROL: resuming an unrelated manager row is UNAFFECTED by the SETUP-specific sibling check (role-gate)", !errE && resE?.id === "exitedE" && resE?.role === "manager");
 
   // ==================== (F) REST /resume route error-mapping ====================
   const stub = {};

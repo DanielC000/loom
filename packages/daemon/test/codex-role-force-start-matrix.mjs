@@ -164,9 +164,13 @@ try {
   // CONTROL: an ordinary claude-pinned manager row resumes completely unchanged (this whole path is a
   // no-op for every role NOT in TRANSCRIPT_ROOT_DENY_ROLES ∩ harness:"codex" — proves the branch is
   // correctly gated, not firing unconditionally on every resume).
+  // af165ec7: its OWN agent (aForResumeNormalControl), not aForResumeNormal — `rId` above is still
+  // genuinely live there, and resume()'s unconditional second-live-manager check would otherwise refuse
+  // this row before ever reaching the no-engine-id check this control is actually proving.
+  db.insertAgent({ id: "aForResumeNormalControl", projectId: "pX", name: "aForResumeNormalControl", startupPrompt: "x", position: 0, profileId: null });
   const rIdControl = "resume-control-1";
   db.insertSession({
-    id: rIdControl, projectId: "pX", agentId: "aForResumeNormal", engineSessionId: null, title: null, cwd: repo,
+    id: rIdControl, projectId: "pX", agentId: "aForResumeNormalControl", engineSessionId: null, title: null, cwd: repo,
     processState: "exited", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "manager", gen: 0,
   });

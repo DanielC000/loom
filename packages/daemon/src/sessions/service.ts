@@ -80,7 +80,7 @@ import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_D
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, checkCanonicalIndexLockNotPresent } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
-import { isSupersededByRecycle, currentHaltedSuccessor, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
+import { isSupersededByRecycle, currentHaltedSuccessor, isSanctionedHaltedPartner, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, RESUME_UNKNOWN_REASON_FALLBACK, type ResumeOneResult } from "../orchestration/resume-nudge.js";
@@ -2517,6 +2517,25 @@ export class SecondLiveManagerError extends Error {
   }
 }
 
+/** Card af165ec7: `forkSession` refusing to fork a manager session while a different, or that SAME,
+ *  manager is live — a fork carries `role: src.role` forward (see forkSession's own doc), so forking a
+ *  LIVE manager would mint a second live manager for its agent exactly like a fresh spawn. Deliberately
+ *  a DISTINCT class from `SecondLiveManagerError` (not a re-wrap) so the message reads correctly for a
+ *  fork — "stop it, or recycle it, before starting another" is wrong phrasing for forking, and the
+ *  far more common case here is the source refusing itself (see forkSession's call site doc).
+ *
+ *  @decision af165ec7 — `sourceSessionId` disambiguates the self-match case from the rarer one where
+ *  `holderSessionId` names a DIFFERENT live manager than the (exited) fork source — "forking it" would
+ *  otherwise wrongly read as "forking the holder" instead of the actual fork target. */
+export class ForkLiveManagerError extends Error {
+  constructor(public readonly holderSessionId: string, sourceSessionId: string) {
+    super(holderSessionId === sourceSessionId
+      ? `stop this live manager session (${holderSessionId}) before forking it`
+      : `cannot fork — a different live manager session (${holderSessionId}) already exists for this agent; stop it first`);
+    this.name = "ForkLiveManagerError";
+  }
+}
+
 // @decision ad131671 — card 15806f81: forkSession's own singleton refusal, mirrored on
 // MANAGER_SESSION_BARRED_ERROR's shape (a plain message string, checked by equality at the REST route).
 export const SETUP_SESSION_FORK_BARRED_ERROR =
@@ -3739,15 +3758,72 @@ export class SessionService {
   }
 
   /**
+   * Card af165ec7: the scan `refuseSecondLiveManager` throws on, factored out so a caller that wants to
+   * REDIRECT instead of refuse (the wake-mode fire() sites — see `resolveWakeDeliveryTarget`) can reuse
+   * the identical predicate for "what counts as a live manager for this agent" — never a second
+   * definition of that question. `excludeSessionIds` lets a caller exclude one or more candidate
+   * matches (a fork's own live source; resume()'s own sanctioned halted partner — see
+   * `refuseSecondLiveManagerUnlessHaltedPartner`); omitted, this is byte-identical to 0368c784's
+   * original inline scan — `refuseSecondLiveManager`'s own callers (startNew/startManager) pass no
+   * exclude and so see no behavior change.
+   */
+  private findLiveManagerForAgent(agentId: string, excludeSessionIds: readonly string[] = []): Session | undefined {
+    return this.db.listAllSessions().find((s) =>
+      s.agentId === agentId && !excludeSessionIds.includes(s.id) && s.role === "manager" &&
+      (s.processState === "live" || s.processState === "starting") && this.pty.isAlive(s.id));
+  }
+
+  /**
    * @decision 0368c784 — races unless the calling method stays non-`async` with no `await` between this
    * call and `insertSession`. NO `hasSuccessor` exemption — a halted recycle leaves it permanently true
    * over a predecessor that is still the real live owner; a live successor already blocks on its own.
+   * @decision af165ec7 — called VERBATIM (no exclusion) by startNew/startManager/forkSession — the
+   * halted-partner exemption below is resume()'s OWN, narrower wrapper; it never widens this function.
    */
   private refuseSecondLiveManager(agentId: string): void {
-    const holder = this.db.listAllSessions().find((s) =>
-      s.agentId === agentId && s.role === "manager" && (s.processState === "live" || s.processState === "starting") &&
-      this.pty.isAlive(s.id));
+    const holder = this.findLiveManagerForAgent(agentId);
     if (holder) throw new SecondLiveManagerError(holder.id);
+  }
+
+  /**
+   * resume()'s own second-live-manager check — see `isSanctionedHaltedPartner`'s own doc for exactly
+   * which pairing this exempts and why. A holder that is NOT the sanctioned partner refuses immediately,
+   * one hop only; a holder that IS the partner is excluded and the scan runs AGAIN, so a third, unrelated
+   * live manager for the same agent is still refused even with the partner present.
+   *
+   * @decision af165ec7 — never call this from startNew/startManager/forkSession — they call
+   * `refuseSecondLiveManager` directly, unaffected by this exemption.
+   */
+  private refuseSecondLiveManagerUnlessHaltedPartner(session: Session): void {
+    const holder = this.findLiveManagerForAgent(session.agentId, [session.id]);
+    if (!holder) return;
+    if (!isSanctionedHaltedPartner(this.db, session, holder)) throw new SecondLiveManagerError(holder.id);
+    const other = this.findLiveManagerForAgent(session.agentId, [session.id, holder.id]);
+    if (other) throw new SecondLiveManagerError(other.id);
+  }
+
+  /**
+   * Resolve where a wake-mode delivery (event-trigger/webhook/poll `fire()`) should land before the
+   * caller resumes its stored `targetSessionId` — redirects to a different live manager that has since
+   * superseded a stale, non-recycled target. `redirectedFrom` is present only on an actual redirect, so
+   * the caller can file its own durable `wake_target_redirected` record.
+   *
+   * @decision af165ec7 — never resume the stale target directly here when a redirect applies; it would
+   * now be refused anyway (`refuseSecondLiveManager`) and silently drop the content. Byte-identical to
+   * the pre-af165ec7 `if (!isAlive) await resume(id)` when nothing is superseded.
+   * @decision af165ec7 — never redirect to a holder that is the target's own sanctioned halted partner
+   * (`isSanctionedHaltedPartner`) — resume()'s own `refuseSecondLiveManagerUnlessHaltedPartner` exemption
+   * already covers that pairing (the target is itself resumable); fall through to resume() instead.
+   */
+  resolveWakeDeliveryTarget(targetSessionId: string): { sessionId: string; redirectedFrom?: string } {
+    if (this.pty.isAlive(targetSessionId)) return { sessionId: targetSessionId };
+    const target = this.db.getSession(targetSessionId);
+    if (target?.role === "manager") {
+      const holder = this.findLiveManagerForAgent(target.agentId, [targetSessionId]);
+      if (holder && !isSanctionedHaltedPartner(this.db, target, holder)) return { sessionId: holder.id, redirectedFrom: targetSessionId };
+    }
+    this.resume(targetSessionId);
+    return { sessionId: targetSessionId };
   }
 
   /**
@@ -4476,6 +4552,10 @@ export class SessionService {
     // current row WITHOUT re-spawning — a no-op that can't double-spawn or clobber the live map. A
     // genuinely exited/dead session (isAlive=false) falls through and resumes normally.
     if (this.pty.isAlive(session.id)) return session;
+    // @decision af165ec7 — unconditional for role==="manager", never gated by allowSuperseded (that
+    // flag overrides recycle-retirement bookkeeping, not "accept two live managers"). The one exemption
+    // (a still-unreconciled halted recycle partner) is scoped inside the helper itself — see its doc.
+    if (session.role === "manager") this.refuseSecondLiveManagerUnlessHaltedPartner(session);
     // @decision 7955458e — ruling 1(b): a codex-pinned row whose RESOLVED role forces claude can never be
     // `--resume`d on codex — detected here, before the codex-transcript checks below (irrelevant to it).
     // @decision a4c5f234 — THE one call site for this check, shared with `isDurablyResumable` — never
@@ -8567,6 +8647,17 @@ export class SessionService {
         detail: { source: "fork", projectId: project.id, repoPath: project.repoPath, reserved: !!project.reserved },
       });
       throw new Error(MANAGER_SESSION_BARRED_ERROR);
+    }
+    // @decision af165ec7 — call the 0368c784 helper VERBATIM, no exclusion: a LIVE manager source IS
+    // the holder this scan finds (itself), correctly refusing the fork. Re-thrown as
+    // ForkLiveManagerError — the fork context needs its own message, not resume's "...another".
+    if (src.role === "manager") {
+      try {
+        this.refuseSecondLiveManager(src.agentId);
+      } catch (e) {
+        if (e instanceof SecondLiveManagerError) throw new ForkLiveManagerError(e.holderSessionId, src.id);
+        throw e;
+      }
     }
     const config = resolveConfig(project.config);
 

@@ -25,7 +25,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError, ForkLiveManagerError } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -892,7 +892,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // isTrustTierHookActive: unlike Tier 1 (which needs the remote-bind hook live to mean anything), a
   // Tier-2 endpoint is reachable from loopback too (useful for local testing) and stays fully
   // HMAC-gated either way. ---
-  registerWebhookIngress(app, { db: deps.db, sessions: deps.sessions, pty: deps.pty });
+  // Card af165ec7: resolveWakeTarget redirects a stale wake-mode target to its live superseding manager
+  // — see WebhookIngressDeps.resolveWakeTarget's own doc. Guarded with a typeof check (not a bare
+  // arrow) so a hermetic test's hand-built `sessions` stub that never implements the new method keeps
+  // working byte-identical, exactly as every other optional dep in this wiring already does.
+  registerWebhookIngress(app, {
+    db: deps.db, sessions: deps.sessions, pty: deps.pty,
+    resolveWakeTarget: typeof deps.sessions.resolveWakeDeliveryTarget === "function"
+      ? (id) => deps.sessions.resolveWakeDeliveryTarget(id) : undefined,
+  });
 
   // --- Single-process mode (Releases v1, Part 1): serve the PREBUILT web viewport from the daemon's own
   // loopback origin, so the whole app runs as ONE process on one port (the prerequisite for `npx loomctl`).
@@ -6140,6 +6148,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (e instanceof Error && (e.message === MANAGER_SESSION_BARRED_ERROR || e.message === SETUP_SESSION_RESUME_BARRED_ERROR)) {
         return reply.code(409).send({ error: e.message });
       }
+      // Card af165ec7: resume() now refuses a second live-or-starting manager too — same honest-4xx shape
+      // as the /api/agents/:id/sessions route's own SecondLiveManagerError mapping above.
+      if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
       throw e;
     }
   });
@@ -6149,6 +6160,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } catch (e) {
       // Card 961da6c6: an honest 4xx (not a generic 500) so the UI's global mutation-error alert names the reason.
       if (e instanceof CodexForkUnsupportedError) return reply.code(409).send({ error: e.message });
+      // Card af165ec7: forking a live manager (or an exited one whose agent has a different live manager)
+      // is refused too — same honest-4xx shape, its own typed error (dynamic message, not message-keyed).
+      if (e instanceof ForkLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
       // Card 15806f81: the same honest-4xx treatment for the message-keyed refusals forkSession can throw.
       // f437d4e9 Decision 6 added a third one (PLATFORM_SESSION_FORK_BARRED_ERROR, non-dev install).
       if (e instanceof Error && (e.message === MANAGER_SESSION_BARRED_ERROR || e.message === SETUP_SESSION_FORK_BARRED_ERROR || e.message === PLATFORM_SESSION_FORK_BARRED_ERROR)) {
@@ -6798,7 +6812,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
     try { return reply.send(deps.sessions.restoreSession(id)); }
-    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    catch (e) {
+      // Card af165ec7: restoreSession routes through resume({allowSuperseded:true}), which can now also
+      // throw SecondLiveManagerError — same honest 409 shape as /resume's own mapping above, not the
+      // generic 400 every other restoreSession failure gets.
+      if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
+      return reply.code(400).send({ error: (e as Error).message });
+    }
   });
   app.delete("/api/sessions/:id/archive", async (req, reply) => {
     const id = (req.params as { id: string }).id;

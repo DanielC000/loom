@@ -136,9 +136,13 @@ try {
   // harness already corrected to claude (undefined), but engineSessionId cleared to null (never yet
   // overwritten by the real id, since that only happens once SessionStart fires) — never the OLD bug's
   // state (harness=claude PAIRED WITH the stale codex id), which is what used to get marked dead.
+  // af165ec7: its OWN agent — `w1` (above) is now genuinely live on "aForResume", and resume()'s
+  // unconditional second-live-manager check would otherwise refuse this row before ever reaching the
+  // no-engine-id check WINDOW 2 is actually proving.
+  db.insertAgent({ id: "aForResumeW2", projectId: "pX", name: "aForResumeW2", startupPrompt: "x", position: 1, profileId: null });
   const w2 = "window2-manager";
   db.insertSession({
-    id: w2, projectId: "pX", agentId: "aForResume", engineSessionId: null, title: null, cwd: repo,
+    id: w2, projectId: "pX", agentId: "aForResumeW2", engineSessionId: null, title: null, cwd: repo,
     processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "manager", harness: undefined, gen: 0,
   });
@@ -152,9 +156,11 @@ try {
   // CONTROL: an ordinary (never-codex) fresh claude manager row that crashed before its own first
   // SessionStart lands in the SAME (harness:claude, engineSessionId:null) shape — proves WINDOW 2's fix
   // doesn't depend on anything codex-specific; it's the SAME pre-existing "no engine id yet" handling.
+  // af165ec7: its OWN agent too, same reasoning as aForResumeW2 above.
+  db.insertAgent({ id: "aForResumeW2Control", projectId: "pX", name: "aForResumeW2Control", startupPrompt: "x", position: 2, profileId: null });
   const control = "window2-control-ordinary";
   db.insertSession({
-    id: control, projectId: "pX", agentId: "aForResume", engineSessionId: null, title: null, cwd: repo,
+    id: control, projectId: "pX", agentId: "aForResumeW2Control", engineSessionId: null, title: null, cwd: repo,
     processState: "exited", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "manager", gen: 0,
   });

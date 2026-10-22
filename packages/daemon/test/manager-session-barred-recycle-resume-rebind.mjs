@@ -75,7 +75,7 @@ initRepo(tmpHome);
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
-const { SessionService } = await import("../dist/sessions/service.js");
+const { SessionService, ForkLiveManagerError } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { checkRepoRebind } = await import("../dist/projects/rebind.js");
 const { managerSessionBarredFrom, MANAGER_SESSION_BARRED_ERROR } = await import("../dist/agents/clone-core.js");
@@ -326,12 +326,38 @@ try {
   check("(E) its detail carries NO liveWorkerIds (a fork has no worker lineage to report, unlike resume())",
     barredEventsE[0]?.detail?.liveWorkerIds === undefined);
 
-  // (E negative control) reverting the project to ordinary lets the SAME manager source fork successfully.
+  // (E negative control) reverting the project to ordinary lifts the BARRED refusal specifically — but
+  // af165ec7 means mE (still genuinely live) is now refused for a DIFFERENT, NEW reason instead:
+  // forkSession's own second-live-manager check (0368c784's helper, called verbatim) finds mE itself as
+  // the live holder. Disentangle the two: prove the barred refusal is lifted (a distinct error, naming
+  // mE as the holder) here, then stop mE and prove the fork succeeds once nothing is live to self-match.
   db.updateProject("pE", { repoPath: repoE });
-  let forkedE, forkErr2;
-  try { forkedE = sessions.forkSession(mE.id); } catch (e) { forkErr2 = e; }
-  check("(E control) once un-barred, forkSession on the SAME source succeeds",
-    !forkErr2 && !!forkedE && forkedE.processState === "live" && forkedE.role === "manager");
+  let forkErr2;
+  try { sessions.forkSession(mE.id); } catch (e) { forkErr2 = e; }
+  check("(E control) once un-barred, the refusal is no longer MANAGER_SESSION_BARRED_ERROR",
+    !!forkErr2 && !/manager session can never start in this project/.test(forkErr2.message));
+  check("(E control) af165ec7: forking the STILL-LIVE mE is instead refused by the second-live-manager check, naming itself",
+    forkErr2 instanceof ForkLiveManagerError && forkErr2.holderSessionId === mE.id);
+  // Code Review f643b83a NIT: the SELF-match message must read as "stop THIS session" — never the
+  // other, DIFFERENT-holder wording (proven on forkErr4 below).
+  check("(E control) self-match ForkLiveManagerError wording names it as the session being forked, not a different holder",
+    /stop this live manager session/.test(forkErr2.message) && !/a different live manager/.test(forkErr2.message));
+
+  host.handles.get(mE.id).kill(); // mE is no longer live — nothing left to self-match
+  let forkedE, forkErr3;
+  try { forkedE = sessions.forkSession(mE.id); } catch (e) { forkErr3 = e; }
+  check("(E control 2) once un-barred AND mE is no longer live, forkSession on the SAME source succeeds",
+    !forkErr3 && !!forkedE && forkedE.processState === "live" && forkedE.role === "manager");
+
+  // (E control 3) DIFFERENT-HOLDER wording: forkedE (above) is now the live manager for mE's own
+  // agentId. Forking the still-dead mE again finds forkedE as a DIFFERENT holder (never mE itself) —
+  // the NIT fix's other branch must name forkedE, not read as "forking the holder" (forkedE) itself.
+  let forkErr4;
+  try { sessions.forkSession(mE.id); } catch (e) { forkErr4 = e; }
+  check("(E control 3) a DIFFERENT live holder (forkedE, not mE) is correctly named",
+    forkErr4 instanceof ForkLiveManagerError && forkErr4.holderSessionId === forkedE.id);
+  check("(E control 3) DIFFERENT-holder wording never reads as self-referential",
+    /a different live manager session \(.*\) already exists/.test(forkErr4.message) && !/before forking it/.test(forkErr4.message));
 
   // (E negative control 2) a non-manager (plain) source is never subject to this bar in the first place —
   // proves the check is keyed on role, not a blanket "any fork into a barred project" rule.

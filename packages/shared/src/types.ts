@@ -2025,7 +2025,18 @@ export type OrchestrationEventKind =
   // @decision 8c70e33c — an audit-only record of which instruction file a session loaded; filed for
   // every role, deliberately excluded from EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/
   // ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS. See record for the full payload/scope/filing rationale.
-  | "instructions_loaded";
+  | "instructions_loaded"
+  // Card af165ec7: a wake-mode delivery (event-trigger/webhook/poll) whose stored `targetSessionId`
+  // wasn't alive was redirected to a DIFFERENT live/starting manager now covering the same agent —
+  // instead of resuming (and now being refused for, by 0368c784's `refuseSecondLiveManager`) the stale,
+  // non-recycled target. Filed under the id it was ACTUALLY delivered to (the live holder), never the
+  // stale original — mirrors `manager_session_barred`'s "file under the row that matters now" posture.
+  // `detail` carries { source: "event-trigger" | "webhook" | "poll", originalTargetId }. Audit-only,
+  // same reasoning as `codex_auto_commit`/`process_survived_kill` above — deliberately excluded from
+  // EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS: the
+  // delivery itself still files its own ordinary event_trigger_fired/poll_fired/wake-nudge activity
+  // record at the (redirected) live id, so no orchestration decision or activity tally needs this one.
+  | "wake_target_redirected";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -2084,6 +2095,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   profile_grant_reach: true, agent_profile_rebind: true,
   process_survived_kill: true,
   trust_lock_degraded: true,
+  wake_target_redirected: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 
