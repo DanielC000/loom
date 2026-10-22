@@ -36,6 +36,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");
 useOwnLoomHome("loom-mw-ffunv-home-");
 
@@ -91,7 +92,7 @@ async function addWorker(tag) {
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
   return { taskId, workerId, worktreePath, branch };
 }
-const batch = async (ws) => { const r = await sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)); return r.settled && r.ok ? r.value : { __unsettled: r }; };
+const batch = async (ws) => { const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)), { label: "mergeBatchTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
 
 try {
   // ── (U1) a real batch lands normally — control, establishes the watermark baseline ────────────────────

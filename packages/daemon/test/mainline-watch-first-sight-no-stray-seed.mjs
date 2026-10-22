@@ -26,6 +26,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");
 useOwnLoomHome("loom-mwfs-home-");
 
@@ -103,9 +104,8 @@ try {
     const w1 = await addWorker(P.db, P.projId, P.agentId, P.mgrId, repoA, "a");
     const w2 = await addWorker(P.db, P.projId, P.agentId, P.mgrId, repoA, "a");
 
-    const r1 = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
-    check("(A) call #1 settled synchronously", r1.settled === true);
-    const v1 = r1.settled && r1.ok ? r1.value : { __unsettled: r1 };
+    const r1 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const v1 = r1.ok ? r1.value : { __unsettled: r1 };
     check("(A) call #1 refused for the branch-pin mismatch (unrelated to the watermark)", v1.ok === false && v1.branchDiverted === true);
     check("(A) RED-FIRST: the watermark is STILL unseeded after a refused, diverted first-sight call", watermark(P.db, P.projId) === null);
 
@@ -114,9 +114,8 @@ try {
     git(repoA, "branch", "-q", "-D", strayName);
     check("(A) precondition: checkout is restored to mainline", canonBranch() === MAIN);
 
-    const r2 = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
-    check("(A) call #2 settled synchronously", r2.settled === true);
-    const v2 = r2.settled && r2.ok ? r2.value : { __unsettled: r2 };
+    const r2 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const v2 = r2.ok ? r2.value : { __unsettled: r2 };
     check("(A) the NEXT batch lands cleanly (never hard-refused against a stray baseline)", v2.ok === true);
     check("(A) the watermark now correctly reflects the real landing on mainline", watermark(P.db, P.projId)?.branch === MAIN);
     P.db.close();
@@ -153,8 +152,8 @@ try {
 
     const w1 = await addWorker(P.db, P.projId, P.agentId, P.mgrId, repoB, "b");
 
-    const r1 = await sessions.confirmWorkerMergeTracked(P.mgrId, w1.workerId);
-    const v1 = r1.settled && r1.ok ? r1.value : { __unsettled: r1 };
+    const r1 = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w1.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+    const v1 = r1.ok ? r1.value : { __unsettled: r1 };
     check("(B) call #1 refused for an UNRELATED reason (canonical's sha moved mid-gate, not a branch-pin issue)", v1.merged === false && v1.gateBaseInvalidated === true);
     check("(B) RED-FIRST: the watermark is STILL unseeded after a refused, diverted first-sight call", watermark(P.db, P.projId) === null);
 
@@ -164,8 +163,8 @@ try {
     check("(B) precondition: checkout is restored to mainline", canonBranch() === MAIN);
 
     const w2 = await addWorker(P.db, P.projId, P.agentId, P.mgrId, repoB, "b");
-    const r2 = await sessions.confirmWorkerMergeTracked(P.mgrId, w2.workerId);
-    const v2 = r2.settled && r2.ok ? r2.value : { __unsettled: r2 };
+    const r2 = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w2.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+    const v2 = r2.ok ? r2.value : { __unsettled: r2 };
     check("(B) the NEXT solo confirm lands cleanly (never hard-refused against a stray baseline)", v2.merged === true);
     check("(B) the watermark now correctly reflects the real landing on mainline", watermark(P.db, P.projId)?.branch === MAIN);
     P.db.close();
@@ -193,8 +192,8 @@ try {
     const w1 = await addWorker(P.db, P.projId, P.agentId, P.mgrId, repoC, "c");
     git(repoC, "checkout", "-q", "-b", strayName); // same-commit divert BEFORE confirm — nothing refuses this on first sight (no watermark ⇒ no branch pin)
 
-    const r1 = await sessions.confirmWorkerMergeTracked(P.mgrId, w1.workerId);
-    const v1 = r1.settled && r1.ok ? r1.value : { __unsettled: r1 };
+    const r1 = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w1.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+    const v1 = r1.ok ? r1.value : { __unsettled: r1 };
     check("(C) the first landing itself is NOT refused (this card adds no landing refusal)", v1.merged === true);
     check("(C) the landing really did land on the stray branch", canonBranch() === strayName);
     check("(C) the watermark IS seeded from the stray branch (not left unseeded)", watermark(P.db, P.projId)?.branch === strayName && watermark(P.db, P.projId)?.sha === git(repoC, "rev-parse", "HEAD"));
@@ -210,8 +209,8 @@ try {
     // the SAME disagreeing default must not re-fire the notice, while the seed itself still happens.
     P.db.deleteMeta(MW.mainlineWatermarkKey(P.projId, "primary"));
     const w2 = await addWorker(P.db, P.projId, P.agentId, P.mgrId, repoC, "c");
-    const r2 = await sessions.confirmWorkerMergeTracked(P.mgrId, w2.workerId);
-    const v2 = r2.settled && r2.ok ? r2.value : { __unsettled: r2 };
+    const r2 = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w2.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+    const v2 = r2.ok ? r2.value : { __unsettled: r2 };
     check("(C) DEDUPE: the second first-sight landing on the SAME stray branch still lands", v2.merged === true);
     check("(C) DEDUPE: no second event or nudge for the same (branch, defaultBranch) fact", mwEvents(P.db, P.projId).length === 1 && nudges.length === 1);
     check("(C) DEDUPE: the watermark still correctly re-seeds despite the deduped notice", watermark(P.db, P.projId)?.branch === strayName && watermark(P.db, P.projId)?.sha === git(repoC, "rev-parse", "HEAD"));

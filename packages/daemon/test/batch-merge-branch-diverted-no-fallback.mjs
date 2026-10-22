@@ -46,6 +46,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");
 useOwnLoomHome("loom-bmd-nf-home-");
 
@@ -113,9 +114,8 @@ try {
     const w1 = await addWorker(d.db, "a"), w2 = await addWorker(d.db, "b");
 
     check("precondition: canonical is on mainline before the batch", canonBranch() === MAIN && canonHead() === baseSha);
-    const r = await d.sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
-    check("settled synchronously", r.settled === true);
-    const value = r.settled && r.ok ? r.value : { __unsettled: r };
+    const r = await awaitTrackedSettle(() => d.sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const value = r.ok ? r.value : { __unsettled: r };
 
     check("(1) the batch refuses, typed branchDiverted (never a bare !ok)", value.ok === false && value.branchDiverted === true);
     check("(1) reason names the divert", /diverted|not the expected mainline branch/i.test(value.reason ?? ""));

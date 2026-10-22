@@ -25,6 +25,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20"; // keep the transient-retry settle wait tiny
 useOwnLoomHome("loom-mgrae-home-"); // cleanup-by-construction: registered for the exit sweep (a self-assigned home would leak)
@@ -110,10 +111,15 @@ const owed = (db, P) => db.getMergeGateState(P.projId).gateOwed === true;
 const failRows = (db, P) => db.getMergeGateState(P.projId).recent.filter((e) => e.result === "fail");
 const settle = async (p) => { try { return { value: await p }; } catch (err) { return { thrown: err }; } };
 const confirmSolo = async (sessions, P, w) => {
-  const r = await settle(sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId));
+  // Card 7aeaeedd (broader-shape sweep): await the REAL settle rather than taking a possible
+  // `{settled:false, op}` FIRST result as final — confirmWorkerMergeTracked can legitimately degrade to
+  // that shape once syncAttachBudgetMs elapses, a documented, supported async path, never a failure. The
+  // original unguarded `r.value.settled && r.value.ok ? ... : ...` measured the host's speed, not the
+  // code: an unsettled read would have folded a still-in-flight confirm into a fabricated `{thrown:r.value}`.
+  const r = await settle(awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 }));
   if (!r.value) return r;
   // `confirmWorkerMergeTracked` folds a thrown chain error into a settled `ok:false` result (never a rejection).
-  return r.value.settled && r.value.ok ? { value: r.value.value } : { thrown: r.value.settled ? r.value.error ?? r.value : r.value };
+  return r.value.ok ? { value: r.value.value } : { thrown: r.value.error ?? r.value };
 };
 /** Make `db.appendEvent` throw ONCE for `kind` — used to end a chain by a throw INSIDE a link's `next`, after that link settled. */
 function throwOnceOnEvent(db, kind) {

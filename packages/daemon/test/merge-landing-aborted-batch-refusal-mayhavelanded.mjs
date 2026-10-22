@@ -39,6 +39,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 useOwnLoomHome("loom-mlab-home-");
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${sfx}`);
@@ -159,9 +160,8 @@ try {
     // this card's fix, so skipping this step would silently test nothing for the re-task/attribution half.
     await sessions.reviewWorkerMerge(mgrId, w1.workerId);
     await sessions.reviewWorkerMerge(mgrId, w2.workerId);
-    const r = await sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]);
-    check("(D) settled synchronously", r.settled === true);
-    const value = r.settled && r.ok ? r.value : { __unsettled: r };
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const value = r.ok ? r.value : { __unsettled: r };
     check("(D) precondition: the batch genuinely landed-but-unverified (never a bare !ok, never branchDiverted/quarantined)", value.ok === false && value.unverified === true && value.branchDiverted !== true && value.quarantined !== true);
     for (const [w, label] of [[w1, "a"], [w2, "b"]]) {
       const events = landingAbortedEventsFor(db, w.workerId);
@@ -202,9 +202,8 @@ try {
     await sessions.reviewWorkerMerge(mgrId, w1.workerId);
     await sessions.reviewWorkerMerge(mgrId, w2.workerId);
     try {
-      const r = await sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]);
-      check("(E) settled synchronously", r.settled === true);
-      const value = r.settled && r.ok ? r.value : { __unsettled: r };
+      const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+      const value = r.ok ? r.value : { __unsettled: r };
       check("(E) precondition: the batch genuinely quarantined via an UNCONFIRMED kill (never a bare !ok)", value.ok === false && value.quarantined === true);
       check("(E) precondition: the reason names the unconfirmed kill (not a plain already-quarantined refusal)", /could not be confirmed dead after a kill/.test(value.reason ?? ""));
       for (const [w, label] of [[w1, "a"], [w2, "b"]]) {
@@ -252,9 +251,8 @@ try {
     const w1 = await addWorker(db, repo, projId, agentId, mgrId, "fa2"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "fb2");
     await sessions.reviewWorkerMerge(mgrId, w1.workerId);
     await sessions.reviewWorkerMerge(mgrId, w2.workerId);
-    const r = await sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]);
-    check("(F) settled synchronously", r.settled === true);
-    const value = r.settled && r.ok ? r.value : { __unsettled: r };
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const value = r.ok ? r.value : { __unsettled: r };
     check("(F) precondition: the batch genuinely post-ff branch-diverted on a SHA mismatch (never unverified)", value.ok === false && value.branchDiverted === true && value.unverified !== true);
     check("(F) precondition: the reason names the sha mismatch, not a branch-name mismatch", /canonical HEAD reads/.test(value.reason ?? ""));
     check("(F) canonical mainline's OWN ref actually DID advance — the --ff-only genuinely landed, only the fabricated re-read disagreed", git(repo, "rev-parse", "main") !== baseMainSha);

@@ -20,6 +20,7 @@ import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil, deferred } from "./_wait.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 const noReap = async () => ({ killedPids: [] });
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgint-home-${Date.now()}-${process.pid}`);
@@ -99,8 +100,8 @@ function mkService(db) {
   return { sessions, gate, spy };
 }
 const confirm = async (sessions, mgrId, workerId) => {
-  const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-  return r.settled && r.ok ? r.value : { __unsettled: r };
+  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+  return r.ok ? r.value : { __unsettled: r };
 };
 const reset = (ctx) => { ctx.gate.calls = 0; ctx.spy.decide = 0; ctx.spy.record = 0; ctx.spy.recorded.length = 0; };
 

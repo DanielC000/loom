@@ -54,6 +54,7 @@ import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 const noReap = async () => ({ killedPids: [] });
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ulc-home-${Date.now()}-${process.pid}`);
@@ -128,8 +129,8 @@ function mkService(db) {
   return { sessions, gate };
 }
 const confirm = async (sessions, mgrId, workerId) => {
-  const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-  return r.settled && r.ok ? r.value : { __unsettled: r };
+  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+  return r.ok ? r.value : { __unsettled: r };
 };
 const landingCheckRows = (db, mgrId) => db.listEvents(mgrId).filter((e) => e.kind === "worker_gate" && e.detail?.landingCheckOnly === true);
 

@@ -11,6 +11,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome, mkdtempManaged } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");
 useOwnLoomHome("loom-mainline-bounds-home-");
 const traceDir = mkdtempManaged("loom-mw-trace-");
@@ -73,7 +74,7 @@ async function addWorker(tag) {
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
   return { taskId, workerId, worktreePath, branch };
 }
-const confirm = async (w) => { const r = await sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId); return r.settled && r.ok ? r.value : { __unsettled: r }; };
+const confirm = async (w) => { const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
 const evFor = (w) => db.listEventsForWorker(w.workerId).filter((e) => e.kind === "mainline_moved_outside_loom");
 const KEY = MW.mainlineWatermarkKey(P.projId, "primary");
 const watermark = () => MW.parseMainlineWatermark(db.getMeta(KEY));

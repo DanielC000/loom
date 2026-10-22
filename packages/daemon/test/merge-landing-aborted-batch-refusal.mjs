@@ -50,6 +50,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 useOwnLoomHome("loom-mlab-home-");
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${sfx}`);
@@ -136,9 +137,8 @@ try {
       return PASS;
     });
     const w1 = await addWorker(db, repo, projId, agentId, mgrId, "fa"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "fb");
-    const r = await sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]);
-    check("(A) settled synchronously", r.settled === true);
-    const value = r.settled && r.ok ? r.value : { __unsettled: r };
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const value = r.ok ? r.value : { __unsettled: r };
     // Card b4080777 finding: `MergeBatchResult` does NOT expose a `forfeited` flag on this generic
     // `!result.ok` fallthrough (unlike branchDiverted/quarantined/unverified/cancelled, each of which gets
     // its own dedicated return block) — only the durable `batch_merge_forfeited` audit event and the
@@ -176,9 +176,8 @@ try {
       return PASS;
     });
     const w1 = await addWorker(db, repo, projId, agentId, mgrId, "da"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "db");
-    const r = await sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]);
-    check("(B) settled synchronously", r.settled === true);
-    const value = r.settled && r.ok ? r.value : { __unsettled: r };
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const value = r.ok ? r.value : { __unsettled: r };
     check("(B) precondition: the batch genuinely branch-diverted", value.ok === false && value.branchDiverted === true);
     for (const [w, label] of [[w1, "a"], [w2, "b"]]) {
       const events = landingAbortedEventsFor(db, w.workerId);
@@ -202,9 +201,8 @@ try {
     });
     try {
       const w1 = await addWorker(db, repo, projId, agentId, mgrId, "qa"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "qb");
-      const r = await sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]);
-      check("(C) settled synchronously", r.settled === true);
-      const value = r.settled && r.ok ? r.value : { __unsettled: r };
+      const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+      const value = r.ok ? r.value : { __unsettled: r };
       check("(C) precondition: the batch genuinely quarantined AT THE FAST-FORWARD STEP (assembly itself succeeded)", value.ok === false && value.quarantined === true);
       for (const [w, label] of [[w1, "a"], [w2, "b"]]) {
         const events = landingAbortedEventsFor(db, w.workerId);

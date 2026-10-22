@@ -28,6 +28,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${Date.now()}-${process.pid}`);
 useOwnLoomHome("loom-bmil-home-");
 
@@ -85,9 +86,8 @@ try {
   // ── call #1: a real lock is already present BEFORE the whole batch call — the NEW pre-gate check
   //    (card e7a88047) catches it before the worktree is even cut, so the gate never runs at all ────────
   plantLock();
-  const r1 = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
-  check("call #1 settled synchronously", r1.settled === true);
-  const v1 = r1.settled && r1.ok ? r1.value : { __unsettled: r1 };
+  const r1 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const v1 = r1.ok ? r1.value : { __unsettled: r1 };
   check("call #1 refused, typed indexLockPresent", v1.ok === false && v1.indexLockPresent === true);
   check("call #1's reason names the specific reason code", /canonical_index_lock_present/.test(v1.reason ?? ""));
   check("call #1 never invoked the gate (the NEW pre-gate check caught the lock before any worktree cut)", gateCalls === 0);
@@ -121,9 +121,8 @@ try {
   // ── call #2: SAME workerSessionIds, unchanged candidate branches ⇒ IDENTICAL verdictIdentity ───────────
   const tipBefore2 = { a: git(P.repo, "rev-parse", w1.branch), b: git(P.repo, "rev-parse", w2.branch) };
   check("the candidate branch heads are IDENTICAL across both calls (verdictIdentity would match)", tipBefore2.a === tipBefore1.a && tipBefore2.b === tipBefore1.b);
-  const r2 = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
-  check("call #2 settled synchronously", r2.settled === true);
-  const v2 = r2.settled && r2.ok ? r2.value : { __unsettled: r2 };
+  const r2 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const v2 = r2.ok ? r2.value : { __unsettled: r2 };
 
   check("(B2 FIX) the gate counter INCREMENTED — call #2 ran a REAL gate, not a cache replay", gateCalls === 1);
   check("(B2 FIX) cacheHit is ABSENT on call #2's AttachResult — a genuinely fresh op, never served from the stale lock-present verdict", !("cacheHit" in r2));
