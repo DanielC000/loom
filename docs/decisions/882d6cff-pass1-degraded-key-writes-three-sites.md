@@ -372,7 +372,7 @@ correction above for the full, now-measured characterization):**
 | site-c-multiple-unresolvable-claimants-tmp-shape | RED | RED | — |
 | site-b-remount-one-claimant-no-collateral-damage | RED | RED | — |
 | clear-one-claimant-reports-kept-and-reasserts-on-restart | RED | RED | RED |
-| clear-remount-unmount-both-claimants-durable-via-latch-id | RED | RED | RED |
+| clear-remount-unmount-both-claimants-durable-via-latch-id | RED *(at precondition — the parent's single-winner `hashToRepo` never diverts W1 at all, so the scenario fails before reaching the latch-clear assertions)* | RED | RED |
 
 **7 of the original ten are genuine RED-on-parent repros** (not 8). **2 of the original ten are
 controls** that pass on parent BY DESIGN — `item2-hashToRepo-order-RXT` (the order that happened to
@@ -476,8 +476,8 @@ re-run clean — no regressions.
   entry currently owns a given filename without first gating on `isRepoPathCurrentlyResolvable(e.repoPath)`
   — an entry that graduated then went unresolvable again stays in `activeQuarantines`, and recomputing its
   key now degrades back to whatever ancestor key it ORIGINALLY shared, falsely "protecting" an unrelated
-  file that key coincidentally still hashes to. The real write target for an unresolvable entry is never
-  that recompute — nothing in this module ever writes there for one.
+  file that key coincidentally still hashes to. For an unresolvable entry, ownership is established by
+  its armed keys (the hash leg), never by the degraded recompute.
 - Do not report a clear as a bare, unqualified success when the thing it cleared is one of SEVERAL
   claimants sharing a latch — surface `latchKept`/`referencingRepoPaths` (mirroring the existing
   `clearMergeQuarantineLatchFile` shape) so the caller can see that a restart will re-arm this (and every
