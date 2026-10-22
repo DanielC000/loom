@@ -527,6 +527,13 @@ if (s5.merge1?.ok === false) {
   // docs/decisions/8d8fa497-*.md — so `quarantined:true` on merge1 itself is the only reliable signal).
   check("[scenario 5] merge1's OWN result carries quarantined:true — not just inferred from merge2's refusal",
     s5.merge1?.quarantined === true);
+  // Card 623c7a82: the squash-commit's own unconfirmed-kill message used to say only "canonical repo may
+  // need manual inspection" — which reads as "go fix this by hand" even in the common case where the
+  // commit actually landed and nothing needs fixing. It must now say the commit may have already landed,
+  // and that a retry (once a human clears the quarantine) finalizes it as ALREADY_MERGED rather than
+  // re-landing or needing manual surgery.
+  check("[scenario 5] merge1's reason says the commit may have already landed, and that a cleared retry finalizes as ALREADY_MERGED",
+    /may have already landed/.test(s5.merge1?.reason ?? "") && /ALREADY_MERGED/.test(s5.merge1?.reason ?? ""));
 }
 check("[scenario 5] merge2 (a DIFFERENT branch, same repo, attempted immediately after) is refused by the QUARANTINE, not a generic failure",
   s5.merge2?.ok === false && /QUARANTINED/.test(s5.merge2?.reason ?? ""));
@@ -538,7 +545,13 @@ check("[scenario 5] the quarantine is visible directly via the internal quaranti
 const s5MarkerAppeared = await pollUntil(() => fs.existsSync(s5.markerPath), { timeoutMs: S5_HOLD_MS + SETTLE_MARGIN_MS });
 check("[scenario 5] the escaped descendant's marker write IS eventually observed (proves it genuinely ran)",
   s5MarkerAppeared);
-check("[scenario 5] but the escaped descendant's own git add (fixedX.txt) never lands in EITHER merge's real commit — no corruption",
+// Card 623c7a82: this repro shape's hook is a PRE-COMMIT hook, so `git commit` never runs until it exits
+// — the squash is therefore ALWAYS left STAGED whenever this hook's tree-kill goes unconfirmed, which
+// means the entry staged-residue check (@decision 2eddf573) would ALSO independently refuse merge2 here,
+// quarantine or not. So this check proves only that no corruption occurs on THIS repro shape — it does
+// NOT by itself prove the quarantine specifically is what prevents it (the dedicated QUARANTINED-reason
+// check above does that).
+check("[scenario 5] no corruption on this repro shape — the escaped descendant's own git add (fixedX.txt) never lands in EITHER merge's real commit",
   !anyCommitHasPath(s5.repo, "fixedX.txt"));
 
 // AUTO-CLEAR: once the descendant's own exit lets the real confirmation finally arrive, the quarantine
@@ -568,7 +581,8 @@ console.log(failures === 0
     "landed despite a hung post-commit hook is reported truthfully instead of a false failure (scenario " +
     "2), the kill reaches a BACKGROUNDED grandchild of the hook (scenario 3), a lint-staged-shaped " +
     "hook's own unprompted git add never lands in any commit either merge actually makes (scenario 4), " +
-    "and a double-forked hook tail that escapes the tree-kill entirely quarantines the repo (no corruption, " +
-    "a second merge refused) and auto-clears once its own eventual confirmed death arrives (scenario 5)."
+    "and a double-forked hook tail that escapes the tree-kill entirely quarantines the repo (no corruption " +
+    "on this repro shape, a second merge refused) and auto-clears once its own eventual confirmed death " +
+    "arrives (scenario 5)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

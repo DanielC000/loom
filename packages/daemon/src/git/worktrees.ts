@@ -9086,7 +9086,7 @@ async function mergeBranchLocked(
         raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("squash commit could not be confirmed dead after a kill"), opId);
         return {
           ok: false,
-          reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}`,
+          reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message} — the commit may have already landed despite this failure (the real git child's own commit may have completed before or after the kill could be confirmed); canonical repo may need manual inspection, but once a human clears the quarantine, simply retrying this merge will detect any already-landed content as ALREADY_MERGED and finalize without creating a duplicate commit`,
           quarantined: true,
         };
       }
