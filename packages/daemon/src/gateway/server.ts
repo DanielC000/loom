@@ -601,6 +601,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!isOAuthCallback && typeof origin === "string" && origin.length > 0 && !isAllowedOrigin(origin, cls)) {
       return reply.code(403).send({ error: "cross-origin request refused" });
     }
+    // @decision b49e7983 — Sec-Fetch-Site backstop for the Origin-absent fail-safe above (/api/* only,
+    // method-agnostic, exact "cross-site" match, same-site/same-origin/none/malformed all stay allowed).
+    const routePattern = req.routeOptions.url;
+    const secFetchSite = req.headers["sec-fetch-site"];
+    const originAbsent = !(typeof origin === "string" && origin.length > 0);
+    if (originAbsent && routePattern?.startsWith("/api/") && secFetchSite === "cross-site") {
+      return reply.code(403).send({ error: "cross-origin request refused" });
+    }
     // Host must be present and allowed (DNS-rebind defence). Real HTTP clients always send Host; a
     // missing/disallowed Host → reject.
     const host = req.headers.host;
