@@ -45,8 +45,11 @@ function textOnlyContent(content: unknown): string | null {
   return parts.length ? parts.join("\n") : null;
 }
 
-/** True iff `content` is a non-empty array of ONLY `tool_result` blocks (mirrors transcript.ts's classifyRole). */
-function isToolResultOnly(content: unknown): boolean {
+/** True iff `content` is a non-empty array of ONLY `tool_result` blocks (mirrors transcript.ts's classifyRole).
+ *  Exported (card 5d068eec) so `pty/host.ts`'s give-up transcript-growth corroboration can reuse the SAME
+ *  "is this user line real, or just a tool result" rule this module already established, rather than a
+ *  second independent copy drifting from it. */
+export function isToolResultOnly(content: unknown): boolean {
   return (
     Array.isArray(content) &&
     content.length > 0 &&
@@ -54,8 +57,9 @@ function isToolResultOnly(content: unknown): boolean {
   );
 }
 
-/** Raw text of a "user"-role message: a string content verbatim, or array "text" blocks joined. */
-function userTurnText(content: unknown): string | null {
+/** Raw text of a "user"-role message: a string content verbatim, or array "text" blocks joined. Exported
+ *  (card 5d068eec) for the same reuse reason as {@link isToolResultOnly}. */
+export function userTurnText(content: unknown): string | null {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
   const parts: string[] = [];

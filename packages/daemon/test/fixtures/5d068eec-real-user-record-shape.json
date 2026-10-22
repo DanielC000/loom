@@ -1,0 +1,28 @@
+{
+  "parentUuid": null,
+  "isSidechain": false,
+  "promptId": "a230ddd5-390e-48bb-aa7f-1ef464a97d54",
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": "FIXTURE_NEUTRAL_TEXT"
+  },
+  "uuid": "FIXTURE_UUID",
+  "timestamp": "2026-10-21T15:58:47.129Z",
+  "permissionMode": "acceptEdits",
+  "origin": {
+    "kind": "human"
+  },
+  "promptSource": "typed",
+  "turnOrigin": "human",
+  "turnPosition": {
+    "promptIndex": 1,
+    "turnIndex": 1
+  },
+  "userType": "external",
+  "entrypoint": "cli",
+  "cwd": "FIXTURE_CWD",
+  "sessionId": "FIXTURE_SESSION_ID",
+  "version": "2.1.306",
+  "gitBranch": "master"
+}

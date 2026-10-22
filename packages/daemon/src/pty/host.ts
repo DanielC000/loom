@@ -27,7 +27,7 @@ import { ensureTrustedResilient } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
-import { readContextStats, type ContextStats } from "../sessions/context.js";
+import { readContextStats, type ContextStats, isToolResultOnly, userTurnText } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { TRANSCRIPT_ROOT_READ_DENY_RULE, otherProjectTranscriptDenyRules } from "./claude-transcript.js";
 import { withLoomHomeWriteDenyForSpawn } from "./loom-home-deny.js";
@@ -804,6 +804,12 @@ const REASSERT_SETTLE_MAX_POLLS = Number(process.env.LOOM_REASSERT_SETTLE_MAX_PO
  *  595aad10/fea23514) or reuse REASSERT_SETTLE's pair (a different, faster mechanism). */
 const GIVE_UP_CONFIRM_SETTLE_POLL_MS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS) || 15;
 const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) || 20;
+
+/** Card 5d068eec (CR round 2 Minor 3 — HEAD, not tail) — bound on how much `transcriptGrowthShowsTurnStarted`
+ *  ever reads, starting from the byte-offset baseline (`Live.giveUpTranscriptBaselineSize`) forward, never
+ *  the whole file. A single message line whose own serialized size exceeds this can never corroborate —
+ *  see that method's own doc. */
+const GIVE_UP_TRANSCRIPT_READ_CAP_BYTES = Number(process.env.LOOM_GIVE_UP_TRANSCRIPT_READ_CAP_BYTES) || 65_536;
 
 /**
  * Card 3e76ecad: bounded, OBSERVED wait `flushComposer` (the manager-facing submit-only affordance) uses
@@ -3189,6 +3195,19 @@ interface Live {
   // because it must survive a give-up (the give-up branch doesn't clear it) so `requeueGiveUpOrigin` can
   // stamp an accurate `writtenAt` onto `ambiguousDispatches` for the generation that just gave up.
   currentGenFirstWrittenAt: number | null;
+  // Card 5d068eec: a cheap `fs.statSync` size baseline of this generation's transcript, captured
+  // alongside `currentGenFirstWrittenAt` (same `attempt===1` site, same reset-at-submit() lifecycle,
+  // including `flushComposer`'s attempt:1 re-entry resetting it) — never a file READ here, only a stat.
+  // Consulted ONLY at GIVE-UP RECOVERY's commit point (`transcriptGrowthShowsTurnStarted`) to tell
+  // whether the transcript has grown since THIS attempt began. null means "no baseline captured" (no
+  // engineSessionId yet, or the stat failed) — the give-up check treats that as "cannot corroborate",
+  // never as "already grown".
+  giveUpTranscriptBaselineSize: number | null;
+  // Card 5d068eec (CR round 2 Minor 3/NIT): the EXACT path `giveUpTranscriptBaselineSize` was stat'd
+  // from — stored so the commit-point check stats and reads the SAME direct path, never re-resolving via
+  // `resolveTranscriptFile`'s scan fallback (a sync `readdir`) on this path. Same lifecycle/reset as
+  // `giveUpTranscriptBaselineSize`; always non-null exactly when that field is.
+  giveUpTranscriptBaselinePath: string | null;
   // @decision 2ff893f3 — stamped ONCE inside submit() itself; unlike `currentGenFirstWrittenAt`, never
   // touched by `flushComposer`'s re-entry into `fireEnterAndVerify` (attempt:1 there overwrites that
   // field). The field a per-generation AGE bound must read instead.
@@ -6436,7 +6455,7 @@ export class PtyHost {
       giveUpOrigin: null,
       giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
-      currentGenFirstWrittenAt: null, generationStartedAt: null,
+      currentGenFirstWrittenAt: null, giveUpTranscriptBaselineSize: null, giveUpTranscriptBaselinePath: null, generationStartedAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       giveUpRecoveryFiredAt: [],
@@ -6740,7 +6759,7 @@ export class PtyHost {
       giveUpOrigin: null,
       giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
-      currentGenFirstWrittenAt: null, generationStartedAt: null,
+      currentGenFirstWrittenAt: null, giveUpTranscriptBaselineSize: null, giveUpTranscriptBaselinePath: null, generationStartedAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       giveUpRecoveryFiredAt: [],
@@ -8006,7 +8025,7 @@ export class PtyHost {
       giveUpOrigin: null,
       giveUpOriginWrittenText: null,
       giveUpConfirmQueue: [],
-      currentGenFirstWrittenAt: null, generationStartedAt: null,
+      currentGenFirstWrittenAt: null, giveUpTranscriptBaselineSize: null, giveUpTranscriptBaselinePath: null, generationStartedAt: null,
       ambiguousDispatches: new Map(),
       retiredGiveUpSignatures: new Map(),
       giveUpRecoveryFiredAt: [],
@@ -12019,6 +12038,8 @@ export class PtyHost {
     // Card 4a0af485: reset for THIS fresh generation — stamped for real by `fireEnterAndVerify`'s first
     // attempt once the actual Enter write happens (not here — this is only the paste, not the Enter yet).
     live.currentGenFirstWrittenAt = null;
+    live.giveUpTranscriptBaselineSize = null; // card 5d068eec — re-stamped at attempt===1, same lifecycle
+    live.giveUpTranscriptBaselinePath = null;
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
     // @decision c228b237 — `writeNewTurn` stays bound to the `live` it closed over at submit() entry; never
@@ -12353,7 +12374,20 @@ export class PtyHost {
     // (attempt>1) must never overwrite it, or a give-up's own reassert/retry writes would keep resetting
     // the clock and understate the true confirmation lag. Read by the CONFIRMED logging below and by
     // `requeueGiveUpOrigin` (to stamp an accurate `writtenAt` onto `ambiguousDispatches`).
-    if (attempt === 1) live.currentGenFirstWrittenAt = enterWrittenAt;
+    if (attempt === 1) {
+      live.currentGenFirstWrittenAt = enterWrittenAt;
+      // Card 5d068eec: ONE cheap statSync of the DIRECT computed path (never the scan-fallback
+      // `resolveTranscriptFile`, and never a file read) — a baseline for the GIVE-UP commit check far
+      // downstream. Missing engineSessionId or a missing/unreadable file at this instant both collapse to
+      // `null` ("no baseline"), which that check treats as "cannot corroborate", never as "already grown".
+      live.giveUpTranscriptBaselineSize = null;
+      live.giveUpTranscriptBaselinePath = null;
+      if (live.engineSessionId !== null) {
+        const p = engineTranscriptPath(live.cwd, live.engineSessionId);
+        try { live.giveUpTranscriptBaselineSize = fs.statSync(p).size; live.giveUpTranscriptBaselinePath = p; }
+        catch { /* file not there yet at this instant — baseline stays null, the give-up check fails closed */ }
+      }
+    }
     // Card 04de8bbf's investigation: this line previously carried no generation/message id, so no
     // analysis (or future live reconciliation fix on 4a0af485) could join a submit to its true confirming
     // hook — only an approximate time-order pairing, which breaks down across a give-up cascade (several
@@ -12419,8 +12453,29 @@ export class PtyHost {
           if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
           const l2 = live;
           if (!l2.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
+          // @decision 5d068eec — the ONLY hookless TERMINAL suppression (the output discriminator above
+          // never suppresses on its own — it still falls through to this same recheck). The match is
+          // content-only, not generation-scoped — never widen any give-up window to compensate.
+          const transcriptCheck = this.transcriptGrowthShowsTurnStarted(l2);
+          if (transcriptCheck.matched) {
+            // Card 5d068eec (CR round 2 Minor 2): leave the generation in the SAME state a real confirming
+            // hook would — `enterConfirmed=true` (so `healIfStuck` reads this as confirmed: a later LOST
+            // Stop then heals via its "heal-if-stuck-stale" branch, which clears busy and requeues NOTHING,
+            // never the OTHER branch's mark-dirty+restore) and `firstTurnStarted=true` (also read by
+            // `healIfStuck`'s staleMs choice). Knock-on effect checked (UserPromptSubmit's own handler,
+            // `submitWasOutstanding = !live.enterConfirmed`): a real-but-LATE hook racing this suppression
+            // will see `submitWasOutstanding=false` instead of true, skipping only its OWN diagnostic-only
+            // `[submit] CONFIRMED`/`[prompt-echo]` logging for this generation — nothing correctness-
+            // relevant, since this path never calls `requeueGiveUpOrigin`, so `live.ambiguousDispatches`/
+            // `live.retiredGiveUpSignatures` have no entry for this generation for that late hook to find.
+            l2.enterConfirmed = true;
+            l2.firstTurnStarted = true;
+            // eslint-disable-next-line no-console
+            console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — no confirming hook ever arrived, but the session transcript grew with a user record matching this generation's own intended text (card 5d068eec transcript corroboration — the first and only hookless TERMINAL suppression); turn actually started; leaving busy/composer untouched`);
+            return;
+          }
           // eslint-disable-next-line no-console
-          console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no confirming hook observed${outputSeen ? " despite output after the final Enter write (the output discriminator's suppression was never confirmed by an actual hook)" : " since the final Enter write"}; turn never confirmed started; recovering busy so the session doesn't wedge`);
+          console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no confirming hook observed${outputSeen ? " despite output after the final Enter write (the output discriminator's suppression was never confirmed by an actual hook)" : " since the final Enter write"}; transcript corroboration also declined (${transcriptCheck.reason}); turn never confirmed started; recovering busy so the session doesn't wedge`);
           this.maybeFireGiveUpRecoveryAlarm(sessionId, l2); // card c00231e2 — see that method's own doc
           // @decision 3ce3fa39 — do NOT clear the composer HERE: no confirming hook arrived, so a
           // backspace burst is least safely interpreted at this point (2 specimens resurfaced,
@@ -12442,6 +12497,61 @@ export class PtyHost {
         }, live);
       }
     }, SUBMIT_VERIFY_TIMEOUT_MS);
+  }
+
+  /**
+   * Card 5d068eec — GIVE-UP RECOVERY's third, hook-independent corroboration check: did the session
+   * transcript gain a user-turn record matching THIS generation's own intended text since this attempt's
+   * baseline? Fails CLOSED (returns `{matched:false}`) on anything uncertain — no baseline, a stat/read
+   * error, or no growth — never on a positive assumption.
+   *
+   * Reads `[baseline, min(size, baseline + {@link GIVE_UP_TRANSCRIPT_READ_CAP_BYTES}))` — the HEAD of the
+   * grown region, never the tail. `baseline` is NOT guaranteed to land on a real line boundary (a stat
+   * can catch a half-flushed append) — a partial first line simply fails `JSON.parse` and is skipped like
+   * any other unparsable line; that partial fragment can only belong to a record that STARTED before
+   * `baseline`, so it can never be mistaken for this generation's own new record either way.
+   *
+   * @decision 5d068eec — content-only match: an earlier same-text message landing after this baseline is
+   * wrongly suppressed (accepted; reopen on a non-idempotent specimen).
+   */
+  private transcriptGrowthShowsTurnStarted(live: Live): { matched: boolean; reason: string } {
+    if (live.giveUpTranscriptBaselineSize === null || live.giveUpTranscriptBaselinePath === null) return { matched: false, reason: "no-baseline" };
+    if (live.giveUpOriginWrittenText === null) return { matched: false, reason: "no-intended-text" };
+    const baseline = live.giveUpTranscriptBaselineSize;
+    const file = live.giveUpTranscriptBaselinePath; // the SAME direct path the baseline was stat'd from (CR round 2 NIT) — never resolveTranscriptFile's scan fallback here
+    const intendedText = live.giveUpOriginWrittenText;
+    let size: number;
+    try { size = fs.statSync(file).size; }
+    catch { return { matched: false, reason: "stat-threw" }; }
+    if (size <= baseline) return { matched: false, reason: "no-growth" };
+
+    const readEnd = Math.min(size, baseline + GIVE_UP_TRANSCRIPT_READ_CAP_BYTES);
+    let chunk: string;
+    try {
+      const fd = fs.openSync(file, "r");
+      try {
+        const buf = Buffer.alloc(readEnd - baseline);
+        fs.readSync(fd, buf, 0, buf.length, baseline);
+        chunk = buf.toString("utf8");
+      } finally { fs.closeSync(fd); }
+    } catch { return { matched: false, reason: "read-threw" }; }
+
+    for (const line of chunk.split("\n")) {
+      if (!line.trim()) continue;
+      let o: Record<string, unknown>;
+      try { o = JSON.parse(line); } catch { continue; } // incl. a line truncated by the read cap — see this method's own doc
+      if (o.type !== "user" || !o.message) continue;
+      const msg = o.message as { content?: unknown };
+      if (isToolResultOnly(msg.content)) continue;
+      const text = userTurnText(msg.content);
+      // Reuse `isRecognizedPastedContentWrap` (this file's own existing reported-vs-intended recognizer,
+      // already covering the composer's trailing-whitespace trim + the CLI's own nested-tag escape) rather
+      // than a new matcher — a direct `===` covers the common unwrapped case it doesn't itself check.
+      if (text !== null && (text === intendedText || isRecognizedPastedContentWrap(text, intendedText))) {
+        return { matched: true, reason: "content-matched" };
+      }
+    }
+    return { matched: false, reason: "no-matching-user-record" };
   }
 
   /**
