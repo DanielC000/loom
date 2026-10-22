@@ -20,6 +20,9 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { boundedSimpleGit } = await import("../dist/git/bounded.js");
+const { nonInteractiveEnv } = await import("../dist/git/writer.js");
+const { awaitTrackedSettle } = await import("./_settle-tracked-monotonic.mjs");
 const MW = await import("../dist/git/mainline-watch.js");
 
 let failures = 0;
@@ -69,8 +72,24 @@ async function addWorker(db, tag) {
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
   return { taskId, workerId, worktreePath, branch, tip: git(worktreePath, "rev-parse", "HEAD") };
 }
-const batch = async (d, ws) => { const r = await d.sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)); return r.settled && r.ok ? r.value : { __unsettled: r }; };
-const confirm = async (d, w) => { const r = await d.sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId); return r.settled && r.ok ? r.value : { __unsettled: r }; };
+// Card 7aeaeedd: await the REAL settle (`awaitTrackedSettle`, same shared helper
+// cut-base-sha-confirm-and-batch.mjs uses) rather than taking a possible `{settled:false, op}` FIRST
+// result as final — a real `mergeBatchTracked`/`confirmWorkerMergeTracked` call can legitimately degrade
+// to that shape once `syncAttachBudgetMs` elapses before the real batch assembly + gate + fallback
+// landings finish, a documented, supported async path (orchestration/pending-ops.ts), never a failure.
+// The ORIGINAL unguarded `r.settled && r.ok ? r.value : {__unsettled:r}` measured the host's speed, not
+// the code: under load it could return `{__unsettled:r}` (r.ok === undefined) for a batch that was still
+// correctly forfeiting in the background, failing a `r4.ok === false` assertion for a reason that had
+// nothing to do with forfeit detection — confirmed directly by instrumenting a real run of (B4): the
+// injected move landed exactly once, deterministically, before the forfeit check's own read, and the
+// batch still "FAIL"ed only because `batch()` gave up on the first unsettled poll.
+// `timeoutMs: 240_000` (not the helper's own 60s default) — matches the precedent several
+// confirmWorkerMergeTracked-polling siblings already use (merge-confirm-branch-tip-unresolvable.mjs,
+// merge-confirm-inert-skip-pin.mjs) for a REAL tracked call under real git conditions; a batch's own
+// forfeit-and-fallback path here runs TWO full solo squash landings on top of the batch assembly + gate,
+// which can legitimately exceed the default 60s under host contention (measured: a 60s budget threw here).
+const batch = async (d, ws) => { const r = await awaitTrackedSettle(() => d.sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)), { label: "mergeBatchTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
+const confirm = async (d, w) => { const r = await awaitTrackedSettle(() => d.sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
 const mwEvents = (d) => d.db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === P.projId);
 const watermark = (d) => MW.parseMainlineWatermark(d.db.getMeta(MW.mainlineWatermarkKey(P.projId, "primary")));
 const bypass = (w) => { git(w.worktreePath, "update-ref", MAINREF, w.tip); git(P.repo, "reset", "-q", "--hard"); };
@@ -84,23 +103,59 @@ try {
   // ── (B4) TOCTOU: main moves AFTER the check, BEFORE the fast-forward ───────
   {
     const k = await addWorker(d1.db, "k"), l = await addWorker(d1.db, "l"), m = await addWorker(d1.db, "m"), n = await addWorker(d1.db, "n");
-    const before = mwEvents(d1).length, wmBefore = watermark(d1)?.sha;
-    // The reader seam runs inside the check (post-gate, guard held): let it read the pre-move facts, THEN write main — i.e. the move lands in the
-    // window between the check and the fast-forward.
-    const realReader = d1.sessions.mainlineFactsReader;
-    let armed = true;
-    d1.sessions.mainlineFactsReader = async (...args) => { const facts = await realReader(...args); if (armed) { armed = false; git(k.worktreePath, "update-ref", MAINREF, k.tip); git(P.repo, "reset", "-q", "--hard"); } return facts; };
-    // The reader is only consulted when main != watermark; force that (a benign human commit) so the seam actually fires.
-    fs.writeFileSync(path.join(P.repo, "human2.txt"), "h2\n"); git(P.repo, "add", "human2.txt"); git(P.repo, "commit", "-q", "-m", "docs: human commit before B4");
+    const before = mwEvents(d1).length;
+    // Card 7aeaeedd: deterministic injection, no wall-clock race. The PRIOR version hooked
+    // `mainlineFactsReader` (consulted inside `checkMainlineMove`, itself raced by `boundedByDeadline`
+    // against a ~30s deadline with only a 100ms grace past it) and performed the raw move from inside that
+    // hook, after awaiting the real reader. Under host contention the two `execFileSync` git spawns doing
+    // the raw move could outlast that 100ms grace, so `boundedByDeadline` returned early (fail-open) while
+    // the move kept running in the background — landing it AFTER, not before, the batch's own
+    // fast-forward read. That let the fast-forward observe the PRE-move tip and succeed instead of
+    // forfeiting: a test-synchronization race (seen flaking twice, both under load, card 7aeaeedd), not a
+    // product gap. Fixed by injecting through the SAME `batchFfGitFactory` test seam
+    // batch-merge-mainline-advanced-post-ff.mjs uses: intercept the FIRST combined `rev-parse HEAD
+    // --symbolic-full-name HEAD` read inside `fastForwardCanonicalMain` (the forfeit check's own read,
+    // git/batch-merge.ts) and perform the raw move synchronously BEFORE delegating to the real git call —
+    // the read is then GUARANTEED to observe the moved tip, with no deadline machinery involved at all.
+    let combinedCalls = 0;
+    const batchFfGitFactory = (repoPath, blockTimeoutMs) => {
+      const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
+      return {
+        raw: async (args) => {
+          if (Array.isArray(args) && args[0] === "rev-parse" && args.includes("--symbolic-full-name")) {
+            combinedCalls++;
+            if (combinedCalls === 1) bypass(k); // raw move lands inside the forfeit check's own read, before it resolves
+          }
+          return real.raw(args);
+        },
+      };
+    };
+    const realBatchFfGitFactory = d1.sessions.batchFfGitFactory;
+    d1.sessions.batchFfGitFactory = batchFfGitFactory;
     const r4 = await batch(d1, [l, m]);
-    d1.sessions.mainlineFactsReader = realReader;
-    check("(B4) setup control: the move DID land between the check and the fast-forward (the raw-written tip is in main's history)", armed === false && (() => { try { git(P.repo, "merge-base", "--is-ancestor", k.tip, "HEAD"); return true; } catch { return false; } })());
+    d1.sessions.batchFfGitFactory = realBatchFfGitFactory;
+    check("(B4) setup control: the injected move fired exactly once, from inside the forfeit check's own read (deterministic — no race)", combinedCalls === 1);
+    // `combinedCalls === 1` only proves the HOOK fired, not that `bypass(k)`'s own raw git calls actually
+    // LANDED — a hook that fired but whose bypass silently failed (e.g. a transient git error swallowed by
+    // nothing, since bypass() doesn't check its own exit codes) would otherwise pass this control and then
+    // fail the forfeit check below for the WRONG reason (main never having moved at all, not a detection
+    // gap). Restore the original ancestry control alongside it: the raw-written tip must actually be main's
+    // history by now.
+    check("(B4) setup control: the raw-written tip actually landed on main (the hook firing is not proof the bypass itself succeeded)",
+      (() => { try { git(P.repo, "merge-base", "--is-ancestor", k.tip, "HEAD"); return true; } catch { return false; } })());
     check("(B4) the batch FORFEITED (main moved since it was cut): it landed nothing itself (its candidates fall back to solo landings)", r4.ok === false && (r4.landed?.length ?? 0) === 0);
     const o = await addWorker(d1.db, "o");
     await confirm(d1, o);
+    // Dropping the old human2.txt forcing-commit (no longer needed now the move is injected via
+    // batchFfGitFactory, not mainlineFactsReader) changes WHICH checkMainlineMove call first observes the
+    // mismatch — the batch's own PRE-ff call now sees watermark===HEAD (main hasn't moved yet) and skips
+    // silently — but not THAT it's observed: watermark stays pinned to s0's sha (unchanged) while the raw
+    // move already sits on main by the time l's/m's fallback squash runs its own checkMainlineMove (via
+    // confirmWorkerMergeTracked), so the SAME real (unmocked) mainlineFactsReader classifies it there
+    // instead, exactly once, before the next confirm's own check could duplicate it.
     const ev4 = mwEvents(d1).slice(before);
     check("(B4) the move is NOT absorbed by the batch: across the forfeit's fallback landings and the next confirm it is reported exactly ONCE, naming the raw-written tip", ev4.length === 1 && ev4[0].detail.suspectShas?.includes(k.tip) && ev4[0].detail.to === k.tip);
-    void n; void wmBefore;
+    void n;
   }
 
   // ── (B5) fail-open ─────────────────────────────────────────────────────────
