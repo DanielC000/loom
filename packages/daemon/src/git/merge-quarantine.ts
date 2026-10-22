@@ -4415,6 +4415,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // memory by an earlier reduce whose write failed — a strict superset, always safe here.
       const writtenTwin = writePendingDivertFile(p.sourceFile, updated, new Set(entry!.tokens));
       if (writtenTwin) {
+        // @decision b47cf261 — re-point every in-memory reference BEFORE the hand assignment below, or
+        // activeQuarantines is left pointing at the now-stale `updated`, breaking 64283e06's twin invariant.
+        if (writtenTwin.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, writtenTwin.entry);
         p.entry = writtenTwin.entry;
         p.sourceFile = writtenTwin.filename;
       } else {
