@@ -1681,7 +1681,9 @@ function consumeMatchedPendingsIntoArmedEntry(
         for (const p of group) replaceEntryEverywhere(activeQuarantines, p.entry, foreignUnion);
         // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
         // `base.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
-        const written = writePendingDivertFile(base.sourceFile, foreignUnion);
+        // @decision 2dd97aaa (Follow-up 535fd69d) — `foreignUnion` only ever UNIONS this group's own members; it never drops
+        // a token, so `droppedTokens` is empty.
+        const written = writePendingDivertFile(base.sourceFile, foreignUnion, new Set());
         if (written) {
           if (written.entry !== foreignUnion) replaceEntryEverywhere(activeQuarantines, foreignUnion, written.entry);
           pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
@@ -2084,8 +2086,12 @@ function pendingDivertCollisionFilenameFor(repoPath: string): string {
  * @decision 702b4241 (round 7) — a marked `filename` is RE-READ right here before redirecting: a stale
  * mark must not force a redirect once the content is readable again and genuinely this same identity.
  * See the decision record's "Round 7" section for the mechanism and why this is the one chokepoint fix.
+ *
+ * @decision 2dd97aaa (Follow-up 535fd69d) — `droppedTokens` is REQUIRED, never optional: every caller states explicitly
+ * whether it narrows (`new Set()` when it does not), or the re-read-and-union above can resurrect a
+ * caller's own just-dropped token. See the decision record.
  */
-function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, droppedTokens?: ReadonlySet<string>): { filename: string; entry: MergeQuarantineEntry } | false {
+function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): { filename: string; entry: MergeQuarantineEntry } | false {
   let target = filename;
   let toWrite = entry;
   if (keptUnreadableLatchFiles.has(filename)) {
@@ -2527,7 +2533,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // @decision 702b4241 (round 4) — use whatever `writePendingDivertFile` ACTUALLY wrote to below, never
   // `filename`/`toWrite` unconditionally — `filename` can itself be marked `keptUnreadableLatchFiles`
   // (see the decision record's "Round 4" section), in which case the write redirects elsewhere.
-  const written = writePendingDivertFile(filename, toWrite);
+  // @decision 2dd97aaa (Follow-up 535fd69d) — `toWrite` is a copy-aside of `occupantRepoPath`'s own content (already filtered
+  // through `clearedTokens` at READ time, via `readSurvivingOnDiskTokens`), never a narrowing of a token
+  // set this call itself decided to drop; `droppedTokens` is empty.
+  const written = writePendingDivertFile(filename, toWrite, new Set());
   if (!written) {
     // @decision 4900c365 (round 2) — re-establish an in-memory record that OWNS `final` at its OWN
     // current name (self-referenced in `orphanLatchFiles`): enforces in THIS process too, not only on a
@@ -2678,7 +2687,9 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   }
   // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
   // `base.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
-  const written = writePendingDivertFile(base.sourceFile, merged);
+  // @decision 2dd97aaa (Follow-up 535fd69d) — `merged` unions `matched` plus the new `token`; it never drops a token, so
+  // `droppedTokens` is empty.
+  const written = writePendingDivertFile(base.sourceFile, merged, new Set());
   if (written) {
     if (written.entry !== merged) replaceEntryEverywhere(activeQuarantines, merged, written.entry);
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
@@ -2956,7 +2967,9 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
   // @decision 702b4241 (round 4) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
   // `filename` unconditionally: `filename` can itself be marked `keptUnreadableLatchFiles` (see the
   // decision record's "Round 4" section for why this reaches a `pending-` name too).
-  const written = writePendingDivertFile(filename, toWrite);
+  // @decision 2dd97aaa (Follow-up 535fd69d) — `toWrite` is `reconcilePendingDivertTarget`'s own mint/union result; it never
+  // drops a token, so `droppedTokens` is empty.
+  const written = writePendingDivertFile(filename, toWrite, new Set());
   if (written) {
     if (written.entry !== toWrite) replaceEntryEverywhere(activeQuarantines, toWrite, written.entry);
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
@@ -3036,7 +3049,9 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
   // `base.sourceFile` unconditionally: `base.sourceFile` can BE the boot-time UNREADABLE placeholder's
   // own self-referenced final — the exact overwrite this round closes. See the decision record.
-  const written = writePendingDivertFile(base.sourceFile, merged);
+  // @decision 2dd97aaa (Follow-up 535fd69d) — `merged` unions `all` (every matched twin plus the raise's own `entry`); it
+  // never drops a token, so `droppedTokens` is empty.
+  const written = writePendingDivertFile(base.sourceFile, merged, new Set());
   if (written) {
     if (written.entry !== merged) replaceEntryEverywhere(activeQuarantines, merged, written.entry);
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
@@ -3407,7 +3422,9 @@ function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry,
       console.error(`[merge-quarantine] keeping ${orphanFile} UNTOUCHED (left stale) after a partial clear of ${updated.repoPath} — its own ownership could not be positively confirmed as this same entity's (a different entity's live latch, an unreadable/unparsable read, a marked-kept basename, or a real on-disk token this write doesn't already account for); fail-closed rather than risk destroying a different entity's only durable copy.`);
       continue;
     }
-    if (!writePendingDivertFile(orphanFile, updated)) {
+    // @decision 2dd97aaa (Follow-up 535fd69d) — thread the caller's own `droppedTokens` through: this write narrows the
+    // folded orphan file, and omitting it can resurrect the just-dropped tokens from a stale copy.
+    if (!writePendingDivertFile(orphanFile, updated, droppedTokens)) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${updated.repoPath} into its own folded orphan latch file ${orphanFile} after a partial clear — that file's own PRE-EXISTING (un-reduced) bytes are left UNTOUCHED, so a restart before this is fixed may re-arm the just-cleared token from it.`);
     }
@@ -3519,7 +3536,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     }
     // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
     // `pending.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
-    const written = writePendingDivertFile(pending.sourceFile, updated);
+    // @decision 2dd97aaa (Follow-up 535fd69d) — `updated` drops `token`; pass it as `droppedTokens` — `tombstoneIfNotSurviving`
+    // above does not protect this write when `token` is still "surviving" on another in-memory record.
+    const written = writePendingDivertFile(pending.sourceFile, updated, new Set([token]));
     if (written) {
       if (written.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, written.entry);
       pendingUnresolvedQuarantines[idx] = { entry: written.entry, sourceFile: written.filename };
@@ -3636,7 +3655,9 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     writtenFinalBasenames.add(pending.sourceFile);
     // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to for
     // THIS twin alone; never mutate the shared `updated` object other twins/the active key already used.
-    const written = writePendingDivertFile(pending.sourceFile, updated);
+    // @decision 2dd97aaa (Follow-up 535fd69d) — `updated` drops `token`; pass it as `droppedTokens`, same reason as
+    // `clearTokenFromPendingIndices`'s own identical write above.
+    const written = writePendingDivertFile(pending.sourceFile, updated, new Set([token]));
     if (written) {
       pendingUnresolvedQuarantines[idx] = { entry: written.entry, sourceFile: written.filename };
     } else {

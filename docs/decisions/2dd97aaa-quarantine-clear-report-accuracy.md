@@ -225,6 +225,75 @@ failing assertions in either file.
 - **Doc correction** (item 2's own "Tests" section, above): the original "Proven RED via
   `negative-control.mjs`" claim was itself wrong — see the correction inline there.
 
+## Follow-up 535fd69d — the two other narrowing writers item 2's own "broader finding" named are fixed
+
+Card `535fd69d`. Both sites the Code Reviewer confirmed by reading (not by repro) — `clearTokenFromPendingIndices`'s
+own "reduce" branch and `clearActiveEntryTokenAtKey`'s own dual-tracked-twin loop — were reproduced
+directly and fixed the same way item 2 was: `droppedTokens` threaded into their own `writePendingDivertFile`
+call.
+
+**Why each one's own `tombstoneIfNotSurviving` call does not protect it, and the two sites fail for
+slightly different reasons, both resolving to the same root cause (`tombstoneIfNotSurviving`'s own
+"is this token surviving ANYWHERE in memory" scan returns a false negative whenever some OTHER in-memory
+record still legitimately holds the token at that instant):**
+
+- `clearTokenFromPendingIndices` is `clearMergeQuarantineByToken`'s own by-token **pending pre-pass** —
+  it runs BEFORE that function's second phase ever touches a matching ACTIVE entry. So when the token
+  being cleared is also held by an active entry W (reproduced: W holds `[wa-token, wc-token]`, a separate
+  non-twin pending entry P holds `[wa-token, p-token]`), the tombstone call inside the pending pre-pass
+  finds `wa-token` still "surviving" on W (not yet cleared) and never adds it to `clearedTokens` at all.
+  P's own write is then exposed exactly like item 2's reduce branch: a stale `keptUnreadableLatchFiles`
+  mark on P's own `sourceFile` lets the re-read-and-union resurrect `wa-token` from P's unchanged on-disk
+  copy.
+- `clearActiveEntryTokenAtKey`'s own dual-tracked-twin loop runs AFTER that SAME function's own
+  `replaceEntryEverywhere` + `tombstoneIfNotSurviving` calls — so in the ordinary single-entity case the
+  token IS already genuinely tombstoned by the time this loop's own write runs, and the gap cannot be
+  observed from that shape alone. It is reproducible all the same: an UNRELATED active entry Q,
+  independently holding the identical token value and not yet visited by `clearMergeQuarantineByToken`'s
+  own active-entry iteration (inserted into `activeQuarantines` after the entry being cleared, so Map
+  iteration order processes it later), is "surviving" at the exact instant this function's own tombstone
+  call runs for the entry it IS clearing — defeating it for the SAME reason as the pending-pre-pass case,
+  despite the different call ordering. Reproduced on X (a degraded, `resolvedKey`-dual-tracked occupant,
+  `883e29bc`-style) holding `[dx-ta, dx-tb]`, with Q crafted to independently also hold `dx-ta`.
+
+Both repros proven RED-before (`negative-control.mjs --ref HEAD`, 5 real `FAIL`s across the two
+scenarios) / GREEN-after / byte-identical restore.
+
+**CR Minor 1 — `droppedTokens` made a REQUIRED parameter on `writePendingDivertFile`, at every call
+site, per the card's own instruction (mirrors `21ec39e5`'s identical "Do not give an optional parameter
+with an implicit default" rule for this module's OTHER tmp-sweep policy parameter).** Auditing every call
+site to decide what each one passes found a NINTH site sharing the `writePendingDivertFile` chokepoint
+that had never threaded a `droppedTokens`-shaped parameter through at all:
+`rewriteOrphanLatchFilesAfterPartialClear`'s own internal write (it rewrites a partial clear's folded
+orphan-reference files, and already RECEIVES `droppedTokens` as its own parameter — passed to
+`orphanRewriteOwnershipConfirmed` — but never forwarded it to its own `writePendingDivertFile` call).
+
+**This ninth site is NOT an independently reproducible vulnerability, unlike the two above — reported as
+a refutation, not silently fixed as if it were equivalent.** `orphanRewriteOwnershipConfirmed` REFUSES
+outright, unconditionally, as its very first check, whenever the target file's basename is marked
+`keptUnreadableLatchFiles` — exactly the one precondition the union-resurrection vulnerability needs to
+fire inside `writePendingDivertFile` itself. So by the time this call site could ever reach
+`writePendingDivertFile`, the mark is already confirmed ABSENT, and `writePendingDivertFile`'s own
+re-read-and-union branch (gated on that exact same mark) structurally cannot fire. Threading the caller's
+real `droppedTokens` through anyway is still correct — it is the only value consistent with "every call
+site states whether it narrows," and a future change to `orphanRewriteOwnershipConfirmed`'s own gate
+should not have to also remember to wire this parameter in for the first time — but no repro was written
+for it, and none should be invented.
+
+**Every other `writePendingDivertFile` call site passes an explicit empty `droppedTokens` set** — each
+one unions or mints a record and never narrows a token the caller already knows is gone:
+`consumeMatchedPendingsIntoArmedEntry`'s `foreignUnion` write, `protectOccupantContentBeforeDelete`'s
+`toWrite` write (its own `tokens` field is already filtered through `clearedTokens` at READ time, via
+`readSurvivingOnDiskTokens` — a different mechanism from this card's `droppedTokens`, not a second
+instance of it), `mergeTokenIntoPendingEntries`'s `merged` write, `mintPendingDivert`'s `toWrite` write,
+and `divertRaiseEntry`'s `merged` write.
+
+### Tests
+
+`merge-quarantine-535fd69d-bytoken-stale-mark-union.mjs` — two scenarios, one per site, both described
+above. Each asserts the in-memory AND on-disk reduced state immediately after the clear, plus survival
+across a real reboot.
+
 ## Do not
 
 - Do not fold a content-parsed `parsedRepoPath` into a human-facing `contentKeptRepoPaths`/
@@ -241,10 +310,22 @@ failing assertions in either file.
   caller's own known-dropped set via `droppedTokens` instead; tombstoning only affects a LATER
   reconciliation, never the write it (mistakenly) appeared to precede.
 - Do not treat `clearTokenFromPendingIndices`'s own partial-clear branch or `clearActiveEntryTokenAtKey`'s
-  own dual-tracked-twin loop as already safe against this union-resurrection merely because each already
-  tombstones before its write — both were confirmed to share the identical vulnerability item 2 fixed for
-  `clearMergeQuarantineByKey`'s reduce branch alone; a follow-up card is needed to thread `droppedTokens`
-  through them too.
+  own dual-tracked-twin loop as safe against this union-resurrection merely because each already
+  tombstones before its write — both shared the identical vulnerability item 2 fixed for
+  `clearMergeQuarantineByKey`'s reduce branch alone; both are now fixed too (card `535fd69d`, see the
+  Follow-up section above).
+- Do not assume `writePendingDivertFile`'s own `droppedTokens` parameter is optional, or give it an
+  implicit default, at any NEW call site — it is REQUIRED (card `535fd69d`), so a new site is forced to
+  decide, explicitly, whether its own write narrows (pass the dropped tokens) or not (pass `new Set()`),
+  rather than silently inheriting the "no, I don't narrow" default an optional parameter would have given
+  it for free.
+- Do not assume a call site reaching `writePendingDivertFile` through ANOTHER function's own content/
+  ownership gate is automatically exposed to this union-resurrection class just because it shares the same
+  underlying write — check whether that gate's own precondition is actually compatible with
+  `keptUnreadableLatchFiles` being set. `rewriteOrphanLatchFilesAfterPartialClear`'s own write is gated by
+  `orphanRewriteOwnershipConfirmed`, which refuses outright whenever that exact mark is present — making
+  this one site structurally unreachable with the vulnerability's own precondition, unlike the two sites
+  above (card `535fd69d`'s own "Follow-up" section).
 - Do not read item 3's "not reproduced" result as proof no pending-divert/safety-tmp loss can EVER occur
   — it means two specific, realistic constructions (the two named above) did not lose data; a materially
   different construction was not tried and is not ruled out by this record.
