@@ -856,6 +856,14 @@ a tip, not about the comparison itself.
   Safe and additive for EVERY caller (human REST, Platform Lead, manager, and — found only at round 11,
   see below — the operator's `git_checkout`, `mcp/operator.ts`) — none of them rely on the
   DWIM-from-remote behavior, so this is not scoped to manager-checkout alone.
+  - **CORRECTION (card `59e53710`, round 2):** "no trailing `--`" is no longer current — `GitWriter.checkout()`
+    now spawns with a trailing `--`. That does NOT contradict this bullet's own finding: this bullet's `--`
+    was tried against OPTION INJECTION/revision-shorthand (`"-"`/`"@{-1}"`/`"-bsneaky"`) and measured to do
+    nothing against that hazard, which is still true. `59e53710` round 2's trailing `--` targets a DIFFERENT
+    hazard — git's PATHSPEC-RESTORE fallback for an argument that is neither a recognized option nor an
+    existing ref — where a trailing `--` genuinely does change the outcome (measured there). See that
+    record's round 2 for the repro; it is a second, narrower fix layered on top of this one, not a
+    reintroduction of what this bullet ruled out.
 - **`refuseIfTargetBranchUntrusted` no longer returns `{ok:true, classifiedTip:null}` for anything.** A
   non-existent local branch is now refused directly, here, before any git mutation — never deferred to
   `GitWriter.checkout()`. On success, `classifiedTip` is always a real sha (the type narrows from
@@ -899,6 +907,11 @@ order explicitly: check out the target branch first, THEN call the reset route.
   safety against option injection" — verified directly that it does nothing for that purpose (see above);
   it would be a no-op dressed as a fix, and a reader who trusts it would stop looking for the real gate
   (`unsafeBranchNameReason`).
+  - **CORRECTION (card `59e53710`, round 2):** this prohibition is scoped to OPTION INJECTION specifically
+    — the hazard this round measured `--` as useless against. `GitWriter.checkout()` now DOES spawn with a
+    trailing `--`, added by `59e53710` round 2 to close a DIFFERENT, pathspec-fallback hazard where a
+    trailing `--` genuinely is effective (measured there). Do not "fix" that `--` away by citing this
+    bullet — read `59e53710`'s own record before touching it.
 - Do not widen `unsafeBranchNameReason` to reject a `"<remote>/<name>"`-shaped name — that shape is a
   legal local branch name too; the existing-local-ref requirement in `refuseIfTargetBranchUntrusted`
   already closes the exploitable case without this false-positive risk.
@@ -1033,6 +1046,10 @@ Six items, all decided by the lead, none of them reopening round 9's exact-match
    do NOT run `unsafeBranchNameReason` at all — only `project_checkout_branch`'s own single entry point
    does — so the option-like/revision-shorthand name-shape bypasses round 10 closed for the MANAGER
    surface remain open on those two surfaces; tracked separately as card `59e53710`.
+   **CORRECTION (round 14, card `59e53710`): this gap is CLOSED, not merely tracked** — see this
+   record's own round-14 section below. `unsafeBranchNameReason` itself is still opt-in per caller, but
+   its no-legitimate-use subset (leading `-`, `@{`) now ALSO runs inside `GitWriter.checkout()`/
+   `createBranch()` themselves, so every one of the four callers refuses that subset structurally.
 
 ### Do not (round 11 additions)
 
@@ -1264,3 +1281,90 @@ Setup controls in every scenario assert git's own ambiguous shortening is genuin
 (`for-each-ref --format=%(refname:short)` on the manufactured fixture returns something other than
 `"feat"`) before trusting the scenario's own RED/GREEN result — without it, a scenario that happened not
 to reproduce git's own ambiguity on a given git version/config would pass GREEN vacuously either way.
+
+## Round 14 (card `59e53710`) — the name-shape bypass round 11 tracked for the non-manager surfaces is closed
+
+Round 11's item 6 named, rather than fixed, a shared-unit-divergence gap: `unsafeBranchNameReason` was
+opt-in per caller, and only `project_checkout_branch` (this card's own manager surface) called it, so the
+operator's `git_checkout`/`git_create_branch` (`mcp/operator.ts`), the Platform Lead's own pair
+(`mcp/platform.ts`), and the human REST route (`gateway/server.ts`) all handed a raw, unvalidated branch
+name straight to `GitWriter` — reopening MAJOR #2's `"-"`/`"@{-1}"`/`"-bsneaky"` bypass (round 10) on all
+three. A Code Review of this card's own commit `4fabafd1` found the gap and filed card `59e53710` to close
+it.
+
+**Fix (full detail: `docs/decisions/59e53710-branch-name-shape-check-into-gitwriter.md`):**
+`unsafeBranchNameShapeReason(name)`, a new, narrower function carrying only the two checks with no
+legitimate branch-name use at all (a leading `"-"`, and `"@{"`), is now called by
+`GitWriter.checkout()`/`createBranch()` THEMSELVES, before any git call — so every caller that constructs
+a `GitWriter` gets this subset enforced structurally, not just whichever caller happens to run the wider
+`unsafeBranchNameReason` first. `unsafeBranchNameReason` is unchanged in behavior: it delegates its own
+leading-`"-"`/`"@{"` checks to the new function and keeps its remaining three checks (`".."`, a `"refs/"`
+prefix, the conservative `SAFE_BRANCH_NAME_RE` charset) exactly where they were — caller-side-only, run
+only by `project_checkout_branch`. `project_checkout_branch`'s own behavior is therefore byte-identical
+before and after this round; the widening is additive-only for the other three surfaces.
+**CORRECTION (round 15): the `"refs/"` prefix claim above is WRONG** — git's own validation does NOT
+reject it (measured), and it has since MOVED into the shared function too. See round 15 below.
+
+### Do not (round 14 additions)
+
+- Do not fold `".."`/the `"refs/"` prefix/the charset check into `unsafeBranchNameShapeReason` too — see
+  `59e53710`'s own record for why those three stay caller-side-only (they are either already redundant
+  with git's own ref validation, or deliberately more restrictive than `GitWriter`'s other three callers
+  should be).
+- Do not read this round as reopening round 9/10's own exact-match trust gate — it fixes a DIFFERENT,
+  shared-unit-divergence problem (a check some callers of `GitWriter` never ran at all), not another layer
+  on `refuseIfTargetBranchUntrusted`.
+
+### Tests (round 14)
+
+New per-surface integration coverage, each proven RED on pre-fix `GitWriter.checkout`/`createBranch` (the
+writer-only change reverted via `git checkout HEAD --`, rebuilt, re-run, then restored and re-verified
+GREEN): `operator-branch-name-shape-refusal.mjs`, `platform-branch-name-shape-refusal.mjs`,
+`gateway-branch-name-shape-refusal.mjs` — each tries `"-"`/`"@{-1}"`/`"-bsneaky"` against both
+`checkout`/`createBranch`, asserts the structured refusal, asserts canonical HEAD/branch-list is
+unchanged, and carries a negative control that an ordinary name still succeeds. Direct unit coverage of
+`unsafeBranchNameShapeReason` and the two `GitWriter` methods themselves was added to `git-writer.mjs`.
+The pre-existing manager-surface `(NAMES)` coverage in `project-checkout-branch.mjs` (round 10) is
+unchanged and confirmed still green — this round does not touch `project_checkout_branch`'s own behavior.
+
+## Round 15 (Code Review of round 14's commit `c37bd715`, card `59e53710`) — a doc error, a pathspec-
+## fallback data-loss path, and a weaker-than-claimed test
+
+Full detail: `docs/decisions/59e53710-branch-name-shape-check-into-gitwriter.md`'s own "Round 2" section
+(that record's round numbering is independent of this one — don't conflate the two). Three findings:
+
+1. **DOC ERROR.** Round 14's claim above that a `"refs/"` prefix is "redundant with git's own ref
+   validation" is FALSE, measured directly: `createBranch("refs/heads/other")` creates a real nested
+   `refs/heads/refs/heads/other` ref, and `checkout("refs/heads/<existing-branch>")` DETACHES HEAD rather
+   than switching to that branch. **Fixed by moving `"refs/"` into `unsafeBranchNameShapeReason` itself**
+   (alongside leading `"-"`/`"@{"`) — enforced for every `GitWriter` caller, not caller-side-only.
+2. **A pre-existing pathspec-fallback data-loss path**, reachable via the SAME three non-manager
+   surfaces round 14 widened: `GitWriter.checkout()`'s `git checkout --no-guess <name>` spawn (no trailing
+   `--`) falls back to PATHSPEC mode for a name that resolves as neither an option/revision shorthand nor
+   an existing ref — `checkout(".")` or `checkout(<a tracked filename>)` silently discards a dirty tracked
+   file; `checkout("<branch>^{}")` detaches HEAD. **Fixed:** `checkout()` now verifies `target` is an
+   EXISTING local branch (`branchLocal().all`, NOT a `raw(["show-ref",...])` exit-code check — simple-git's
+   `.raw()` does not reject on that command's failure shape, verified directly) before the mutating spawn,
+   plus a trailing `--` as a second, independent layer against a check/use race.
+3. **Test strength.** Round 14's own per-surface `"-"`/`"@{-1}"` cases passed pre-fix for the wrong reason
+   (no real reflog "previous branch" in the fixture to resolve to) and the `"-bsneaky"` checkout case
+   compared a bare sha (a same-sha new branch passes). Fixed: every test now establishes a real previous
+   branch first and asserts via `git symbolic-ref HEAD`, never a sha.
+
+### Do not (round 15 additions)
+
+- Do not trust round 14's own claim that `"refs/"` stays caller-side-only — it does not, as of this round.
+  Read `59e53710`'s own record (not this file) for the current, authoritative split of which checks live
+  in `unsafeBranchNameShapeReason` vs. `unsafeBranchNameReason`.
+- Do not add a `show-ref`/`raw()`-based existence check anywhere git-writer-adjacent in this repo without
+  first checking whether the exact command's failure shape actually rejects through this codebase's
+  simple-git wrapper — it does not for every command, and the silent-pass failure mode is exactly what
+  round 15's finding 2 was.
+
+### Tests (round 15)
+
+Each of the three per-surface files from round 14, plus `git-writer.mjs`'s own direct unit coverage, now
+ALSO covers: the `"refs/heads/<existing-branch>"` shape (checkout detach + createBranch nested-ref), and
+the pathspec-fallback shapes `"."`/a real tracked filename/`"<branch>^{}"` (dirty-file byte-unchanged +
+HEAD-never-detached assertions). All new assertions proven RED against the real round-14 tip (`c37bd715`,
+reverting just `writer.ts` to that commit, rebuilding, re-running, then restored and re-verified GREEN).

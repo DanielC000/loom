@@ -21,9 +21,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // threadpool threads and wedged the daemon. This test uses an INJECTED never-settling fake instead — no
 // real subprocess, no real timer starvation risk, exactly what the new seam exists for.
 //
-// Asserts BOTH halves of the DoD-3 spec:
-//   1. checkout() with a never-settling branchLocal() rejects within ~gitLocalMs (not forever), and its
-//      structured error names the specific bounded call + budget.
+// Asserts BOTH halves of the DoD-3 spec, for EACH of checkout()'s two in-lock bounded-call sites
+// separately (round 3, card 59e53710 — the original single-case version hung the fake's branchLocal()
+// unconditionally; once round 2 of 59e53710 added an EARLIER `branchLocal()` existence check at ~:492,
+// that hang always fired there first and the test never actually reached the POST-checkout call at ~:518
+// this card was filed to prove. A loose `git branch.*exceeded` regex then matched either call's label, so
+// the gap was invisible: removing `withTimeout` from the ~:518 call alone still passed every assertion.
+// Round 3 of 59e53710 then replaced the existence check with a `raw(["for-each-ref",...])` call (a
+// detached-HEAD fix, unrelated to this card), so checkout()'s two sites are now DIFFERENT methods on the
+// fake — a `raw()` existence check and a `branchLocal()` post-checkout read — tested as cases 1a/1b below):
+//   1. checkout() with a never-settling call AT THAT SITE rejects within ~gitLocalMs (not forever), and
+//      its structured error names THAT EXACT call's label (never the sibling site's).
 //   2. A SECOND checkout() call on the SAME repo (a healthy, fast fake) is still ADMITTED promptly — this
 //      is the actual LOCK-DAMAGE proof, not just "did the first call itself settle."
 // commit()'s revparse() is proven the same shape via a THIRD case, since it's the second of the two
@@ -45,15 +53,31 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // test/merge-hang-does-not-wedge-queue.mjs's own `guard`.
 const guard = (ms, label) => new Promise((resolve) => setTimeout(() => resolve({ __guardFired: label }), ms));
 
-/** A fake git client — no real subprocess, no real timer. `hang` names which method(s) never settle;
+/** A fake git client — no real subprocess, no real timer. `hang` names which method(s)/call never settle;
  *  every other method resolves immediately with innocuous data. */
 function makeFakeGit(hang = {}) {
   return {
     checkout: async () => ({}),
     checkoutLocalBranch: async () => ({}),
-    branchLocal: () => (hang.branchLocal ? new Promise(() => { /* never settles */ }) : Promise.resolve({ current: "main" })),
+    // @decision 59e53710 — `checkout()`'s POST-checkout read (~:518, card 40a264d3's own DoD-3 site, the
+    // one this file was filed to prove bounded) is the ONLY `branchLocal()` call left in `checkout()` as
+    // of round 3 — the pre-spawn existence check now uses `raw(["for-each-ref",...])` instead (see below).
+    branchLocal: () => (hang.branchLocal
+      ? new Promise(() => { /* never settles */ })
+      : Promise.resolve({ current: "main", all: ["main", "x", "y"] })),
     status: async () => ({ isClean: () => false, files: [] }),
-    raw: async (args) => (Array.isArray(args) && args[0] === "add" ? "" : ""),
+    raw: async (args) => {
+      // @decision 59e53710 (round 3) — `checkout()`'s existence check reads `refs/heads/` via
+      // `for-each-ref`, never `branchLocal()` (a detached-HEAD pseudo-entry can false-match it — see the
+      // decision record). `hang.forEachRef` hangs ONLY this call, never the unrelated `["add",...]` raw
+      // call `commit()` uses, so a case proving one site is bounded can't silently miss the other.
+      if (Array.isArray(args) && args[0] === "for-each-ref") {
+        return hang.forEachRef
+          ? new Promise(() => { /* never settles */ })
+          : "refs/heads/main\nrefs/heads/x\nrefs/heads/y\n";
+      }
+      return Array.isArray(args) && args[0] === "add" ? "" : "";
+    },
     commit: async () => ({ commit: "" }), // empty .commit forces commit()'s fallback revparse(["HEAD"]) path
     // `hang.revparse` must hang ONLY the ["HEAD"] call this test exists to prove bounded — never the
     // operational-home guard's OWN, EARLIER `revparse(["--show-toplevel"])` probe (card f9360c84 round 3:
@@ -79,25 +103,67 @@ const repo = path.join(os.tmpdir(), `loom-gitwriter-hangbound-${Date.now()}-${pr
 fs.mkdirSync(repo, { recursive: true });
 
 try {
-  // ── 1+2. checkout(): a never-settling branchLocal() must not hang, and must not wedge a later caller ──
+  // ── 1a. checkout(): a never-settling for-each-ref EXISTENCE CHECK (~:492) must not hang ──
+  {
+    const hangingWriter = new GitWriter(repo, {
+      gitLocalMs: GIT_LOCAL_MS,
+      gitFactory: () => makeFakeGit({ forEachRef: true }),
+    });
+
+    const t0 = performance.now(); // MONOTONIC (survives an NTP/backward clock step)
+    const checkoutResult = await Promise.race([hangingWriter.checkout("x"), guard(GUARD_MS, "checkout-existence")]);
+    const elapsedMs = performance.now() - t0;
+
+    check(`[checkout existence-check] settles on its own within its bounded timeout (${Math.round(elapsedMs)}ms, ` +
+      `cap ~${GIT_LOCAL_MS}ms) — a never-settling for-each-ref (the pre-spawn existence check) does NOT hang it forever`,
+      checkoutResult?.__guardFired !== "checkout-existence" && elapsedMs < GUARD_MS);
+    check("[checkout existence-check] reports a structured failure (never a hang, never a false success)",
+      checkoutResult?.ok === false);
+    check(`[checkout existence-check] the failure names THIS EXACT call's label, not the sibling branchLocal() ` +
+      `site's ("git for-each-ref (existence check) exceeded ${GIT_LOCAL_MS}ms") — actual: "${checkoutResult?.error}"`,
+      typeof checkoutResult?.error === "string" &&
+        new RegExp(`^git for-each-ref \\(existence check\\) exceeded ${GIT_LOCAL_MS}ms`).test(checkoutResult.error));
+
+    // THE LOCK-DAMAGE PROOF: a SECOND caller on the SAME repo must still be admitted promptly — not
+    // queued forever behind the first call's now-settled (rejected, but previously would-have-been
+    // never-settling) op. This is what actually distinguishes "this op timed out" from "the shared
+    // per-repo lock is now wedged for every future caller."
+    const healthyWriter = new GitWriter(repo, {
+      gitLocalMs: GIT_LOCAL_MS,
+      gitFactory: () => makeFakeGit({}),
+    });
+    const t1 = performance.now();
+    const secondResult = await Promise.race([healthyWriter.checkout("y"), guard(GUARD_MS, "second-checkout-existence")]);
+    const elapsedMs2 = performance.now() - t1;
+    check(`[lock] a SECOND checkout() call on the SAME repo is still admitted (settled in ${Math.round(elapsedMs2)}ms) ` +
+      `— not queued forever behind the first call's unbounded existence-check for-each-ref`,
+      secondResult?.__guardFired !== "second-checkout-existence");
+    check("[lock] the second call actually succeeded (real admission, not just 'didn't hang')",
+      secondResult?.ok === true && secondResult?.branch === "main");
+  }
+
+  // ── 1b. checkout(): a never-settling branchLocal() POST-CHECKOUT READ (~:518) must not hang either —
+  // this is card 40a264d3's own original DoD-3 site, and the one the lost-guard regression (see this
+  // file's header comment) let slip past undetected. ──
   {
     const hangingWriter = new GitWriter(repo, {
       gitLocalMs: GIT_LOCAL_MS,
       gitFactory: () => makeFakeGit({ branchLocal: true }),
     });
 
-    const t0 = performance.now(); // MONOTONIC (survives an NTP/backward clock step)
+    const t0 = performance.now();
     const checkoutResult = await Promise.race([hangingWriter.checkout("x"), guard(GUARD_MS, "checkout")]);
     const elapsedMs = performance.now() - t0;
 
     check(`[checkout] settles on its own within its bounded timeout (${Math.round(elapsedMs)}ms, cap ~${GIT_LOCAL_MS}ms) ` +
-      `— a never-settling branchLocal() does NOT hang it forever`,
+      `— a never-settling branchLocal() (the post-spawn read) does NOT hang it forever`,
       checkoutResult?.__guardFired !== "checkout" && elapsedMs < GUARD_MS);
     check("[checkout] reports a structured failure (never a hang, never a false success)",
       checkoutResult?.ok === false);
-    check(`[checkout] the failure names the specific bounded call and its budget ` +
-      `("git branch ... exceeded ${GIT_LOCAL_MS}ms") — actual: "${checkoutResult?.error}"`,
-      typeof checkoutResult?.error === "string" && new RegExp(`git branch.*exceeded ${GIT_LOCAL_MS}ms`).test(checkoutResult.error));
+    check(`[checkout] the failure names THIS EXACT call's label, not the sibling for-each-ref site's ` +
+      `("git branch exceeded ${GIT_LOCAL_MS}ms") — actual: "${checkoutResult?.error}"`,
+      typeof checkoutResult?.error === "string" &&
+        new RegExp(`^git branch exceeded ${GIT_LOCAL_MS}ms`).test(checkoutResult.error));
 
     // THE LOCK-DAMAGE PROOF: a SECOND caller on the SAME repo must still be admitted promptly — not
     // queued forever behind the first call's now-settled (rejected, but previously would-have-been
@@ -111,7 +177,7 @@ try {
     const secondResult = await Promise.race([healthyWriter.checkout("y"), guard(GUARD_MS, "second-checkout")]);
     const elapsedMs2 = performance.now() - t1;
     check(`[lock] a SECOND checkout() call on the SAME repo is still admitted (settled in ${Math.round(elapsedMs2)}ms) ` +
-      `— not queued forever behind the first call's unbounded branchLocal()`,
+      `— not queued forever behind the first call's unbounded post-checkout branchLocal()`,
       secondResult?.__guardFired !== "second-checkout");
     check("[lock] the second call actually succeeded (real admission, not just 'didn't hang')",
       secondResult?.ok === true && secondResult?.branch === "main");

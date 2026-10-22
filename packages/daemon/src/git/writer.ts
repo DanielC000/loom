@@ -39,6 +39,9 @@ import { enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReaso
 // The REST endpoints in gateway/server.ts, the platform git tools in mcp/platform.ts, and the operator
 // git tools in mcp/operator.ts (codex parity surface) call in too — four callers total, as of the
 // decision record's round 11.
+//
+// @decision 59e53710 — `checkout()`/`createBranch()` both run `unsafeBranchNameShapeReason` THEMSELVES,
+// before any git call, so every one of the four callers refuses a name-shape bypass uniformly.
 
 /**
  * Per-op ceiling. Every git write runs BOUNDED + NON-INTERACTIVE: this repo has been bitten twice by
@@ -62,19 +65,36 @@ const GIT_PUSH_TIMEOUT_MS = 45_000;
 const SAFE_BRANCH_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]|\/[A-Za-z0-9])*$/;
 
 /**
+ * @decision 59e53710 — the leading-"-"/"@{"/"refs/"-prefix checks belong here, enforced for EVERY
+ * `GitWriter.checkout`/`createBranch` caller. Never fold ".."/the conservative charset in here too —
+ * those stay caller-side-only, inside `unsafeBranchNameReason` below.
+ *
+ * Returns the reason a name is unsafe, or `null` when it is a plain branch name.
+ */
+export function unsafeBranchNameShapeReason(name: string): string | null {
+  if (name.startsWith("-")) return `"${name}" starts with "-" — it could be parsed as a git command-line option, not a branch name`;
+  if (name.includes("@{")) return `"${name}" contains "@{" — that is revision/reflog shorthand (e.g. the previous-branch shortcut "@{-1}"), never a plain branch name`;
+  if (/^refs\//i.test(name)) return `"${name}" starts with "refs/" — pass a short branch name (e.g. "main"), not a full ref path`;
+  return null;
+}
+
+/**
  * @decision 2a6a292a round 10 — pre-git shape validation; no git-argument-level mitigation exists for
  * "-"/"@{-1}"/"-bsneaky" (verified: neither `--no-guess` nor a trailing `--` stops them). Callers accepting
  * an untrusted branch name MUST call this before any git call. See the decision record's round-10 section.
+ *
+ * @decision 59e53710 — never re-inline the leading-"-"/"@{"/"refs/"-prefix checks here; delegate to
+ * `unsafeBranchNameShapeReason` so `GitWriter` itself enforces that subset for every caller, not just
+ * `project_checkout_branch`. Keep the ".."/charset checks here, caller-side-only.
  *
  * Returns the reason a name is unsafe, or `null` when it is a plain branch name. Deliberately does NOT
  * reject a name merely because it looks like `<remote>/<name>` (e.g. "origin/evil") — see the record for why.
  */
 export function unsafeBranchNameReason(name: string): string | null {
   if (!name) return "a branch name is required";
-  if (name.startsWith("-")) return `"${name}" starts with "-" — it could be parsed as a git command-line option, not a branch name`;
-  if (name.includes("@{")) return `"${name}" contains "@{" — that is revision/reflog shorthand (e.g. the previous-branch shortcut "@{-1}"), never a plain branch name`;
+  const shapeReason = unsafeBranchNameShapeReason(name);
+  if (shapeReason) return shapeReason;
   if (name.includes("..")) return `"${name}" contains ".." — that is range syntax, never a plain branch name`;
-  if (/^refs\//i.test(name)) return `"${name}" starts with "refs/" — pass a short branch name (e.g. "main"), not a full ref path`;
   if (!SAFE_BRANCH_NAME_RE.test(name)) return `"${name}" contains characters outside the conservative branch-name charset (letters, digits, ".", "_", "-", and "/" between segments)`;
   return null;
 }
@@ -448,6 +468,11 @@ export class GitWriter {
   async checkout(branch: string, opts?: { precondition?: () => Promise<{ ok: true } | { ok: false; error: string }> }): Promise<GitWriteResult<{ branch: string; sha: string | null }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
     const target = branch.trim();
+    // @decision 59e53710 — the no-legitimate-use subset (leading "-", "@{") is enforced HERE, for every
+    // caller of this method, not just project_checkout_branch (which runs the wider unsafeBranchNameReason
+    // before ever constructing a GitWriter).
+    const shapeReason = unsafeBranchNameShapeReason(target);
+    if (shapeReason) return { ok: false, error: shapeReason };
     const homeRefusal = await this.refuseIfOperationalHome();
     if (homeRefusal) return homeRefusal;
     // @decision 24c0bdba (round 6) — the try/catch wraps the WHOLE withCanonicalIndexLock(...) call, not
@@ -461,6 +486,18 @@ export class GitWriter {
             if (!pre.ok) return pre;
           }
           const git = this.gitLocal(this.localMs);
+          // @decision 59e53710 — verify target is an existing local branch via `for-each-ref`, never
+          // `branchLocal().all` (round 3: a detached HEAD's pseudo-entry can false-match) or
+          // `raw(["show-ref",...])` (unrejected). See the decision record for the full repro.
+          const refsRaw = await withTimeout(
+            git.raw(["for-each-ref", "--format=%(refname)", "refs/heads/"]),
+            this.localMs,
+            "git for-each-ref (existence check)",
+          );
+          const localRefs = new Set((refsRaw ?? "").split("\n").map((line) => line.trim()).filter(Boolean));
+          if (!localRefs.has(`refs/heads/${target}`)) {
+            return { ok: false, error: `"${target}" is not an existing local branch — checkout only switches to an EXISTING branch` };
+          }
           // @decision d8bb2074 — kill-confirmed (killableCanonicalRaw), not a bare withTimeout race: an
           // orphaned checkout child must never survive past the lock releasing, and the repo is re-checked
           // for quarantine immediately before spawning.
@@ -472,7 +509,11 @@ export class GitWriter {
             // @decision 2a6a292a round 10 — `--no-guess` disables git's own DWIM (a plain checkout of a
             // non-existent local name silently tracking a same-named remote ref); verified safe/additive
             // for every caller. See the decision record's round-10 section for the full repro + proof.
-            await killableCanonicalRaw(this.repoPath, ["checkout", "--no-guess", target], this.localMs, "git checkout", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
+            // @decision 59e53710 — trailing "--" marks end-of-revision: if target somehow isn't a real
+            // ref despite the exists-check above (a check/use race), git hard-fails "invalid reference"
+            // instead of silently falling back to pathspec-restore mode (measured, real git: a dirty
+            // tracked file named identically to `target` is left byte-unchanged on that failure).
+            await killableCanonicalRaw(this.repoPath, ["checkout", "--no-guess", target, "--"], this.localMs, "git checkout", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             if (treeDeathUnconfirmed(e)) {
               raisedToken = enterMergeQuarantine(this.repoPath, target, unconfirmedKillReason(`git checkout could not be confirmed dead after a kill: ${(e as Error).message}`));
@@ -522,6 +563,10 @@ export class GitWriter {
   async createBranch(name: string, opts?: { startPoint?: string; precondition?: () => Promise<{ ok: true; startPoint?: string } | { ok: false; error: string }> }): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
     const target = name.trim();
+    // @decision 59e53710 — see checkout()'s identical comment above: enforced here too, so EVERY caller
+    // of createBranch (not just project_checkout_branch's create:true) refuses these two shapes.
+    const shapeReason = unsafeBranchNameShapeReason(target);
+    if (shapeReason) return { ok: false, error: shapeReason };
     const homeRefusal = await this.refuseIfOperationalHome();
     if (homeRefusal) return homeRefusal;
     // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap

@@ -1307,9 +1307,12 @@ try {
     // (in production) already succeeded.
     const fakeGit = {
       checkout: async () => {}, checkoutLocalBranch: async () => {},
-      branchLocal: async () => ({ current: "atlas" }),
+      // @decision 59e53710 (round 3) — `checkout()`'s PRE-spawn existence check reads `refs/heads/` via
+      // `raw(["for-each-ref",...])`, not `branchLocal()` — the response must list "refs/heads/atlas" or
+      // that check refuses first, before ever reaching the simulated POST-checkout revparse failure below.
+      branchLocal: async () => ({ current: "atlas", all: ["atlas"] }),
       status: async () => ({ isClean: () => true, files: [] }),
-      raw: async () => "",
+      raw: async (args) => (Array.isArray(args) && args[0] === "for-each-ref" ? "refs/heads/atlas\n" : ""),
       commit: async () => ({ commit: "" }),
       // `revparse` is ALSO used for the unrelated operational-home toplevel probe
       // (`["--show-toplevel"]`) earlier in checkout() — only the post-checkout `["HEAD"]` read must fail.

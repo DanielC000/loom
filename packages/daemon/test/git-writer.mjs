@@ -5,7 +5,7 @@ import "./_guard.mjs"; // FIRST: arms LOOM_TEST=1 + strips GIT_PAGER/PAGER befor
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { GitWriter, nonInteractiveEnv, stripClaudeSessionTrailer } from "../dist/git/writer.js";
+import { GitWriter, nonInteractiveEnv, stripClaudeSessionTrailer, unsafeBranchNameShapeReason } from "../dist/git/writer.js";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
@@ -101,6 +101,101 @@ const w = new GitWriter(repo);
   check("HEAD switched back to base", git("rev-parse", "--abbrev-ref", "HEAD").trim() === baseBranch);
   const bad = await w.checkout("does-not-exist");
   check("checkout of unknown branch rejected", bad.ok === false && typeof bad.error === "string" && bad.error.length > 0);
+
+  // 3b. @decision 59e53710 — unsafeBranchNameShapeReason's three no-legitimate-use checks ("-", "@{", a
+  //     "refs/" prefix), unit-tested directly, PLUS the same names proven refused through
+  //     checkout()/createBranch() THEMSELVES — the chokepoint this card moved the check into. A REAL
+  //     previous branch is established first (round-2 CR correction) so "-"/"@{-1}" genuinely have
+  //     something to resolve to pre-fix, not merely fail for lack of one. HEAD is asserted via the
+  //     SYMBOLIC ref, never a sha (a same-sha new branch would pass a sha-only check), and state is reset
+  //     to the baseline between every case.
+  git("checkout", "-b", "second");
+  git("checkout", baseBranch);
+  const symbolicRef3b = () => { try { return git("symbolic-ref", "HEAD").trim(); } catch { return null; } };
+  const branchSet3b = () => git("branch", "--list").split("\n").map((l) => l.replace(/^[* ]+/, "").trim()).filter(Boolean).sort().join(",");
+  function resetToBaseline3b() {
+    try { git("checkout", "--", "."); } catch { /* nothing dirty */ }
+    try { git("checkout", baseBranch); } catch { /* best-effort */ }
+    for (const b of branchSet3b().split(",").filter(Boolean)) {
+      if (b !== baseBranch && b !== "second") { try { git("branch", "-D", b); } catch { /* ignore */ } }
+    }
+  }
+  for (const name of ["-", "@{-1}", "-bsneaky"]) {
+    check(`unsafeBranchNameShapeReason(${JSON.stringify(name)}) rejects`, typeof unsafeBranchNameShapeReason(name) === "string");
+    resetToBaseline3b();
+    const refBefore = symbolicRef3b();
+    const coUnsafe = await w.checkout(name);
+    check(`checkout(${JSON.stringify(name)}) rejected`, coUnsafe.ok === false && typeof coUnsafe.error === "string");
+    check(`checkout(${JSON.stringify(name)}): symbolic HEAD unchanged`, symbolicRef3b() === refBefore);
+    resetToBaseline3b();
+    const setBefore = branchSet3b();
+    const cbUnsafe = await w.createBranch(name);
+    check(`createBranch(${JSON.stringify(name)}) rejected`, cbUnsafe.ok === false && typeof cbUnsafe.error === "string");
+    check(`createBranch(${JSON.stringify(name)}): no new branch landed`, branchSet3b() === setBefore);
+  }
+  // "refs/" prefix — moved INTO unsafeBranchNameShapeReason this round (CR correction: git's own
+  // validation does NOT reject it — verified directly: createBranch("refs/heads/other") used to create a
+  // real, nested "refs/heads/refs/heads/other" ref, and checkout()ing an EXISTING branch's own
+  // "refs/heads/<name>" full path used to DETACH HEAD rather than switch to that branch).
+  check('unsafeBranchNameShapeReason("refs/heads/other") rejects', typeof unsafeBranchNameShapeReason("refs/heads/other") === "string");
+  resetToBaseline3b();
+  {
+    const refBefore = symbolicRef3b();
+    const r = await w.checkout("refs/heads/second");
+    check('checkout("refs/heads/second") rejected (refs/ prefix)', r.ok === false && typeof r.error === "string");
+    check('checkout("refs/heads/second"): symbolic HEAD unchanged (never detached)', symbolicRef3b() === refBefore);
+  }
+  resetToBaseline3b();
+  {
+    const setBefore = branchSet3b();
+    const r = await w.createBranch("refs/heads/other");
+    check('createBranch("refs/heads/other") rejected (refs/ prefix)', r.ok === false && typeof r.error === "string");
+    check('createBranch("refs/heads/other"): no nested branch landed', branchSet3b() === setBefore);
+  }
+  // Negative control: an ordinary, legal local-branch SHAPE this function deliberately does NOT reject —
+  // "origin/x" is a syntactically valid local branch name too (see unsafeBranchNameReason's own doc).
+  check("negative control: unsafeBranchNameShapeReason(\"origin/x\") does NOT reject", unsafeBranchNameShapeReason("origin/x") === null);
+  check("negative control: unsafeBranchNameShapeReason(\"feature/x\") does NOT reject", unsafeBranchNameShapeReason("feature/x") === null);
+
+  // 3c. @decision 59e53710 — the PATHSPEC-FALLBACK data-loss path: checkout(".")/checkout(a tracked
+  //     filename)/checkout("<branch>^{}") used to resolve as a pathspec-restore or a detached revision
+  //     instead of refusing an unknown branch, silently discarding a dirty tracked file or detaching HEAD.
+  //     Closed by requiring `target` to be an EXISTING local branch (via for-each-ref, see 3d below for
+  //     why not branchLocal().all) before the mutating spawn, plus a trailing "--" so a check/use race
+  //     still hard-fails rather than falling back to pathspec mode. Reset to a clean baseline, then
+  //     re-dirty, before every case.
+  for (const name of [".", "seed.txt", `${baseBranch}^{}`]) {
+    resetToBaseline3b();
+    fs.writeFileSync(path.join(repo, "seed.txt"), "DIRTY EDIT\n");
+    const refBefore = symbolicRef3b();
+    const r = await w.checkout(name);
+    check(`checkout(${JSON.stringify(name)}) [pathspec-fallback] rejected`, r.ok === false && typeof r.error === "string");
+    check(`checkout(${JSON.stringify(name)}): seed.txt is byte-unchanged (dirty edit survived)`, fs.readFileSync(path.join(repo, "seed.txt"), "utf8") === "DIRTY EDIT\n");
+    check(`checkout(${JSON.stringify(name)}): symbolic HEAD unchanged (never detached)`, symbolicRef3b() === refBefore);
+  }
+  resetToBaseline3b();
+
+  // 3d. @decision 59e53710 (round 3) — DETACHED-HEAD PSEUDO-ENTRY: on a detached canonical HEAD, simple-git
+  //     parses git's own "(HEAD detached at X)" branch-list line into a pseudo-entry and puts the bare
+  //     commit-ish X into branchLocal().all — so an existence check built on `.all` wrongly treated
+  //     checkout(<that sha>) as "an existing local branch". The fix reads real branch names from
+  //     for-each-ref's refs/heads/ listing instead, which never contains a detached-HEAD line at all.
+  //     Detach for real (raw git, bypassing the writer under test — it refuses a non-branch target by
+  //     design) at both the short (git's own default abbreviation, the exact string the pseudo-entry
+  //     would have carried) and full sha forms. MUST detach via the raw SHA, never a branch name — git
+  //     itself renders the branch-list line differently in each case ("(HEAD detached at <sha>)" vs.
+  //     "(HEAD detached at refs/heads/<branch>)", measured directly on this host's git 2.47.0), and only
+  //     the sha form produces the pseudo-entry this case exists to catch.
+  const detachedFullSha = git("rev-parse", baseBranch).trim();
+  git("checkout", "--detach", detachedFullSha);
+  const detachedShortSha = git("rev-parse", "--short", "HEAD").trim();
+  for (const shaForm of [detachedShortSha, detachedFullSha]) {
+    const r = await w.checkout(shaForm);
+    check(`checkout(${JSON.stringify(shaForm)}) [detached-HEAD pseudo-entry] rejected`, r.ok === false && typeof r.error === "string");
+    check(`checkout(${JSON.stringify(shaForm)}): still detached at the same commit (never switched)`, git("rev-parse", "HEAD").trim() === detachedFullSha);
+  }
+  git("checkout", baseBranch); // back to a normal branch before step 4's push tests rely on it.
+  resetToBaseline3b(); // clean seed.txt + back on baseBranch before step 4's push tests rely on both.
 
   // 4. push with NO reachable remote must FAIL FAST (bounded + non-interactive) — never hang. The repo
   //    has no remote configured, so git errors immediately ("No configured push destination"). We also
