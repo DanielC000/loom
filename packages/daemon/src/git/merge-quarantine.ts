@@ -253,12 +253,46 @@ function unionArmedKeys(all: MergeQuarantineEntry[]): string[] | undefined {
  * hand-copied drift between two call sites reopens the exact gap the branch-text fallback exists to close. */
 export const PLACEHOLDER_BRANCH_CORRUPT = "(unknown — corrupt boot-time latch)";
 export const PLACEHOLDER_BRANCH_UNRESOLVED = "(unknown — boot could not resolve which repo/branch this protects)";
+/** @decision 702b4241 — never conflate this with {@link PLACEHOLDER_BRANCH_CORRUPT}: "could not read"
+ *  (EACCES/EMFILE/...) and "read and found bad" are different facts with different safe actions. */
+export const PLACEHOLDER_BRANCH_UNREADABLE = "(unknown — boot found this latch unreadable, not corrupt)";
 
 /** `true` for an in-memory {@link MergeQuarantineEntry} (via its own `placeholder` field) OR a raw,
  *  not-yet-validated parsed-JSON object (via the legacy branch-text fallback — see the consts' own doc
  *  comment for why that fallback can never misfire on a real entry). */
 function isPlaceholderEntryShape(parsed: { placeholder?: unknown; branch?: unknown }): boolean {
-  return parsed.placeholder === true || parsed.branch === PLACEHOLDER_BRANCH_CORRUPT || parsed.branch === PLACEHOLDER_BRANCH_UNRESOLVED;
+  return parsed.placeholder === true || parsed.branch === PLACEHOLDER_BRANCH_CORRUPT || parsed.branch === PLACEHOLDER_BRANCH_UNRESOLVED
+    || parsed.branch === PLACEHOLDER_BRANCH_UNREADABLE;
+}
+
+/** @decision 702b4241 (round 2) — `true` ONLY for card 702b4241's own synthetic boot-minted placeholder
+ *  (never a genuine raise, and never the CORRUPT/UNRESOLVED siblings) — the one shape {@link
+ *  reconcileMarkedBasenameBeforeWrite}'s re-ingestion branch must act on. */
+function isUnreadablePlaceholderEntry(entry: MergeQuarantineEntry): boolean {
+  return entry.placeholder === true && entry.branch === PLACEHOLDER_BRANCH_UNREADABLE;
+}
+
+/** @decision 702b4241 (round 2) — do not fold this into PASS 1/1b/safety-tmp's own inline parses (each
+ *  is independently decision-anchored); this is a deliberate, narrow duplication for ONE new caller,
+ *  {@link reconcileMarkedBasenameBeforeWrite}'s re-ingestion branch, not a shared-helper refactor. */
+function latchEntryFromParsedRecord(parsed: Record<string, unknown> & { repoPath: string; branch: string; reason: string }): MergeQuarantineEntry {
+  const tokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
+    ? parsed.tokens
+    : [typeof parsed.token === "string" ? parsed.token : randomUUID()];
+  return {
+    repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
+    opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
+    enteredAt: typeof parsed.enteredAt === "number" ? parsed.enteredAt : Date.now(),
+    tokens,
+    orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
+      ? parsed.orphanLatchFiles : undefined,
+    resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
+    resolvedKeys: parseResolvedKeysField(parsed as { resolvedKeys?: unknown }),
+    contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
+      ? parsed.contributorRepoPaths : undefined,
+    provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
+    provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
+  };
 }
 
 const activeQuarantines = new Map<string, MergeQuarantineEntry>();
@@ -294,6 +328,13 @@ let pendingUnresolvedQuarantines: PendingUnresolvedQuarantine[] = [];
  * decision record's "Round 5"; the THREE call sites that may `.delete()` are each tagged with this id.
  */
 const keptUnreadableLatchFiles = new Set<string>();
+
+/**
+ * @decision 702b4241 (round 4) — every synthetic `randomUUID()` {@link divertUnreadableBootLatch} ever
+ * minted — never returned to a real caller, so it must be filtered from any later union (see the
+ * decision record's "Round 4" section).
+ */
+const unreadablePlaceholderTokens = new Set<string>();
 
 /**
  * Every token THIS PROCESS has deliberately cleared — populated EXCLUSIVELY by
@@ -1190,6 +1231,35 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
   if (!isReadableLatchRecord(parsed)) return entry; // e.g. the bare literal `null` — nothing usable
   if (typeof parsed.repoPath !== "string") return entry;
   if (directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) return entry; // a different identity — the pre-existing guard/protect rules already govern this
+  // @decision 702b4241 (round 2) — when `entry` is itself card 702b4241's own UNREADABLE placeholder,
+  // the generic token-only union below is the WRONG direction: RE-INGEST the on-disk record WHOLESALE
+  // instead, or the placeholder's own synthetic branch/reason durably wins over genuine recovered data.
+  if (isUnreadablePlaceholderEntry(entry) && !isPlaceholderEntryShape(parsed)
+    && typeof parsed.branch === "string" && typeof parsed.reason === "string") {
+    const reingested = latchEntryFromParsedRecord(parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string });
+    const finalOwnHashForReingest = path.basename(final, ".json");
+    // @decision db0a9db0 (round 4) — run the SAME detector every other re-parse site uses, on the
+    // REINGESTED record (its own disk-sourced keys), before anything below overrides them — never force
+    // `provenanceTracked: true` here; see db0a9db0's own "only writeMergeQuarantineLatch stamps it" rule.
+    const reingestedUnknownProvenance = detectUnknownProvenance(reingested, finalOwnHashForReingest);
+    const onDiskKeysForReingest = informativeKeysFor(reingested).filter((k) => quarantineHashForKey(k) !== finalOwnHashForReingest);
+    // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too, never drop them wholesale:
+    // `entry` can ALREADY carry a REAL raiser's own token (unioned in via `divertRaiseEntry` before this
+    // basename ever became readable), not just the placeholder's bare synthetic one — see "Round 5" below.
+    // @decision 702b4241 (round 4) — but filter OUT every {@link unreadablePlaceholderTokens} member: that
+    // specific synthetic token was never returned to a real caller and must never ride into the union,
+    // even on the plain query-after-boot path where `entry.tokens` holds nothing else at all.
+    return {
+      ...reingested,
+      tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingested.tokens])],
+      resolvedKey: entry.resolvedKey,
+      resolvedKeys: onDiskKeysForReingest.length > 0
+        ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeysForReingest, `reconcileMarkedBasenameBeforeWrite-reingest(${entry.repoPath})`)
+        : entry.resolvedKeys,
+      armedKeys: entry.armedKeys,
+      provenanceUnknown: reingestedUnknownProvenance ? true : reingested.provenanceUnknown,
+    };
+  }
   const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed);
   // @decision 8db913e2 (Follow-up 150aed7b) — exclude the key `final`'s OWN basename hash names, never
   // a recomputed `canonicalRepoLockKey(entry.repoPath)` (82032b5c/97cff6db's own rule: this write may
@@ -1200,8 +1270,16 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
     resolvedKeys: parseResolvedKeysField(parsed),
   } as MergeQuarantineEntry).filter((k) => quarantineHashForKey(k) !== finalOwnHash);
   if (resurrectable.length === 0 && onDiskKeys.length === 0) return entry;
+  // @decision 702b4241 (round 4) — the genuine on-disk record's identity wins when OLDER than `entry`'s
+  // own (mirrors `unionQuarantineEntries`'s longest-outstanding-raise rule) — see "Round 4" below.
+  const onDiskEnteredAt = typeof parsed.enteredAt === "number" ? parsed.enteredAt : undefined;
+  const onDiskIdentity = onDiskEnteredAt !== undefined && onDiskEnteredAt < entry.enteredAt
+    && typeof parsed.branch === "string" && typeof parsed.reason === "string"
+    ? { branch: parsed.branch, reason: parsed.reason, enteredAt: onDiskEnteredAt, opId: typeof parsed.opId === "string" ? parsed.opId : undefined }
+    : undefined;
   return {
     ...entry,
+    ...onDiskIdentity,
     tokens: [...new Set([...resurrectable, ...entry.tokens])],
     resolvedKeys: onDiskKeys.length > 0
       ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeys, `reconcileMarkedBasenameBeforeWrite(${entry.repoPath})`)
@@ -1597,8 +1675,14 @@ function consumeMatchedPendingsIntoArmedEntry(
         // under a DIFFERENT key — re-point it (replacement only, never a union source, c9114934) before
         // re-inserting, or that slot is stranded holding a stale, pre-raise snapshot.
         for (const p of group) replaceEntryEverywhere(activeQuarantines, p.entry, foreignUnion);
-        pendingUnresolvedQuarantines.push({ entry: foreignUnion, sourceFile: base.sourceFile });
-        if (!writePendingDivertFile(base.sourceFile, foreignUnion)) {
+        // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
+        // `base.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
+        const written = writePendingDivertFile(base.sourceFile, foreignUnion);
+        if (written) {
+          if (written.entry !== foreignUnion) replaceEntryEverywhere(activeQuarantines, foreignUnion, written.entry);
+          pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
+        } else {
+          pendingUnresolvedQuarantines.push({ entry: foreignUnion, sourceFile: base.sourceFile });
           // eslint-disable-next-line no-console
           console.error(`[merge-quarantine] could not durably persist a merged sibling pending latch for ${foreignUnion.repoPath} at ${base.sourceFile} after an unrelated raise's own divert — the PRE-EXISTING durable state there is left UNTOUCHED (still enforced in THIS process).`);
         }
@@ -1728,7 +1812,7 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
  * claimant ({@link survivingSharedClaimRepoPaths}) that kept `final` on disk (empty if none) — a check
  * that never yields to `provenCoverage`. See the decision record.
  */
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string | undefined, liftedKeys: ReadonlySet<string>): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }> } {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string | undefined, liftedKeys: ReadonlySet<string>): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; unattributed?: true } {
   const final = quarantinePathForKey(key);
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — every key THIS clear is itself touching, never
   // `key` alone — the caller computes it (via `ownedKeysIncluding`/`keysToLift`) and must pass it
@@ -1788,6 +1872,10 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   // posture as `sharedClaimants`, applied to a content-based rather than structural claim.
   if (contentClaimants.length > 0) finalProtectOk = false;
   const keptClaimants = [...new Set([...sharedClaimants, ...contentClaimants])];
+  // @decision 702b4241 (round 2) — set ONLY in the bare "kept, no claimant to name" branch below — the
+  // ONE shape this function's own return had no way to represent at all (card 702b4241's own basename-
+  // only unreadable mark, with no foreign identity attached), silently losing the keep at every caller.
+  let unattributedKept = false;
   if (finalProtectOk) {
     let unlinkConfirmed = true;
     try {
@@ -1812,6 +1900,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   } else {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — a foreign occupant's content could not be durably protected (or could not be read) before this clear; see the error just above. It also stays marked kept in THIS PROCESS (a real self-owned record, or a basename-only read-failure mark), not only after a later boot.`);
+    unattributedKept = true;
   }
   // @decision 182c01cc (round 2, finding 1) — fold this sweep's OWN relocations (and, round 4, its own
   // kept double-faults) in too; it used to discard them, so a clear whose only foreign content sat in a
@@ -1830,6 +1919,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   return {
     kept: [...keptClaimants.map((repoPath) => ({ repoPath, sourceFile: finalBasename })), ...persistedKept],
     relocated: persistedRelocated,
+    ...(unattributedKept ? { unattributed: true as const } : {}),
   };
 }
 
@@ -1976,27 +2066,54 @@ function pendingDivertCollisionFilenameFor(repoPath: string): string {
  * module — that residual is card `2a6a8073`'s own, at `enterMergeQuarantine`'s brand-new-entry arm instead.
  *
  * @decision d4b25feb (round 2) — see the paragraph above for why this site needs no degraded-occupant guard.
+ *
+ * @decision 702b4241 (round 3) — REFUSES to rename over a `filename` still marked
+ * {@link keptUnreadableLatchFiles}, diverting to a fresh record instead (see the decision record's
+ * "Round 3" section). The caller MUST use the RETURNED `filename`/`entry`, never its own arguments.
+ *
+ * @decision 702b4241 (round 7) — a marked `filename` is RE-READ right here before redirecting: a stale
+ * mark must not force a redirect once the content is readable again and genuinely this same identity.
+ * See the decision record's "Round 7" section for the mechanism and why this is the one chokepoint fix.
  */
-function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): boolean {
+function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): { filename: string; entry: MergeQuarantineEntry } | false {
+  let target = filename;
+  let toWrite = entry;
+  if (keptUnreadableLatchFiles.has(filename)) {
+    const reread = readPendingDivertFileAt(path.join(MERGE_QUARANTINE_DIR, filename));
+    if (reread.state === "entry" && directPathIdentity(reread.entry.repoPath) === directPathIdentity(entry.repoPath)) {
+      // Proven safe, right now: the SAME identity already occupies `filename`, readably. Discharge the
+      // stale mark by overwriting in place below, unioning the on-disk content forward — never dropped.
+      toWrite = unionIntoOnDiskPendingEntry(reread.entry, entry);
+    } else if (reread.state === "enoent") {
+      // Nothing real there any more — safe to write `entry` unchanged, in place (mirrors
+      // reconcilePendingDivertTarget's own ENOENT branch).
+    } else {
+      // Still genuinely unreadable, corrupt, or a DIFFERENT identity entirely — never overwrite blind.
+      target = pendingDivertCollisionFilenameFor(entry.repoPath);
+      toWrite = { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), filename])] };
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] refusing to rename over ${filename} — it is still marked UNREADABLE (never confirmed safe to overwrite); diverting ${entry.repoPath}'s own pending-divert record to ${target} instead and tracking ${filename} as an orphan reference.`);
+    }
+  }
   let fd: number | undefined;
-  const final = path.join(MERGE_QUARANTINE_DIR, filename);
+  const final = path.join(MERGE_QUARANTINE_DIR, target);
   const tmp = `${final}.tmp-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
     fd = fs.openSync(tmp, "w");
-    const { armedKeys: _armedKeys, ...persistable } = entry;
+    const { armedKeys: _armedKeys, ...persistable } = toWrite;
     fs.writeSync(fd, JSON.stringify(persistable, null, 2) + "\n");
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, final);
     // @decision 63e49ee2 (round 5) — same rule as writeMergeQuarantineLatch's own identical rename.
-    keptUnreadableLatchFiles.delete(filename);
+    keptUnreadableLatchFiles.delete(target);
     // @decision d4b25feb (round 2, MINOR) — this write is never batched the way boot's own safety-tmp
     // writes are (Phase 0 fsyncs the directory ONCE after the whole batch) — fsync the directory here,
     // per call, so the rename's own directory-entry visibility is durable too, not just the file's bytes.
     fsyncQuarantineDir();
-    return true;
+    return { filename: target, entry: toWrite };
   } catch (e) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already broken; nothing more to close */ } }
     // eslint-disable-next-line no-console
@@ -2381,7 +2498,11 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // @decision 8db913e2 (Follow-up 4b06875f) — `toPersist`/`toWrite` carry `resolvedKey` ONLY as filtered by
   // `excludeLiftedResolvedKey` (never `armedKeys`) — including the in-memory entry a union below may
   // introduce; nothing here bypasses that filter. This keeps 82032b5c/c9114934's own invariant intact.
-  if (!writePendingDivertFile(filename, toWrite)) {
+  // @decision 702b4241 (round 4) — use whatever `writePendingDivertFile` ACTUALLY wrote to below, never
+  // `filename`/`toWrite` unconditionally — `filename` can itself be marked `keptUnreadableLatchFiles`
+  // (see the decision record's "Round 4" section), in which case the write redirects elsewhere.
+  const written = writePendingDivertFile(filename, toWrite);
+  if (!written) {
     // @decision 4900c365 (round 2) — re-establish an in-memory record that OWNS `final` at its OWN
     // current name (self-referenced in `orphanLatchFiles`): enforces in THIS process too, not only on a
     // later boot, and every reference-aware sweep in this module already honours this ownership shape.
@@ -2431,28 +2552,28 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // `atFinalBasenameSameIdentity`, never the bare index — a mismatched-identity slot is left completely
   // untouched (no union, no re-point, no splice) and falls through to the independent-mint `else` below.
   if (atFilenameSameIdentity) {
-    replaceEntryEverywhere(activeQuarantines, oldAtFilename!, toWrite);
-    if (atFinalBasenameSameIdentity) replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, toWrite);
-    pendingUnresolvedQuarantines[atFilenameIdx] = { entry: toWrite, sourceFile: filename };
+    replaceEntryEverywhere(activeQuarantines, oldAtFilename!, written.entry);
+    if (atFinalBasenameSameIdentity) replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, written.entry);
+    pendingUnresolvedQuarantines[atFilenameIdx] = { entry: written.entry, sourceFile: written.filename };
     if (atFinalBasenameSameIdentity) pendingUnresolvedQuarantines.splice(atFinalBasenameIdx, 1);
   } else if (atFinalBasenameSameIdentity) {
     // @decision 8db913e2 (Follow-up 37452ddd) — re-point for the REPLACEMENT only, never as a union
     // source — `c9114934` still forbids unioning `atFinalBasenameIdx`'s own tokens into `toWrite`.
-    replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, toWrite);
-    pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: toWrite, sourceFile: filename };
+    replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, written.entry);
+    pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: written.entry, sourceFile: written.filename };
   } else {
     // @decision 1922be3a (round 4) — ALWAYS mint an independent, durably-tracked pending record here;
     // never fold into a live entry's own `orphanLatchFiles` (round 2's now-removed
     // `liveEntrySupersettingTokens` branch resurrected a cleared token — see the decision record).
-    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
+    pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
   }
-  // @decision 182c01cc — every branch above durably persists the occupant at `filename`; name it once
-  // here rather than duplicating this at each branch. `toPersist.repoPath` (never toWrite's, which can
-  // carry a union) is always this function's own occupant identity.
+  // @decision 182c01cc — every branch above durably persists the occupant at `written.filename`; name it
+  // once here rather than duplicating this at each branch. `toPersist.repoPath` (never toWrite's, which
+  // can carry a union) is always this function's own occupant identity.
   //
   // @decision 182c01cc (round 4, CR3 MAJOR) — `relocated:true`: the write above just succeeded, so
-  // `filename` genuinely names a new/re-pointed latch, distinct from `final`'s own basename.
-  return { ok: true, persisted: { repoPath: toPersist.repoPath, sourceFile: filename }, relocated: true };
+  // `written.filename` genuinely names a new/re-pointed latch, distinct from `final`'s own basename.
+  return { ok: true, persisted: { repoPath: toPersist.repoPath, sourceFile: written.filename }, relocated: true };
 }
 
 /**
@@ -2488,7 +2609,10 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   for (const i of [...indices].sort((a, b) => b - a)) pendingUnresolvedQuarantines.splice(i, 1); // descending so earlier indices stay valid
   const base = matched.reduce((a, b) => (a.entry.enteredAt <= b.entry.enteredAt ? a : b));
   const others = matched.filter((p) => p !== base);
-  const tokens = [...new Set([...matched.flatMap((p) => p.entry.tokens), token])];
+  // @decision 702b4241 (round 7) — same filter as divertRaiseEntry's own identical union (and
+  // reconcileMarkedBasenameBeforeWrite's reingest branch, round 4): a matched pending entry here can be a
+  // boot-time UNREADABLE placeholder, whose bare synthetic token must never ride into a durable union.
+  const tokens = [...new Set([...matched.flatMap((p) => p.entry.tokens).filter((t) => !unreadablePlaceholderTokens.has(t)), token])];
   const orphanLatchFiles = [...new Set([
     ...(base.entry.orphanLatchFiles ?? []),
     ...others.flatMap((p) => p.entry.orphanLatchFiles ?? []),
@@ -2526,9 +2650,14 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
     divertRaiseEntry(merged);
     return token;
   }
-  const persisted = writePendingDivertFile(base.sourceFile, merged);
-  pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
-  if (!persisted) {
+  // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
+  // `base.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
+  const written = writePendingDivertFile(base.sourceFile, merged);
+  if (written) {
+    if (written.entry !== merged) replaceEntryEverywhere(activeQuarantines, merged, written.entry);
+    pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
+  } else {
+    pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] canonical repo ${merged.repoPath} is quarantined IN THIS PROCESS ONLY right now (merged into its own still-unresolvable pending latch) — the durable pending-divert latch failed to re-write (see the error just above), so a daemon restart BEFORE that is fixed would silently LIFT this quarantine instead of re-arming it. Investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
   }
@@ -2798,9 +2927,13 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
   // already placed `entry` into `activeQuarantines` before calling this) in sync with the reconciled
   // object that is about to become the durable bytes.
   if (toWrite !== entry) replaceEntryEverywhere(activeQuarantines, entry, toWrite);
-  const persisted = writePendingDivertFile(filename, toWrite);
-  if (persisted) {
-    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
+  // @decision 702b4241 (round 4) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
+  // `filename` unconditionally: `filename` can itself be marked `keptUnreadableLatchFiles` (see the
+  // decision record's "Round 4" section for why this reaches a `pending-` name too).
+  const written = writePendingDivertFile(filename, toWrite);
+  if (written) {
+    if (written.entry !== toWrite) replaceEntryEverywhere(activeQuarantines, toWrite, written.entry);
+    pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
     return;
   }
   // eslint-disable-next-line no-console
@@ -2849,7 +2982,10 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   const base = matched.reduce((a, b) => (a.entry.enteredAt <= b.entry.enteredAt ? a : b));
   const others = matched.filter((p) => p !== base);
   const all = [base.entry, ...others.map((p) => p.entry), entry];
-  const tokens = [...new Set(all.flatMap((e) => e.tokens))];
+  // @decision 702b4241 (round 7) — filter OUT every {@link unreadablePlaceholderTokens} member, same rule
+  // as reconcileMarkedBasenameBeforeWrite's own reingest branch (round 4): a matched entry here can be a
+  // boot-time UNREADABLE placeholder, and its bare synthetic token was never returned to a real caller.
+  const tokens = [...new Set(all.flatMap((e) => e.tokens).filter((t) => !unreadablePlaceholderTokens.has(t)))];
   const orphanLatchFiles = [...new Set([
     ...all.flatMap((e) => e.orphanLatchFiles ?? []),
     ...others.map((p) => p.sourceFile).filter((f) => f !== base.sourceFile),
@@ -2871,9 +3007,13 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   };
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
   replaceEntryEverywhere(activeQuarantines, entry, merged);
-  const persisted = writePendingDivertFile(base.sourceFile, merged);
-  if (persisted) {
-    pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
+  // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
+  // `base.sourceFile` unconditionally: `base.sourceFile` can BE the boot-time UNREADABLE placeholder's
+  // own self-referenced final — the exact overwrite this round closes. See the decision record.
+  const written = writePendingDivertFile(base.sourceFile, merged);
+  if (written) {
+    if (written.entry !== merged) replaceEntryEverywhere(activeQuarantines, merged, written.entry);
+    pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
     return;
   }
   // eslint-disable-next-line no-console
@@ -3351,11 +3491,18 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${pending.entry.repoPath}'s own armed copy at key ${k} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
       }
     }
-    if (!writePendingDivertFile(pending.sourceFile, updated)) {
+    // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
+    // `pending.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
+    const written = writePendingDivertFile(pending.sourceFile, updated);
+    if (written) {
+      if (written.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, written.entry);
+      pendingUnresolvedQuarantines[idx] = { entry: written.entry, sourceFile: written.filename };
+      rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
+    } else {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${pending.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
+      rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
     }
-    rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
   }
 }
 
@@ -3458,7 +3605,12 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     if (writtenFinalBasenames.has(pending.sourceFile)) continue;
     if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, pending.sourceFile))) continue;
     writtenFinalBasenames.add(pending.sourceFile);
-    if (!writePendingDivertFile(pending.sourceFile, updated)) {
+    // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to for
+    // THIS twin alone; never mutate the shared `updated` object other twins/the active key already used.
+    const written = writePendingDivertFile(pending.sourceFile, updated);
+    if (written) {
+      pendingUnresolvedQuarantines[idx] = { entry: written.entry, sourceFile: written.filename };
+    } else {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
     }
@@ -4095,6 +4247,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     const r = deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, L);
     for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, kc.sourceFile);
     for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, rc.sourceFile);
+    // @decision 702b4241 (round 2) — fold an UNATTRIBUTED keep (card 702b4241's own basename-only
+    // unreadable mark, or any other claimant-less protect failure) into this function's own return —
+    // previously lost entirely, so a kept file reported as a bare, unqualified success.
+    if (r.unattributed) anyKeptUnattributed = true;
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   const sourceFilesToSweep: string[] = [];
@@ -4125,7 +4281,14 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
           console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin's armed copy at key ${k} after this clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union an already-cleared token back in.`);
         }
       }
-      if (!writePendingDivertFile(p.sourceFile, updated)) {
+      // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to; mutate
+      // `p` in place (never reassign `arr[idx]` — `64119847`'s own rule), as the ONLY pending entry this
+      // redirect concerns.
+      const writtenTwin = writePendingDivertFile(p.sourceFile, updated);
+      if (writtenTwin) {
+        p.entry = writtenTwin.entry;
+        p.sourceFile = writtenTwin.filename;
+      } else {
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin at ${p.sourceFile} after this clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with an already-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       }
@@ -4153,6 +4316,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L);
       for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, kc.sourceFile);
       for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, rc.sourceFile);
+      // @decision 702b4241 (round 2) — same fold as the active loop above.
+      if (r.unattributed) anyKeptUnattributed = true;
     }
     sourceFilesToSweep.push(p.sourceFile);
     // @decision 07e3ad30 — resolve `p`'s own CURRENT index fresh, right now, never a precomputed one —
@@ -4407,6 +4572,8 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
         const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L);
         for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, blockedCoOccupant(kc.repoPath, kc.sourceFile));
         for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, blockedCoOccupant(rc.repoPath, rc.sourceFile));
+        // @decision 702b4241 (round 2) — same fold as clearMergeQuarantineByKey's own two loops.
+        if (r.unattributed) anyKeptUnattributed = true;
       }
       pendingTouchedBasenames.push(p.sourceFile);
       // @decision 883e29bc (round 4) — never a bare unlink: `p` is already removed from
@@ -5418,6 +5585,68 @@ function reenterMergeQuarantinesAtBootImpl(
   const byRepoKey = new Map<string, MergeQuarantineEntry>();
   const orphanFilenames: string[] = [];
   const orphanReasonParts: string[] = [];
+  /**
+   * @decision 702b4241 — call ONLY for a genuinely UNREADABLE read (a real errno other than
+   * ENOENT/EISDIR) — never for ENOENT/EISDIR or a JSON.parse/field-validation failure, which must keep
+   * using the existing corrupt-latch cascade, unchanged.
+   *
+   * Diverts straight to `pendingUnresolvedQuarantines` (self-referencing `f`), never into
+   * `deferredCorruptJsons`/`deferredCorruptTmps`/the safety-tmp `resolveAndArm` cascade. This still does
+   * NOT make `f` structurally unwritable THIS boot — a SIBLING source (a tmp residue or a stale migrate
+   * source) sharing `f`'s own key can ALSO put `f` into `allBootWriteTargets`, and Phase 0's own at-risk
+   * protection re-points THIS divert's `sourceFile` off `f` onto a fresh safety-tmp the moment that
+   * happens (closing a DIFFERENT gap, ef651188) — which is exactly what disarms the backstop refusal in
+   * `bootWriteLatch` (`pendingUnresolvedQuarantines.some((p) => p.sourceFile === targetBasename)`) for
+   * that sibling's own write. Confirmed via a real rename-tracing probe during this card's round-2 review
+   * (Code Review `12c5623d`): `bootWriteLatch` DOES rename over `f` during the SAME boot in exactly this
+   * shape. The ACTUAL protection is `keptUnreadableLatchFiles` plus TWO write-side mechanisms, every
+   * writer that could reach a marked basename going through one or the other (round 3, Code Review
+   * `b939aead`, closed a THIRD writer — `writePendingDivertFile` — that reached a marked basename through
+   * neither): `writeMergeQuarantineLatch` (direct, and via `bootWriteLatch`'s own external pre-call) folds
+   * (or, for a placeholder entry, wholesale re-ingests) `final`'s own on-disk content via
+   * `reconcileMarkedBasenameBeforeWrite`/`foldInOnDiskTokensIfMarked` before ever writing; every diverting
+   * caller of `writePendingDivertFile` — `divertRaiseEntry` foremost — instead REFUSES to rename over a
+   * marked basename at all, diverting to a freshly-minted record with the marked file folded into that
+   * record's own `orphanLatchFiles`, rather than reading and unioning `final`'s content directly (see that
+   * function's own doc for why: the content there may belong to ANOTHER identity entirely, so folding it
+   * forward would risk absorbing it). That first mechanism only holds end to end because of two further
+   * fixes, also from round 2: `reconcileMarkedBasenameBeforeWrite` re-ingests the REAL record wholesale
+   * when the entry being written is itself one of these synthetic placeholders (never just unions its own
+   * fake branch/reason over recovered content), and `bootWriteLatch` syncs `byRepoKey` to the reconciled
+   * result BEFORE writing (never leaves memory holding a stale, pre-reconcile object once the kept mark
+   * clears on a successful write). The no-match fallback (ordinary orphan sweep) writes to each
+   * REGISTERED repo's own key, never to `f` itself, so it carries no risk either way.
+   */
+  const divertUnreadableBootLatch = (f: string, hash: string, code: string, kindLabel: string): void => {
+    keptUnreadableLatchFiles.add(f);
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] boot-time ${kindLabel} ${f} is UNREADABLE (${code}), NOT corrupt — leaving it AS WRITTEN; never overwriting/migrating/deleting a file whose content could not be confirmed; retrying enforcement on a later boot.`);
+    const matchedRepo = hashToRepo.get(hash);
+    const claimants = matchedRepo ? undefined : unresolvedClaimantsByHash.get(hash);
+    const ancestorClaimants = (!matchedRepo && !(claimants && claimants.length > 0)) ? ancestorHashToRepo().get(hash) : undefined;
+    const owners = matchedRepo
+      ? [matchedRepo]
+      : (claimants && claimants.length > 0 ? claimants : (ancestorClaimants && ancestorClaimants.length > 0 ? ancestorClaimants : undefined));
+    if (owners) {
+      for (const owner of owners) {
+        // @decision 702b4241 (round 4) — remember this exact synthetic token so a later reconcile can
+        // filter it back out of any union, never carrying it forward as if it were a genuine raise.
+        const syntheticToken = randomUUID();
+        unreadablePlaceholderTokens.add(syntheticToken);
+        pendingUnresolvedQuarantines.push({
+          entry: {
+            repoPath: owner, branch: PLACEHOLDER_BRANCH_UNREADABLE,
+            reason: `boot found an UNREADABLE (${code}) quarantine ${kindLabel} (${f}) matching this repo's hash — fail-closed rather than risk discarding a real quarantine, but never overwriting/migrating/deleting this file since its content could not be confirmed`,
+            enteredAt: Date.now(), tokens: [syntheticToken], placeholder: true,
+          },
+          sourceFile: f,
+        });
+      }
+      return;
+    }
+    orphanFilenames.push(f);
+    orphanReasonParts.push(`${f}: UNREADABLE (${code})`);
+  };
   // @decision 92c645cc — PASS 1b's "stale tmp, safe to delete" branch must gate on a key having had a
   // CLEAN parse here, never on `byRepoKey.has(...)` alone (a corrupt-but-hash-matched placeholder also
   // lands in `byRepoKey`, even when its own self-heal write failed).
@@ -5748,6 +5977,13 @@ function reenterMergeQuarantinesAtBootImpl(
         }
       }
     } catch (e) {
+      // @decision 702b4241 — a genuine (non-ENOENT/EISDIR) read failure is UNREADABLE, never corrupt;
+      // route it through the dedicated chokepoint BEFORE the corrupt-latch cascade below ever runs.
+      const readErrorCode = (e as NodeJS.ErrnoException).code;
+      if (readErrorCode && readErrorCode !== "ENOENT" && readErrorCode !== "EISDIR") {
+        divertUnreadableBootLatch(f, hash, readErrorCode, "latch");
+        continue;
+      }
       // BLOCKER 2 fix: an unparsable/corrupt latch must never fail OPEN (a 0-byte file at boot used to
       // re-arm nothing at all).
       const matchedRepo = hashToRepo.get(hash);
@@ -5984,6 +6220,13 @@ function reenterMergeQuarantinesAtBootImpl(
       list.push(tmpPath);
       tmpsToUnlinkByKey.set(currentKey, list);
     } catch (e) {
+      // @decision 702b4241 — a genuine (non-ENOENT/EISDIR) read failure is UNREADABLE, never corrupt;
+      // route it through the dedicated chokepoint BEFORE the corrupt-tmp cascade below ever runs.
+      const readErrorCode = (e as NodeJS.ErrnoException).code;
+      if (readErrorCode && readErrorCode !== "ENOENT" && readErrorCode !== "EISDIR") {
+        divertUnreadableBootLatch(f, hash, readErrorCode, "tmp latch");
+        continue;
+      }
       // Genuinely unreadable/unparsable tmp content (a crash mid-write, before fsync even completed).
       // @decision 92c645cc (round 2, item 2b) — DEFER fail-closed handling: a sibling tmp for the SAME
       // key, read earlier or later in this loop, may carry real data an inline placeholder would clobber.
@@ -6109,6 +6352,15 @@ function reenterMergeQuarantinesAtBootImpl(
         });
       }
     } catch (e) {
+      // @decision 702b4241 — a genuine (non-ENOENT/EISDIR) read failure is UNREADABLE, never corrupt;
+      // route it through the dedicated chokepoint BEFORE the corrupt-residue cascade below ever runs.
+      const readErrorCode = (e as NodeJS.ErrnoException).code;
+      if (readErrorCode && readErrorCode !== "ENOENT" && readErrorCode !== "EISDIR") {
+        // `hash` below is block-scoped to this SAME catch (redeclared a few lines down) — recompute
+        // from `f` directly rather than reference the identifier, which TDZs for the whole block.
+        divertUnreadableBootLatch(f, f.slice(0, f.indexOf(".json.tmp-safety-")), readErrorCode, "SAFETY-TMP residue");
+        continue;
+      }
       // A corrupt safety-tmp should never normally happen (we write it ourselves) — leave it AS WRITTEN
       // rather than guess at its content; a human can investigate, same posture as any other unreadable
       // residue in this file.
@@ -6347,7 +6599,24 @@ function reenterMergeQuarantinesAtBootImpl(
     // @decision e1cb7d33 — one of TWO opt-out families (the other: enterMergeQuarantine's 4 write
     // sites). Phase 0's safety-tmp above already secures any at-risk degraded occupant's content before
     // this write runs. See the decision record.
-    const ok = writeMergeQuarantineLatch(entry, false, targetKey, true);
+    //
+    // @decision 702b4241 (round 2) — reconcile a MARKED target HERE, externally, then sync `byRepoKey`
+    // to match — writeMergeQuarantineLatch's own internal reconcile never propagates back to this
+    // chokepoint's caller, so memory can otherwise go stale the instant the kept mark clears on success.
+    let toWrite = entry;
+    let reconciledAlready = false;
+    if (keptUnreadableLatchFiles.has(targetBasename)) {
+      const reconciled = foldInOnDiskTokensIfMarked(quarantinePathForKey(targetKey), entry);
+      if (reconciled === "unreadable") {
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — it is STILL unreadable right now; the kept mark and the in-memory entry both stay unchanged, to be retried on a later write/boot.`);
+        return false;
+      }
+      if (reconciled !== entry) replaceEntryEverywhere(byRepoKey, entry, reconciled);
+      toWrite = reconciled;
+      reconciledAlready = true;
+    }
+    const ok = writeMergeQuarantineLatch(toWrite, false, targetKey, true, reconciledAlready);
     if (ok) writeTargetsThisPass.add(targetBasename);
     return ok;
   };
