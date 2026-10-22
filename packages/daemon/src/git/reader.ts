@@ -141,9 +141,13 @@ export class GitReader {
     // Structural, locale-independent primary check: HEAD resolves to a commit once (and only once)
     // the repo has one. `--quiet` suppresses stderr on failure, so there's no text to parse — this
     // holds regardless of the host's git locale, unlike the message-match fallback below.
+    //
+    // @decision a6f84660 — must read the OUTPUT, not rely on rejection: simple-git resolves "" here on an
+    // unborn HEAD instead of throwing.
     let headResolves = true;
     try {
-      await withTimeout(this.git.revparse(["--quiet", "--verify", "HEAD"]), this.timeoutMs, "git rev-parse --verify HEAD");
+      const out = await withTimeout(this.git.revparse(["--quiet", "--verify", "HEAD"]), this.timeoutMs, "git rev-parse --verify HEAD");
+      headResolves = out.trim() !== "";
     } catch {
       headResolves = false;
     }
