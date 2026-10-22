@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Db } from "../db.js";
+import type { Session } from "@loom/shared";
 import { SCRATCH_ROOT_DIR } from "../paths.js";
 import { killableRemoveDir, raceRemoval, type RemoveDirResult } from "../git/worktrees.js";
 import { listAllTranscriptIds } from "../pty/claude-transcript.js";
@@ -94,6 +95,43 @@ export interface ScratchGcResult {
   wedged: string[];
 }
 
+/** Card 0e701396 — the label `classifyScratchDirResumability` returns, factored out of predicates 2-5
+ *  below so the sweep (which deletes) and `scratch-largest-dirs.ts`'s reporter (which only reads, for
+ *  `served_status`'s `scratchLargestDirs`) share ONE answer and can never drift. Deliberately excludes
+ *  predicate 6 (the grace period) — that is a deletion-timing decision the sweep alone makes; the
+ *  reporter surfaces raw `ageDays` instead and lets a human compare it against the grace period itself. */
+export type ScratchDirResumability = "no-row" | "live" | "no-engine-id" | "resumable" | "unresumable";
+
+export interface ScratchDirClassification {
+  status: ScratchDirResumability;
+  /** The session row, when one exists (every status except `"no-row"`) — lets a caller that already
+   *  has this (e.g. for `lastActivity`/`ageDays`) avoid a second `db.getSession` call. */
+  row?: Session;
+}
+
+/**
+ * Card 0e701396 — predicates 2-5 of `sweepUnresumableScratchDirs`'s own approved predicate (see this
+ * file's header doc), factored into one pure, non-deleting function so the sweep and the
+ * `scratch-largest-dirs.ts` reporter ask the EXACT SAME question rather than two that merely correlate.
+ * Never deletes anything and never reads predicate 6 (the grace period) — see {@link ScratchDirResumability}.
+ */
+export function classifyScratchDirResumability(
+  db: Db,
+  name: string,
+  deps: Pick<ScratchGcDeps, "transcriptIds" | "codexTranscriptExists"> = {},
+): ScratchDirClassification {
+  const row = db.getSession(name);
+  if (!row) return { status: "no-row" }; // predicate 2
+  if (row.processState === "live" || row.processState === "starting") return { status: "live", row }; // predicate 3
+  if (!row.engineSessionId) return { status: "no-engine-id", row }; // predicate 4
+  const liveTranscriptIds = deps.transcriptIds ?? listAllTranscriptIds();
+  const codexTranscriptExists = deps.codexTranscriptExists ?? ((cwd, id) => engineTranscriptExists(cwd, id, "codex"));
+  const stillResumable = row.harness === "codex"
+    ? codexTranscriptExists(row.cwd, row.engineSessionId)
+    : liveTranscriptIds.has(row.engineSessionId);
+  return { status: stillResumable ? "resumable" : "unresumable", row }; // predicate 5
+}
+
 async function withBoundedConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   async function lane(): Promise<void> {
@@ -121,19 +159,15 @@ async function withBoundedConcurrency<T>(items: T[], limit: number, worker: (ite
  *      DELIBERATELY excludes the 2 no-DB-row test-fixture dirs some daemon tests still leak into the real
  *      scratch root, and the 9 agent-written loose root files; neither is reachable by a session-id-keyed
  *      sweep, and a test fixture could be mid-write during a boot sweep on a host also running tests);
- *   2. a `sessions` row exists for that name (`db.getSession`, unfiltered by `archived_at` — deliberately;
- *      see the header doc on why that column is not a signal this sweep uses at all);
- *   3. that row's `processState` is NOT `live`/`starting` (a session mid-turn is never a candidate,
- *      regardless of anything else);
- *   4. that row's `engineSessionId` is set (nothing to check transcript existence against otherwise —
- *      absent-id rows are skipped rather than treated as automatically reapable);
- *   5. that id is not resumable per its OWN harness's liveness source (`resume()` is then structurally
- *      impossible) — a plain/`"claude"` row checks membership in the bulk claude-only
- *      `listAllTranscriptIds()` set; a `"codex"` row instead calls {@link ScratchGcDeps.codexTranscriptExists}
- *      (default: the harness-aware `engineTranscriptExists(cwd, id, "codex")`), since a codex conversation
- *      id is a codex rollout id and can never appear in the claude-only set (card cb8b7eff — the claude
- *      set's own scan is scoped to `~/.claude/projects`, see `pty/claude-transcript.ts`);
- *   6. `lastActivity` is older than {@link SCRATCH_GC_GRACE_MS}.
+ *   2-5. {@link classifyScratchDirResumability} returns `"unresumable"` — card 0e701396 factored these
+ *      four checks (DB row exists / not `live`/`starting` / `engineSessionId` set / not still resumable
+ *      per its own harness's liveness source) out of this loop into that one pure, non-deleting function,
+ *      shared with `scratch-largest-dirs.ts`'s `served_status` reporter so the two can never ask two
+ *      different questions that merely correlate (see that function's own doc for the per-predicate
+ *      detail, unchanged from this sweep's original inline logic);
+ *   6. `lastActivity` is older than {@link SCRATCH_GC_GRACE_MS} — deliberately NOT folded into the shared
+ *      classifier: this is a deletion-TIMING decision the sweep alone makes, while the reporter surfaces
+ *      raw age instead and lets a human compare it against the grace period themselves.
  */
 export async function sweepUnresumableScratchDirs(db: Db, deps: ScratchGcDeps = {}): Promise<ScratchGcResult> {
   const result: ScratchGcResult = { scanned: 0, reaped: [], wedged: [] };
@@ -155,14 +189,12 @@ export async function sweepUnresumableScratchDirs(db: Db, deps: ScratchGcDeps = 
     if (!entry.isDirectory() || !V4_UUID_RE.test(entry.name)) continue; // scope: non-uuid entries + loose root files untouched
     result.scanned++;
 
-    const row = db.getSession(entry.name);
-    if (!row) continue; // no-DB-row dir (predicate 2) — carve-out, see header doc
-    if (row.processState === "live" || row.processState === "starting") continue; // predicate 3
-    if (!row.engineSessionId) continue; // predicate 4
-    const stillResumable = row.harness === "codex"
-      ? codexTranscriptExists(row.cwd, row.engineSessionId)
-      : liveTranscriptIds.has(row.engineSessionId);
-    if (stillResumable) continue; // predicate 5 — still resumable, never reap
+    // Card 0e701396 — predicates 2-5 now live in classifyScratchDirResumability (this file), shared with
+    // scratch-largest-dirs.ts's reporter; only a classification of "unresumable" is a deletion candidate
+    // at all (every other label is exactly the same `continue` this loop always did, just named).
+    const classification = classifyScratchDirResumability(db, entry.name, { transcriptIds: liveTranscriptIds, codexTranscriptExists });
+    if (classification.status !== "unresumable") continue;
+    const row = classification.row!; // "unresumable" always carries a row (predicate 2 already passed)
     const lastActivityMs = Date.parse(row.lastActivity);
     if (Number.isNaN(lastActivityMs) || nowMs - lastActivityMs < SCRATCH_GC_GRACE_MS) continue; // predicate 6
 
@@ -286,4 +318,29 @@ export function measureScratchRootBytes(root: string = SCRATCH_ROOT_DIR): number
     }
   }
   return total;
+}
+
+/** Card 0e701396 — per-top-level v4-uuid-shaped child byte totals under `SCRATCH_ROOT_DIR`, for
+ *  `scratch-largest-dirs.ts`'s background-refreshed top-N `served_status` reporter. Scoped the SAME way
+ *  `sweepUnresumableScratchDirs`'s own candidate scan is (direct v4-UUID-shaped children only — the 2
+ *  no-DB-row test-fixture dirs and the 9 agent-written loose root files are excluded, by construction,
+ *  not by an exclusion list). Reuses {@link measureScratchRootBytes}'s own recursive-walk ALGORITHM once
+ *  per top-level child, rather than inventing a second byte-counting routine — but it is still its OWN
+ *  walk of the tree (called from the background refresh, on its own throttle), never a shared read with
+ *  the always-synchronous, every-call `measureScratchRootBytes(SCRATCH_ROOT_DIR)` total `served_status`
+ *  already reports; the two are deliberately independent so this function's cost is paid on the refresh's
+ *  own schedule, never added to that unconditional per-call walk. */
+export function measureScratchRootDirSizes(root: string = SCRATCH_ROOT_DIR): { name: string; bytes: number }[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const sizes: { name: string; bytes: number }[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !V4_UUID_RE.test(entry.name)) continue;
+    sizes.push({ name: entry.name, bytes: measureScratchRootBytes(path.join(root, entry.name)) });
+  }
+  return sizes;
 }

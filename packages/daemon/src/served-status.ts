@@ -19,6 +19,11 @@ import {
   getBootScratchGcSweepOutcome,
   type ScratchGcSweepOutcome,
 } from "./sessions/scratch-gc.js";
+import {
+  getCachedScratchLargestDirs,
+  kickScratchLargestDirsRefresh,
+  type ScratchLargestDirEntry,
+} from "./sessions/scratch-largest-dirs.js";
 import { listStaleAsideWorktrees, repoKeysByProjectFromProjects, staleAsideRepoKeysByProject } from "./git/worktrees.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -124,6 +129,17 @@ export interface ServedStatus {
    */
   scratchGcSweep: ScratchGcSweepOutcome;
   /**
+   * Card 0e701396 — the N=5 largest v4-uuid-shaped scratch dirs, with each one's age and resumability
+   * label (`sessions/scratch-largest-dirs.ts`) — the visibility fix for the gap `scratchRootOverCeiling`
+   * leaves open: that field says the ROOT is over its ceiling but names no individual dir, so answering
+   * "which one" used to cost a human a manual `du -sm` (the investigation phase of this card did exactly
+   * that by hand). WARN-only, additive, deletes nothing — same binding posture as `scratchRootBytes`
+   * itself. Like `projectsWorkRootBytes`, this is a CACHED figure (never a fresh walk on this read),
+   * refreshed in the background by `scratch-largest-dirs.ts`; may be `[]` on the very first read after
+   * boot, before the first background refresh has landed — an honest "not computed yet", never fabricated.
+   */
+  scratchLargestDirs: ScratchLargestDirEntry[];
+  /**
    * Card ad34efb5 — renamed-aside stale worktree dirs (`<path>.stale-<ts>`, see
    * `renameWorktreeDirAside`) left under `WORKTREES_DIR`: never auto-deleted, and no session row names
    * them, so nothing else surfaces them. COUNT-ONLY, deliberately — this field is read on every polled
@@ -158,6 +174,15 @@ export function buildServedStatus(db: Db): ServedStatus {
   // polled on an interval, so a real recursive disk walk per call is an acceptable, already-established
   // trade here.
   const scratchRootBytes = measureScratchRootBytes();
+  // Card 0e701396 — cached read + background kick, same discipline as projectsWorkRootUsage just below:
+  // NEVER a fresh walk on this read path. `classifyScratchDirResumability` (called only inside the
+  // background refresh) needs `db.getSession`, so degrade (skip the kick, keep whatever's cached) for a
+  // partial test stub missing it — same guard shape this function already uses for the project-work-root
+  // kick a few lines down.
+  const scratchLargestDirs = getCachedScratchLargestDirs();
+  if (typeof db.getSession === "function") {
+    kickScratchLargestDirsRefresh(db);
+  }
   // Card 5eace211 Code Review: NEVER a fresh walk here — this read is synchronous and the walk must not
   // block the event loop. Always the last-cached figure (possibly stale, possibly the all-zero initial
   // value before the first background refresh has ever landed); same degrade-on-partial-stub guard as
@@ -203,6 +228,7 @@ export function buildServedStatus(db: Db): ServedStatus {
     projectsWorkRootOverCeiling: projectsWorkRootUsage.overCeiling,
     projectsWorkRootTruncated: projectsWorkRootUsage.truncated,
     scratchGcSweep: getBootScratchGcSweepOutcome(),
+    scratchLargestDirs,
     staleWorktreeLeftovers: {
       count: staleAside.length,
       oldestStaleSinceMs: staleAside.length ? Math.min(...staleAside.map((e) => e.staleSinceMs)) : null,
