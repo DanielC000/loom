@@ -386,6 +386,45 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (P) card 2dd97aaa item 1 — the SAME shape as (H), but the orphan's own on-disk content names the
+  // CLEARER'S OWN identity (a stale leftover copy of P's own quarantine data, holding a token never
+  // accounted for in this clear), never a genuinely foreign repo. Pre-fix, `excludeIdentities` only
+  // excluded the clearer's own identity from the TRUE in-memory referencer scan — the content-parsed
+  // fallback (`orphanSweepSafeToDelete`) had no such exclusion, so it reported P's own path back via
+  // `contentKeptRepoPaths` as if it were "1 other repo's own outstanding token", misleading a human into
+  // re-clearing a ghost claim against themselves.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const P = makeToplevelRepo("p-self");
+    const tP = enterMergeQuarantine(P, "loom/p-branch", "merge in progress for P (by-key self-content-keep)");
+    const filesAfterP = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json") && JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).repoPath === P);
+    const pFinalPath = path.join(MERGE_QUARANTINE_DIR, filesAfterP[0]);
+    const orphanBasenameP = `${randomBytes(12).toString("hex")}.json`;
+    const pRecord = JSON.parse(fs.readFileSync(pFinalPath, "utf8"));
+    pRecord.orphanLatchFiles = [orphanBasenameP];
+    fs.writeFileSync(pFinalPath, JSON.stringify(pRecord));
+
+    const bootedP = await freshBootModule();
+    bootedP.reenterMergeQuarantinesAtBoot([P]);
+    check("(P precondition) P is armed after boot, carrying the orphan reference", (bootedP.listActiveMergeQuarantines().find((e) => e.repoPath === P)?.orphanLatchFiles ?? []).includes(orphanBasenameP));
+
+    // The orphan's own content names P ITSELF — a stale leftover, never a different identity — holding a
+    // token this clear's own candidateTokens will never include.
+    const tStaleP = randomUUID();
+    const orphanPathP = path.join(MERGE_QUARANTINE_DIR, orphanBasenameP);
+    fs.writeFileSync(orphanPathP, JSON.stringify({
+      repoPath: P, branch: "loom/p-branch", reason: "stale leftover copy of P's own data, written AFTER boot",
+      enteredAt: Date.now(), tokens: [tStaleP],
+    }));
+    check("(P precondition) the orphan exists before P's full clear", fs.existsSync(orphanPathP));
+
+    const clearResultP = bootedP.clearMergeQuarantine(P);
+    check("*** CARD 2dd97aaa *** (P) THE FIX: a content-keep whose only named claimant is P's OWN identity is never reported via contentKeptRepoPaths", !(clearResultP?.contentKeptRepoPaths ?? []).includes(P));
+    check("(P) ...the file is still kept on disk regardless (fail-closed, just not misreported)", fs.existsSync(orphanPathP));
+    check("(P) ...and the clear is reported as unattributed-kept rather than a false foreign claim", clearResultP?.unattributed === true);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // (I) card 0a783fb2 — clearMergeQuarantineByRecordedPath's own orphan-sweep (reached via
   // clearMergeQuarantine's UNRESOLVABLE dispatch, and directly) must report a content-based keep too.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════

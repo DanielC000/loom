@@ -2085,7 +2085,7 @@ function pendingDivertCollisionFilenameFor(repoPath: string): string {
  * mark must not force a redirect once the content is readable again and genuinely this same identity.
  * See the decision record's "Round 7" section for the mechanism and why this is the one chokepoint fix.
  */
-function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): { filename: string; entry: MergeQuarantineEntry } | false {
+function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, droppedTokens?: ReadonlySet<string>): { filename: string; entry: MergeQuarantineEntry } | false {
   let target = filename;
   let toWrite = entry;
   if (keptUnreadableLatchFiles.has(filename)) {
@@ -2093,7 +2093,12 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry): 
     if (reread.state === "entry" && directPathIdentity(reread.entry.repoPath) === directPathIdentity(entry.repoPath)) {
       // Proven safe, right now: the SAME identity already occupies `filename`, readably. Discharge the
       // stale mark by overwriting in place below, unioning the on-disk content forward — never dropped.
-      toWrite = unionIntoOnDiskPendingEntry(reread.entry, entry);
+      //
+      // @decision 2dd97aaa — EXCEPT for `droppedTokens`: a caller NARROWING `entry` (a reduce/partial
+      // clear that has already decided these specific tokens are gone) must never have this on-disk
+      // union silently resurrect them from a stale copy that predates the narrowing write.
+      const unioned = unionIntoOnDiskPendingEntry(reread.entry, entry);
+      toWrite = droppedTokens?.size ? { ...unioned, tokens: unioned.tokens.filter((t) => !droppedTokens.has(t)) } : unioned;
     } else if (reread.state === "enoent") {
       // Nothing real there any more — safe to write `entry` unchanged, in place (mirrors
       // reconcilePendingDivertTarget's own ENOENT branch).
@@ -3855,15 +3860,19 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: s
   if (referencingRepoPaths.size > 0) return { kept: true, referencingRepoPaths: [...referencingRepoPaths] };
   const safety = orphanSweepSafeToDelete(filename, candidateTokens);
   if (!safety.safe) {
+    // @decision 2dd97aaa — a `parsedRepoPath` sharing `excludeIdentities`' own identity is the clearer's
+    // OWN stale content, never a true foreign claimant — never report it as a content-kept claimant here,
+    // not just exclude it from the referencer scan above.
+    const ownContent = !!safety.parsedRepoPath && !!excludeIdentities?.has(directPathIdentity(safety.parsedRepoPath));
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] keeping orphan latch ${filename} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for${safety.parsedRepoPath ? ` (its own parsed content names repoPath '${safety.parsedRepoPath}')` : ""}; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.`);
+    console.error(`[merge-quarantine] keeping orphan latch ${filename} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for${!ownContent && safety.parsedRepoPath ? ` (its own parsed content names repoPath '${safety.parsedRepoPath}')` : ""}; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.`);
     // @decision 8db913e2 (Follow-up f2cc5f18, Code Review 745c3736) — a caller must be able to SEE this
     // keep, never a silent `{kept:true, referencingRepoPaths:[]}` indistinguishable from "nothing to
     // report" — name the parsed foreign repoPath when the content gave us one.
     //
     // @decision 8db913e2 (Follow-up 0a783fb2) — a CONTENT-parsed repoPath never shares
     // `referencingRepoPaths` with a true in-memory referencer again — see `foldOrphanSweepResult`.
-    return { kept: true, referencingRepoPaths: [], contentKeptRepoPath: safety.parsedRepoPath };
+    return { kept: true, referencingRepoPaths: [], contentKeptRepoPath: ownContent ? undefined : safety.parsedRepoPath };
   }
   unlinkLatchFile(filename);
   return { kept: false, referencingRepoPaths: [] };
@@ -4164,6 +4173,16 @@ export function setActiveQuarantineTestOnly(key: string, entry: MergeQuarantineE
   activeQuarantines.set(key, entry);
 }
 
+/** TEST-ONLY: directly marks `basename` in the REAL, module-global {@link keptUnreadableLatchFiles} set —
+ *  lets a test construct the "a stale mark outlived the read failure that set it, and the file is now
+ *  readable again" precondition {@link writePendingDivertFile}'s own round-7 re-read-and-union branch
+ *  exists for, without needing to engineer a genuine, OS-level non-ENOENT read failure (EACCES is not
+ *  portably reproducible across this module's own test matrix). Never imported by `index.ts` — see
+ *  {@link setActiveQuarantineTestOnly}'s own doc for why the `TestOnly` suffix is load-bearing. */
+export function markLatchFileUnreadableTestOnly(basename: string): void {
+  keptUnreadableLatchFiles.add(basename);
+}
+
 /**
  * `key` itself (unconditionally — the caller already freshly matched it) plus every OTHER member of
  * `entry`'s own `armedKeys`, gated through {@link entryStillOwnsKey} — the SAME shape
@@ -4339,7 +4358,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to; mutate
       // `p` in place (never reassign `arr[idx]` — `64119847`'s own rule), as the ONLY pending entry this
       // redirect concerns.
-      const writtenTwin = writePendingDivertFile(p.sourceFile, updated);
+      //
+      // @decision 2dd97aaa — pass the FULL `entry!.tokens`, never just `overlapTokens`: a stale on-disk
+      // copy of this twin can hold OTHER tokens of `entry` already dropped from `p.entry.tokens` in
+      // memory by an earlier reduce whose write failed — a strict superset, always safe here.
+      const writtenTwin = writePendingDivertFile(p.sourceFile, updated, new Set(entry!.tokens));
       if (writtenTwin) {
         p.entry = writtenTwin.entry;
         p.sourceFile = writtenTwin.filename;
@@ -4426,6 +4449,12 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
   tombstoneIfNotSurviving(candidateTokens, [...touchedFinalBasenames, ...sourceFilesToSweep]);
+  // @decision 2dd97aaa — a content-kept claimant whose own file no longer exists BY THE TIME this clear
+  // returns (e.g. swept by a later step of this same call) is a ghost, never a real claim — drop it here,
+  // right before this function's own result is built, rather than report a keep nothing backs any more.
+  for (const [rp, sourceFile] of [...keptContentRepoPaths]) {
+    if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, sourceFile))) keptContentRepoPaths.delete(rp);
+  }
   // @decision 182c01cc (round 2, finding 1) — a RELOCATED co-occupant alone must still produce a
   // non-void result naming it: `latchKept` stays absent, but `stillBlockedCoOccupants` never is.
   const anyReferencing = keptReferencingRepoPaths.size > 0 || orphanReferencingRepoPaths.size > 0;
