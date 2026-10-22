@@ -111,7 +111,7 @@ function mkService(db) {
   return { sessions, gate, spy };
 }
 const confirm = async (sessions, mgrId, workerId) => {
-  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   return r.ok ? r.value : { __unsettled: r };
 };
 const reset = (ctx) => { ctx.gate.calls = 0; ctx.spy.decide = 0; ctx.spy.record = 0; ctx.spy.recorded.length = 0; };
@@ -360,14 +360,12 @@ try {
     // `{settled:false, op}` async-degrade path (orchestration/pending-ops.ts) is a SUPPORTED outcome
     // whenever `syncAttachBudgetMs` elapses before the real work finishes, which a loaded host (two
     // overlapping full gates, per the card) makes far more likely to hit even at this service's already
-    // generous 60s budget. `awaitTrackedSettle` re-calls the SAME closure until it genuinely settles
-    // (`PendingOpRegistry.attach` dedupes by key — card `f944d4e4` — so a re-call re-attaches to the
-    // in-flight op instead of re-running assembly), bounded with `performance.now()` so a real wedge
-    // still throws loudly instead of hanging. Same fix shape already proven for this exact degrade on
-    // `cut-base-sha-confirm-and-batch.mjs` scenario (2).
+    // generous 60s budget. `awaitTrackedSettle` polls THAT SAME op's own settlement read-only via
+    // `PendingOpRegistry.awaitSettleByOpId` (card 89539537 — never re-invokes the closure), bounded with
+    // `performance.now()` so a real wedge still throws loudly instead of hanging.
     const r = await awaitTrackedSettle(
       () => ctx.sessions.mergeBatchTracked(P.mgrId, [f1.workerId, f2.workerId]),
-      { label: "merge-gate-interval (BF): the failing batch gate" },
+      { label: "merge-gate-interval (BF): the failing batch gate", pendingOps: ctx.sessions.pendingOps },
     );
     const v = r.ok ? r.value : undefined;
     check("(BF) K=2 at N=1 is due (0+2>1): the batch gate ran and FAILED ⇒ ok:false, nothing landed by the batch", v?.ok === false && v.landed.length === 0 && ctx.gate.calls >= 1);

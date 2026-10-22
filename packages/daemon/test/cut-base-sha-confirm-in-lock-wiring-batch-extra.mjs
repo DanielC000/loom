@@ -127,7 +127,7 @@ try {
     // comment for why that's unsafe for a fast, NEVER_CACHED outcome under a stubbed runGate).
     const batch = await awaitTrackedSettle(
       () => sessionsB.mergeBatchTracked(mgrId, [workerGoodId, workerGood2Id]),
-      { label: "(e) mergeBatchTracked", timeoutMs: 60_000 },
+      { label: "(e) mergeBatchTracked", timeoutMs: 60_000, pendingOps: sessionsB.pendingOps },
     );
     check("(e) the batch settled", batch.settled === true && batch.ok === true);
     check("(e) the batch gate DID run for real (advisory passed clean for both candidates)", batchGateCalls === 1);
@@ -193,7 +193,7 @@ try {
     // Card 426f9bdb: awaits the real settle (see scenario (e)'s own comment above for why no forced budget).
     const batch = await awaitTrackedSettle(
       () => sessions.mergeBatchTracked(mgrId, [workerGoodId, workerLegacyId]),
-      { label: "(i) mergeBatchTracked", timeoutMs: 60_000 },
+      { label: "(i) mergeBatchTracked", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
     );
     check("(i) the batch gate DID run for real", gateCalls === 1);
     check("(i) the batch settled", batch.settled === true && batch.ok === true);

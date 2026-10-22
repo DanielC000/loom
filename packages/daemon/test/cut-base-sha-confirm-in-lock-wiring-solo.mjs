@@ -150,7 +150,7 @@ try {
     // of a clean pending-then-settled sequence).
     const r = await awaitTrackedSettle(
       () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
-      { label: "(d) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+      { label: "(d) confirmWorkerMergeTracked", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
     );
     check("(d) the gate DID run for real (the advisory's OWN probe failed and fell through, never refusing on an inconclusive read)", gateCalls === 1);
     check("(d) op settled, NOT merged", r.settled === true && r.ok && r.value.merged === false);
@@ -202,7 +202,7 @@ try {
     // Card 426f9bdb: awaits the real settle (see scenario (d)'s own comment above for why no forced budget).
     const r1 = await awaitTrackedSettle(
       () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
-      { label: "(1 in-lock) confirmWorkerMergeTracked r1", timeoutMs: 60_000 },
+      { label: "(1 in-lock) confirmWorkerMergeTracked r1", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
     );
     check("(1 in-lock) the gate ran (the ADVISORY's own merge-base call succeeded cleanly)", gateCalls === 1);
     check("(1 in-lock) exactly one simulated merge-base failure occurred (the IN-LOCK call)", mbFails === 1);
@@ -214,7 +214,7 @@ try {
 
     const r2 = await awaitTrackedSettle(
       () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
-      { label: "(3) confirmWorkerMergeTracked r2", timeoutMs: 60_000 },
+      { label: "(3) confirmWorkerMergeTracked r2", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
     );
     check("(3) r2 (transient cleared, nothing else moved — SAME identity as r1) genuinely re-attempts and merges, NOT a cached replay of r1's stale refusal",
       r2.settled === true && r2.ok && r2.value.merged === true && r2.cacheHit === undefined);
@@ -272,7 +272,7 @@ try {
     // Card 426f9bdb: awaits the real settle (see scenario (d)'s own comment above for why no forced budget).
     const r = await awaitTrackedSettle(
       () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
-      { label: "(h) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+      { label: "(h) confirmWorkerMergeTracked", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
     );
     check("(h) the gate ran (the ADVISORY's own rev-parse HEAD call succeeded cleanly)", gateCalls === 1);
     check("(h) exactly one simulated rev-parse HEAD failure occurred (the IN-LOCK call)", rpFails === 1);

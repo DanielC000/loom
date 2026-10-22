@@ -116,7 +116,7 @@ const confirmSolo = async (sessions, P, w) => {
   // that shape once syncAttachBudgetMs elapses, a documented, supported async path, never a failure. The
   // original unguarded `r.value.settled && r.value.ok ? ... : ...` measured the host's speed, not the
   // code: an unsettled read would have folded a still-in-flight confirm into a fabricated `{thrown:r.value}`.
-  const r = await settle(awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 }));
+  const r = await settle(awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps }));
   if (!r.value) return r;
   // `confirmWorkerMergeTracked` folds a thrown chain error into a settled `ok:false` result (never a rejection).
   return r.value.ok ? { value: r.value.value } : { thrown: r.value.error ?? r.value };

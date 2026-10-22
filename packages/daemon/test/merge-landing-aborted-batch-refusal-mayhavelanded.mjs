@@ -160,7 +160,7 @@ try {
     // this card's fix, so skipping this step would silently test nothing for the re-task/attribution half.
     await sessions.reviewWorkerMerge(mgrId, w1.workerId);
     await sessions.reviewWorkerMerge(mgrId, w2.workerId);
-    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
     const value = r.ok ? r.value : { __unsettled: r };
     check("(D) precondition: the batch genuinely landed-but-unverified (never a bare !ok, never branchDiverted/quarantined)", value.ok === false && value.unverified === true && value.branchDiverted !== true && value.quarantined !== true);
     for (const [w, label] of [[w1, "a"], [w2, "b"]]) {
@@ -202,7 +202,7 @@ try {
     await sessions.reviewWorkerMerge(mgrId, w1.workerId);
     await sessions.reviewWorkerMerge(mgrId, w2.workerId);
     try {
-      const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+      const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
       const value = r.ok ? r.value : { __unsettled: r };
       check("(E) precondition: the batch genuinely quarantined via an UNCONFIRMED kill (never a bare !ok)", value.ok === false && value.quarantined === true);
       check("(E) precondition: the reason names the unconfirmed kill (not a plain already-quarantined refusal)", /could not be confirmed dead after a kill/.test(value.reason ?? ""));
@@ -251,7 +251,7 @@ try {
     const w1 = await addWorker(db, repo, projId, agentId, mgrId, "fa2"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "fb2");
     await sessions.reviewWorkerMerge(mgrId, w1.workerId);
     await sessions.reviewWorkerMerge(mgrId, w2.workerId);
-    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
     const value = r.ok ? r.value : { __unsettled: r };
     check("(F) precondition: the batch genuinely post-ff branch-diverted on a SHA mismatch (never unverified)", value.ok === false && value.branchDiverted === true && value.unverified !== true);
     check("(F) precondition: the reason names the sha mismatch, not a branch-name mismatch", /canonical HEAD reads/.test(value.reason ?? ""));

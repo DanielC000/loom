@@ -146,7 +146,7 @@ try {
     // comment for why that's unsafe for a fast, NEVER_CACHED outcome under a stubbed runGate).
     const batch = await awaitTrackedSettle(
       () => sessions.mergeBatchTracked(mgrId, [workerProbeId, workerGoodId]),
-      { label: "(f) mergeBatchTracked", timeoutMs: 60_000 },
+      { label: "(f) mergeBatchTracked", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
     );
     // 2 real gate runs, not 1: ONE for the batch's own assembled-tree gate (covering "good"'s landing —
     // proves gap v, the advisory fell through instead of pulling "probe" to stranded fallback), and a
@@ -248,7 +248,7 @@ try {
     // Card 426f9bdb: awaits the real settle (see scenario (f)'s own comment above for why no forced budget).
     const batch = await awaitTrackedSettle(
       () => sessions.mergeBatchTracked(mgrId, [workerGoodId, workerStrayId]),
-      { label: "(g) mergeBatchTracked", timeoutMs: 60_000 },
+      { label: "(g) mergeBatchTracked", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
     );
     check("(g) the batch gate DID run for real (the advisory's OWN probe failed and fell through, never pulling stray to stranded fallback on an inconclusive read)", gateCalls === 1);
     check("(g) the batch settled", batch.settled === true && batch.ok === true);

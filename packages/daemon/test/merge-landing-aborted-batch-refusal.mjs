@@ -137,7 +137,7 @@ try {
       return PASS;
     });
     const w1 = await addWorker(db, repo, projId, agentId, mgrId, "fa"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "fb");
-    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
     const value = r.ok ? r.value : { __unsettled: r };
     // Card b4080777 finding: `MergeBatchResult` does NOT expose a `forfeited` flag on this generic
     // `!result.ok` fallthrough (unlike branchDiverted/quarantined/unverified/cancelled, each of which gets
@@ -176,7 +176,7 @@ try {
       return PASS;
     });
     const w1 = await addWorker(db, repo, projId, agentId, mgrId, "da"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "db");
-    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+    const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
     const value = r.ok ? r.value : { __unsettled: r };
     check("(B) precondition: the batch genuinely branch-diverted", value.ok === false && value.branchDiverted === true);
     for (const [w, label] of [[w1, "a"], [w2, "b"]]) {
@@ -201,7 +201,7 @@ try {
     });
     try {
       const w1 = await addWorker(db, repo, projId, agentId, mgrId, "qa"), w2 = await addWorker(db, repo, projId, agentId, mgrId, "qb");
-      const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+      const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
       const value = r.ok ? r.value : { __unsettled: r };
       check("(C) precondition: the batch genuinely quarantined AT THE FAST-FORWARD STEP (assembly itself succeeded)", value.ok === false && value.quarantined === true);
       for (const [w, label] of [[w1, "a"], [w2, "b"]]) {

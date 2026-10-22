@@ -122,7 +122,7 @@ try {
   const tipBefore1 = { a: git(P.repo, "rev-parse", w1.branch), b: git(P.repo, "rev-parse", w2.branch) };
 
   // ── call #1: diverts mid-gate ────────────────────────────────────────────────────────────────────────
-  const r1 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const r1 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   const v1 = r1.ok ? r1.value : { __unsettled: r1 };
   check("call #1 refused, typed branchDiverted", v1.ok === false && v1.branchDiverted === true);
   check("call #1 invoked the gate exactly once", gateCalls === 1);
@@ -137,7 +137,7 @@ try {
   // ── call #2: SAME workerSessionIds, unchanged candidate branches ⇒ IDENTICAL verdictIdentity ───────────
   const tipBefore2 = { a: git(P.repo, "rev-parse", w1.branch), b: git(P.repo, "rev-parse", w2.branch) };
   check("the candidate branch heads are IDENTICAL across both calls (verdictIdentity would match)", tipBefore2.a === tipBefore1.a && tipBefore2.b === tipBefore1.b);
-  const r2 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const r2 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   const v2 = r2.ok ? r2.value : { __unsettled: r2 };
 
   check("(DoD-1) the gate counter INCREMENTED — call #2 ran a REAL gate, not a cache replay", gateCalls === 2);

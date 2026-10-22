@@ -199,7 +199,7 @@ try {
     // asserted on directly) without that self-inflicted hazard.
     const merge = await awaitTrackedSettle(
       () => svc.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id),
-      { label: "(1) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+      { label: "(1) confirmWorkerMergeTracked", timeoutMs: 60_000, pendingOps: svc.pendingOps },
     );
     check("(1) the real confirm settles (not a throw)", merge.settled === true && merge.ok === true);
     check("(1) refused — merged:false", merge.value?.merged === false);
@@ -287,14 +287,16 @@ try {
     // batch-merge-gate-history.mjs already use for this exact purpose) FORCES the real
     // `mergeBatchTracked` call below to degrade to `{settled:false, op}` on EVERY run, deterministically
     // — never relying on ambient host speed to happen to reproduce the manager's gate failure. This
-    // turns the flake into a permanent, always-exercised regression test for the awaitTrackedSettle
-    // re-attach path below, rather than a one-off manual demonstration. A separate SessionService
-    // instance (same shared `db`/`host`) — spawning stays on `svc`, only this merge call needs the
-    // forced-tiny budget; mirrors scenario (4)'s own `sessionsReplace`/`sessionsControl` split.
+    // turns the flake into a permanent, always-exercised regression test for `awaitTrackedSettle`'s
+    // opId-based settle-poll (card 89539537 — see its own decision record for why this scenario is
+    // exactly the case a re-poll-via-closure can genuinely double-run), rather than a one-off manual
+    // demonstration. A separate SessionService instance (same shared `db`/`host`) — spawning stays on
+    // `svc`, only this merge call needs the forced-tiny budget; mirrors scenario (4)'s own
+    // `sessionsReplace`/`sessionsControl` split.
     const sessionsBatch = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: 1 });
     const batch = await awaitTrackedSettle(
       () => sessionsBatch.mergeBatchTracked(`${P}-mgr1`, [goodWorker.id, good2Worker.id, strayWorker.id]),
-      { label: "(2) mergeBatchTracked", timeoutMs: 180_000 },
+      { label: "(2) mergeBatchTracked", timeoutMs: 180_000, pendingOps: sessionsBatch.pendingOps },
     );
     check("(2) the real batch settles", batch.settled === true && batch.ok === true);
     check("(2) BOTH good candidates landed via the REAL batch assembly path (batch.value.landed) — consistent with correct `batchCandidates` wiring, but does NOT isolate it (they'd land the same way even if cutBaseSha were dropped — see cut-base-sha-confirm-in-lock-wiring-batch.mjs for that)",
@@ -350,7 +352,7 @@ try {
     // why that's unsafe for a fast, gateless confirm on this file's real SeamHost).
     const merge = await awaitTrackedSettle(
       () => svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId),
-      { label: "(3) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+      { label: "(3) confirmWorkerMergeTracked", timeoutMs: 60_000, pendingOps: svc.pendingOps },
     );
     check("(3) the legacy worker's branch lands normally (grandfathered, never refused)",
       merge.settled === true && merge.ok === true && merge.value?.merged === true);
@@ -431,7 +433,7 @@ try {
     // NOT forced to a tiny `syncAttachBudgetMs` — the same fast, pre-gate-refusal + real-SeamHost shape).
     const merge = await awaitTrackedSettle(
       () => sessionsReplace.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id),
-      { label: "(4) confirmWorkerMergeTracked (positive)", timeoutMs: 60_000 },
+      { label: "(4) confirmWorkerMergeTracked (positive)", timeoutMs: 60_000, pendingOps: sessionsReplace.pendingOps },
     );
     check("(4) WITH real canonicalGit, the advisory correctly refuses PRE-GATE (gateCalls stays 0 — the forgery never fools it)", gateCalls === 0);
     check("(4) classified forkPointDiverged", merge.settled === true && merge.ok && merge.value?.merged === false && merge.value?.forkPointDiverged === true);
@@ -453,7 +455,7 @@ try {
     });
     await awaitTrackedSettle(
       () => sessionsControl.confirmWorkerMergeTracked(`${P}-mgr1`, worker.id),
-      { label: "(4 control) confirmWorkerMergeTracked", timeoutMs: 60_000 },
+      { label: "(4 control) confirmWorkerMergeTracked", timeoutMs: 60_000, pendingOps: sessionsControl.pendingOps },
     );
     check("(4 control) WITH a plain, replace-honoring git wrapper (this.boundedGit's own shape), the advisory is FOOLED and falls through to a REAL gate run (gateCallsControl === 1, not 0) — RED exactly where the positive case was green",
       gateCallsControl === 1);

@@ -103,7 +103,7 @@ try {
   const w1 = await addWorker("a"), w2 = await addWorker("b");
 
   check("precondition: canonical is on mainline before the batch", canonBranch() === MAIN && git(P.repo, "rev-parse", "HEAD") === baseSha);
-  const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   const value = r.ok ? r.value : { __unsettled: r };
 
   check("precondition: the injected factory's post-ff interception actually fired", combinedCalls > 1 && typeof externalAdvanceSha === "string");

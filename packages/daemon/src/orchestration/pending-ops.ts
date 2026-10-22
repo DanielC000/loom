@@ -189,6 +189,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Card 89539537 — see {@link PendingOpRegistry.awaitSettleByOpId}'s own doc for the full rationale. Sized
+ *  generously relative to the brief race window it exists to cover (a caller reading its own opId promptly
+ *  after being told "pending"), not a general-purpose cache lifetime. */
+const SETTLE_BY_OPID_RETENTION_MS = 60_000;
+
 /** @decision 164f7915 — clear the timer on either race outcome, not just its own firing.
  *  Exported (card cee17efe) for `GateSemaphore.waitForSettleBriefly` to reuse, rather than a second copy. */
 export function clearableSleep(ms: number): { promise: Promise<void>; clear: () => void } {
@@ -319,6 +324,23 @@ export class PendingOpRegistry {
    *  settled at least once, never explicitly purged — an accepted, tiny, long-running-daemon leak, not a
    *  gap to fix. */
   private readonly untilSupersededVerdicts = new Map<string, UntilSupersededVerdict>();
+  /** Card 89539537 — see {@link awaitSettleByOpId}'s own doc. Keyed by `opId` (unique per real
+   *  invocation), NOT `key` — unlike `retained`/`untilSupersededVerdicts` above, this is not a cache for a
+   *  FUTURE caller under the same `key` and is never gated on `NEVER_CACHED_OUTCOMES`/`retainMs`/
+   *  `retainVerdictUntilSuperseded`: every real settle writes here unconditionally, so the ONE caller
+   *  holding this exact opId can always recover its own op's raw outcome. Self-evicts after
+   *  {@link SETTLE_BY_OPID_RETENTION_MS}. */
+  private readonly settledByOpId = new Map<string, { ok: true; value: unknown } | { ok: false; error: unknown }>();
+
+  /** Card 89539537 — write-once-per-opId, unconditional (see `settledByOpId`'s own doc for why this is
+   *  deliberately NOT identity-guarded the way the `retained`/`untilSupersededVerdicts` writes just below
+   *  are: a dead-owner-evicted op's late settle still legitimately ran for real under ITS OWN opId, and the
+   *  one caller who was handed that exact opId deserves to see it, independent of whatever replaced it
+   *  under the shared `key`). */
+  private recordSettleByOpId(opId: string, outcome: { ok: true; value: unknown } | { ok: false; error: unknown }): void {
+    this.settledByOpId.set(opId, outcome);
+    setTimeout(() => { this.settledByOpId.delete(opId); }, SETTLE_BY_OPID_RETENTION_MS).unref?.();
+  }
 
   /** Read-only, NEVER consumes — for surfacing (worker_list's `pendingMerge` field). Returns a RUNNING
    *  op's view, or — if `key` has no running entry but a not-yet-expired RETAINED terminal view (see the
@@ -788,6 +810,8 @@ export class PendingOpRegistry {
         (value) => {
           fresh.state = "done"; fresh.result = value;
           fresh.outcome = opts?.classifyOutcome?.({ ok: true, value }); const settledIdentity = opts?.identityFromValue?.(value) ?? opts?.verdictIdentity;
+          // Card 89539537 — see `settledByOpId`'s own doc: unconditional, never identity-guarded.
+          this.recordSettleByOpId(fresh.opId, { ok: true, value });
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
             if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value }, settledIdentity);
@@ -828,6 +852,8 @@ export class PendingOpRegistry {
         (err) => {
           fresh.state = "failed"; fresh.error = err;
           fresh.outcome = opts?.classifyOutcome?.({ ok: false, error: err });
+          // Card 89539537 — see `settledByOpId`'s own doc: unconditional, never identity-guarded.
+          this.recordSettleByOpId(fresh.opId, { ok: false, error: err });
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
             if (opts?.retainMs && (opts.retainErrors ?? true)) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err }, opts.verdictIdentity);
@@ -869,6 +895,32 @@ export class PendingOpRegistry {
     return e.state === "done"
       ? { settled: true, ok: true, value: e.result as T, freshMint: e.freshMint }
       : { settled: true, ok: false, error: e.error, freshMint: e.freshMint };
+  }
+
+  /**
+   * @decision 89539537 — never recover a `{settled:false}` op's verdict by re-invoking the production
+   * closure that minted it; a NEVER_CACHED_OUTCOMES key legitimately re-mints a second real op on a
+   * second call, and the caller would then report that wrong op's verdict as the first's.
+   *
+   * Scans the live `entries` for a RUNNING entry whose `opId` matches (this registry is keyed by `key`,
+   * not `opId`); if found, awaits its `settle` (bounded by `timeoutMs`) and reads the verdict off that
+   * reference. Otherwise falls back to the short-lived `settledByOpId` record. Returns `undefined` when
+   * `opId` is unknown to both — never a fabricated verdict.
+   */
+  async awaitSettleByOpId<T>(opId: string, timeoutMs: number): Promise<{ ok: true; value: T } | { ok: false; error: unknown } | undefined> {
+    for (const e of this.entries.values()) {
+      if (e.opId !== opId) continue;
+      if (e.state === "running") {
+        // Card 89539537 CR follow-up: `clearableSleep` (not a bare `sleep`), mirroring `waitBriefly`'s own
+        // pattern — when `e.settle` wins the race, the loser's timer must still be cleared, or it stays
+        // armed (and keeping the process alive) for up to `timeoutMs` after this call has already resolved.
+        const timeout = clearableSleep(timeoutMs);
+        try { await Promise.race([e.settle, timeout.promise]); } finally { timeout.clear(); }
+      }
+      if (e.state === "running") return undefined;
+      return e.state === "done" ? { ok: true, value: e.result as T } : { ok: false, error: e.error };
+    }
+    return this.settledByOpId.get(opId) as { ok: true; value: T } | { ok: false; error: unknown } | undefined;
   }
 }
 

@@ -478,7 +478,7 @@ function mkService(db, extra = {}) {
   return { sessions, gate, spy };
 }
 const confirm = async (sessions, mgrId, workerId) => {
-  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   return r.ok ? r.value : { __unsettled: r };
 };
 // `maxConcurrentGates` has NO per-project override layer (platform-only, like schedulerEnabled) — a

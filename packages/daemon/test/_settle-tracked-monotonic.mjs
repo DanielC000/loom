@@ -7,40 +7,38 @@
 // `confirmWorkerMergeTracked`/`mergeBatchTracked` call across this test family can share ONE
 // implementation instead of five near-identical copies.
 //
-// Tolerates the documented `{settled:false, op}` async degrade of a `*Tracked` call (see
-// `orchestration/pending-ops.ts`) — a SUPPORTED path, not a failure. A test asserting `r.settled===true`
-// on the FIRST result measures the host's speed, not the code under test. Re-calling the SAME closure
-// RE-ATTACHES to the in-flight op (`PendingOpRegistry.attach` dedupes by key) instead of re-running it
-// WHILE it is still running, so this is a condition wait on genuine settlement, bounded so a real wedge
-// throws loudly and NAMES the last-seen op — never a blind sleep, and never a fabricated value for the
-// unsettled case.
+// @decision 89539537 — a `{settled:false, op}` degrade is recovered by polling `op.opId`'s own
+// settlement read-only (`PendingOpRegistry.awaitSettleByOpId`), NEVER by re-invoking `call()` — see
+// docs/decisions/89539537-await-settle-by-opid-not-re-invoke.md for why re-invoking is unsafe.
 //
-// ⚠️ DELIBERATELY NO cross-poll re-mint guard (unlike the ORIGINAL local `awaitBatchSettle` this
-// generalizes from, which asserted consecutive pending polls carry the SAME opId): proven by a real run
-// against a FAST, gateless solo confirm (`cut-base-sha-confirm-and-batch.mjs` scenario (1), under a
-// forced `syncAttachBudgetMs: 1`) that this assertion is a FALSE POSITIVE for that shape. A gateless
-// cross-lineage refusal settles in low single-digit milliseconds — faster than this helper's own
-// call-await-call round-trip — so the FIRST minted op can genuinely SETTLE before the second poll even
-// starts. confirmWorkerMergeTracked's own verdict handling for this outcome does not replay the just-
-// settled verdict on that second call (see cut-base-sha-confirm-verdict-cache.mjs scenario (2)'s own
-// "sanity: the REAL condition, not a cache, is still the blocker here" — a fresh real re-attempt, not a
-// cache read) — it legitimately mints a SECOND real op. That is correct production behavior, not a race:
-// this helper only ever has ONE in-flight call at a time (every iteration `await`s the previous one
-// before issuing the next), so there is no way for THIS caller to cause two GENUINELY CONCURRENT real
-// merges — a changed opId between two sequential, fully-awaited polls can only mean the first finished in
-// between, never that two ran at once. Asserting same-ness there was testing an invariant the call
-// pattern can't violate, while incorrectly flagging the real, intended NEVER_CACHED_OUTCOMES behavior as
-// a bug. (The ORIGINAL `awaitBatchSettle`'s own guard happened to never trip in production because real
-// batch assembly takes seconds, not milliseconds — the window this note describes is specific to a FAST
-// underlying op under a FORCED tiny budget, which batch calls never hit.)
-export async function awaitTrackedSettle(call, { label = "tracked call", timeoutMs = 60_000 } = {}) {
+// Needs `{ pendingOps }` (the SessionService's own `PendingOpRegistry` instance — pass
+// `sessions.pendingOps` / `d.sessions.pendingOps`, whatever the call site's session handle is named) to
+// take the fixed path above. Every caller of this helper was updated to pass it (card 89539537) EXCEPT
+// the four files card aa7677fa may be concurrently editing (mainline-watch.mjs, mainline-watch-batch.mjs,
+// mainline-watch-boot.mjs, mainline-watch-batch-edges.mjs) — those still omit `pendingOps` and so still
+// take the PRE-FIX path below (re-polling via `call()`, the same behavior this helper had before this
+// card), pending a follow-up once that card's edits land. Do not add a new call site on the pre-fix path.
+export async function awaitTrackedSettle(call, { label = "tracked call", timeoutMs = 60_000, pendingOps } = {}) {
   const deadline = performance.now() + timeoutMs;
-  let r = await call();
-  while (!r.settled) {
-    if (performance.now() > deadline) {
-      throw new Error(`${label} did not settle within ${timeoutMs}ms (last op: ${JSON.stringify(r.op)})`);
+  const r = await call();
+  if (r.settled) return r;
+  if (!pendingOps) {
+    // PRE-FIX PATH — retained only for a caller not yet updated to pass `pendingOps` (see the header note
+    // above). Loops by re-calling the SAME tracked closure until `settled`; carries the documented
+    // double-run hazard this card fixed everywhere else (see docs/decisions/89539537-*.md).
+    let cur = r;
+    while (!cur.settled) {
+      if (performance.now() > deadline) {
+        throw new Error(`${label} did not settle within ${timeoutMs}ms (last op: ${JSON.stringify(cur.op)})`);
+      }
+      cur = await call();
     }
-    r = await call();
+    return cur;
   }
-  return r;
+  const remaining = Math.max(0, deadline - performance.now());
+  const settled = await pendingOps.awaitSettleByOpId(r.op.opId, remaining);
+  if (!settled) {
+    throw new Error(`${label} did not settle within ${timeoutMs}ms (last op: ${JSON.stringify(r.op)})`);
+  }
+  return settled.ok ? { settled: true, ok: true, value: settled.value } : { settled: true, ok: false, error: settled.error };
 }

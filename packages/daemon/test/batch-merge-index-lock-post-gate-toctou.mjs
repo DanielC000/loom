@@ -88,7 +88,7 @@ try {
   // ── call #1: no lock present yet — the pre-gate check passes clean, assembly + a REAL gate run both
   //    happen, and the lock appears FROM INSIDE the gate callback, so only the SUBSEQUENT fast-forward
   //    sees it and refuses ────────────────────────────────────────────────────────────────────────────
-  const r1 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const r1 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   const v1 = r1.ok ? r1.value : { __unsettled: r1 };
   check("call #1 refused, TYPED indexLockPresent (the post-gate ff-only arm, not the pre-gate one)", v1.ok === false && v1.indexLockPresent === true);
   check("call #1's reason names the specific reason code", /canonical_index_lock_present/.test(v1.reason ?? ""));
@@ -127,7 +127,7 @@ try {
   raiseLockOnGate = false;
   const tipBefore2 = { a: git(P.repo, "rev-parse", w1.branch), b: git(P.repo, "rev-parse", w2.branch) };
   check("the candidate branch heads are IDENTICAL across both calls (verdictIdentity would match)", tipBefore2.a === tipBefore1.a && tipBefore2.b === tipBefore1.b);
-  const r2 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const r2 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   const v2 = r2.ok ? r2.value : { __unsettled: r2 };
 
   check("NEVER CACHED: the gate counter INCREMENTED — call #2 ran a REAL gate, not a cache replay", gateCalls === 2);

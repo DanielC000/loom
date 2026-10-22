@@ -99,7 +99,7 @@ try {
   // wiring-solo.mjs's own comment for why that's unsafe for a fast, NEVER_CACHED outcome).
   const r1 = await awaitTrackedSettle(
     () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
-    { label: "(1) confirmWorkerMergeTracked r1", timeoutMs: 60_000 },
+    { label: "(1) confirmWorkerMergeTracked r1", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
   );
   check("(1) op 1 settled, NOT merged, refused BEFORE any gate lane (the advisory pre-gate check)", r1.settled === true && r1.ok && r1.value.merged === false && gateCalls === 0);
   check("(1) op 1's result carries forkPointDiverged:true", r1.ok && r1.value.forkPointDiverged === true);
@@ -111,7 +111,7 @@ try {
   // REAL condition is still the blocker here, not yet proof either way about the cache.
   const rStillDiverted = await awaitTrackedSettle(
     () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
-    { label: "(2) confirmWorkerMergeTracked rStillDiverted", timeoutMs: 60_000 },
+    { label: "(2) confirmWorkerMergeTracked rStillDiverted", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
   );
   check("(2) a re-call while STILL diverted is refused again, still no gate lane", rStillDiverted.settled === true && rStillDiverted.ok && rStillDiverted.value.merged === false && rStillDiverted.value.forkPointDiverged === true && gateCalls === 0);
 
@@ -122,7 +122,7 @@ try {
 
   const r2 = await awaitTrackedSettle(
     () => sessions.confirmWorkerMergeTracked(mgrId, workerId),
-    { label: "(3) confirmWorkerMergeTracked r2", timeoutMs: 60_000 },
+    { label: "(3) confirmWorkerMergeTracked r2", timeoutMs: 60_000, pendingOps: sessions.pendingOps },
   );
   check("(3) card 0eaaa693: after the real condition is fixed, the re-call does NOT replay the stale forkPointDiverged refusal — it genuinely re-attempts (gate runs for real)", gateCalls === 1 && r2.cacheHit === undefined);
   check("(3) op 2 actually merges (the worktree had real, mergeable work all along — only the divergence ever stood in the way)", r2.settled === true && r2.ok && r2.value.merged === true);

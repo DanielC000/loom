@@ -105,7 +105,7 @@ async function addWorker(sessions, tag) {
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
   return { taskId, workerId, worktreePath, branch };
 }
-const batch = async (sessions, ws) => { const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)), { label: "mergeBatchTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
+const batch = async (sessions, ws) => { const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps }); return r.ok ? r.value : { __unsettled: r }; };
 
 try {
   // ── seed the watermark with a real, ordinary first landing (branch = MAIN) ─────────────────────────────
@@ -197,7 +197,7 @@ try {
   const preD5Sha = canonHead();
   git(P.repo, "checkout", "-q", "-b", strayBranch3); // same-commit divert, entirely before the worker is even spawned
   const d5Sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, runGate: async () => PASS, reapWorktreeProcesses: noReap });
-  const confirmSolo = async (sessions, w) => { const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
+  const confirmSolo = async (sessions, w) => { const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps }); return r.ok ? r.value : { __unsettled: r }; };
   const countBeforeD5 = mwEvents().length;
   const w7 = await addWorker(d5Sessions, "d5a");
   const rd5 = await confirmSolo(d5Sessions, w7);

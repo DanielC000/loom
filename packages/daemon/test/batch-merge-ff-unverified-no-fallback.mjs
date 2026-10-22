@@ -122,7 +122,7 @@ try {
   const w1 = await addWorker(d.db, "a"), w2 = await addWorker(d.db, "b");
 
   check("precondition: canonical is on mainline before the batch", canonBranch() === MAIN && canonHead() === baseSha);
-  const r = await awaitTrackedSettle(() => d.sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000 });
+  const r = await awaitTrackedSettle(() => d.sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: d.sessions.pendingOps });
   const value = r.ok ? r.value : { __unsettled: r };
 
   check("precondition: the injected factory's post-ff interception actually fired", combinedCalls > 1);

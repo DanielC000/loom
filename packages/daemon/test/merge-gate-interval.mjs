@@ -181,7 +181,7 @@ function mkService(db, extra = {}) {
   return { sessions, gate, spy };
 }
 const confirm = async (sessions, mgrId, workerId) => {
-  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 });
+  const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(mgrId, workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   return r.ok ? r.value : { __unsettled: r };
 };
 const reset = (ctx) => { ctx.gate.calls = 0; ctx.spy.decide = 0; ctx.spy.record = 0; ctx.spy.recorded.length = 0; };
