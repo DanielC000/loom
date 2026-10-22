@@ -229,12 +229,15 @@ try {
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const repo = makeRepo("stale");
-    enterMergeQuarantine(repo, "stale-branch", "the REAL current reason");
+    const staleRealToken = enterMergeQuarantine(repo, "stale-branch", "the REAL current reason");
     const latchPath = fs.readdirSync(MERGE_QUARANTINE_DIR)
       .map((f) => path.join(MERGE_QUARANTINE_DIR, f))
       .find((p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).repoPath === repo; } catch { return false; } });
     const staleTmpPath = `${latchPath}.tmp-111111`;
-    fs.writeFileSync(staleTmpPath, JSON.stringify({ repoPath: repo, branch: "STALE-EARLIER-ATTEMPT", reason: "an earlier, now-superseded attempt", enteredAt: 1, tokens: ["stale-token"] }));
+    // @decision 21ec39e5 — the stale tmp must hold a token the current final ALREADY covers (a genuinely
+    // superseded earlier attempt for this SAME raise) — an invented, uncovered token is no longer swept
+    // blind (see the decision record); this fixture now tests the shape it always meant to.
+    fs.writeFileSync(staleTmpPath, JSON.stringify({ repoPath: repo, branch: "STALE-EARLIER-ATTEMPT", reason: "an earlier, now-superseded attempt", enteredAt: 1, tokens: [staleRealToken] }));
     check("(STALE) precondition: both a real final latch and a stale tmp exist", fs.existsSync(latchPath) && fs.existsSync(staleTmpPath));
 
     const found = reenterMergeQuarantinesAtBoot([repo]);

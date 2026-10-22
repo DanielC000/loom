@@ -296,10 +296,13 @@ try {
     // (b) a STALE tmp beside an ALREADY-VALID final latch (an earlier interrupted write; a LATER write
     // then succeeded normally) must be cleaned up as harmless residue — never clobber the real entry.
     const repo2 = makeRepo("tw-stale");
-    enterMergeQuarantine(repo2, "tw-stale-branch", "the REAL current reason");
+    const tw2RealToken = enterMergeQuarantine(repo2, "tw-stale-branch", "the REAL current reason");
     const latchPath2 = findLatchPathFor(repo2);
     const staleTmpPath = `${latchPath2}.tmp-111111`;
-    fs.writeFileSync(staleTmpPath, JSON.stringify({ repoPath: repo2, branch: "STALE-EARLIER-ATTEMPT", reason: "an earlier, now-superseded attempt", enteredAt: 1, tokens: ["stale-token"] }));
+    // @decision 21ec39e5 — the stale tmp must hold a token the current final ALREADY covers (a genuinely
+    // superseded earlier attempt for this SAME raise) — an invented, uncovered token is no longer swept
+    // blind (see the decision record); this fixture now tests the shape it always meant to.
+    fs.writeFileSync(staleTmpPath, JSON.stringify({ repoPath: repo2, branch: "STALE-EARLIER-ATTEMPT", reason: "an earlier, now-superseded attempt", enteredAt: 1, tokens: [tw2RealToken] }));
     check("(TW-stale) precondition: both a real final latch and a stale tmp exist", fs.existsSync(latchPath2) && fs.existsSync(staleTmpPath));
 
     const foundStale = reenterMergeQuarantinesAtBoot([repo2]);
@@ -413,9 +416,12 @@ try {
 
     // --- (4) clearMergeQuarantineByToken's own PARTIAL-clear branch also sweeps stray residue ---
     const tokenA = enterMergeQuarantine(repo, "wfr-a", "token A");
-    enterMergeQuarantine(repo, "wfr-b", "token B"); // appended to the SAME entry (round 7, M1 SET semantics)
+    const tokenB = enterMergeQuarantine(repo, "wfr-b", "token B"); // appended to the SAME entry (round 7, M1 SET semantics)
     const strayTmpPath2 = path.join(MERGE_QUARANTINE_DIR, `${hash}.json.tmp-888888`);
-    fs.writeFileSync(strayTmpPath2, JSON.stringify({ repoPath: repo, branch: "stray2", reason: "stray tmp 2", enteredAt: Date.now(), tokens: ["stray-token-2"] }));
+    // @decision 21ec39e5 — the stray tmp's own token must be one the PARTIAL clear's own write already
+    // carries forward (tokenB, which survives this clear) — an invented, uncovered token is no longer
+    // swept blind (see the decision record); this fixture now tests the shape it always meant to.
+    fs.writeFileSync(strayTmpPath2, JSON.stringify({ repoPath: repo, branch: "stray2", reason: "stray tmp 2", enteredAt: Date.now(), tokens: [tokenB] }));
     check("(WFR-4) precondition: a second stray tmp exists; repo quarantined by TWO tokens", fs.existsSync(strayTmpPath2) && activeMergeQuarantineFor(repo)?.tokens?.length === 2);
     clearMergeQuarantineByToken(repo, tokenA);
     check("(WFR-4) repo STILL quarantined (one token remains) — this is a PARTIAL clear, not a full one", !!activeMergeQuarantineFor(repo));

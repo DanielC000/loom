@@ -409,21 +409,37 @@ try {
     const Kp = canonicalRepoLockKey(p);
     const freshHashP = createHash("sha256").update(Kp).digest("hex").slice(0, 24);
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${freshHashP}.json`), JSON.stringify({
+    const finalPathP = path.join(MERGE_QUARANTINE_DIR, `${freshHashP}.json`);
+    fs.writeFileSync(finalPathP, JSON.stringify({
       repoPath: p, branch: "p-branch", reason: "P's own clean, current, non-placeholder final",
       enteredAt: Date.now(), tokens: ["p-token"],
     }, null, 2) + "\n");
+    // @decision 21ec39e5 — the stale tmp's own token must be one the current final ALREADY covers
+    // ("p-token" — a genuinely superseded earlier attempt for this SAME raise); an invented, uncovered
+    // token is no longer swept blind (see the decision record). This fixture now tests the shape it
+    // always meant to.
     const staleTmpPath = path.join(MERGE_QUARANTINE_DIR, `${oldHashFor(p)}.json.tmp-999-feedface`);
     fs.writeFileSync(staleTmpPath, JSON.stringify({
       repoPath: p, branch: "p-branch-stale", reason: "an earlier, now-superseded interrupted write",
-      enteredAt: Date.now() - 120_000, tokens: ["p-stale-token"],
+      enteredAt: Date.now() - 120_000, tokens: ["p-token"],
     }, null, 2) + "\n");
     check("(precondition) P is genuinely resolvable", fs.existsSync(p));
     check("(precondition) the stale tmp exists before boot", fs.existsSync(staleTmpPath));
 
+    // @decision 21ec39e5 (round 2, MAJOR) — a subset-token fixture alone cannot tell "took the cheap
+    // early-exit delete" apart from "fell into the union/deferred-write pipeline and still ended up
+    // deleting it afterward" — both leave P with exactly 1 token and no surviving tmp. Capture the
+    // final's own bytes + mtime BEFORE boot so this scenario can assert WHICH path ran: the early exit
+    // never rewrites `final` at all (byte- and mtime-identical); the union pipeline always rewrites it
+    // (a fresh `fs.writeSync`+`renameSync`), even when the rewritten content happens to be equivalent.
+    const finalBytesBeforeBoot = fs.readFileSync(finalPathP);
+    const finalMtimeBeforeBoot = fs.statSync(finalPathP).mtimeMs;
+
     reenterMergeQuarantinesAtBoot([p]); // THE CALL UNDER TEST
 
     check("*** NEGATIVE CONTROL *** P's genuinely stale tmp residue IS still deleted immediately, unaffected by the resolvability gate", !fs.existsSync(staleTmpPath));
+    check("*** THE DISCRIMINATOR *** the early-exit's own CHEAP delete path ran — final is byte- AND mtime-IDENTICAL (never rewritten by the union pipeline)",
+      fs.existsSync(finalPathP) && fs.readFileSync(finalPathP).equals(finalBytesBeforeBoot) && fs.statSync(finalPathP).mtimeMs === finalMtimeBeforeBoot);
     const activeP = activeMergeQuarantineFor(p);
     check("(boot) P's real quarantine is untouched by the (correctly-deleted) stale tmp", !!activeP && (activeP.tokens ?? []).length === 1 && activeP.tokens.includes("p-token"));
   } else if (scenarioName === "residual") {
