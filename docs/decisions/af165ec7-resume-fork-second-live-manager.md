@@ -59,6 +59,18 @@ DIRECT successor link — there is no transitive walk anywhere in this predicate
 elsewhere in a longer lineage (or any unrelated manager) is never exempted by construction, not by a
 role/id check bolted on afterward.
 
+**This one-hop invariant depends on the lineage never growing a second hop while the first is still
+unresolved — card 8d8a3647 is what keeps that true.** Code Review f643b83a found that nothing originally
+stopped a session that is ITSELF the live, unresolved halted successor of some predecessor (B, named by
+`currentHaltedSuccessor(A)`) from recycling again to a brand-new successor (C): `recycleManager` only
+guarded `hasSuccessor(old)`, never "am I someone else's still-unresolved halted successor". B's own
+B->C recycle never touches A's halt event, so `currentHaltedSuccessor(A)` kept naming the now-dead,
+superseded B forever, and `isSanctionedHaltedPartner(A, C)` was false — on the next restart, A and C were
+both captured as resume targets and whichever resumed second was refused with `SecondLiveManagerError`.
+8d8a3647's fix refuses the B->C recycle itself (in `recycleManager`, before any teardown/spawn), closing
+the hole at its root instead of teaching this predicate to walk a chain — see
+`docs/decisions/8d8a3647-halted-successor-self-recycle-guard.md` for the full repro + fix.
+
 ### Why a RECONCILED or ORDINARY (never-halted) pair gets no exemption
 
 An ordinary (never-halted) recycle structurally cannot have both halves live at once in steady state:
@@ -183,6 +195,10 @@ event with the real thrown reason, which now includes `SecondLiveManagerError`'s
 - Do not redirect `resolveWakeDeliveryTarget` to a holder that is the target's own sanctioned halted
   partner — it would wake the wrong half of a still-unresolved pair; fall through to `resume()` instead
   (Code Review f643b83a MINOR, round 2).
+- Do not assume this predicate's one-hop design is self-sufficient — it relies on `recycleManager` (card
+  8d8a3647) refusing a session that is itself someone's still-unresolved halted successor from recycling
+  again. If that guard is ever removed, this file's "one hop only" claim stops being true in practice, even
+  though the predicate's own code never changes.
 
 ## Source
 
@@ -201,4 +217,6 @@ nesting). `packages/shared/src/types.ts` (`wake_target_redirected`). Tests:
 `packages/daemon/test/codex-role-force-start-matrix.mjs`,
 `packages/daemon/test/forced-role-resume-retry-safety.mjs`,
 `packages/daemon/test/webhook-enqueue-durable-nudge-wiring.mjs`,
-`packages/daemon/test/webhook-ingress.mjs`. See also `docs/decisions/0368c784-second-live-manager-refusal.md`.
+`packages/daemon/test/webhook-ingress.mjs`. See also `docs/decisions/0368c784-second-live-manager-refusal.md`
+and `docs/decisions/8d8a3647-halted-successor-self-recycle-guard.md` (the companion guard that keeps this
+file's one-hop invariant true in practice).

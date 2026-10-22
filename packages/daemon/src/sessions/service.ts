@@ -16268,6 +16268,77 @@ export class SessionService {
     // The whole pre-spawn block runs synchronously, so this check + the retire/spawn below are one atomic
     // guard on the event loop.
     if (this.db.hasSuccessor(oldManagerId)) throw new Error("this manager has already been recycled — its successor is live");
+    // @decision 8d8a3647 — never let a session that is ITSELF a currently-unresolved halted recycle
+    // successor recycle again — it would leave its own predecessor's halt event wrongly naming a now-dead,
+    // superseded partner, defeating af165ec7's one-hop isSanctionedHaltedPartner exemption on next boot.
+    if (old.recycledFrom) {
+      const ownPredecessor = this.db.getSession(old.recycledFrom);
+      if (ownPredecessor && currentHaltedSuccessor(this.db, ownPredecessor.id)?.id === oldManagerId) {
+        // @decision 8d8a3647 — never unconditionally refuse here when the predecessor isn't live — it can
+        // never call recycle_reattempt (requires a LIVE session), so that would trap `old` forever. Settle
+        // the split handoff FORWARD from `old`'s own side first (see this method's own full doc for why).
+        if (!this.pty.isAlive(ownPredecessor.id)) {
+          const { failedSteps } = this.attemptManagerOwnershipTransfer(ownPredecessor.id, oldManagerId);
+          const workersStepFailed = failedSteps.includes("workers");
+          const pendingCarryFailedRefs = this.attemptPendingQueueCarry(ownPredecessor.id, oldManagerId, workersStepFailed, failedSteps);
+          if (failedSteps.length === 0 && pendingCarryFailedRefs.length === 0) {
+            // Clean — file the SAME resolution marker recycle_reattempt's own resolved branch files, so
+            // currentHaltedSuccessor(ownPredecessor) stops matching and isSupersededByRecycle(ownPredecessor)
+            // flips true: no later boot or human resume can ever bring the dead predecessor back alongside
+            // a future successor of `old`'s. Never call settleRecycleHandoff here — the predecessor is
+            // already dead; there is nothing live left to stop.
+            try {
+              this.db.appendEvent({
+                id: randomUUID(), ts: new Date().toISOString(),
+                managerSessionId: oldManagerId, workerSessionId: ownPredecessor.id,
+                kind: "recycle_ownership_transfer_resolved", detail: { successorId: oldManagerId, gen: old.gen },
+              });
+            } catch (e) {
+              throw new Error(
+                `cannot recycle: settling your dead predecessor ${ownPredecessor.id.slice(0, 8)}'s unresolved ` +
+                `handoff forward succeeded, but recording the resolution failed (${(e as Error).message}) — ` +
+                `you were NOT recycled; retry.`,
+              );
+            }
+            // Fall through — the episode is resolved; proceed with the ordinary recycle below.
+          } else {
+            // @decision 8d8a3647 — ROUND 3: file a durable trail of this still-split forward settle, same
+            // shape as recycle_reattempt_failed's own still-split branch (detail.source distinguishes it).
+            this.bestEffortPostSpawn("recording the recycle_reattempt_failed (forward-settle) event", oldManagerId, () => {
+              this.db.appendEvent({
+                id: randomUUID(), ts: new Date().toISOString(),
+                managerSessionId: oldManagerId, workerSessionId: ownPredecessor.id, kind: "recycle_reattempt_failed",
+                detail: { successorId: oldManagerId, gen: old.gen, failedSteps, failedMessageRefs: pendingCarryFailedRefs, source: "forward-settle" },
+              });
+            });
+            const bannerConfirmed = this.notifyPredecessorOfBlockedSelfRecycle(ownPredecessor, old, false);
+            throw new Error(
+              `cannot recycle: your own immediate predecessor ${ownPredecessor.id.slice(0, 8)} is NOT live, and ` +
+              `its ownership-transfer handoff to you is STILL unresolved after an attempted forward settle ` +
+              `(failed step(s): ${failedSteps.length ? failedSteps.join(", ") : "queued message carry"}) — ` +
+              `recycle_reattempt requires a LIVE predecessor, so recycle_reattempt cannot fix this on its own ` +
+              `right now. A human must RESUME your predecessor first (e.g. the Sessions UI, or ` +
+              `POST /api/sessions/${ownPredecessor.id}/resume — no override flag needed, this exact pairing is ` +
+              `already sanctioned to coexist), after which it can call recycle_reattempt. ` +
+              (bannerConfirmed
+                ? `A [loom:orphaned-fleet] banner has been raised on your predecessor for visibility. `
+                : `A [loom:orphaned-fleet] banner could NOT be confirmed on your predecessor (notification may ` +
+                  `have failed) — escalate to a human/Platform Lead directly if this persists. `) +
+              `You have NOT been recycled and remain fully live.`,
+            );
+          }
+        } else {
+          this.notifyPredecessorOfBlockedSelfRecycle(ownPredecessor, old, true);
+          throw new Error(
+            `cannot recycle: your own immediate predecessor ${ownPredecessor.id.slice(0, 8)}'s ownership-transfer ` +
+            `handoff to you is still unresolved (halted) — ask it to call recycle_reattempt (it received ` +
+            `halted:true from its own recycle_me and is expected to retry once the failing step is fixed), or ` +
+            `escalate to a human/Platform Lead to ask them to do so on its behalf. You have NOT been recycled ` +
+            `and remain fully live.`,
+          );
+        }
+      }
+    }
     const agent = this.db.getAgent(old.agentId);
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
@@ -16543,6 +16614,64 @@ export class SessionService {
     });
 
     return { ...fresh, processState: "live" };
+  }
+
+  /**
+   * Card 8d8a3647 — notifies the PREDECESSOR (A) that its own halted successor (B) just tried to recycle
+   * again and was refused, so a context-pressured B doesn't depend on A happening to look before it can
+   * recycle safely. Best-effort: this is pure notification, never an ownership-transfer step the caller's
+   * own refusal depends on — a failure here must never suppress or soften that refusal.
+   *
+   * @decision 8d8a3647 — ROUND 2: `predecessorLive` picks the channel — a dead predecessor can't receive a
+   *  session nudge. DEAD reuses the SAME `[loom:orphaned-fleet]` lastError-banner idiom this file's own
+   *  `stampStranded`/halted-consolidation branches already use for "no live session to act, a human must".
+   *
+   * @decision 8d8a3647 — ROUND 3: dedupe keys on `(blockedSuccessorId, predecessorLive)`, never that id
+   *  alone — see the decision record's ROUND 3 section. Returns whether a banner is confirmed present
+   *  (meaningful only when `predecessorLive` is `false`); the caller words its refusal off this, never assumes success.
+   */
+  private notifyPredecessorOfBlockedSelfRecycle(predecessor: Session, blocked: Session, predecessorLive: boolean): boolean {
+    let bannerConfirmed = false;
+    try {
+      const priorEpisodeEvents = this.db.listEventsForSession(predecessor.id).filter((e) =>
+        e.kind === "recycle_self_recycle_blocked"
+        && (e.detail as { blockedSuccessorId?: string } | undefined)?.blockedSuccessorId === blocked.id);
+      // A dead-channel notification, once filed, stamps a banner that persists on the session row — a
+      // LATER attempt (dead or live) can truthfully report it as already present.
+      bannerConfirmed = priorEpisodeEvents.some((e) =>
+        (e.detail as { predecessorLive?: boolean } | undefined)?.predecessorLive === false);
+      const alreadyNotifiedThisChannel = priorEpisodeEvents.some((e) =>
+        (e.detail as { predecessorLive?: boolean } | undefined)?.predecessorLive === predecessorLive);
+      if (alreadyNotifiedThisChannel) return bannerConfirmed;
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: predecessor.id, workerSessionId: blocked.id,
+        kind: "recycle_self_recycle_blocked", detail: { blockedSuccessorId: blocked.id, gen: blocked.gen, predecessorLive },
+      });
+      if (predecessorLive) {
+        this.enqueueDurableNudge(predecessor.id, "manager",
+          `[loom:recycle-blocked] your successor ${blocked.id.slice(0, 8)} just tried to recycle itself to a ` +
+          `further successor, but Loom refused it because YOUR OWN ownership-transfer handoff to it is still ` +
+          `unresolved (halted). Call recycle_reattempt to resolve it (or escalate to a human/Platform Lead if ` +
+          `the failing step can't be fixed) so ${blocked.id.slice(0, 8)} — and anyone after it — can recycle ` +
+          `safely again.`);
+      } else {
+        this.db.restoreSession(predecessor.id);
+        this.db.setLastError(predecessor.id,
+          `[loom:orphaned-fleet] Your successor ${blocked.id.slice(0, 8)} tried to recycle itself further, but ` +
+          `your own ownership-transfer handoff to it is still unresolved (halted) and could not be settled ` +
+          `forward automatically — and this predecessor is NOT live to resolve it (recycle_reattempt requires ` +
+          `a live session). A human must RESUME this session (e.g. the Sessions UI, or ` +
+          `POST /api/sessions/${predecessor.id}/resume — no override flag needed, this exact pairing is ` +
+          `already sanctioned to coexist) so it can call recycle_reattempt; once resolved, ` +
+          `${blocked.id.slice(0, 8)} can recycle again.`);
+        bannerConfirmed = true;
+      }
+      return bannerConfirmed;
+    } catch (e) {
+      console.error(`[recycle] notifying predecessor ${predecessor.id.slice(0, 8)} of a blocked self-recycle attempt by ${blocked.id.slice(0, 8)} failed:`, (e as Error).message);
+      return bannerConfirmed;
+    }
   }
 
   /**

@@ -1108,8 +1108,26 @@ export type OrchestrationEventKind =
   // @decision dfc3b014 — never let a halt resolve by nulling `recycled_from` when the successor remains
   // the genuine forward owner; file this marker instead, so `currentHaltedSuccessor` stops matching.
   | "recycle_ownership_transfer_resolved"
+  // Card 8d8a3647 — `recycleManager` REFUSED a recycle because `old` IS ITSELF a currently-unresolved
+  // halted recycle successor (`currentHaltedSuccessor(predecessor)?.id === old.id`) — i.e. a halted
+  // successor tried to grow the lineage by one more hop while its OWN predecessor's handoff to it is
+  // still split. Filed under the PREDECESSOR (`managerSessionId`), never the blocked session, so a
+  // context-pressured B's blocked attempt is durably surfaced to the one party who can actually resolve
+  // it (`recycle_reattempt`) rather than depending on A happening to look. `workerSessionId` = the blocked
+  // session (B); `detail` carries { blockedSuccessorId, gen }. Deduped per episode by `recycleManager`'s
+  // own guard: only the FIRST blocked attempt for a given (predecessor, blockedSuccessorId) pair files
+  // this/nudges the predecessor — a repeat attempt while still unresolved is refused again but files
+  // nothing more, so a context-full B retrying doesn't spam A.
+  //
+  // @decision 8d8a3647 — never fold into EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/
+  // REPORT_RESOLVED_EVENT_KINDS — audit-only, same posture as `recycle_ownership_transfer_failed`'s own
+  // sibling kinds; checked against all four, none apply.
+  | "recycle_self_recycle_blocked"
   // Audit-only: `recycle_reattempt` retried a halted handoff and at least one category is STILL failing.
-  // `detail` carries { successorId, gen, failedSteps: string[], failedMessageRefs }.
+  // `detail` carries { successorId, gen, failedSteps: string[], failedMessageRefs, source? }. `source` is
+  // absent for an ordinary `recycle_reattempt` retry; `"forward-settle"` (card 8d8a3647 ROUND 3) marks the
+  // SAME shape filed instead by `recycleManager`'s own dead-predecessor forward-settle branch when it's
+  // still split — a different caller, same observational posture, reused rather than a new kind.
   //
   // @decision dfc3b014 — never fold this into `currentHaltedSuccessor`'s id/gen match — a retry changes
   // neither, so this kind must stay purely observational.
@@ -2055,7 +2073,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true,
   recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true,
   recycle_fleet_stranded_across_restart: true, recycle_split_lineage_consolidated: true, recycle_successor_retired: true, recycle_ownership_transfer_failed: true,
-  recycle_ownership_transfer_resolved: true, recycle_reattempt_failed: true, recycle_reattempt_handoff_undelivered: true, worker_revived: true, merge_request: true,
+  recycle_ownership_transfer_resolved: true, recycle_self_recycle_blocked: true, recycle_reattempt_failed: true, recycle_reattempt_handoff_undelivered: true, worker_revived: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, merge_landing_started: true, merge_landing_aborted: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, build_gate_single_file_retry_attempt: true, schedule_fire_failed: true, schedule_fire_deferred: true,
