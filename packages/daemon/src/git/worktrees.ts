@@ -287,14 +287,23 @@ async function worktreeAddLanded(worktreePath: string, branch: string, gitDeps: 
   if (!fs.existsSync(worktreePath) || !fs.existsSync(path.join(worktreePath, ".git"))) return false;
   try {
     const { git, timeoutMs } = boundedGit(worktreePath, gitDeps);
+    // card 967eb326 — `symbolic-ref HEAD` is never ambiguity-shortened, unlike `rev-parse --abbrev-ref
+    // HEAD` (which can resolve to "heads/<name>" beside a same-named tag or refs/remotes/<name>/HEAD;
+    // see docs/decisions/2a6a292a-* "Round 13"). Compare the full ref, not a shortened name.
     const head = (await withTimeout(
-      git.raw(["rev-parse", "--abbrev-ref", "HEAD"]), timeoutMs, "git rev-parse --abbrev-ref HEAD (post-add benign-noise verify)",
+      git.raw(["symbolic-ref", "HEAD"]), timeoutMs, "git symbolic-ref HEAD (post-add benign-noise verify)",
     )).trim();
-    return head === branch;
+    return head === `refs/heads/${branch}`;
   } catch {
     return false;
   }
 }
+
+/** TEST-ONLY seam (card 967eb326): `worktreeAddLanded` itself has no production export — every other
+ *  caller of it reaches it only through {@link createWorktree}'s own benign-noise handling, which needs a
+ *  genuine ambiguity-shortened `git worktree add` warning to exercise. This alias lets a test call it
+ *  directly instead of manufacturing that warning end-to-end. */
+export const worktreeAddLandedTestOnly = worktreeAddLanded;
 
 /**
  * Injectable seam for {@link diffBranch}, mirroring {@link BoundedGitDeps} — same
@@ -2412,12 +2421,14 @@ export async function resolveMainlineBranchState(repoPath: string, deps: Bounded
   });
   try {
     const out = await withTimeout(
-      git.raw(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]),
+      git.raw(["symbolic-ref", "refs/remotes/origin/HEAD"]),
       timeoutMs,
       "git symbolic-ref origin/HEAD",
     );
-    const ref = out.trim(); // e.g. "origin/main"
-    const branch = ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
+    const ref = out.trim(); // e.g. "refs/remotes/origin/main" — full ref, never ambiguity-shortened
+    // card 967eb326 — `--short` shortens ambiguously (a colliding local ref can make this resolve to a
+    // longer disambiguated form); strip the known-fixed `refs/remotes/origin/` prefix in JS instead.
+    const branch = ref.startsWith("refs/remotes/origin/") ? ref.slice("refs/remotes/origin/".length) : ref;
     // Card 787dd2a7 round 3: empty output on a successful exit is a killed-child/transient read, never a
     // genuine no-default — the @decision above already rules this must defer like a "failed" read, not
     // seed like a settled "no-default" (never observed for real git; defensive only).
@@ -2450,8 +2461,11 @@ export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDe
 export async function listMergedLoomBranches(repoPath: string, mainlineBranch: string, deps: BoundedGitDeps = {}): Promise<{ branches: string[]; failed: boolean }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
+    // card 967eb326 — `%(refname:short)` shortens ambiguously (e.g. to "heads/<name>" beside a
+    // same-named tag or refs/remotes/<name>/HEAD); `%(refname:lstrip=2)` strips refs/heads/
+    // unconditionally instead (same fix as 1bc9602b; see docs/decisions/2a6a292a-* "Round 13").
     const out = await withTimeout(
-      git.raw(["branch", "--list", "loom/*", "--merged", mainlineBranch, "--format=%(refname:short)"]),
+      git.raw(["branch", "--list", "loom/*", "--merged", mainlineBranch, "--format=%(refname:lstrip=2)"]),
       timeoutMs,
       "git branch --list --merged",
     );
@@ -3007,8 +3021,12 @@ export async function attemptCodexAutoCommit(
   // chokepoint's unconditional allowlist, so no OTHER caller's `unsafe` set is widened by this feature.
   // @decision a746a3eb — `localNonInteractiveEnv()`: every read/write below calls this instance's own
   // `.raw()` directly against the worktree, which never touches a remote.
+  //
+  // @decision 967eb326 — pin LC_ALL/LANGUAGE=C at construction, never via a LATER `.env()` mutation on
+  // this instance — the detached-HEAD classification below needs git's fatal text in English regardless
+  // of host locale, or it silently disarms and fails safe to "not stranded"/"skip the auto-commit".
   const makeGit = deps.gitFactory
-    ?? ((p, ms) => canonicalGit(p, ms, localNonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
+    ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(localNonInteractiveEnv(), { LC_ALL: "C", LANGUAGE: "C" }), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(worktreePath, timeoutMs);
@@ -3017,16 +3035,33 @@ export async function attemptCodexAutoCommit(
   }
   const cfg = ["-c", `core.hooksPath=${AUTOCOMMIT_HOOKS_PATH}`, "-c", "core.fsmonitor=false", "-c", "core.quotePath=false"];
 
-  // (A) HEAD check.
-  let head: string;
+  // (A) HEAD check. card 967eb326 — `symbolic-ref HEAD` is never ambiguity-shortened, unlike
+  // `rev-parse --abbrev-ref HEAD` (see docs/decisions/2a6a292a-* "Round 13") — a same-named tag or
+  // refs/remotes/<name>/HEAD can otherwise make this read "heads/<branch>" and silently skip the
+  // auto-commit.
+  let headRef: string | null = null;
   try {
-    head = (await withTimeout(
-      git.raw([...cfg, "rev-parse", "--abbrev-ref", "HEAD"]), timeoutMs, "codex-auto-commit rev-parse --abbrev-ref HEAD",
+    const raw = (await withTimeout(
+      git.raw([...cfg, "symbolic-ref", "HEAD"]), timeoutMs, "codex-auto-commit symbolic-ref HEAD",
     )).trim();
-  } catch {
-    return { attempted: false, committed: false }; // FAIL SAFE: unreadable HEAD → skip, never refuse on infra flakiness
+    // card 967eb326 (Code Review minor 2) — a SUCCESSFUL-but-EMPTY read is a killed/transient child
+    // (card 787dd2a7's own precedent), never a confirmed detached HEAD: a genuinely detached HEAD
+    // THROWS with NOT_A_SYMBOLIC_REF's text below, so an empty resolve means the read was interrupted
+    // before it could say anything — fail safe exactly like an unreadable HEAD does, rather than report
+    // a false headMismatch naming "HEAD".
+    if (!raw) return { attempted: false, committed: false };
+    headRef = raw;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!NOT_A_SYMBOLIC_REF.test(msg)) {
+      return { attempted: false, committed: false }; // FAIL SAFE: unreadable HEAD → skip, never refuse on infra flakiness
+    }
+    headRef = null; // CONFIRMED detached HEAD — the read completed and said so
   }
-  if (head !== branch) return { attempted: true, committed: false, headMismatch: { head } };
+  const head = headRef
+    ? (headRef.startsWith("refs/heads/") ? headRef.slice("refs/heads/".length) : headRef)
+    : "HEAD"; // detached HEAD, matching what `rev-parse --abbrev-ref HEAD` used to report for the same state
+  if (headRef !== `refs/heads/${branch}`) return { attempted: true, committed: false, headMismatch: { head } };
 
   // (B) status, filtered. `-z --untracked-files=all`: the `-z` half (Code Review "S1") NUL-delimits and
   // never quotes/escapes a path — see parseAutoCommitStatusZ's own doc; `--untracked-files=all` is
@@ -3229,22 +3264,46 @@ export async function detectStrandedWork(
   deps: BoundedGitDeps = {},
 ): Promise<StrandedWork> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  // @decision 967eb326 — pin LC_ALL/LANGUAGE=C at construction so the detached-HEAD classification
+  // below matches git's fatal text under any locale — an unpinned read would otherwise silently fail
+  // safe to stranded:false even for a worktree genuinely stranded on a detached HEAD.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" })));
   try {
     const mainSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD")).trim();
 
     // (1) Work on the ASSIGNED branch? Any commit reachable from it but not from canonical main ⇒ the
     //     normal path — not stranded, regardless of what the worktree is checked out on.
+    // card 967eb326 — qualify as refs/heads/ so a same-named tag can never win over the real branch
+    // (a bare revision resolves a same-named tag first; see docs/decisions/2a6a292a-* "Round 13").
     const assignedAhead = parseInt(
-      (await withTimeout(git.raw(["rev-list", "--count", `${mainSha}..${assignedBranch}`]), timeoutMs, "git rev-list --count assigned")).trim(),
+      (await withTimeout(git.raw(["rev-list", "--count", `${mainSha}..refs/heads/${assignedBranch}`]), timeoutMs, "git rev-list --count assigned")).trim(),
       10,
     );
     if (Number.isFinite(assignedAhead) && assignedAhead > 0) return { stranded: false };
 
     // (2) Assigned branch is empty (0 ahead). Inspect the WORKTREE's actual checked-out branch.
+    // card 967eb326 — `symbolic-ref HEAD` is never ambiguity-shortened, unlike `rev-parse --abbrev-ref
+    // HEAD` (which can resolve to "heads/<name>" beside a same-named tag or refs/remotes/<name>/HEAD).
     const wt = makeGit(worktreePath, timeoutMs);
-    const wtBranch = (await withTimeout(wt.raw(["rev-parse", "--abbrev-ref", "HEAD"]), timeoutMs, "git rev-parse --abbrev-ref HEAD")).trim();
-    if (!wtBranch || wtBranch === assignedBranch) return { stranded: false }; // same branch ⇒ no divergence
+    let wtBranchRef: string | null = null;
+    try {
+      const raw = (await withTimeout(wt.raw(["symbolic-ref", "HEAD"]), timeoutMs, "git symbolic-ref HEAD")).trim();
+      // card 967eb326 (Code Review minor 2) — a SUCCESSFUL-but-EMPTY read is a killed/transient child
+      // (card 787dd2a7's own precedent), never a confirmed detached HEAD: a genuinely detached HEAD
+      // THROWS with NOT_A_SYMBOLIC_REF's text below, so an empty resolve means the read was interrupted
+      // before it could say anything at all — fail safe exactly like the old `!wtBranch` guard did,
+      // rather than treat an ambiguous empty read as "confirmed detached".
+      if (!raw) return { stranded: false };
+      wtBranchRef = raw;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!NOT_A_SYMBOLIC_REF.test(msg)) throw e; // genuine read failure → outer catch fails safe
+      wtBranchRef = null; // CONFIRMED detached HEAD — the read completed and said so
+    }
+    const wtBranch = wtBranchRef
+      ? (wtBranchRef.startsWith("refs/heads/") ? wtBranchRef.slice("refs/heads/".length) : wtBranchRef)
+      : "HEAD";
+    if (wtBranchRef === `refs/heads/${assignedBranch}`) return { stranded: false }; // same branch ⇒ no divergence
 
     const wtAhead = parseInt(
       (await withTimeout(wt.raw(["rev-list", "--count", `${mainSha}..HEAD`]), timeoutMs, "git rev-list --count worktree")).trim(),
