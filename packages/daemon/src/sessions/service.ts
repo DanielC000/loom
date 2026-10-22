@@ -6482,9 +6482,16 @@ export class SessionService {
     const liveTip = exact.sha;
     const trustedSha = this.db.getMainlineBranchTrust(a.projectId, a.repoKey, a.branch);
     if (!trustedSha) {
+      // @decision 2a6a292a round 17 (card f683a5ad round 2) — a real landing lands on whatever is
+      // CURRENTLY checked out, never on the named target; naming it as a remedy when the target ISN'T
+      // checked out would be flatly wrong, not just imprecise.
+      const currentHead = await readMainlineHead(a.repoPath, ms);
+      const landingRemedy = currentHead?.branch === a.branch
+        ? `land a real worker_merge_confirm/merge_batch on "${a.branch}" itself (a genuine landing establishes its trust record automatically, no human step needed), `
+        : "";
       return {
         ok: false,
-        error: `refusing: branch "${a.branch}" has no trusted baseline on record — create a NEW branch instead with project_checkout_branch's create:true (stamped at the current trusted tip), or ask the owner to check out "${a.branch}" THEMSELVES first and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before`,
+        error: `refusing: branch "${a.branch}" has no trusted baseline on record — ${landingRemedy}create a NEW branch instead with project_checkout_branch's create:true (stamped at the current trusted tip), or ask the owner to check out "${a.branch}" THEMSELVES first and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before`,
       };
     }
     if (liveTip === trustedSha) return { ok: true, classifiedTip: liveTip };
@@ -6499,7 +6506,7 @@ export class SessionService {
     // a stale claim the m4 fix above was built to stop making.
     return {
       ok: false,
-      error: `refusing: branch "${a.branch}"'s live tip (${liveTip.slice(0, 8)}) does not match its own trusted baseline (${trustedSha.slice(0, 8)}) exactly — only an EXACT match to the trust record is adopted, never a descendant or any other move (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity) — ask the owner to review it, check out "${a.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before — before retrying`,
+      error: `refusing: branch "${a.branch}"'s live tip (${liveTip.slice(0, 8)}) does not match its own trusted baseline (${trustedSha.slice(0, 8)}) exactly — only an EXACT match to the trust record is adopted, never a descendant or any other move (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity). This ALSO fires after a perfectly ordinary manual \`git commit\` on "${a.branch}" made outside Loom (e.g. by the owner directly in the canonical repo) — Loom cannot tell that apart from a forged move, by design (card f683a5ad). Ask the owner to review it, check out "${a.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before — before retrying`,
     };
   }
 
@@ -6519,7 +6526,7 @@ export class SessionService {
           evidence, suspectShas, rawReflogMessages: [], source: "manager-checkout-precheck",
           reason: evidence.includes("remote-tracking-shadow")
             ? `project_checkout_branch refused: branch "${a.branch}" has no local ref, but a remote-tracking ref with that name exists — refusing rather than risk git's own branch-DWIM creating a local one from it`
-            : `project_checkout_branch refused: branch "${a.branch}"'s live tip ${to.slice(0, 8)} does not EXACTLY match its own trusted baseline ${from.slice(0, 8)} — no other tip is accepted`,
+            : `project_checkout_branch refused: branch "${a.branch}"'s live tip ${to.slice(0, 8)} does not EXACTLY match its own trusted baseline ${from.slice(0, 8)} — no other tip is accepted. This also fires after an ordinary manual commit on "${a.branch}" made outside Loom; it is not necessarily a forgery.`,
         },
       });
       try {
@@ -6528,6 +6535,31 @@ export class SessionService {
       } catch { /* the durable event above is the record; a failed nudge must not matter */ }
     }
     return alreadyFiled;
+  }
+
+  /** @decision 2a6a292a round 17 (card f683a5ad round 2) — `createProjectBranch` must never branch from
+   *  an untrusted W: W is `4fa36502`'s own fail-open dedupe, not a trust decision. Call with whichever W
+   *  the caller already has freshest — never re-read here, or this becomes a second staleness source.
+   *  @decision 2a6a292a round 18 (card f683a5ad round 3) — a NULL trust is quiet, never a mismatch;
+   *  see the decision record's round-16 section. */
+  private refuseIfWatermarkUntrusted(a: { projectId: string; repoKey: string; managerSessionId: string; taskId: string | null }, w: { branch: string; sha: string }): { ok: true } | { ok: false; error: string; refused: true } {
+    const trusted = this.db.getMainlineBranchTrust(a.projectId, a.repoKey, w.branch);
+    if (trusted === w.sha) return { ok: true };
+    if (trusted === null) {
+      return {
+        ok: false, refused: true,
+        error: `refusing: the current mainline watermark ("${w.branch}" at ${w.sha.slice(0, 8)}) has no trusted baseline on record yet — branching a new name from it would inherit whatever moved it there with no Loom verification. Land a real worker_merge_confirm/merge_batch on "${w.branch}" itself (a genuine landing establishes its trust record automatically, no human step needed), or ask the owner to check out "${w.branch}" THEMSELVES and use the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — after that, a plain (non-create) project_checkout_branch call onto "${w.branch}" will also re-seed the watermark to match`,
+      };
+    }
+    const evidence: MainlineEvidence[] = ["untrusted-tip-mismatch"];
+    const alreadyFiled = this.fileManagerCheckoutRefusalEvent(
+      { projectId: a.projectId, repoKey: a.repoKey, branch: w.branch, managerSessionId: a.managerSessionId, taskId: a.taskId },
+      trusted, w.sha, evidence, [w.sha],
+    );
+    return {
+      ok: false, refused: true,
+      error: `refusing: the current mainline watermark ("${w.branch}" at ${w.sha.slice(0, 8)}) does not match its own trust record (${trusted.slice(0, 8)}) exactly — branching a new name from it would inherit whatever moved it there with no Loom verification (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity). This ALSO fires after a perfectly ordinary manual \`git commit\` on "${w.branch}" made outside Loom (e.g. by the owner) — Loom cannot tell that apart from a forged move, by design (card f683a5ad). Ask the owner to review it, check out "${w.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) before retrying`,
+    };
   }
 
   /** "A manager must never be able to clear the owner's alarm": while ANY mainline alert marker for
@@ -6716,8 +6748,15 @@ export class SessionService {
     if (!preCheck.ok) return preCheck;
     const w = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(projectId, repoKey)));
     if (!w) {
-      return { ok: false, error: "refusing: no established mainline watermark to branch from yet — a real Loom landing (or a human checkout plus the human-only reset route) must establish one first" };
+      // @decision 2a6a292a round 18 (card f683a5ad round 3) — the human-only reset route does NOT
+      // establish W (resetMainlineWatermark PURGES it; `adopt` only re-stamps TRUST). Name the real
+      // re-seed instead: see the decision record's round-16 section.
+      return { ok: false, error: `refusing: no established mainline watermark to branch from yet — a real Loom landing (worker_merge_confirm/merge_batch) establishes one with no human step, or, after the owner checks out the branch themselves and uses the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) to establish its trust record, a plain (non-create) project_checkout_branch call onto that same branch re-seeds the watermark to match — the reset route itself does NOT establish the watermark on its own` };
     }
+    // @decision 2a6a292a round 17 (card f683a5ad round 2) — never branch from an untrusted W; see
+    // refuseIfWatermarkUntrusted's own doc.
+    const trustCheck = this.refuseIfWatermarkUntrusted({ projectId, repoKey, managerSessionId, taskId: null }, w);
+    if (!trustCheck.ok) return trustCheck;
     const nameCollision = await checkExistingNameCollision();
     if (!nameCollision.ok) return nameCollision;
     // @decision 2a6a292a round 11 (CR8, item 5) — CREATE-path only; see refuseIfCreateNameShadowsRemote's
@@ -6744,6 +6783,10 @@ export class SessionService {
         if (!rs.ok) { structuredInLockRefusal = rs; return { ok: false, error: rs.error }; }
         const freshW = parseMainlineWatermark(this.db.getMeta(mainlineWatermarkKey(projectId, repoKey)));
         if (!freshW) return { ok: false, error: "refusing: the mainline watermark was cleared while this create was being admitted — no established baseline left to branch from; retry" };
+        // @decision 2a6a292a round 17 (card f683a5ad round 2) — re-checked against the FRESH, in-lock W,
+        // never the stale outer one; see refuseIfWatermarkUntrusted's own doc.
+        const freshTrustCheck = this.refuseIfWatermarkUntrusted({ projectId, repoKey, managerSessionId, taskId: null }, freshW);
+        if (!freshTrustCheck.ok) { structuredInLockRefusal = freshTrustCheck; return { ok: false, error: freshTrustCheck.error }; }
         freshStartSha = freshW.sha;
         return { ok: true, startPoint: freshW.sha };
       },
@@ -23203,9 +23246,10 @@ export class SessionService {
       const alertKey = mainlineBootAlertKey(a.projectId, a.repoKey);
       // @decision 4fa36502 — ONE predicate for every marker delete (`dropBootAlert`): a marker goes only once DELIVERED, or when this check's baseline IS the marker's own `from` (a true re-detection / undo). An undelivered one is an alert no manager has read; W moving must never drop it.
       const dropBootAlert = (sameBaseline?: string): void => { const m = parseMainlineBootAlert(this.db.getMeta(alertKey)); if (m && (m.nudgedAt || (sameBaseline !== undefined && m.from === sameBaseline))) this.db.deleteMeta(alertKey); };
-      // @decision 2a6a292a round 6 — every store() also refreshes this branch's own trust record: the
-      // tripwire classified this tip clean (or it's true first sight), so it's as trustworthy as W itself.
-      const store = (): void => { if (this.db.getMeta(key) === rawW) { this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); this.db.setMainlineBranchTrust(a.projectId, a.repoKey, head.branch, head.tip); dropBootAlert(); } };
+      // @decision 2a6a292a round 16 (card f683a5ad) — store() must NEVER write the per-branch trust
+      // record: classifyMainlineMove's verdict is forgeable (attacker-writable reflog/trailer text), not
+      // Loom's own durable record. It still advances W exactly as before — 4fa36502's protected dedupe.
+      const store = (): void => { if (this.db.getMeta(key) === rawW) { this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip })); dropBootAlert(); } };
       const boot = a.source === "boot";
       // @decision 4fa36502 — TRUE first sight only: no watermark has EVER been stamped for this (project, repoKey).
       // @decision 787dd2a7 — a LANDING-path first sight never stores here; seeding defers to

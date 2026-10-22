@@ -129,8 +129,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //                 the real method (a `GitWriter.prototype.checkout` patch, not a fake GitWriter) — the
 //                 round-6 (N1) scenario above could only reach GitWriter.checkout() itself, never this.
 //                 Round 8's negative control also asserts W actually MOVED on the retry (MAJOR #2 below).
-//   (C3)          round 7 (M3-iii) — checkMainlineMove's BOOT-path store() also re-stamps the per-branch
-//                 trust record, not just W.
+//   (C3)          card f683a5ad (round 16 of the decision record, renumbered from round 14 to avoid a
+//                 collision with card 59e53710's own round 14 — see that round's "Renumbering note") —
+//                 checkMainlineMove's BOOT-path store()
+//                 must NEVER re-stamp the per-branch trust record from its own classified verdict (that
+//                 verdict is forgeable reflog/trailer text, not Loom's own durable record); only W moves.
+//                 (Round 7/M3-iii originally added this scenario asserting the OPPOSITE, now-fixed
+//                 behavior — inverted by f683a5ad, not merely deleted, so the boot path's own store() stays
+//                 under live regression coverage.)
 //   (C7)          round 7 (M3-iii) — a repo rebind (`resetMainlineBaselinesForRepoChange`) wipes every
 //                 per-branch trust record too, not just W.
 //   (STALE-NOOP)  round 8's MAJOR #2 — the "already checked out" path used to silently report success
@@ -1395,7 +1401,8 @@ try {
     check("(N1-MISMATCH) negative control: once the alert is cleared, the SAME call now succeeds and actually re-points the previously-stuck watermark (round 8 MAJOR #2, not a bare noop)", r2.ok === true && r2.noop === false && fx.watermark()?.branch === "atlas" && fx.watermark()?.sha === fx.canonHead());
   }
 
-  // ===================== (C3) checkMainlineMove's BOOT-path store() also re-stamps the per-branch trust record (M3-iii) =====================
+  // ===================== (C3) checkMainlineMove's BOOT-path store() must NEVER re-stamp the per-branch
+  //                        trust record (card f683a5ad) — only W advances =====================
   {
     const fx = makeFixture("c3boot");
     const w = await fx.addWorker("seed");
@@ -1411,13 +1418,9 @@ try {
     commitAll(fx.repo, "chore(x): ordinary advance for the boot check to classify", GIT_ID);
     const advancedTip = fx.canonHead();
     check("(C3) setup: HEAD advanced past W via an ordinary (non-Loom) commit", advancedTip !== landedSha);
-    // Clear the trust record directly — this isolates the BOOT path's OWN store() as what's actually
-    // being tested below, rather than leaning on the landing's own (separately-tested) write.
-    db.deleteMeta(MW.mainlineBranchTrustKey(fx.projId, "primary", fx.main));
-    check("(C3) setup: trust record cleared", fx.trust(fx.main) === null);
     await fx.sessions.checkMainlineMovesOnBoot();
-    check("(C3) the boot path's own checkMainlineMove store() re-stamps the trust record to the NEW tip (C3)", fx.trust(fx.main) === advancedTip);
-    check("(C3) W itself also advanced to the new tip", fx.watermark()?.sha === advancedTip);
+    check("(C3) THE FIX (card f683a5ad): the boot path's own checkMainlineMove store() leaves the trust record exactly as the landing left it — NEVER re-stamped to the newly-classified tip", fx.trust(fx.main) === landedSha);
+    check("(C3) W itself still advances to the new tip (4fa36502's own protected dedupe — unaffected by this card)", fx.watermark()?.sha === advancedTip);
   }
 
   // ===================== (C7) a repo rebind wipes every per-branch trust record too, not just W (M3-iii) =====================

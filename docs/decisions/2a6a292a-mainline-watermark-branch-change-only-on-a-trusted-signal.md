@@ -1368,3 +1368,341 @@ ALSO covers: the `"refs/heads/<existing-branch>"` shape (checkout detach + creat
 the pathspec-fallback shapes `"."`/a real tracked filename/`"<branch>^{}"` (dirty-file byte-unchanged +
 HEAD-never-detached assertions). All new assertions proven RED against the real round-14 tip (`c37bd715`,
 reverting just `writer.ts` to that commit, rebuilding, re-running, then restored and re-verified GREEN).
+
+**Renumbering note:** this card (`f683a5ad`) and card `59e53710` both forked from round 13 and both numbered their own rounds 14/15 independently; `59e53710`'s rounds 14/15 (above) landed on main first and keep those numbers, so this card's three rounds are renumbered 16/17/18 here, in the order they were actually reviewed.
+
+## Round 16 (card `f683a5ad`) — the shared tripwire's OWN `store()` was a forgeable trust writer too
+
+Round 10's own "Out of scope" section named this gap explicitly and tracked it separately: "The shared
+mainline tripwire's own `store()` writes to the per-branch trust record are themselves git-derived
+(reflog/trailer-based) and forgeable by the same class of attacker this round defends against." Card
+`f683a5ad` closes it.
+
+### The bug
+
+Round 6 (above) wired `setMainlineBranchTrust` into `checkMainlineMove`'s `store()` closure
+(`sessions/service.ts`), reasoning "the tripwire classified this tip clean (or it's true first sight), so
+it's as trustworthy as W itself." That premise is false: `classifyMainlineMove`'s verdict is derived from
+reflog message text and commit-trailer text, both of which anyone with `.git` write access can forge —
+exactly the class of signal round 9 (above) already proved unsound for a TRUST decision and removed from
+`refuseIfTargetBranchUntrusted` entirely. `store()` kept using it anyway, on W's SIBLING record, with two
+concrete bypasses (hermetic repro, real git, both proven RED-then-GREEN against the real
+`checkMainlineMove`):
+
+- **Repro A (silent).** A forged commit — same tree as the trusted sha, parent the trusted sha, carrying a
+  forged `Loom-Worker-Branch:` trailer in its message — landed via `git update-ref -m "commit: x"
+  refs/heads/<branch> <forged>` (a forged, PORCELAIN-LOOKING reflog message). `classifyMainlineMove` reads:
+  message matches the porcelain pattern ⇒ not raw; trailer parses as real ⇒ not untrailered ⇒ verdict
+  `explained`. Zero events, zero nudges — and `store()` silently stamped both W and the per-branch trust
+  record onto the forged sha.
+- **Repro B (alerted, but still laundered).** The same forged parentage, left UNTRAILERED, landed via a
+  BARE `git update-ref refs/heads/<branch> <forged>` (empty message ⇒ raw) ⇒ verdict `alert`
+  (`reflog-raw-write`). This correctly files one HIGH `mainline_moved_outside_loom` event and one manager
+  nudge — but `store()` still ran unconditionally afterward, laundering the trust record onto the forged
+  sha anyway. Worse: a sha-level landing-path alert (unlike a `branch-diverted` one) writes NO
+  `mainline-boot-alerted:` marker at all, so `hasUnresolvedMainlineAlert` sees nothing and a manager's very
+  next `project_checkout_branch`/`create:true` call on that branch would pass trivially — the exact-match
+  gate reading a trust record `store()` had just re-stamped to the forged tip moments earlier.
+  **ROUND 17 CORRECTION:** this round's own "Tests" section below originally read as having proven
+  `create:true` safe end-to-end on its own. It had not — see round 17's own headline finding: `create:true`
+  called FIRST, with no prior switch attempt, bypasses this round's fix entirely via a SECOND, independent
+  path (`createProjectBranch` branching from W directly, never consulting a per-branch trust record at
+  all). Fixed there, not here.
+
+### Fix
+
+Delete the `setMainlineBranchTrust` call from `store()`. Nothing else in the closure changes: W's own
+write (`this.db.setMeta(key, …)`) and `dropBootAlert()` are untouched — advancing W after a non-
+branch-diverted alert remains `4fa36502`'s own protected dedupe (it stops the SAME still-unlanded move
+from re-alerting on every subsequent check), and that is not a trust decision, so it is out of scope here.
+The per-branch trust record is now refreshed ONLY by a site keyed on Loom's own durable record or a
+human/manager-authenticated act: a verified real landing (`advanceMainlineWatermark{,ForBatch}`, after
+`readFirstParent`/`isAncestorCommit` confirms the landed commit's own parentage — unaffected by this
+round), `Db.repointMainlineWatermark` (the manager-checkout success path, itself gated by this record's own
+round-9/13 exact-match hardening), or `Db.resetMainlineWatermark`'s `adopt` param (the human's own live git
+read via the REST route). All four are unchanged by this round.
+
+### Accepted cost: a trust record that only ever absorbed an un-landed observation now lags until a real landing
+
+A branch whose trust was previously refreshed by a boot-time first-sight seed, or by a landing-path
+`explained`/`unverifiable`/cap-skip check with no landing immediately following, no longer gets its trust
+refreshed by that observation alone. `refuseIfTargetBranchUntrusted` refuses "no trusted baseline on
+record" until either a genuine landing happens on that branch (the ordinary case — this self-heals the
+moment a real `worker_merge_confirm`/`merge_batch` lands) or a human uses the reset route. This is strictly
+MORE conservative than before (every previously-accepted case still passes once a real landing lands on
+it) and introduces no new false-allow — the same "accepted cost" shape round 9 already named for the
+target-branch gate itself, now also true of this one remaining writer.
+
+### Refusal text updated to name the self-healing remedy
+
+`refuseIfTargetBranchUntrusted`'s "no trusted baseline on record" message already named `create:true` and
+the human-only reset route; it did not say that landing a real confirm/batch merge on the branch itself
+also establishes its trust record with no human step at all — now the first-named remedy, since it is the
+ordinary, no-action-needed path for a project that simply hasn't landed on this branch yet.
+
+## Do not (round 16 additions)
+
+- Do not reintroduce a trust-record write into `checkMainlineMove`'s `store()`, in this closure or a new
+  one, keyed on `classifyMainlineMove`'s verdict (or any other git-derived classification) — see round 9's
+  own "Do not" above; this is the exact pattern that produced this round.
+- Do not stop the non-branch-diverted `alert` verdict from falling through to `store()`'s W-write on the
+  landing path — that write is `4fa36502`'s own protected dedupe for W, unrelated to trust, and predates
+  this card; removing it would let the SAME still-unlanded move re-alert/re-nudge on every subsequent
+  check, regressing a different, already-fixed and tested card.
+- Do not read this round's "accepted cost" as a reason to widen `refuseIfTargetBranchUntrusted` with a
+  second, softer check for "no trust record yet" — the three authenticated writers above (a landing, this
+  tool, the reset route) are the only three ways trust may ever be established; a fourth, softer one would
+  reopen exactly the hole this round closes.
+
+### Tests (round 16)
+
+`mainline-watch-trust-store.mjs` (new): (A)/(B) above, RED-then-GREEN against the real `checkMainlineMove`
+— pre-fix, trust launders in both; post-fix, trust stays at the pre-existing sha in both while W's own
+existing behavior (and B's one HIGH event/nudge) is unchanged — "W moves, trust does not" is the asserted
+post-fix signature. Both repros additionally assert END-TO-END through the real manager tool path: after
+the forged move, a `checkoutProjectBranch` switch to that branch is refused, naming
+`untrusted-tip-mismatch`/the "no trusted baseline" text, and a SUBSEQUENT `checkoutProjectBranch({create:
+true})` from it is ALSO refused.
+**ROUND 17 CORRECTION — the `create:true` half of that sentence overclaimed what was actually proven.**
+The `create:true` call in each scenario was refused only because the PRIOR switch attempt, run moments
+earlier in the same scenario, had already filed the alert marker `hasUnresolvedMainlineAlert` then blocks
+on — it was never itself independently proven to refuse a `create:true` call made FIRST, with no such
+marker on file. It is not: `createProjectBranch` reaches it via `GitWriter.createBranch(branch,
+{startPoint: w.sha, …})`, never through `refuseIfTargetBranchUntrusted` at all, so nothing in this round's
+own fix touched that path. See round 17's (A2)/(B2) tests for the scenario actually proving `create:true`
+safe when called first, and round 17's own fix for what closes it.
+(FIRST-SIGHT-THEN-LANDING): a fresh project with no
+prior watermark/trust at all — `project_checkout_branch` on its one branch refuses "no trusted baseline",
+naming the landing/create:true/reset-route remedies — then a real landing (`confirmWorkerMergeTracked`)
+lands on it, after which the SAME call succeeds: trust is picked up by the landing with no permanent
+orphan and no human step required.
+
+## Round 17 (card `f683a5ad` round 2, Code Review of `93486f69` — NOT MERGEABLE) — `create:true` called
+## FIRST bypasses round 16 entirely; a false lockout after an ordinary hand commit made legible; two wording fixes
+
+Round 16's own fix closed `checkMainlineMove`'s `store()`, but never touched `createProjectBranch`, which
+reaches its start point a completely different way (`GitWriter.createBranch(branch, {startPoint: w.sha,
+…})` — W directly, never `refuseIfTargetBranchUntrusted`, never a per-branch trust record at all). The
+Code Review's own hermetic repro (real git, a real payload file, `create:true` called FIRST with no prior
+switch) proved this end to end: shape A (forged porcelain message + forged trailer, zero events) and shape
+B (bare `update-ref`, one HIGH event but no marker) both landed `{ok:true, created:true}` at the forged
+sha, payload content included, on commit `93486f69` — round 16's own fix, alone, does not close this.
+
+### 1. CRITICAL fix — `createProjectBranch` must never branch from an untrusted W
+
+A new helper, `SessionService.refuseIfWatermarkUntrusted(a, w)`, requires `w.sha === Db.getMainlineBranchTrust(a.projectId, a.repoKey, w.branch)` — the IDENTICAL exact-match discipline `refuseIfTargetBranchUntrusted` already applies to a switch TARGET, now also applied to the CURRENT WATERMARK before `createProjectBranch` is allowed to use it as a start point. On a mismatch it refuses via the SAME `fileManagerCheckoutRefusalEvent` the switch path uses: the same `untrusted-tip-mismatch` evidence, the same HIGH event, the same `mainline-boot-alerted` marker (never silent), naming the human reset route.
+**ROUND 18 CORRECTION:** this paragraph previously read "a null trust (never established) refuses exactly like a mismatch — there is no softer case." That was a regression, not a deliberate design choice: see round 18's own section below. A null trust is now a QUIET refusal (no event, no marker) — only a genuine mismatch still files the loud HIGH event + marker described in the sentence above.
+
+Called at BOTH of `createProjectBranch`'s own precondition sites, each against whichever W value that
+site already has freshest (never a THIRD, independently-timed read, which would reopen a TOCTOU gap of
+its own): the OUTER courtesy pre-check, against the `w` read right after it; and the IN-LOCK re-check
+(round 7's own n2 fix), against `freshW` — right where `freshStartSha` is set, replacing the stale outer
+value — mirroring the stamp-time-defense pattern every other check in this gate already uses.
+
+**Rejected alternative, named explicitly because it was considered and is wrong:** branch from the TRUST
+sha instead of W, sidestepping the need to refuse at all. Two reasons this doesn't work: it silently drops
+any commits between the trust sha and W's own (possibly perfectly legitimate, e.g. cap-skipped or
+first-sight-seeded) tip, and it STILL has to refuse outright when trust is null — there is no sha to
+silently substitute in that case. Refusing is the only sound answer either way.
+
+### 2. Test/docs overclaim — `create:true`'s round-14 coverage restated at its true scope
+
+`mainline-watch-trust-store.mjs`'s own (A)/(B) scenarios called `create:true` only AFTER a switch attempt
+had already been refused and had already filed the alert marker — so they proved the MARKER blocks
+`create:true`, never that `create:true` defends itself. New, FRESH-fixture scenarios (A2)/(B2) call
+`create:true` FIRST, with no prior switch at all, against the same two forge shapes (now with a real
+payload file, proving content laundering, not just a tip-sha fact) — RED on `93486f69` (lands the forged
+tip, payload included), GREEN after this round's fix (refused, no branch ref ever created, no trust
+record ever stamped for the attempted name). Round 16's own "Tests" section above is corrected in place to
+state this scope precisely rather than implying `create:true` was already proven safe end-to-end.
+
+### 3. MAJOR, by design, now legible — an ordinary owner hand commit triggers the identical HIGH lockout a forgery would
+
+Sequence: W/trust on `main` at `C0`; the owner makes a perfectly ordinary `git commit` on `main` (no
+forgery, no Loom involvement at all) to `C1`; a boot pass advances W to `C1` (4fa36502's own dedupe) but —
+round 16's own fix — never touches trust, which stays `C0`; the next `project_checkout_branch` call (even
+a bare switch onto the branch already checked out) now refuses HIGH, `untrusted-tip-mismatch`, and files
+the marker, exactly as a real forgery would. **Ruling: KEEP this fail-closed shape — do not weaken it.**
+Round 9's whole design point is that Loom cannot tell an ordinary hand commit on the canonical branch
+apart from a forged one; distinguishing them would require exactly the git-derived classification round 9
+proved unsound. The fix here is legibility, not behavior:
+- `refuseIfTargetBranchUntrusted`'s own mismatch error text, and the shared `fileManagerCheckoutRefusalEvent`'s
+  durable-event `reason` text (read by both the switch path and `createProjectBranch`'s new check above),
+  now both say PLAINLY that this also fires after a perfectly ordinary manual commit made outside Loom
+  (e.g. by the owner), not only "treat as a bypass of the merge gate" — and still name the exact human
+  reset route, checkout-then-reset ordering included.
+- This "Accepted cost" section (round 16, above) described only the QUIETER first-sight/no-trust-record
+  refusal shape. It is extended here: an EXISTING, previously-matching trust record can ALSO start
+  refusing — loudly, HIGH-severity, with a lockout on every later call — purely because of an otherwise
+  completely unremarkable commit the owner made directly, with no Loom session involved at all. This is
+  the SAME accepted cost (fail-closed over fail-open), just a second, louder shape of it that deserves its
+  own explicit statement rather than hiding under the quieter one.
+- `mainline-watch-trust-store.mjs`'s new (HAND-COMMIT-LOCKOUT) scenario pins the full sequence: hand
+  commit, boot (W moves, trust doesn't), refusal (HIGH, with the new wording), a bare retry (still locked
+  out — dedupe, not a second alert), the human-only reset route's `adopt`, then success.
+
+### 4. MINOR fix — the "no trusted baseline" remedy must not claim a landing self-heals a branch that isn't checked out
+
+A real landing always lands on whatever is CURRENTLY CHECKED OUT (canonical HEAD) — never on an arbitrarily
+named branch. `refuseIfTargetBranchUntrusted`'s "no trusted baseline on record" message named the
+real-landing remedy (round 16's own addition) UNCONDITIONALLY, which is simply false advice when the
+branch being refused isn't the one checked out right now. Fixed: a fresh `readMainlineHead` read inside
+that one refusal branch (never on the ordinary success path — this is not a cost paid on every call) gates
+the clause on `currentHead?.branch === a.branch`; otherwise only `create:true` and the human reset route
+are named.
+
+**Test-authoring correction, disclosed rather than silently substituted:** the kickoff's own literal
+framing for this test ("fresh project, create:true feat-y, then switch back to main refuses") was checked
+against the real code and does NOT reproduce — `main`'s own trust record is untouched by a `create:true`-
+and-switch-back round trip (round 6's own "Do not purge a branch's trust record merely because a switch or
+create moves W" design, still true here), so switching back to `main` after `create:true "feat-y"`
+succeeds cleanly; verified directly before writing any assertion. The actually-reproducible shape used in
+`mainline-watch-trust-store.mjs`'s (NOT-CHECKED-OUT) scenario instead: after `create:true "feat-y"` (now
+canonical HEAD), a THIRD branch created directly in git (never through Loom, no trust record of its own)
+is switched to while `feat-y` — not it — is checked out; the refusal correctly omits the landing remedy, a
+negative control confirms the SAME remedy still appears for a branch that IS checked out.
+
+## Do not (round 17 additions)
+
+- Do not branch `createProjectBranch` from the per-branch TRUST sha instead of refusing on a mismatch —
+  see the "Rejected alternative" above; it silently drops commits and still can't handle a null trust.
+- Do not read the HAND-COMMIT-LOCKOUT shape as a bug to fix by loosening the refusal — see round 9's own
+  "Do not" above (no fourth git-derived classification layer) and this round's item 3: the fix here is
+  wording, never a weakened check.
+- Do not gate the `currentHead` read (item 4) behind anything but the one refusal branch that needs it —
+  it is a real git call, and every other path through this gate must stay exactly as cheap as before.
+- Do not trust a kickoff's own literal test description over the code — see item 4's test-authoring
+  correction; verify every new scenario against the real build before writing its assertion, not just
+  before believing its conclusion.
+
+### Tests (round 17)
+
+`mainline-watch-trust-store.mjs`: (A2)/(B2) — `create:true` called FIRST after each forge shape, fresh
+fixtures, a real payload file proving content (not just tip-sha) laundering is blocked; RED on `93486f69`,
+GREEN after; each with a negative control that an UNFORGED project's `create:true` still succeeds
+normally. (NOT-CHECKED-OUT) — the corrected not-checked-out, no-trust-record scenario (see item 4 above),
+with a negative control that the checked-out branch's own "no trusted baseline" case still names the
+landing remedy. (HAND-COMMIT-LOCKOUT) — the full hand-commit → HIGH refusal (new wording asserted
+verbatim) → dedup'd retry → human reset `adopt` → success sequence.
+
+## Round 18 (card `f683a5ad` round 3, narrow re-review of `463d04b1`) — a null trust is not a mismatch;
+## `refuseIfWatermarkUntrusted`'s own loud path was a false-alarm-and-lockout regression
+
+Round 17's own fix (above) made `refuseIfWatermarkUntrusted` treat a NULL trust (never established at
+all) exactly like a genuine MISMATCH — both filed a HIGH `mainline_moved_outside_loom` event plus a
+`mainline-boot-alerted` marker. That premise was never examined: a null trust is not a weaker form of
+"someone tampered with this branch" — it is the ORDINARY, expected state of a branch that simply has not
+landed through Loom yet. Since round 16 removed the trust write from `checkMainlineMove`'s `store()`, a
+boot-time TRUE first-sight pass still stamps W silently (unchanged, `4fa36502`'s own design) but never
+stamps trust — so this hit EVERY fresh project on its very first `create:true`, with no forgery, no hand
+commit, nothing adversarial at all.
+
+### The bug, probe-verified against `463d04b1`
+
+1. A fresh project boots; `checkMainlineMovesOnBoot` seeds W (`{branch:"main", sha:C0}`) via true first
+   sight; trust for `"main"` stays null (round 16's own fix, unaffected by this round).
+2. The manager's first `create:true` call reaches `refuseIfWatermarkUntrusted`, finds `trusted === null`,
+   and — pre-fix — refuses via the SAME path a mismatch takes: files a HIGH event, stamps the
+   `mainline-boot-alerted` marker, sends a manager nudge. A false alarm; nothing was ever forged.
+3. A plain, non-create `project_checkout_branch({branch:"main"})` — even onto the branch already checked
+   out — is now ALSO refused, with `"an unresolved mainline alert already exists for this repo"`
+   (`hasUnresolvedMainlineAlert`, gated on the marker the step above just wrote). The entire tool is
+   locked for this (project, repoKey) until a human resets it — for a project that has done nothing wrong.
+4. The owner reviews, confirms nothing is amiss, and calls the human-only reset route with `adopt`
+   (`POST /api/projects/:id/mainline-watermark/reset`). `resetMainlineWatermark`'s `adopt` param stamps
+   TRUST directly (`Db.setMainlineBranchTrust`) but — by design, see `purgeMainlineWatermarkState` —
+   unconditionally PURGES W. `create:true` called right after this still refused, on
+   `createProjectBranch`'s own `if (!w)` guard, with text that read *"...(or a human checkout plus the
+   human-only reset route) must establish one first"* — false: the reset route the sentence just named
+   does not establish W; it deletes it.
+5. The ONLY thing that actually re-seeds W in this state is a plain, non-create
+   `project_checkout_branch` call onto the branch that is CURRENTLY checked out — `checkoutProjectBranch`'s
+   own "already checked out, W disagrees" fixup path (the `oldWatermark && oldWatermark.branch === branch`
+   branch inside `checkoutProjectBranch` in `sessions/service.ts` — see that method's own comments for its
+   current location), which re-runs the full precondition (now passing, since `adopt` already set trust to
+   match the live tip) and calls `Db.repointMainlineWatermark` — which stamps BOTH W and trust. No prose
+   anywhere named this step.
+
+### Fix
+
+`refuseIfWatermarkUntrusted` now branches on `trusted === null` BEFORE building the mismatch-shaped
+refusal: a null trust returns a QUIET `{ok:false, refused:true}` — no `fileManagerCheckoutRefusalEvent`
+call, so no event, no marker, no nudge — naming the real remedies (a genuine landing on `w.branch`, or
+the owner checking it out themselves and using the human-only reset route, followed by a plain
+`project_checkout_branch` call to pick up the just-established trust and re-seed the watermark too). A
+genuine MISMATCH (trust was established at some point; the live watermark no longer matches it exactly)
+is completely unchanged: same `fileManagerCheckoutRefusalEvent` call, same HIGH event, same marker, same
+wording — this round narrows the null case only and does not soften the real security case round 9/15
+built.
+
+`createProjectBranch`'s separate "no established mainline watermark" message (reached when `w` itself is
+null — the step-4 state above, right after a reset) is fixed the same way: it no longer claims the
+human-only reset route alone establishes W. It now says so plainly — the reset route establishes TRUST
+only; W is re-seeded by a genuine landing, or by a subsequent plain `project_checkout_branch` call onto
+the branch the reset just adopted.
+
+Both messages were probe-verified end to end against the real build, not merely read for plausibility:
+the (NULL-TRUST-QUIET) test below runs every step of the bug sequence above, then runs the two named
+remedies and confirms each one actually does what its own refusal text now claims.
+
+### Round 16's "accepted cost" (self-heals the moment a real landing lands) is re-confirmed, including for `create:true`
+
+Round 16's own accepted-cost section (above) claims a branch's trust record self-heals via a real
+`worker_merge_confirm`/`merge_batch` landing, with no human step, for the SWITCH path
+(`refuseIfTargetBranchUntrusted`). This round leaves that mechanism untouched and confirms it holds
+equally for the CREATE path (`refuseIfWatermarkUntrusted`), with a DEDICATED test, not an inference drawn
+from a sibling scenario: (NULL-TRUST-LANDING) runs a genuine landing (through `confirmWorkerMergeTracked`)
+against a fresh, boot-seeded, never-trusted project, with NO human reset and NO intervening plain switch,
+and confirms `create:true` succeeds immediately afterward.
+**CORRECTION (narrow re-review `847b0e21` of `ae61b35f`):** this subsection previously cited
+(NULL-TRUST-QUIET) as the evidence for this claim. It is not: that test's own landing-free path recovers
+through the human reset route followed by a plain switch, never through a landing alone, so it never
+actually exercises "a real landing, by itself, unblocks `create:true`" — the very claim this subsection
+makes. (NULL-TRUST-LANDING), added in this correction, is the test that actually proves it; see its own
+header comment in `mainline-watch-trust-store.mjs`.
+
+## Do not (round 18 additions)
+
+- Do not reintroduce a HIGH event/marker for `refuseIfWatermarkUntrusted`'s null-trust branch, on the
+  theory that "no trust yet" might itself be suspicious — it is the ordinary state of a branch that has
+  not landed through Loom yet, and every fresh project passes through it exactly once. Keep it quiet.
+- Do not soften the MISMATCH branch to match the null branch's quiet behaviour — a mismatch (trust WAS
+  established, the live watermark disagrees with it) is the real security case round 9/15 built; it keeps
+  the loud event + marker.
+- Do not claim, in either refusal message, that the human-only reset route BY ITSELF establishes the
+  watermark — `resetMainlineWatermark` always purges W (see `purgeMainlineWatermarkState`); only its
+  `adopt` param (re-)stamps trust. If the watermark needs re-seeding too, name the real step: a landing,
+  or a subsequent plain `project_checkout_branch` call onto the branch the reset just adopted.
+- Do not trust a kickoff's own claimed remedy sequence without probe-verifying it against the real build
+  first — this round's own fix text was shaped by running the sequence end to end (see "The bug,
+  probe-verified" above) rather than accepting the claim as given; a remedy that reads as working standalone
+  can turn out to depend on a prior step (here: the reset's `adopt`) that was not stated.
+- **Residual, by design, not a regression:** `checkMainlineMove`'s `store()` still absorbs a forged move
+  silently/with-only-an-alert exactly as rounds 1/9/16 left it — that classifier-driven behavior is
+  UNCHANGED by this round. What changed is ONLY what `refuseIfWatermarkUntrusted` does when `create:true`
+  is later called against a W that absorbed such a move while NEVER having had an established trust record
+  at all (a boot-seeded, never-landed branch) — that specific case now gets the SAME quiet refusal as any
+  other null-trust branch, where round 2 made it loud. This is correct, not a softening: round 2's loud
+  path fired IDENTICALLY on every benign fresh project's first `create:true` (see "The bug" above) and so
+  carried no signal to distinguish a real attack from the ordinary case — a HIGH alert that fires on
+  100% of innocent traffic is not security, it is noise the owner learns to ignore. The behavior still
+  fails CLOSED: nothing is ever created or trusted on this path (`create:true` still refuses outright), it
+  is simply refused QUIETLY instead of loudly, same as every other never-trusted branch. A future reader
+  must not "fix" this by making it loud again without first re-establishing that it can actually
+  discriminate a real attack from the ordinary first-boot case — round 2 could not, and nothing in this
+  round changes that.
+
+### Tests (round 18)
+
+`mainline-watch-trust-store.mjs`: (NULL-TRUST-QUIET) — the full bug sequence above, RED on `463d04b1`
+(asserted: the create:true-first refusal files a HIGH event + marker + nudge, and a following plain
+switch is locked out by "an unresolved mainline alert already exists"), GREEN after this round's fix
+(zero event/marker/nudge; the plain switch gets its own separate, unaffected "no trusted baseline"
+refusal, never the marker-driven lockout); then runs the human reset, confirms `create:true` right after
+still correctly refuses on "no established mainline watermark" with the corrected wording, confirms a
+plain switch onto the already-checked-out branch re-seeds W, and confirms `create:true` finally succeeds.
+(NULL-TRUST-LANDING) — the dedicated test for the OTHER self-heal leg (see the "accepted cost"
+correction above): a genuine landing, by itself, with no human reset and no intervening plain switch,
+establishes W + trust and `create:true` succeeds immediately afterward. (MISMATCH-STILL-LOUD) — the
+negative control: a genuine trust mismatch (not null) on `create:true` still files the loud HIGH event +
+marker + nudge, unaffected by this round's fix.

@@ -4625,12 +4625,12 @@ export class OrchestrationMcpRouter {
           "the TARGET branch regardless of what's currently checked out (so tampering a branch while it's " +
           "away, then switching back to it later, is still caught), refused with a HIGH-severity event " +
           "filed and the same human-only reset route named. Only an EXACT match adopts; no other " +
-          "git-derived fact is consulted. The trust record this compares against is written by SEVERAL " +
-          "things, not just this tool: a real Loom landing on that branch, the human-only reset route's " +
-          "own `adopt`, and ALSO the shared mainline tripwire's own boot/landing check — which reads git " +
-          "content (reflog/trailers) and is itself forgeable by the same class of attacker this tool " +
-          "defends against (tracked separately, card f683a5ad) — it is NOT an unconditionally-safe, " +
-          "Loom-only record. " +
+          "git-derived fact is consulted. The trust record this compares against is written by EXACTLY " +
+          "three things, each keyed on Loom's own durable record: a real Loom landing on that branch, " +
+          "this tool's own checkout/create success, and the human-only reset route's own `adopt` — never " +
+          "a raw git-derived classification. Inherent residual: a landing's own stamp transitively " +
+          "includes whatever the mainline tripwire admitted on the checked-out branch at that moment, " +
+          "since that content was already live on mainline — not a gap this check itself can close. " +
           "(4) any worker branch " +
           "in this project not yet PROVEN merged that is either LIVE or whose worktree still exists on " +
           "disk (an EXITED worker whose worktree was already removed is excluded — card 0eaaa693's " +
