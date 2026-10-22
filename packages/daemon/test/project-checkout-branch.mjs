@@ -179,6 +179,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //                    is a SECOND, independent trigger for the identical bug; both the switch-succeeds and
 //                    create-is-refused shapes are covered.
 //
+// Card 1bc9602b (found by CR9 reviewing round 12, scoped OUT of round 13 above as its own card) —
+// `listUnmergedWorkerBranches` (sessions/service.ts) had the IDENTICAL `%(refname:short)` bug as round
+// 13's two sites, but on the OTHER side of the shape: it treats a live worker branch MISSING from the
+// listing as "gone" (never merged-but-deleted ⇒ safe to ignore), so an ambiguous shortening there makes a
+// real, unmerged worker branch look gone and the unmerged-worker refusal silently FAILS OPEN instead of
+// false-refusing. Now reads `%(refname:lstrip=2)`, same fix:
+//   (UNMRG-TAG)         a same-named TAG on the worker's own `loom/<id>` branch used to make it vanish
+//                        from the listing, letting an UNMERGED worker branch through as if merged/gone.
+//   (UNMRG-REMOTEHEAD)  a `refs/remotes/<branch>/HEAD` ref sharing the worker branch's own full name is
+//                        the second, independent trigger for the identical bug.
+//
 // Run: 1) build daemon (pnpm build), 2) node test/project-checkout-branch.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -498,6 +509,53 @@ try {
     check("(UNMRG) setup: the branch actually landed", confirmed.settled === true && confirmed.ok === true && confirmed.value.merged === true);
     const r2 = await fx.call("project_checkout_branch", { branch: "atlas" });
     check("(UNMRG) negative control: once merged, the SAME call now succeeds", r2.ok === true);
+  }
+
+  // ===================== (UNMRG-TAG) card 1bc9602b — a same-named TAG on the worker's own branch used to
+  // make `listUnmergedWorkerBranches`'s `%(refname:short)` read shorten it to "heads/loom/<id>", never
+  // matching the candidate's plain "loom/<id>" — the unmerged-worker refusal silently failed OPEN =====================
+  {
+    const fx = makeFixture("unmrg-tag");
+    git(fx.repo, "branch", "atlas");
+    fx.trustBranch("atlas");
+    const w = await fx.addWorker("w"); // inserted as processState:"exited" — never landed, worktree still on disk
+    git(fx.repo, "tag", w.branch); // same-named TAG — the real git ambiguity source
+    check("(UNMRG-TAG) setup control: git's own ambiguous shortening is really present", git(fx.repo, "for-each-ref", "--format=%(refname:short)", `refs/heads/${w.branch}`) !== w.branch);
+    const r1 = await fx.call("project_checkout_branch", { branch: "atlas" });
+    check("(UNMRG-TAG) an unmerged worker branch shadowed by a same-named tag STILL refuses the switch", r1.ok === false && r1.refused === true && Array.isArray(r1.unmergedWorkers) && r1.unmergedWorkers.some((u) => u.workerSessionId === w.workerId && u.branch === w.branch));
+    check("(UNMRG-TAG) canonical untouched", fx.canonBranch() === fx.main);
+    // negative control: land it, then the same call succeeds (same shape as (UNMRG)'s own control, proving
+    // the tag-ambiguity fixture itself isn't what's blocking the switch). The tag is deleted FIRST — a
+    // same-named tag also defeats `detectStrandedWork`'s own bare-revision `rev-list <mainSha>..<branch>`
+    // read (git's rev-parse precedence puts refs/tags/ ahead of refs/heads/ for a bare name, so it silently
+    // diffs against the TAG's target instead of the real branch and false-flags "stranded work", refusing
+    // the merge) — a SEPARATE, pre-existing ambiguity bug in a different function, out of scope for this
+    // card (card 1bc9602b); deleting the tag here keeps this negative control isolated to the ONE concern
+    // this scenario exists to prove (listUnmergedWorkerBranches), not entangled with that other one.
+    git(fx.repo, "tag", "-d", w.branch);
+    const confirmed = await fx.sessions.confirmWorkerMergeTracked(fx.mgrId, w.workerId);
+    check("(UNMRG-TAG) setup: the branch actually landed", confirmed.settled === true && confirmed.ok === true && confirmed.value.merged === true);
+    const r2 = await fx.call("project_checkout_branch", { branch: "atlas" });
+    check("(UNMRG-TAG) negative control: once merged, the SAME call now succeeds", r2.ok === true);
+  }
+
+  // ===================== (UNMRG-REMOTEHEAD) card 1bc9602b — a SECOND, independent real-git ambiguity
+  // source for `%(refname:short)`: a `refs/remotes/<branch>/HEAD` ref sharing the worker branch's own full
+  // name (no configured remote needed — the bare ref is enough) =====================
+  {
+    const fx = makeFixture("unmrg-remotehead");
+    git(fx.repo, "branch", "atlas");
+    fx.trustBranch("atlas");
+    const w = await fx.addWorker("w");
+    git(fx.repo, "update-ref", `refs/remotes/${w.branch}/HEAD`, fx.canonHead());
+    check("(UNMRG-REMOTEHEAD) setup control: git's own ambiguous shortening is really present", git(fx.repo, "for-each-ref", "--format=%(refname:short)", `refs/heads/${w.branch}`) !== w.branch);
+    const r1 = await fx.call("project_checkout_branch", { branch: "atlas" });
+    check("(UNMRG-REMOTEHEAD) an unmerged worker branch shadowed by a refs/remotes/.../HEAD ref STILL refuses the switch", r1.ok === false && r1.refused === true && Array.isArray(r1.unmergedWorkers) && r1.unmergedWorkers.some((u) => u.workerSessionId === w.workerId && u.branch === w.branch));
+    check("(UNMRG-REMOTEHEAD) canonical untouched", fx.canonBranch() === fx.main);
+    const confirmed = await fx.sessions.confirmWorkerMergeTracked(fx.mgrId, w.workerId);
+    check("(UNMRG-REMOTEHEAD) setup: the branch actually landed", confirmed.settled === true && confirmed.ok === true && confirmed.value.merged === true);
+    const r2 = await fx.call("project_checkout_branch", { branch: "atlas" });
+    check("(UNMRG-REMOTEHEAD) negative control: once merged, the SAME call now succeeds", r2.ok === true);
   }
 
   // ===================== (TRUST) an existing branch with no trust record is refused outright =====================

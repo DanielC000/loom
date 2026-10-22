@@ -6469,7 +6469,11 @@ export class SessionService {
     let existingBranches: Set<string> | null;
     try {
       const ms = this.mainlineGitMs();
-      const raw = await withTimeout(this.canonicalReadGit(repoPath, ms).raw(["for-each-ref", "--format=%(refname:short)", "refs/heads/"]), ms, "git for-each-ref");
+      // card 1bc9602b — `%(refname:short)` shortens ambiguously (e.g. to `heads/<name>` beside a
+      // same-named tag), silently making a live branch look "gone" to the `.has(branch)` check below.
+      // `%(refname:lstrip=2)` is never ambiguity-dependent — same fix as 4fabafd1 round 13's two sites
+      // (see docs/decisions/2a6a292a-mainline-watermark-branch-change-only-on-a-trusted-signal.md).
+      const raw = await withTimeout(this.canonicalReadGit(repoPath, ms).raw(["for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"]), ms, "git for-each-ref");
       existingBranches = new Set(raw.split("\n").map((l) => l.trim()).filter(Boolean));
     } catch {
       existingBranches = null; // fail closed: can't confirm gone ⇒ treat every candidate as still existing
