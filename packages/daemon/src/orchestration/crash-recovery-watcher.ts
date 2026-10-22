@@ -73,6 +73,17 @@ export interface CrashRecoveryDeps {
   resume: (sessionId: string) => boolean;
   /** §17a pause registry — a human-paused session (or its manager) is never auto-resumed (watcher parity). */
   control: OrchestrationControl;
+  /**
+   * OPTIONAL: would `resume(sessionId)` refuse right now because a DIFFERENT, non-partner live manager
+   * already holds this agent (`SessionService.findSupersedingLiveManager`, reusing resume()'s own
+   * `SecondLiveManagerError` predicate)? Returns that holder's session id, or `null`/`undefined` when it
+   * would not be refused for this reason. ABSENT (e.g. a hermetic test double that doesn't pass it) falls
+   * back to the pre-card-63edeb55 behavior — resume() is attempted and its refusal is treated like any
+   * other failure, unchanged.
+   * @decision 63edeb55 — checked BEFORE `session_resume_attempt` is filed; never burns a crash-loop
+   * attempt for this one refusal reason. Any OTHER resume failure keeps the pre-existing accounting.
+   */
+  findSupersedingLiveManager?: (sessionId: string) => string | null | undefined;
   /** OPTIONAL: enqueue a cheap heads-up to a dead worker's live parent manager on give-up. The required,
    *  role-agnostic surface is the Mission-Control attention event + lastError; this is additive. */
   pty?: CrashRecoveryPty;
@@ -349,7 +360,7 @@ export class CrashRecoveryWatcher {
   }
 
   tick(now: Date = new Date()): void {
-    const { db, resume, control, pty, enqueueDurableNudge } = this.deps;
+    const { db, resume, control, pty, enqueueDurableNudge, findSupersedingLiveManager } = this.deps;
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
     const fileEvent = (s: { id: string; parentSessionId?: string | null; taskId?: string | null }, kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>): void => {
@@ -431,6 +442,12 @@ export class CrashRecoveryWatcher {
       }
 
       if (s.processState !== "exited") continue;                         // 'starting' = mid-(re)spawn → settle next tick
+
+      // Card 63edeb55 — a manager refused by resume()'s own SecondLiveManagerError check (a DIFFERENT,
+      // non-partner live manager already holds this agent) never crashed; skip BEFORE the attempt is
+      // ever recorded, same "not actually a candidate right now" posture as isSupersededByRecycle above —
+      // see docs/decisions/63edeb55-crash-recovery-second-live-manager-is-not-a-crash.md.
+      if (s.role === "manager" && findSupersedingLiveManager?.(s.id)) continue;
 
       // Exited with an UNRECOVERED death.
       if (attempts >= maxAttempts) {

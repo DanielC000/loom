@@ -52,7 +52,7 @@ const at = (ms) => new Date(NOW.getTime() + ms);
 // fallback branch specifically, pass `enqueueDurableNudge: null` (the explicit "no dep" sentinel — distinct
 // from simply not passing the option, which now means "give me the default wired stub"). Passing an actual
 // function (as (17a)/(17b) below do, to inspect their OWN call log) still works unchanged.
-function makeEnv({ projectConfig = {}, enqueueDurableNudge } = {}) {
+function makeEnv({ projectConfig = {}, enqueueDurableNudge, findSupersedingLiveManager, resume: resumeOverride } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-crash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `cp-${Math.random().toString(36).slice(2, 8)}`;
@@ -64,7 +64,7 @@ function makeEnv({ projectConfig = {}, enqueueDurableNudge } = {}) {
   // records the call. By default a resume "succeeds" (stays live); a test flips it back to exited + adds a
   // new death to simulate a re-death.
   const resumes = [];
-  const resume = (id) => { resumes.push(id); db.setProcessState(id, "live"); return true; };
+  const resume = resumeOverride ?? ((id) => { resumes.push(id); db.setProcessState(id, "live"); return true; });
   const enqueued = [];
   const pty = { enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; } };
   const durableCalls = [];
@@ -74,7 +74,10 @@ function makeEnv({ projectConfig = {}, enqueueDurableNudge } = {}) {
       ? undefined // explicit opt-out → dispatchNudge falls back to raw pty.enqueueStdin
       : enqueueDurableNudge; // caller-supplied stub (e.g. (17a)/(17b) inspecting their own log)
   const control = new OrchestrationControl();
-  const watcher = new CrashRecoveryWatcher({ db, control, pty, resume, stabilityMs: STABILITY_MS, enqueueDurableNudge: dep });
+  const watcher = new CrashRecoveryWatcher({
+    db, control, pty, resume, stabilityMs: STABILITY_MS, enqueueDurableNudge: dep,
+    findSupersedingLiveManager,
+  });
   return { dbFile, db, projId, agentId, resumes, enqueued, durableCalls, control, watcher, resume };
 }
 
@@ -797,6 +800,50 @@ function cleanup(e) {
   e.watcher.tick(at(100));
   check("(20) FIX-SAFE: a deliberately-stopped halted predecessor is NEVER revived, even though its successor still matches",
     !e.resumes.includes("old-20") && evKinds(e, "old-20", "session_resume_attempt").length === 0);
+  cleanup(e);
+}
+
+// ============ (21) CARD 63edeb55 — refused by a superseding live manager is NOT a crash loop ============
+{
+  let holderActive = true;
+  const e = makeEnv({ findSupersedingLiveManager: (id) => (holderActive && id === "s21" ? "holder-21" : null) });
+  seedSession(e, "s21", { role: "manager" });
+  die(e, "s21", NOW);
+  // Tick repeatedly — well past the default cap of 3 — while a DIFFERENT, non-partner live manager keeps
+  // holding the agent (resume()'s own SecondLiveManagerError would refuse this every time). None of this
+  // may ever be treated as a resume attempt or a crash.
+  for (let i = 1; i <= 5; i++) e.watcher.tick(at(i * 1000));
+  check("(21) a manager refused by a superseding live holder is NEVER resumed", e.resumes.length === 0);
+  check("(21) no session_resume_attempt is ever recorded for it (no burned attempts)", evKinds(e, "s21", "session_resume_attempt").length === 0);
+  check("(21) no session_recovery_abandoned escalation (it never crashed — a guard refused)", evKinds(e, "s21", "session_recovery_abandoned").length === 0);
+  const row = e.db.getSession("s21");
+  check("(21) NO misleading [loom:crash-loop] banner on lastError", row.lastError === null);
+  check("(21) no continuation nudge was dispatched for it either", e.durableCalls.length === 0 && e.enqueued.length === 0);
+  // The holder stops superseding (exits / recycles / reconciles) — the very NEXT tick falls through to a
+  // normal resume attempt, proving the check is live every tick, not a sticky/permanent skip.
+  holderActive = false;
+  e.watcher.tick(at(6000));
+  check("(21) once the holder stops superseding, the NEXT tick resumes normally", e.resumes.length === 1 && e.resumes[0] === "s21");
+  check("(21) that resume records exactly one session_resume_attempt (attempt 1 of 3 — nothing was burned while superseded)",
+    evKinds(e, "s21", "session_resume_attempt").length === 1 && evKinds(e, "s21", "session_resume_attempt")[0].detail?.attempt === 1);
+  cleanup(e);
+}
+
+// === (22) CONTROL — a genuine (non-superseded) resume failure still counts toward the cap, unchanged ===
+{
+  const resumeAttempts = [];
+  const alwaysFails = (id) => { resumeAttempts.push(id); throw new Error("boom-22 (unrelated resume failure)"); };
+  const e = makeEnv({ resume: alwaysFails, findSupersedingLiveManager: () => null }); // never superseded
+  seedSession(e, "s22", { role: "manager" });
+  for (let i = 1; i <= 5; i++) {
+    die(e, "s22", at(i * 1000));
+    e.watcher.tick(at(i * 1000 + 100));
+  }
+  check("(22) CONTROL: a genuine resume failure is still ATTEMPTED and CAPPED at maxAttempts (3), unchanged",
+    resumeAttempts.length === 3 && evKinds(e, "s22", "session_resume_attempt").length === 3);
+  check("(22) CONTROL: it still ESCALATES once past the cap with the crash-loop banner — findSupersedingLiveManager being wired (and returning null) does not suppress a REAL crash loop",
+    evKinds(e, "s22", "session_recovery_abandoned").length === 1 &&
+    typeof e.db.getSession("s22").lastError === "string" && e.db.getSession("s22").lastError.startsWith("[loom:crash-loop]"));
   cleanup(e);
 }
 

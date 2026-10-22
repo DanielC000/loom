@@ -1571,6 +1571,9 @@ async function main(): Promise<void> {
     // through the SAME durable helper too (card 06ebbb78 converged that last gap) — see service.ts's
     // `resumeFleetOnBoot` doc (durability bullet) for the ruling.
     enqueueDurableNudge: (id, role, text, taskId) => sessions.enqueueDurableNudge(id, role, text, taskId),
+    // Card 63edeb55: a manager refused by resume()'s SecondLiveManagerError check never crashed — see
+    // CrashRecoveryDeps.findSupersedingLiveManager's own doc.
+    findSupersedingLiveManager: (id) => sessions.findSupersedingLiveManager(id),
   });
   crashRecoveryWatcher.start();
   console.log(`[boot] crash-recovery watchdog on (tick ${crashRecoveryMs}ms)`);

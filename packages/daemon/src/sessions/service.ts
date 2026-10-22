@@ -3803,6 +3803,27 @@ export class SessionService {
   }
 
   /**
+   * Card 63edeb55: would `resume(sessionId)` refuse right now with `SecondLiveManagerError` — a
+   * DIFFERENT, non-partner live manager already holding `sessionId`'s agent? Returns that holder's
+   * session id, or `null` when `sessionId` isn't a manager, doesn't exist, or resume() would not be
+   * refused for this reason (no holder, or the holder is the sanctioned halted partner). Used by
+   * CrashRecoveryWatcher to recognize this refusal as structural, not a crash, BEFORE it burns a
+   * crash-loop attempt — reuses `refuseSecondLiveManagerUnlessHaltedPartner` itself, by catching the SAME
+   * `SecondLiveManagerError` `resume()` would throw, so the two can never drift apart.
+   */
+  findSupersedingLiveManager(sessionId: string): string | null {
+    const session = this.db.getSession(sessionId);
+    if (!session || session.role !== "manager") return null;
+    try {
+      this.refuseSecondLiveManagerUnlessHaltedPartner(session);
+      return null;
+    } catch (e) {
+      if (e instanceof SecondLiveManagerError) return e.holderSessionId;
+      throw e;
+    }
+  }
+
+  /**
    * Resolve where a wake-mode delivery (event-trigger/webhook/poll `fire()`) should land before the
    * caller resumes its stored `targetSessionId` — redirects to a different live manager that has since
    * superseded a stale, non-recycled target. `redirectedFrom` is present only on an actual redirect, so
