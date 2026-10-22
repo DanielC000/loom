@@ -17,11 +17,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //       (plain, no ` · ` fields) direction — via the SAME `carryPendingToSuccessor` code path — is
 //       carried UNLABELED. Proves the peer-frame detector is scoped to the richer cross-project frame
 //       and doesn't blanket-label every carried message.
+//   (4) card 248abf9b: a peer_message record that has ALREADY been cross-remint-wrapped (the real
+//       `handleGiveUpExhausted` -> `framePossibleDuplicate` shape) before the manager ever gets a chance
+//       to recycle still gets the `[loom:inherited-by-recycle]` label — and the possible-duplicate tag
+//       stays FIRST, ahead of the label, so a LATER `stripPossibleDuplicateFrame` call still finds it at
+//       the true start of the string.
+//   (4 chain) a SECOND recycle of that same successor, before it ever drains, carries the text
+//       BYTE-IDENTICAL — PEER_MESSAGE_FRAME_RE correctly does not re-match the now-label-prefixed text,
+//       so the chain never duplicates the tag or the label.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/peer-message-recycle-inheritance.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -36,6 +45,7 @@ const ordinaryRepo = path.join(os.tmpdir(), `loom-peer-inherit-repo-${Date.now()
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { framePossibleDuplicate, stripPossibleDuplicateFrame } = await import("../dist/pty/host.js");
 
 // Same contract-faithful PtyStub as recycle-pending-carry.mjs: a LIVE+BUSY recipient HOLDS an enqueue
 // (delivered:false), flushPending splices+returns held entries WITH onDeliver (not firing it).
@@ -148,12 +158,75 @@ try {
       text.startsWith("[loom:from-manager]\nbuild X please") && !text.includes("loom:inherited-by-recycle"));
   }
 
+  // ========== (4) card 248abf9b — a peer_message ALREADY cross-remint-wrapped before recycle ==========
+  // ========== must still get the inherited-by-recycle label, with the dup tag staying FIRST ===========
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+
+    // Capture a BYTE-FAITHFUL peer frame via the real send path first — never hand-type the frame
+    // literal (same rationale as this file's own (1) and worker-report-refusal-preview.mjs).
+    const mgrACap = `mgrACap4-${sfx}`, mgrBCap = `mgrBCap4-${sfx}`;
+    mkSession({ id: mgrACap, projectId: pA, agentId: agA, role: "manager" });
+    mkSession({ id: mgrBCap, projectId: pB, agentId: agB, role: "manager" });
+    pty.setLive(mgrACap); pty.setLive(mgrBCap); pty.setBusy(mgrBCap);
+    sessions.messagePeerManager(mgrACap, pB, "re-minted farewell — give-up cycle before recycle");
+    // Read back by SENDER (mgrACap, a fresh id used nowhere else in this file), not by the intended
+    // recipient mgrBCap: `findLiveManagerForProject` resolves the recipient from the WHOLE shared `db`
+    // (every pB manager across every earlier block in this file, not just this block's own PtyStub), so
+    // by this point in the file it can legitimately land on an earlier block's still-"live" successor
+    // instead of mgrBCap — `db.listEvents` keyed on the sender is immune to that ambiguity.
+    const capturedFrame = db.listEvents(mgrACap).find((e) => e.kind === "session_message_queued")?.detail?.text ?? "";
+    check("(4 setup) captured a real byte-faithful peer frame to re-wrap", capturedFrame.startsWith("[loom:from-manager · "));
+
+    // Now simulate the REAL `handleGiveUpExhausted` cross-remint having already wrapped this record's
+    // text in a possible-duplicate tag BEFORE the manager ever got a chance to recycle — built with the
+    // real, exported `framePossibleDuplicate`, seeded directly onto a FRESH recipient (never a hand-typed
+    // tag literal, and never sharing a recipient with the capture step above).
+    const mgrA4 = `mgrA4-${sfx}`, mgrBOld4 = `mgrBold4-${sfx}`;
+    mkSession({ id: mgrA4, projectId: pA, agentId: agA, role: "manager" });
+    mkSession({ id: mgrBOld4, projectId: pB, agentId: agB, role: "manager" });
+    pty.setLive(mgrA4); pty.setLive(mgrBOld4);
+
+    const msgId4 = randomUUID();
+    const dupWrappedText = framePossibleDuplicate(capturedFrame, "deadbeef");
+    check("(4 setup) the pre-recycle record carries the possible-duplicate tag AHEAD of the unlabeled peer frame",
+      dupWrappedText.startsWith("[loom:possible-duplicate root:deadbeef] [loom:from-manager · ") && !dupWrappedText.includes("loom:inherited-by-recycle"));
+    db.appendEvent({
+      id: randomUUID(), ts: now,
+      managerSessionId: mgrA4, workerSessionId: mgrBOld4, taskId: null,
+      kind: "session_message_queued", detail: { msgId: msgId4, text: dupWrappedText, sender: mgrA4 },
+    });
+
+    const fresh4 = await sessions.recycleManager(mgrBOld4, "successor: nothing else in flight, drain the queue");
+    const reminted4 = db.listUnresolvedQueuedMessagesForWorker(fresh4.id);
+    check("(4) exactly ONE record re-minted onto the successor", reminted4.length === 1);
+    const text4 = reminted4[0]?.detail?.text ?? "";
+
+    check("(4) the possible-duplicate tag stays FIRST, ahead of the inherited-by-recycle label",
+      text4.startsWith(`[loom:possible-duplicate root:deadbeef] [loom:inherited-by-recycle · predecessor:${mgrBOld4.slice(0, 8)}]\n`));
+    check("(4) the ORIGINAL peer frame survives byte-identical, further in the text",
+      text4.includes(capturedFrame));
+    check("(4) a LATER stripPossibleDuplicateFrame call still finds the dup tag at the true start (proves the label was prepended ahead of it, not behind it)",
+      stripPossibleDuplicateFrame(text4).startsWith("[loom:inherited-by-recycle · predecessor:"));
+
+    // -------- (4 chain) recycle the successor AGAIN before it ever drains — the shape must not --------
+    // -------- duplicate or corrupt across a chain: still exactly ONE tag, ONE label, tag first ---------
+    pty.setLive(fresh4.id); // the real PtyStub.spawn() already does this for a freshly recycled-into session; explicit for clarity
+    const fresh5 = await sessions.recycleManager(fresh4.id, "second successor: still nothing else in flight");
+    const reminted5 = db.listUnresolvedQueuedMessagesForWorker(fresh5.id);
+    check("(4 chain) exactly ONE record re-minted onto the SECOND successor", reminted5.length === 1);
+    const text5 = reminted5[0]?.detail?.text ?? "";
+    check("(4 chain) a double recycle carries the text BYTE-IDENTICAL — the stripped body no longer starts with the peer frame (it now starts with the FIRST hop's own label), so PEER_MESSAGE_FRAME_RE correctly does NOT re-match and re-label a second time: still exactly one tag, one label, tag first",
+      text5 === text4);
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a peer_message queued for a manager that recycles before draining carries onto its successor LABELED as inherited (never bare), a clean recycle fabricates no label, and an ordinary worker-direction carry through the same code path stays unlabeled."
+  ? "\n✅ ALL PASS — a peer_message queued for a manager that recycles before draining carries onto its successor LABELED as inherited (never bare), a clean recycle fabricates no label, an ordinary worker-direction carry through the same code path stays unlabeled, a cross-remint-wrapped peer_message still gets labeled with the possible-duplicate tag staying first, and a SECOND recycle of that same successor before it ever drains carries the text byte-identical — no duplicated tag, no duplicated label."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

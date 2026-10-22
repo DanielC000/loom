@@ -13,11 +13,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //   (c) NEGATIVE PROOF (the sharp edge DoD-4 calls out): a queued worker-report-shaped nudge and a queued
 //       durable cross-tree message (the SAME mechanism a peer_message/session_message carry uses) BOTH
 //       still reach the successor untouched — the purge must never become a wholesale queue wipe.
+//   (d) card 248abf9b Round 2: the SAME purge survives a cross-remint — an emergency-redirect record
+//       ALREADY wrapped in a `[loom:possible-duplicate root:…]` tag (the real `handleGiveUpExhausted`
+//       -> `framePossibleDuplicate` shape) must still be purged, not carried to the successor.
 //
 // Run: 1) build daemon, 2) node test/recycle-purges-stale-context-nudge.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -32,6 +36,7 @@ const ordinaryRepo = path.join(os.tmpdir(), `loom-rpurge-repo-${Date.now()}-${pr
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { framePossibleDuplicate } = await import("../dist/pty/host.js");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -113,12 +118,46 @@ try {
   const reminted = db.listUnresolvedQueuedMessagesForWorker(fresh.id);
   check("(c) the platform (peer-shaped) directive is RE-MINTED onto the successor, original sender kept", reminted.some((r) => r.detail?.sender === lead && typeof r.detail?.text === "string" && r.detail.text.includes("PLATFORM DIRECTIVE")));
 
+  // =============== (d) card 248abf9b Round 2 — the SAME purge survives a cross-remint ===============
+  {
+    const pty2 = new PtyStub();
+    const sessions2 = new SessionService(db, pty2, new OrchestrationControl());
+    const oldMgr2 = `mgr2-${sfx}`;
+    mkSession({ id: oldMgr2, role: "manager" });
+    pty2.setLive(oldMgr2); pty2.setBusy(oldMgr2);
+
+    // Capture a byte-faithful emergency-redirect frame via the REAL path first — never hand-type it.
+    const emergency2 = sessions2.redirectManagerForEmergencyRecycle(oldMgr2, "Your context is ~92% of your window — the EMERGENCY floor...");
+    check("(d setup) the emergency redirect fired and was held", emergency2.fired === true && emergency2.result.delivered === false);
+    const capturedRecord = db.listUnresolvedQueuedMessagesForWorker(oldMgr2).find((r) => typeof r.detail?.text === "string" && r.detail.text.includes("EMERGENCY floor"));
+    check("(d setup) captured a real byte-faithful emergency-redirect frame", capturedRecord?.detail?.text?.startsWith("[loom:context-emergency:redirect]\n") ?? false);
+
+    // Simulate the REAL `handleGiveUpExhausted` cross-remint having already wrapped THIS exact record's
+    // text in a possible-duplicate tag BEFORE the manager ever got a chance to recycle — seeded directly
+    // (the real give-up path supersedes the old record and mints a new one; this test only needs the
+    // RESULTING shape, not the re-mint plumbing recycle-pending-carry.mjs already covers elsewhere).
+    const dupWrappedText = framePossibleDuplicate(capturedRecord.detail.text, "deadbeef");
+    check("(d setup) the dup-wrapped text carries the tag AHEAD of the unstripped emergency-redirect frame",
+      dupWrappedText.startsWith("[loom:possible-duplicate root:deadbeef] [loom:context-emergency:redirect]\n"));
+    db.appendEvent({
+      id: randomUUID(), ts: now,
+      managerSessionId: oldMgr2, workerSessionId: oldMgr2, taskId: null,
+      kind: "session_message_queued", detail: { msgId: randomUUID(), text: dupWrappedText, sender: "system" },
+    });
+    check("(d setup) the predecessor now holds TWO unresolved emergency-redirect-shaped records (the original + the dup-wrapped re-mint)",
+      db.listUnresolvedQueuedMessagesForWorker(oldMgr2).filter((r) => typeof r.detail?.text === "string" && r.detail.text.includes("EMERGENCY floor")).length === 2);
+
+    const fresh2 = await sessions2.recycleManager(oldMgr2, "successor: nothing else in flight");
+    check("(d) the DUP-WRAPPED emergency-redirect record is NOT re-minted onto the successor (the purge still fires behind the tag)",
+      !db.listUnresolvedQueuedMessagesForWorker(fresh2.id).some((r) => typeof r.detail?.text === "string" && r.detail.text.includes("EMERGENCY floor")));
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — recycleManager's DoD-4 purge drops a queued ordinary context nudge and supersedes a queued emergency-redirect durable record (narrowly, by exact text tag) WITHOUT touching a queued worker-report-shaped nudge or a queued durable cross-tree (peer-shaped) message, both of which still reach the successor exactly as the generic carry mechanism already guarantees."
+  ? "\n✅ ALL PASS — recycleManager's DoD-4 purge drops a queued ordinary context nudge and supersedes a queued emergency-redirect durable record (narrowly, by exact text tag) WITHOUT touching a queued worker-report-shaped nudge or a queued durable cross-tree (peer-shaped) message, both of which still reach the successor exactly as the generic carry mechanism already guarantees — and the purge still fires on an emergency-redirect record that was already wrapped in a possible-duplicate cross-remint tag before the recycle."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

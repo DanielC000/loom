@@ -11611,8 +11611,14 @@ export class SessionService {
       // Card f907c8c4 DoD-1: a peer_message frame carried here was addressed to `oldId`, which recycled
       // before delivering it — label it as inherited so the successor doesn't read a bare, contextless
       // message (see this method's own doc + PEER_MESSAGE_FRAME_RE's doc for the full reasoning/scope).
-      const carriedText = PEER_MESSAGE_FRAME_RE.test(text)
-        ? `[loom:inherited-by-recycle · predecessor:${oldId.slice(0, 8)}]\nThe manager session this peer message was originally addressed to recycled before it could deliver/read it — you are its successor and have no context on any earlier exchange in this thread. Read it accordingly.\n\n${text}`
+      //
+      // @decision 248abf9b — test the DUP-TAG-STRIPPED text, else a cross-remint's possible-duplicate
+      // wrapper defeats the anchored regex and the label is silently omitted; keep the recovered dup-tag
+      // prefix FIRST so a later strip still finds it.
+      const strippedText = stripPossibleDuplicateFrame(text);
+      const dupFramePrefix = text.slice(0, text.length - strippedText.length); // "" when no dup frame present
+      const carriedText = PEER_MESSAGE_FRAME_RE.test(strippedText)
+        ? `${dupFramePrefix}[loom:inherited-by-recycle · predecessor:${oldId.slice(0, 8)}]\nThe manager session this peer message was originally addressed to recycled before it could deliver/read it — you are its successor and have no context on any earlier exchange in this thread. Read it accordingly.\n\n${strippedText}`
         : text;
       // Card d09d58e7: carry `reportEventId` forward — without it, a worker-report nudge still queued on a
       // recycled manager (the card's own specimen: `recycleManager` -> this loop) re-mints UNTAGGED onto the
@@ -13077,10 +13083,15 @@ export class SessionService {
           // real delivery, which is exactly what a worker mistook it for (the incident this card fixes).
           // Strip that header before previewing, and mark every entry as a truncated preview so nothing
           // here can be mistaken for the real thing again.
+          //
+          // @decision 248abf9b — strip the possible-duplicate tag, then RE-PREPEND it (never discard it —
+          // it signals a duplicate of direction already acted on); only the impersonating header is dropped.
           const pendingList = pending
             .map((e, i) => {
               const raw = typeof e.detail?.text === "string" ? e.detail.text : "(no text captured)";
-              const body = raw.replace(FROM_MANAGER_HEADER_RE, "");
+              const stripped = stripPossibleDuplicateFrame(raw);
+              const dupFramePrefix = raw.slice(0, raw.length - stripped.length); // "" when no dup frame present
+              const body = dupFramePrefix + stripped.replace(FROM_MANAGER_HEADER_RE, "");
               const truncated = body.length > 500 ? `${body.slice(0, 500)}…` : body;
               return `  ${i + 1}. [preview only — full text arrives when you end this turn; do not act on this fragment] ${truncated}`;
             })
@@ -15372,8 +15383,12 @@ export class SessionService {
     };
     if (!pendingCarryHardFailed && !flushLiveQueue() && !flushLiveQueue()) pendingCarryHardFailed = true;
     if (!pendingCarryHardFailed) {
-      const isStaleContextNudge = (text: string): boolean =>
-        text.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || text.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
+      // @decision 248abf9b — strip a leading possible-duplicate tag before EITHER prefix check, or a
+      // give-up re-mint of the durable emergency redirect defeats this purge and carries it to the successor.
+      const isStaleContextNudge = (text: string): boolean => {
+        const stripped = stripPossibleDuplicateFrame(text);
+        return stripped.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || stripped.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
+      };
       const carried: QueuedMessage[] = [];
       for (const m of flushedRaw) {
         if (isStaleContextNudge(m.text)) {

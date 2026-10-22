@@ -21,6 +21,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       proving the refusal builder only computed a local display copy and never touched the record that
 //       actually drains as the real delivery. A test that only checks the label would pass on a change
 //       that silently stopped delivering; this is the one that would catch that.
+//   (5) card 248abf9b (Round 2): a record whose text was ALSO wrapped in a `[loom:possible-duplicate
+//       root:…]` tag (the real `handleGiveUpExhausted` -> `framePossibleDuplicate` shape) still has the
+//       impersonating `[loom:from-manager]` header stripped from its preview — but the possible-duplicate
+//       tag itself is KEPT (re-prepended), never discarded: it's the one honest signal that this
+//       instruction may be a duplicate of direction the worker already acted on.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/worker-report-refusal-preview.mjs
 import fs from "node:fs";
@@ -34,6 +39,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService, frameFromManager, FROM_MANAGER_TAG } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { framePossibleDuplicate } = await import("../dist/pty/host.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -54,6 +60,11 @@ const mgrId = `wrrp-mgr-${sfx}`, workerId = `wrrp-wkr-${sfx}`;
 const repo = path.join(os.tmpdir(), `loom-wrrp-repo-${sfx}`);
 const worktreePath = path.join(os.tmpdir(), `loom-wrrp-wt-${sfx}`);
 const branch = `loom/wrrp-${sfx}`;
+// Card 248abf9b: a second task/worker pair for the cross-remint case (5) — kept separate from the
+// primary scenario above so (4)'s byte-identity check can't be confused by a second record.
+const taskId2 = `wrrp-task2-${sfx}`, workerId2 = `wrrp-wkr2-${sfx}`;
+const worktreePath2 = path.join(os.tmpdir(), `loom-wrrp-wt2-${sfx}`);
+const branch2 = `loom/wrrp2-${sfx}`;
 
 try {
   // worktreePath EXISTS but is NOT a git repo ⇒ the done-precheck's git step fails SAFE to allow, so the
@@ -110,14 +121,43 @@ try {
   const after = db.listEvents(mgrId).find((e) => e.kind === "session_message_queued" && e.detail?.msgId === msgId);
   check("(4) the underlying durable record's text is BYTE-IDENTICAL after the refusal (full body still follows)",
     after.detail.text === framedText);
+
+  // ===================== (5) card 248abf9b — the strip survives a cross-remint ======================
+  fs.mkdirSync(worktreePath2, { recursive: true });
+  db.insertTask({ id: taskId2, projectId: projId, title: "WRRP-TASK-2", body: "", columnKey: "in_progress", position: 2, createdAt: now, updatedAt: now });
+  db.insertSession({ id: workerId2, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath2, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: taskId2, worktreePath: worktreePath2, branch: branch2 });
+
+  // Build the dup-wrapped text the SAME way `handleGiveUpExhausted` actually does — the real exported
+  // `framePossibleDuplicate` applied to the real `frameFromManager` output, never a hand-typed literal.
+  const msgId2 = randomUUID();
+  const realBody2 = "STOP — re-minted direction after a give-up cycle, redo the auth flow";
+  const dupWrappedText = framePossibleDuplicate(frameFromManager(realBody2), "deadbeef");
+  check("(5 setup) the dup-wrapped text carries the possible-duplicate tag AHEAD of the unstripped header",
+    dupWrappedText.startsWith("[loom:possible-duplicate root:deadbeef] [loom:from-manager]\n"));
+  db.appendEvent({
+    id: randomUUID(), ts: now,
+    managerSessionId: mgrId, workerSessionId: workerId2, taskId: taskId2,
+    kind: "session_message_queued", detail: { msgId: msgId2, text: dupWrappedText, sender: mgrId },
+  });
+
+  const r2 = await sessions.workerReport(workerId2, { status: "done", summary: "I think I'm done" });
+  check("(5 refused) workerReport(done) is refused while the re-minted instruction is unconsumed",
+    r2.reported === false && r2.refused === true);
+  check("(5) preview KEEPS the possible-duplicate tag — the duplicate-of-already-acted-on signal — never discards it",
+    r2.error.includes("[loom:possible-duplicate root:deadbeef]"));
+  check("(5) preview still drops the impersonating bare '[loom:from-manager]' header (no impersonation, even behind the kept tag)",
+    !r2.error.includes(`[${FROM_MANAGER_TAG}]`));
+  check("(5) preview still shows the re-minted instruction's real body text",
+    r2.error.includes(realBody2));
 } finally {
   db.close();
   try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(worktreePath2, { recursive: true, force: true }); } catch { /* ignore */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the worker_report(done) refusal's embedded preview marks itself as a truncated preview, drops the impersonating bare [loom:from-manager] header, still shows the real instruction body, and never mutates the underlying durable record the real delivery still drains from."
+  ? "\n✅ ALL PASS — the worker_report(done) refusal's embedded preview marks itself as a truncated preview, drops the impersonating bare [loom:from-manager] header while KEEPING any possible-duplicate cross-remint tag (re-prepended, never discarded), still shows the real instruction body, and never mutates the underlying durable record the real delivery still drains from."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
