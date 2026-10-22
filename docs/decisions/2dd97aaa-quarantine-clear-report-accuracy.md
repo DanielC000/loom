@@ -294,6 +294,38 @@ and `divertRaiseEntry`'s `merged` write.
 above. Each asserts the in-memory AND on-disk reduced state immediately after the clear, plus survival
 across a real reboot.
 
+## Follow-up 58957b1e — the ARMED-KEY write path (a SEPARATE chokepoint from writePendingDivertFile)
+
+Card `58957b1e`, from Code Reviewer `8aa0750e`'s review of `535fd69d`. `reconcileMarkedBasenameBeforeWrite`
+(the chokepoint EVERY `writeMergeQuarantineLatch` call runs through for a marked basename) had the
+IDENTICAL defect as `writePendingDivertFile`'s own re-read-and-union — it only ever consulted the global
+`clearedTokens` tombstone, never a caller's own known-dropped set — but on the ARMED-KEY final, not the
+pending-divert record. Fixed the same way: `droppedTokens: ReadonlySet<string>` made a REQUIRED parameter
+on `reconcileMarkedBasenameBeforeWrite`, `foldInOnDiskTokensIfMarked`, and `writeMergeQuarantineLatch`
+itself (inserted as the 2nd positional param, right after `entry`, since several existing params already
+carry defaults and TypeScript forbids a required param after an optional one).
+
+**This is a SEPARATE 9-site call-site audit from 535fd69d's own 9-site `writePendingDivertFile` audit
+above — the two never overlap, and neither total describes the other.** Of `writeMergeQuarantineLatch`'s
+9 call sites, THREE narrow (pass the caller's own dropped token(s)): `clearActiveEntryTokenAtKey`'s own
+armed-key loop (the card's own named repro — reproduced directly, same "unrelated active entry Q, visited
+later in Map order" technique as 535fd69d's own scenario 2) and `clearMergeQuarantineByKey`'s own
+tied-twin reduce branch's armed-key write (reproduced directly — this one needs NO "unrelated Q" trick at
+all, since this function defers its one tombstone call to the very end, well after this write, so
+`clearedTokens` is simply never populated yet) both pass the dropped token(s); the THIRD,
+`clearTokenFromPendingIndices`'s own armed-key loop, is fixed the same way but NOT independently
+reproduced — per decision `64283e06`'s own posture, that loop is unreachable today (its sole caller,
+`clearMergeQuarantineByToken`, only ever hands it non-twin pending indices). The other SIX call sites
+never narrow (raises, unions, boot writes, a fresh fail-closed placeholder mint) and pass an explicit
+empty `droppedTokens` set.
+
+### Tests
+
+`merge-quarantine-58957b1e-armed-latch-stale-mark-union.mjs` — two scenarios (the two independently
+reproduced sites above), each asserting the in-memory AND on-disk reduced state immediately after the
+clear, plus survival across a real reboot. Proven RED-before (`negative-control.mjs --ref HEAD`, 4 real
+`FAIL`s across the two scenarios) / GREEN-after / byte-identical restore.
+
 ## Do not
 
 - Do not fold a content-parsed `parsedRepoPath` into a human-facing `contentKeptRepoPaths`/
@@ -310,10 +342,11 @@ across a real reboot.
   caller's own known-dropped set via `droppedTokens` instead; tombstoning only affects a LATER
   reconciliation, never the write it (mistakenly) appeared to precede.
 - Do not treat `clearTokenFromPendingIndices`'s own partial-clear branch or `clearActiveEntryTokenAtKey`'s
-  own dual-tracked-twin loop as safe against this union-resurrection merely because each already
-  tombstones before its write — both shared the identical vulnerability item 2 fixed for
-  `clearMergeQuarantineByKey`'s reduce branch alone; both are now fixed too (card `535fd69d`, see the
-  Follow-up section above).
+  own dual-tracked-twin loop as fully safe against this union-resurrection just because card `535fd69d`
+  (above) fixed their own `writePendingDivertFile` call — that fixed only the PENDING-divert write. Each
+  of these two functions ALSO has a SEPARATE armed-key write (via `writeMergeQuarantineLatch`, reached
+  through `reconcileMarkedBasenameBeforeWrite`) sharing the identical vulnerability, left unfixed by
+  535fd69d and fixed only by card `58957b1e` — see the Follow-up section below.
 - Do not assume `writePendingDivertFile`'s own `droppedTokens` parameter is optional, or give it an
   implicit default, at any NEW call site — it is REQUIRED (card `535fd69d`), so a new site is forced to
   decide, explicitly, whether its own write narrows (pass the dropped tokens) or not (pass `new Set()`),
@@ -338,3 +371,8 @@ across a real reboot.
   separate, non-failing `diagnose(...)` helper for anything merely informational, or a future
   implementation change that doesn't affect the real claim will fail the suite for the wrong reason
   (round 2, CR Minor 3).
+- Do not assume fixing a function's `writePendingDivertFile` call (the pending-divert record) also covers
+  its OWN `writeMergeQuarantineLatch` call (the armed-key final) — they are two STRUCTURALLY SEPARATE
+  writes, each with its own chokepoint and its own `droppedTokens` parameter; a function can narrow
+  through one path while the other stays unfixed, exactly what happened to `clearTokenFromPendingIndices`
+  and `clearActiveEntryTokenAtKey` between card `535fd69d` and card `58957b1e` (see that Follow-up above).

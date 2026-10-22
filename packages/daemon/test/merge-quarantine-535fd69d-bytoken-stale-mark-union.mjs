@@ -18,8 +18,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // the simple single-token case the token IS genuinely tombstoned before this loop's own write. To
 // reproduce the SAME structural gap (an in-memory sibling still holding the literal token value, so
 // tombstoneIfNotSurviving's own "is this surviving ANYWHERE" scan returns a false negative), this
-// scenario injects a wholly unrelated, independent pending entry Q that also carries the literal token
-// string — the fixture-level technique already used throughout this module's own test suite (see e.g.
+// scenario injects a wholly unrelated, independent ACTIVE entry Q (via setActiveQuarantineTestOnly,
+// inserted into activeQuarantines AFTER X — Map iteration visits X first) that also carries the literal
+// token string — the fixture-level technique already used throughout this module's own test suite (see e.g.
 // 2dd97aaa item 2 CR Minor 2's z2-token scenario) to isolate one write site's own vulnerability from
 // whatever happens to tombstone a token in the common case.
 //

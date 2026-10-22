@@ -1210,8 +1210,12 @@ function survivingTokenHolderRepoPaths(tokens: string[], excludeIdentity: string
  * @decision 8db913e2 (Follow-up 150aed7b) — also folds the on-disk record's own
  * {@link informativeKeysFor}, not just `tokens`; dropping them here silently unblocked a dual-armed
  * entry's own secondary worktrees after the next reboot. See the decision record's own section.
+ *
+ * @decision 2dd97aaa (Follow-up 58957b1e) — `droppedTokens` (REQUIRED, same posture as
+ * {@link writePendingDivertFile}'s own parameter): this union only consulted the global `clearedTokens`
+ * tombstone before. See the decision record.
  */
-function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantineEntry): MergeQuarantineEntry | "unreadable" {
+function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): MergeQuarantineEntry | "unreadable" {
   let raw: string;
   try {
     raw = fs.readFileSync(final, "utf8");
@@ -1251,7 +1255,9 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
     // even on the plain query-after-boot path where `entry.tokens` holds nothing else at all.
     return {
       ...reingested,
-      tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingested.tokens])],
+      // @decision 2dd97aaa (Follow-up 58957b1e) — filter `droppedTokens` AFTER the union, same posture
+      // as writePendingDivertFile's own re-read-and-union branch.
+      tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingested.tokens])].filter((t) => !droppedTokens.has(t)),
       resolvedKey: entry.resolvedKey,
       resolvedKeys: onDiskKeysForReingest.length > 0
         ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeysForReingest, `reconcileMarkedBasenameBeforeWrite-reingest(${entry.repoPath})`)
@@ -1282,7 +1288,9 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
   return {
     ...entry,
     ...onDiskIdentity,
-    tokens: [...new Set([...resurrectable, ...entry.tokens])],
+    // @decision 2dd97aaa (Follow-up 58957b1e) — filter `droppedTokens` AFTER the union; see this
+    // function's own doc comment.
+    tokens: [...new Set([...resurrectable, ...entry.tokens])].filter((t) => !droppedTokens.has(t)),
     resolvedKeys: onDiskKeys.length > 0
       ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeys, `reconcileMarkedBasenameBeforeWrite(${entry.repoPath})`)
       : entry.resolvedKeys,
@@ -1310,10 +1318,13 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
  * read, not merely an additional one.
  *
  * @decision 8db913e2 (round 2; round 3 — now a shared result, not a silent swallow)
+ *
+ * @decision 2dd97aaa (Follow-up 58957b1e) — `droppedTokens` (REQUIRED) is forwarded straight to
+ * {@link reconcileMarkedBasenameBeforeWrite}; see that function's own doc.
  */
-function foldInOnDiskTokensIfMarked(final: string, entry: MergeQuarantineEntry): MergeQuarantineEntry | "unreadable" {
+function foldInOnDiskTokensIfMarked(final: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): MergeQuarantineEntry | "unreadable" {
   if (!keptUnreadableLatchFiles.has(path.basename(final))) return entry;
-  return reconcileMarkedBasenameBeforeWrite(final, entry);
+  return reconcileMarkedBasenameBeforeWrite(final, entry, droppedTokens);
 }
 
 /**
@@ -1349,15 +1360,19 @@ function foldInOnDiskTokensIfMarked(final: string, entry: MergeQuarantineEntry):
  * on, so this chokepoint must not re-read `final` a second, independent time for the same write (CR2 B2:
  * two separate reads of one file for one write can disagree on a transient failure). See that function's
  * own doc for who sets this and why.
+ *
+ * @decision 2dd97aaa (Follow-up 58957b1e) — `droppedTokens` (REQUIRED) forwards to the internal
+ * {@link reconcileMarkedBasenameBeforeWrite} call below when `!reconciledAlready`. Every call site must
+ * state what it narrows. See that function's own doc.
  */
-function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, sweepOtherTmpsOnSuccess = false, targetKey?: string, skipDegradedOccupantGuard = false, reconciledAlready = false): boolean {
+function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, sweepOtherTmpsOnSuccess = false, targetKey?: string, skipDegradedOccupantGuard = false, reconciledAlready = false): boolean {
   let fd: number | undefined;
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
     const final = targetKey ? quarantinePathForKey(targetKey) : quarantinePathFor(entry.repoPath);
     if (!skipDegradedOccupantGuard && wouldOverwriteDifferentUnresolvableOccupant(final, entry)) return false;
     if (!reconciledAlready && keptUnreadableLatchFiles.has(path.basename(final))) {
-      const reconciled = reconcileMarkedBasenameBeforeWrite(final, entry);
+      const reconciled = reconcileMarkedBasenameBeforeWrite(final, entry, droppedTokens);
       if (reconciled === "unreadable") {
         if (!skipDegradedOccupantGuard) return false;
         // @decision 8db913e2 (round 3) — defensive fallback (every current raise call site already
@@ -1619,7 +1634,9 @@ function consumeMatchedPendingsIntoArmedEntry(
   // @decision 8db913e2 (round 2; round 3 — now also the ONE read for the write below, per
   // foldInOnDiskTokensIfMarked's own doc) — fold on-disk tokens forward before arming, so every caller
   // here sets an in-memory record matching the durable bytes.
-  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), armed);
+  // @decision 2dd97aaa (Follow-up 58957b1e) — this union only ever ADDS matched pendings' tokens, never
+  // drops any — `droppedTokens` is empty.
+  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), armed, new Set());
   if (folded === "unreadable") {
     if (skipDegradedOccupantGuard) {
       // @decision 8db913e2 (Follow-up 6c04633d) — a divert union keeps the RAISER's own identity for the raiser's own tokens;
@@ -1716,7 +1733,8 @@ function consumeMatchedPendingsIntoArmedEntry(
   // @decision 8db913e2 (round 3) — `writeSucceeded` is forced `false` without calling the write at all
   // when the fold above already determined "unreadable" for a non-raise caller — the chokepoint would
   // only re-read the SAME file and reach the SAME answer (ONE READ PER WRITE).
-  const writeSucceeded = folded === "unreadable" ? false : writeMergeQuarantineLatch(armed, false, key, skipDegradedOccupantGuard, true);
+  // @decision 2dd97aaa (Follow-up 58957b1e) — `armed` is a union (above), never a narrowing — `droppedTokens` is empty.
+  const writeSucceeded = folded === "unreadable" ? false : writeMergeQuarantineLatch(armed, new Set(), false, key, skipDegradedOccupantGuard, true);
   if (writeSucceeded) {
     const failedToDelete = sourceFiles.filter((sourceFile) => !deleteSourceLatchIfSuperseded(sourceFile, armed, key));
     if (failedToDelete.length > 0) {
@@ -1726,7 +1744,7 @@ function consumeMatchedPendingsIntoArmedEntry(
       // reference was already placed there correctly by the fix above (never a slot belonging to W).
       replaceEntryEverywhere(activeQuarantines, armed, updated);
       armed = updated;
-      if (!writeMergeQuarantineLatch(armed, false, key, skipDegradedOccupantGuard, true)) {
+      if (!writeMergeQuarantineLatch(armed, new Set(), false, key, skipDegradedOccupantGuard, true)) {
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] graduated ${armed.repoPath} but could NOT re-persist it after ${failedToDelete.length} stale source file(s) (${failedToDelete.join(", ")}) failed to unlink — those file(s) stay on disk, UNTRACKED by this entry's own bookkeeping in THIS process; a restart may re-arm this quarantine from them (fail-closed, never open, but investigate the unlink failure).`);
       }
@@ -3140,7 +3158,9 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
       divertRaiseEntry(baseEntry);
       return token;
     }
-    const folded = foldInOnDiskTokensIfMarked(finalForKey, baseEntry);
+    // @decision 2dd97aaa (Follow-up 58957b1e) — `baseEntry` only ever APPENDS the fresh token; a raise
+    // never drops a token, so `droppedTokens` is empty.
+    const folded = foldInOnDiskTokensIfMarked(finalForKey, baseEntry, new Set());
     if (folded === "unreadable") {
       // @decision 8db913e2 (round 3) — a transient failure discovered HERE (after resolveRaiseOverwrite's
       // own earlier read said "proceed") is the CR2 B2 shape — divert now rather than let the later write
@@ -3192,7 +3212,8 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
       // @decision 8db913e2 (round 3) — `reconciledAlready: isPrimaryKey`: `entry` was already reconciled
       // against `finalForKey` (== this key's own final) above — only the PRIMARY key's write reuses that
       // SAME read; a secondary key's final is a DIFFERENT physical file and still gets its own chokepoint read.
-      const succeeded = writeMergeQuarantineLatch(entry, true, k, isPrimaryKey, isPrimaryKey);
+      // @decision 2dd97aaa (Follow-up 58957b1e) — `entry` only appends the fresh token (never drops) — `droppedTokens` is empty.
+      const succeeded = writeMergeQuarantineLatch(entry, new Set(), true, k, isPrimaryKey, isPrimaryKey);
       if (isPrimaryKey) {
         primaryWriteSucceeded = succeeded;
       } else if (!succeeded) {
@@ -3276,7 +3297,8 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     repoPath, branch, reason, opId, enteredAt: Date.now(), tokens: [token],
     resolvedKey: key, armedKeys: [key], provenanceTracked: true,
   };
-  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), fresh);
+  // @decision 2dd97aaa (Follow-up 58957b1e) — a brand-new raise mints `fresh` with nothing to drop.
+  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), fresh, new Set());
   if (folded === "unreadable") {
     // @decision 8db913e2 (round 3) — same CR2 B2 TOCTOU as the existing-branch above: resolveRaiseOverwrite
     // said "proceed" earlier; this later, independent read disagrees — divert rather than overwrite blind.
@@ -3285,7 +3307,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
   }
   const entry = folded;
   activeQuarantines.set(key, entry);
-  const persisted = writeMergeQuarantineLatch(entry, false, undefined, true, true);
+  const persisted = writeMergeQuarantineLatch(entry, new Set(), false, undefined, true, true);
   if (!persisted) {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] canonical repo ${repoPath} is quarantined IN THIS PROCESS ONLY right now — the durable latch failed to write (see the error just above), so a daemon restart BEFORE that is fixed would silently LIFT this quarantine instead of re-arming it. Investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
@@ -3526,10 +3548,12 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     // as `clearActiveEntryTokenAtKey`'s own identical placement.
     tombstoneIfNotSurviving([token]);
     const writtenBasenames = new Set<string>([pending.sourceFile]);
+    // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens`
+    // (DEFENSIVE — `64283e06`'s own posture: unreachable today, see that record).
     for (const k of pending.entry.armedKeys ?? []) {
       if (activeQuarantines.get(k) !== updated) continue; // no longer genuinely owned — do not write there
       writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
-      if (!writeMergeQuarantineLatch(updated, false, k)) {
+      if (!writeMergeQuarantineLatch(updated, new Set([token]), false, k)) {
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${pending.entry.repoPath}'s own armed copy at key ${k} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
       }
@@ -3626,9 +3650,12 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // below actually wrote, so the dual-tracked-twin loop after it never redundantly rewrites the SAME
   // physical file a moment later — see that loop's own doc.
   const writtenFinalBasenames = new Set<string>();
+  // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens` — the
+  // tombstone call above can fail to protect this write (an unrelated in-memory record still holding
+  // `token` at this instant defeats `tombstoneIfNotSurviving`'s own "surviving anywhere" scan).
   for (const k of armedKeysForEntry) {
     if (!entryStillOwnsKey(k, updated)) continue;
-    if (writeMergeQuarantineLatch(updated, false, k)) {
+    if (writeMergeQuarantineLatch(updated, new Set([token]), false, k)) {
       writtenFinalBasenames.add(`${quarantineHashForKey(k)}.json`);
       // @decision be79f4d5 (round 4) — reference-aware, same reason as the other two sites: a DIFFERENT,
       // surviving entry's own same-hash tmp must survive a partial clear here too.
@@ -4368,10 +4395,13 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // `overlapTokens` feeds `candidateTokens` (never the full set), so this write always precedes this
       // function's one deferred tombstone call. See the decision record for the ordering argument.
       const writtenBasenames = new Set<string>([p.sourceFile]);
+      // @decision 2dd97aaa (Follow-up 58957b1e) — pass the FULL `entry!.tokens` as `droppedTokens`, same
+      // strict-superset reasoning (and same value) as this branch's own `writePendingDivertFile` call
+      // below — this write runs BEFORE the function's one deferred tombstone call (line ~4472).
       for (const k of p.entry.armedKeys ?? []) {
         if (activeQuarantines.get(k) !== updated) continue;
         writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
-        if (!writeMergeQuarantineLatch(updated, false, k)) {
+        if (!writeMergeQuarantineLatch(updated, new Set(entry!.tokens), false, k)) {
           // eslint-disable-next-line no-console
           console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin's armed copy at key ${k} after this clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union an already-cleared token back in.`);
         }
@@ -5588,7 +5618,9 @@ function quarantineAllRegisteredFailClosed(registeredRepoPaths: string[], reason
     };
     activeQuarantines.set(key, entry);
     // Round 7 cheap-minor: don't ignore a failed durable write here either.
-    if (!writeMergeQuarantineLatch(entry)) {
+    // @decision 2dd97aaa (Follow-up 58957b1e) — a brand-new fail-closed placeholder mints a fresh
+    // identity; nothing is ever dropped.
+    if (!writeMergeQuarantineLatch(entry, new Set())) {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] fail-closed quarantine for ${repoPath} could NOT be durably persisted — it will NOT survive another restart until this is fixed.`);
     }
@@ -6752,8 +6784,10 @@ function reenterMergeQuarantinesAtBootImpl(
     // chokepoint's caller, so memory can otherwise go stale the instant the kept mark clears on success.
     let toWrite = entry;
     let reconciledAlready = false;
+    // @decision 2dd97aaa (Follow-up 58957b1e) — a boot write only ever reconciles/arms; it never drops a
+    // token on this entry's own behalf.
     if (keptUnreadableLatchFiles.has(targetBasename)) {
-      const reconciled = foldInOnDiskTokensIfMarked(quarantinePathForKey(targetKey), entry);
+      const reconciled = foldInOnDiskTokensIfMarked(quarantinePathForKey(targetKey), entry, new Set());
       if (reconciled === "unreadable") {
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — it is STILL unreadable right now; the kept mark and the in-memory entry both stay unchanged, to be retried on a later write/boot.`);
@@ -6763,7 +6797,7 @@ function reenterMergeQuarantinesAtBootImpl(
       toWrite = reconciled;
       reconciledAlready = true;
     }
-    const ok = writeMergeQuarantineLatch(toWrite, false, targetKey, true, reconciledAlready);
+    const ok = writeMergeQuarantineLatch(toWrite, new Set(), false, targetKey, true, reconciledAlready);
     if (ok) writeTargetsThisPass.add(targetBasename);
     return ok;
   };
