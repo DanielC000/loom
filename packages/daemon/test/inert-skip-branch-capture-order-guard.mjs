@@ -1,7 +1,7 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pure fs below, no daemon/Db used
 // PRE-WAIT BRANCH CAPTURE ORDERING GUARD (card 60926911, Code Review's own counter-proposal on card
 // db413510). `SessionService`'s inert-skip path (packages/daemon/src/sessions/service.ts) captures
-// `preWaitBranchHead` via `resolveGitRef` BEFORE calling `isInertMergeDiff` to derive `inertSkip` — because
+// `preWaitBranchHead` via `resolveBranchTip` BEFORE calling `isInertMergeDiff` to derive `inertSkip` — because
 // `isInertMergeDiff` resolves `branch` BY NAME internally, so classifying first and capturing the branch tip
 // afterward (even a line later) opens a window where a commit landing between the two reads is invisible to
 // the later `postWaitBranchHead !== preWaitBranchHead` movement check, letting a stale `inertSkip:true` ride
@@ -24,7 +24,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 //
 // ⚠ KEPT NARROW (card 60926911 DoD-5, per card df88c1b2's own record of a broad static scanner exhausting
 // itself after 5 independent scope defects): this guard checks exactly ONE named pair of lines in ONE file —
-// it does NOT generalize into "every resolveGitRef call must precede every classification call."
+// it does NOT generalize into "every resolveBranchTip call must precede every classification call."
 //
 // Run: node packages/daemon/test/inert-skip-branch-capture-order-guard.mjs (no build needed — pure fs/regex)
 import fs from "node:fs";
@@ -40,9 +40,9 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // The two lines this guard pins, verbatim (as of card db413510 / 339eda11):
-//   const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+//   const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
 //   inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
-const PRE_WAIT_RE = /const\s+preWaitBranchHead\s*=\s*await\s+resolveGitRef\(/;
+const PRE_WAIT_RE = /const\s+preWaitBranchHead\s*=\s*await\s+resolveBranchTip\(/;
 // Card e8df2659 rewrote the call to `inertSkip = gateDisabled ? true : await isInertMergeDiff(`; the optional group matches both the old and the current form.
 const INERT_CALL_RE = /inertSkip\s*=\s*(?:gateDisabled\s*\?\s*true\s*:\s*)?await\s+isInertMergeDiff\(/;
 
@@ -101,20 +101,20 @@ function checkOrdering(text) {
 // duplicated code still trips it.
 {
   const commentDuplicate = [
-    "// e.g. const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "// e.g. const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "// then: inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
-    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(A-control) NEGATIVE: comment-only duplicate mentions no longer trip the ambiguous-match fail-closed leg",
     checkOrdering(stripComments(commentDuplicate)).ok);
-  const capture = "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;";
+  const capture = "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;";
   const currentCall = "inertSkip = gateDisabled ? true : await isInertMergeDiff(repoPath, gateBaseMainHead!, branch, { timeoutMs: this.gitOpMs });";
   check("(A-control) the CURRENT gate-off-aware call form is matched: capture-then-call passes, call-then-capture FAILS (card e8df2659's rewrite)",
     checkOrdering([capture, currentCall].join("\n")).ok && !checkOrdering([currentCall, capture].join("\n")).ok);
   const realDuplicate = [
-    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(A-control) POSITIVE: a REAL duplicate capture line still trips the check after stripping",
@@ -130,7 +130,7 @@ function checkOrdering(text) {
     "        inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
     "        if (inertSkip) {",
     "          gateRan = false;",
-    "          const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "          const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "          try {",
   ].join("\n");
   const result = checkOrdering(preFixFa04f92c);
@@ -144,13 +144,13 @@ function checkOrdering(text) {
   check("(C1) zero matches of either target line fails closed", !checkOrdering(noMatches).ok);
 
   const duplicatePreWait = [
-    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(C2) a duplicate preWaitBranchHead capture line fails closed (ambiguous target)", !checkOrdering(duplicatePreWait).ok);
 
-  const missingInert = "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;\n";
+  const missingInert = "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;\n";
   check("(C3) a missing isInertMergeDiff classification line fails closed", !checkOrdering(missingInert).ok);
 }
 
@@ -158,7 +158,7 @@ function checkOrdering(text) {
 //        outcomes (i.e. the matcher isn't simply always-red or always-green) ────────────────────────────
 {
   const postFix = [
-    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(D) a correctly-ordered fixture passes (sanity: the matcher can distinguish the two arrangements)", checkOrdering(postFix).ok);

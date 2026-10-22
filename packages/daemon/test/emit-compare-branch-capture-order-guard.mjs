@@ -2,9 +2,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // EMIT-COMPARE PRE-CLASSIFICATION BRANCH CAPTURE ORDERING GUARD (card 88ac0d05, extending
 // `inert-skip-branch-capture-order-guard.mjs`'s coverage — card 60926911/712f4c0a — to the SIBLING call
 // site card 7183540f/877fc958 introduced). `SessionService`'s emit-compare reduced-gate path
-// (packages/daemon/src/sessions/service.ts) captures `emitComparePreWaitBranchHead` via `resolveGitRef`
-// BEFORE calling `computeEmitCompareGate` — because that function resolves `branch` BY NAME internally,
-// so classifying first and capturing the branch tip afterward (even a line later) opens a window where a
+// (packages/daemon/src/sessions/service.ts) captures `emitComparePreWaitBranchHead` via `resolveBranchTip`
+// BEFORE calling `computeEmitCompareGate` — originally because that function resolved `branch` BY NAME
+// internally (card 56c10535 round 2 switched it to take the already-resolved tip directly instead, but
+// the ordering requirement is unchanged: the capture must still precede the call that consumes it), so
+// classifying first and capturing the branch tip afterward (even a line later) opens a window where a
 // commit landing between the two reads is invisible to the later admission-time
 // `postWaitBranchHead !== emitComparePreWaitBranchHead` movement check, letting a stale
 // `emitCompareSkip:true` ride through undetected — the exact shape of the incident `db413510`/`fa04f92c`
@@ -74,10 +76,11 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // The two lines this guard pins, verbatim (as of card 7183540f / 877fc958, unmoved by 91d8e343; the
 // classify line's own arg list updated by card fe848bfc, which dropped computeEmitCompareGate's repoPath
-// arg — CLASSIFY_RE below does not depend on this, see the note above):
-//   emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
-//   const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
-const CAPTURE_RE = /emitComparePreWaitBranchHead\s*=\s*await\s+resolveGitRef\(/;
+// arg, and by card 56c10535, which switched the capture to resolveBranchTip and the classify call's
+// third argument to the resolved tip — CLASSIFY_RE below does not depend on either, see the note above):
+//   emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+//   const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, emitComparePreWaitBranchHead, { timeoutMs: this.gitOpMs });
+const CAPTURE_RE = /emitComparePreWaitBranchHead\s*=\s*await\s+resolveBranchTip\(/;
 const CLASSIFY_RE = /const\s+emitCompare\s*=\s*await\s+computeEmitCompareGate\(/;
 
 /**
@@ -136,16 +139,16 @@ function checkOrdering(text) {
 // duplicated code still trips it.
 {
   const commentDuplicate = [
-    "// e.g. emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "// e.g. emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "// then: const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(A-control) NEGATIVE: comment-only duplicate mentions no longer trip the ambiguous-match fail-closed leg",
     checkOrdering(stripComments(commentDuplicate)).ok);
   const realDuplicate = [
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(A-control) POSITIVE: a REAL duplicate capture line still trips the check after stripping",
@@ -162,7 +165,7 @@ function checkOrdering(text) {
   const syntheticInverted = [
     "        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
     "        if (emitCompare.eligible) {",
-    "          emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "          emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "          emitCompareSkip = true;",
   ].join("\n");
   const result = checkOrdering(syntheticInverted);
@@ -176,27 +179,27 @@ function checkOrdering(text) {
   check("(C1) zero matches of either target line fails closed", !checkOrdering(noMatches).ok);
 
   const duplicateCapture = [
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(C2) a duplicate emitComparePreWaitBranchHead capture line fails closed (ambiguous target)", !checkOrdering(duplicateCapture).ok);
 
   const duplicateClassify = [
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
     "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(C3) a duplicate 'const emitCompare = computeEmitCompareGate(...)' line fails closed (ambiguous target)", !checkOrdering(duplicateClassify).ok);
 
-  const missingClassify = "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;\n";
+  const missingClassify = "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;\n";
   check("(C4) a missing computeEmitCompareGate classification line fails closed", !checkOrdering(missingClassify).ok);
 
   // The near-collision guarded against above (see the header doc): a second, differently-named
   // resolveGitRef capture and computeEmitCompareGate call — mirroring 91d8e343's real additions — must
   // NOT be mistaken for a second match of THIS pair's own targets.
   const withRealNearCollisions = [
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
     "const emitCompareAdmissionMainHead = await resolveGitRef(repoPath, \"HEAD\", { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const reclassified = (postWaitBranchHead && emitCompareAdmissionMainHead) ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs }) : undefined;",
@@ -208,7 +211,7 @@ function checkOrdering(text) {
 //        outcomes (i.e. the matcher isn't simply always-red or always-green) ────────────────────────────
 {
   const postFix = [
-    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(D) a correctly-ordered fixture passes (sanity: the matcher can distinguish the two arrangements)", checkOrdering(postFix).ok);
@@ -220,8 +223,8 @@ function checkOrdering(text) {
 //        deliberately never inspect either call's argument list — see the header note) — added because
 //        card fe848bfc's own review found the mistake this pins is CONSTRUCTIBLE, not hypothetical:
 //        `repoPath` is a local of the same `string` type, in scope one line above the pre-wait classify
-//        call (the `resolveGitRef(repoPath, branch, ...)` capture CAPTURE_RE above already matches), so
-//        swapping it in compiles clean and would be near-silent at a solo site (`ref` is a branch name, so
+//        call (the `resolveBranchTip(repoPath, branch, ...)` capture CAPTURE_RE above already matches),
+//        so swapping it in compiles clean and would be near-silent at a solo site (`ref` is a sha, so
 //        the diff itself would still be correct — only the function's own worktreePath-only filesystem
 //        reads would silently answer from the wrong checkout). Same static-source-text + RED-proof
 //        technique as (A)-(D), independent of `checkOrdering` (a different function, a different property,
@@ -282,7 +285,82 @@ function firstArgsOf(text) {
   );
 }
 
+// ── (F) card 56c10535 Round 3 item 3 — THIRD-ARGUMENT PIN: the pre-wait classify call (A)-(E) already
+//        match by its OPENING PAREN, and its SIBLING post-wait reclassify call (which (A)-(E) never
+//        inspect at all), must each pass their ALREADY-RESOLVED branch tip (emitComparePreWaitBranchHead /
+//        postWaitBranchHead respectively) as the THIRD positional argument, never the bare `branch` name.
+//        Closes the exact gap Code Review a9e8a86b found: CLASSIFY_RE stops at the opening paren and never
+//        looks at arguments (see its own header note above), so a revert of either call site back to
+//        passing `branch` — reopening the same-named-tag/decoy misclassification card 56c10535 closed —
+//        would go completely undetected by every check above. Independent of checkOrdering/firstArgsOf (a
+//        different function, a different property) — one's coverage lapsing can never mask this one's. ──
+const PRE_WAIT_THIRD_ARG_RE = /const\s+emitCompare\s*=\s*await\s+computeEmitCompareGate\(\s*worktreePath\s*,\s*gateBaseMainHead\s*,\s*([A-Za-z0-9_]+)\s*,/;
+const POST_WAIT_THIRD_ARG_RE = /await\s+computeEmitCompareGate\(\s*worktreePath\s*,\s*emitCompareAdmissionMainHead\s*,\s*([A-Za-z0-9_]+)\s*,/;
+
+function thirdArgMatches(re, text) {
+  const matches = [];
+  for (const line of text.split("\n")) {
+    const m = re.exec(line);
+    if (m) matches.push(m[1]);
+  }
+  return matches;
+}
+
+// (F) REAL REPO — both call sites' third argument, read fresh from sessions/service.ts.
+{
+  let text = null;
+  try {
+    text = stripComments(fs.readFileSync(SERVICE_TS, "utf8"));
+  } catch (err) {
+    check(`(F) sessions/service.ts is readable at ${SERVICE_TS} (fail-closed: an unreadable target is a FAIL, not a skip) — ${err.message}`, false);
+  }
+  if (text != null) {
+    const preWaitArgs = thirdArgMatches(PRE_WAIT_THIRD_ARG_RE, text);
+    const postWaitArgs = thirdArgMatches(POST_WAIT_THIRD_ARG_RE, text);
+    check(`(F) sanity: exactly 1 pre-wait computeEmitCompareGate classify line found (found ${preWaitArgs.length})`, preWaitArgs.length === 1);
+    check(`(F) sanity: exactly 1 post-wait computeEmitCompareGate reclassify line found (found ${postWaitArgs.length})`, postWaitArgs.length === 1);
+    check(
+      `(F) the pre-wait classify call passes emitComparePreWaitBranchHead as its third argument, never branch (found: ${JSON.stringify(preWaitArgs)})`,
+      preWaitArgs.length === 1 && preWaitArgs[0] === "emitComparePreWaitBranchHead",
+    );
+    check(
+      `(F) the post-wait reclassify call passes postWaitBranchHead as its third argument, never branch (found: ${JSON.stringify(postWaitArgs)})`,
+      postWaitArgs.length === 1 && postWaitArgs[0] === "postWaitBranchHead",
+    );
+  }
+}
+
+// (F-control) NEGATIVE: a comment-only mention of the regressed (bare `branch`) shape is gone after
+// stripping. POSITIVE: the identical text as REAL code still flags it (same stripComments discipline as
+// (A-control)/(E-control) above — a prose mention of either target line must never itself count as a hit).
+{
+  const commentOnly = "// e.g. const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });\n" +
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, emitComparePreWaitBranchHead, { timeoutMs: this.gitOpMs });\n";
+  const strippedArgs = thirdArgMatches(PRE_WAIT_THIRD_ARG_RE, stripComments(commentOnly));
+  check("(F-control) NEGATIVE: comment-only mention of the bare-branch third-arg shape is gone after stripping",
+    strippedArgs.length === 1 && strippedArgs[0] === "emitComparePreWaitBranchHead");
+}
+
+// (F) RED PROOF — the exact regression this section exists to catch: either call site reverted
+// (source-level) to passing the bare `branch` name as its third argument. Fails the real-repo check above
+// (not just these isolated fixtures) when applied to the actual file — verified by hand: reverting
+// sessions/service.ts's pre-wait classify call to `computeEmitCompareGate(worktreePath, gateBaseMainHead,
+// branch, ...)` and re-running this file end-to-end trips (F) RED; restoring the real call makes it GREEN
+// again. These fixtures prove the MATCHER itself can distinguish the two shapes, independent of the repo's
+// current (correct) state.
+{
+  const regressedPreWait = "        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });";
+  const preArgs = thirdArgMatches(PRE_WAIT_THIRD_ARG_RE, regressedPreWait);
+  check("(F) RED PROOF: a synthetic pre-wait call passing bare `branch` as the third argument is flagged, not silently accepted",
+    preArgs.length === 1 && preArgs[0] === "branch");
+
+  const regressedPostWait = "              ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs })";
+  const postArgs = thirdArgMatches(POST_WAIT_THIRD_ARG_RE, regressedPostWait);
+  check("(F) RED PROOF: a synthetic post-wait call passing bare `branch` as the third argument is flagged, not silently accepted",
+    postArgs.length === 1 && postArgs[0] === "branch");
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — sessions/service.ts still captures emitComparePreWaitBranchHead before classifying via computeEmitCompareGate, the matcher is proven to go RED against the synthetic re-scoped-inside-if(eligible) inversion, it survives 91d8e343's real near-collision siblings without a false duplicate-match failure, it fails closed on an unreadable file or an ambiguous (zero/duplicate) match, and every real computeEmitCompareGate call site passes worktreePath (never repoPath) as its first argument — proven to actually flag the named near-miss, not just silently pass."
+  ? "\n✅ ALL PASS — sessions/service.ts still captures emitComparePreWaitBranchHead before classifying via computeEmitCompareGate, the matcher is proven to go RED against the synthetic re-scoped-inside-if(eligible) inversion, it survives 91d8e343's real near-collision siblings without a false duplicate-match failure, it fails closed on an unreadable file or an ambiguous (zero/duplicate) match, every real computeEmitCompareGate call site passes worktreePath (never repoPath) as its first argument, and both the pre-wait and post-wait calls pass their already-resolved branch tip (never the bare branch name) as their third argument."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

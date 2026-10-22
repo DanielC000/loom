@@ -1,6 +1,6 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { diffBranch, normalizeDiffstatPath, type DiffBranchDeps, type DiffstatFile } from "./worktrees.js";
+import { diffBranch, normalizeDiffstatPath, resolveBranchTip, type DiffBranchDeps, type DiffstatFile } from "./worktrees.js";
 import { boundedSimpleGit, withTimeout } from "./bounded.js";
 import { COMMENT_ANCHOR_LINT_SCRIPT } from "../paths.js";
 
@@ -176,7 +176,12 @@ export async function detectUnanchoredAddedCommentBlocks(
 
     const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
     const git = boundedSimpleGit(repoPath, timeoutMs);
-    const range = `${base}...${branch}`;
+    // @decision 56c10535 — resolved via resolveBranchTip's exact lookup, never a bare `branch` STRING
+    // (DWIM-reachable); an unresolvable tip fails safe to EMPTY_RESULT, matching this function's own
+    // never-blocking contract (see its own doc comment above).
+    const branchTip = await resolveBranchTip(repoPath, branch, deps);
+    if (!branchTip) return EMPTY_RESULT;
+    const range = `${base}...${branchTip}`;
     const patch = await withTimeout(
       git.diff([range, "--", ...candidates]), timeoutMs, "git diff (unanchored-comment-blocks, scoped)",
     );
@@ -190,7 +195,7 @@ export async function detectUnanchoredAddedCommentBlocks(
       if (added.size === 0) continue;
       let content: string;
       try {
-        content = await withTimeout(git.show([`${branch}:${file}`]), timeoutMs, "git show (unanchored-comment-blocks, file content at branch tip)");
+        content = await withTimeout(git.show([`${branchTip}:${file}`]), timeoutMs, "git show (unanchored-comment-blocks, file content at branch tip)");
       } catch {
         continue; // deleted/renamed-away/unreadable at the branch tip — nothing to scan
       }

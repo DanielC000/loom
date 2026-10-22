@@ -136,7 +136,10 @@ try {
     const alreadyLandedGitFactory = (repoPath, timeoutMs) => {
       const real = canonicalGit(repoPath, timeoutMs);
       return { raw: async (args) => {
-        if (args[0] === "rev-parse" && args[1] === "--verify" && String(args[2] ?? "").includes(a.branch)) throw new Error("INJECTED FAULT (throw) resolveGitRef");
+        // @decision 56c10535 — resolveBranchTip's exact lookup replaced the old `rev-parse --verify
+        // <ref>^{commit}` call with `for-each-ref --format=... -- refs/heads/<branch>`; match THAT shape
+        // or this injection silently never fires (the real call succeeds, masking the scenario entirely).
+        if (args[0] === "for-each-ref" && args[args.length - 1] === `refs/heads/${a.branch}`) throw new Error("INJECTED FAULT (throw) resolveBranchTip");
         return real.raw(args);
       } };
     };

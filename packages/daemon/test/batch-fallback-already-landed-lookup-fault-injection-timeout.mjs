@@ -169,7 +169,10 @@ try {
         // never resolves on its own — wrapped in the REAL, exported withTimeout at a short, test-chosen
         // ms so it still rejects via a genuine timer-based mechanism (see header NOTE, card 3a34fc76),
         // independent of the session's own (now generous) gitOpMs below.
-        if (args[0] === "rev-parse" && args[1] === "--verify" && String(args[2] ?? "").includes(a.branch)) return withTimeout(new Promise(() => {}), TEST_FAULT_MS, "test-fault resolveGitRef");
+        // @decision 56c10535 — resolveBranchTip's exact lookup replaced the old `rev-parse --verify
+        // <ref>^{commit}` call with `for-each-ref --format=... -- refs/heads/<branch>`; match THAT shape
+        // or this injection silently never fires (the real call succeeds, masking the scenario entirely).
+        if (args[0] === "for-each-ref" && args[args.length - 1] === `refs/heads/${a.branch}`) return withTimeout(new Promise(() => {}), TEST_FAULT_MS, "test-fault resolveBranchTip");
         return real.raw(args);
       } };
     };

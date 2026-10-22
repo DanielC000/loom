@@ -317,6 +317,13 @@ export const worktreeAddLandedTestOnly = worktreeAddLanded;
 export interface DiffBranchDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw" | "diffSummary" | "diff">;
   timeoutMs?: number;
+  /**
+   * An ALREADY-RESOLVED branch tip (e.g. a review-spawn's `headSha`, also used for its `reviewBaseSha`
+   * stamp).
+   * @decision 56c10535 — when set, {@link diffBranch} skips its own `resolveBranchTip` call and diffs
+   * THIS sha, so two logically-identical reads can never diverge; `branch` is then display-only.
+   */
+  resolvedTip?: string;
 }
 
 /** Build the bounded git instance + resolve the timeout for {@link diffBranch}'s ops, applying the seam's defaults. */
@@ -438,6 +445,43 @@ export async function resolveGitRef(repoPath: string, ref: string, deps: Bounded
     const out = await withTimeout(git.raw(["rev-parse", "--verify", `${ref}^{commit}`]), timeoutMs, "git rev-parse --verify");
     const sha = out.trim();
     return sha || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The BRANCH-qualified sibling of {@link resolveGitRef}: resolves `branch`'s tip to its commit sha, or
+ * `null` if `refs/heads/<branch>` does not exist — via `git for-each-ref`, never `rev-parse`/`merge-base`.
+ * @decision 56c10535 — every `resolveGitRef` caller passing a worker/loom BRANCH NAME must call THIS
+ * function instead; never blanket-prefix inside `resolveGitRef` itself (other callers pass a sha/"HEAD"/
+ * mainline name, which `refs/heads/`-prefixing would silently break).
+ * @decision 56c10535 — `refs/heads/<branch>^{commit}` is NOT exact (git's own DWIM can resolve a PLANTED
+ * decoy when the real branch is missing, confirmed on real git) — use `for-each-ref` + exact `%(refname)`
+ * equality instead, never a prefix/startsWith check (it also pattern-matches sub-paths).
+ */
+export async function resolveBranchTip(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  const wanted = `refs/heads/${branch}`;
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // card 59e53710 — never resolve a ref's existence by exit code alone (simple-git's `raw()` does not
+    // reliably reject on an exit-code-only failure, e.g. `show-ref --verify --quiet`); for-each-ref's
+    // verdict is read from its OUTPUT CONTENT (the exact-refname filter below), never from whether the
+    // call itself threw.
+    const out = await withTimeout(
+      git.raw(["for-each-ref", "--format=%(refname)%00%(objectname)", "--", wanted]),
+      timeoutMs, "git for-each-ref (exact branch tip)",
+    );
+    for (const line of out.split("\n")) {
+      if (!line) continue;
+      const sepIdx = line.indexOf("\x00");
+      if (sepIdx === -1) continue;
+      if (line.slice(0, sepIdx) === wanted) {
+        const sha = line.slice(sepIdx + 1).trim();
+        return sha || null;
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -794,8 +838,13 @@ async function recutStaleReusedBranch(
 ): Promise<{ recut: boolean; discardedOnRecut?: DiscardedOnRecutInfo }> {
   const { git: repoGit, timeoutMs: repoTimeoutMs } = boundedGit(repoPath, deps);
   const mainSha = (await withTimeout(repoGit.raw(["rev-parse", "HEAD"]), repoTimeoutMs, "git rev-parse HEAD")).trim();
+  // @decision 56c10535 — resolve the tip via resolveBranchTip's EXACT lookup, count against that SHA
+  // (never a `refs/heads/<branch>` string — DWIM-reachable when the branch is missing); unresolvable
+  // is treated the same as an unparseable count below — never re-cut.
+  const branchTip = await resolveBranchTip(repoPath, branch, deps);
+  if (!branchTip) return { recut: false };
   const aheadRaw = await withTimeout(
-    repoGit.raw(["rev-list", "--count", `${mainSha}..${branch}`]), repoTimeoutMs, "git rev-list --count (ahead of main)",
+    repoGit.raw(["rev-list", "--count", `${mainSha}..${branchTip}`]), repoTimeoutMs, "git rev-list --count (ahead of main)",
   );
   // FAIL SAFE: only re-cut a PROVABLY-empty branch (0 ahead). A recovery branch (>0 ahead) OR a malformed/
   // unparseable count (NaN) → leave the branch EXACTLY as-is; never let a bad count fall through to the
@@ -912,7 +961,7 @@ async function detectStaleBase(repoPath: string, branch: string, mainSha: string
   if (!behindBy || behindBy <= 0) return undefined;
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const baseSha = (await withTimeout(git.raw(["merge-base", branch, mainSha]), timeoutMs, "git merge-base")).trim();
+    const baseSha = (await withTimeout(git.raw(["merge-base", `refs/heads/${branch}`, mainSha]), timeoutMs, "git merge-base")).trim();
     const filesRaw = await withTimeout(git.raw(["diff", "--name-only", baseSha, mainSha]), timeoutMs, "git diff --name-only");
     const allFiles = filesRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     return {
@@ -2515,7 +2564,7 @@ export async function listCheckedOutBranches(repoPath: string, deps: BoundedGitD
 export async function countCommitsBehind(repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {}): Promise<number | undefined> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    const raw = await withTimeout(git.raw(["rev-list", "--count", `${branch}..${base}`]), timeoutMs, "git rev-list --count (behind base)");
+    const raw = await withTimeout(git.raw(["rev-list", "--count", `refs/heads/${branch}..${base}`]), timeoutMs, "git rev-list --count (behind base)");
     const n = parseInt(raw.trim(), 10);
     return Number.isFinite(n) ? n : undefined;
   } catch {
@@ -2814,7 +2863,7 @@ export async function precheckWorkerDone(
   if (branch) {
     try {
       const ahead = parseInt(
-        (await withTimeout(git.raw(["rev-list", "--count", `${base}..${branch}`]), timeoutMs, "git rev-list --count")).trim(),
+        (await withTimeout(git.raw(["rev-list", "--count", `${base}..refs/heads/${branch}`]), timeoutMs, "git rev-list --count")).trim(),
         10,
       );
       if (Number.isFinite(ahead) && ahead === 0) return { uncommitted: false, files: [], zeroAhead: true, aheadCount: 0 };
@@ -3228,13 +3277,18 @@ export async function worktreeHasWork(
   }
 
   // (2) Branch ahead of the canonical base? Any commit reachable from the branch but not from `base`.
+  // @decision 56c10535 — resolved via resolveBranchTip's exact for-each-ref lookup, never a bare
+  // `refs/heads/<branch>` STRING (still DWIM-reachable once the branch is missing). A null resolve
+  // fails SAFE to true (assume work) — see decision 9cb0287a's own "Do not" on this function's default.
   if (branch) {
     try {
+      const branchTip = await resolveBranchTip(repoPath, branch, deps);
+      if (!branchTip) return true; // missing/unreadable branch → fail SAFE / has work
       const ahead = parseInt(
-        (await withTimeout(git.raw(["rev-list", "--count", `${base}..${branch}`]), timeoutMs, "git rev-list --count")).trim(),
+        (await withTimeout(git.raw(["rev-list", "--count", `${base}..${branchTip}`]), timeoutMs, "git rev-list --count")).trim(),
         10,
       );
-      if (!Number.isFinite(ahead) || ahead > 0) return true; // NaN (parse/ref error) or >0 → fail SAFE / has work
+      if (!Number.isFinite(ahead) || ahead > 0) return true; // NaN (parse error) or >0 → fail SAFE / has work
     } catch {
       return true; // bounded failure → fail SAFE
     }
@@ -3341,6 +3395,10 @@ export async function detectCanonicalDirtyOverlap(
   deps: BoundedGitDeps = {},
 ): Promise<CanonicalDirtyOverlap> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
+  // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of the
+  // real branch (refs/tags/ outranks refs/heads/ in git's own revision priority), which could hide a
+  // real overlap.
+  const branchRef = `refs/heads/${branch}`;
   try {
     const statusRaw = await withTimeout(
       git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=no"]),
@@ -3364,8 +3422,8 @@ export async function detectCanonicalDirtyOverlap(
     }
     if (dirtyUnstaged.size === 0) return { overlap: false };
 
-    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, dirty-overlap preflight)")).trim();
-    const changed = await changedPathsBetween(git, mergeBase, branch, timeoutMs);
+    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branchRef]), timeoutMs, "git merge-base (canonical, dirty-overlap preflight)")).trim();
+    const changed = await changedPathsBetween(git, mergeBase, branchRef, timeoutMs);
     let overlapping = changed.filter((p) => dirtyUnstaged.has(p));
     if (overlapping.length === 0) return { overlap: false };
 
@@ -3391,7 +3449,7 @@ export async function detectCanonicalDirtyOverlap(
     // above only to find the branch's OWN candidate set), since this is the question that actually decides
     // whether `--squash` touches the working tree: has HEAD since independently converged on what the
     // branch would apply, regardless of what the branch changed relative to its own fork point.
-    const stillDiffersFromHead = new Set(await changedPathsBetween(git, "HEAD", branch, timeoutMs));
+    const stillDiffersFromHead = new Set(await changedPathsBetween(git, "HEAD", branchRef, timeoutMs));
     overlapping = overlapping.filter((p) => stillDiffersFromHead.has(p));
     if (overlapping.length === 0) return { overlap: false };
 
@@ -3424,6 +3482,10 @@ export async function detectCanonicalUntrackedOverlap(
   deps: BoundedGitDeps = {},
 ): Promise<CanonicalUntrackedOverlap> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
+  // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of the
+  // real branch (refs/tags/ outranks refs/heads/ in git's own revision priority), which could hide a
+  // real overlap.
+  const branchRef = `refs/heads/${branch}`;
   try {
     const statusRaw = await withTimeout(
       git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"]),
@@ -3441,8 +3503,8 @@ export async function detectCanonicalUntrackedOverlap(
     }
     if (untracked.size === 0) return { overlap: false };
 
-    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, untracked-overlap preflight)")).trim();
-    const changed = await changedPathsBetween(git, mergeBase, branch, timeoutMs);
+    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branchRef]), timeoutMs, "git merge-base (canonical, untracked-overlap preflight)")).trim();
+    const changed = await changedPathsBetween(git, mergeBase, branchRef, timeoutMs);
     const candidates = changed.filter((p) => untracked.has(p));
     if (candidates.length === 0) return { overlap: false };
 
@@ -3452,7 +3514,7 @@ export async function detectCanonicalUntrackedOverlap(
     for (const p of candidates) {
       try {
         await withTimeout(
-          git.raw(["cat-file", "-e", `${branch}:${p}`]), timeoutMs, "git cat-file -e branch:path (canonical, untracked-overlap existence check)",
+          git.raw(["cat-file", "-e", `${branchRef}:${p}`]), timeoutMs, "git cat-file -e branch:path (canonical, untracked-overlap existence check)",
         );
         overlapping.push(p);
       } catch {
@@ -3898,7 +3960,12 @@ export async function diffBranch(
   // reviewWorkerMerge (and thus the manager's worker_merge gate) forever; the outer try/catch there only
   // ever caught an ERROR, never a HANG.
   const { git, timeoutMs } = boundedDiffGit(repoPath, deps);
-  const range = `${base}...${branch}`; // 3-dot: changes on `branch` since the merge-base with `base`
+  // @decision 56c10535 — resolved via resolveBranchTip's exact lookup, never a bare `refs/heads/<branch>`
+  // STRING (DWIM-reachable when missing). `deps.resolvedTip`, if set, skips the second read so it can
+  // never diverge from it. An unresolvable branch throws; every caller already tolerates that.
+  const branchTip = deps.resolvedTip ?? (await resolveBranchTip(repoPath, branch, deps));
+  if (!branchTip) throw new Error(`diffBranch: could not resolve ${branch}'s current tip (refs/heads/${branch} is unreadable or missing)`);
+  const range = `${base}...${branchTip}`; // 3-dot: changes on `branch` since the merge-base with `base`
   const summary = await withTimeout(git.diffSummary([range]), timeoutMs, "git diff --stat (diffBranch summary)");
   const allFiles: DiffstatFile[] = summary.files.map((f) => ({
     file: f.file,
@@ -4103,13 +4170,16 @@ async function branchContentLandedInCommit(
 ): Promise<boolean> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of
+    // the real branch (refs/tags/ outranks refs/heads/), which would misclassify ALREADY_MERGED.
+    const branchRef = `refs/heads/${branch}`;
     const changedFiles = (await withTimeout(
-      git.raw(["diff", "--name-only", `${mergeBase}..${branch}`]), timeoutMs, "git diff --name-only (content check)",
+      git.raw(["diff", "--name-only", `${mergeBase}..${branchRef}`]), timeoutMs, "git diff --name-only (content check)",
     )).trim();
     if (!changedFiles) return true; // branch has no changes of its own relative to its fork point — vacuously landed
     const files = changedFiles.split("\n").filter(Boolean);
     const diffOutput = (await withTimeout(
-      git.raw(["diff", "--name-only", sha, branch, "--", ...files]), timeoutMs, "git diff --name-only (content check, candidate vs branch)",
+      git.raw(["diff", "--name-only", sha, branchRef, "--", ...files]), timeoutMs, "git diff --name-only (content check, candidate vs branch)",
     )).trim();
     return diffOutput === ""; // no output ⇒ zero difference on any of the branch's own paths ⇒ content matches
   } catch {
@@ -6145,7 +6215,7 @@ export async function changedDaemonSrcTsPathsForCommit(
  *  justify reintroducing a second path with "a worktree shares its parent's object database" — that's false
  *  for refs (HEAD is per-worktree). */
 export async function computeEmitCompareGate(
-  worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
+  worktreePath: string, baseSha: string, ref: string | undefined, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
   // Card 4def0708: replaces the old single `notEligible(reason, notApplicable = false)` — a DEFAULTED
   // boolean param let a forgotten call site silently stamp the INFORMATIVE value (12 of 16 original call
@@ -6158,6 +6228,9 @@ export async function computeEmitCompareGate(
   // "no call site can express the wrong thing by omission" discipline card 4def0708 already applied to the
   // `notReducible`/`notApplicableHere` split itself, one layer in.
   const notApplicableHere = (reason: string, kind: EmitCompareNotApplicableKind): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [], identicalFileCount: 0, reason, notApplicable: true, notApplicableKind: kind });
+  // @decision 56c10535 — `ref` is the branch SHA the caller already resolved (mirrors
+  // isInertMergeDiff's own contract), never a bare branch NAME; an unreadable tip fails closed here.
+  if (!ref) return notApplicableHere("branch tip unreadable", "git-operation-failed");
   const { git, timeoutMs } = boundedGit(worktreePath, deps);
 
   let entries: string[];
@@ -6831,7 +6904,7 @@ export async function findLandedSquashCommit(
       // Re-task guard: if the trailer commit is an ANCESTOR of the branch tip, the branch was re-cut onto
       // it (a re-spawned task carrying NEW live work) — NOT an orphaned squash-merge of the current branch.
       const mergeBase = (await withTimeout(
-        git.raw(["merge-base", sha, branch]), timeoutMs, "git merge-base",
+        git.raw(["merge-base", sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
       )).trim();
       if (mergeBase === sha) return null;
       // Content-reachability: a trailer match is not proof (see branchContentLandedInCommit's doc).
@@ -6871,6 +6944,9 @@ export async function findIntroducingSquashCommit(
 ): Promise<string> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of
+    // the real branch (refs/tags/ outranks refs/heads/; attribution-only, but still identity).
+    const branchRef = `refs/heads/${branch}`;
     if ((await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list (attribution)")).trim() === "") return landedSha;
     const out = await withTimeout(
       git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
@@ -6885,13 +6961,13 @@ export async function findIntroducingSquashCommit(
     const at = shas.indexOf(landedSha);
     if (at === -1) return landedSha;
     const ownChanges = (await withTimeout(
-      git.raw(["diff", "--name-only", `${(await withTimeout(git.raw(["merge-base", landedSha, branch]), timeoutMs, "git merge-base (attribution)")).trim()}..${branch}`]),
+      git.raw(["diff", "--name-only", `${(await withTimeout(git.raw(["merge-base", landedSha, branchRef]), timeoutMs, "git merge-base (attribution)")).trim()}..${branchRef}`]),
       timeoutMs, "git diff --name-only (attribution)",
     )).trim();
     if (!ownChanges) return landedSha;
     let introducer = landedSha;
     for (const older of shas.slice(at + 1, at + 1 + INTRODUCING_COMMIT_MAX_OLDER)) {
-      const mergeBase = (await withTimeout(git.raw(["merge-base", older, branch]), timeoutMs, "git merge-base (attribution)")).trim();
+      const mergeBase = (await withTimeout(git.raw(["merge-base", older, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
       if (!mergeBase || mergeBase === older) break; // re-cut onto it: the branch descends from this commit
       if (!(await branchContentLandedInCommit(repoPath, branch, older, mergeBase, deps))) break;
       introducer = older;
@@ -6984,7 +7060,7 @@ export async function workerDiff(
   if (branch && worktreePath && fs.existsSync(worktreePath)) {
     try {
       const { git, timeoutMs } = boundedDiffGit(repoPath, deps);
-      const base = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (workerDiff uncommitted)")).trim();
+      const base = (await withTimeout(git.raw(["merge-base", "HEAD", `refs/heads/${branch}`]), timeoutMs, "git merge-base (workerDiff uncommitted)")).trim();
       const { git: wt } = boundedDiffGit(worktreePath, deps);
       const summary = await withTimeout(wt.diffSummary([base]), timeoutMs, "git diff --stat (workerDiff uncommitted)"); // <base> with one arg = base..WORKING-TREE
       const patch = await withTimeout(wt.diff([base]), timeoutMs, "git diff (workerDiff uncommitted)");
@@ -7535,7 +7611,7 @@ async function resolveMergedCommitMapHit(
     )).trim() !== "";
     if (branchPresent) {
       const mergeBase = (await withTimeout(
-        git.raw(["merge-base", hit.sha, branch]), timeoutMs, "git merge-base",
+        git.raw(["merge-base", hit.sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
       )).trim();
       if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
       if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
@@ -7704,7 +7780,7 @@ export function toConventionalSubject(raw: string): string {
 export async function deriveTasklessSubject(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<string | undefined> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    const raw = await withTimeout(git.raw(["log", "-1", "--format=%s", branch]), timeoutMs, "git log -1 --format=%s (taskless subject)");
+    const raw = await withTimeout(git.raw(["log", "-1", "--format=%s", `refs/heads/${branch}`]), timeoutMs, "git log -1 --format=%s (taskless subject)");
     const subject = raw.trim().split(/\r?\n/)[0]?.trim();
     return subject ? subject : undefined;
   } catch {
@@ -7729,7 +7805,7 @@ async function deriveWorkerCommitLogBody(
     // that failure degrades this best-effort body exactly like every other failure mode below.
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const raw = await withTimeout(
-      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..${branch}`]),
+      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..refs/heads/${branch}`]),
       timeoutMs, "git log (canonical, worker commit-log body)",
     );
     subjects = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
@@ -7767,10 +7843,10 @@ export async function deriveOwnNonTipCommitSubjects(
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const mergeBase = (await withTimeout(
-      git.raw(["merge-base", base, branch]), timeoutMs, "git merge-base (own non-tip commit subjects)",
+      git.raw(["merge-base", base, `refs/heads/${branch}`]), timeoutMs, "git merge-base (own non-tip commit subjects)",
     )).trim();
     const raw = await withTimeout(
-      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..${branch}`]),
+      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..refs/heads/${branch}`]),
       timeoutMs, "git log (canonical, own non-tip commit subjects)",
     );
     all = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
@@ -8368,7 +8444,7 @@ export async function mergeBranch(
   // what excludes `undefined` — TS1016 forbids a bare required param after these optional ones): an
   // omitting caller now gets the SAME logged legacy/grandfathered path as explicit `null`, never a silent skip.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -8608,7 +8684,7 @@ async function mergeBranchLocked(
   // @decision 0eaaa693 (round 5) — same required-`string | null` posture as {@link mergeBranch}'s own
   // param; see that signature's comment for why `= null` (not a bare `?`) is what achieves it here.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -8629,14 +8705,21 @@ async function mergeBranchLocked(
   // re-confirm into a spurious refusal.
   // @decision 7efc2bff — the squash target is resolved to a frozen sha HERE, never the branch NAME —
   // `git merge --squash <name>` re-resolves at squash time and could silently pick up a late commit that
-  // landed after the gate-base check. A failed resolve falls back to the branch name, never a hard failure.
-  let resolvedBranchHead: string | undefined;
-  try {
-    resolvedBranchHead = (await withTimeout(
-      git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (resolve squash target)",
-    )).trim();
-  } catch { /* fall through: squashTarget below stays the branch name, unchanged from before this fix */ }
-  const squashTarget = resolvedBranchHead ?? branch;
+  // landed after the gate-base check.
+  // @decision 56c10535 — resolved via {@link resolveBranchTip} (exact `for-each-ref`, never a bare
+  // revision). A FAILED resolve now REFUSES (zero side effects) rather than falling back to squashing
+  // the bare branch NAME (7efc2bff's old rule) — that fallback is the identical hazard this closes.
+  const resolvedBranchHead = (await resolveBranchTip(repoPath, branch, deps)) ?? undefined;
+  // @decision 56c10535 (Round 3, item 2) — DISTINCT from the generic merge_failed fallthrough: nothing
+  // was attempted here, and it is never a content/conflict problem fixable by rebasing. The flag lets
+  // service.ts give this its own honest wording instead of a misleading "re-task a rebase."
+  if (resolvedBranchHead === undefined) {
+    return {
+      ok: false, branchTipUnresolvable: true,
+      reason: `the branch tip for '${branch}' could not be resolved exactly (refs/heads/${branch} is unreadable or missing) — canonical repo and worktree are untouched; nothing was squashed`,
+    };
+  }
+  const squashTarget = resolvedBranchHead;
   // @decision 975c774b — a gated PASS covers only the tip the gate spawned on; refuse (zero side effects) if the branch moved
   // since, or its tip can't be read. Optional: callers that pass no expected tip keep today's behavior.
   if (expectedBranchTip !== undefined && resolvedBranchHead !== expectedBranchTip) {
@@ -9081,7 +9164,7 @@ async function mergeBranchLocked(
     // proof). Best-effort: a capture failure just omits the body from this commit.
     let workerCommitLogBody: string | undefined;
     try {
-      const mergeBaseForSquashMeta = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, squash metadata)")).trim();
+      const mergeBaseForSquashMeta = (await withTimeout(git.raw(["merge-base", "HEAD", `refs/heads/${branch}`]), timeoutMs, "git merge-base (canonical, squash metadata)")).trim();
       workerCommitLogBody = await deriveWorkerCommitLogBody(repoPath, branch, mergeBaseForSquashMeta, subject, deps);
     } catch (e) {
       // eslint-disable-next-line no-console

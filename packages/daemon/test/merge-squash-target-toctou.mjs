@@ -9,8 +9,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // right after the canonical-index lock, and squash THAT SHA — never the moving ref.
 //
 // THE RED HALF this proves (card's own 📌 spec, built here rather than left unbuilt): a real git repo +
-// worktree, `deps.gitFactory` hooking the EXACT `rev-parse --verify <branch>^{commit}` call
-// mergeBranchLocked makes to resolve its squash target — real result returned to the caller (so the
+// worktree, `deps.gitFactory` hooking the EXACT `for-each-ref` call (card 56c10535 Round 2:
+// resolveBranchTip's exact-refname lookup, superseding the pre-card bare `rev-parse --verify
+// <branch>^{commit}`) mergeBranchLocked makes to resolve its squash target — real result returned to the caller (so the
 // stability check still reports "stable", exactly matching gateBaseBranchHead), but a NEW commit is landed
 // on the branch in the gap between that call returning and the eventual `git merge --squash` call.
 //
@@ -63,7 +64,10 @@ function toctouGitFactory(repoPath, blockTimeoutMs) {
   return {
     raw: async (args) => {
       const result = await real.raw(args);
-      if (!mutated && Array.isArray(args) && args[0] === "rev-parse" && args[1] === "--verify" && args[2] === `${branch}^{commit}`) {
+      // @decision 56c10535 — the squash-target resolve now goes through resolveBranchTip's exact
+      // `for-each-ref` lookup (never a bare/DWIM-prone rev-parse); match THAT call shape, or this hook
+      // silently never fires.
+      if (!mutated && Array.isArray(args) && args[0] === "for-each-ref" && args[args.length - 1] === `refs/heads/${branch}`) {
         mutated = true;
         // Simulate a still-alive worker committing more work in the exact TOCTOU window.
         fs.writeFileSync(path.join(worktreePath, NEW_FILE), "landed after the stability check resolved\n");

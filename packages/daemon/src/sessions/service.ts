@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -883,6 +883,10 @@ type ConfirmMergeResult = {
    *  nothing — main no longer carries the landed content (most often a human revert). Refused, canonical
    *  repo restored, never a commit; real verdict about main, so never cached, same as `gateBaseInvalidated`. */
   landedContentDiverged?: boolean;
+  /** @decision 56c10535 (Round 3) — the branch's own tip could not be resolved exactly before squashing
+   *  (missing, or an unreadable/ambiguous `refs/heads/<branch>`); nothing was ever attempted, classified
+   *  `"branch-tip-unresolvable"`, `NEVER_CACHED_OUTCOMES` — a re-confirm genuinely re-attempts. */
+  branchTipUnresolvable?: boolean;
   /** @decision d69d4858 — the canonical checkout was off the expected mainline branch; mirrors
    *  `mergeBatchTracked`'s own `branchDiverted`/`unverified`, same `NEVER_CACHED_OUTCOMES` strings. */
   branchDiverted?: boolean;
@@ -9420,7 +9424,7 @@ export class SessionService {
       // Session-scoped repo resolution uses the session's OWN stamped repoKey (never a fresh task read) —
       // see resolveRepoByKey's doc: the worktree is physically rooted in whatever repo it was cut from.
       const reviewRepo = resolveRepoByKey(project, reviewed.repoKey);
-      const headSha = await resolveGitRef(reviewRepo.path, reviewed.branch);
+      const headSha = await resolveBranchTip(reviewRepo.path, reviewed.branch);
       if (!headSha) {
         throw new Error(`worker_spawn reviewOfWorkerSessionId '${opts.reviewOfWorkerSessionId}' names branch '${reviewed.branch}' which does not exist in ${reviewRepo.path}`);
       }
@@ -9442,7 +9446,7 @@ export class SessionService {
       // session lookup needed, so this also works for a task whose worker has since exited/recycled.
       const reviewBranch = `loom/${taskKey(reviewedTask.id)}`;
       const reviewRepo = resolveRepo(project, reviewedTask);
-      const headSha = await resolveGitRef(reviewRepo.path, reviewBranch);
+      const headSha = await resolveBranchTip(reviewRepo.path, reviewBranch);
       if (!headSha) {
         throw new Error(`worker_spawn reviewOfTaskId '${reviewRef}' resolves to branch '${reviewBranch}' which does not exist in ${reviewRepo.path} — has a worker been spawned on it yet?`);
       }
@@ -9571,8 +9575,11 @@ export class SessionService {
       // needs to EXECUTE (a build-free worktree never populates `dist/` for it to import). For an ordinary
       // noCommit rig with no reviewed branch yet (a fresh task — nothing to inspect), the decision is
       // unchanged: `!noCommit`. See ProvisionDeps.runBuild's doc for the full rationale.
+      // @decision 56c10535 — pass the already-resolved headSha via resolvedTip, never re-resolve
+      // reviewForkFrom.branch by name: a second, independent read of the same logical value is the
+      // exact divergence hazard card 46addc1a closed one level up (the cut + the reviewBaseSha stamp).
       const runBuild = !noCommit || (reviewForkFrom
-        ? await reviewDiffNeedsBuild(reviewForkFrom.repo.path, reviewForkFrom.branch, "HEAD", { timeoutMs: this.gitOpMs })
+        ? await reviewDiffNeedsBuild(reviewForkFrom.repo.path, reviewForkFrom.branch, "HEAD", { timeoutMs: this.gitOpMs, resolvedTip: reviewForkFrom.headSha })
         : false);
       // @decision a5d9c458 — clear any stale wedged-worktree tracking for this exact path BEFORE createWorktree can claim it.
       releaseWorktreePathClaim = this.reclaimWedgedWorktreePathForSpawn(project.id, taskId ?? claimKey, targetRepo.key).release;
@@ -9581,7 +9588,10 @@ export class SessionService {
       this.markCuttingWorktree(targetRepo.path);
       let cutResult: Awaited<ReturnType<typeof createWorktree>>;
       try {
-        cutResult = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
+        // @decision 46addc1a — pass the already-resolved headSha, never reviewForkFrom.branch: the cut
+        // and the reviewBaseSha stamped below (also from headSha) must read the identical sha, never a
+        // branch name re-resolved independently at cut time.
+        cutResult = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.headSha);
       } finally {
         this.unmarkCuttingWorktree(targetRepo.path);
       }
@@ -17808,7 +17818,7 @@ export class SessionService {
     // Card bbccf470: the branch tip this review covers, read BEFORE the diff so a commit landing between the two reads can only be UNDER-covered
     // (later refused), never recorded as reviewed. Consumed only by `reviewedTipFor`. `null` (unreadable) is recorded, not omitted: an event with
     // no `tip` key is a pre-bbccf470 review (treated as never-reviewed), while `tip:null` fails CLOSED at the check.
-    const reviewedTip = await resolveGitRef(repoPath, worker.branch, { timeoutMs: this.gitOpMs });
+    const reviewedTip = await resolveBranchTip(repoPath, worker.branch, { timeoutMs: this.gitOpMs });
     const includePatch = opts.includePatch === true;
     const diff = await diffBranch(repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true }, { timeoutMs: this.gitOpMs });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
@@ -19101,7 +19111,7 @@ export class SessionService {
         // `gateBaseMainHead`: a failed resolve leaves this `undefined`, which `mergeBranch` reads as "no
         // stability proof available" and falls through to enforcing the ordinary check — never as "assume
         // unchanged".
-        gateBaseBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+        gateBaseBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
         // @decision 24c22912 — explicit, not inferred: this IS the preLanded producer, so the eventual
         //  squash must stage nothing (its content is already on main) or mergeBranch refuses.
         expectAlreadyLanded = true;
@@ -19252,7 +19262,7 @@ export class SessionService {
       // "no prior stamp to compare".
       const stampDiffers = hasLastCheck ? gateStampsDiffer(lastCheck.stamp, freshStamp) : undefined;
       // @decision 01777ceb — belt and braces for a self-check recorded before headCurrent knew about a detached worktree: the FRESH worktree HEAD must be the branch tip.
-      const freshOnBranch = gateHeadOnBranch(freshStamp.head, await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null));
+      const freshOnBranch = gateHeadOnBranch(freshStamp.head, await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null));
       // @decision e50600d2 — a green run_gate self-check is reused here at merge time; do not remove
       // run_gate to cut shared gate load, only widen/tighten reuse.
       // Card e8df2659: never "reuse" a self-check when the gate is off — that would stamp `reused:true`
@@ -19401,7 +19411,7 @@ export class SessionService {
         //
         // @decision 776fc8c9 — never cost this call in isolation from `postWaitHead`/`postWaitBranchHead`
         // below: this path makes THREE `resolveGitRef` calls total, and a split account has gone stale before.
-        const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+        const preWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
         // Card e8df2659: gate OFF ⇒ the skip is unconditional (no diff-inertness proof needed). `gateBaseMainHead`
         // is truthy on every non-disabled entry (the block's guard), so the `!` is safe on that arm.
         inertSkip = gateDisabled ? true : await isInertMergeDiff(repoPath, gateBaseMainHead!, preWaitBranchHead, { timeoutMs: this.gitOpMs });
@@ -19478,7 +19488,7 @@ export class SessionService {
           const postWaitHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
           // @decision 776fc8c9 — never treat this read as a second, independent cost from `preWaitBranchHead`
           // above: both are folded into the SAME three-call account (see the anchor above that declaration).
-          const postWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+          const postWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
           if (!postWaitHead || postWaitHead !== gateBaseMainHead || !postWaitBranchHead || postWaitBranchHead !== preWaitBranchHead) {
             // MAIN OR BRANCH MOVED DURING THE WAIT — re-union first (union producer only), then re-check.
             // `isInertMergeDiff` is a two-dot diff between a main sha and `branch`'s CURRENT tip: for the
@@ -19560,7 +19570,7 @@ export class SessionService {
             // real conflict surfaces as the ordinary squash conflict refusal.
             // @decision 35cfcbe0 — capture the branch tip BEFORE the diff that classifies it (the db413510 ordering): the tip this re-classification covers, which the squash is
             // then pinned to. An unreadable tip fails closed to the real gate below (`stillInert` false).
-            const reclassifyTip = gateDisabled ? undefined : await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+            const reclassifyTip = gateDisabled ? undefined : await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
             const stillInert = gateDisabled
               ? true
               : (!reunionFailed && reclassifyBase && reclassifyTip)
@@ -19619,7 +19629,7 @@ export class SessionService {
             // Card 6f13746c: the gate-OFF / gate-INTERVAL skip is pinned like every other no-gate landing — to the tip its decision covered (the worktree
             // stamp taken once the repo guard is held), so a commit landing after it is refused in-lock rather than squashed ungated.
             // Pinned to the BRANCH REF read now, under the guard (like the inert path's `postWaitBranchHead`), not the worktree HEAD; the two must agree.
-            const skipBranchTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+            const skipBranchTip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
             if (!skipBranchTip || skipBranchTip !== heldStamp.head) {
               return refuseWorktreeDirty("before-gate", !skipBranchTip ? "the branch tip could not be read after the repo merge guard was granted, so the ungated landing cannot be pinned" : `the worktree HEAD (${heldStamp.head.slice(0, 8)}) is not the branch tip (${skipBranchTip.slice(0, 8)}), so the ungated landing cannot be pinned to a tip`);
             }
@@ -19661,16 +19671,19 @@ export class SessionService {
         // PRE-CLASSIFICATION BRANCH-TIP CAPTURE (card 7183540f — the emit-compare two-path sibling of
         // db413510, which closed the identical shape for the inert-skip path; read that card's own
         // in-code doc before touching this). `emitComparePreWaitBranchHead` is captured fresh via
-        // `resolveGitRef`; `emitComparePreWaitMainHead` is a plain assignment (not a second git read) —
+        // `resolveBranchTip`; `emitComparePreWaitMainHead` is a plain assignment (not a second git read) —
         // `gateBaseMainHead` is already resolved above, so this just snapshots what THIS classification
         // actually ran against, detectable later by simple inequality against an admission-time re-read.
         //
-        // @decision 7183540f — capture strictly BEFORE `computeEmitCompareGate` runs, never after: that
-        //  call resolves `branch` BY NAME, so a late capture misses a commit landing between
-        //  classification and capture — db413510's ordering-trap mistake, recurring at this call site.
-        emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+        // @decision 7183540f — capture strictly BEFORE `computeEmitCompareGate` runs, never after: a late
+        //  capture misses a commit landing between classification and capture — db413510's mistake,
+        //  recurring here. (56c10535 round 2: the classify call now consumes this tip directly — same hazard.)
+        emitComparePreWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
         emitComparePreWaitMainHead = gateBaseMainHead;
-        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
+        // @decision 56c10535 — pass the ALREADY-RESOLVED tip, never the bare branch name: a planted
+        // same-named tag/decoy would otherwise pick the REDUCED-gate classification while the eventual
+        // squash lands the real branch's (differently-shaped) content.
+        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, emitComparePreWaitBranchHead, { timeoutMs: this.gitOpMs });
         if (emitCompare.eligible) {
           emitCompareSkip = true;
           emitCompareTestFiles = emitCompare.changedTestFiles;
@@ -19747,7 +19760,7 @@ export class SessionService {
         // @decision d099087f — reflog snapshot FIRST: anything that moves the tip after it is inside the delta, never before it.
         gateLinkLeft = false; gateLinkPreHeadOff = undefined; gateLinkPreUnverified = false;
         gatePreReflog = await this.snapshotReflogs(repoPath, branch, worktreePath, { timeoutMs: this.gitOpMs });
-        try { gatedTip = (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
+        try { gatedTip = (await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined; } catch { gatedTip = undefined; }
         try { gatedMain = (await readMainlineHead(repoPath, this.mainlineGitMs()))?.tip; } catch { gatedMain = undefined; }
         if (pin) pinnedGateTip = gatedTip;
         gatePreStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
@@ -19968,7 +19981,7 @@ export class SessionService {
         //  to this function on both merge producers; neither piggybacks on state whose advance is
         //  scoped to only one producer.
         if (emitCompareSkip) {
-          const postWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+          const postWaitBranchHead = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
           // OWN ADMISSION-TIME HEAD READ FOR THE MAIN LEG: a dedicated, bounded
           // `resolveGitRef(..., "HEAD", ...)`, read unconditionally on both producers.
           //
@@ -20000,8 +20013,10 @@ export class SessionService {
             // @decision 66b3112a — base this re-derivation on `emitCompareAdmissionMainHead`, not
             //  `gateBaseMainHead` — the freshly re-read value is what main's tip actually IS right
             //  now, on both producers, uniformly.
+            // @decision 56c10535 — pass postWaitBranchHead (the already-resolved re-read tip), never
+            // the bare branch name — same reason as the pre-wait classification call above.
             const reclassified = (postWaitBranchHead && emitCompareAdmissionMainHead)
-              ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs })
+              ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, postWaitBranchHead, { timeoutMs: this.gitOpMs })
               : undefined;
             if (reclassified?.eligible) {
               emitCompareTestFiles = reclassified.changedTestFiles;
@@ -20312,7 +20327,7 @@ export class SessionService {
         if (solRedRecorded || !gate || !settled) return;
         if (!isMergeGateRed(settled) && !(thrown !== undefined && settled === partialPassResult)) return;
         solRedRecorded = true;
-        await this.recordMergeGateFailure(project.id, { repoPath, repoKey: worker.repoKey ?? "primary", opId: thisOpId, periodic: mergeGateDecision.cadence !== "every", branchTip: pinnedGateTip ?? ((await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? null), branch });
+        await this.recordMergeGateFailure(project.id, { repoPath, repoKey: worker.repoKey ?? "primary", opId: thisOpId, periodic: mergeGateDecision.cadence !== "every", branchTip: pinnedGateTip ?? ((await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? null), branch });
       };
       try {
         // INERT-DIFF SKIP (card db9b0130): `{ passed: true, steps: [] }` mirrors the reuse producer's own
@@ -20631,7 +20646,7 @@ export class SessionService {
       }
       // @decision 975c774b — friendly pre-check; mergeBranch's in-lock `expectedBranchTip` is the structural half.
       if (gateRan) {
-        const liveTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null) ?? null;
+        const liveTip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs }).catch(() => null) ?? null;
         if (!pinnedGateTip || liveTip !== pinnedGateTip) {
           return { ...(await refuseGateTipMoved("pre-squash", pinnedGateTip, liveTip)), ...gatePassRefusalExtras() };
         }
@@ -20741,7 +20756,7 @@ export class SessionService {
     if (owedAtSquash) return owedAtSquash;
     // Card bbccf470: the SAME reviewed-tip check, against the tip the squash is pinned to (every landing kind: gated, reuse, inert, gate-interval/gate-disabled; a
     // no-gate-configured landing has no pin, so it is checked — and then pinned — at the tip read here, which the squash then freezes).
-    const squashTip = expectedTipForLanding(landingPin) ?? (await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
+    const squashTip = expectedTipForLanding(landingPin) ?? (await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
     {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null);
       if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "pre-squash");
@@ -20907,6 +20922,16 @@ export class SessionService {
           merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan,
           ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, landedContentDiverged: true,
         };
+      }
+      // @decision 56c10535 (Round 3, item 2) — checked BEFORE the generic fallthrough: nothing was ever
+      // attempted here, and the fallthrough's "Re-task a rebase" is actively wrong for an unresolvable
+      // branch tip — a rebase cannot fix a branch that is genuinely gone or ambiguous.
+      if (merge.branchTipUnresolvable) {
+        const why = merge.reason ?? "the branch tip could not be resolved exactly";
+        const detailText = `${why}; nothing was squashed — canonical repo and worktree are untouched. Re-confirm to retry: if the branch tip was transiently unreadable, a fresh re-confirm will resolve it cleanly. If the branch is genuinely gone or ambiguous (e.g. deleted, or a same-named tag/ref now shadows it), that is a BRANCH problem, not a rebase — a human must re-cut or re-point the branch before a re-confirm can succeed.`;
+        const { suppressed, sha } = await rejectNotify("branch_tip_unresolvable", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "branch_tip_unresolvable", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, branchTipUnresolvable: true };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
@@ -21215,7 +21240,7 @@ export class SessionService {
     // (a transient unreadable tip, a sentinel, a ref-kept branch at the landed tip) releases itself. An unreadable or MISSING current tip stays held (fail closed; 42daa283).
     // RESIDUAL: a retention that recorded no tip on a squash with no trailer (pre-cc9bce38) has nothing to compare, so it stays held until a merge_done or a later squash.
     const recordedTip = await this.heldRecordedTip(retain, repoPath);
-    const currentTip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+    const currentTip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
     // A MISSING branch does NOT release (42daa283: a ref probe reads a transiently locked ref as missing, and a hand-deleted branch is harmless to keep reporting): only a
     // current tip that is READABLE and equals the recorded one releases.
     if (recordedTip && currentTip && currentTip === recordedTip) return undefined;
@@ -21242,7 +21267,7 @@ export class SessionService {
     if (held.gitUnverified) return { kind: "refuse", reason: `${branch} is HELD and its release could not be verified (reading main for a later Loom-Worker-Branch commit failed) — usually transient, retry; else ${guidance}` };
     const base = await this.heldRecordedTip(held.retain, repoPath);
     if (!base) return { kind: "refuse", reason: `${branch} is HELD but its retain event records no readable assembledTip/landedTip, so the range it still owes main cannot be determined — ${guidance}` };
-    const tip = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+    const tip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
     if (!tip) return { kind: "refuse", reason: `${branch} is HELD and its current tip could not be read — ${guidance}` };
     let baseIsCommit = false;
     let baseIsAncestor = false;
@@ -21275,7 +21300,7 @@ export class SessionService {
    */
   private async reviewedTipVerdict(branch: string, repoPath: string, repoKey: string | null, tip?: string | null): Promise<ReviewedTipVerdict> {
     const last = this.db.listEventsForBranch(branch, "merge_request").filter((e) => (e.detail?.repoKey ?? null) === repoKey).at(-1);
-    const live = tip !== undefined ? tip : await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs });
+    const live = tip !== undefined ? tip : await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
     if (!last || !Object.prototype.hasOwnProperty.call(last.detail ?? {}, "tip")) return { state: "never-reviewed", tip: live };
     const recorded = typeof last.detail?.tip === "string" && last.detail.tip ? last.detail.tip : null;
     let why = recorded === null ? "the reviewed tip could not be read at review time" : live === null ? "the branch tip could not be read" : "";
@@ -21326,9 +21351,9 @@ export class SessionService {
    * (trusted only when the same on both reads) as its legacy fallback.
    */
   private async tipAcrossLandedCheck<T>(repoPath: string, branch: string, check: () => Promise<T>): Promise<{ result: T; landedTip?: string; branchGone?: boolean }> {
-    const before = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
+    const before = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     const result = await check();
-    const after = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
+    const after = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     const stable = before && before === after ? before : undefined; // the legacy fallback: a tip read that did not move across the lookup
     if (typeof result === "string" && result) return { result, ...(await this.pinnedTipForLandedSquash(repoPath, branch, result, stable)) };
     if (!before && !after && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }))) return { result, branchGone: true };
@@ -21341,7 +21366,7 @@ export class SessionService {
    * (landed before this card) is stuck with. No tip at all fails closed at the caller (the sentinel).
    */
   private async pinnedTipForLandedSquash(repoPath: string, branch: string, squashSha: string | null | undefined, legacyTip?: string): Promise<{ landedTip?: string; branchGone?: boolean }> {
-    const live = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
+    const live = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     if (!live && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }))) return { branchGone: true };
     const trailerTip = squashSha ? await readLandedTipTrailer(repoPath, squashSha, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }) : null;
     if (trailerTip) return { landedTip: trailerTip };
@@ -21824,7 +21849,7 @@ export class SessionService {
         const heads: string[] = [];
         let allResolved = true;
         for (const c of chosen) {
-          const head = await resolveGitRef(finalRepoPath, c.branch, { timeoutMs: this.gitOpMs });
+          const head = await resolveBranchTip(finalRepoPath, c.branch, { timeoutMs: this.gitOpMs });
           if (!head) { allResolved = false; break; }
           heads.push(head);
         }
@@ -22592,7 +22617,7 @@ export class SessionService {
             //  would silently destroy it under a "landed" batch. Compare the live tip to the assembled one and, if it
             //  moved (or cannot be read — fail closed), RETAIN branch + worktree + live worker and surface it.
             let liveTip: string | null = null;
-            try { liveTip = (await resolveGitRef(finalRepoPath, lb.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+            try { liveTip = (await resolveBranchTip(finalRepoPath, lb.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
             // Records the retain durably (Q5: daemon-authored decisions get audited) + in the log; the landed row carries the flag.
             const noteRetained = (phase: BranchAdvancedDuringGate["phase"], live: string | null, reason?: "quarantined"): BranchAdvancedDuringGate => {
               const flag: BranchAdvancedDuringGate = { assembledTip: lb.assembledTip ?? null, liveTip: live, phase };
@@ -24024,7 +24049,7 @@ export class SessionService {
       const w = this.db.getSession(workerSessionId);
       const project = w ? this.db.getProject(w.projectId) : undefined;
       if (w?.branch && project) {
-        const tip = await resolveGitRef(resolveRepoByKey(project, w.repoKey).path, w.branch, { timeoutMs: this.gitOpMs });
+        const tip = await resolveBranchTip(resolveRepoByKey(project, w.repoKey).path, w.branch, { timeoutMs: this.gitOpMs });
         if (tip === v.gatedIdentity) return v;
       }
     } catch { /* fail-safe: fall through to unstamped */ }
@@ -24497,7 +24522,7 @@ export class SessionService {
         // @decision c30952c1 — `worktreeGoneLandingUnconfirmed` classifies distinctly too, same reasoning:
         // the cause (a transient lookup glitch, or the worktree still being gone) is checked fresh on a
         // re-call, never replayed from cache.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
@@ -25017,7 +25042,7 @@ export class SessionService {
           const reflogUnverified = !!(admitReflog && settleReflog && gateReflogUnreadable(admitReflog, settleReflog));
           const roundTrip = !reflogUnverified && !!(admitReflog && settleReflog && gateReflogLeftHead(admitStamp!.head!, admitReflog, settleReflog));
           // @decision 01777ceb — the shared head-vs-branch-ref rule; a worker row with no branch has nothing to compare against.
-          const settleOnBranch = worker.branch ? gateHeadOnBranch(settleStamp.head, await resolveGitRef(targetRepo.path, worker.branch, { timeoutMs: this.gitOpMs }).catch(() => null)) : undefined;
+          const settleOnBranch = worker.branch ? gateHeadOnBranch(settleStamp.head, await resolveBranchTip(targetRepo.path, worker.branch, { timeoutMs: this.gitOpMs }).catch(() => null)) : undefined;
           const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp, roundTrip, settleOnBranch, reflogUnverified);
           // REUSE-A-GREEN-SELF-CHECK RECORD (card e50600d2): record THIS settle — pass or fail — as the
           // worker's latest self-check outcome, so confirmWorkerMerge can later prove (or refuse to
@@ -26065,7 +26090,7 @@ export class SessionService {
       const deleted = await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs, gitFactory: args.gitFactory, ...(args.expectedBranchTip ? { expectedTip: args.expectedBranchTip } : {}) });
       if (!deleted) {
         let liveTip: string | null = null;
-        try { liveTip = (await resolveGitRef(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+        try { liveTip = (await resolveBranchTip(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
         args.onBranchRetained?.(liveTip, "ref-kept-after-finalize");
       }
     }
@@ -26207,7 +26232,7 @@ export class SessionService {
     }
     if (args.expectedBranchTip) {
       let liveTip: string | null = null;
-      try { liveTip = (await resolveGitRef(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+      try { liveTip = (await resolveBranchTip(args.repoPath, args.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
       if (!liveTip || liveTip !== args.expectedBranchTip) {
         args.onBranchRetained?.(liveTip, "at-finalize");
         return {};
@@ -26929,7 +26954,7 @@ export class SessionService {
               let tipMismatch = false;
               if (sibGuard.expectedBranchTip) {
                 let liveTip: string | null = null;
-                try { liveTip = (await resolveGitRef(repoPath, s.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
+                try { liveTip = (await resolveBranchTip(repoPath, s.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
                 if (!liveTip || liveTip !== sibGuard.expectedBranchTip) {
                   sibGuard.onBranchRetained(liveTip, "at-finalize");
                   tipMismatch = true;
@@ -27702,7 +27727,10 @@ export class SessionService {
         // card 37fe091c: the SAME base the KEEP decision itself used (workerBaseRef) — a review spawn's
         // commitsAhead must never be measured against mainline HEAD, or this display misreports inherited
         // reviewed-branch commits as the reviewer's own unmerged work.
-        const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `${workerBaseRef(reviewBaseSha)}..${branch}`]);
+        // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of
+        // the real branch (refs/tags/ outranks refs/heads/); this is advisory-only display, never a
+        // destructive action, so qualifying inline (not a full resolveBranchTip resolve) is sufficient.
+        const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `${workerBaseRef(reviewBaseSha)}..refs/heads/${branch}`]);
         const parsed = parseInt(raw.trim(), 10);
         commitsAhead = Number.isFinite(parsed) ? parsed : null;
       } catch {
@@ -27852,7 +27880,9 @@ export class SessionService {
           ? this.db.listWorktreeSessionsForTask(w.taskId).filter((s) => s.id !== w.id && s.worktreePath && worktreeIdentityKey(s.worktreePath) === worktreeIdentityKey(w.worktreePath!))
           : this.db.listSessionsAtWorktreePath(w.worktreePath, w.id);
       const trusted = trustedReviewBaseSha([{ taskId: w.taskId, reviewBaseSha: w.reviewBaseSha }, ...siblings]);
-      const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `${workerBaseRef(trusted)}..${w.branch}`]);
+      // @decision 56c10535 — qualified: a bare branch revision resolves a same-named tag ahead of the
+      // real branch; advisory-only display (cached dangling-ahead count), never a destructive action.
+      const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `${workerBaseRef(trusted)}..refs/heads/${w.branch}`]);
       const parsed = parseInt(raw.trim(), 10);
       const result = Number.isFinite(parsed) ? parsed : null;
       if (cacheKey && result !== null) this.danglingAheadCache.set(cacheKey, result);

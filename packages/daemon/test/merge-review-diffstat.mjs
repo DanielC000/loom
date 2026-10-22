@@ -37,6 +37,11 @@ try {
     fs.writeFileSync(path.join(worktreePath, `big-${i}.txt`), body);
   }
   commitAll(worktreePath, "big change", "-c user.email=mrd@loom -c user.name=mrd");
+  // @decision 56c10535 — diffBranch now resolves the branch tip itself via resolveBranchTip BEFORE any
+  // of the fake-git scenarios below run; the already-resolved REAL tip is handed through `resolvedTip`
+  // so each fake exercises only the ONE git call it's actually testing (diffSummary/diff/raw), never an
+  // incidental resolveBranchTip read none of these fakes implement.
+  const branchTip = execSync(`git rev-parse ${branch}`, { cwd: repo }).toString().trim();
 
   // ── DEFAULT (includePatch:false) → bounded diffstat, NO patch.
   const stat = await diffBranch(repo, branch, "HEAD", { includePatch: false });
@@ -83,7 +88,7 @@ try {
     let boundMs = -1;
     let rejected = false;
     const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
-    await diffBranch(repo, branch, "HEAD", {}, { gitFactory: (_p, ms) => { boundMs = ms; return neverGit; }, timeoutMs: tinyMs })
+    await diffBranch(repo, branch, "HEAD", {}, { gitFactory: (_p, ms) => { boundMs = ms; return neverGit; }, timeoutMs: tinyMs, resolvedTip: branchTip })
       .then(() => {}, () => { rejected = true; });
     const elapsed = performance.now() - t0;
     check("BOUNDED(a): diffBranch REJECTS (not hangs) when the underlying diffSummary never resolves", rejected);
@@ -95,7 +100,7 @@ try {
     //     ops (detectStrandedWork / countCommitsBehind / GIT_OP_TIMEOUT_MS).
     let defaultMs = -1;
     const fastGit = { diffSummary: async () => ({ files: [], insertions: 0, deletions: 0 }), diff: async () => "", raw: async () => "" };
-    await diffBranch(repo, branch, "HEAD", { includePatch: false }, { gitFactory: (_p, ms) => { defaultMs = ms; return fastGit; } });
+    await diffBranch(repo, branch, "HEAD", { includePatch: false }, { gitFactory: (_p, ms) => { defaultMs = ms; return fastGit; }, resolvedTip: branchTip });
     check("BOUNDED(b): default per-op block timeout is 15000ms (matches GIT_OP_TIMEOUT_MS)", defaultMs === 15000);
 
     // (c) the `git diff` PATCH step hangs (diffSummary succeeds) → still bounded, not just the summary call.
@@ -106,7 +111,7 @@ try {
     };
     let rejectedPatch = false;
     const t1 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
-    await diffBranch(repo, branch, "HEAD", { includePatch: true }, { gitFactory: () => patchHangsGit, timeoutMs: tinyMs })
+    await diffBranch(repo, branch, "HEAD", { includePatch: true }, { gitFactory: () => patchHangsGit, timeoutMs: tinyMs, resolvedTip: branchTip })
       .then(() => {}, () => { rejectedPatch = true; });
     const elapsedPatch = performance.now() - t1;
     check("BOUNDED(c): diffBranch REJECTS when the `git diff` patch step hangs (summary already succeeded)", rejectedPatch);
@@ -124,7 +129,7 @@ try {
     let statusSettled = false;
     let statusResult;
     const t2 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
-    await diffBranch(repo, branch, "HEAD", { includePatch: false, includeStatus: true }, { gitFactory: () => nameStatusHangsGit, timeoutMs: tinyMs })
+    await diffBranch(repo, branch, "HEAD", { includePatch: false, includeStatus: true }, { gitFactory: () => nameStatusHangsGit, timeoutMs: tinyMs, resolvedTip: branchTip })
       .then((r) => { statusSettled = true; statusResult = r; });
     const elapsedStatus = performance.now() - t2;
     check("BOUNDED(d): diffBranch RESOLVES (degrades, not hangs) when the name-status call hangs", statusSettled);

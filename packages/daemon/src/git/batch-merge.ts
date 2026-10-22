@@ -2,7 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
-import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, type MergeEmptyKind } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, type MergeEmptyKind } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
@@ -314,8 +314,13 @@ async function landBranchCommitsIndividually(
 
   let branchTip: string;
   try {
+    // @decision 56c10535 — a bare (or even refs/heads/-qualified, DWIM-reachable-when-missing) branch
+    // revision resolves a decoy ahead of the real branch; use resolveBranchTip's exact lookup instead,
+    // whenever there is no already-resolved `pinnedTip` sha to use directly.
+    const resolved = pinnedTip ?? (await resolveBranchTip(batchWorktreePath, branch, deps));
+    if (!resolved) return { ok: false, reason: `failed to resolve branch tip: ${branch} does not resolve to an exact refs/heads/${branch}` };
     branchTip = (await withTimeout(
-      git.raw(["rev-parse", "--verify", `${pinnedTip ?? branch}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
+      git.raw(["rev-parse", "--verify", `${resolved}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
     )).trim();
   } catch (e) {
     return { ok: false, reason: `failed to resolve branch tip: ${(e as Error).message}` };
@@ -758,7 +763,7 @@ async function earliestAuthorDateMs(
   let branchTip: string;
   try {
     branchTip = (await withTimeout(
-      git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (batch sort)",
+      git.raw(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]), timeoutMs, "git rev-parse branch (batch sort)",
     )).trim();
   } catch {
     return undefined;

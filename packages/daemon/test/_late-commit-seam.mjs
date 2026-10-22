@@ -2,7 +2,7 @@
 // merge-confirm-reuse-head-rule.mjs, and merge-gate-interval.mjs's (P) scenario.
 //
 // A `soloMergeGitFactory` seam that writes a "late" commit from WITHIN `mergeBranchLocked`'s own first real
-// git call (`rev-parse --verify <branch>^{commit}`, the fresh squash-target tip read) — the exact instant
+// git call (`resolveBranchTip`'s exact `for-each-ref` lookup, the fresh squash-target tip read) — the exact instant
 // that function already owns the per-repo lock, since `mergeBranch` acquires it before `mergeBranchLocked`'s
 // body ever runs.
 //
@@ -32,10 +32,36 @@ export function lateCommitBeforeSquashTarget(branch, writeLate) {
       const { boundedSimpleGit } = await import("../dist/git/bounded.js");
       const { nonInteractiveEnv } = await import("../dist/git/writer.js");
       const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
-      if (!fired && Array.isArray(args) && args[0] === "rev-parse" && args[1] === "--verify" && args[2] === `${branch}^{commit}`) {
+      // @decision 56c10535 — the squash-target resolve now goes through resolveBranchTip's exact
+      // `for-each-ref` lookup (never a bare/DWIM-prone rev-parse); match THAT call shape, or this hook
+      // silently never fires.
+      if (!fired && Array.isArray(args) && args[0] === "for-each-ref" && args[args.length - 1] === `refs/heads/${branch}`) {
         fired = true;
         writeLate();
       }
+      return real.raw(args);
+    },
+  });
+}
+
+// @decision 56c10535 (Round 3, item 2) — SHARED TEST HELPER for `merge-confirm-branch-tip-unresolvable.mjs`:
+// a `soloMergeGitFactory` seam that makes mergeBranchLocked's OWN squash-target `for-each-ref` lookup
+// (the exact same call site `lateCommitBeforeSquashTarget` above hooks) come back EMPTY — simulating a
+// genuinely-unresolvable branch tip WITHOUT actually deleting the branch or touching anything else
+// `confirmWorkerMerge`'s own earlier preconditions read, since this seam is only ever wired into the ONE
+// `deps.gitFactory` mergeBranch/mergeBranchLocked itself threads through (`this.soloMergeGitFactory`),
+// never confirmWorkerMerge's own earlier, separately-constructed git reads. Every OTHER call (including
+// every OTHER for-each-ref lookup) passes through to real git unchanged. Deliberately NOT one-shot (unlike
+// `fired` above) — a persistently-missing branch fails EVERY read of it, not just the first.
+export function squashTargetUnresolvable(branch) {
+  return (repoPath, blockTimeoutMs) => ({
+    raw: async (args) => {
+      if (Array.isArray(args) && args[0] === "for-each-ref" && args[args.length - 1] === `refs/heads/${branch}`) {
+        return ""; // empty output ⇒ resolveBranchTip's own exact-refname filter finds nothing ⇒ null
+      }
+      const { boundedSimpleGit } = await import("../dist/git/bounded.js");
+      const { nonInteractiveEnv } = await import("../dist/git/writer.js");
+      const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
       return real.raw(args);
     },
   });
