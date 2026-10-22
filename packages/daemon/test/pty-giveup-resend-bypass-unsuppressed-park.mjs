@@ -10,8 +10,9 @@
 // resend.mjs scenario 5). But inheriting that OLD logicalId also means inheriting its `giveUpLineages`
 // mark. If, by the time the resend arrives, a DIFFERENT lineage ("owner B") physically owns the composer
 // (round 2's own `composerOwnerLineage` ownership gate), the resend's OWN write would be silently blocked
-// by `giveUpWithoutWriting` — never even attempting to land — and if it later parks too, that park used to
-// be suppressed as "duplicate-parked" of the root's EARLIER park (CR round 2, MAJOR finding).
+// by submit()'s own no-write ownership-mismatch branch — never even attempting to land — and if it later
+// parks too, that park used to be suppressed as "duplicate-parked" of the root's EARLIER park (CR round 2,
+// MAJOR finding).
 //
 // THE FIX: `QueuedMessage.bypassOwnershipGateOnce` (set exactly once, at dispatch, only for a dispatch that
 // itself auto-joined via `hasAmbiguousMatch` — sessions/service.ts's `bypassOwnershipGateOnce`) lets THIS

@@ -10586,7 +10586,13 @@ export class SessionService {
       // give-up-exhausted-durable.mjs is what HOLDS it true: it asserts zero follow-on dispatch attempts
       // against the real Db, AND (7b) proves the assertion isn't vacuous by faking `getSession("system")`
       // live and confirming a follow-on dispatch WOULD then occur. If that guard ever breaks, (7a) goes red.
-      try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId, kind: "warning" }); } catch { /* best-effort — the durable session_message_gave_up record for the ORIGINAL message still stands regardless */ }
+      // @decision 08ac0e79 (round 4) — log loudly, never swallow silently: the durable session_message_gave_up
+      // record for the ORIGINAL message still stands regardless, but an invariant throw here (e.g. an M1/M2
+      // guard) must never vanish with zero trace — see Code Review cba0d2f2's repro of the silent loss this fixes.
+      try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId, kind: "warning" }); } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[give-up] ${recipientId} failed to enqueue the [loom:redelivery-parked] notice to sender ${sender} (root ${rootMsgId}) — best-effort only; the durable session_message_gave_up record for the ORIGINAL message still stands regardless:`, err);
+      }
     }
   }
 

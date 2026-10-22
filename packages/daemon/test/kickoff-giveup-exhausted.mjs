@@ -210,6 +210,12 @@ try {
 
     // Cycle 2 ALSO never confirms — this SECOND give-up exceeds GIVE_UP_REQUEUE_LIMIT(1) → EXHAUSTED.
     await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
+    // Card 08ac0e79 round 4: `onGiveUpExhausted` now fires OFF-STACK (a trailing `setTimeout(0)` in
+    // `requeueGiveUpOrigin`), never synchronously as part of the same call that clears busy — poll for it
+    // rather than reading the log the instant busy-false is observed (this check previously passed only by
+    // lucky scheduling against the deferred callback, not deterministically).
+    await sharedWaitUntil(() => (exhaustedLog[SID]?.length ?? 0) === 1,
+      { timeoutMs: 10_000, intervalMs: 2, label: `${SID} onKickoffGiveUpExhausted fires (deferred off-stack)` });
     check("(H1) POSITIVE: onKickoffGiveUpExhausted fired exactly once, after the SECOND give-up",
       exhaustedLog[SID]?.length === 1);
     check("(H1) BOUNDED: the kickoff is finally gone from pending — handed to onGiveUpExhausted, not looping forever",

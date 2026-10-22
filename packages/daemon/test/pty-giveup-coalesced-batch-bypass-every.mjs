@@ -13,7 +13,8 @@
 // this exact branch decision from give-up/hold/timing plumbing.
 //
 //   `.every` (correct): NOT every member is flagged -> `bypassOwnershipGateOnce` is false -> the
-//   ownership-mismatch check still runs, finds no match, and writes NOTHING (`giveUpWithoutWriting`).
+//   ownership-mismatch check still runs, finds no match, and writes NOTHING (submit()'s no-write
+//   ownership-mismatch branch).
 //   `.some` (the bug this guards against): AT LEAST ONE member is flagged -> `bypassOwnershipGateOnce`
 //   wrongly reads true -> the ownership-mismatch check is skipped entirely -> the batch's body is written
 //   in full via the ordinary clear+repaste branch, even though the unflagged member never earned a bypass.

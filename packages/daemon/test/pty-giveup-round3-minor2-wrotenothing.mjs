@@ -1,5 +1,5 @@
-// Regression test for card 844ca34e round 3 CR MINOR 2 — a no-write generation (the ownership-mismatch
-// `giveUpWithoutWriting` branch) must NOT enroll in `Live.giveUpConfirmQueue`'s content-blind positional-
+// Regression test for card 844ca34e round 3 CR MINOR 2 — a no-write generation (submit()'s no-write
+// ownership-mismatch branch) must NOT enroll in `Live.giveUpConfirmQueue`'s content-blind positional-
 // purge fallback (pty/host.ts's `requeueGiveUpOrigin`'s new `wroteNothing` param).
 //
 // Reuses the EXACT Shape-1 ownership-mismatch setup pty-enter-only-verifies-composer-trust.mjs's own
@@ -105,7 +105,7 @@ try {
     + "file's own scenario (1)",
     pendingNow.length === 2 && pendingNow[0].text === TEXT_B && pendingNow[1].text === TEXT_A);
 
-  // A's redelivery: owner is B, not A -> ownership mismatch -> giveUpWithoutWriting -> writes NOTHING.
+  // A's redelivery: owner is B, not A -> ownership mismatch -> submit()'s no-write branch -> writes NOTHING.
   // Fired in the SAME synchronous tick B's own give-up settles (no intervening sleep) — A's hold (set
   // way back, before B's own full cycle even started) is long expired, B's is still fresh.
   lenBefore = busyLog[SID].length;

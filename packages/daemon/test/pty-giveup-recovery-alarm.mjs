@@ -184,9 +184,9 @@ try {
       alarmCalls[alarmCalls.length - 1]?.count === THRESHOLD);
   }
 
-  // ===================== (5) card 844ca34e round 3 MINOR 7: an OWNERSHIP-MISMATCH give-up (the
-  // ===================== `giveUpWithoutWriting` branch — a DIFFERENT code path from the ordinary GIVE-UP
-  // ===================== RECOVERY branch every scenario above exercises) also counts toward THIS SAME =====
+  // ===================== (5) card 844ca34e round 3 MINOR 7: an OWNERSHIP-MISMATCH give-up (submit()'s
+  // ===================== no-write ownership-mismatch branch — a DIFFERENT code path from the ordinary
+  // ===================== GIVE-UP RECOVERY branch every scenario above exercises) also counts toward THIS ==
   // ===================== manager burst alarm, not just the ordinary give-up flavor ========================
   {
     const SID = "sess-giveup-alarm-manager-mismatch";
@@ -238,7 +238,7 @@ try {
     await sharedWaitUntil(() => alarmCalls.length === callsBefore + 1, { timeoutMs: 10_000, intervalMs: 2, label: `${SID} ownership-mismatch give-up fires the alarm` });
     check("(5) THE FIX (MINOR 7), THE ASSERTION THAT GOES RED WITHOUT IT: the OWNERSHIP-MISMATCH give-up "
       + "itself crossed THRESHOLD and fired the alarm — this give-up flavor was previously invisible to "
-      + "maybeFireGiveUpRecoveryAlarm entirely (giveUpWithoutWriting never called it)",
+      + "maybeFireGiveUpRecoveryAlarm entirely (the no-write ownership-mismatch branch never called it)",
       alarmCalls.length === callsBefore + 1 && alarmCalls[alarmCalls.length - 1]?.count === THRESHOLD);
 
     try { host.stop(SID, "hard"); } catch { /* ignore */ }

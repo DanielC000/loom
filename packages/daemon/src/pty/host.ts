@@ -12124,7 +12124,12 @@ export class PtyHost {
         // requeue/re-mint/park machinery (`requeueGiveUpOrigin`) any other give-up converges through.
         // eslint-disable-next-line no-console
         console.error(`[submit] ${sessionId} GIVE-UP (composer ownership mismatch, no write attempted) — this lineage's own give-up mark is set, but the composer's current body belongs to ${live.composerOwnerLineage === null ? "an UNKNOWN owner" : "a DIFFERENT lineage"}; refusing to Enter or re-paste under the wrong identity (card 844ca34e)`);
-        this.giveUpWithoutWriting(sessionId, gen, live);
+        // @decision 08ac0e79 (round 3) — requeue + alarm run SYNCHRONOUSLY, here, never deferred: see
+        // giveUpWithoutWritingBusyClear's own doc for why (Code Review 3de1021c's repro of the stale-gen
+        // loss this closes). Only the busy-clear decision itself still needs to wait for M1 below.
+        this.maybeFireGiveUpRecoveryAlarm(sessionId, live);
+        this.requeueGiveUpOrigin(sessionId, gen, true); // wroteNothing:true — see that param's own doc
+        this.giveUpWithoutWritingBusyClear(sessionId, gen, live);
       }
     } else if (live.composerDirtyLen > 0 && live.composerLen === 0) {
       // Reached when this write's own lineage has NEVER given up before (`lineageEverGaveUp` false),
@@ -12189,19 +12194,28 @@ export class PtyHost {
   }
 
   /**
-   * @decision 844ca34e (round 2/3) — a marked lineage whose ownership check failed writes NOTHING;
-   * schedules the terminal give-up sequence off-stack (so `submit()`'s trailing M1 `setBusy(true)` is
-   * never fought), checking only identity/alive/generation — deliberately no `enterConfirmed` bail.
+   * @decision 844ca34e (round 2/3) — a marked lineage whose ownership check failed writes NOTHING.
+   * @decision 08ac0e79 (round 3) — ONLY the busy-clear decision is deferred now; the requeue and the
+   * alarm run SYNCHRONOUSLY at the call site in `submit()`, closing a stale-generation loss window a
+   * deferred requeue could not (Code Review 3de1021c's repro — see this card's own decision record).
    * @decision 17339316 — bound to `boundLive` by identity, re-checked on fire.
    */
-  private giveUpWithoutWriting(sessionId: string, gen: number, boundLive: Live): void {
+  private giveUpWithoutWritingBusyClear(sessionId: string, gen: number, boundLive: Live): void {
     setTimeout(() => {
       if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
       const live = boundLive;
-      if (!live.alive || live.submitGeneration !== gen) return; // stale / dead — nothing more to do
-      this.maybeFireGiveUpRecoveryAlarm(sessionId, live); // card 844ca34e round 3: counts toward c00231e2's burst alarm like any other give-up
+      // Stale/dead: either this session died, or a DIFFERENT submit (this generation's own, or an
+      // unrelated message's) already ran and its own M1/confirming hook now owns `busy` — never touch
+      // it from here regardless of which.
+      if (!live.alive || live.submitGeneration !== gen) return;
+      // @decision 08ac0e79 (round 3) — a confirming hook already decided busy's correct value for this
+      // moment (true if a turn just started, false if one just ended) — never override that decision.
+      if (live.enterConfirmed) {
+        // eslint-disable-next-line no-console
+        console.log(`[submit] ${sessionId} GIVE-UP (composer ownership mismatch) — a confirming hook landed before this no-write resolution settled; leaving busy exactly as that hook left it (gen=${gen})`);
+        return;
+      }
       this.setBusy(sessionId, false, "give-up-ownership-mismatch");
-      this.requeueGiveUpOrigin(sessionId, gen, true); // wroteNothing:true — see that param's own doc
     }, 0);
   }
 
@@ -12760,9 +12774,13 @@ export class PtyHost {
    * (worker_message/redirect/recycle-carry, plus the settle nudges this card converted) gets the "never
    * orphaned" guarantee; nothing here claims a raw human turn does too.
    *
-   * @decision 844ca34e (round 3) — `wroteNothing` (default false, set only by `giveUpWithoutWriting`):
-   * a generation that never physically wrote anything must not enroll in `giveUpConfirmQueue`'s
-   * content-blind positional fallback — see that param's own inline doc below for the full mechanism.
+   * @decision 844ca34e (round 3) — `wroteNothing` (set only by `submit()`'s own no-write ownership-
+   * mismatch branch, card 08ac0e79 round 3): a never-written generation must not enroll in
+   * `giveUpConfirmQueue`'s content-blind positional fallback — see that param's own inline doc below.
+   *
+   * @decision 08ac0e79 (round 5) — a budget-exhausted member's `onGiveUpExhausted` runs OFF-STACK (a
+   * trailing `setTimeout(0)`) ONLY when `this.finalizingTurn` is true; otherwise it runs synchronously,
+   * exactly as before round 4 — see this card's own record (round 5) for why.
    */
   private requeueGiveUpOrigin(sessionId: string, gen: number, wroteNothing = false): void {
     const live = this.live.get(sessionId);
@@ -12770,6 +12788,7 @@ export class PtyHost {
     const origin = live.giveUpOrigin;
     live.giveUpOrigin = null;
     if (!origin || origin.length === 0) return;
+    const exhausted: { id: string; cb: () => void }[] = [];
     // Code Review Major finding (card 4a0af485, Major 4): seed the signature from the text ACTUALLY
     // SUBMITTED, never each message's own individual `.text` — `drainPending` may have COALESCED several
     // origin messages into ONE physical write, and `live.lastPrompt`/the engine's echo reflect that JOINED
@@ -12861,13 +12880,9 @@ export class PtyHost {
         // content-bearing diagnostic in this file uses instead of a standalone textSignature call.
         // eslint-disable-next-line no-console
         console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${m.text.length} chars, ${redactedExcerpt(m.text)}) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — handing off to onGiveUpExhausted (${m.onGiveUpExhausted ? "wired" : "none — non-durable entry, nothing further to preserve"}) instead of a bare drop`);
-        // CR follow-up (card ccb407eb, finding [7]): a give-up-exhausted fault must never break GIVE-UP
-        // RECOVERY itself, but swallowing it SILENTLY would also eat a deliberately-loud M1/M2 invariant
-        // throw from deep inside handleGiveUpExhausted's re-mint path (enqueueStdin → submit). Log it.
-        try { m.onGiveUpExhausted?.(); } catch (err) {
-          // eslint-disable-next-line no-console
-          console.error(`[submit] ${sessionId} onGiveUpExhausted threw for message ${m.id} — swallowed so GIVE-UP RECOVERY itself is never broken, but logged so it can't fail silently:`, err);
-        }
+        // @decision 08ac0e79 (round 4) — collected, never invoked synchronously here: see this method's
+        // own doc above (Code Review cba0d2f2's M2-throw repro).
+        if (m.onGiveUpExhausted) exhausted.push({ id: m.id, cb: m.onGiveUpExhausted });
         continue;
       }
       // @decision 844ca34e (round 4, MAJOR) — `...m` would otherwise carry `bypassOwnershipGateOnce`
@@ -12892,6 +12907,21 @@ export class PtyHost {
       const actualHoldMs = kept[0]!.giveUpHeldUntil! - Date.now();
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending, HELD from drain for up to ${actualHoldMs}ms pending a confirming hook${wroteNothing ? " (no-write generation — excluded from the positional queue)" : ""} — see purgeConfirmedGiveUpRequeue/isGiveUpHeld`);
+    }
+    if (exhausted.length > 0) {
+      const invokeExhausted = () => {
+        for (const { id, cb } of exhausted) {
+          try { cb(); } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error(`[submit] ${sessionId} onGiveUpExhausted threw for message ${id} — swallowed so GIVE-UP RECOVERY itself is never broken, but logged so it can't fail silently:`, err);
+          }
+        }
+      };
+      // @decision 08ac0e79 (round 5) — defer OFF-STACK only when THIS call is itself running inside
+      // deliverHook's M2 finalizingTurn window; every other caller (fireEnterAndVerify's GIVE-UP RECOVERY,
+      // healIfStuck) invokes synchronously, exactly as before round 4 — see this card's own record.
+      if (this.finalizingTurn) setTimeout(invokeExhausted, 0);
+      else invokeExhausted();
     }
   }
 

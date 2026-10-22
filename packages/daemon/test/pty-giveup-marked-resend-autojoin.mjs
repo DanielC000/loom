@@ -111,6 +111,11 @@ try {
   host.reconcile();
   await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === true, { timeoutMs: 10_000, intervalMs: 2 });
   await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
+  // Card 08ac0e79 round 5: a budget-exhausted `onGiveUpExhausted` runs OFF-STACK (a trailing
+  // `setTimeout(0)`) whenever this exhaustion happens to land inside deliverHook's M2 finalizingTurn
+  // window — poll for the re-mint log line rather than reading it the instant busy-false settles.
+  await sharedWaitUntil(() => submitLog.some((l) => l.includes("re-minted as")),
+    { timeoutMs: 10_000, intervalMs: 2, label: `${wkrId} gen A's second give-up re-mints` });
   // Phrased as a pure PRESENCE check (never "not parked") — GIVE_UP_REMINT_LIMIT=1 means chainDepth 0 is
   // still below the limit, so this generation re-mints rather than parking; the assertion itself only
   // confirms the re-mint log line is present, so it reads correctly to fixed-wait-negative-guard.mjs too.

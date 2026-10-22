@@ -62,7 +62,9 @@
 // decisive-confirm resets `composerDirtyLen` is). A marked lineage may trust Enter-only ONLY when it is
 // ALSO the current owner. B's own write makes B the owner; A's later redelivery finds owner=B, not A —
 // mismatch — and takes neither Enter nor a re-paste, converging through the ordinary bounded give-up
-// machinery instead (`giveUpWithoutWriting`). Card 4796f999's own `composerDirtyLenBelieved ===
+// machinery instead (submit()'s no-write ownership-mismatch branch — card 08ac0e79 round 3's
+// `giveUpWithoutWritingBusyClear` handles only the deferred busy-clear half of it). Card 4796f999's own
+// `composerDirtyLenBelieved ===
 // composerDirtyLen` trust check is RETIRED and its code deleted (card 844ca34e's own record proves it was
 // already subsumed by lineage history alone, before ownership even entered the picture) — ownership is
 // the real discriminator cards 4796f999 and 844ca34e-round-1 were both informally reaching for.
@@ -303,6 +305,10 @@ try {
     // The give-up-without-writing sequence is deliberately ASYNC (so the M1 invariant's trailing
     // `setBusy(true)` above is never fought) — wait for it to settle before reading the outcome.
     await waitForBusyFalseAfter(SID, lenBeforeRedeliver, "(1) A's give-up-without-writing settles");
+    // Card 08ac0e79 round 4: a budget-exhausted `onGiveUpExhausted` now fires OFF-STACK (a trailing
+    // `setTimeout(0)` in `requeueGiveUpOrigin`), never synchronously alongside the busy-clear — poll for
+    // it rather than reading it the instant busy-false settles.
+    await waitUntil(() => aGaveUpExhausted === true, { timeoutMs: 10_000, label: "(1) A's onGiveUpExhausted fires (deferred off-stack)" });
     check("(1) A's own message is terminally resolved (its wired onGiveUpExhausted fired) rather than "
       + "silently retried forever OR wrongly matched to B's content",
       aGaveUpExhausted === true);
@@ -373,6 +379,8 @@ try {
       newBurstSync === "");
 
     await waitForBusyFalseAfter(SID, lenBeforeHeal, "(2) A's give-up-without-writing settles");
+    // Card 08ac0e79 round 4: see scenario (1)'s own comment — poll rather than read immediately.
+    await waitUntil(() => aGaveUpExhausted === true, { timeoutMs: 10_000, label: "(2) A's onGiveUpExhausted fires (deferred off-stack)" });
     check("(2) A's own message is terminally resolved (its wired onGiveUpExhausted fired)",
       aGaveUpExhausted === true);
     check("(2) A is genuinely gone from pending — not stuck in a loop, and never confused with B",

@@ -178,6 +178,12 @@ try {
     secondCycleBurst.length > 0 && !secondCycleBurst.includes(TEXT));
   await sharedWaitUntil(() => busyLog[wkr]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
 
+  // Card 08ac0e79 round 5: a budget-exhausted `onGiveUpExhausted` runs OFF-STACK (a trailing
+  // `setTimeout(0)`) whenever this exhaustion happens to land inside deliverHook's M2 finalizingTurn
+  // window — poll for the durable park event rather than reading it the instant busy-false settles.
+  await sharedWaitUntil(() => db.listEventsForWorker(wkr)
+    .some((e) => e.kind === "session_message_gave_up" && e.detail?.outcome === "parked"),
+    { timeoutMs: 10_000, intervalMs: 2, label: `${wkr} the second exhaustion's parked event` });
   const parkedEvents = db.listEventsForWorker(wkr)
     .filter((e) => e.kind === "session_message_gave_up" && e.detail?.outcome === "parked");
   check("(2) THE SECOND EXHAUSTION PARKS — exactly once, never a silent re-mint loop", parkedEvents.length === 1);

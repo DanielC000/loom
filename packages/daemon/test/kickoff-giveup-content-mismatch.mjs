@@ -186,6 +186,11 @@ async function driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount) {
   await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 2 gave up: the kickoff EXHAUSTED (real two-cycle exhaustion, not the single-cycle shortcut)`,
     submitLog.some((l) => l.includes("exhausted its requeue budget (1)")));
+  // Card 08ac0e79 round 4: `onGiveUpExhausted` now fires OFF-STACK (a trailing `setTimeout(0)` in
+  // `requeueGiveUpOrigin`), never synchronously as part of the same call that clears busy — so this must
+  // POLL for the capture rather than read it the instant busy-false is observed.
+  await sharedWaitUntil(() => typeof rootMsgIdBySession[SID] === "string",
+    { timeoutMs: 10_000, intervalMs: 2, label: `${SID} onKickoffGiveUpExhausted fires (deferred off-stack)` });
   const rootMsgId = rootMsgIdBySession[SID];
   check(`(${SID}) rootMsgId was captured via onKickoffGiveUpExhausted`, typeof rootMsgId === "string");
   return framePossibleDuplicate(KICKOFF, rootMsgId);
@@ -257,12 +262,14 @@ try {
     // Card 844ca34e round 4 (CR round 3, MINOR 5): round 3 replaced the body-count guard below with a
     // `composerBodyWrittenForGen`-vs-gen snapshot captured at the ownership-mismatch log line, reasoning
     // it was a stronger, non-racy check. CR round 3 (8d98f9d4) judged that snapshot ITSELF tautological:
-    // `giveUpWithoutWriting`'s whole branch structurally never touches `composerBodyWrittenForGen` for
-    // ITS OWN generation — once you're inside that branch (proven by the log firing at all), the snapshot
-    // is true by construction, regardless of whether reaching that branch was itself the right decision.
-    // Restored instead: the generation's own PHYSICAL body-write count, read right after the deferred
-    // give-up-without-writing timer settles (same placement the original pre-round-3 check used) — a real
-    // behavioral signal, not an internal-field snapshot.
+    // submit()'s no-write ownership-mismatch branch structurally never touches `composerBodyWrittenForGen`
+    // for ITS OWN generation — once you're inside that branch (proven by the log firing at all), the
+    // snapshot is true by construction, regardless of whether reaching that branch was itself the right
+    // decision. Restored instead: the generation's own PHYSICAL body-write count, read right after the
+    // deferred busy-clear settles (`giveUpWithoutWritingBusyClear` — card 08ac0e79 round 3 renamed and
+    // narrowed this to JUST the busy-clear decision; the requeue+alarm run synchronously at the mismatch
+    // site instead, same placement the original pre-round-3 check used) — a real behavioral signal, not
+    // an internal-field snapshot.
     const writesBeforeMismatchSettle = fake.writes.length;
     await reconcileUntil(() => host.getPendingEntries(SID).length === 0, 15_000);
     check("(C) THE RESTORED BODY-COUNT GUARD: zero NEW physical writes for the KICKOFF text occurred while "

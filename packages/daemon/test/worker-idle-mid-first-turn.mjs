@@ -4,7 +4,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // ROOT CAUSE: a busy:false worker row with turnSeq still 0 is NOT proof a turn ever finished (turnSeq
 // only increments on a real Stop/StopFailure); a give-up path (fireEnterAndVerify's GIVE-UP RECOVERY, or
-// giveUpWithoutWriting's ownership-mismatch branch) can clear `busy` with NO confirming hook ever landing,
+// submit()'s no-write ownership-mismatch branch) can clear `busy` with NO confirming hook ever landing,
 // while the real engine is still alive and genuinely mid its first turn. classifyIdleWorker's fallthrough
 // used to unconditionally read this as "finished a turn and is idle", firing [loom:worker-idle] repeatedly
 // while the worker was actually still working.

@@ -175,6 +175,11 @@ async function driveToExhaustionAndCaptureCycle2Text(host, rootMsgIdBySession, S
   await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 2 gave up: the kickoff EXHAUSTED (real two-cycle exhaustion)`,
     submitLog.some((l) => l.includes("exhausted its requeue budget (1)")));
+  // Card 08ac0e79 round 4: `onGiveUpExhausted` now fires OFF-STACK (a trailing `setTimeout(0)` in
+  // `requeueGiveUpOrigin`), never synchronously as part of the same call that clears busy — poll for the
+  // capture rather than reading it the instant busy-false is observed.
+  await sharedWaitUntil(() => typeof rootMsgIdBySession[SID] === "string",
+    { timeoutMs: 10_000, intervalMs: 2, label: `${SID} onKickoffGiveUpExhausted fires (deferred off-stack)` });
   const rootMsgId = rootMsgIdBySession[SID];
   check(`(${SID}) rootMsgId was captured via onKickoffGiveUpExhausted`, typeof rootMsgId === "string");
   return framePossibleDuplicate(KICKOFF, rootMsgId);

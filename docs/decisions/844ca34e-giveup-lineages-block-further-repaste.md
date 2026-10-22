@@ -129,7 +129,18 @@ Four smaller fixes landed alongside it:
   generation never had a real PTY write for a confirming hook to legitimately attribute via FIFO
   position. Test: `pty-giveup-round3-minor2-wrotenothing.mjs`.
 - `giveUpWithoutWriting` no longer bails early on `live.enterConfirmed` — it checks only identity/alive/
-  generation, matching the ordinary give-up path's own discipline.
+  generation. **Corrected by card `08ac0e79`:** the STATED reason here ("matching the ordinary give-up
+  path's own discipline") was false — that path checks `enterConfirmed` at every link — and should never
+  have been the justification. But removing the old bail was itself the right call, for the true reason:
+  this generation never wrote anything, so no confirming hook can ever be attributable to IT specifically
+  — the old bail was treating an unattributable signal as proof of this generation's own confirmation.
+  `08ac0e79` (round 2) later found a narrower, correctly-scoped use for the same signal: it now gates ONLY
+  the busy clear, never the requeue, which must always run regardless. **Round 3 of that same card further
+  corrected the framing stated here:** a confirming hook landing in this window is NOT proof a different
+  lineage's turn is "genuinely in flight" — a `Stop`/`StopFailure` hook means a turn just ENDED, the
+  opposite state. The accurate framing is that a confirming hook has ALREADY decided busy's correct value
+  for this moment, whichever way it went, and this give-up must never override that decision either way.
+  See `docs/decisions/08ac0e79-ownership-mismatch-giveup.md` (Round 3, MINOR-3).
 - `Live.giveUpLineages` is now a true LRU (delete-then-add on every touch, mirroring `a9e4240f`'s
   identical fix for `ambiguousDispatches`) AND releases an id at the moment its OWN composer ownership is
   decisively confirmed (the two `composerOwnerLineage`-nulling sites) — a resolved chain no longer sits
