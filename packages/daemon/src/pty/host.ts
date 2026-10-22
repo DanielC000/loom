@@ -946,6 +946,13 @@ export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unre
  */
 export const PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG = "[loom:prompt-mismatch-unmatched]";
 
+/** @decision d3edcee5 — the ONE place that tests text against all three notice tags (post-strip); every
+ *  recognition site calls this, never re-inlines the three-tag test, or they silently drift apart. */
+function isPromptMismatchNoticeText(text: string): boolean {
+  const stripped = stripPossibleDuplicateFrame(text);
+  return stripped.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || stripped.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG) || stripped.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG);
+}
+
 /** Card 4a0af485 — bounds `Live.ambiguousDispatches` by COUNT (not elapsed time): an OBSERVATION-WINDOW
  *  bound, not a retry deadline (the lag has no known ceiling — 232s measured, none established).
  *  @decision 4a0af485 — the cap is a memory-safety backstop, not a claim ambiguity is rare. */
@@ -3063,6 +3070,9 @@ interface Live {
   // detector silently comparing `undefined` and never firing again for every subsequent turn.
   promptFieldAbsentDiagnosedOnce: boolean;
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
+  // @decision d3edcee5 — never derive this from `lastPrompt`'s joined text (a prefix test misses a
+  // notice that isn't the first drained member); always derive it from `submit()`'s own `origin` array.
+  lastSubmitExemptAsOwnNotice: boolean;
   // Card 25813ecc: the ORIGINAL fresh-spawn kickoff intent, seeded ONCE at spawn() from
   // `opts.startupPrompt ?? null` and never written again by anything else — unlike `lastPrompt`, which
   // every submit() (including a resume's drainPending-triggered delivery of a QUEUED message) unconditionally
@@ -3358,6 +3368,10 @@ interface Live {
   // narrower fact. See e01687ea's record, "Decision B" section.
   activeTurnSenderId: string | null;
   lastPromptSenderId: string | null;
+  // @decision d3edcee5 — mirrors `lastPrompt` the SAME way `lastPromptRoute`/`lastPromptSenderId` do (set
+  // from `origin[0]`'s own kind in `submit()`, survives a give-up — `requeueGiveUpOrigin` never touches
+  // it); `resumeAfterRateLimit`'s blocked re-enqueue reads this, never a hard-coded `"agent"`.
+  lastPromptKind: QueuedMessageKind;
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
   // Card 850eb55c (round 2): true from the moment the SessionStart handler hands the boot permission-mode
@@ -6438,6 +6452,7 @@ export class PtyHost {
       // carries NO companion route (a startup turn is never a companion inbound), so the route fields
       // start null.
       lastPrompt: opts.startupPrompt ?? null,
+      lastSubmitExemptAsOwnNotice: false, // no submit() has run yet — a fresh kickoff is never Loom's own notice
       startupPrompt: opts.startupPrompt ?? null, // immutable kickoff intent — see field's own doc
       lastRawSubmit: null,
       pendingRawOwnerSubmit: null,
@@ -6472,6 +6487,7 @@ export class PtyHost {
       recentPlaceholderTokens: [],
       activeTurnSenderId: null,
       lastPromptSenderId: null,
+      lastPromptKind: "agent", // a fresh kickoff is always kind:"agent" (scheduleKickoffGuarantee's own synthesized origin)
       activeTurnProactive: false,
       lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchPastedContentWrapReplay: null, mismatchResolvedGens: new Set(), echoConfirmedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
@@ -6747,7 +6763,7 @@ export class PtyHost {
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastSubmitExemptAsOwnNotice: false, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -6767,6 +6783,7 @@ export class PtyHost {
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
+      lastPromptKind: "agent", // inert placeholder — a shell/canned kind never calls submit()/resumeAfterRateLimit
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchPastedContentWrapReplay: null, mismatchResolvedGens: new Set(), echoConfirmedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
@@ -8013,7 +8030,7 @@ export class PtyHost {
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastSubmitExemptAsOwnNotice: false, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -8033,6 +8050,7 @@ export class PtyHost {
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, lastPromptOwnerTextSeq: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
+      lastPromptKind: "agent", // inert placeholder — a shell/canned kind never calls submit()/resumeAfterRateLimit
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchPastedContentWrapReplay: null, mismatchResolvedGens: new Set(), echoConfirmedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       unrecognizedMismatchTimestamps: [], unrecognizedMismatchCooldownUntil: null,
@@ -9291,18 +9309,10 @@ export class PtyHost {
               // See the guard this feeds, just before `mismatchText` is composed/delivered, for the
               // termination argument it establishes.
               //
-              // Card 84a0b357 — strip a leading possible-duplicate tag BEFORE this check, same reason as
-              // the `submittedText` strip in the paste-recovery tripwire path, same file (card 78e4b3f2):
-              // a notice that gave up once
-              // and was requeued is re-wrapped by `annotatedMessageText`/`framePossibleDuplicate` with
-              // `[loom:possible-duplicate root:…]` PREPENDED ahead of its own tag, so a raw `startsWith`
-              // against `intended` silently misses it — the guard never fires for exactly the redelivery
-              // path a degraded-confirmation session routes every notice through, letting that notice's
-              // own re-arm mint a fresh notice forever (the self-sustaining loop observed on session
-              // `e56c4e44`). `stripPossibleDuplicateFrame` is a no-op when no tag is present, so the
-              // untagged case (the ordinary, first-delivery case) is byte-identical to before.
-              const strippedForLoopBreaker = stripPossibleDuplicateFrame(intended);
-              const intendedIsOwnMismatchNotice = strippedForLoopBreaker.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || strippedForLoopBreaker.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG) || strippedForLoopBreaker.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG);
+              // @decision d3edcee5 — read `live.lastSubmitExemptAsOwnNotice`, never re-derive this from a
+              // prefix test on the joined `intended` string — a coalesced batch can carry the notice as a
+              // NON-FIRST member, which a whole-string prefix test structurally cannot see.
+              const intendedIsOwnMismatchNotice = live.lastSubmitExemptAsOwnNotice;
               let i = 0;
               const max = Math.min(reported.length, intended.length);
               while (i < max && reported[i] === intended[i]) i++;
@@ -9627,7 +9637,7 @@ export class PtyHost {
                 // on before this card — that argument assumed an i.i.d. per-submission mismatch rate, which
                 // does not hold once a session has entered a persistent, sustained lag.
                 // eslint-disable-next-line no-console
-                console.log(`[prompt-mismatch-notice-self-exempt] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — this generation's own intended text IS one of Loom's own prompt-mismatch-family notices ([loom:prompt-mismatch] or [loom:prompt-mismatch-unresolved]); skipping mismatch detection/re-notification/timer-arming for it entirely so a notice can never mint a follow-up notice about its own confirmation (card 87d2dc95, the self-sustaining "notice delivered -> submit -> mismatches -> another notice" feedback loop observed on session 67568eba).`);
+                console.log(`[prompt-mismatch-notice-self-exempt] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — this generation's own submitted batch CONTAINS one of Loom's own prompt-mismatch-family notices ([loom:prompt-mismatch], [loom:prompt-mismatch-unresolved], or [loom:prompt-mismatch-unmatched]), and every member is kind:"warning" (card d3edcee5); skipping mismatch detection/re-notification/timer-arming for it entirely so a notice can never mint a follow-up notice about its own confirmation (card 87d2dc95, the self-sustaining "notice delivered -> submit -> mismatches -> another notice" feedback loop observed on session 67568eba).`);
               } else if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed && !confirmedPastedContentWrapOfCurrent && !confirmedBarePastedContentWrapOfCurrent) {
                 // @decision 68459420 — DoD-3: a FOURTH, uncharacterized mismatch population (reported
                 // LONGER than intended, matching no recent write). Characterize/tag only — never fold
@@ -11931,6 +11941,15 @@ export class PtyHost {
     // `requeueGiveUpOrigin` must read this, never re-derive via `joinSubmittedText(origin, gen-1)` (see
     // `Live.giveUpOriginWrittenText`'s own doc + the record for why).
     live.giveUpOriginWrittenText = origin ? text : null;
+    // @decision d3edcee5 — derived from `origin`, per member, never from `text`/`lastPrompt`. When `origin`
+    // is `undefined` (a "rate-limit-replay" whose `giveUpOrigin` was already nulled), this re-submits the
+    // SAME `text` these fields were already computed for — leave both untouched, never reset to default.
+    if (origin !== undefined) {
+      live.lastPromptKind = origin.length > 0 ? origin[0]!.kind : live.lastPromptKind;
+      live.lastSubmitExemptAsOwnNotice = origin.length > 0
+        && origin.every((m) => m.kind === "warning")
+        && origin.some((m) => isPromptMismatchNoticeText(m.text));
+    }
     // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): `reason` names WHICH of the
     // four call sites is writing this turn — the two queue-mediated ones ("immediate"/"drain", both already
     // busy-gated) and the two DIRECT-write bypasses (resumeAfterRateLimit's "rate-limit-replay", and
@@ -13579,7 +13598,11 @@ export class PtyHost {
         // @decision 7a64f16b — `logicalId` (only the HEAD member's, same limit any single-entry mint has)
         // carries `replayOrigin`'s own identity through this fresh QueuedMessage, rather than minting an
         // unrelated one — a later drain's own submit() then threads it on as that drain's real `origin`.
-        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, { ownerTextSeq: live.lastPromptOwnerTextSeq, logicalId: replayOrigin?.[0]?.logicalId });
+        //
+        // @decision d3edcee5 — replay with `live.lastPromptKind`, never a hard-coded `"agent"`: a hard-coded
+        // kind mislabels a "warning"-kind replay for every kind-sensitive drain decision downstream, not
+        // only this card's own own-notice exemption.
+        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, live.lastPromptKind, undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, { ownerTextSeq: live.lastPromptOwnerTextSeq, logicalId: replayOrigin?.[0]?.logicalId });
       } else {
         this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay", replayOrigin ?? undefined, live.lastPromptOwnerTextSeq);
       }
