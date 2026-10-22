@@ -148,6 +148,10 @@ this worker's own error, not a real doc defect; retracted here rather than "fixe
   covers it, since `matchedPending` can span several distinct identities at once (card `882d6cff`).
 - Do not overload `latchKept`/`referencingRepoPaths` to mean "the identity is still quarantined" — that
   field means "a physical file survives on disk"; use the separate `stillQuarantined`/`reason` fields.
+- Do not overload `referencingRepoPaths` with a CONTENT-parsed repoPath either (card `0a783fb2`, extending
+  this bullet) — that field means a TRUE in-memory referencer only; use the separate
+  `contentKeptRepoPaths` field, and never fold a content-parsed keep into `stillBlockedCoOccupants` (no
+  live entry backs it to clear by id). See `docs/decisions/8db913e2-raise-diverts-instead-of-overwriting-a-kept-occupant.md`'s own "Follow-up 0a783fb2" section.
 - Do not hand-roll a SECOND "still quarantined, here's why, here's the remedy" message at a new call
   site — call the shared `stillQuarantinedReason(after, before)` helper, or the wording can drift between
   `clearMergeQuarantineReporting` and `clearMergeQuarantineLatchFile` the next time either one changes.

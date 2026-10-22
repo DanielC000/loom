@@ -21,7 +21,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID, randomBytes } from "node:crypto";
+import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { execSync, execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { commitAll } from "./_git-commit.mjs";
@@ -72,6 +72,22 @@ function injectPersistentReadFailure(targetPath, code = "EACCES") {
     return real(p, ...rest);
   };
   return { restore: () => { fs.readFileSync = real; } };
+}
+
+// Card 0a783fb2 — the unlink twin of the read-failure injector above: fails EVERY unlink of `targetPath`
+// (persistent), simulating an EPERM/EBUSY-shaped delete failure rather than a corrupted/unreadable file —
+// drives `unlinkLatchFileConfirmed`'s own `false` (unconfirmed) return, which is the ONLY way
+// `sweepOwnLatchFileUnlessOwnedElsewhere` reports a kept-but-UNATTRIBUTED result (no physical owner, no
+// `keptUnreadableLatchFiles` mark — just a failed delete of an otherwise-orphaned file).
+function injectPersistentUnlinkFailure(targetPath, code = "EBUSY") {
+  const real = fs.unlinkSync;
+  fs.unlinkSync = (p, ...rest) => {
+    if (typeof p === "string" && p === targetPath) {
+      throw Object.assign(new Error(`${code}: simulated unlink failure`), { code });
+    }
+    return real(p, ...rest);
+  };
+  return { restore: () => { fs.unlinkSync = real; } };
 }
 
 try {
@@ -279,6 +295,9 @@ try {
   // when NO in-memory entry anywhere matches the given id) must report a content-based keep via
   // `latchKept`, never silently — a kept file indistinguishable from "nothing was kept" is exactly the
   // shape 9cabd143's own doc warns against.
+  //
+  // @decision 8db913e2 (Follow-up 0a783fb2) — MIGRATED: the parsed repoPath now reports via
+  // `contentKeptRepoPaths`, never `referencingRepoPaths` (that field is TRUE in-memory referencers only).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const foreignRepoF = makeToplevelRepo("f-foreign");
@@ -295,7 +314,8 @@ try {
     const clearResultF = mod.clearMergeQuarantineLatchFile(idF);
     check("(F) THE FIX: a by-id clear of a foreign-token orphan via the RAW-FALLBACK reports ok:true", clearResultF.ok === true);
     check("(F) THE FIX: ...and reports it KEPT via latchKept, never silently", clearResultF.latchKept === true);
-    check("(F) THE FIX: ...naming the parsed foreign repoPath", (clearResultF.referencingRepoPaths ?? []).includes(foreignRepoF));
+    check("*** CARD 0a783fb2 *** (F) ...naming the parsed foreign repoPath via contentKeptRepoPaths", (clearResultF.contentKeptRepoPaths ?? []).includes(foreignRepoF));
+    check("*** CARD 0a783fb2 *** (F) ...and NEVER folding it into referencingRepoPaths too", !(clearResultF.referencingRepoPaths ?? []).includes(foreignRepoF));
     check("(F) the orphan genuinely survives on disk", fs.existsSync(orphanPathF));
   }
 
@@ -330,6 +350,324 @@ try {
     check("(G) THE FIX: ...with an EMPTY referencingRepoPaths — nothing could be attributed", Array.isArray(clearResultG.referencingRepoPaths) && clearResultG.referencingRepoPaths.length === 0);
     check("(G) the orphan genuinely survives on disk (the read never even reached the unlink)", fs.existsSync(orphanPathG));
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (H) card 0a783fb2 — clearMergeQuarantineByKey's own orphan-sweep (reached via clearMergeQuarantine's
+  // RESOLVABLE dispatch) used to discard a content-based keep entirely (console.error only, no response
+  // field). It must now report it via `contentKeptRepoPaths`, and never fold it into `referencingRepoPaths`.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const H = makeToplevelRepo("h");
+    const tH = enterMergeQuarantine(H, "loom/h-branch", "merge in progress for H (by-key content-keep)");
+    const filesAfterH = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json") && JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).repoPath === H);
+    const hFinalPath = path.join(MERGE_QUARANTINE_DIR, filesAfterH[0]);
+    const orphanBasenameH = `${randomBytes(12).toString("hex")}.json`;
+    const hRecord = JSON.parse(fs.readFileSync(hFinalPath, "utf8"));
+    hRecord.orphanLatchFiles = [orphanBasenameH];
+    fs.writeFileSync(hFinalPath, JSON.stringify(hRecord));
+
+    const bootedH = await freshBootModule();
+    bootedH.reenterMergeQuarantinesAtBoot([H]);
+    check("(H precondition) H is armed after boot, carrying the orphan reference", (bootedH.listActiveMergeQuarantines().find((e) => e.repoPath === H)?.orphanLatchFiles ?? []).includes(orphanBasenameH));
+
+    const foreignRepoH = makeToplevelRepo("h-foreign");
+    const tForeignH = randomUUID();
+    const orphanPathH = path.join(MERGE_QUARANTINE_DIR, orphanBasenameH);
+    fs.writeFileSync(orphanPathH, JSON.stringify({
+      repoPath: foreignRepoH, branch: "loom/h-foreign-branch", reason: "foreign occupant, written AFTER boot",
+      enteredAt: Date.now(), tokens: [tForeignH],
+    }));
+    check("(H precondition) the orphan exists before H's full clear", fs.existsSync(orphanPathH));
+
+    const clearResultH = bootedH.clearMergeQuarantine(H);
+    check("*** CARD 0a783fb2 *** (H) clearMergeQuarantineByKey reports the content-parsed keep via contentKeptRepoPaths", (clearResultH?.contentKeptRepoPaths ?? []).includes(foreignRepoH));
+    check("*** CARD 0a783fb2 *** (H) ...and never folds it into referencingRepoPaths", !(clearResultH?.referencingRepoPaths ?? []).includes(foreignRepoH));
+    check("(H) THE FIX: O (holding the foreign token) SURVIVES H's full clear", fs.existsSync(orphanPathH));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (I) card 0a783fb2 — clearMergeQuarantineByRecordedPath's own orphan-sweep (reached via
+  // clearMergeQuarantine's UNRESOLVABLE dispatch, and directly) must report a content-based keep too.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const pI = path.join(os.tmpdir(), `loom-mqosca-pI-never-exists-${freshSfx()}`);
+    const orphanBasenameI = `${randomBytes(12).toString("hex")}.json`;
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d, NIT) — the production runtime-divert
+    // shape (d4b25feb): `pending-<sha256(directPathIdentity(repoPath)).slice(0,24)>.json`, never an
+    // arbitrary `pending-i-...` basename — pI never resolves, so directPathIdentity falls back to
+    // `path.resolve(pI).toLowerCase()` (win32), mirroring the real function exactly.
+    const identityI = path.resolve(pI).toLowerCase();
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${createHash("sha256").update(identityI).digest("hex").slice(0, 24)}.json`), JSON.stringify({
+      repoPath: pI, branch: "p-i-branch", reason: "P — I, unresolvable, carries the orphan reference",
+      enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [orphanBasenameI],
+    }, null, 2) + "\n");
+
+    const bootedI = await freshBootModule();
+    bootedI.reenterMergeQuarantinesAtBoot([pI]);
+    check("(I precondition) P is quarantined (pending, unresolvable) after boot", bootedI.listActiveMergeQuarantines().some((e) => e.repoPath === pI && (e.orphanLatchFiles ?? []).includes(orphanBasenameI)));
+
+    const foreignRepoI = makeToplevelRepo("i-foreign");
+    const tForeignI = randomUUID();
+    const orphanPathI = path.join(MERGE_QUARANTINE_DIR, orphanBasenameI);
+    fs.writeFileSync(orphanPathI, JSON.stringify({
+      repoPath: foreignRepoI, branch: "loom/i-foreign-branch", reason: "foreign occupant, written AFTER boot",
+      enteredAt: Date.now(), tokens: [tForeignI],
+    }));
+    check("(I precondition) the orphan exists before P's full clear", fs.existsSync(orphanPathI));
+
+    const clearResultI = bootedI.clearMergeQuarantineByRecordedPath(pI);
+    check("*** CARD 0a783fb2 *** (I) clearMergeQuarantineByRecordedPath reports the content-parsed keep via contentKeptRepoPaths", (clearResultI?.contentKeptRepoPaths ?? []).includes(foreignRepoI));
+    check("*** CARD 0a783fb2 *** (I) ...and never folds it into referencingRepoPaths", !(clearResultI?.referencingRepoPaths ?? []).includes(foreignRepoI));
+    check("(I) THE FIX: O (holding the foreign token) SURVIVES P's full clear", fs.existsSync(orphanPathI));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (J) card 0a783fb2 — clearMergeQuarantineLatchFile's PENDING-MATCH branch's own orphan-sweep
+  // (orphanFilesToSweep, distinct from ownSweep/finalSweep/tmpSweep) used to discard a content-based keep
+  // entirely too — the "one more" discard site this card's own investigation found.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const pJ = path.join(os.tmpdir(), `loom-mqosca-pJ-never-exists-${freshSfx()}`);
+    const orphanBasenameJ = `${randomBytes(12).toString("hex")}.json`;
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    // @decision 8db913e2 (Follow-up 0a783fb2, test-construction fix) — a PASS-1-sourced pending entry's
+    // own sourceFile must be `<24-hex>.json` — pendingLatchIdFor's fallback (no other naming pattern
+    // matches) returns everything before `.json` VERBATIM as the id, never hashing it; a `pending-j-...`
+    // basename derived an invalid, non-24-hex id and clearMergeQuarantineLatchFile refused it outright.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${randomBytes(12).toString("hex")}.json`), JSON.stringify({
+      repoPath: pJ, branch: "p-j-branch", reason: "P — J, unresolvable, carries the orphan reference",
+      enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [orphanBasenameJ],
+    }, null, 2) + "\n");
+
+    const bootedJ = await freshBootModule();
+    bootedJ.reenterMergeQuarantinesAtBoot([pJ]);
+    const entryJ = bootedJ.listActiveMergeQuarantines().find((e) => e.repoPath === pJ);
+    check("(J precondition) P is quarantined (pending, unresolvable) after boot, carrying the orphan reference", !!entryJ && (entryJ.orphanLatchFiles ?? []).includes(orphanBasenameJ));
+    const idJ = bootedJ.quarantineLatchFileIdsFor(entryJ)[0];
+
+    const foreignRepoJ = makeToplevelRepo("j-foreign");
+    const tForeignJ = randomUUID();
+    const orphanPathJ = path.join(MERGE_QUARANTINE_DIR, orphanBasenameJ);
+    fs.writeFileSync(orphanPathJ, JSON.stringify({
+      repoPath: foreignRepoJ, branch: "loom/j-foreign-branch", reason: "foreign occupant, written AFTER boot",
+      enteredAt: Date.now(), tokens: [tForeignJ],
+    }));
+    check("(J precondition) the orphan exists before P's clear-by-id", fs.existsSync(orphanPathJ));
+
+    const clearResultJ = bootedJ.clearMergeQuarantineLatchFile(idJ);
+    check("(J) clear-by-id reports ok:true", clearResultJ.ok === true);
+    check("*** CARD 0a783fb2 *** (J) the pending-match branch's own orphan-sweep reports the content-parsed keep via contentKeptRepoPaths", (clearResultJ.contentKeptRepoPaths ?? []).includes(foreignRepoJ));
+    check("*** CARD 0a783fb2 *** (J) ...and never folds it into referencingRepoPaths", !(clearResultJ.referencingRepoPaths ?? []).includes(foreignRepoJ));
+    check("(J) THE FIX: O (holding the foreign token) SURVIVES P's clear-by-id", fs.existsSync(orphanPathJ));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (K) card 0a783fb2 — clearMergeQuarantineLatchFile's PENDING-MATCH branch never tracked a
+  // kept-but-UNATTRIBUTED result from its own ownSweep/finalSweep/tmpSweep calls before this card (issue
+  // #2 of the card's own investigation) — reported via latchKept now, mirroring the RAW-FALLBACK branch's
+  // own anyKeptUnattributed arm (scenario G above). Driven by an UNLINK failure (not a read failure) on
+  // the pending entry's OWN sourceFile — the only way `sweepOwnLatchFileUnlessOwnedElsewhere` reports a
+  // kept-but-unattributed result with no `keptUnreadableLatchFiles` mark involved at all.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const pK = path.join(os.tmpdir(), `loom-mqosca-pK-never-exists-${freshSfx()}`);
+    // @decision 8db913e2 (Follow-up 0a783fb2, test-construction fix) — same reason as (J) above: must be
+    // `<24-hex>.json`, not a `pending-k-...`-shaped basename, or pendingLatchIdFor derives an invalid id.
+    const sourceFileK = `${randomBytes(12).toString("hex")}.json`;
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sourceFileK), JSON.stringify({
+      repoPath: pK, branch: "p-k-branch", reason: "P — K, unresolvable, own sourceFile unlink will fail",
+      enteredAt: Date.now(), tokens: [randomUUID()],
+    }, null, 2) + "\n");
+
+    const bootedK = await freshBootModule();
+    bootedK.reenterMergeQuarantinesAtBoot([pK]);
+    const entryK = bootedK.listActiveMergeQuarantines().find((e) => e.repoPath === pK);
+    check("(K precondition) P is quarantined (pending, unresolvable) after boot", !!entryK);
+    const idK = bootedK.quarantineLatchFileIdsFor(entryK)[0];
+
+    const sourceFilePathK = path.join(MERGE_QUARANTINE_DIR, sourceFileK);
+    check("(K precondition) P's own sourceFile exists before the clear-by-id", fs.existsSync(sourceFilePathK));
+    const injectK = injectPersistentUnlinkFailure(sourceFilePathK, "EBUSY");
+    let clearResultK;
+    try {
+      clearResultK = bootedK.clearMergeQuarantineLatchFile(idK);
+    } finally {
+      injectK.restore();
+    }
+    check("(K) clear-by-id reports ok:true", clearResultK.ok === true);
+    check("*** CARD 0a783fb2 *** (K) the pending-match branch reports latchKept via the unattributed arm, never silently", clearResultK.latchKept === true);
+    check("*** CARD 0a783fb2 *** (K) ...with an EMPTY referencingRepoPaths — nothing could be attributed", Array.isArray(clearResultK.referencingRepoPaths) && clearResultK.referencingRepoPaths.length === 0);
+    check("(K) P's own sourceFile genuinely survives (the unlink failed)", fs.existsSync(sourceFilePathK));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (L) card 0a783fb2, Code Review 47289f8d — clearMergeQuarantineByKey's own orphan-sweep must surface a
+  // TRUE, DIFFERENT-identity referencer into stillBlockedCoOccupants (the extension this round added) —
+  // distinct from (H)'s content-only proof.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const L1 = makeToplevelRepo("l1");
+    enterMergeQuarantine(L1, "loom/l1-branch", "merge in progress for L1 (true referencer)");
+    const filesAfterL1 = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json") && JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).repoPath === L1);
+    const l1FinalPath = path.join(MERGE_QUARANTINE_DIR, filesAfterL1[0]);
+    const sharedOrphanL = `${randomBytes(12).toString("hex")}.json`;
+    const l1Record = JSON.parse(fs.readFileSync(l1FinalPath, "utf8"));
+    l1Record.orphanLatchFiles = [sharedOrphanL];
+    fs.writeFileSync(l1FinalPath, JSON.stringify(l1Record));
+
+    const L2 = makeToplevelRepo("l2"); // DIFFERENT identity, survives
+    enterMergeQuarantine(L2, "loom/l2-branch", "merge in progress for L2 (survives, true referencer)");
+    const filesAfterL2 = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => f.endsWith(".json") && JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).repoPath === L2);
+    const l2FinalPath = path.join(MERGE_QUARANTINE_DIR, filesAfterL2[0]);
+    const l2Record = JSON.parse(fs.readFileSync(l2FinalPath, "utf8"));
+    l2Record.orphanLatchFiles = [sharedOrphanL];
+    fs.writeFileSync(l2FinalPath, JSON.stringify(l2Record));
+
+    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — a WELL-FORMED record (repoPath/
+    // branch/reason/tokens all present), never a bare placeholder: PASS 1 treats a record missing those
+    // fields as CORRUPT debris needing its own fail-closed broad protection, which REWRITES every
+    // currently-unresolvable entry's own orphanLatchFiles to point at it — exactly the kind of
+    // cross-entry mutation this test must NOT trigger as a side effect of its own fixture.
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanL), JSON.stringify({
+      repoPath: path.join(os.tmpdir(), `loom-mqosca-sharedOrphan-owner-${freshSfx()}`), branch: "b", reason: "r",
+      enteredAt: Date.now(), tokens: [randomUUID()],
+    }));
+
+    const bootedL = await freshBootModule();
+    bootedL.reenterMergeQuarantinesAtBoot([L1, L2]);
+    check("(L precondition) both L1 and L2 are armed, both carrying the shared orphan reference", bootedL.listActiveMergeQuarantines().filter((e) => (e.orphanLatchFiles ?? []).includes(sharedOrphanL)).length === 2);
+
+    const clearResultL = bootedL.clearMergeQuarantine(L1);
+    check("*** CARD 0a783fb2 *** (L) clearMergeQuarantineByKey surfaces a TRUE, different-identity referencer via referencingRepoPaths", (clearResultL?.referencingRepoPaths ?? []).includes(L2));
+    check("*** CARD 0a783fb2 *** (L) ...and via stillBlockedCoOccupants (the extension this round added)", !!clearResultL?.stillBlockedCoOccupants?.some((c) => c.repoPath === L2));
+    check("(L) L2 is genuinely untouched — the clear never cleared it", bootedL.listActiveMergeQuarantines().some((e) => e.repoPath === L2));
+    check("(L) the shared orphan file survives (L2 still needs it)", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanL)));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (M) card 0a783fb2, Code Review 47289f8d — clearMergeQuarantineByRecordedPath's own orphan-sweep
+  // (matchedPending block) must surface a TRUE, DIFFERENT-identity referencer too.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const pM1 = path.join(os.tmpdir(), `loom-mqosca-pM1-never-exists-${freshSfx()}`);
+    const pM2 = path.join(os.tmpdir(), `loom-mqosca-pM2-never-exists-${freshSfx()}`);
+    const sharedOrphanM = `${randomBytes(12).toString("hex")}.json`;
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const identityM1 = path.resolve(pM1).toLowerCase();
+    const identityM2 = path.resolve(pM2).toLowerCase();
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${createHash("sha256").update(identityM1).digest("hex").slice(0, 24)}.json`), JSON.stringify({
+      repoPath: pM1, branch: "p-m1-branch", reason: "P — M1, unresolvable, carries the shared orphan reference",
+      enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanM],
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${createHash("sha256").update(identityM2).digest("hex").slice(0, 24)}.json`), JSON.stringify({
+      repoPath: pM2, branch: "p-m2-branch", reason: "P — M2, unresolvable, survives, carries the shared orphan reference",
+      enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanM],
+    }, null, 2) + "\n");
+    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — see (L)'s own identical note: a
+    // WELL-FORMED record, never a bare placeholder (avoids PASS 1's corrupt-debris fail-closed fold).
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanM), JSON.stringify({
+      repoPath: path.join(os.tmpdir(), `loom-mqosca-sharedOrphan-owner-${freshSfx()}`), branch: "b", reason: "r",
+      enteredAt: Date.now(), tokens: [randomUUID()],
+    }));
+
+    const bootedM = await freshBootModule();
+    bootedM.reenterMergeQuarantinesAtBoot([pM1, pM2]);
+    check("(M precondition) both pM1 and pM2 are pending, both carrying the shared orphan reference", bootedM.listActiveMergeQuarantines().filter((e) => (e.orphanLatchFiles ?? []).includes(sharedOrphanM)).length === 2);
+
+    const clearResultM = bootedM.clearMergeQuarantineByRecordedPath(pM1);
+    check("*** CARD 0a783fb2 *** (M) clearMergeQuarantineByRecordedPath surfaces a TRUE, different-identity referencer via referencingRepoPaths", (clearResultM?.referencingRepoPaths ?? []).includes(pM2));
+    check("*** CARD 0a783fb2 *** (M) ...and via stillBlockedCoOccupants", !!clearResultM?.stillBlockedCoOccupants?.some((c) => c.repoPath === pM2));
+    check("(M) pM2 is genuinely untouched", bootedM.listActiveMergeQuarantines().some((e) => e.repoPath === pM2));
+    check("(M) the shared orphan file survives (pM2 still needs it)", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanM)));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (N) card 0a783fb2, Code Review 47289f8d — clearMergeQuarantineLatchFile's own pending-match branch
+  // orphan-sweep must surface a TRUE, DIFFERENT-identity referencer too — distinct from (J)'s content-only
+  // proof.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const pN1 = path.join(os.tmpdir(), `loom-mqosca-pN1-never-exists-${freshSfx()}`);
+    const pN2 = path.join(os.tmpdir(), `loom-mqosca-pN2-never-exists-${freshSfx()}`);
+    const sharedOrphanN = `${randomBytes(12).toString("hex")}.json`;
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const identityN1 = path.resolve(pN1).toLowerCase();
+    const identityN2 = path.resolve(pN2).toLowerCase();
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${createHash("sha256").update(identityN1).digest("hex").slice(0, 24)}.json`), JSON.stringify({
+      repoPath: pN1, branch: "p-n1-branch", reason: "P — N1, unresolvable, carries the shared orphan reference",
+      enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanN],
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${createHash("sha256").update(identityN2).digest("hex").slice(0, 24)}.json`), JSON.stringify({
+      repoPath: pN2, branch: "p-n2-branch", reason: "P — N2, unresolvable, survives, carries the shared orphan reference",
+      enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanN],
+    }, null, 2) + "\n");
+    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — see (L)'s own identical note: a
+    // WELL-FORMED record, never a bare placeholder (avoids PASS 1's corrupt-debris fail-closed fold).
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanN), JSON.stringify({
+      repoPath: path.join(os.tmpdir(), `loom-mqosca-sharedOrphan-owner-${freshSfx()}`), branch: "b", reason: "r",
+      enteredAt: Date.now(), tokens: [randomUUID()],
+    }));
+
+    const bootedN = await freshBootModule();
+    bootedN.reenterMergeQuarantinesAtBoot([pN1, pN2]);
+    const entryN1 = bootedN.listActiveMergeQuarantines().find((e) => e.repoPath === pN1);
+    check("(N precondition) P (N1) is pending, carrying the shared orphan reference", !!entryN1 && (entryN1.orphanLatchFiles ?? []).includes(sharedOrphanN));
+    const idN1 = bootedN.quarantineLatchFileIdsFor(entryN1)[0];
+
+    const clearResultN = bootedN.clearMergeQuarantineLatchFile(idN1);
+    check("(N) clear-by-id reports ok:true", clearResultN.ok === true);
+    check("*** CARD 0a783fb2 *** (N) the pending-match branch surfaces a TRUE, different-identity referencer via referencingRepoPaths", (clearResultN.referencingRepoPaths ?? []).includes(pN2));
+    check("*** CARD 0a783fb2 *** (N) ...and via stillBlockedCoOccupants", !!clearResultN.stillBlockedCoOccupants?.some((c) => c.repoPath === pN2));
+    check("(N) pN2 is genuinely untouched", bootedN.listActiveMergeQuarantines().some((e) => e.repoPath === pN2));
+    check("(N) the shared orphan file survives (pN2 still needs it)", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanN)));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (O) card 0a783fb2, Code Review 47289f8d — clearTokenFromPendingIndices's own "remove" branch has NO
+  // human-facing return (clearMergeQuarantineByToken is `void`); a TRUE, different-identity referencer
+  // must still be disclosed via console.warn, never silently discarded.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const pO1 = path.join(os.tmpdir(), `loom-mqosca-pO1-never-exists-${freshSfx()}`);
+    const pO2 = path.join(os.tmpdir(), `loom-mqosca-pO2-never-exists-${freshSfx()}`);
+    const sharedOrphanO = `${randomBytes(12).toString("hex")}.json`;
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const identityO1 = path.resolve(pO1).toLowerCase();
+    const identityO2 = path.resolve(pO2).toLowerCase();
+    const tO1 = randomUUID();
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${createHash("sha256").update(identityO1).digest("hex").slice(0, 24)}.json`), JSON.stringify({
+      repoPath: pO1, branch: "p-o1-branch", reason: "P — O1, unresolvable, sole token being lifted",
+      enteredAt: Date.now(), tokens: [tO1], orphanLatchFiles: [sharedOrphanO],
+    }, null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `pending-${createHash("sha256").update(identityO2).digest("hex").slice(0, 24)}.json`), JSON.stringify({
+      repoPath: pO2, branch: "p-o2-branch", reason: "P — O2, unresolvable, survives, carries the shared orphan reference",
+      enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanO],
+    }, null, 2) + "\n");
+    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — see (L)'s own identical note: a
+    // WELL-FORMED record, never a bare placeholder (avoids PASS 1's corrupt-debris fail-closed fold).
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanO), JSON.stringify({
+      repoPath: path.join(os.tmpdir(), `loom-mqosca-sharedOrphan-owner-${freshSfx()}`), branch: "b", reason: "r",
+      enteredAt: Date.now(), tokens: [randomUUID()],
+    }));
+
+    const bootedO = await freshBootModule();
+    bootedO.reenterMergeQuarantinesAtBoot([pO1, pO2]);
+    check("(O precondition) both pO1 and pO2 are pending, both carrying the shared orphan reference", bootedO.listActiveMergeQuarantines().filter((e) => (e.orphanLatchFiles ?? []).includes(sharedOrphanO)).length === 2);
+
+    const capturedWarnings = [];
+    const realWarn = console.warn;
+    console.warn = (msg) => { capturedWarnings.push(msg); };
+    try {
+      bootedO.clearMergeQuarantineByToken(pO1, tO1);
+    } finally {
+      console.warn = realWarn;
+    }
+    check("*** CARD 0a783fb2 *** (O) clearTokenFromPendingIndices's own no-human-route warn names the TRUE, different-identity referencer", capturedWarnings.some((w) => w.includes(pO2)));
+    check("(O) pO2 is genuinely untouched", bootedO.listActiveMergeQuarantines().some((e) => e.repoPath === pO2));
+    check("(O) the shared orphan file survives (pO2 still needs it)", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanO)));
+  }
 } finally {
   for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
@@ -340,9 +678,19 @@ console.log(failures === 0
     "unreferenced orphan once every real on-disk token is covered by this clear's own candidateTokens " +
     "(B) or already globally tombstoned (C); a non-ENOENT read failure fails closed (D); a readable, " +
     "genuine, TOKENLESS occupant is kept rather than vacuously covered (E); a by-id clear via the " +
-    "RAW-FALLBACK branch reports a content-based keep via latchKept, naming the parsed repoPath when " +
-    "one parses (F) or via anyKeptUnattributed when none does (G), never silently. Genuinely corrupt " +
+    "RAW-FALLBACK branch reports a content-based keep via contentKeptRepoPaths, naming the parsed repoPath " +
+    "when one parses (F) or via anyKeptUnattributed when none does (G), never silently, and never folded " +
+    "into referencingRepoPaths (card 0a783fb2). That same card's shared fold-in helper closes the four " +
+    "other discard sites: clearMergeQuarantineByKey (H), clearMergeQuarantineByRecordedPath (I), and " +
+    "clearMergeQuarantineLatchFile's own pending-match branch, both for its orphan-sweep (J) and its " +
+    "previously-untracked ownSweep/finalSweep/tmpSweep unattributed case (K). Genuinely corrupt " +
     "debris (never a real record) stays deletable once unreferenced, unchanged — see " +
-    "merge-quarantine-clear-by-path.mjs's own (J)/(Z1)/(Z1-route), run standalone in the full suite."
+    "merge-quarantine-clear-by-path.mjs's own (J)/(Z1)/(Z1-route), run standalone in the full suite. " +
+    "Code Review 47289f8d (round 2): a TRUE, DIFFERENT-identity referencer correctly reaches " +
+    "stillBlockedCoOccupants (the extension this round added) at clearMergeQuarantineByKey (L), " +
+    "clearMergeQuarantineByRecordedPath (M), clearMergeQuarantineLatchFile's pending-match branch (N), " +
+    "and clearTokenFromPendingIndices's own no-human-route console.warn (O) — none of them ever confuses " +
+    "a DIFFERENT identity's real blocker with the SAME identity's own, still-in-progress twin (see " +
+    "merge-quarantine-clear-by-path.mjs's own (AM) for that MAJOR self-reference fix)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

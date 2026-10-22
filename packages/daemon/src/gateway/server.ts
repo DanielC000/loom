@@ -3246,13 +3246,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const { wasQuarantined, reason, latchKept, referencingRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
+    const { wasQuarantined, reason, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
     return {
       ok: true, wasQuarantined, repoPath: repo.path, ...(reason ? { reason } : {}),
       // @decision 182c01cc (round 2) — spread UNCONDITIONALLY, never gated on `latchKept`: a RELOCATED
       // co-occupant never sets latchKept, so gating here would silently drop it at the REST boundary.
       stillBlockedCoOccupants,
       ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
+      // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
+      // `referencingRepoPaths` above — its own, separately-gated field.
+      ...(contentKeptRepoPaths?.length ? { contentKeptRepoPaths } : {}),
     };
   });
 
@@ -3282,13 +3285,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
       // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
       // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
-      const { wasQuarantined, reason, latchKept, referencingRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      const { wasQuarantined, reason, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
       return {
         ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}),
         // @decision 182c01cc (round 2) — see the matching note on `/clear` above: unconditional, never
         // gated on `latchKept`.
         stillBlockedCoOccupants,
         ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
+        // @decision 8db913e2 (Follow-up 0a783fb2) — same split as `/clear` above.
+        ...(contentKeptRepoPaths?.length ? { contentKeptRepoPaths } : {}),
       };
     }
     const result = clearMergeQuarantineLatchFile(body.id as string);
@@ -3302,6 +3307,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // explicitly rather than letting a bare `liftedRepoPaths` omission go unexplained.
       ...(result.stillQuarantined ? { stillQuarantined: true, reason: result.reason } : {}),
       ...(result.latchKept ? { latchKept: true, referencingRepoPaths: result.referencingRepoPaths } : {}),
+      // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
+      // `referencingRepoPaths` above — its own, separately-gated field.
+      ...(result.contentKeptRepoPaths?.length ? { contentKeptRepoPaths: result.contentKeptRepoPaths } : {}),
     };
   });
 
