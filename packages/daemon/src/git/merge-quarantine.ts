@@ -1257,7 +1257,9 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
         ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeysForReingest, `reconcileMarkedBasenameBeforeWrite-reingest(${entry.repoPath})`)
         : entry.resolvedKeys,
       armedKeys: entry.armedKeys,
-      provenanceUnknown: reingestedUnknownProvenance ? true : reingested.provenanceUnknown,
+      // @decision 4913e721 — OR in `entry`'s own (caller's live) mark too, never disk-only: the old code
+      // discarded it outright, the same drop class db0a9db0's "carry forward at EVERY copy site" forbids.
+      provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
     };
   }
   const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed);
@@ -1836,7 +1838,10 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   const persistedKept: Array<{ repoPath: string; sourceFile: string }> = [];
   const collectPersisted = (r: ProtectResult) => { if (r.persisted) (r.relocated ? persistedRelocated : persistedKept).push(r.persisted); };
   if (clearingRepoPath) {
-    const r = protectDegradedOccupantBeforeDelete(final, clearingRepoPath, undefined, liftedKeys);
+    // @decision 4913e721 — thread `clearedEntry` through as `knownOccupant`: this clear's own caller
+    // already deleted that identity's live map slot before this read runs, so only this pre-delete
+    // snapshot can still recover a memory-only `provenanceUnknown`.
+    const r = protectDegradedOccupantBeforeDelete(final, clearingRepoPath, undefined, liftedKeys, clearedEntry);
     finalProtectOk = r.ok && finalProtectOk;
     collectPersisted(r);
   }
@@ -2320,7 +2325,10 @@ function unattributedKeptReasonFor(): string {
   return "this identity's own quarantine is lifted, but a physical latch file it referenced is still on disk — its content could not be durably confirmed removed or fully covered, so no specific other claimant can be named; it will re-divert on the next restart until a later successful clear resolves it.";
 }
 
-function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string, protectResolvableToo = false, liftedKeys: ReadonlySet<string> = new Set()): ProtectResult {
+/** @decision 4913e721 — `knownOccupant`, when given, is a pre-delete snapshot of whatever entry the
+ *  caller already had armed at this key, passed through so a lost-from-the-live-maps `provenanceUnknown`
+ *  can still be recovered — see {@link protectOccupantContentBeforeDelete}'s own doc. */
+function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: string, protectResolvableToo = false, liftedKeys: ReadonlySet<string> = new Set(), knownOccupant?: MergeQuarantineEntry): ProtectResult {
   const result = differentUnresolvableOccupantRepoPathAt(final, clearingRepoPath, protectResolvableToo);
   if (result.state === "none") return { ok: true };
   if (result.state === "unknown") {
@@ -2331,7 +2339,7 @@ function protectDegradedOccupantBeforeDelete(final: string, clearingRepoPath: st
     console.error(`[merge-quarantine] keeping ${path.basename(final)} on disk — its content could not be read (for a reason other than being missing) while clearing ${clearingRepoPath}, so it may genuinely be a different, unresolvable entry's own exclusive backing; treating this as UNKNOWN rather than assuming nothing to protect. It is marked kept in THIS PROCESS too (fail-closed, over-broad until a reboot or a later successful read resolves it), and it survives on disk for either to recover.`);
     return { ok: false };
   }
-  return protectOccupantContentBeforeDelete(final, result.repoPath, clearingRepoPath, liftedKeys);
+  return protectOccupantContentBeforeDelete(final, result.repoPath, clearingRepoPath, liftedKeys, knownOccupant);
 }
 
 /**
@@ -2407,8 +2415,12 @@ function excludeLiftedResolvedKeys(keys: string[] | undefined, final: string, li
  *
  * @decision 8db913e2 (Follow-up 7a7e041b) — reads on-disk tokens via {@link readSurvivingOnDiskTokens} (shared with
  * {@link reconcileMarkedBasenameBeforeWrite}) and skips the copy-aside when every real on-disk token is
- * already cleared — see the decision record for why that's safe. */
-function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: string, describeClearer: string, liftedKeys: ReadonlySet<string> = new Set()): ProtectResult {
+ * already cleared — see the decision record for why that's safe.
+ *
+ * @decision 4913e721 — `provenanceUnknown` is OR'd with {@link inMemoryProvenanceUnknownFor}'s own live
+ * scan AND (when its identity matches `occupantRepoPath`) `knownOccupant`'s own mark — never disk bytes
+ * alone. See the decision record. */
+function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: string, describeClearer: string, liftedKeys: ReadonlySet<string> = new Set(), knownOccupant?: MergeQuarantineEntry): ProtectResult {
   let raw: string;
   try {
     raw = fs.readFileSync(final, "utf8");
@@ -2453,7 +2465,11 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
       ? parsed.contributorRepoPaths : undefined,
     // @decision db0a9db0 — same carry-forward, same reason, for this explicit field whitelist.
-    provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
+    // @decision 4913e721 — see this function's own doc for the two in-memory sources OR'd in here too.
+    provenanceUnknown: parsed.provenanceUnknown === true
+      || inMemoryProvenanceUnknownFor(occupantRepoPath)
+      || (knownOccupant !== undefined && directPathIdentity(knownOccupant.repoPath) === directPathIdentity(occupantRepoPath) && knownOccupant.provenanceUnknown === true)
+      ? true : undefined,
     // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.
     provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
     // @decision 8db913e2 (Follow-up 4b06875f) — see the guard computed just above; `undefined` here is the pre-existing,
@@ -4452,6 +4468,31 @@ function ownIdentityEntryFor(repoPath: string): MergeQuarantineEntry | undefined
     if (directPathIdentity(entry.repoPath) === identity) return entry;
   }
   return pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === identity)?.entry;
+}
+
+/**
+ * Whether ANY in-memory record for `repoPath`'s own identity — active tier OR pending tier, every object
+ * sharing the identity, never just the first match — carries `provenanceUnknown`. A fresh read of a
+ * physical latch file (e.g. {@link protectOccupantContentBeforeDelete}'s own read of `final`) can be
+ * durably STALE relative to this: {@link detectUnknownProvenance} is a pure in-memory boot-time inference
+ * that becomes durable on disk only when SOME OTHER write happens to persist it that same boot — a
+ * degraded occupant whose file is left "AS WRITTEN", or one already correctly filed at its own
+ * ancestor-walked key with nothing to migrate, can carry `provenanceUnknown:true` in memory while the
+ * physical bytes never reflect it (card `4913e721`).
+ *
+ * Deliberately NOT {@link ownIdentityEntryFor} — that returns the single FIRST match, right for "the one
+ * entry a query should treat as its own blocker," but wrong for a STICKY OR: `d4b25feb`'s own "two
+ * objects per identity" case (one active-only, one pending-only, disjoint tokens) means the mark can sit
+ * on the object this function would NOT have returned.
+ *
+ * @decision 4913e721
+ */
+function inMemoryProvenanceUnknownFor(repoPath: string): boolean {
+  const identity = directPathIdentity(repoPath);
+  for (const entry of activeQuarantines.values()) {
+    if (directPathIdentity(entry.repoPath) === identity && entry.provenanceUnknown) return true;
+  }
+  return pendingUnresolvedQuarantines.some((p) => directPathIdentity(p.entry.repoPath) === identity && p.entry.provenanceUnknown);
 }
 
 /** The entry a query for `repoPath` should treat as ITS OWN blocker: {@link ownIdentityEntryFor} when

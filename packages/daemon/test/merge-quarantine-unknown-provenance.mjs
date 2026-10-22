@@ -534,7 +534,12 @@ try {
     // `provenanceTracked` and the closing `};` — the anchor below is extended to match, same
     // disambiguating-suffix technique as the 6451a749 update noted above. Card 43cf3b26 added a
     // `resolvedKeys` field right after `resolvedKey` — extended again, same technique.
-    const PROTECT_WHITELIST_LINE = "provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,\n        // @decision 8db913e2 (Follow-up 4b06875f) — see the guard computed just above; `undefined` here is the pre-existing,\n        // unchanged behavior for every self-consistently-filed (collision) occupant.\n        resolvedKey: resolvedKeyToCarry,\n        resolvedKeys: resolvedKeysToCarry,\n    };\n    const finalBasename = path.basename(final);";
+    // Card 4913e721 widened this whitelist's own `provenanceUnknown` line from a single-line disk-only
+    // ternary into a multi-line OR across disk bytes, inMemoryProvenanceUnknownFor, and an optional
+    // knownOccupant — the anchor below is extended to match that shape (re-derived from the real compiled
+    // dist text, per this repo's own withDistMutation indentation rule), same disambiguating-suffix
+    // technique as every prior card's update to this anchor.
+    const PROTECT_WHITELIST_LINE = "provenanceUnknown: parsed.provenanceUnknown === true\n            || inMemoryProvenanceUnknownFor(occupantRepoPath)\n            || (knownOccupant !== undefined && directPathIdentity(knownOccupant.repoPath) === directPathIdentity(occupantRepoPath) && knownOccupant.provenanceUnknown === true)\n            ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,\n        // @decision 8db913e2 (Follow-up 4b06875f) — see the guard computed just above; `undefined` here is the pre-existing,\n        // unchanged behavior for every self-consistently-filed (collision) occupant.\n        resolvedKey: resolvedKeyToCarry,\n        resolvedKeys: resolvedKeysToCarry,\n    };\n    const finalBasename = path.basename(final);";
     await withDistMutation(PROTECT_WHITELIST_LINE,
       "provenanceUnknown: undefined, provenanceTracked: undefined, resolvedKey: resolvedKeyToCarry, resolvedKeys: resolvedKeysToCarry };\n    const finalBasename = path.basename(final);", async (m) => {
         const { x3, y3 } = buildProtectFixture("mutated");
@@ -760,7 +765,9 @@ try {
       const protective = await runProtectTrackedAndReadCopy(await rebootSim(), x10, y10);
       check("(10a baseline, unmutated) the protective copy carries provenanceTracked forward", protective?.provenanceTracked === true);
     }
-    const PROTECT_WHITELIST_TRACKED_LINE = "// @decision db0a9db0 — same carry-forward, same reason, for this explicit field whitelist.\n        provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,";
+    // Card 4913e721 — same anchor widening as PROTECT_WHITELIST_LINE above; see that constant's own
+    // comment for why.
+    const PROTECT_WHITELIST_TRACKED_LINE = "// @decision db0a9db0 — same carry-forward, same reason, for this explicit field whitelist.\n        // @decision 4913e721 — see this function's own doc for the two in-memory sources OR'd in here too.\n        provenanceUnknown: parsed.provenanceUnknown === true\n            || inMemoryProvenanceUnknownFor(occupantRepoPath)\n            || (knownOccupant !== undefined && directPathIdentity(knownOccupant.repoPath) === directPathIdentity(occupantRepoPath) && knownOccupant.provenanceUnknown === true)\n            ? true : undefined,\n        // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.\n        provenanceTracked: parsed.provenanceTracked === true ? true : undefined,";
     await withDistMutation(PROTECT_WHITELIST_TRACKED_LINE,
       PROTECT_WHITELIST_TRACKED_LINE.replace("provenanceTracked: parsed.provenanceTracked === true ? true : undefined,", "provenanceTracked: undefined,"), async (m) => {
         const { x10, y10 } = buildProtectTrackedFixture("mutated");
