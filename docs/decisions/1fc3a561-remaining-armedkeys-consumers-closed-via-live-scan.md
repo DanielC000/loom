@@ -138,9 +138,11 @@ other site.
   `replaceEntryEverywhere` site that grows a NEW `armedKeys`-only consumer is not retroactively covered.
   In particular, `clearTokenFromPendingIndices` (~:3520/:3562/:3646) is LEFT on `armedKeys` deliberately —
   its only caller, `clearMergeQuarantineByToken`, passes non-twin indices only, so `liveArmedKeysOf` would
-  add nothing there today. Two more siblings, `ambiguousIdentitiesForLatchId` (~:532) and
-  `writeMergeQuarantineLatch`'s own `freshSecondaryKeys` (~:1399), are likewise untouched here — tracked
-  on card `d69a6744`, not this one.
+  add nothing there today. **Two more siblings, `ambiguousIdentitiesForLatchId` (~:532) and
+  `writeMergeQuarantineLatch`'s own `freshSecondaryKeys` (~:1399), were left untouched by THIS card — both
+  are now closed by card `d69a6744`**, which additionally found `freshSecondaryKeys`'s own gap to be a
+  real, reproduced FAIL-OPEN (not merely a theoretical under-inclusion like every site above) — see that
+  card's own decision record.
 
 ## Verification
 

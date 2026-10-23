@@ -527,9 +527,13 @@ function ambiguousIdentitiesFor(key: string, entry: MergeQuarantineEntry): Ambig
 /** {@link ambiguousIdentitiesFor}, but keyed off a specific OFFERED latch id — for a dual-armed entry,
  *  `entry.armedKeys?.[0]` is NOT guaranteed to be the key that hashes to `latchId` ({@link
  *  quarantineLatchFileIdsFor}'s own id list is sorted real-file-first, never `armedKeys` order), so this
- *  finds the armed key that actually hashes to `latchId` first, mirroring 9a55fb90's own round 2 fix. */
+ *  finds the armed key that actually hashes to `latchId` first, mirroring 9a55fb90's own round 2 fix.
+ *
+ * @decision d69a6744 — derives the candidate key set via {@link liveArmedKeysOf}, never bare
+ * `entry.armedKeys` — a re-pointed twin used to resolve `key=undefined` here. See the decision record. */
 function ambiguousIdentitiesForLatchId(entry: MergeQuarantineEntry, latchId: string | undefined): AmbiguousIdentities {
-  const key = latchId ? (entry.armedKeys?.find((k) => quarantineHashForKey(k) === latchId) ?? entry.armedKeys?.[0]) : undefined;
+  const liveKeys = liveArmedKeysOf(entry);
+  const key = latchId ? (liveKeys.find((k) => quarantineHashForKey(k) === latchId) ?? liveKeys[0]) : undefined;
   return {
     siblingRepoPaths: key ? canonicalSiblingsFor(key, entry.repoPath).map((p) => p.entry.repoPath) : [],
     contributorRepoPaths: entry.contributorRepoPaths ?? [],
@@ -1396,7 +1400,10 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, droppedTokens: R
     // @decision 8db913e2 (Follow-up 43cf3b26) — the retention formula (prior resolvedKeys UNION this
     // write's own fresh secondary armedKeys) — see the decision record's own "retention rule" section.
     const ownKeyForWrite = targetKey ?? canonicalRepoLockKey(entry.repoPath);
-    const freshSecondaryKeys = (entry.armedKeys ?? []).filter((k) => k !== ownKeyForWrite);
+    // @decision d69a6744 — derived from LIVE occupancy (liveArmedKeysOf), filtered by ownership
+    // (entryStillOwnsKey), never bare `entry.armedKeys` — a stale/foreign armedKeys member used to
+    // persist straight through here. See the decision record.
+    const freshSecondaryKeys = liveArmedKeysOf(entry).filter((k) => k !== ownKeyForWrite && entryStillOwnsKey(k, entry));
     const retainedResolvedKeys = unionResolvedKeysRetaining(entry.resolvedKeys, freshSecondaryKeys, `writeMergeQuarantineLatch(${entry.repoPath})`);
     const resolvedKeys = retainedResolvedKeys.length > 0 ? retainedResolvedKeys : undefined;
     // Backward compat: an OLD reader only ever looks at the scalar — promote the first surviving
