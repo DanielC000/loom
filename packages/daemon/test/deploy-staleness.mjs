@@ -157,13 +157,17 @@ import { register } from "node:module";
 // a genuine module-customization-hooks seam, not a mock) that intercepts `node:child_process` ONLY when
 // it's imported by the real compiled `dist/deploy-staleness.js` (never by this test file's OWN `execSync`
 // import above, nor by anything else in this process) and swaps in a thin passthrough wrapper around the
-// REAL `execFileSync`. Every call that isn't deliberately armed via `globalThis.__dsGitFault` falls
-// straight through to the real `execFileSync`, so every scenario in this file that doesn't explicitly arm
-// the fault is byte-for-byte unaffected by this hook's mere presence. Used below at (23m-fault-proof) to
-// prove — by actually injecting a transient `ETIMEDOUT`-shaped failure into ONE of
-// `computeAncestorBehaviouralMatch`'s own per-file `git show` calls — that this failure mode is swallowed
-// to `builtContentMatchesHead:null` while `available` stays `true`, a shape the top-level
-// `isTransientGitTimeout` retry below structurally cannot see (it only ever inspects `available`).
+// REAL `execFileSync`. Every call that isn't deliberately armed via `globalThis.__dsGitFault` (or its
+// sibling `globalThis.__dsDiffFault`, card 89a454b2) falls straight through to the real `execFileSync`, so
+// every scenario in this file that doesn't explicitly arm one of the faults is byte-for-byte unaffected by
+// this hook's mere presence. Used below at (23m-fault-proof) to prove — by actually injecting a transient
+// `ETIMEDOUT`-shaped failure into ONE of `computeAncestorBehaviouralMatch`'s own per-file `git show` calls
+// — that this failure mode is swallowed to `builtContentMatchesHead:null` while `available` stays `true`,
+// a shape the top-level `isTransientGitTimeout` retry below structurally cannot see (it only ever inspects
+// `available`). Card 89a454b2: `__dsDiffFault` is a SECOND, independent one-shot fault targeting the SAME
+// function's own leading, unconditional `git diff --name-status` call — the real-world hazard that can
+// starve the `show`-fault below of ever firing under genuine host load (see (23m-fault-proof) itself for
+// the full mechanism and the RED/GREEN proof that motivated adding it).
 // A bare PATH shim (prepending a directory holding a `git.cmd`/`git.bat` to PATH) does NOT work for this:
 // Node's own `execFileSync`/`spawnSync` refuses to resolve a bare command name to a shell file without
 // `shell:true` (the CVE-2024-27980 fix) — confirmed empirically while building this fixture, the same
@@ -188,7 +192,27 @@ export async function load(url, context, nextLoad) {
       // load path (not just a standalone sweep) before landing; don't "simplify" the backslash count
       // without re-verifying against a live run, the same way this count was derived.
       const isGitBinary = (f) => /(^|[\\\\\\\\/])git(\\\\.exe)?$/i.test(f);
+      // Card 89a454b2: a SECOND, independent one-shot fault — globalThis.__dsDiffFault — matched on the
+      // literal "--name-status" arg, which (verified: grepped the whole module) is unique to
+      // computeAncestorBehaviouralMatch's own LEADING, unconditional git diff --name-status call
+      // (deploy-staleness.ts, before the per-file show loop the fault above watches). This simulates a
+      // REAL, uninjected ETIMEDOUT on that leading call — the exact mechanism that starves the show-fault
+      // below of ever firing under genuine host load (card 89a454b2's own investigation). Checked FIRST,
+      // same ordering as production's real call sequence (diff before any show).
+      // NOTE: this comment deliberately avoids backtick characters — this text is nested TWO template-
+      // literal levels deep (CP_FAULT_HOOK_SOURCE's own literal, then this src literal within it); a single
+      // backslash-escaped backtick here only survives the outer level and still closes the INNER literal
+      // early, which is exactly the syntax break this note exists to prevent recurring.
       export const execFileSync = (file, args, opts) => {
+        const diffFault = globalThis.__dsDiffFault;
+        if (diffFault && diffFault.armed && isGitBinary(file) && Array.isArray(args) && args.includes("--name-status") && diffFault.fired < diffFault.maxFires) {
+          diffFault.fired++;
+          const sab = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(sab, 0, 0, diffFault.delayMs);
+          const err = new Error("spawnSync git ETIMEDOUT");
+          err.code = "ETIMEDOUT";
+          throw err;
+        }
         const fault = globalThis.__dsGitFault;
         if (fault && fault.armed && isGitBinary(file) && Array.isArray(args) && args.includes("show") && fault.fired < fault.maxFires) {
           fault.fired++;
@@ -1285,9 +1309,83 @@ try {
   // computeAncestorBehaviouralMatch makes against this exact at-cap fixture — via the CP_FAULT_HOOK_SOURCE
   // loader hook registered at the top of this file (a real Node module-customization-hooks seam, not a
   // mock: everything that isn't this one deliberately-armed call falls straight through to the real git).
+  //
+  // Card 89a454b2: the DIRECT positive control below ("fired exactly once") used to assert that in ONE
+  // un-retried attempt — but `computeAncestorBehaviouralMatch`'s own leading, unconditional
+  // `git diff --name-status` call (deploy-staleness.ts, BEFORE the per-file loop this fault targets) is
+  // bound by the SAME production GIT_TIMEOUT_MS and has no retry of its own; a REAL (uninjected) transient
+  // timeout there aborts the whole function to null before the show-fault is ever evaluated, so `fired`
+  // legitimately reads 0 under genuine host load with no regression anywhere — exactly what the real gate
+  // red (card 89a454b2's own evidence) showed. `runShowFaultWithRetry` below re-samples (bounded, logged)
+  // ONLY on that specific "never reached the fault" shape, so the control counts only what it can prove —
+  // the injected mechanism engaged — without weakening what it proves: a show-fault that genuinely never
+  // fires within the retry budget still fails loud (see the EXHAUSTED self-check below).
+  function runShowFaultWithRetry(callFn, label) {
+    const armShowFault = () => { globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 }; };
+    let result;
+    let attempts = 0;
+    for (let attempt = 1; attempt <= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS; attempt++) {
+      attempts = attempt;
+      armShowFault();
+      result = callFn();
+      if (globalThis.__dsGitFault.fired === 1) break;
+      if (attempt < GIT_TIMEOUT_RETRY_MIN_ATTEMPTS) {
+        console.log(`RETRY (${attempt}) (${label}): the injected show-fault never fired this attempt (fired=0) — consistent with computeAncestorBehaviouralMatch's own leading \`git diff --name-status\` call hitting a REAL, uninjected ETIMEDOUT under host load before ever reaching the per-file loop; retrying`);
+      }
+    }
+    return { result, attempts, fired: globalThis.__dsGitFault.fired };
+  }
+
   const capOptions = { distEntry: atCap.capDistEntry, repoRoot: atCap.capRepo, processBuiltSha: atCap.capBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START };
+
+  // ---- (23m-fault-proof self-check) Card 89a454b2: prove the MECHANISM itself — a real, uninjected
+  // ETIMEDOUT on the leading `diff --name-status` call — by actually injecting ONE via the independent
+  // `__dsDiffFault` hook (CP_FAULT_HOOK_SOURCE, matched on the literal "--name-status" arg, unique to this
+  // one call in the whole module). (a) the OLD, un-retried pattern goes RED on it; (b) the NEW retry-
+  // wrapped pattern recovers to GREEN against the EXACT SAME fault; (c) the ordinary (no diff-fault) path
+  // still passes with ZERO retries; (d) a show-fault that can never fire (maxFires:0) still exhausts the
+  // retry budget and fails loud rather than looping forever or silently passing.
+  globalThis.__dsDiffFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
   globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
-  const rFaultRaw = computeDeployStalenessRaw(capOptions);
+  computeDeployStalenessRaw(capOptions); // OLD pattern: one un-retried attempt, exactly as it used to run.
+  check("(23m-fault-proof self-check) the diff-fault engaged exactly once, proving this run genuinely exercised the leading-call hazard",
+    globalThis.__dsDiffFault.fired === 1);
+  check("(23m-fault-proof self-check) RED: under that real-shaped diff-call timeout, the OLD un-retried pattern's show-fault never got a chance to fire (fired=0) — its own 'fired === 1' assertion would have FAILED here, exactly the card 89a454b2 flake",
+    globalThis.__dsGitFault.fired === 0);
+
+  globalThis.__dsDiffFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
+  const redGreen = runShowFaultWithRetry(() => computeDeployStalenessRaw(capOptions), "23m-fault-proof self-check GREEN");
+  check("(23m-fault-proof self-check) GREEN: the SAME diff-call fault, retried through the NEW wrapper, still proves the show-fault engaged",
+    redGreen.fired === 1);
+  check("(23m-fault-proof self-check) GREEN: ...and it took a SECOND attempt to get there — the diff-fault consumed attempt 1 (exactly as a real transient timeout would), the show-fault fired on attempt 2",
+    redGreen.attempts === 2);
+  check("(23m-fault-proof self-check) GREEN: the one-shot diff-fault fired exactly once across the whole retry — it cannot re-trigger on a later attempt",
+    globalThis.__dsDiffFault.fired === 1);
+  globalThis.__dsDiffFault = null;
+
+  const ordinary = runShowFaultWithRetry(() => computeDeployStalenessRaw(capOptions), "23m-fault-proof self-check ordinary");
+  check("(23m-fault-proof self-check) ORDINARY PATH: with no diff-fault armed, the wrapper needs exactly ONE attempt — it never retries when nothing forced it to",
+    ordinary.attempts === 1 && ordinary.fired === 1);
+
+  const exhausted = (() => {
+    let result;
+    let attempts = 0;
+    for (let attempt = 1; attempt <= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS; attempt++) {
+      attempts = attempt;
+      globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 0, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 }; // never fires
+      result = computeDeployStalenessRaw(capOptions);
+      if (globalThis.__dsGitFault.fired === 1) break;
+    }
+    return { result, attempts, fired: globalThis.__dsGitFault.fired };
+  })();
+  check(`(23m-fault-proof self-check) EXHAUSTED: a show-fault that can never fire (maxFires:0) still runs out after exactly GIT_TIMEOUT_RETRY_MIN_ATTEMPTS (${GIT_TIMEOUT_RETRY_MIN_ATTEMPTS}) attempts with fired left at 0 — demonstrating the bounded retry gives up and would fail loud rather than looping forever or silently claiming success`,
+    exhausted.attempts === GIT_TIMEOUT_RETRY_MIN_ATTEMPTS && exhausted.fired === 0);
+
+  // ---- (23m-fault-proof) the real hazard + fix proof, now via the retry-wrapped (self-check-proven above)
+  // calls — immune to the self-check's own injected diff-fault (unarmed here) AND to a genuine, uninjected
+  // instance of the same leading-call hazard occurring under real host load during this gate run.
+  const direct = runShowFaultWithRetry(() => computeDeployStalenessRaw(capOptions), "23m-fault-proof direct");
+  const rFaultRaw = direct.result;
   // Code Review 201f0c7e: assert the fault ACTUALLY fired, directly — not merely inferred from the
   // downstream shape below. `fired === 1` proves `isGitBinary(file)` matched the real (now win32-resolved
   // on this host, see card b5416a46) git binary AND `args.includes("show")` matched a real per-file
@@ -1295,17 +1393,17 @@ try {
   // then be asserting against an UNFAULTED (ordinary, successful) run instead of the injected hazard —
   // a shape that could coincidentally look identical if `computeAncestorBehaviouralMatch` ever started
   // returning null/true for some OTHER reason, silently defeating this whole positive control.
-  check("(23m-fault-proof) POSITIVE CONTROL, DIRECT: the injected fault actually fired exactly once",
-    globalThis.__dsGitFault.fired === 1, `fired=${globalThis.__dsGitFault.fired}`);
+  check(`(23m-fault-proof) POSITIVE CONTROL, DIRECT: the injected fault actually fired exactly once (${direct.attempts} attempt(s))`,
+    direct.fired === 1);
   check("(23m-fault-proof) THE HAZARD: a single transient git-show ETIMEDOUT inside computeAncestorBehaviouralMatch is swallowed to builtContentMatchesHead:null/stale:true even though every file is genuinely comment-only" + reasonSuffix(rFaultRaw),
     rFaultRaw.builtContentMatchesHead === null && rFaultRaw.stale === true);
   check("(23m-fault-proof) THE GAP: available stays true throughout, so the existing top-level isTransientGitTimeout retry structurally cannot see this failure at all",
     rFaultRaw.available === true);
 
-  globalThis.__dsGitFault = { armed: true, fired: 0, maxFires: 1, delayMs: GIT_TIMEOUT_EVIDENCE_MS + 50 };
-  const rFaultRetried = computeAtCapWithRetry(capOptions, "23m-fault-proof-retry");
-  check("(23m-fault-proof) POSITIVE CONTROL, DIRECT: the SAME fault fired exactly once here too (same reasoning as the direct check above)",
-    globalThis.__dsGitFault.fired === 1, `fired=${globalThis.__dsGitFault.fired}`);
+  const retried = runShowFaultWithRetry(() => computeAtCapWithRetry(capOptions, "23m-fault-proof-retry"), "23m-fault-proof-retry");
+  const rFaultRetried = retried.result;
+  check(`(23m-fault-proof) POSITIVE CONTROL, DIRECT: the SAME fault fired exactly once here too (same reasoning as the direct check above; ${retried.attempts} attempt(s))`,
+    retried.fired === 1);
   check("(23m-fault-proof) THE FIX: the SAME injected fault recovers to builtContentMatchesHead:true/stale:false once computeAtCapWithRetry's elapsed-time-evidenced retry re-attempts against the now-unarmed fault",
     rFaultRetried.builtContentMatchesHead === true && rFaultRetried.stale === false);
   globalThis.__dsGitFault = null;
