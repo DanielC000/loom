@@ -50,6 +50,12 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   // card's eight re-homed paths any redirect targets, and this map's own positive control above
   // rejects a path that none does.
   "/repository": "25c08fba — a tab on the project node, under its tab row and counts",
+  // Card a7f23a2f — /workspace is the redirect that lands here. Inside the frame the Projects page
+  // drops its own "Projects" label + description, because the crumbs and the node head already name
+  // the node; the classic shell still renders both. It is the only one of that card's four pages any
+  // declared redirect targets, and this map's own positive control above rejects a path that none
+  // does.
+  "/projects": "a7f23a2f — the frame names the node, so the page drops its own label + description",
 };
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY

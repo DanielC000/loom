@@ -20,3 +20,18 @@ export const AtlasNodeHeadContext = createContext<HTMLElement | null>(null);
 export function useAtlasNodeHeadSlot(): HTMLElement | null {
   return useContext(AtlasNodeHeadContext);
 }
+
+/**
+ * True when the Atlas frame is already stating this surface's identity — its crumb trail, its node
+ * head `<h1>` and its tab row all name the node before the page renders a thing. A page carrying its
+ * OWN title + description block suppresses that block when this reads true. Every block suppressed
+ * this way carries `data-testid="page-identity"`, so one locator covers the whole set —
+ * `atlas-page-identity.spec.ts` reads both polarities off it.
+ *
+ * @decision a7f23a2f — never re-express this as a read of the Atlas SWITCH (`useAtlasUi`). That reads
+ * which shell the browser renders, not whether THIS mount sits inside the frame's content region —
+ * the only condition a surface with mounts on both sides survives.
+ */
+export function useFrameOwnsNodeIdentity(): boolean {
+  return useAtlasNodeHeadSlot() !== null;
+}

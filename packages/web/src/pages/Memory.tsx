@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useFrameOwnsNodeIdentity } from "../lib/atlasNodeHead";
 import { SectionLabel, Segmented, Meter, Chip, Badge } from "../components/ui";
 import { color, font, radius, tone, type Tone } from "../theme";
 
@@ -286,19 +287,27 @@ export default function Memory() {
   const selected = openKey ? entries.find((e) => e.key === openKey) ?? null : null;
   const pinned = useMemo(() => sorted.filter((e) => e.pinned), [sorted]);
 
-  const header = (
+  // The Atlas frame already names this node — crumbs, node head and tab row — so inside it the page
+  // keeps only its search (card a7f23a2f). The entry count the dropped line carried is still read off
+  // the foot strip below; `useFrameOwnsNodeIdentity` is false under the classic shell, which renders
+  // no node head, so the header there is byte-unchanged.
+  const ownIdentity = !useFrameOwnsNodeIdentity();
+  const showSearch = entries.length > 0;
+  const header = (ownIdentity || showSearch) && (
     <div style={{ display: "flex", alignItems: "flex-end", gap: 20, marginBottom: 20, flexWrap: "wrap" }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
-        <h1 style={{ fontFamily: font.head, fontWeight: 700, fontSize: 22, letterSpacing: "0.02em", color: color.text, margin: 0, display: "inline-flex", alignItems: "center", gap: 10 }}>
-          <span aria-hidden style={{ color: color.phosphor, fontSize: 18 }}>◈</span> Memory
-        </h1>
-        <span style={{ color: color.textDim, fontSize: 12.5, maxWidth: "62ch" }}>
-          The durable knowledge your fleet writes and recalls — <b style={{ color: color.text, fontWeight: 500 }}>{entries.length}</b>{" "}
-          {entries.length === 1 ? "entry" : "entries"}{projectName ? <> in <b style={{ color: color.text, fontWeight: 500 }}>{projectName}</b></> : null}. Read-only; agents write via the <b style={{ color: color.text, fontWeight: 500 }}>memory</b> MCP.
-        </span>
-      </div>
+      {ownIdentity && (
+        <div data-testid="page-identity" style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+          <h1 style={{ fontFamily: font.head, fontWeight: 700, fontSize: 22, letterSpacing: "0.02em", color: color.text, margin: 0, display: "inline-flex", alignItems: "center", gap: 10 }}>
+            <span aria-hidden style={{ color: color.phosphor, fontSize: 18 }}>◈</span> Memory
+          </h1>
+          <span style={{ color: color.textDim, fontSize: 12.5, maxWidth: "62ch" }}>
+            The durable knowledge your fleet writes and recalls — <b style={{ color: color.text, fontWeight: 500 }}>{entries.length}</b>{" "}
+            {entries.length === 1 ? "entry" : "entries"}{projectName ? <> in <b style={{ color: color.text, fontWeight: 500 }}>{projectName}</b></> : null}. Read-only; agents write via the <b style={{ color: color.text, fontWeight: 500 }}>memory</b> MCP.
+          </span>
+        </div>
+      )}
       <span style={{ flex: 1 }} />
-      {entries.length > 0 && (
+      {showSearch && (
         <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
           <span aria-hidden style={{ position: "absolute", left: 10, color: color.textMuted, fontSize: 13, pointerEvents: "none" }}>⌕</span>
           <input value={search} onChange={(e) => setSearch(e.target.value)} className="loom-field"

@@ -4,6 +4,7 @@ import { errorText } from "../lib/loopbackCredential";
 import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, profileRoleBindsAsPlainSession, type Agent, type Project, type RepoRegistryEntry, type StalePromptWarning } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useFrameOwnsNodeIdentity } from "../lib/atlasNodeHead";
 import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots, StaleStartupPromptWarning } from "../components/ui";
 // The agent editor, the create form and the three agent writes all live in components/agentEditor.tsx
 // since card 318b5a21 — the Atlas Agents node mounts the SAME ones. This page keeps the frame (the
@@ -33,6 +34,7 @@ const TEMPLATE_AGENTS: { name: string; startupPrompt: string }[] = [
 // (card 274f9ba9): now a Config surface, adjacent to Profiles & Skills — the "define your actors" cluster.
 export default function Projects() {
   const qc = useQueryClient();
+  const ownIdentity = !useFrameOwnsNodeIdentity();
   // The active project is the shared, header-persisted selection (see lib/activeProject) — the
   // project rail WRITES to it. The agent selection stays local to this page.
   const { projectId, setProjectId } = useActiveProject();
@@ -170,12 +172,17 @@ export default function Projects() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <SectionLabel style={{ margin: 0 }}>Projects</SectionLabel>
-        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>
-          create and manage projects and their agents · live sessions live on Terminals and Overview
-        </span>
-      </div>
+      {/* The frame's crumbs and node head already say "Projects" inside Atlas, so this row goes there
+          (card a7f23a2f) — and its copy points at "Terminals and Overview", two destinations the Atlas
+          tree no longer has. Unchanged under the classic shell, where both still hold. */}
+      {ownIdentity && (
+        <div data-testid="page-identity" style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <SectionLabel style={{ margin: 0 }}>Projects</SectionLabel>
+          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>
+            create and manage projects and their agents · live sessions live on Terminals and Overview
+          </span>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "244px 320px minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
         {/* ── Projects rail: filter + live-dotted list + create + archived footer ─────────────────── */}

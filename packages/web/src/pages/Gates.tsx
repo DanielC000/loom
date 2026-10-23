@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
 import type { GateRun, GateHistoryRow, GateType, GateOutcome, TaskPriority } from "@loom/shared";
 import { api } from "../lib/api";
+import { useFrameOwnsNodeIdentity } from "../lib/atlasNodeHead";
 import { Panel, Button, SectionLabel } from "../components/ui";
 import { color, font, radius, space } from "../theme";
 
@@ -382,18 +383,24 @@ export default function Gates() {
 }
 
 // ── Page header — title + subtitle + the global semaphore occupancy lamps ────────
+// Inside the Atlas frame the title + subtitle go: the frame's crumbs, node head and tab row already
+// name this node (card a7f23a2f). The LAMPS stay either way — they are live state, not identity, and
+// nothing above the page carries them. Under the classic shell the whole head is unchanged.
 function PageHead({ cap, activeCount, queuedCount }: { cap: number; activeCount: number; queuedCount: number }) {
   const laneTone = activeCount > 0 ? color.amber : color.borderStrong;
+  const ownIdentity = !useFrameOwnsNodeIdentity();
   return (
     <div style={{ display: "flex", alignItems: "flex-end", gap: space(4), flexWrap: "wrap" }}>
-      <div>
-        <h1 style={{ fontFamily: font.head, fontWeight: 600, fontSize: 22, letterSpacing: "0.14em", textTransform: "uppercase", margin: 0, color: color.text }}>
-          Gates
-        </h1>
-        <div style={{ color: color.textDim, fontSize: 12, marginTop: 2 }}>
-          Every gate serializes through the GateSemaphore — {cap} lane{cap === 1 ? "" : "s"} by default
+      {ownIdentity && (
+        <div data-testid="page-identity">
+          <h1 style={{ fontFamily: font.head, fontWeight: 600, fontSize: 22, letterSpacing: "0.14em", textTransform: "uppercase", margin: 0, color: color.text }}>
+            Gates
+          </h1>
+          <div style={{ color: color.textDim, fontSize: 12, marginTop: 2 }}>
+            Every gate serializes through the GateSemaphore — {cap} lane{cap === 1 ? "" : "s"} by default
+          </div>
         </div>
-      </div>
+      )}
       <div style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: space(4) }}>
         <Lamp color={laneTone} glow={activeCount > 0} label={`${activeCount} / ${cap} lane${cap === 1 ? "" : "s"} busy`} />
         <Lamp color={queuedCount > 0 ? color.cyan : color.borderStrong} label={`${queuedCount} queued`} />

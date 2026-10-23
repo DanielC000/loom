@@ -157,6 +157,15 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   "/memory": "25c08fba — a tab on the project node, under its tab row and counts",
   "/runs": "25c08fba — a tab on the project node, under its tab row and counts",
   "/archive": "25c08fba — a tab on the project node, under its tab row and counts",
+  // Card a7f23a2f: these three carry their OWN title/description block, which the Atlas frame now
+  // suppresses because its crumbs, node head and tab row already name the node — so their Atlas
+  // rendering is the classic one MINUS that block, and identity here would mean the suppression never
+  // happened. (`/memory` is the fourth such page; its 25c08fba row above already inverts it, and one
+  // inversion per path is all this map can express. The other eight pages mounted in the frame carry
+  // no identity block at all, so that card leaves their comparison exact.)
+  "/gates": "a7f23a2f — the frame names the node, so the page drops its own <h1> + subtitle",
+  "/inbox": "a7f23a2f — the frame names the node, so the page drops its own name above its tab row",
+  "/projects": "a7f23a2f — the frame names the node, so the page drops its own label + description",
 };
 
 async function routesFrom(page: Page, selector: string): Promise<string[]> {
