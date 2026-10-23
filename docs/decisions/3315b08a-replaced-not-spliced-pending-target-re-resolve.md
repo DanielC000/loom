@@ -85,7 +85,8 @@ re-resolved `live` wrapper in place of `pending`.
   unexpected case; guessing which candidate is "the" target risks destroying or resurrecting the wrong
   one's content.
 - CLOSED (Code Review `d7eaad3d`, card `0faffa95`): `clearActiveEntryTokenAtKey`'s own dual-tracked-twin
-  loop (`merge-quarantine.ts:3724-3733`) is NOT exposed to this ASSIGN shape — it only ever calls
+  loop (its `collectPendingIndices((p) => p.entry === updated)` rewrite loop, inside the reduce branch)
+  is NOT exposed to this ASSIGN shape — it only ever calls
   `writePendingDivertFile` for each pending slot it finds, never `protectOccupantContentBeforeDelete` (or
   any other function that could detach a DIFFERENT, not-yet-processed pending wrapper via an ASSIGN from
   outside its own loop). `0faffa95` found the real sibling hazard elsewhere: a re-resolved `live` can

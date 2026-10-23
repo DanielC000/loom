@@ -176,6 +176,14 @@ fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, finalBasenameForK2), JSON.stringify({
     repoPath: Z2, branch: "z2-disk-branch", reason: "3315b08a S2: Z2's own real on-disk content at k2 (no survivor)", enteredAt: Date.now(), tokens: ["shared-token-2"],
   }, null, 2) + "\n");
+  // Z2's OWN armed key (k2own) ALSO needs a REAL on-disk latch file before the clear — without one,
+  // "the file doesn't exist after" would trivially pass even if ownedArmedKeys were wrongly computed as
+  // [] (nothing to delete either way), making the check vacuous. Writing a real file here is what lets
+  // this assertion actually fail if the fresh-ownedArmedKeys computation regresses.
+  const k2ownLatchPath = path.join(MERGE_QUARANTINE_DIR, `${hashKey(k2own)}.json`);
+  fs.writeFileSync(k2ownLatchPath, JSON.stringify({
+    repoPath: Z2, branch: "occupant-z2-branch", reason: "3315b08a S2: Z2's own real on-disk latch at k2own, pre-clear", enteredAt: Date.now(), tokens: ["shared-token-2"],
+  }, null, 2) + "\n");
 
   check("(precondition S2) Z2 reads blocked before the clear", !assertRepoNotQuarantined(Z2).ok);
   check("(precondition S2) M2 reads blocked before the clear", !assertRepoNotQuarantined(M2).ok);
@@ -185,7 +193,13 @@ fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   check("*** S2 *** M2 is fully lifted", assertRepoNotQuarantined(M2).ok);
   check("*** S2 *** Z2 is fully lifted too (re-derived REMOVE, not left stuck as a stale reduce)", assertRepoNotQuarantined(Z2).ok);
   check("*** S2 *** no entry anywhere still carries Z2's identity (the re-resolved pending slot was actually spliced, never left dangling at a stale index)", !listActiveMergeQuarantines().some((e) => e.repoPath === Z2));
-  check("*** S2 *** Z2's OWN armed key k2own was also durably cleared (fresh ownedArmedKeys, derived from the re-resolved live.entry, was actually processed)", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(k2own)}.json`)));
+  check("*** S2 *** Z2's OWN armed key k2own was also durably cleared (fresh ownedArmedKeys, derived from the re-resolved live.entry, was actually processed)", !fs.existsSync(k2ownLatchPath));
+
+  // ACROSS A REBOOT: re-import fresh and re-scan — Z2 must read clear, not resurrected by a stale file.
+  const rb2 = await rebootSim();
+  rb2.reenterMergeQuarantinesAtBoot([Z2, M2]);
+  check("*** REBOOT (S2) *** Z2 reads clear after reboot", !rb2.listActiveMergeQuarantines().some((e) => e.repoPath === Z2));
+  check("*** REBOOT (S2) *** M2 reads clear after reboot", !rb2.listActiveMergeQuarantines().some((e) => e.repoPath === M2));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -258,10 +272,15 @@ fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
 // 0-candidate branch for real.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 {
-  // Fresh module instance AND a fresh, nested, isolated LOOM_HOME (never the shared one S1/S2/S3a's own
-  // real latch writes have been cluttering) — a fresh JS module instance ALONE still boot-scans the SAME
-  // physical MERGE_QUARANTINE_DIR as everything earlier in this file, which would make B land at some
-  // OTHER index than 0. This scenario needs B to be the sole, known-index-0 entry.
+  // Fresh module instance — its own module-global pendingUnresolvedQuarantines/activeQuarantines start
+  // empty. The useOwnLoomHome({fresh:true}) call below does NOT, by itself, isolate the physical
+  // MERGE_QUARANTINE_DIR this fresh instance reads/writes: that path is derived from paths.ts, a
+  // statically-imported module Node's own cache never re-evaluates across a cache-busted dynamic
+  // re-import of merge-quarantine.js alone, so it stays pinned to whatever LOOM_HOME resolved to at this
+  // whole process's FIRST import, regardless of any later process.env.LOOM_HOME reassignment — a fresh
+  // module instance still boot-scans the SAME physical directory S1/S2/S3a's own real latch writes have
+  // been cluttering, which would make B land at some OTHER index than 0 if assumed to be index 0. This
+  // scenario therefore resolves B's REAL index below (findIdxFresh) rather than relying on isolation.
   useOwnLoomHome("loom-mq3315b08a-s3b-", { fresh: true });
   const freshMod = await rebootSim();
   const {
@@ -279,11 +298,7 @@ fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   ]);
 
   check("(precondition S3b) B reads blocked before the clear", !assertRepoNotQuarantinedFresh(B).ok);
-  // B's own REAL index — a fresh JS module instance still boot-scans the SAME physical
-  // MERGE_QUARANTINE_DIR every earlier scenario in this file already wrote real latch files into (that
-  // directory is derived from LOOM_HOME via paths.ts, a statically-imported module Node's own cache
-  // never re-evaluates across a cache-busted dynamic re-import of merge-quarantine.js alone) — so B is
-  // NOT reliably at index 0 here; resolve it for real rather than assuming a fixed position.
+  // B's own REAL index — see this scenario's own opening comment for why index 0 can't be assumed.
   const bIdx = findIdxFresh(B);
   check("(precondition S3b) B's own index was found", bIdx !== -1);
 

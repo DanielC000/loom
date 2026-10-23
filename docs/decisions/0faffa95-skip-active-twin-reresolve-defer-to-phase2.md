@@ -27,7 +27,7 @@ genuinely points that key at `live.entry`.
   that key resurrects `token` as outstanding there.
 - **REMOVE** (nothing survives the union): SAFE. The remove branch never mutates `live.entry.tokens`
   itself (it only ever deletes keys it OWNS), so phase 2 still finds `token` present on the twin's entry
-  and fully lifts it there, including rewriting the twin's own physical latch file — this is the "phase 2
+  and fully lifts it there, including unlinking the twin's own physical latch file — this is the "phase 2
   backstops" case named in the card.
 
 ## The fix
@@ -35,12 +35,23 @@ genuinely points that key at `live.entry`.
 In the re-resolve branch only, immediately after resolving `live`: scan `activeQuarantines.values()` for
 a reference-equal (`===`) match to `live.entry`. If found, log (disclosure-safe: repoPath + sourceFile
 only) and `continue` — skip remove/reduce here entirely, deferring to `clearActiveEntryTokenAtKey`
-(phase 2). This is complete, not merely "deferred and hoped": `clearActiveEntryTokenAtKey` already walks
-every key in `entry.armedKeys` (falling back to the one key it was found at when `armedKeys` is
-empty/missing) via `replaceEntryEverywhere`, AND separately re-writes every PENDING slot sharing the SAME
-object reference (`collectPendingIndices((p) => p.entry === updated)`, its own dual-tracked-twin loop,
-`@decision ae79d492`) — which durably rewrites the stranded target's own pending slot in the same pass
+(phase 2). **This is complete for a twin armed at a SINGLE key — the only shape this card's own repro
+constructs and verifies** (`merge-quarantine-0faffa95-active-twin-defer-to-phase2.mjs`'s T2 carries
+exactly one `armedKeys` entry, `kTwin`): `clearActiveEntryTokenAtKey`'s own `armedKeysForEntry` falls
+back to the ONE key it was found at (`entry.armedKeys?.length ? entry.armedKeys : [key]`) precisely
+because `written.entry.armedKeys` is empty (never unioned, per `c9114934`/`cd5a3cf9`) — so for a
+single-key twin that fallback is harmless (there is only one key to begin with) and
+`clearActiveEntryTokenAtKey` correctly walks it AND separately re-writes every PENDING slot sharing the
+SAME object reference (`collectPendingIndices((p) => p.entry === updated)`, its own dual-tracked-twin
+loop, `@decision ae79d492`) — durably rewriting the stranded target's own pending slot in the same pass
 that fixes the twin's latch.
+
+**Known residual, NOT closed by this card (card `6be6c9ff`):** for a twin armed at MORE THAN ONE key,
+the SAME `armedKeys`-empty gap means `armedKeysForEntry`'s one-key fallback only ever covers whichever
+key phase 2's own iteration happened to land on — the twin's OTHER key(s) are never durably rewritten by
+this call, even though `activeQuarantines` was re-pointed for all of them. This record's "complete" claim
+does not extend to that shape; see card `6be6c9ff` for the multi-key gap itself and card `f00e9de8` for
+the related question of an armed twin's own in-memory tokens being dropped by the re-point.
 
 ## Do not
 
@@ -53,13 +64,14 @@ that fixes the twin's latch.
   derived; letting REMOVE "pass through" here too is what keeps the fix simple and correct for both, and
   avoids re-deriving (and risking drift on) the remove-vs-reduce distinction a second time, redundantly,
   right before immediately discarding it.
-- Do not assume a bare `liveMatches.length === 0` is reachable via any real `protectOccupantContentBeforeDelete`
-  mutation path — every real branch there either re-points an EXISTING same-identity slot (preserving it)
-  or mints an independent new one (never fewer); the 0-candidate test in
+- Do not assume a bare `liveMatches.length === 0` is reachable via `protectOccupantContentBeforeDelete`'s
+  own mutations — that is the ONLY path shown here, and every real branch there either re-points an
+  EXISTING same-identity slot (preserving it) or mints an independent new one (never fewer); this says
+  nothing about every OTHER function in this module. The 0-candidate test in
   `merge-quarantine-3315b08a-replace-not-splice-stale-target.mjs` exercises the defensive branch directly
   (via the `clearTokenFromPendingIndicesTestOnly` seam, with the SAME index passed twice) precisely
-  because no organic cascade can produce it — do not try to "upgrade" that test to a purely organic
-  construction; it would be testing a state this module's own copy-aside architecture cannot produce.
+  because no cascade through protect's own mutations can produce it — do not try to "upgrade" that test
+  to a construction routed only through protect; it would be testing a state THAT path cannot produce.
 
 ## Verification
 
