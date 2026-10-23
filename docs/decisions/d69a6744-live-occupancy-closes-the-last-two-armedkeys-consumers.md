@@ -55,13 +55,33 @@ shared helper `6be6c9ff`/`c52b290e`/`1fc3a561` already established — never bar
 
 - Site 1: `const liveKeys = liveArmedKeysOf(entry); const key = latchId ? (liveKeys.find(k =>
   quarantineHashForKey(k) === latchId) ?? liveKeys[0]) : undefined;`
-- Site 2: `const freshSecondaryKeys = liveArmedKeysOf(entry).filter(k => k !== ownKeyForWrite &&
-  entryStillOwnsKey(k, entry));` — ADDITIONALLY filtered through `entryStillOwnsKey`, unlike site 1: this
-  is a WRITE site (it durably persists what it computes), so a stale/foreign member must never merely be
-  unioned-in — it must be excluded. `entryStillOwnsKey` admits a key via either reference equality OR a
-  same-identity, token-subset occupant — proven (Scenario 4 below) to still correctly retain a LEGITIMATE
-  secondary key via either admission path, so the ownership filter is additive safety, never a narrowing
-  that could strand a real secondary.
+- Site 2: `const freshSecondaryKeys = liveArmedKeysOf(entry, ownershipMap).filter(k => k !== ownKeyForWrite
+  && entryStillOwnsKey(k, entry, ownershipMap));` — ADDITIONALLY filtered through `entryStillOwnsKey`,
+  unlike site 1: this is a WRITE site (it durably persists what it computes), so a stale/foreign member
+  must never merely be unioned-in — it must be excluded. `entryStillOwnsKey` admits a key via either
+  reference equality OR a same-identity, token-subset occupant — proven (Scenario 4 below) to still
+  correctly retain a LEGITIMATE secondary key via either admission path, so the ownership filter is
+  additive safety, never a narrowing that could strand a real secondary.
+
+**Boot-time correction (found by the full-corpus verification step, not by review):** `entryStillOwnsKey`/
+`liveArmedKeysOf` default to reading the module-global `activeQuarantines` map — correct for every
+existing (runtime-only) caller, but WRONG for `writeMergeQuarantineLatch`'s own `bootWriteLatch` caller:
+`reenterMergeQuarantinesAtBootImpl` builds a LOCAL `byRepoKey` map and only copies it into
+`activeQuarantines` once, at the very end of the whole boot function (`for (const [key, entry] of
+byRepoKey) activeQuarantines.set(key, entry);`) — long after every boot-time write has already run. A
+boot-time write that reached the live-occupancy filter against the stale, not-yet-synced
+`activeQuarantines` therefore saw NONE of that same boot pass's own in-progress arming, including a key
+this very entry was *genuinely, freshly* dual-armed at this boot (the `8bff3cae`
+`shared-ancestor-sibling-survives-divergence` scenario's own `staleKeyRetentionCandidates` mechanism,
+which arms a migrated entry at BOTH its new key and a still-live sibling key via `byRepoKey` directly) —
+wrongly excluding that live secondary and reopening `8bff3cae`'s own regression on the VERY NEXT reboot
+after the fix's own first write. Fixed by giving both helpers an optional `map` parameter (default
+`activeQuarantines`, byte-identical for every existing call) and threading it through
+`writeMergeQuarantineLatch`'s own new `ownershipMap` parameter (default `activeQuarantines`), with
+`bootWriteLatch` the one caller passing its own closure-captured `byRepoKey` instead. Caught by this
+card's own DoD (the full `merge-quarantine*.mjs` corpus run), not by code review — see
+`merge-quarantine-pass1-migrate-resolvedkey-8bff3cae.mjs`'s own `shared-ancestor-sibling` scenario, the
+one that went red.
 
 ## The resolvedKeys-retention residual — OUT OF SCOPE, tracked on `f575cebf`
 
@@ -78,6 +98,11 @@ basename reconcile) is unproven, not merely unfixed. Filed as card `f575cebf` (p
 
 ## Do not
 
+- Do not add a new boot-time caller of `writeMergeQuarantineLatch` (directly, or via `bootWriteLatch`)
+  without passing the boot's own local `byRepoKey` as `ownershipMap` — the default (`activeQuarantines`)
+  is correct for every RUNTIME caller but structurally stale for any write that happens before
+  `reenterMergeQuarantinesAtBootImpl`'s own end-of-function sync loop runs. Same rule for any NEW call to
+  `entryStillOwnsKey`/`liveArmedKeysOf` added inside that function — pass `byRepoKey` explicitly.
 - Do not have `protectOccupantContentBeforeDelete`'s own re-point stamp `armedKeys` onto `written.entry`
   as "the" fix for this shape — same prohibition `1fc3a561`/`c52b290e` already state, for the same reason
   (it covers only one of 20+ `replaceEntryEverywhere` sites in this file). This card never unions an OLD
@@ -106,11 +131,17 @@ basename reconcile) is unproven, not merely unfixed. Filed as card `f575cebf` (p
   admitted via `entryStillOwnsKey`'s SUBSET-TOKEN branch rather than reference equality, survives a reboot
   with neither key dropped).
 - RED/GREEN via `pnpm --filter @loom/daemon negative-control --file packages/daemon/src/git/merge-quarantine.ts
-  --test packages/daemon/test/merge-quarantine-d69a6744-liveoccupancy-ambiguity-and-write.mjs --ref <this
-  card's own commit>~1` — a logic-only revert (every symbol this test imports already existed pre-fix;
-  only the two widened expressions' own formulas changed), never `--ref HEAD` once committed.
+  --test packages/daemon/test/merge-quarantine-d69a6744-liveoccupancy-ambiguity-and-write.mjs --ref
+  <this card's own first commit>~1` (the parent BEFORE either of this card's two commits) — a logic-only
+  revert (every symbol this test imports already existed pre-fix; only the widened expressions' own
+  formulas changed), never `--ref HEAD` once committed. Two commits land this card's own fix: the first
+  (the Lead-approved formula) regressed `8bff3cae`'s own boot-time scenario, found by the full-corpus run
+  below; the second is the `ownershipMap` correction described above. The negative-control's own RED
+  phase reverts BOTH in one step (one `--file`), so it proves the full, corrected diff, not an intermediate
+  state.
 - Full `merge-quarantine*.mjs` corpus, individually, fresh `LOOM_HOME` per file, both env states
-  (`env -u LOOM_DEV -u LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane.
+  (`env -u LOOM_DEV -u LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane — this is what caught
+  the boot-time regression (`merge-quarantine-pass1-migrate-resolvedkey-8bff3cae.mjs`), not code review.
 - `pnpm --filter @loom/daemon guards`, committed first.
 
 See `docs/decisions/1fc3a561-remaining-armedkeys-consumers-closed-via-live-scan.md`'s own "Do not" section,
