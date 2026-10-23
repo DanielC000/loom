@@ -843,7 +843,14 @@ export const api = {
   // while the gate is STILL genuinely running (`pending:true`, `opId` set); it was NOT rejected. A
   // consumer must check `pending`/`merged === null` BEFORE reading `!merged` as "rejected" — see the
   // REST route's own doc for the incident a `false`-only shape caused.
-  mergeWorker: (sessionId: string) => post<{ merged: boolean | null; pending?: boolean; opId?: string; reason?: string }>(`/api/sessions/${sessionId}/merge`),
+  // Card 3059ce95: `commitSubject` widens this declared shape on purpose (superseding the narrower
+  // one `c2182f9d`'s own doc warned against enriching past) — the REST route (`gateway/server.ts`'s
+  // `/api/sessions/:id/merge`) already forwards it verbatim via `reply.send(r.value)`, and the
+  // daemon's plain green `ConfirmMergeResult` sets it unconditionally on every landed squash
+  // (`sessions/service.ts`). Still absent on the `ALREADY_MERGED` finish (`finishAlreadyMerged` never
+  // sets it — no new commit lands there) and on `pending`/rejection — a consumer must keep treating it
+  // as optional, never assume it accompanies every `merged:true`.
+  mergeWorker: (sessionId: string) => post<{ merged: boolean | null; pending?: boolean; opId?: string; reason?: string; commitSubject?: string }>(`/api/sessions/${sessionId}/merge`),
   // `schedulerEnabled` is the boot-time cron-Scheduler gate (LOOM_SCHEDULER_ENABLED=1 OR resolved
   // orchestration.schedulerEnabled). Read-only; the Schedules page uses it to warn, honestly, when
   // created schedules will NOT fire because the scheduler is off (the default).

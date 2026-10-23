@@ -114,6 +114,75 @@ function expectMergePost(hits: { url: string; method: string }[], n: number, wor
 const MERGED_OK = { merged: true, pending: false } as const;
 
 test.describe("one-click merge success is acknowledged (card c2182f9d)", () => {
+  // Card 3059ce95: `commitSubject` is named in the success line when the daemon sends one. Unlike
+  // `merged` (no per-run sentinel of its own — the real daemon's green response carries no `reason`
+  // to put one in), the subject itself embeds this run's short prefix, so a match proves the line
+  // came from THIS row's own mutation, not merely "a" success line somewhere on a shared daemon.
+  test("switch ON: a subject in the merge response is named; its absence still renders bare `merged`", async ({ page, loomDaemon }) => {
+    test.setTimeout(150_000);
+    const seeded = await seedPendingReview(loomDaemon);
+    const subject = `fix(web): land merge-ok-${seeded.short}`;
+    let reply: Record<string, unknown> = { ...MERGED_OK };
+    const hits = await interceptMerge(page, () => reply);
+
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.projectId);
+    await page.goto(loomDaemon.baseURL + "/home");
+
+    const action = page.getByTestId(`atlas-band-merge-${seeded.wkr.sessionId}`);
+    await expect(action).toBeVisible();
+    const goButton = page.getByTestId(`atlas-band-merge-go-${seeded.wkr.sessionId}`);
+
+    const bareMergedLine = action.getByText("merged", { exact: true });
+    const mergedWithSubjectLine = action.getByText(`merged — ${subject}`, { exact: true });
+
+    // ── NO subject on the response ⇒ the bare line, exactly as before this card.
+    await expect(bareMergedLine).toHaveCount(0);
+    await goButton.click();
+    await expect(bareMergedLine).toBeVisible();
+    await expect(mergedWithSubjectLine).toHaveCount(0);
+    expectMergePost(hits, 1, seeded.wkr.sessionId);
+
+    // ── A subject on the response ⇒ the enriched line, and the bare exact-match line is gone (it is
+    //    a DIFFERENT string, not a superset) — re-driven on the SAME mount, so this also proves the
+    //    enrichment doesn't leak into a mount that got no subject.
+    reply = { merged: true, pending: false, commitSubject: subject };
+    await goButton.click();
+    await expect(mergedWithSubjectLine).toBeVisible();
+    await expect(bareMergedLine).toHaveCount(0);
+    expectMergePost(hits, 2, seeded.wkr.sessionId);
+  });
+
+  test("switch OFF: the classic Review queue card names a subject the same way", async ({ page, loomDaemon }) => {
+    test.setTimeout(150_000);
+    const seeded = await seedPendingReview(loomDaemon);
+    const subject = `fix(web): land merge-ok-${seeded.short}`;
+    let reply: Record<string, unknown> = { ...MERGED_OK };
+    const hits = await interceptMerge(page, () => reply);
+
+    await pinProject(page, seeded.projectId);
+    await page.goto(loomDaemon.baseURL + "/overview");
+
+    const card = page.locator("main div")
+      .filter({ hasText: `w:${seeded.short}` }).filter({ hasText: "Approve & merge" }).last();
+    const goButton = card.getByRole("button", { name: "Approve & merge" });
+    await expect(goButton).toBeVisible();
+
+    const bareMergedLine = card.getByText("merged", { exact: true });
+    const mergedWithSubjectLine = card.getByText(`merged — ${subject}`, { exact: true });
+
+    await expect(bareMergedLine).toHaveCount(0);
+    await goButton.click();
+    await expect(bareMergedLine).toBeVisible();
+    await expect(mergedWithSubjectLine).toHaveCount(0);
+    expectMergePost(hits, 1, seeded.wkr.sessionId);
+
+    reply = { merged: true, pending: false, commitSubject: subject };
+    await goButton.click();
+    await expect(mergedWithSubjectLine).toBeVisible();
+    await expect(bareMergedLine).toHaveCount(0);
+    expectMergePost(hits, 2, seeded.wkr.sessionId);
+  });
   test("switch ON: the Atlas band row confirms a merge, and still reads both other outcomes", async ({ page, loomDaemon }) => {
     // One node load and three merge round-trips is past the 30s default.
     test.setTimeout(150_000);
