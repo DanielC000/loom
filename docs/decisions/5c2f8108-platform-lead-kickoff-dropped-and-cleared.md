@@ -77,6 +77,27 @@ confirm anything either. The web attention item text and the Platform-Lead board
 so explicitly, so the owner/Lead dismiss the alert manually after a manual recovery rather than waiting
 for it to clear on its own.
 
+## Round 4 — pointer only
+
+The restart-survival gap this record's own Narrative names ("the Platform Lead has no Lead above it
+either") turned out to apply to the DEFERRAL window too, not just the drop itself: a Lead's kickoff still
+within `withinKickoffConfirmWindow` at exhaustion wrote nothing durable before a restart, same as a
+manager's. Fixed on card `ab3c965d`'s own record (its "Round 4" section) — covers both roles identically,
+since `handleKickoffGiveUpExhausted`'s `pending` branch and `escalateDeferredManagerKickoffAtBoot` are
+shared code, keyed on `w.role` only at the points that differ (Lead-escalation skipped for `"platform"`).
+Not restated here — read it there.
+
+## Round 5 — pointer only
+
+A Code Review of Round 4 (full narrative on `ab3c965d`'s own record, its "Round 5" section; also card
+`3d72900f`'s own "Round 5" section, which documents the busy-capture correction this review's own first
+fix attempt needed) found the boot-consumer wiring missed `recoverCrashOrphanedWorkers` entirely — the
+path a Platform Lead's own end-user install
+actually boots through on an ordinary crash/service restart, since the Lead is never resumed via a
+self-host `daemon_restart`'s `RestartIntent` on a fresh/first-run install. That gap, and every other
+round-5 fix (the vacuous-proof fix, the dead try/catch fix, the reverted `isLiveAndPreBoot` removal), is
+shared code with the manager path and applies to the Lead identically — not restated here.
+
 ## Do not
 
 - Do not call `handleManagerKickoffDropped` without passing the caller's own, already-verified role — the

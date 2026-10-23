@@ -1427,7 +1427,12 @@ export type OrchestrationEventKind =
   // repeated GIVE-UP RECOVERY. Deliberately INDEPENDENT of `session_message_delivered` (that marker is
   // stamped optimistically before give-up detection resolves) — consult both, don't infer "never
   // dropped" from delivered alone. `detail` carries { msgId, rootMsgId, chainDepth,
-  // outcome: "reminted" | "parked" | "confirmed-after-park", remintedAs? }.
+  // outcome: "reminted" | "parked" | "confirmed-after-park" | "deferred", remintedAs? }. Card 3d72900f:
+  // `outcome:"deferred"` is the manager/platform-only shape — `handleKickoffGiveUpExhausted`'s manager/
+  // platform branch writes it (with an additive `origin:"kickoff"` and `role:"manager"|"platform"` in
+  // the same detail) the instant it defers a still-within-window drop, BEFORE arming the in-memory-only
+  // recheck timer, so `escalateDeferredManagerKickoffAtBoot` has something durable to resume from across
+  // a restart; it carries no `remintedAs` (managers never re-mint — see the manager carve-out's own doc).
   // @decision ccb407eb — never infer "never dropped" from `session_message_delivered` alone; consult
   //  this event too. A re-mint resets budget/increments chainDepth, never re-runs the same loop. A
   //  "parked" event with no later "confirmed-after-park" is NOT proof the message never landed.

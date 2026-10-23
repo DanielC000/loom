@@ -7748,6 +7748,11 @@ export class SessionService {
             );
           }
         } else if (e.role === "manager" || e.role === "platform") {
+          // @decision 3d72900f — decide the deferred-kickoff-drop escalation FIRST, same load-bearing
+          // ordering as the worker branch's escalateParkedKickoffAtBoot call above: the continuation
+          // nudge composed below (or the pending replay) can itself start this session's first turn.
+          const hasQueuedPendingMgr = (intent.pending?.[e.sessionId] ?? []).length > 0;
+          if (this.escalateDeferredManagerKickoffAtBoot(e.sessionId, hasQueuedPendingMgr, e.busy === true, e.hadUnsentDraft === true)) continue;
           const impact = wakeImpact(e.sessionId, e.role);
           // Card a1b79655: same ADDITIVE treatment as draftNote — a dropped cap-queued spawn intent is new,
           // actionable information distinct from board-impact classification, so it must never be suppressed
@@ -8108,6 +8113,9 @@ export class SessionService {
     opts: {
       resumeOne?: (id: string) => ResumeOneResult; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null;
       hadCrashLogAtBoot?: boolean; bootedAt?: Date; supervisorIteration?: number | null;
+      // @decision 3d72900f — pre-crash busy, captured by index.ts from `recoverStaleSessions()`'s own
+      // pre-UPDATE SELECT (`recovered`); the persisted row's busy is already 0 by the time this runs.
+      busyAtCrashByManagerId?: Map<string, boolean>;
     } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[]; retiredSkipped: string[]; consolidatedSkipped: string[] } {
     const now = opts.now ?? new Date();
@@ -8326,6 +8334,14 @@ export class SessionService {
         }
         continue; // resumed live; honor the park — no summary nudge
       }
+      // @decision 3d72900f — this is the ONLY boot path a non-self-host install takes; decide the
+      // escalation BEFORE the unconditional summary nudge below, or it hides the drop forever.
+      // `opts.busyAtCrashByManagerId` carries the PRE-crash busy (`db...busy` is always false here).
+      if (this.escalateDeferredManagerKickoffAtBoot(
+        managerId,
+        this.db.listUnresolvedQueuedMessagesForWorker(managerId).length > 0,
+        opts.busyAtCrashByManagerId?.get(managerId) === true,
+      )) continue;
       // card c9e51581 (Path B extension of 61cc91c6): a manager/platform with NO stake in this crash —
       // no crash-orphaned worker candidates (recovered or failed) alongside it, no stranded board work,
       // no unconsumed answer — resumes SILENTLY instead of burning the unconditional summary nudge below.
@@ -11561,6 +11577,14 @@ export class SessionService {
       if (pending) {
         // eslint-disable-next-line no-console
         console.warn(`[give-up] ${sessionId} turn-1 ${roleLabel} kickoff (root ${rootMsgId}) exhausted its give-up requeue budget, but is still within its plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s) — deferring manager_kickoff_dropped and re-checking when the window ends instead of dropping immediately`);
+        // @decision 3d72900f — record this deferral durably BEFORE arming the in-memory-only recheck
+        // timer below, or a restart inside this window loses the drop permanently with nothing for
+        // escalateDeferredManagerKickoffAtBoot to resume from.
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
+          kind: "session_message_gave_up",
+          detail: { msgId, rootMsgId, outcome: "deferred", origin: "kickoff", role: w.role },
+        });
         this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs, rootMsgId, (ww) => {
           // The generic stand-down in armKickoffConfirmRecheck already re-checked hasFirstTurnStarted/
           // busy/turnSeq before calling this callback at all; re-check the ONE discriminator it doesn't
@@ -11803,6 +11827,71 @@ export class SessionService {
       ? ` Also: worker ${sessionId} had an unsent composer draft at the moment of this restart — never submitted, so it is not part of its resumed history. This was likely its own attempt to confirm the kickoff.`
       : "";
     this.enqueueSystemNudge(w.parentSessionId, buildKickoffNeverConfirmedBrokenMsg(w) + draftClause, { kind: "warning", taskId: null });
+    return true;
+  }
+
+  /**
+   * @decision 3d72900f — the manager/platform twin of `escalateParkedKickoffAtBoot` just above: a
+   * still-within-window manager/platform kickoff used to lose its drop across a restart with nothing
+   * durable recorded; reads the `outcome:"deferred"` marker `handleKickoffGiveUpExhausted` now writes.
+   *
+   * Called from `resumeFleetOnBoot`'s manager/platform branch BEFORE it composes any continuation nudge,
+   * for the SAME load-bearing-ordering reason `escalateParkedKickoffAtBoot` already documents: that
+   * nudge (or the pending replay above it) can itself start this session's first turn, flipping
+   * `turnSeq`/`hasFirstTurnStarted` and permanently hiding that the ORIGINAL kickoff never landed.
+   *
+   * Same stand-down discriminator SHAPE as `escalateParkedKickoffAtBoot` (cheapest field/param reads
+   * first, the disk-reading transcript read last — see card 3d72900f/Round 5, deliberately not restating a
+   * count here, since a bare number drifts the moment either function's own check list changes without
+   * this comment being touched in lockstep): role must be "manager"/"platform"; the PERSISTED `turnSeq`
+   * already > 0 (the kickoff confirmed and completed before this restart); the PERSISTED `w.busy` (still
+   * mid-turn as of the last write); `hasBusyAtCapture` — on `resumeFleetOnBoot` this is the
+   * `RestartResumeEntry`'s own captured busy flag, a second, independent busy signal; on the
+   * crash-recovery call site there is no restart-intent snapshot, so it instead carries the PRE-crash
+   * busy `recoverStaleSessions()` captured before zeroing it (`recoverCrashOrphanedWorkers`'s own
+   * `busyAtCrashByManagerId`, card 3d72900f/Round 5 SF-1 — the persisted row's busy is already false by
+   * the time either boot path reaches this check, so reading it live here would always read false);
+   * `hasQueuedPending` (queued direction about to replay would itself resolve the question). It omits ONE check the worker
+   * twin has — "any worker_report ever recorded" — since nothing a manager calls on itself serves that
+   * role; the disk transcript read is the comprehensive catch-all here instead, mirroring the live path's
+   * own `lateConfirmation()` compound (`hasFirstTurnStarted() || transcriptNonEmpty()`) —
+   * `hasFirstTurnStarted` itself is never callable at boot (live-pty-only, pre-resume), same reason
+   * `escalateParkedKickoffAtBoot` never calls it either.
+   *
+   * Looks up the latest `outcome:"deferred"` marker (via the SAME indexed `listEventsForWorkerKinds` the
+   * worker twin uses) BEFORE the transcript read, not after (card 3d72900f/Round 5, N-2) — a session with no
+   * marker at all never pays for that disk read. Returns true iff it escalated (the caller must skip the
+   * normal continuation nudge for this entry) — false for any discriminator above, no deferred marker at
+   * all (dropped immediately pre-restart, already durable via `handleManagerKickoffDropped`, or this
+   * branch was never reached), or a deferred marker whose own `rootMsgId` already has a LATER
+   * `manager_kickoff_dropped` event in the same trail (the live timer fired before this restart hit —
+   * never a double-fire across repeated boots, including across the crash-recovery AND restart-intent
+   * boot paths, which can never both run for the same boot — card 9fc41af5).
+   *
+   * `hadUnsentDraft` (card 3d72900f/Round 5, N-6) is informational only, never a discriminator — forwarded to
+   * `handleManagerKickoffDropped` to append a draft-loss clause to the Lead-facing escalation text, the
+   * same additive treatment `escalateParkedKickoffAtBoot`'s own `draftClause` gives the worker twin.
+   */
+  private escalateDeferredManagerKickoffAtBoot(sessionId: string, hasQueuedPending: boolean, hasBusyAtCapture: boolean, hadUnsentDraft = false): boolean {
+    const w = this.db.getSession(sessionId);
+    if (!w || (w.role !== "manager" && w.role !== "platform")) return false;
+    if ((w.turnSeq ?? 0) > 0) return false;
+    if (w.busy) return false;
+    if (hasBusyAtCapture) return false;
+    if (hasQueuedPending) return false;
+    // Card 3d72900f/Round 5 (N-2): the indexed trail lookup is a cheap DB query — run it BEFORE the
+    // disk-reading transcript check below, so a session with no deferred marker at all never pays for it.
+    const trail = this.db.listEventsForWorkerKinds(sessionId, ["session_message_gave_up", "manager_kickoff_dropped"]);
+    const deferred = trail.filter((e) => e.kind === "session_message_gave_up" && e.detail?.outcome === "deferred" && e.detail?.origin === "kickoff").at(-1);
+    if (!deferred) return false;
+    const rootMsgId = deferred.detail?.rootMsgId as string | undefined;
+    const msgId = deferred.detail?.msgId as string | undefined;
+    if (!rootMsgId || !msgId) return false;
+    const deferredIdx = trail.indexOf(deferred);
+    const alreadyDropped = trail.slice(deferredIdx + 1).some((e) => e.kind === "manager_kickoff_dropped" && e.detail?.rootMsgId === rootMsgId);
+    if (alreadyDropped) return false;
+    if (w.engineSessionId && readTranscript(w.cwd, w.engineSessionId, w.harness).length > 0) return false;
+    this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId, w.role as "manager" | "platform", hadUnsentDraft);
     return true;
   }
 
@@ -12085,9 +12174,21 @@ export class SessionService {
 
     const liveLead = this.db.listAllSessions().find((x) => x.role === "platform" && x.processState === "live" && !this.db.hasSuccessor(x.id));
     let leadNotified = false;
+    // @decision ab3c965d (Round 5, SF-4) — `isLiveAndPreBoot` stays: removing it broke a real hazard
+    // test (the Lead can itself be stuck on the same blocking dialog as the session it's notifying about).
     if (liveLead && !this.pty.isLiveAndPreBoot(liveLead.id)) {
-      this.enqueueSystemNudge(liveLead.id, liveNudgeText(leadBoardTaskId), { kind: "warning", taskId: null });
-      leadNotified = true;
+      // @decision ab3c965d (Round 5, SF-3) — this try/catch guards ONLY the nudge-send below (the
+      // liveNudgeText() call plus enqueueDurableNudge itself), separate from insertTask above, so a
+      // throw here never costs the already-filed leadBoardTaskId the caller's own return needs to carry.
+      try {
+        // enqueueDurableNudge never throws; leadNotified comes from its onOutcome, which fires
+        // synchronously here since role "platform" never defers (not orchestration-mcp).
+        this.enqueueDurableNudge(liveLead.id, "platform", liveNudgeText(leadBoardTaskId), null, {
+          onOutcome: (outcome) => { leadNotified = outcome.dispatched; },
+        });
+      } catch (e) {
+        console.warn(`[give-up] notifyLeadOfParentlessManagerIssue: nudge-send to Lead ${liveLead.id.slice(0, 8)} threw — board task ${leadBoardTaskId} is still filed: ${(e as Error)?.message ?? e}`);
+      }
     }
     return { leadNotified, leadBoardTaskId };
   }
@@ -12121,8 +12222,14 @@ export class SessionService {
    * manager episode: a turn-1 kickoff that exhausted its give-up budget. See that method's own doc, and
    * `handleManagerKickoffDropped`'s own doc for why this exists at all.
    */
-  private notifyLeadOfDroppedManagerKickoff(sessionId: string, s: Session | undefined): { leadNotified: boolean; leadBoardTaskId?: string } {
+  private notifyLeadOfDroppedManagerKickoff(sessionId: string, s: Session | undefined, hadUnsentDraft: boolean): { leadNotified: boolean; leadBoardTaskId?: string } {
     const originProject = s?.projectId ? this.db.getProject(s.projectId) : undefined;
+    // @decision ab3c965d (Round 5, N-6) — third person (this text's audience is the LEAD, never the
+    // dropped session itself or its — nonexistent — manager); mirrors escalateParkedKickoffAtBoot's own
+    // draftClause for the worker twin.
+    const draftClause = hadUnsentDraft
+      ? ` Also: this session had an unsent composer draft at the moment of the restart that resumed it — never submitted, so it is not part of its resumed history. This was likely its own attempt to confirm the kickoff.`
+      : "";
     const body = [
       "**A project manager's turn-1 kickoff (its brief) was never confirmed delivered, and Loom gave up retrying it.**",
       "",
@@ -12131,11 +12238,11 @@ export class SessionService {
       "",
       "It likely booted (or is still sitting) with NO brief at all, and will not experience this as \"missing text\" — it just starts context-free and may rationalize it rather than report a gap. Check its live screen/transcript; if it genuinely never started a turn, recover its brief via `agent_get` (the full startupPrompt, verbatim) and send it directly, or session_stop + respawn.",
       "",
-      "A manual recovery like that (or a daemon restart between this drop and a late confirmation) does NOT auto-clear this alert by itself — dismiss it once you've confirmed the session is actually running.",
+      "A manual recovery like that (or a daemon restart between this drop and a late confirmation) does NOT auto-clear this alert by itself — dismiss it once you've confirmed the session is actually running." + draftClause,
     ].join("\n");
     return this.notifyLeadOfParentlessManagerIssue(
       sessionId, "manager_kickoff_dropped", `[Manager kickoff dropped] ${sessionId.slice(0, 8)}`, body,
-      (leadBoardTaskId) => `[loom:manager-kickoff-dropped] manager session ${sessionId}'s turn-1 kickoff was never confirmed delivered — Loom gave up retrying it. Filed as Platform task ${leadBoardTaskId}. It likely booted context-free; check its live screen/transcript and recover its brief via agent_get if so.`,
+      (leadBoardTaskId) => `[loom:manager-kickoff-dropped] manager session ${sessionId}'s turn-1 kickoff was never confirmed delivered — Loom gave up retrying it. Filed as Platform task ${leadBoardTaskId}. It likely booted context-free; check its live screen/transcript and recover its brief via agent_get if so.${draftClause}`,
     );
   }
 
@@ -12160,12 +12267,22 @@ export class SessionService {
    * @decision ab3c965d (round 2) — do not call this method without the caller first verifying
    * `lateConfirmation` is false; this method has no way to check that itself, and round 1 omitted the
    * check for the manager branch entirely.
+   *
+   * @decision 3d72900f (round 4) — Lead-notify is wrapped in its own try/catch so a DB fault there can
+   * never prevent the `manager_kickoff_dropped` event below from being recorded; a later boot's
+   * already-dropped check depends on that event existing regardless of whether Lead-notify succeeded.
    */
-  private handleManagerKickoffDropped(sessionId: string, msgId: string, rootMsgId: string, role: "manager" | "platform"): void {
+  private handleManagerKickoffDropped(sessionId: string, msgId: string, rootMsgId: string, role: "manager" | "platform", hadUnsentDraft = false): void {
     const s = this.db.getSession(sessionId);
-    const { leadNotified, leadBoardTaskId } = role === "manager"
-      ? this.notifyLeadOfDroppedManagerKickoff(sessionId, s)
-      : { leadNotified: false, leadBoardTaskId: undefined };
+    let leadNotified = false;
+    let leadBoardTaskId: string | undefined;
+    if (role === "manager") {
+      try {
+        ({ leadNotified, leadBoardTaskId } = this.notifyLeadOfDroppedManagerKickoff(sessionId, s, hadUnsentDraft));
+      } catch (e) {
+        console.warn(`[give-up] ${sessionId} notifyLeadOfDroppedManagerKickoff threw — swallowed, manager_kickoff_dropped is still recorded below: ${(e as Error)?.message ?? e}`);
+      }
+    }
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId, workerSessionId: sessionId, taskId: s?.taskId ?? null,
       kind: "manager_kickoff_dropped",
@@ -17980,8 +18097,8 @@ export class SessionService {
    */
   archiveOnExit(session: Session): void {
     // @decision 8882e2ca — this session's own pty process has exited either way below; never fire the
-    // one-shot escalation into a session whose process is gone (harmless no-op for a non-worker, which
-    // never has an entry here).
+    // one-shot escalation into a session whose process is gone. A manager/platform session can hold an
+    // entry here too (card ab3c965d round 3's within-window deferral) — this clear is not worker-only.
     this.clearKickoffConfirmRecheckTimer(session.id);
     if (session.role === "manager" || session.role === "platform") {
       const liveWorkers = this.db.listWorkers(session.id).filter((w) => w.processState === "live");
