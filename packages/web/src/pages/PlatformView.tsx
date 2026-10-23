@@ -288,9 +288,8 @@ function AtlasPlatformLayout({
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {/* The frame states this node's identity once — crumbs, the one <h1>, these pills and the tab row —
           so the page starts on its content, exactly as every other re-homed surface does (card a7f23a2f).
-          ⛔ The edition's explainer PARAGRAPH is deliberately not carried up: a node head is a row, and a
-          paragraph in it would be the same second identity block in a different place. It still renders
-          in full on the classic layout, which has no frame to state anything for it. */}
+          The edition's explainer PARAGRAPH does not come up here (a node head is a row); it renders at
+          the top of the HOME tab's body instead — see its own note at that call site. */}
       <AtlasNodeHead pills={headPills} />
 
       {/* The SAME underlined row the project and workspace nodes wear — one tab affordance for every
@@ -316,6 +315,18 @@ function AtlasPlatformLayout({
         {{
           home: (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              {/* The edition's explainer, kept inside the frame rather than dropped with the identity
+                  strip it used to sit in. It is the ONLY place this surface says what Platform is — the
+                  agent cards below carry no prose of their own — so losing it would cost a new end user
+                  the one explanation they have, which no amount of tab-affordance tidying is worth.
+                  ⛔ HOME ONLY, and exactly once on the node. All five panels stay mounted (see the note
+                  at the Panels call site), so a copy on a second tab would be a second live match in the
+                  DOM, not an alternative placement. Muted body copy, NOT a heading: the node head above
+                  owns the identity, this only explains it. */}
+              <p data-testid="platform-explainer"
+                style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
+                {edition.copy.header.paragraph}
+              </p>
               <GuidedSetupLauncher onStart={() => setWizardOpen(true)} />
               <SetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
               <PlatformAgentsSection edition={edition} previewOnly={previewOnly} operator={operator} auditor={auditor}

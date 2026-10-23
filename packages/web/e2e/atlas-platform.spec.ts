@@ -987,11 +987,11 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await expect(content(page)).toBeVisible();
     await expect(content(page).getByTestId("atlas-nodehead-pill-scope")).toHaveCount(0);
     await expect(content(page).getByText(/hidden from the project picker/i)).toHaveCount(0);
-    // The explainer paragraph goes with it — a paragraph cannot sit on a one-row node head, and leaving
-    // it below the tab row is the same second identity block in a different place. Its presence on the
-    // CLASSIC page is asserted by leg 6, so this pair is a split, not a bare deletion.
-    await expect(content(page).getByText(/Platform is your friendly, cross-project workspace agent/i))
-      .toHaveCount(0);
+    // The explainer paragraph is NOT part of what moved up — it stays in the content column, at the top
+    // of the Home tab's body (leg 12 owns that claim). What must not be here is a copy of it in the node
+    // head, which is the placement a "fold everything into the head" reading would have produced.
+    await expect(page.getByTestId("atlas-nodehead-extras")
+      .getByText(/Platform is your friendly, cross-project workspace agent/i)).toHaveCount(0);
 
     // The identity is stated ONCE: the frame's <h1>, not a second heading underneath it.
     await expect(page.locator("h1")).toHaveCount(1);
@@ -1025,6 +1025,49 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
     }));
     expect(doc.scroll).toBeLessThanOrEqual(doc.client);
+  });
+
+  // ── 12. card f76b89b9 — the explainer survives the switch, on the Home tab, exactly once ──────────
+  //
+  // The identity STRIP was folded into the node head; the edition's explainer PARAGRAPH was not deleted
+  // with it. It is the only place this surface says what Platform is — the agent cards carry no prose —
+  // so an end user who turns the switch on must still get it. It lives at the top of the Home tab body.
+  test("switch ON: the edition's explainer renders in the Home panel, once, and on no other tab",
+    async ({ page, loomDaemon }) => {
+    await seedAtlasOn(page);
+    await page.goto(`${loomDaemon.baseURL}/platform`);
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+
+    const explainer = /Platform is your friendly, cross-project workspace agent/i;
+
+    // In the HOME panel, and it is the Home panel that holds it — not merely somewhere on the page.
+    await expect(panel(page, "home").getByText(explainer)).toBeVisible();
+
+    // ⚠️ EXACTLY ONCE ON THE NODE, and this is not a formality: all five panels stay MOUNTED (the
+    // inactive ones only `hidden`), so a second copy placed on another tab would sit in the DOM as a
+    // live match rather than being invisible. A page-wide count is therefore the honest scope here —
+    // the nav chrome renders no prose, so there is no label collision to scope around.
+    await expect(page.getByTestId("platform-explainer")).toHaveCount(1);
+    await expect(page.getByText(explainer)).toHaveCount(1);
+
+    // Muted body copy, not a second heading competing with the node head's <h1>.
+    await expect(page.getByTestId("platform-explainer")).toHaveJSProperty("tagName", "P");
+    await expect(page.locator("h1")).toHaveCount(1);
+
+    // Switching tabs does not surface a second copy, and the Home one is parked rather than destroyed.
+    await openTab(page, "Cadence");
+    await expect(page.getByTestId("platform-explainer")).toHaveCount(1);
+    await expect(page.getByTestId("platform-explainer")).toBeHidden();
+    await openTab(page, "Home");
+    await expect(page.getByTestId("platform-explainer")).toBeVisible();
+
+    // The DEV edition gets its own explainer in the same place — the placement is the node's, not one
+    // edition's. Asserted as a CONTRAST (the end-user text absent), so this cannot pass on a stale copy.
+    await serveDevPlatformHome(page, loomDaemon);
+    await page.goto(`${loomDaemon.baseURL}/platform`);
+    await expect(panel(page, "home").getByText(/The Platform Lead is the always-available/i)).toBeVisible();
+    await expect(page.getByText(explainer)).toHaveCount(0);
+    await expect(page.getByTestId("platform-explainer")).toHaveCount(1);
   });
 });
 
