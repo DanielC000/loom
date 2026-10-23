@@ -11,7 +11,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // tree-kill's PID-walk) and prove the fix: the repo is QUARANTINED on an unconfirmed kill, every later
 // GitWriter call on it (commit/checkout/createBranch) refuses — via the PRE-EXISTING withCanonicalIndexLock
 // entry check for those, see section [3]'s own comment — until the escaped descendant's own eventual exit
-// lets the auto-clear fire.
+// lets the auto-clear fire. Card bd38f3b7: the escaped descendant's "still running" window is anchored to
+// an explicit sentinel FILE this file deletes only once section [3]/[3-control] no longer need the
+// quarantine active, not to a fixed sleep duration — see the sentinel constants/helpers below for why.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/git-writer-kill-confirm.mjs
 import fs from "node:fs";
@@ -121,12 +123,48 @@ const cwdEntriesBefore = fs.readdirSync(process.cwd());
 // SMALL_MS < HOOK's own natural duration — see merge-commit-kill-confirm.mjs's header doc for the same
 // reasoning applied to mergeBranchLocked; identical shape here, just against GitWriter.commit().
 const SMALL_MS = 2000;
-// Comfortably past withTimeoutKillingChild's own give-up deadline (2*SMALL_MS from call start) — the
-// escaped descendant must still be alive when the SECOND write attempt (immediately after) runs.
-const HOLD_MS = 2 * SMALL_MS + 4000;
 // Keeps the hook's own DIRECT process (the top-level `sh`, reachable by the tree-kill) alive well past
 // the SMALL_MS kill-trigger, so the kill genuinely has something live to signal.
 const MAIN_MS = 15000;
+
+// Card bd38f3b7 — sightings of section [3] flaking under a loaded host: the ORIGINAL design paced the
+// escaped descendant's own lifetime with a fixed `sleep HOLD_MS` and relied on a WALL-CLOCK margin
+// (HOLD_MS minus withTimeoutKillingChild's own give-up deadline) staying wide enough for this file's own
+// JS to reach section [3] before the real tree-death confirmation could arrive and auto-clear the
+// quarantine. Under host contention that margin is not an event guarantee — widening the constants would
+// still be the same bet, just at better odds. Replaced with an EVENT ANCHOR instead: the escaped
+// descendant now blocks on a sentinel FILE's existence (bounded by a generous max wait so a forgotten
+// release can never hang the suite) and this file only deletes that sentinel once every assertion that
+// needs the quarantine still active has already run — see `sentinelWaitClause`/`writeSentinelGatedHook`.
+const SENTINEL_POLL_INTERVAL_S = 0.2;
+const SENTINEL_MAX_ITERS = 300; // 60s generous bound — never the thing that actually paces a healthy run
+/** The `sh` clause an escaped descendant runs to block until `sentinelPosixPath` no longer exists (or the
+ *  bounded max wait elapses) — shared between the primary scenario and the [3-control] negative control
+ *  below so the two hooks stay byte-identical in shape. */
+function sentinelWaitClause(sentinelPosixPath) {
+  return `i=0; while [ -f "${sentinelPosixPath}" ]; do i=$((i+1)); if [ $i -ge ${SENTINEL_MAX_ITERS} ]; then break; fi; sleep ${SENTINEL_POLL_INTERVAL_S}; done`;
+}
+/** Writes (and chmods) a pre-commit hook whose escaped descendant waits on `sentinelPosixPath` (see
+ *  {@link sentinelWaitClause}) before writing `fixedX.txt`/staging it/dropping `markerName`, while the
+ *  hook's own DIRECT process sleeps `MAIN_MS` in the foreground regardless of the sentinel (unrelated —
+ *  see the `MAIN_MS` doc above). Same escape shape as the original: the outer subshell backgrounds an
+ *  inner one and returns immediately, so by the time the kill-trigger's tree-kill walks the process tree,
+ *  the intermediate subshell has already exited and the escaped descendant is unreachable by a
+ *  PID-walking tree-kill (24c0bdba's decision record, round 3, Code Review B-2).
+ *  @decision f59ca98a — that PPID-walk escape is win32-only; the POSIX branch below is load-bearing, not
+ *  decoration — see the record for why. */
+function writeSentinelGatedHook(hookPath, sentinelPosixPath, markerName) {
+  const wait = sentinelWaitClause(sentinelPosixPath);
+  fs.writeFileSync(hookPath,
+    `#!/bin/sh\n` +
+    `if command -v setsid >/dev/null 2>&1; then\n` +
+    `  ( setsid sh -c '${wait}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}' & )\n` +
+    `else\n` +
+    `  ( (${wait}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}) & )\n` +
+    `fi\n` +
+    `sleep ${MAIN_MS / 1000}\n`);
+  fs.chmodSync(hookPath, 0o755);
+}
 
 const root = fs.realpathSync(mkdtempManaged("loom-gw-killconfirm-"));
 const repo = path.join(root, "repo");
@@ -137,24 +175,13 @@ git("config", "user.email", "killconfirm@loom");
 git("config", "user.name", "killconfirm");
 git("commit", "-q", "--allow-empty", "-m", "init");
 
-// The OUTER subshell backgrounds an INNER one and returns immediately — by the time the kill-trigger's
-// tree-kill walks the process tree, the intermediate subshell that spawned the inner one has already
-// exited, so the escaped descendant is unreachable by a PID-walking tree-kill (see 24c0bdba's decision
-// record, round 3, Code Review B-2, for the full mechanism this reproduces).
-// @decision f59ca98a — that PPID-walk escape is win32-only; the POSIX branch below is load-bearing, not
-// decoration — see the record for why.
 const markerName = "escaped-descendant.marker";
 const markerPath = path.join(repo, markerName);
+const sentinelPath = path.join(root, "release-sentinel");
+const sentinelPathPosix = sentinelPath.split(path.sep).join("/");
+fs.writeFileSync(sentinelPath, "");
 const hookPath = path.join(repo, ".git", "hooks", "pre-commit");
-fs.writeFileSync(hookPath,
-  `#!/bin/sh\n` +
-  `if command -v setsid >/dev/null 2>&1; then\n` +
-  `  ( setsid sh -c 'sleep ${HOLD_MS / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}' & )\n` +
-  `else\n` +
-  `  ( (sleep ${HOLD_MS / 1000}; echo fixedX > fixedX.txt; git add fixedX.txt; echo done > ${markerName}) & )\n` +
-  `fi\n` +
-  `sleep ${MAIN_MS / 1000}\n`);
-fs.chmodSync(hookPath, 0o755);
+writeSentinelGatedHook(hookPath, sentinelPathPosix, markerName);
 
 const writer = new GitWriter(repo, { gitLocalMs: SMALL_MS });
 
@@ -174,6 +201,13 @@ const entry = activeMergeQuarantineFor(repo);
 check("[2] the repo is QUARANTINED after the unconfirmed kill (not a bare, unprotected failure)", !!entry);
 check("[2] the quarantine names GitWriter commit as the reason", /git (add -A|commit)/.test(entry?.reason ?? ""));
 
+// Card bd38f3b7 — explicit PRECONDITION, not an assumption: the escaped descendant is still parked on
+// `sentinelPath` (never released before this point), so the quarantine CANNOT have auto-cleared yet —
+// this turns any future regression of this shape into a loud, distinctly-labeled precondition failure
+// instead of a mislabelled "[3] second commit refused" failure whose real cause is a wall-clock race.
+check("[3-pre] the repo is STILL quarantined immediately before the second commit() attempt (explicit precondition — the escaped descendant has not been released)",
+  !!activeMergeQuarantineFor(repo));
+
 // THREE further calls, one per method, against the repo quarantined above by the REAL hook escape. Each
 // is refused by withCanonicalIndexLock's own PRE-EXISTING entry check (round 6 of 24c0bdba — a quarantine
 // already active when the lock is acquired), NOT by this card's new per-call re-check (see section [0]
@@ -191,10 +225,56 @@ check("[3] createBranch() is ALSO refused by the live quarantine",
   createBranchAttempt.ok === false && /QUARANTINED/.test(createBranchAttempt.error ?? ""));
 check("[3] createBranch()'s refusal cut no stray branch", !git("branch", "--list", "some-new-branch").trim());
 
-// Wait for the escaped descendant's own marker — proves it genuinely ran (this was a REAL unconfirmed
-// kill, not a false positive), then wait for the quarantine's own in-process auto-clear once its exit
-// finally lets confirmation arrive.
-const markerAppeared = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: HOLD_MS + 5000, intervalMs: 100 });
+// ═══════════════════ [3-control] card bd38f3b7 — NEGATIVE CONTROL: force the OLD race, prove detection ═══════════════════
+// Demonstrates what [3]'s old wall-clock-margin design could silently do under load: release the escaped
+// descendant's sentinel BEFORE checking the precondition / retrying commit(), instead of after every [3]
+// assertion. A SEPARATE repo (never the primary one above) — the primary's own sentinel is still held.
+{
+  const controlRepo = path.join(root, "control-repo");
+  fs.mkdirSync(controlRepo);
+  const cgit = (...args) => execFileSync("git", args, { cwd: controlRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  cgit("init", "-q");
+  cgit("config", "user.email", "control@loom");
+  cgit("config", "user.name", "control");
+  cgit("commit", "-q", "--allow-empty", "-m", "init");
+
+  const controlSentinel = path.join(root, "control-sentinel");
+  const controlSentinelPosix = controlSentinel.split(path.sep).join("/");
+  fs.writeFileSync(controlSentinel, "");
+  const controlHookPath = path.join(controlRepo, ".git", "hooks", "pre-commit");
+  writeSentinelGatedHook(controlHookPath, controlSentinelPosix, "control-escaped.marker");
+
+  const controlWriter = new GitWriter(controlRepo, { gitLocalMs: SMALL_MS });
+  fs.writeFileSync(path.join(controlRepo, "a.txt"), "content-a\n");
+  const controlFirst = await controlWriter.commit("test: add a (control)");
+  check("[3-control] setup: the control repo's first commit() is ALSO refused (same unconfirmed-kill shape as [1])", controlFirst.ok === false);
+  check("[3-control] setup: the control repo IS quarantined right after its own unconfirmed kill (same as [2])", !!activeMergeQuarantineFor(controlRepo));
+
+  // THE FORCED RACE: release the control sentinel BEFORE the precondition/retry, instead of after —
+  // this is the exact ordering [3] used to risk under a loaded host.
+  fs.rmSync(controlSentinel, { force: true });
+  const controlCleared = await pollUntil(() => !activeMergeQuarantineFor(controlRepo), { timeoutMs: 20000, intervalMs: 100 });
+  check("[3-control] releasing the sentinel EARLY lets the real confirmation land and auto-clear the quarantine", controlCleared);
+  check("[3-control] the NEW precondition correctly reads 'not quarantined' here — it would FAIL LOUDLY if asserted true, exactly the regression this precondition exists to catch",
+    !activeMergeQuarantineFor(controlRepo));
+  const controlSecond = await controlWriter.commit("test: add a (control retry)");
+  check("[3-control] and the OLD regex-only check does NOT silently pass here either: ok is still false, but the error does not mention QUARANTINED (it re-hit the still-installed hook instead of being refused by a quarantine)",
+    controlSecond.ok === false && !/QUARANTINED/.test(controlSecond.error ?? ""));
+
+  // Let any quarantine controlSecond may have re-raised settle before this file's own leftover-state
+  // checks run — controlHookPath removed first so no THIRD invocation can arm yet another one.
+  fs.rmSync(controlHookPath, { force: true });
+  await pollUntil(() => !activeMergeQuarantineFor(controlRepo), { timeoutMs: 20000, intervalMs: 100 });
+}
+
+// Only NOW — after every [3]/[3-control] assertion that needs the primary repo's quarantine active has
+// run — release the PRIMARY sentinel, letting its escaped descendant finally proceed.
+fs.rmSync(sentinelPath, { force: true });
+// Generous bound once released: sentinel-poll latency (<=SENTINEL_POLL_INTERVAL_S) plus the fixedX/marker
+// writes — not pacing a wall-clock race, just a sanity ceiling so a genuinely stuck descendant can't hang
+// the suite.
+const MARKER_WAIT_TIMEOUT_MS = 20000;
+const markerAppeared = await pollUntil(() => fs.existsSync(markerPath), { timeoutMs: MARKER_WAIT_TIMEOUT_MS, intervalMs: 100 });
 check("[4] the escaped descendant's marker write IS eventually observed (proves it genuinely ran)", markerAppeared);
 const autoCleared = await pollUntil(() => !activeMergeQuarantineFor(repo), { timeoutMs: 10000, intervalMs: 100 });
 check("[4] the quarantine AUTO-CLEARS once the real tree-death confirmation eventually arrives (no human action)", autoCleared);
@@ -300,6 +380,6 @@ if (launcherExeExistedAtStart && launcherExeExistedAtEnd) {
 }
 
 console.log(failures === 0
-  ? "\nALL PASS — GitWriter.commit()/checkout()/createBranch() are kill-confirmed: a quarantine raised MID-SEQUENCE (between add and commit) is caught by the NEW per-call re-check (section [0]); an unconfirmed kill quarantines the canonical repo, and every later call on it (all three methods) refuses — via the pre-existing entry check — until the escaped descendant's own eventual exit lets the auto-clear fire; once cleared, a fresh commit surfaces any swept-in residue structurally (section [6]); `paths`-scoped residue now matches REAL git pathspec semantics across trailing-slash/./glob spellings, with no false positives on an unstaged edit or untracked file (section [7])."
+  ? "\nALL PASS — GitWriter.commit()/checkout()/createBranch() are kill-confirmed: a quarantine raised MID-SEQUENCE (between add and commit) is caught by the NEW per-call re-check (section [0]); an unconfirmed kill quarantines the canonical repo, and every later call on it (all three methods) refuses — via the pre-existing entry check — for as long as the escaped descendant is event-anchored (sentinel-gated, section [3-pre]/[3]), with a forced-early-release negative control proving the new precondition fails loudly rather than silently passing the old regex (section [3-control]); once the sentinel is released and the real exit confirms, the auto-clear fires and a fresh commit surfaces any swept-in residue structurally (section [6]); `paths`-scoped residue now matches REAL git pathspec semantics across trailing-slash/./glob spellings, with no false positives on an unstaged edit or untracked file (section [7])."
   : `\n${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
