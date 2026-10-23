@@ -328,9 +328,10 @@ not navigation — out of scope here, and unaffected by the Atlas build either w
 Source: `packages/web/src/pages/platformEdition.ts` + `Platform.tsx`, read in full.
 
 Loom's web client has **exactly one** dev/end-user fork, and it is resolved **server-side**, not by a
-client env flag: `Platform.tsx` asks `GET /api/platform/home`; a 200 (the reserved "Loom Platform" home
-exists — i.e. the daemon booted with `LOOM_DEV=1` at some point) selects `developerEdition`, a 404
-selects `endUserEdition`. A dev install additionally gets a client-only `ViewAsToggle` to preview the
+client env flag: `Platform.tsx` asks `GET /api/platform/home`, which is always 200 (card 8d82be67) —
+a real `project` (the reserved "Loom Platform" home exists — i.e. the daemon booted with `LOOM_DEV=1` at
+some point) selects `developerEdition`, `project: null` selects `endUserEdition`. A dev install
+additionally gets a client-only `ViewAsToggle` to preview the
 end-user surface (`previewOnly`, never wired to any spawn/role/stop call — see `@decision 8adccd37`).
 
 | Surface | Dev edition | End-user edition | Atlas home | Covered |

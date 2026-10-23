@@ -445,8 +445,11 @@ export const api = {
   // spawn/stop/schedule reuse the existing startSession / stopSession / createSchedule routes below.
   // liveSessions: each platform agent's currently-LIVE sessions (live-over-recency — see server.ts), so a
   // spawn decision can see an existing live Lead/Auditor before minting a second. role is the singleton key.
+  // Card 8d82be67: this route is ALWAYS 200 — `project: null` (no dev home on this install) replaced the
+  // old 404, so every one of its 4 consumers (Platform.tsx/Projects.tsx/Skills.tsx/MissionControl.tsx)
+  // keeps working off the SAME `!!data?.project` / optional-chained `.project?.id` check unchanged.
   platformHome: () => get<{
-    project: Project;
+    project: Project | null;
     agents: Agent[];
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
     // Optional — unlike setupHome below, this route doesn't send it (always undefined in practice); kept

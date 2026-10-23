@@ -59,9 +59,10 @@ export default function Projects() {
   // Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   // Edition discovery (the SAME shared query key Platform.tsx/Skills.tsx use → one cached fetch): the
-  // dev/self-host edition has the reserved Platform home, an end-user npm install 404s it. Gates which
-  // profiles the agent bind-dropdown offers (see AgentEditor). `isSuccess &&` holds it false until the
-  // query settles, so an end user never flashes a dev-layer rig mid-load.
+  // dev/self-host edition has the reserved Platform home; an end-user npm install gets `project: null`
+  // back (card 8d82be67 — the route is always 200). Gates which profiles the agent bind-dropdown offers
+  // (see AgentEditor). `isSuccess &&` holds it false until the query settles, so an end user never
+  // flashes a dev-layer rig mid-load.
   const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
   const isDev = platformHome.isSuccess && !!platformHome.data?.project;
   // Cross-project live sessions — the source for the rail's live-dot AND the "stop the fleet first" guard

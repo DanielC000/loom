@@ -397,12 +397,12 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     //
     // It is the FRAME's claim, and this is the only route where the frame renders alone. Since card
     // 8cbb2ac2 (P1-1) every other URL mounts a real page, and a page brings its own expected network
-    // behaviour: MissionControl at "/" reads GET /api/platform/home with `retry:false` precisely
-    // because it 404s in the shipping edition (pages/MissionControl.tsx:92-96), which a non-dev
-    // throwaway daemon is — and Chromium logs a console error for every 404 response. That fires
-    // identically under the classic shell, so folding it in here would redden this spec for something
-    // Atlas neither caused nor governs. Whether Atlas introduces a NEW error on any REAL page is
-    // asserted in atlas-tree.spec.ts, against the classic shell as its contrast case.
+    // behaviour — MissionControl at "/" reads GET /api/platform/home with `retry:false`
+    // (pages/MissionControl.tsx:92-96), and a page can always log something the catch-all never does
+    // simply by mounting more. Any such noise fires identically under the classic shell, so folding it
+    // in here would redden this spec for something Atlas neither caused nor governs. Whether Atlas
+    // introduces a NEW error on any REAL page is asserted in atlas-tree.spec.ts, against the classic
+    // shell as its contrast case.
     consoleErrors.reset();
     await page.waitForLoadState("networkidle");
     await consoleErrors.assertFires();

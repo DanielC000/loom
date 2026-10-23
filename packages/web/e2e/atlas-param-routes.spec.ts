@@ -312,11 +312,10 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     // after a rename while the crumb and the tree silently disagreed.
     //
     // Read from one of the three addresses, NOT from "/". The tree renders on every Atlas route, so
-    // any of them serves — and routing through "/" instead would mount MissionControl, whose
-    // GET /api/platform/home poll 404s on a non-dev daemon (card 8d82be67). That noise is the
-    // classic UI's too, but only the ATLAS phase would have visited the page producing it, so the
-    // contrast case below would report it as Atlas-introduced. Both walks visit exactly the same
-    // three URLs, which is what makes the comparison mean anything.
+    // any of them serves — and routing through "/" instead would mount MissionControl, which polls a
+    // route neither the classic walk below nor this ATLAS phase would otherwise visit, so a contrast
+    // case built on it would be comparing unequal walks rather than attributing anything to Atlas.
+    // Both walks visit exactly the same three URLs, which is what makes the comparison mean anything.
     await page.goto(loomDaemon.baseURL + reviewUrl);
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
     // Card 0d0c6cee re-homed /inbox out of the tree's rows and into the escape hatch at its foot
@@ -424,11 +423,12 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     await page.waitForLoadState("networkidle");
     await consoleErrors.assertFires();
 
-    // An ABSOLUTE zero is the wrong instrument on this fixture — MissionControl polls GET
-    // /api/platform/home, which 404s on a non-dev throwaway daemon, and Chromium logs a console
-    // error per 404 RESPONSE. That fires under BOTH shells, so the claim Atlas is answerable for is
-    // "no error KIND the classic walk did not already produce". Counts legitimately differ (each
-    // walk fires a different number of polls), so the comparison is over kinds.
+    // This stays a KIND-only comparison rather than an absolute zero — GET /api/platform/home no
+    // longer 404s on this fixture (card 8d82be67), but an absolute zero would still be the wrong
+    // instrument here: the classic walk is the contrast case for whatever noise a page may still log,
+    // so the claim Atlas is answerable for is "no error KIND the classic walk did not already
+    // produce". Counts legitimately differ (each walk fires a different number of polls), so the
+    // comparison is over kinds.
     const introduced = [...new Set(consoleErrors.errors)].filter((e) => !new Set(classicNoise).has(e));
     expect(introduced,
       `the Atlas walk introduced ${introduced.length} error kind(s) the classic walk did not.\n`

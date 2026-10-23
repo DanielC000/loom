@@ -436,12 +436,12 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     await page.waitForLoadState("networkidle");
     await consoleErrors.assertFires();
 
-    // An ABSOLUTE zero is the wrong instrument on this fixture: GET /api/platform/home 404s on a
-    // non-dev throwaway daemon and Chromium logs a console error per 404 RESPONSE (card 8cbb2ac2).
-    // That fires under BOTH shells, so the claim Atlas is answerable for is "no error KIND the
-    // classic walk did not already produce". Counts legitimately differ (different poll counts), so
-    // the comparison is over kinds. Both walks visit exactly the same URLs, which is what makes it
-    // mean anything.
+    // This walk keeps the KIND-only comparison (card 8cbb2ac2) rather than an absolute zero, even
+    // though GET /api/platform/home no longer 404s on this fixture (card 8d82be67 fixed that specific
+    // noise source) — some OTHER page in this walk could still log a console error neither shell is
+    // answerable for, and the subset claim below stays correct either way. Counts legitimately differ
+    // (different poll counts), so the comparison is over kinds. Both walks visit exactly the same
+    // URLs, which is what makes it mean anything.
     const introduced = [...new Set(consoleErrors.errors)].filter((e) => !new Set(classicNoise).has(e));
     expect(introduced,
       `the Atlas redirect walk introduced ${introduced.length} error kind(s) the classic walk did not.\n`

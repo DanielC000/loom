@@ -6,7 +6,8 @@
 //      that a tab highlighted).
 //   3. The old routes redirect: /profiles → /actors (Profiles tab), /skills → /actors?tab=skills (Skills tab).
 //   4. PRESERVED gating: Skills' dev-only "Publish to repo" affordance stays gated. This fixture boots
-//      LOOM_DEV=0 (see fixtures/daemon.ts), so /api/platform/home 404s → isDev=false → the Publish button is
+//      LOOM_DEV=0 (see fixtures/daemon.ts), so /api/platform/home returns `project: null` (card 8d82be67 —
+//      the route is always 200) → isDev=false → the Publish button is
 //      HIDDEN on the Skills tab, while the always-present "Reset to shipped" bundled control DOES render —
 //      proving the consolidation didn't drop the dev gate (not merely that nothing rendered).
 // Builds on the shared `loomDaemon` fixture (card c3fd1d68); skills.spec.ts / profiles-agents.spec.ts are the

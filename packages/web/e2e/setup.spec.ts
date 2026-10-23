@@ -38,7 +38,8 @@ test("the Platform nav tab reaches the shipping onboarding surface", async ({ pa
   await expect(page).toHaveURL(/\/platform$/);
 
   // Shipping edition (the isolated daemon boots LOOM_DEV=0, so the dev "Loom Platform" home never seeds and
-  // GET /api/platform/home 404s): the PlatformView shell mounts its end-user edition, NOT the developer
+  // GET /api/platform/home returns `project: null` — card 8d82be67, the route is always 200): the
+  // PlatformView shell mounts its end-user edition, NOT the developer
   // edition — so the dev-only "View as" preview toggle is absent.
   await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
 

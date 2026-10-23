@@ -454,14 +454,13 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     await consoleErrors.assertFires();
 
     // The card's DoD asks for zero console errors with the switch on. An absolute zero is the WRONG
-    // instrument for it on this fixture: the Platform page polls GET /api/platform/home, which 404s on
-    // a non-dev throwaway daemon (no reserved dev Platform home exists — gateway/server.ts), and
-    // Chromium logs a console error per 404 response. That fires identically under BOTH shells, so it
-    // is not something Atlas introduced, and an absolute-zero assertion would redden this spec forever
-    // for a condition it does not govern. What Atlas IS answerable for is introducing a NEW error —
-    // so the classic walk is the contrast case, and the claim is "no error kind the classic walk did
-    // not already produce". Raw counts legitimately differ between the two walks (each fires a
-    // different number of polls depending on timing), so the comparison is over KINDS, not counts.
+    // instrument for it on this fixture: GET /api/platform/home no longer produces noise here (card
+    // 8d82be67), but some OTHER page this walk visits still could, and that would fire identically
+    // under BOTH shells — not something Atlas introduced, and an absolute-zero assertion would redden
+    // this spec forever for a condition it does not govern. What Atlas IS answerable for is introducing
+    // a NEW error — so the classic walk is the contrast case, and the claim is "no error kind the
+    // classic walk did not already produce". Raw counts legitimately differ between the two walks (each
+    // fires a different number of polls depending on timing), so the comparison is over KINDS, not counts.
     const introduced = [...new Set(consoleErrors.errors)].filter((e) => !new Set(classicNoise).has(e));
     expect(introduced,
       `the Atlas walk introduced ${introduced.length} error kind(s) the classic walk did not.\n`

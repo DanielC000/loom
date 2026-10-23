@@ -4063,15 +4063,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // project is HIDDEN from the ordinary picker (GET /api/projects excludes reserved), so this READ-ONLY
   // endpoint is the one way the web discovers it. NO write/elevated capability lives here — the human
   // spawn/stop/schedule controls reuse the EXISTING agent-session, stop, and schedule REST routes.
-  // 404 only if no reserved home exists (impossible after boot-seed). ---
-  app.get("/api/platform/home", async (_req, reply) => {
+  // Card 8d82be67: a 404 here is NOT a transient/boot-only state — it's the PERMANENT response on every
+  // non-LOOM_DEV shipping install, because the platform-tier dev home never seeds there at all. Four web
+  // consumers (Platform.tsx, Projects.tsx, Skills.tsx, MissionControl.tsx — all sharing the `["platformHome"]`
+  // query key) poll this route purely to read that absence as their "is this a dev install" edition signal,
+  // so a 404 response made Chromium log a console.error on every one of those pages, forever, for every
+  // end user. Changed to ALWAYS 200, with `project: null` standing in for "no dev home" — the EXACT shape
+  // every consumer already treats identically to the old 404 (`!!data?.project` / optional-chained
+  // `.project?.id`), so this is response-shape-only: no consumer's branching logic changed. Mirrors the
+  // sibling `GET /api/setup/home` below, which is ungated and so already always 200s. ---
+  app.get("/api/platform/home", async () => {
     // MARKER-SCOPED (card 5dff8d08): resolve the Platform home via resolvePlatformHome, NOT a bare
     // `.find(reserved)` or a name compare. A second reserved home (the ungated "Platform" setup home) now
     // coexists, so "the one reserved project" is ambiguous and could return the setup home instead of Loom
     // Platform; and a name-only lookup silently stops finding this home the moment a human renames it via
     // PATCH /api/projects/:id. The setup home has its own discovery route below (GET /api/setup/home).
     const found = resolveLivePlatformHome(deps.db);
-    if (!found) return reply.code(404).send({ error: "no reserved platform-tier dev home found" });
+    if (!found) return { project: null, agents: [], liveSessions: [] };
     // Card 6bfc3bfb: redact sessionEnv on this reserved project like GET /api/projects — Platform.tsx
     // never reads config.sessionEnv back out of this response (it only reads project.reserved/name/id).
     const project = redactSessionEnvForRead(found);

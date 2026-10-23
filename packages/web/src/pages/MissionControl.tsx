@@ -90,8 +90,9 @@ export default function MissionControl() {
     refetchInterval: 15000,
   });
   // The reserved/system homes (the dev "Loom Platform" home + the shipping "Platform" home) — discovered
-  // read-only, exactly as the Platform pages do (retry:false, since platformHome 404s in the shipping
-  // edition and setupHome may 404 before the home seeds). Their project ids exclude the reserved homes from
+  // read-only, exactly as the Platform pages do (retry:false; platformHome is always 200 — `project: null`
+  // in the shipping edition, card 8d82be67 — and setupHome may still 404 before the home seeds). Their
+  // project ids exclude the reserved homes from
   // the INACTIVE strip below: they sit in the archive with zero live sessions, but they're hidden from every
   // ordinary project surface and must not leak in here either. Shared query keys ⇒ cache reuse, no extra poll.
   const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });

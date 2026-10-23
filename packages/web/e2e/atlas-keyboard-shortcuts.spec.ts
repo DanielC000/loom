@@ -111,7 +111,8 @@ async function openShell(page: Page, baseURL: string, atlas: boolean, path: stri
 
 // ── Shared seeding: the reserved Platform home's operator agent + a canned-pty session on it ─────────
 // Resolved exactly as PlatformView's end-user edition resolves it (the fixture boots LOOM_DEV=0, so
-// GET /api/platform/home 404s and the page renders the shipping edition off GET /api/setup/home) — the
+// GET /api/platform/home returns `project: null` (card 8d82be67 — the route is always 200) and the page
+// renders the shipping edition off GET /api/setup/home) — the
 // same resolution terminal-queue-ledger.spec.ts and composer-preset-insert.spec.ts already use.
 type HomeAgent = { id: string; name: string; profileId: string | null; startupPrompt: string };
 type SetupHome = { project: { id: string; name: string }; agents: HomeAgent[] };

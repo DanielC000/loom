@@ -93,7 +93,11 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
   const [wizardOpen, setWizardOpen] = useState(false);
 
   if (home.isLoading) return <p style={{ color: color.textMuted }}>Loading the Platform home…</p>;
-  if (home.isError || !home.data) {
+  // `!home.data.project` (card 8d82be67: platformHome's `project` is now `Project | null`, never 404)
+  // covers the SAME "no home to render" case the old `home.isError` check used to catch for a dev-edition
+  // mount that somehow lost its reserved home — setupHome's `project` is never null, so this never fires
+  // on the end-user path.
+  if (home.isError || !home.data || !home.data.project) {
     return <p style={{ color: color.red, fontFamily: font.mono }}>{edition.copy.errorText}</p>;
   }
   const { project, agents, resolvedLead } = home.data;

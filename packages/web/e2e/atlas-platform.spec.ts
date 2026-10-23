@@ -6,7 +6,8 @@
 // WHICH EDITION RENDERS, AND WHY THIS SPEC MOCKS ONE ROUTE
 // Platform.tsx picks the edition from `GET /api/platform/home` — the reserved "Loom Platform" dev home,
 // which only seeds under LOOM_DEV=1. The fixture boots the daemon with LOOM_DEV=0 (fixtures/daemon.ts), so
-// that route 404s and the page renders the SHIPPING end-user edition. platform.spec.ts reports that as a
+// that route returns `project: null` (card 8d82be67 — the route is always 200) and the page renders the
+// SHIPPING end-user edition. platform.spec.ts reports that as a
 // hard limit ("covering the dev edition would need a LOOM_DEV=1 daemon variant"). This spec reaches it by
 // fulfilling THAT ONE ROUTE — the same signal the page already reads, with the REAL reserved home as its
 // payload — so the edition fork is exercised through the production code path rather than a second one.

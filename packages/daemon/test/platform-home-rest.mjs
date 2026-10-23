@@ -6,7 +6,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the two seeded agents (Platform Lead + Platform Auditor) are returned;
 //   (2) the SAME reserved project is still EXCLUDED from GET /api/projects (the ordinary picker) — P6
 //       must not regress the P1 picker exclusion;
-//   (3) with NO reserved project seeded → 404 (the endpoint never invents a home) — for BOTH routes;
+//   (3) card 8d82be67 — with NO reserved project seeded: /api/platform/home → 200 { project: null,
+//       agents: [], liveSessions: [] } (it never invents a home, but it also never 404s — every page that
+//       polls it purely to read the edition signal used to log a console.error on every shipping
+//       install); /api/setup/home is UNTOUCHED by that card and still 404s here (its own absence is a
+//       theoretical, impossible-after-boot-seed branch, not a permanent shipping-edition state);
 //   (4) liveSessions surfaces each platform agent's LIVE sessions, preferring LIVE over RECENCY — a
 //       recently-STOPPED Lead never masks an idle-but-LIVE one (the duplicate-singleton-spawn guard);
 //   (5) THE REGRESSION FIX — with BOTH reserved homes seeded ("Getting Started" + "Loom Platform"),
@@ -213,16 +217,23 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   }
 }
 
-// ===================== (3) no reserved project → 404 (both routes) =====================
+// ===================== (3) no reserved home seeded — card 8d82be67 =====================
+// /api/platform/home: NEVER 404s (every page polling it as a pure edition signal must not log a
+// console.error on a shipping install) → 200 { project: null, agents: [], liveSessions: [] }.
+// /api/setup/home: UNCHANGED by that card — still 404s, since its own "no setup home" branch is a
+// theoretical, impossible-after-boot-seed case, not a permanent shipping-edition state.
 {
   const db = new Db(path.join(TMP, "loom-empty.db")); // fresh DB, NO seeds at all
   const app = await buildApp(db);
   try {
     const r = await app.inject({ method: "GET", url: "/api/platform/home" });
-    check("(3) GET /api/platform/home with no reserved home → 404", r.statusCode === 404);
-    check("(3) 404 body carries a reason", typeof r.json().error === "string");
+    check("(3) GET /api/platform/home with no reserved home → 200 (never 404)", r.statusCode === 200);
+    const body = r.json();
+    check("(3) body carries project: null", body.project === null);
+    check("(3) body carries agents: []", Array.isArray(body.agents) && body.agents.length === 0);
+    check("(3) body carries liveSessions: []", Array.isArray(body.liveSessions) && body.liveSessions.length === 0);
     const s = await app.inject({ method: "GET", url: "/api/setup/home" });
-    check("(3) GET /api/setup/home with no setup home → 404", s.statusCode === 404);
+    check("(3) GET /api/setup/home with no setup home → 404 (unchanged)", s.statusCode === 404);
     check("(3) setup 404 body carries a reason", typeof s.json().error === "string");
   } finally {
     try { await app.close(); } catch { /* ignore */ }
@@ -231,6 +242,6 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), both discovery routes 404 rather than inventing a home when none is seeded, liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard), with BOTH reserved homes seeded the name-scoped lookups never cross: /api/platform/home → 'Loom Platform', /api/setup/home → 'Getting Started' + its Setup Assistant agent, and (card 5dff8d08) both routes keep resolving the same home by its stable marker after a human rename instead of 404ing."
+  ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), /api/platform/home returns 200 + project:null (never 404, card 8d82be67) while /api/setup/home still 404s when no home is seeded, liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard), with BOTH reserved homes seeded the name-scoped lookups never cross: /api/platform/home → 'Loom Platform', /api/setup/home → 'Getting Started' + its Setup Assistant agent, and (card 5dff8d08) both routes keep resolving the same home by its stable marker after a human rename instead of 404ing."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

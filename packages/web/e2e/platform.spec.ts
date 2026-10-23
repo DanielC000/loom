@@ -5,7 +5,8 @@
 // WHICH EDITION RENDERS IN THE DEFAULT STATE — this is the whole reason the spec asserts what it does:
 // Platform.tsx picks the edition from GET /api/platform/home (the reserved "Loom Platform" dev home).
 // That home only seeds under LOOM_DEV=1; the fixture boots the daemon with LOOM_DEV=0 (see
-// fixtures/daemon.ts), so /api/platform/home 404s and the page renders the SHIPPING End-User surface
+// fixtures/daemon.ts), so /api/platform/home returns `project: null` (card 8d82be67 — the route is
+// always 200) and the page renders the SHIPPING End-User surface
 // (the unified PlatformView shell driven by the end-user edition config) — the "Platform" operator +
 // Workspace Auditor, no "View as" toggle.
 //

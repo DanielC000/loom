@@ -30,8 +30,9 @@ export default function Skills() {
   const current = useQuery({ queryKey: ["skill", selected], queryFn: () => api.skill(selected!), enabled: !!selected });
 
   // Edition discovery (same shared query key as Platform.tsx → one cached fetch). The dev/self-host
-  // edition has a Platform home; an end-user npm install 404s it. "Publish to repo" is dev-only — held
-  // hidden until this settles so an end user never flashes it.
+  // edition has a Platform home; an end-user npm install gets `project: null` back (card 8d82be67 — the
+  // route is always 200). "Publish to repo" is dev-only — held hidden until this settles so an end user
+  // never flashes it.
   const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
   const isDev = platformHome.isSuccess && !!platformHome.data?.project;
 

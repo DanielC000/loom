@@ -7,8 +7,8 @@ import { color, font, radius } from "../theme";
 
 // The single consolidated Platform page — ONE nav tab → one /platform route. It renders ONE of two
 // view-components decided by EDITION, where the edition signal is the SAME one useVisibleNavPages uses:
-// the reserved "Loom Platform" home existing (GET /api/platform/home → 200 + project ⇒ DEV edition;
-// 404 / no project ⇒ SHIPPING edition — it only resolves under LOOM_DEV). Dev defaults to the full
+// the reserved "Loom Platform" home existing (GET /api/platform/home — always 200, card 8d82be67 —
+// returns a real project ⇒ DEV edition; `project: null` ⇒ SHIPPING edition). Dev defaults to the full
 // Developer surface (Lead/Auditor go-live, sessions, schedules, history, board) plus a "View as:
 // Developer | End-user" toggle that PREVIEWS the End-user surface; shipping renders the End-user surface
 // (the operator + Workspace Auditor + B6 cadence) ONLY, with no toggle.
