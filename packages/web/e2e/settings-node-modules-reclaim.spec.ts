@@ -241,4 +241,40 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
     await expect(page.getByText(/Cleared 1 of 1 · freed at least 1\.4 GB/)).toBeVisible();
     await expect(page.getByText(/the total above is a lower bound/)).toBeVisible();
   });
+
+  test("a rejected row reports it never started, keeps the static note, and marks the run not-clean", async ({ page, loomDaemon }) => {
+    // Card c71fa8f5 (Code Review finding on 3640abf5): a removal that never STARTED is reported with
+    // outcome "rejected" and a `rejectionMessage` — distinct from "wedged" (which DID start, then was
+    // force-stopped). This proves the panel renders that outcome, the real error text ALONGSIDE the
+    // static "nothing on disk was touched" reassurance (never one replacing the other), the headline's
+    // own "failed to start" clause, and that the run reads as not-clean.
+    await fulfilListing(page, TWO_CANDIDATES);
+    await interceptReclaim(page, {
+      candidatesConsidered: 2, removed: 1, bytesReclaimed: 104_857_600, sizeTruncatedCount: 0,
+      noLongerEligible: 0, missing: 0, wedged: 0, leftOnDisk: 0, rejected: 1,
+      results: [
+        { worktreePath: PATH_A, projectId: "proj-a", projectName: "Alpha Project", taskId: null, outcome: "removed", bytesReclaimed: 104_857_600 },
+        { worktreePath: PATH_B, projectId: "proj-b", projectName: "Beta Project", taskId: null, outcome: "rejected", bytesReclaimed: null, rejectionMessage: "ENOENT: spawn rmdir ENOENT (synthetic)" },
+      ],
+    });
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+
+    await page.getByRole("button", { name: "Select all 2" }).click();
+    await page.getByRole("button", { name: "Delete node_modules from 2 worktrees" }).click();
+    await page.getByRole("button", { name: "Delete 2 node_modules directories" }).click();
+
+    const rejectedRow = page.locator('[data-testid="reclaim-row"][data-outcome="rejected"]');
+    await expect(rejectedRow).toContainText(PATH_B);
+    await expect(rejectedRow).toContainText("Failed to start");
+    await expect(rejectedRow).toContainText("Freed: nothing");
+    // The real error text from the daemon, ALONGSIDE the static reassurance — not in place of it.
+    await expect(rejectedRow).toContainText("ENOENT: spawn rmdir ENOENT (synthetic)");
+    await expect(rejectedRow).toContainText("the removal never started — nothing on disk was touched.");
+
+    // The headline's own clause for this outcome, alongside the real "removed" figure for the other row.
+    await expect(page.getByText(/Cleared 1 of 2 · freed 100 MB · 1 failed to start/)).toBeVisible();
+
+    // The run is not clean: the summary pill wears the amber "attention" tone, never the phosphor clean one.
+    await expect(page.getByText("last reclaim", { exact: true })).toHaveCSS("color", "rgb(255, 178, 62)");
+  });
 });
