@@ -19,6 +19,7 @@ import {
   resolveCompanionMode, resolveManageGroup,
   type CompanionManageGroup, type CompanionManageSectionKey, type CompanionMode,
 } from "../lib/companionManage";
+import { useTabHost } from "../lib/nodeTabHost";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, StatusPill, Chip, Dot } from "../components/ui";
 import { NodeTabs } from "../components/atlasHome";
 import { CompanionChatPanel } from "../components/CompanionChat";
@@ -782,22 +783,22 @@ function AtlasCompanionDetail({ companion, label, onChanged, onDeleted }: {
   companion: CompanionRow; label: string; onChanged: () => void; onDeleted: () => void;
 }) {
   const [params] = useSearchParams();
-  const mode = resolveCompanionMode(params.get("tab"));
+  // `tab` standalone; the host's own key when this node is the Workspace node's Companion tab (card
+  // 41eab0eb) — on `/home?tab=companion` a bare `tab` here is the HOST's, so reading it would resolve
+  // every mode to Chat and writing it would drop the node back to Overview. `sec` below is unaffected:
+  // it is this page's own key and collides with nothing. lib/nodeTabHost.tsx carries the reasoning.
+  const host = useTabHost();
+  const mode = resolveCompanionMode(params.get(host.key));
   // Carried across the mode links so Chat → Manage returns to the section you left. Inert outside
   // Manage, and deliberately NOT React state: a "last section" the URL doesn't carry is a surprise on
-  // reload and unshareable in a link.
-  const sec = params.get("sec");
+  // reload and unshareable in a link. (`host.href` merges over the live query, so it is carried by
+  // construction rather than re-set here.)
   const armed = isArmedInApp(companion.bindings, companion.sessionId);
 
-  const hrefFor = (key: string) => {
-    const next = new URLSearchParams();
-    // Chat is canonical, so its address is the bare node path — the same shape the other Atlas nodes
-    // give their first tab.
-    if (key !== "chat") next.set("tab", key);
-    if (sec) next.set("sec", sec);
-    const query = next.toString();
-    return query ? `/companion?${query}` : "/companion";
-  };
+  // Chat is canonical, so its address carries no mode value at all — the same shape the other Atlas
+  // nodes give their first tab. Built against the LIVE path, so the links are right whether this node
+  // stands at `/companion` or is hosted as a tab of `/home`.
+  const hrefFor = (key: string) => host.href({ [host.key]: key === "chat" ? null : key });
 
   return (
     <>

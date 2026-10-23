@@ -319,7 +319,14 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     // `nav.tsx`'s `redirect()` builds `<Navigate to="/actors" replace/>` from a plain path string, so
     // react-router drops the incoming search entirely. That has always been the behaviour; the point
     // of this row is that the ATLAS shell did not change it in either direction.
-    const EXPECTED_URL = /\/actors$/;
+    //
+    // Card 41eab0eb added a SECOND hop under Atlas alone: /actors is now the Workspace node's
+    // `actors` tab, so the Atlas landing is that tab's address while the classic one is unchanged.
+    // The DROP — which is this test's whole subject — must still happen identically on both, so both
+    // legs below still assert `profile=` is gone; only the path each one lands on differs, and the
+    // per-shell constant is what records that it is a deliberate divergence and not a drift.
+    const ATLAS_URL = /\/home\?tab=actors$/;
+    const CLASSIC_URL = /\/actors$/;
     const PLACEHOLDER = "Select a profile to edit it";
 
     try {
@@ -329,7 +336,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
       await page.goto(`${loomDaemon.baseURL}${deadLink}`);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
       await expect(page.getByText(PLACEHOLDER, { exact: false }), "no profile pre-selected: the query was dropped").toBeVisible();
-      await expect(page).toHaveURL(EXPECTED_URL);
+      await expect(page).toHaveURL(ATLAS_URL);
       expect(page.url()).not.toContain("profile=");
 
       // Switch OFF — a second context, so the seeded flag cannot carry over.
@@ -340,7 +347,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
         await expect(classic.locator(".loom-rail"), "the classic shell really mounted").toBeVisible();
         await expect(classic.getByTestId("atlas-shell")).toHaveCount(0);
         await expect(classic.getByText(PLACEHOLDER, { exact: false })).toBeVisible();
-        await expect(classic).toHaveURL(EXPECTED_URL);
+        await expect(classic).toHaveURL(CLASSIC_URL);
         expect(classic.url()).not.toContain("profile=");
       } finally {
         await classic.close();

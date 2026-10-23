@@ -221,6 +221,60 @@ export const ATLAS_HOMES: AtlasHome[] = [
   { key: "workspace-settings", to: "/workspace-settings", label: "Settings", scoped: false, tierHead: false, element: <WorkspaceSettings /> },
 ];
 
+// ── The Workspace node's tabs ──────────────────────────────────────────────────────────────────
+// Card 41eab0eb (Atlas restructure 2 of 11). The approved round-4 V2 design makes every cross-project
+// surface a TAB on the Workspace node under one persistent KPI readout (`atlas.js`'s own `ROOT_TABS`),
+// never a tree row — so the seven surfaces below leave their addresses and become `?tab=` on `/home`,
+// each one's EXISTING component mounted verbatim as the tab body.
+//
+// A row is just the tab's own key plus the address it is re-homed FROM. The label and the element are
+// resolved from that address's own NAV_PAGES / ATLAS_HOMES row (`workspaceNodeTabOf` below), so there
+// is exactly one declaration of each and a rename reaches the tab for free. Order IS the tab order,
+// and it is the mockup's `ROOT_TABS` order; the node's own `Overview`/`Deck` tabs are prepended by
+// pages/WorkspaceHome.tsx, as the mockup's `homeTabs()` prepends them there.
+//
+// @decision 41eab0eb — `from` must stay a live NAV_PAGES/ATLAS_HOMES address. Removing it re-homes the
+// surface out of the CLASSIC shell too, for a user who never opted into Atlas; only the Atlas shell may
+// redirect it into the tab.
+export type WorkspaceNodeTab = {
+  /** The `?tab=` value on `/home`. */
+  key: string;
+  /** The address this surface owns under the classic shell, and which Atlas redirects into the tab. */
+  from: string;
+};
+
+export const WORKSPACE_NODE_TABS: WorkspaceNodeTab[] = [
+  { key: "inbox", from: "/inbox" },
+  { key: "gates", from: "/gates" },
+  { key: "automation", from: "/automation" },
+  { key: "actors", from: "/actors" },
+  { key: "usage", from: "/usage" },
+  { key: "companion", from: "/companion" },
+  // The Atlas-only workspace Settings node (card 595e2a47) — a `ROOT_TABS` row in the approved design,
+  // so it re-homes with the six rail destinations above rather than staying a tree row of its own. Its
+  // label is already "Settings", which is the tab label the mockup gives it.
+  { key: "settings", from: "/workspace-settings" },
+];
+
+/** The tab a given address re-homes into, or `undefined` for an address that is still its own node. */
+export function workspaceNodeTabFor(path: string): WorkspaceNodeTab | undefined {
+  return WORKSPACE_NODE_TABS.find((t) => t.from === path);
+}
+
+/**
+ * A tab's label and body, resolved from the ONE declaration of the address it re-homes — NAV_PAGES for
+ * the six rail destinations, ATLAS_HOMES for the Atlas-only workspace Settings node. Throws rather
+ * than degrading: a `from` naming no declared address is a typo that would otherwise render an empty
+ * tab, and the tab row would still look complete.
+ */
+export function workspaceNodeTabOf(tab: WorkspaceNodeTab): { key: string; label: string; element: ReactNode } {
+  const page = NAV_PAGES.find((p) => p.to === tab.from);
+  if (page) return { key: tab.key, label: page.label, element: page.element };
+  const home = ATLAS_HOMES.find((h) => h.to === tab.from);
+  if (home) return { key: tab.key, label: home.label, element: home.element };
+  throw new Error(`WORKSPACE_NODE_TABS declares ${tab.from}, which is neither a NAV_PAGES nor an ATLAS_HOMES address`);
+}
+
 // ── The project node's tabs ────────────────────────────────────────────────────────────────────
 // Card 25c08fba (Atlas restructure 3 of 11). The approved round-4 V2 design puts every
 // project-scoped surface on the project NODE, as a tab under its persistent readout, rather than

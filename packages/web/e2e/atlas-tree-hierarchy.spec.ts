@@ -50,13 +50,37 @@ const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 // The two together are what make the claim both specific and drift-proof.
 // ⚠️ `/terminals` LEFT this list with card 25c08fba, which re-homed it as the project node's
 // "Sessions" tab: it is a project-branch tree ROW again now, at project depth, so both halves of the
-// claim below would be false for it. Cards 41eab0eb / 11 take the rest the same way.
+// claim below would be false for it. Only a card that re-homes a destination into a tree ROW takes an
+// entry out of this list that way; card 41eab0eb's seven STAY, because a Workspace node TAB is still
+// not a row — which is what the tab/hatch split below records.
 const RE_HOMED = [
   "/", "/inbox", "/gates", "/projects", "/actors", "/companion", "/automation", "/usage",
   // The Atlas-only workspace Settings node (card 595e2a47) — a `ROOT_TABS` row in the approved design,
   // so it re-homes with the nine rail destinations above rather than staying the tier's footer.
   "/workspace-settings",
 ];
+
+// Where each of them ACTUALLY lives now. Card 0d0c6cee put all ten in the escape hatch; card 41eab0eb
+// then made seven of them Workspace node TABS, which is a different control with a different mark.
+// This card's own claim is unchanged either way — they are not tree ROWS — so the split below governs
+// only the REACHABILITY half, which is what stops "removed from the rows" being satisfiable by
+// stranding the surface.
+//
+// Derived, not hand-split: the tab set is parsed from the real `WORKSPACE_NODE_TABS` declaration, so
+// the next card to re-home one of the two still in the hatch moves it here by editing src/nav.tsx
+// alone.
+function parseWorkspaceNodeTabs(): { rows: { key: string; from: string }[]; rawMarkers: number; block: string } {
+  const src = readFileSync(NAV_SOURCE, "utf8");
+  const start = src.indexOf("export const WORKSPACE_NODE_TABS");
+  if (start < 0) throw new Error(`no WORKSPACE_NODE_TABS declaration found in ${NAV_SOURCE}`);
+  const end = src.indexOf("\n];", start);
+  if (end < 0) throw new Error(`WORKSPACE_NODE_TABS in ${NAV_SOURCE} has no closing "];"`);
+  const block = src.slice(start, end);
+  const rawMarkers = (block.match(/\bkey:\s*"/g) ?? []).length;
+  const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*from:\s*"([^"]+)"/g)]
+    .map((m) => ({ key: m[1] ?? "", from: m[2] ?? "" }));
+  return { rows, rawMarkers, block };
+}
 
 // The two that deliberately STAYED as workspace-tier rows, in order: the tier's own home, and the
 // reserved Platform home — which the mockup pins "above the project list in the tree, not inside it"
@@ -315,12 +339,40 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       }
       expect(treeRoutes, "the tree-row collector missed the project-tier Board row").toContain("/board");
 
+      // Which of them is a Workspace node TAB and which is still an escape-hatch entry.
+      const tabs = parseWorkspaceNodeTabs();
+      expect(tabs.rows.length, `the WORKSPACE_NODE_TABS parse found no rows. Block:\n${tabs.block}`)
+        .toBeGreaterThan(0);
+      expect(tabs.rows.length,
+        `the parse returned ${tabs.rows.length} row(s) but the declaration contains ${tabs.rawMarkers}`
+        + ` entries — the pattern is dropping rows. Block:\n${tabs.block}`).toBe(tabs.rawMarkers);
+      const tabFor = new Map(tabs.rows.map((r) => [r.from, r.key]));
+      // Both branches below must actually RUN, or one of them is an untested claim hiding behind a
+      // list that happens to be all one kind.
+      expect(RE_HOMED.filter((r) => tabFor.has(r)).length,
+        "no re-homed destination is a Workspace node tab, so that branch never runs").toBeGreaterThan(0);
+      expect(RE_HOMED.filter((r) => !tabFor.has(r)).length,
+        "every re-homed destination is a node tab, so the escape-hatch branch never runs").toBeGreaterThan(0);
+
+      // The Workspace node is where a tab can be seen at all; the tree is identical on every route.
+      await page.goto(loomDaemon.baseURL + "/home");
+      await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
+
       for (const gone of RE_HOMED) {
         expect(treeRoutes, `${gone} is still an Atlas tree row`).not.toContain(gone);
         // Reachability is the other half of the claim: removed from the rows, NOT removed from the
-        // app. (Deleting the row and stranding the surface would also satisfy the line above.)
-        await expect(page.getByTestId(`atlas-unhomed-${gone}`),
-          `${gone} left the tree rows without an escape-hatch entry — it is now unreachable`).toHaveCount(1);
+        // app. (Deleting the row and stranding the surface would also satisfy the line above.) Which
+        // control reaches it depends on whether card 41eab0eb has re-homed it yet.
+        const key = tabFor.get(gone);
+        if (key) {
+          await expect(page.getByTestId(`atlas-tab-${key}`),
+            `${gone} left the tree rows without a Workspace node tab — it is now unreachable`).toHaveCount(1);
+          await expect(page.getByTestId(`atlas-unhomed-${gone}`),
+            `${gone} is a node tab and STILL an escape-hatch entry`).toHaveCount(0);
+        } else {
+          await expect(page.getByTestId(`atlas-unhomed-${gone}`),
+            `${gone} left the tree rows without an escape-hatch entry — it is now unreachable`).toHaveCount(1);
+        }
       }
     });
 

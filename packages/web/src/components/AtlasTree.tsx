@@ -23,7 +23,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { Project } from "@loom/shared";
 import {
   ATLAS_HOMES, PROJECT_NODE_TABS, isRehomedProjectTab, projectTabPath, useVisibleNavPages,
-  type AtlasHome, type NavPage,
+  workspaceNodeTabFor, type AtlasHome, type NavPage,
 } from "../nav";
 import { AgentsQuickSpawn } from "./atlasAgents";
 import { NavIcon } from "./navIcons";
@@ -76,12 +76,14 @@ function projectRowLabel(page: NavPage): string {
 // reserved Platform home. The mockup pins it directly above the project list (its own `NODES.platform`
 // row, `crumbs: ["root"]`) because it is a sibling ENTITY of the projects — a home with its own agents
 // — not a surface OF the workspace. Every other unscoped destination is a Workspace-node TAB in the
-// mockup (`ROOT_TABS`), which cards 41eab0eb/25c08fba build; until they land those keep their own
-// addresses and the escape hatch at the foot of the tree.
+// mockup (`ROOT_TABS`): card 41eab0eb built seven of them — `WORKSPACE_NODE_TABS` in src/nav.tsx, the
+// "which node tab does this become" field card 0d0c6cee could not yet guess — and card 25c08fba took
+// `/terminals` down to PROJECT depth as the project node's Sessions tab, so it is no longer an
+// unscoped destination this tier places at all. The two still in the escape hatch at the foot of the
+// tree belong to card 5afd71bd.
 //
-// A one-entry literal rather than a new `nav.tsx` field: this is the single placement judgement this
-// card makes, and the field those two cards will actually need is "which node tab does this become",
-// which neither exists nor can be guessed from here.
+// A one-entry literal rather than a `nav.tsx` field of its own: this stays the single placement
+// judgement card 0d0c6cee made, and nothing since has needed a second entry.
 const WORKSPACE_TIER_NODES = ["/platform"];
 
 /** A right-aligned metric on a row — the mockup's `.node-meta` (muted, 10.5px). */
@@ -203,7 +205,6 @@ function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }:
 const WORKSPACE_HOME = ATLAS_HOMES.find((h) => h.key === "workspace")!;
 const PROJECT_HOME = ATLAS_HOMES.find((h) => h.key === "project")!;
 const AGENTS_NODE = ATLAS_HOMES.find((h) => h.key === "agents")!;
-const WORKSPACE_SETTINGS = ATLAS_HOMES.find((h) => h.key === "workspace-settings")!;
 
 // One project row — cards e47df20a (P1-4) and 0d0c6cee. A real control: clicking it writes the active
 // project to the SAME ActiveProjectProvider the rail chip writes and every `scoped` page reads, so a
@@ -282,11 +283,13 @@ function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle,
 /**
  * Every cross-project destination that has LEFT the tree, with its own address kept alive.
  *
- * Cards 41eab0eb/25c08fba re-home these as Workspace/project node TABS. Until they land, removing the
- * rows without this would strand ten real surfaces behind ⌘K alone — so they stay reachable, but
- * deliberately NOT as `.loom-atlas-node` rows: a hierarchy with a flat page list bolted to its side is
- * the "worst of both worlds" this card exists to end. A disclosure, named for what it is, that the two
- * re-homing cards delete whole.
+ * Card 5afd71bd owns the two that are left — Mission Control and Projects, which the approved design
+ * dissolves outright. Card 41eab0eb took seven as Workspace node tabs, and card 25c08fba took
+ * Terminals down to project depth as the PROJECT node's Sessions tab. Until the last of them lands,
+ * removing these rows without this would strand real surfaces behind ⌘K alone — so they stay
+ * reachable, but deliberately NOT as `.loom-atlas-node` rows: a hierarchy with a flat page list
+ * bolted to its side is the "worst of both worlds" card 0d0c6cee exists to end. A disclosure, named
+ * for what it is, that the last re-homing card deletes.
  *
  * It auto-opens on the destination you are actually looking at, so the tree never goes blank about
  * where you are while these addresses still exist.
@@ -391,13 +394,13 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
   );
 
   const platformNodes = workspace.filter((p) => WORKSPACE_TIER_NODES.includes(p.to));
-  const unhomed = [
-    ...workspace.filter((p) => !WORKSPACE_TIER_NODES.includes(p.to)),
-    // The Atlas-only workspace Settings node (card 595e2a47) is a `ROOT_TABS` row in the mockup, so it
-    // re-homes with the nine above rather than staying the tier's footer. Shaped as a NavPage so the
-    // disclosure has one row type, not two.
-    { label: WORKSPACE_SETTINGS.label, to: WORKSPACE_SETTINGS.to, end: true, element: null, group: "system" } as NavPage,
-  ];
+  // What is left of the hatch. Card 41eab0eb re-homed seven of card 0d0c6cee's ten as Workspace node
+  // tabs — DERIVED by subtracting that declaration rather than by a second list here, so the hatch
+  // shrinks on its own as the remaining cards land. Card 25c08fba took Terminals the other way, down
+  // to project depth as the PROJECT node's Sessions tab, so `splitByDepth` no longer leaves it in
+  // `workspace` for this filter to see at all. Two are still waiting: Mission Control and Projects,
+  // which card 5afd71bd retires outright. The disclosure goes with the last of them.
+  const unhomed = workspace.filter((p) => !WORKSPACE_TIER_NODES.includes(p.to) && !workspaceNodeTabFor(p.to));
 
   /**
    * The surfaces WITHIN one project node. Built per project, so a reader can open a branch they are

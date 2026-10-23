@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { matchPath, Route, Routes, useLocation } from "react-router-dom";
+import { matchPath, Navigate, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
@@ -7,7 +7,7 @@ import { AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
 import {
   ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
-  isRehomedProjectTab, projectNodeTabAt, projectTabPath,
+  isRehomedProjectTab, projectNodeTabAt, projectTabPath, workspaceNodeTabFor,
   type AtlasHome, type NavPage, type ParamPage,
 } from "../nav";
 import { AtlasNodeHeadContext } from "../lib/atlasNodeHead";
@@ -79,6 +79,36 @@ function currentParamPage(pathname: string): { page: ParamPage; id: string } | u
 
 /** Where the frame says you are: the trail THROUGH the tree, and the node it ends at. */
 type NodeAddress = { crumbs: string[]; heading: string };
+
+/**
+ * A re-homed cross-project address, redirected into its Workspace node tab — card 41eab0eb.
+ *
+ * ATLAS-ONLY, deliberately: the `from` path stays a live NAV_PAGES/ATLAS_HOMES route that the CLASSIC
+ * shell mounts verbatim, so a user who never opted in is untouched. That is why this is not a
+ * LEGACY_REDIRECTS row — those carry ONE target for both shells by design (src/nav.tsx), and this is
+ * the one case where the two shells must genuinely differ.
+ *
+ * An incoming `?tab=` is TRANSLATED to the host's sub-key rather than dropped: `/actors?tab=skills` is
+ * a real address today — it is `/skills`'s own legacy target — and chaining it into the tab without
+ * this would silently land on Profiles. Every other incoming param is carried as-is; anything the
+ * guest does not read is inert.
+ */
+function RehomedToNodeTab({ to, subKey }: { to: string; subKey: string }) {
+  const [params] = useSearchParams();
+  const next = new URLSearchParams(params);
+  const sub = next.get("tab");
+  next.delete("tab");
+  if (sub) next.set(subKey, sub);
+  const query = next.toString();
+  return <Navigate to={query ? `${to}&${query}` : to} replace />;
+}
+
+/** The host's sub-key, mirroring pages/WorkspaceHome.tsx's own `SUB_KEY`. */
+const WORKSPACE_SUB_KEY = "sub";
+
+/** A re-homed destination's address on the Workspace node. Never the node's bare path: every tab this
+ *  redirects into is one of the seven, and the bare path is Overview's. */
+const workspaceTabHref = (key: string) => `/home?tab=${key}`;
 
 // A session's node label, in the app's OWN identity grammar — TileTitle (components/TerminalCard.tsx)
 // renders `[project · ]agent[ · role] · <short id>` on every terminal header. The project half is
@@ -296,11 +326,20 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
           <AtlasNodeHeadContext.Provider value={nodeHeadSlot}>
           <Routes>
             {/* Each destination's own component, rendered exactly as the legacy shell renders it —
-                minus the eight card 25c08fba re-homed onto the project node, which are mounted at the
-                bottom of this table pointing at the node instead. */}
-            {NAV_PAGES.filter((p) => !REHOMED_TAB_PATHS.has(p.to)).map((p) => (
-              <Route key={p.to} path={p.to} element={p.element} />
-            ))}
+                minus the eight card 25c08fba re-homed onto the PROJECT node, which are mounted at the
+                bottom of this table pointing at the node instead — and unless card 41eab0eb re-homed
+                it as a WORKSPACE node tab, in which case this address redirects into that tab and the
+                component is mounted there instead. (The two sets are disjoint: a destination is at
+                one depth.) The CLASSIC shell still mounts the page at this same path, unchanged. */}
+            {NAV_PAGES.filter((p) => !REHOMED_TAB_PATHS.has(p.to)).map((p) => {
+              const tab = workspaceNodeTabFor(p.to);
+              return (
+                <Route key={p.to} path={p.to}
+                  element={tab
+                    ? <RehomedToNodeTab to={workspaceTabHref(tab.key)} subKey={WORKSPACE_SUB_KEY} />
+                    : p.element} />
+              );
+            })}
             {/* The parameterized addresses (P1-2), from the SAME declaration LegacyShell mounts —
                 the identical element, so the page is byte-for-byte the one the old URL rendered. */}
             {PARAM_PAGES.map((p) => (
@@ -316,9 +355,15 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {/* The Atlas-only nodes (P2-1's two home nodes, P2-2's Agents node). The classic shell
                 deliberately does NOT mount these; see ATLAS_HOMES' own anchor in src/nav.tsx for
                 why, and why `/` and `/overview` must not be re-pointed at them. */}
-            {ATLAS_HOMES.filter((h) => !REHOMED_TAB_PATHS.has(h.to)).map((h) => (
-              <Route key={h.to} path={h.to} element={h.element} />
-            ))}
+            {ATLAS_HOMES.filter((h) => !REHOMED_TAB_PATHS.has(h.to)).map((h) => {
+              const tab = workspaceNodeTabFor(h.to);
+              return (
+                <Route key={h.to} path={h.to}
+                  element={tab
+                    ? <RehomedToNodeTab to={workspaceTabHref(tab.key)} subKey={WORKSPACE_SUB_KEY} />
+                    : h.element} />
+              );
+            })}
             {/* The re-homed project tabs (card 25c08fba). Every one renders the project NODE, which
                 reads the address back through the same `projectNodeTabAt` resolver this frame uses and
                 shows that tab. The old page is still what renders — as the node's tab body. */}

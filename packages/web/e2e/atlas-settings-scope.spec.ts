@@ -132,37 +132,46 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
       }
     }
 
-    // The Workspace node is still reachable from the tree, and still at workspace depth (not the
-    // project's). Card 0d0c6cee moved it out of the tree's ROWS and into the escape hatch at the
-    // foot of the tree — it is a `ROOT_TABS` row in the approved design, so cards 41eab0eb /
-    // 25c08fba re-home it as a Workspace node tab. What this test is about — that a workspace-tier
-    // Settings address exists, is reachable, and reads at workspace depth — is unchanged; only which
-    // control reaches it moved. ⚠️ Re-point at the tab when those cards land.
+    // The workspace-tier Settings surface is still reachable, and still at workspace depth (not the
+    // project's). WHICH CONTROL reaches it has moved twice: card 0d0c6cee took it out of the tree's
+    // ROWS into the escape hatch, and card 41eab0eb made it the Workspace node's `settings` TAB,
+    // which is what the approved design's `ROOT_TABS` always called for. What this test is about —
+    // that the surface exists, is reachable from the Workspace node, and reads at workspace depth —
+    // is unchanged.
     await page.goto(loomDaemon.baseURL + "/home");
-    // The hatch is a <details> that auto-opens only on one of its OWN destinations, and /home is not
-    // one — so it has to be opened before its rows can be clicked. Exercised as a reader would, by
-    // clicking the summary, with the before/after state asserted on both sides: a bare
-    // `open = true` would prove the row works while leaving the only new control here unexercised.
-    const hatch = page.getByTestId("atlas-unhomed");
-    await expect(hatch, "the escape hatch is open on /home, which is not one of its destinations")
-      .not.toHaveAttribute("open", /.*/);
-    await hatch.locator("summary").click();
-    await expect(hatch, "clicking the escape hatch's summary did not open it").toHaveAttribute("open", /.*/);
-    const treeRow = page.getByTestId("atlas-unhomed-/workspace-settings");
-    await expect(treeRow).toBeVisible();
-    expect(await treeRow.evaluate((el) => !!el.closest("ul.loom-atlas-nodes.is-kids")),
-      "the Workspace Settings row is nested under the project branch").toBe(false);
-    await treeRow.click();
-    await expect.poll(() => new URL(page.url()).pathname,
-      { message: "clicking the Workspace Settings tree node did not navigate" }).toBe(WORKSPACE_NODE);
-    // The frame agrees about where that is: workspace depth, so the project name is NOT a crumb.
-    await expect(page.locator(".loom-atlas-nodehead h1")).toHaveText("Settings");
+    const settingsTab = page.getByTestId("atlas-tab-settings");
+    await expect(settingsTab, "the Workspace node has no Settings tab to reach this surface by")
+      .toBeVisible();
+    // Exercised as a reader would, by clicking, with the before/after state asserted on both sides —
+    // a bare navigation to the address would prove the surface renders while leaving the control
+    // that now reaches it untested.
+    await expect(settingsTab, "the Settings tab reads as selected before it was clicked")
+      .toHaveAttribute("aria-selected", "false");
+    await settingsTab.click();
+    await expect(settingsTab, "clicking the Settings tab did not select it")
+      .toHaveAttribute("aria-selected", "true");
+    // A real address, not component state.
+    await expect(page, "the Settings tab is not an address of its own").toHaveURL(/\?tab=settings$/);
+    // It really is the workspace half that is showing — one section from this sweep's own
+    // workspace-scoped list, picked off the parse rather than named here.
+    await expect(sectionBox(page, workspace[0]!.key),
+      `the Workspace node's Settings tab does not render the ${workspace[0]!.key} section`).toHaveCount(1);
+    // And the old address still gets you there, via the Atlas-side redirect card 41eab0eb added.
+    await page.goto(loomDaemon.baseURL + WORKSPACE_NODE);
+    await expect(page, `${WORKSPACE_NODE} no longer reaches the Workspace node's Settings tab`)
+      .toHaveURL(/\/home\?tab=settings$/);
+
+    // The frame agrees about where that is: workspace depth, so the project name is NOT a crumb. The
+    // heading names the NODE rather than the tab — every `ROOT_TABS` view in the approved mockup
+    // declares `node: "root"` and `title: "Workspace"` — so a tab is a surface OF the workspace, not
+    // a place below it.
+    await expect(page.locator(".loom-atlas-nodehead h1")).toHaveText("Workspace");
     // The crumb TEXT span, not the whole <li>: every <li> past the first also nests an aria-hidden
     // "/" separator, which innerText folds into the label ("/\nSettings").
     const crumbs = await page.getByTestId("atlas-breadcrumb")
       .locator("li > span:not([aria-hidden])").allInnerTexts();
     expect(crumbs.map((c) => c.trim()), "the Workspace Settings crumb trail is not workspace-depth")
-      .toEqual(["Workspace", "Settings"]);
+      .toEqual(["Workspace"]);
   });
 
   test("the project node's Settings edits the ACTIVE project's config, not a decoy's", async ({ page, loomDaemon }) => {

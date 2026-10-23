@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router-dom";
 import { Segmented } from "../components/ui";
+import { useTabHost } from "../lib/nodeTabHost";
 import Profiles from "./Profiles";
 import Skills from "./Skills";
 
@@ -17,11 +18,16 @@ const TABS: { key: ActorsTab; label: string }[] = [
 ];
 
 export default function Actors() {
-  const [params, setParams] = useSearchParams();
-  const tab: ActorsTab = params.get("tab") === "skills" ? "skills" : "profiles";
-  // Profiles is the default/canonical tab, so its URL carries no query; only Skills pins `?tab=skills`.
-  // `replace` keeps tab switches out of the history stack (a back press leaves the page, not the tab).
-  const setTab = (t: ActorsTab) => setParams(t === "skills" ? { tab: "skills" } : {}, { replace: true });
+  const [params] = useSearchParams();
+  // `tab` standalone; the host's own key when this page is the Workspace node's Actors tab (card
+  // 41eab0eb) — writing a bare `tab` there would overwrite the host's own and drop the whole node
+  // back to Overview. lib/nodeTabHost.tsx carries the full reasoning.
+  const host = useTabHost();
+  const tab: ActorsTab = params.get(host.key) === "skills" ? "skills" : "profiles";
+  // Profiles is the default/canonical tab, so its URL carries no query of its own; only Skills pins a
+  // value. `replace` keeps tab switches out of the history stack (a back press leaves the page, not
+  // the tab), and the merge is what preserves the host's `?tab=` where there is one.
+  const setTab = (t: ActorsTab) => host.set({ [host.key]: t === "skills" ? "skills" : null });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

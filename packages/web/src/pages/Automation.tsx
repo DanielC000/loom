@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router-dom";
 import { Segmented } from "../components/ui";
+import { useTabHost } from "../lib/nodeTabHost";
 import Schedules from "./Schedules";
 import EventTriggers from "./EventTriggers";
 
@@ -19,11 +20,15 @@ const TABS: { key: AutomationTab; label: string }[] = [
 ];
 
 export default function Automation() {
-  const [params, setParams] = useSearchParams();
-  const tab: AutomationTab = params.get("tab") === "events" ? "events" : "time";
-  // Time is the default/canonical tab, so its URL carries no query; only Events pins `?tab=events`.
-  // `replace` keeps tab switches out of the history stack (a back press leaves the page, not the tab).
-  const setTab = (t: AutomationTab) => setParams(t === "events" ? { tab: "events" } : {}, { replace: true });
+  const [params] = useSearchParams();
+  // `tab` standalone; the host's own key when this page is the Workspace node's Automation tab (card
+  // 41eab0eb). lib/nodeTabHost.tsx carries why a hardcoded "tab" breaks the host.
+  const host = useTabHost();
+  const tab: AutomationTab = params.get(host.key) === "events" ? "events" : "time";
+  // Time is the default/canonical tab, so its URL carries no query of its own; only Events pins a
+  // value. `replace` keeps tab switches out of the history stack (a back press leaves the page, not
+  // the tab), and the merge is what preserves the host's `?tab=` where there is one.
+  const setTab = (t: AutomationTab) => host.set({ [host.key]: t === "events" ? "events" : null });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

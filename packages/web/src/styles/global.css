@@ -1463,13 +1463,17 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 18px;
   min-width: 0;
-  /* WRAPS (card 25c08fba). With the two tabs this row was built for it never reached its container's
-     edge; the project node's ten do, and an unwrapped row is CLIPPED at that edge — measured at 420px,
-     where the last five tabs were off-screen with no scrollbar and no other way to reach them. The
-     parent `.loom-atlas-tabs` already wraps, so this is the row following its own container rather
-     than a new behaviour. `row-gap` is smaller than the 18px column gap because wrapped tab LINES sit
-     closer than tabs within a line. Nothing changes where the row already fits — every node whose tabs
-     fit on one line, 1440 included, lays out identically. */
+  /* WRAPS (cards 25c08fba and 41eab0eb). With the two tabs this row was built for it never reached
+     its container's edge; the project node's ten do and the Workspace node's nine do, and an
+     unwrapped row is CLIPPED at that edge — measured at 420px, where the last five tabs were
+     off-screen with no scrollbar and no other way to reach them. Wrapping inside the row (rather
+     than scrolling it, or letting it push the page wide) keeps every tab reachable at phone width
+     with no affordance a reader has to discover; the parent `.loom-atlas-tabs` already wraps, so
+     this is the row following its own container rather than a new behaviour. `row-gap` is smaller
+     than the 18px column gap because wrapped tab LINES sit closer than tabs within a line, and it
+     only ever applies once a second line exists. Nothing changes where the row already fits — every
+     node whose tabs fit on one line, 1440 included, lays out identically, so the two-tab nodes are
+     byte-unchanged. */
   flex-wrap: wrap;
   row-gap: 8px;
 }

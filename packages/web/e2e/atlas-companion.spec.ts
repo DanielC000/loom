@@ -115,13 +115,28 @@ const SECTION_LABEL: Record<string, RegExp> = {
 };
 
 const node = (page: Page) => page.locator(".loom-companion-node");
-const modeTabs = (page: Page) => page.locator('[data-testid="atlas-node-tabs"]');
+// Card 41eab0eb made this node the Workspace node's `companion` TAB, so the document now carries TWO
+// `atlas-node-tabs` rows: the Workspace node's own, and this node's modes inside its panel. Every
+// locator here is therefore scoped to the Companion node itself — unscoped they resolve both and the
+// mode assertions would be reading the host's tab row.
+const COMPANION_HOST_TAB = "companion";
+const companionPanel = (page: Page) => page.getByTestId(`atlas-tabpanel-${COMPANION_HOST_TAB}`);
+const modeTabs = (page: Page) => companionPanel(page).locator('[data-testid="atlas-node-tabs"]');
 const modeTab = (page: Page, name: RegExp) => modeTabs(page).getByRole("tab", { name });
 const managePanel = (page: Page) => page.locator('[data-testid="companion-mode-panel-manage"]');
 const chatPanel = (page: Page) => page.locator('[data-testid="companion-mode-panel-chat"]');
 const groupPanel = (page: Page, group: string) => page.locator(`[data-testid="companion-manage-panel-${group}"]`);
 const subTab = (page: Page, name: RegExp) =>
   page.locator('[role="tablist"][aria-label="Companion manage sections"]').getByRole("tab", { name });
+
+/**
+ * The Companion node's own address for a mode — card 41eab0eb. The node is the Workspace node's
+ * `companion` tab now, so the node's path is `/home`, its own `?tab=` is the HOST's, and its modes
+ * ride `sub=` (lib/nodeTabHost.tsx). `/companion?tab=X` still works and still lands here, through the
+ * Atlas-side redirect that translates the one key onto the other — which is exactly what `openNode`
+ * exercises by continuing to navigate the old way.
+ */
+const modeHref = (mode?: string) => `/home?tab=${COMPANION_HOST_TAB}${mode ? `&sub=${mode}` : ""}`;
 
 /** Open the Atlas Companion node with the companion in focus, asserting WHICH companion we are looking at. */
 async function openNode(page: Page, baseURL: string, companionName: string, query = "") {
@@ -225,25 +240,36 @@ function seedCompanionSkill(loomHome: string, sessionId: string, name: string) {
 }
 
 test.describe("Atlas Companion node — the three modes and the twelve Manage sections", () => {
-  test("switch ON: the three modes are the node's own ?tab=, linkable and reload-stable", async ({ page, loomDaemon }) => {
+  test("switch ON: the three modes are the node's own tab query, linkable and reload-stable", async ({ page, loomDaemon }) => {
     const name = `Mode-${Date.now().toString(36)}`;
     await loomDaemon.seedCompanion({ name });
     await openNode(page, loomDaemon.baseURL, name);
 
-    // All three modes, in the NODE's tab row (never the tree's — the row is container-scoped).
+    // All three modes, in the NODE's own tab row (never the tree's and never the HOST node's — the
+    // row is container-scoped; see `modeTabs`).
     for (const label of [/^chat$/i, /^manage$/i, /^terminal$/i]) {
       await expect(modeTab(page, label)).toHaveCount(1);
     }
+    // The scoping is a real claim, so it gets a positive control: the HOST's tab row exists on this
+    // same document, and the node's own row is NOT it.
+    await expect(page.locator('[data-testid="atlas-node-tabs"]'),
+      "positive control: the document does not carry both the host's tab row and this node's")
+      .toHaveCount(2);
+    await expect(page.getByTestId(`atlas-tab-${COMPANION_HOST_TAB}`),
+      "the Companion node is showing but its host tab is not selected")
+      .toHaveAttribute("aria-selected", "true");
 
-    // Chat is canonical: the bare /companion address shows it, and its URL carries no ?tab= at all.
+    // Chat is canonical: the bare /companion address shows it, and its URL pins no mode at all.
     await expect(chatPanel(page)).toBeVisible();
     await expect(modeTab(page, /^chat$/i)).toHaveAttribute("aria-selected", "true");
     await expect(managePanel(page)).toBeHidden();
     await expect(page.locator('[data-testid="companion-mode-panel-terminal"]')).toHaveCount(0);
 
-    // BEFORE → AFTER on a mode click: the address changes, and so does which panel is showing.
+    // BEFORE → AFTER on a mode click: the address changes, and so does which panel is showing. The
+    // mode rides the node's own key, and the HOST's `tab=` is left exactly where it was — which is
+    // the collision card 41eab0eb's `useTabHost` exists to prevent.
     await modeTab(page, /^manage$/i).click();
-    await expect(page).toHaveURL(/\?tab=manage$/);
+    await expect(page).toHaveURL(loomDaemon.baseURL + modeHref("manage"));
     await expect(managePanel(page)).toBeVisible();
     // Chat is HIDDEN, not removed from the DOM. ⚠️ This pair is a STRUCTURAL check only: a panel that
     // React tore down and rebuilt is also "count 1 + hidden", so it cannot see draft loss, which is the
@@ -260,10 +286,10 @@ test.describe("Atlas Companion node — the three modes and the twelve Manage se
     // Terminal mounts only while active (the one deliberate exception to keeping panels mounted: it is
     // read-only, so there is no draft to protect, and mounting it costs a live pty attach).
     await modeTab(page, /^terminal$/i).click();
-    await expect(page).toHaveURL(/\?tab=terminal$/);
+    await expect(page).toHaveURL(loomDaemon.baseURL + modeHref("terminal"));
     await expect(page.locator('[data-testid="companion-mode-panel-terminal"]')).toBeVisible();
     await modeTab(page, /^chat$/i).click();
-    await expect(page).toHaveURL(/\/companion$/);
+    await expect(page).toHaveURL(loomDaemon.baseURL + modeHref());
     await expect(page.locator('[data-testid="companion-mode-panel-terminal"]')).toHaveCount(0);
   });
 

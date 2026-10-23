@@ -10,15 +10,20 @@
 //      this guards is a count going stale, and a hand-copied list in the test would go stale
 //      identically. Since card fd99b2d7 the tree also holds Atlas-ONLY nodes the rail has no
 //      equivalent of, and since card 0d0c6cee the ten cross-project destinations are no longer tree
-//      rows at all — they sit in the escape hatch at the foot of the tree until cards 41eab0eb /
-//      25c08fba re-home them as node tabs. So the claim is a PARTITION: every rail destination is
-//      either a node or a hatch entry, never both and never neither, and every extra node is a
-//      declared Atlas home. See `parseAtlasHomes` below for why that is no weaker than an equality.
+//      rows at all. Card 41eab0eb then made seven of those WORKSPACE NODE TABS, leaving two in the
+//      escape hatch at the foot of the tree (card 25c08fba took `/terminals` the other way, down to
+//      project depth as a tree ROW again). So the claim is a THREE-WAY PARTITION: every rail
+//      destination is a node, a hatch entry, or a declared node tab — in exactly one of the three,
+//      never two and never none — and every extra node is a declared Atlas home. See `parseAtlasHomes`
+//      and `parseWorkspaceNodeTabs` below for why that is no weaker than an equality.
 //   2. CONTENT IDENTITY. For every one of those destinations, the page's rendered structure is
-//      fingerprinted at the OLD route (switch off) and again after clicking the node (switch on), and
-//      required to match. "The same content the old route rendered" is asserted against the old route
-//      itself, not against a marker someone decided was characteristic of it. A destination a PHASE-2
-//      card has deliberately rebuilt asserts the INVERSE instead — see REBUILT_IN_PHASE_2 below.
+//      fingerprinted at the OLD route (switch off) and again after reaching it under Atlas (switch
+//      on), and required to match. "The same content the old route rendered" is asserted against the
+//      old route itself, not against a marker someone decided was characteristic of it. A destination
+//      a PHASE-2 card has deliberately rebuilt asserts the INVERSE instead — see REBUILT_IN_PHASE_2.
+//      A node-TAB destination is fingerprinted at its own `atlas-tabpanel-<key>` wrapper rather than
+//      at `main`: card 41eab0eb re-FRAMED those pages without rebuilding them, so the identity claim
+//      still holds exactly — it just has to be made about the panel the component is mounted in.
 //   3. KEYBOARD. Tab reaches the nodes in document order, Enter activates one, and the focused node
 //      carries a real computed focus ring.
 //
@@ -59,6 +64,38 @@ function parseAtlasHomes(): { paths: string[]; rawMarkers: number; block: string
   const rawMarkers = (block.match(/\bkey:\s*"/g) ?? []).length;
   const paths = [...block.matchAll(/\bto:\s*"([^"]+)"/g)].map((m) => m[1] ?? "");
   return { paths, rawMarkers, block };
+}
+
+// ── The THIRD home a destination can have (card 41eab0eb) ──────────────────────────────────────
+// Phase 2 gave the Workspace node tabs, and seven cross-project destinations moved onto them. Those
+// are neither tree nodes nor escape-hatch entries any more, so the partition below is three-way.
+//
+// Parsed from the same source, the same way, with the same raw-marker control. The TAB is addressed
+// by `atlas-tab-<key>` on `/home`, not by a pathname, which is why it needs its own lookup rather
+// than another `routesFrom` call.
+type NodeTab = { key: string; from: string };
+
+function parseWorkspaceNodeTabs(): { rows: NodeTab[]; rawMarkers: number; block: string } {
+  const src = readFileSync(NAV_SOURCE, "utf8");
+  const start = src.indexOf("export const WORKSPACE_NODE_TABS");
+  if (start < 0) throw new Error(`no WORKSPACE_NODE_TABS declaration found in ${NAV_SOURCE}`);
+  const end = src.indexOf("\n];", start);
+  if (end < 0) throw new Error(`WORKSPACE_NODE_TABS in ${NAV_SOURCE} has no closing "];"`);
+  const block = src.slice(start, end);
+  const rawMarkers = (block.match(/\bkey:\s*"/g) ?? []).length;
+  const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*from:\s*"([^"]+)"/g)]
+    .map((m) => ({ key: m[1] ?? "", from: m[2] ?? "" }));
+  return { rows, rawMarkers, block };
+}
+
+/** The declared tabs, with the parse's own controls run at the call site that uses them. */
+function nodeTabsUnderTest(): Map<string, string> {
+  const { rows, rawMarkers, block } = parseWorkspaceNodeTabs();
+  expect(rows.length, `the WORKSPACE_NODE_TABS parse found no rows. Block:\n${block}`).toBeGreaterThan(0);
+  expect(rows.length,
+    `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} entries`
+    + ` — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
+  return new Map(rows.map((r) => [r.from, r.key]));
 }
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
@@ -140,8 +177,13 @@ async function routesFrom(page: Page, selector: string): Promise<string[]> {
 // levels of panels. Capping trades fidelity nobody needs for stability this comparison does need.
 const FINGERPRINT_DEPTH = 4;
 
-async function pageSkeleton(page: Page, maxDepth: number): Promise<string> {
-  return page.evaluate((depthCap) => {
+// `root` is what the page's own content hangs off. `main` under the classic shell and under an Atlas
+// node that owns the whole column; a `atlas-tabpanel-<key>` wrapper for a destination card 41eab0eb
+// re-homed as a Workspace node TAB — its component is mounted verbatim inside that wrapper, so
+// walking the wrapper's CHILDREN produces the exact string the classic `main` walk produces, and the
+// identity claim survives the re-frame instead of being weakened to "it rendered something".
+async function pageSkeleton(page: Page, maxDepth: number, root = "main"): Promise<string> {
+  return page.evaluate(([depthCap, rootSelector]) => {
     const out: string[] = [];
     const describe = (el: Element) => {
       const raw = typeof el.className === "string" ? el.className.trim() : "";
@@ -156,10 +198,10 @@ async function pageSkeleton(page: Page, maxDepth: number): Promise<string> {
       if (depth >= depthCap || el.tagName.toLowerCase() === "svg") return;
       for (const child of Array.from(el.children)) walk(child, depth + 1);
     };
-    const main = document.querySelector("main");
-    if (main) for (const child of Array.from(main.children)) walk(child, 0);
+    const host = document.querySelector(rootSelector as string);
+    if (host) for (const child of Array.from(host.children)) walk(child, 0);
     return out.join("\n");
-  }, maxDepth);
+  }, [maxDepth, root] as const);
 }
 
 // These pages have async pieces (every panel is a react-query read), so a fingerprint taken straight
@@ -168,11 +210,11 @@ async function pageSkeleton(page: Page, maxDepth: number): Promise<string> {
 const SETTLE_INTERVAL_MS = 300;
 const SETTLE_MAX_SAMPLES = 20;
 
-async function settledPageSkeleton(page: Page): Promise<string> {
-  let last = await pageSkeleton(page, FINGERPRINT_DEPTH);
+async function settledPageSkeleton(page: Page, root = "main"): Promise<string> {
+  let last = await pageSkeleton(page, FINGERPRINT_DEPTH, root);
   for (let i = 0; i < SETTLE_MAX_SAMPLES; i++) {
     await page.waitForTimeout(SETTLE_INTERVAL_MS);
-    const next = await pageSkeleton(page, FINGERPRINT_DEPTH);
+    const next = await pageSkeleton(page, FINGERPRINT_DEPTH, root);
     if (next === last) return next;
     last = next;
   }
@@ -282,20 +324,40 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     //     destination is in EXACTLY ONE of the two places — which is STRONGER than the old
     //     equality-plus-carve-out it replaces, and needs no hand-named exemption list that could go
     //     stale: a destination that fell out of BOTH fails here, and so does one in both at once.
+    // Card 41eab0eb added the THIRD half: a destination may now be a Workspace node TAB instead,
+    // which is neither a tree row nor a hatch entry. Derived from the declaration, then VERIFIED
+    // against the rendered tab row, so a declared tab that never renders fails here too.
+    const nodeTabs = nodeTabsUnderTest();
+    // Read on the Workspace node itself — the tree renders on every Atlas route, but the tab row is
+    // that node's own chrome and exists nowhere else.
+    await page.goto(loomDaemon.baseURL + "/home");
+    await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
+    const renderedTabs = new Set(await page.locator('[data-testid="atlas-node-tabs"] [role="tab"]')
+      .evaluateAll((els) => els.map((el) => (el.getAttribute("data-testid") ?? "").replace(/^atlas-tab-/, ""))));
+    expect(renderedTabs.size, "the Workspace node's tab-row collector found no tabs at all").toBeGreaterThan(2);
+    const tabbedSet = new Set<string>();
+    for (const [from, key] of nodeTabs) {
+      expect(renderedTabs.has(key),
+        `src/nav.tsx declares ${from} as the "${key}" Workspace node tab, which the node does not render`
+        + ` — tabs: ${JSON.stringify([...renderedTabs])}`).toBe(true);
+      tabbedSet.add(from);
+    }
+
     const homedSet = new Set(treeRoutes);
     const unhomedSet = new Set(unhomedRoutes);
+    const placesFor = (route: string) =>
+      [homedSet.has(route), unhomedSet.has(route), tabbedSet.has(route)].filter(Boolean).length;
     for (const route of railRoutes) {
-      expect(homedSet.has(route) || unhomedSet.has(route),
-        `the classic destination ${route} is neither an Atlas tree node nor a "not yet re-homed" entry`
-        + ` — it is unreachable from the tree. nodes: ${JSON.stringify(treeRoutes)};`
-        + ` escape hatch: ${JSON.stringify(unhomedRoutes)}`).toBe(true);
-      expect(homedSet.has(route) && unhomedSet.has(route),
-        `${route} is BOTH a tree node and a "not yet re-homed" entry`).toBe(false);
+      expect(placesFor(route),
+        `the classic destination ${route} is in ${placesFor(route)} of the three Atlas homes — it must be`
+        + ` in EXACTLY one (a tree node, a "not yet re-homed" entry, or a Workspace node tab).`
+        + ` nodes: ${JSON.stringify(treeRoutes)}; escape hatch: ${JSON.stringify(unhomedRoutes)};`
+        + ` node tabs: ${JSON.stringify([...tabbedSet])}`).toBe(1);
     }
-    // Positive control on the escape-hatch collector: a reading of zero would satisfy every
-    // "is in exactly one" check above by making the second disjunct dead, so it has to be non-empty.
-    // When cards 41eab0eb / 25c08fba land, THIS is the assertion that tells you to delete the hatch
-    // and this half of the partition with it.
+    // Positive control on the escape-hatch collector: a reading of zero would make that disjunct dead
+    // and let a destination that fell out of the tree pass as "tabbed" without being either. When the
+    // last of cards 25c08fba / 5afd71bd lands, THIS is the assertion that tells you to delete the
+    // hatch and its third of the partition with it.
     expect(unhomedRoutes.length, "the escape-hatch collector found no entries at all").toBeGreaterThan(0);
     // Card 0d0c6cee's own claim, stated positively rather than left implicit in the partition: a
     // cross-project destination is NOT a tree row any more.
@@ -317,13 +379,13 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
       expect(homes.paths, `the tree renders an extra node for ${extra}, which src/nav.tsx does not`
         + ` declare as an Atlas home`).toContain(extra);
     }
-    //     The other direction, as the same partition: a declared home is a node OR an escape-hatch
-    //     entry, never missing from both. (The workspace Settings home is a `ROOT_TABS` row in the
-    //     approved design, so 0d0c6cee moved it to the hatch with the nine rail destinations.)
+    //     The other direction, as the same partition: a declared home is a node, an escape-hatch
+    //     entry, or a Workspace node tab — never missing from all three. (The workspace Settings home
+    //     is a `ROOT_TABS` row in the approved design, so card 41eab0eb made it the Settings tab.)
     for (const declared of homes.paths) {
-      expect(homedSet.has(declared) || unhomedSet.has(declared),
+      expect(homedSet.has(declared) || unhomedSet.has(declared) || tabbedSet.has(declared),
         `src/nav.tsx declares the Atlas home ${declared}, which the tree renders neither as a node nor`
-        + ` as a "not yet re-homed" entry`).toBe(true);
+        + ` as a "not yet re-homed" entry, and which is not a Workspace node tab either`).toBe(true);
     }
 
     // The tree IS navigation, not a complementary region (the P1-0 review finding this card carries).
@@ -397,15 +459,32 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // rather than named here — see the parity test above for why that is the stronger form.
     const homedSet = new Set(await routesFrom(page, TREE_NODES));
     const unhomedSet = new Set(await routesFrom(page, UNHOMED_LINKS));
+    // The third home (card 41eab0eb) — a Workspace node tab, addressed by its key rather than by a
+    // pathname, so it cannot come from `routesFrom`.
+    const nodeTabs = nodeTabsUnderTest();
     for (const route of routes) {
-      expect(homedSet.has(route) || unhomedSet.has(route),
-        `${route} is reachable from neither the tree nor its escape hatch, so this walk cannot visit it`)
-        .toBe(true);
+      expect(homedSet.has(route) || unhomedSet.has(route) || nodeTabs.has(route),
+        `${route} is reachable from none of the tree, its escape hatch, or the Workspace node's tabs,`
+        + ` so this walk cannot visit it`).toBe(true);
     }
+    // Positive control on the third bucket: a reading of zero would let a destination that fell out
+    // of both tree halves pass the disjunct above without being anywhere.
+    expect([...nodeTabs.keys()].filter((r) => routes.includes(r)).length,
+      "no rail destination is a Workspace node tab, so that branch of the walk never runs")
+      .toBeGreaterThan(0);
 
     let previous = "";
     for (const route of routes) {
-      if (homedSet.has(route)) {
+      const tabKey = nodeTabs.get(route);
+      if (tabKey) {
+        // A re-homed destination is reached the way a reader reaches it from anywhere that still
+        // links the old address: by the address itself, which the Atlas shell redirects into the tab.
+        // There is deliberately NO tree row to click — that is what this card did.
+        await page.goto(loomDaemon.baseURL + route);
+        await expect(page.getByTestId(`atlas-tab-${tabKey}`),
+          `${route} did not land on its "${tabKey}" Workspace node tab`)
+          .toHaveAttribute("aria-selected", "true");
+      } else if (homedSet.has(route)) {
         await page.getByTestId(`atlas-node-${route}`).click();
       } else {
         // A re-homed destination is reached the way a reader reaches it: through the escape hatch at
@@ -417,10 +496,19 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         await page.getByTestId("atlas-unhomed").evaluate((el) => { (el as HTMLDetailsElement).open = true; });
         await page.getByTestId(`atlas-unhomed-${route}`).click();
       }
-      // The click navigated — the row is a real link, not decoration.
-      await expect.poll(() => new URL(page.url()).pathname,
-        { message: `clicking the ${route} row did not navigate` }).toBe(route);
-      const after = await settledPageSkeleton(page);
+      // The click navigated — the row is a real link, not decoration. A re-homed destination's own
+      // address is `/home` with its tab pinned, so what is asserted there is the TAB selection
+      // above; the pathname claim applies to the two that still have a row.
+      if (!tabKey) {
+        await expect.poll(() => new URL(page.url()).pathname,
+          { message: `clicking the ${route} row did not navigate` }).toBe(route);
+      }
+      // A re-homed destination's component is mounted verbatim INSIDE its tab panel, so the identity
+      // comparison walks that wrapper's children — the exact shape the classic `main` walk produces.
+      // Fingerprinting `main` instead would compare the whole Workspace node against one page and
+      // reduce this to "it rendered something", which is the claim this test exists not to make.
+      const after = await settledPageSkeleton(page,
+        tabKey ? `[data-testid="atlas-tabpanel-${tabKey}"]` : "main");
 
       const rebuilt = REBUILT_IN_PHASE_2[route];
       if (rebuilt) {
@@ -447,13 +535,25 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
       // The frame tracks the landed node: the heading and the last breadcrumb name it.
       await expect(page.getByTestId("atlas-breadcrumb")).toBeVisible();
       await expect(page.locator(".loom-atlas-nodehead h1")).not.toBeEmpty();
-      if (homedSet.has(route)) {
+      if (tabKey) {
+        // A Workspace node TAB lives on `/home`, so the WORKSPACE HOME node is the landed one —
+        // exactly one, and it is that row. The approved design says so too: every `ROOT_TABS` view's
+        // own node is `root` and its title is "Workspace". Nothing about the tab itself may mark a
+        // different row, which is what the count of one pins.
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${route} is a Workspace node tab, so exactly one node — the Workspace home — may read as landed`)
+          .toHaveCount(1);
+        await expect(page.getByTestId("atlas-home-workspace")).toHaveClass(/is-active/);
+        // And the escape hatch is not ALSO claiming it: a destination lives in one place now.
+        await expect(page.getByTestId(`atlas-unhomed-${route}`),
+          `${route} is a node tab and still an escape-hatch entry`).toHaveCount(0);
+      } else if (homedSet.has(route)) {
         // Exactly one node reads as active, and it is this one.
         await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
         await expect(page.getByTestId(`atlas-node-${route}`)).toHaveClass(/is-active/);
       } else {
-        // A re-homed destination has no node, so NOTHING may read as the landed node — marking the
-        // nearest-looking row instead would be the tree lying about where you are. The escape
+        // A destination still in the escape hatch has no node, so NOTHING may read as the landed node
+        // — marking the nearest-looking row instead would be the tree lying about where you are. The
         // hatch's own weaker `is-here` mark is what says which address is showing, and asserting it
         // keeps this from being a bare absence claim that a blank tree would also satisfy.
         await expect(page.locator("a.loom-atlas-node.is-active"),

@@ -1,8 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import type { OrchestrationEvent, Project, SessionListItem, UsageLimitsStatus } from "@loom/shared";
+import type { EventTrigger, OrchestrationEvent, Project, QuestionInboxItem, Schedule, SessionListItem, UsageLimitsStatus } from "@loom/shared";
 import { api } from "../lib/api";
+import { WORKSPACE_NODE_TABS, workspaceNodeTabOf } from "../nav";
+import { NodeTabHostProvider } from "../lib/nodeTabHost";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { useOpenRequest } from "../components/requests";
@@ -24,10 +26,12 @@ import { isCompanionSession } from "../lib/sessions";
 import { color, font, type Tone } from "../theme";
 import { useNavigate } from "react-router-dom";
 
-// THE WORKSPACE ROOT NODE — card fd99b2d7 (Atlas P2-1, the owner-approved round-4 V2 design:
-// Mockups/2026-10-19 UI Overhaul Round 4). Overview is the default landing (full-size KPI tiles over
-// a dashboard band over the project grid); Deck is the same node read board-first, with the readouts
-// shrunk onto the tab row and a standing rail beside the grid.
+// THE WORKSPACE ROOT NODE — cards fd99b2d7 (Atlas P2-1) and 41eab0eb (the cross-project surfaces as
+// this node's tabs), both on the owner-approved round-4 V2 design: Mockups/2026-10-19 UI Overhaul
+// Round 4. NINE tabs, in the mockup's own `ROOT_TABS` order: Overview is the default landing
+// (full-size KPI tiles over a dashboard band over the project grid); Deck is the same node read
+// board-first, with the readouts shrunk onto the tab row and a standing rail beside the grid; and the
+// seven cross-project surfaces that used to be tree rows follow them as tab bodies.
 //
 // "Scope is depth": this node is the shallowest thing containing every project, so every figure here
 // is cross-project. Nothing on this page reads the active project.
@@ -36,11 +40,30 @@ import { useNavigate } from "react-router-dom";
 // through the cache keys the classic pages already fill — so this node adds no poll Mission Control
 // or the Gates page was not already making.
 
-const TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label: "Deck" }];
+// The node's OWN two tabs. The seven re-homed cross-project surfaces follow them, in the mockup's
+// `ROOT_TABS` order, from the one declaration in src/nav.tsx (card 41eab0eb) — so this file never
+// names which surfaces they are, only how their counts are derived.
+const HOME_TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label: "Deck" }];
+
+/**
+ * The `?tab=` values this node answers to. Anything else falls back to Overview.
+ *
+ * ⛔ Read at CALL time, never at module scope. src/nav.tsx imports this module (it owns the element
+ * for the `/home` route) and this module imports src/nav.tsx back, so during module evaluation
+ * `WORKSPACE_NODE_TABS` is still undefined — a `const` built from it here blew the whole app up with a
+ * blank page rather than failing in any one component. ESM live bindings make the cycle harmless as
+ * soon as the read happens inside a function.
+ */
+const isTabKey = (key: string) =>
+  HOME_TABS.some((t) => t.key === key) || WORKSPACE_NODE_TABS.some((t) => t.key === key);
+
+/** The query key a hosted page's own sub-tab uses here — see lib/nodeTabHost.tsx for why not `tab`. */
+const SUB_KEY = "sub";
 
 export default function WorkspaceHome() {
   const [params] = useSearchParams();
-  const tab = params.get("tab") === "deck" ? "deck" : "overview";
+  const raw = params.get("tab") ?? "overview";
+  const tab = isTabKey(raw) ? raw : "overview";
   const { projects, setProjectId } = useActiveProject();
   const navigate = useNavigate();
 
@@ -87,6 +110,43 @@ export default function WorkspaceHome() {
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
   const projectByManager = new Map(managers.map((m) => [m.id, m.projectName]));
+
+  // ── The re-homed tabs' counts (card 41eab0eb) ────────────────────────────────────────────────────
+  // The mockup gives a count to three of the seven: `Inbox 4`, `Gates 1·2`, `Automation 9`. The other
+  // four carry none there and carry none here.
+  //
+  // `["openQuestions"]` is already polled app-wide by `useAttention()` (App.tsx mounts it for BOTH
+  // shells), so the Inbox count is a free read off a cache entry that is always warm. The two
+  // Automation reads are the only new fetches this card adds — one-shot, no interval, 30s stale — and
+  // they are the same keys pages/Schedules.tsx and pages/EventTriggers.tsx fill, so landing on that tab
+  // finds its own tables already warm rather than paying twice.
+  const questionsQ = useQuery<QuestionInboxItem[]>({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
+  const schedulesQ = useQuery<Schedule[]>({ queryKey: ["schedules"], queryFn: api.schedules, staleTime: 30_000 });
+  const triggersQ = useQuery<EventTrigger[]>({ queryKey: ["eventTriggers"], queryFn: api.eventTriggers, staleTime: 30_000 });
+  // The Inbox page's OWN headline figure ("Waiting on me (N)", components/requests.tsx): pending plus
+  // answered-awaiting-pickup, with NOTICES excluded — nobody is waiting on anything for a notice, so
+  // counting one here would make the tab claim work that does not exist. Deliberately NOT
+  // `attention.length`, which is the "needs you" KPI's wider population and would disagree on one screen.
+  const inboxCount = questionsQ.data?.filter((q) => q.state !== "notice").length;
+  const automationCount = schedulesQ.data && triggersQ.data
+    ? schedulesQ.data.length + triggersQ.data.length
+    : undefined;
+
+  // A count only once its read has RESOLVED: `undefined` renders no count at all, so a tab never
+  // flashes a "0" that is really "not loaded yet". Gates is the exception and is always shown, because
+  // `gateLanes` has no pending state of its own and the `gate run·queued` KPI already reads 0·0 at rest.
+  const tabCounts: Record<string, ReactNode> = {
+    inbox: inboxCount,
+    gates: `${lanes.running}·${lanes.queued}`,
+    automation: automationCount,
+  };
+  const tabs = [
+    ...HOME_TABS,
+    ...WORKSPACE_NODE_TABS.map((t) => {
+      const { key, label } = workspaceNodeTabOf(t);
+      return { key, label, count: tabCounts[key] };
+    }),
+  ];
 
   const kpis: KpiItem[] = [
     {
@@ -187,11 +247,21 @@ export default function WorkspaceHome() {
 
   return (
     <div className="loom-atlas-home">
-      <NodeTabs tabs={TABS} active={tab} hrefFor={(k) => (k === "overview" ? "/home" : `/home?tab=${k}`)}>
+      {/* Overview is canonical, so its address is the bare node path — the shape every Atlas node
+          gives its first tab. A tab link is built FRESH rather than merged over the live query: `sub`
+          belongs to whichever re-homed page is showing, and carrying it onto a sibling tab would hand
+          one guest's sub-tab value to another. */}
+      <NodeTabs tabs={tabs} active={tab} hrefFor={(k) => (k === "overview" ? "/home" : `/home?tab=${k}`)}>
         {tab === "deck" && <KpiStrip items={kpis} />}
       </NodeTabs>
 
-      {tab === "overview" ? (
+      <RehomedTabPanels active={tab} />
+
+      {/* The node's own two tabs stay CONDITIONAL, unlike the re-homed bodies above: neither holds
+          unfinished user input (a KPI pop-over is ephemeral, and the fleet controls confirm in place),
+          and the Deck's whole trade is vertical room — so mounting the other one hidden would cost
+          every one of these panels' polls on a tab that is not showing them. */}
+      {tab === "overview" && (
         <>
           <KpiDeck items={kpis} />
           {/* The four daemon-global fleet controls (clear usage hold / pause / resume / kill all) take
@@ -218,7 +288,8 @@ export default function WorkspaceHome() {
             {grid}
           </section>
         </>
-      ) : (
+      )}
+      {tab === "deck" && (
         <div className="loom-atlas-deck">
           <section className="loom-atlas-deckmain">
             <div className="loom-atlas-primaryhead">
@@ -241,6 +312,50 @@ export default function WorkspaceHome() {
         </div>
       )}
     </div>
+  );
+}
+
+// ── The re-homed cross-project surfaces, as this node's tabs ───────────────────────────────────
+// Card 41eab0eb. Each tab's body is the destination's OWN component, mounted verbatim — the frame
+// moved, the page did not.
+//
+// 🔴 A VISITED PANEL IS NEVER UNMOUNTED. Five of the seven hold unfinished user input the moment a
+// reader touches them (a half-written cron in Automation, an edited profile or skill in Actors, a
+// Settings field, a companion composer draft or persona edit, an in-progress Request answer), and a
+// tab click is not consent to discard it — the owner's standing rule. `hidden`, not an inline
+// `display`, is also what keeps an inactive panel out of the accessibility tree and the tab order.
+//
+// 🔴 BUT A PANEL IS NOT MOUNTED UNTIL IT IS FIRST VISITED. Mounting all seven on arrival would make
+// `/home` — the default Atlas landing — pay for every poll in Gates, Usage, Automation, Actors,
+// Settings and the Companion node's twelve manage sections before the reader has asked for any of
+// them. Mount-on-first-visit keeps both halves: nothing a reader has touched is ever destroyed, and
+// nothing they have not touched is ever started.
+//
+// @decision 41eab0eb — never render only the active panel (it destroys unfinished input), and never
+// mount all seven up front (it makes the default landing pay for six surfaces nobody opened). Never
+// put an inline `display` on a panel wrapper: it out-specifies the UA's `[hidden]` rule.
+function RehomedTabPanels({ active }: { active: string }) {
+  // Grows, never shrinks, for the life of this node's mount. Set during render (React's own
+  // "adjusting state when a prop changes" path) rather than in an effect, so a tab's first frame is
+  // already its content and not an empty column.
+  const [visited, setVisited] = useState<string[]>([]);
+  const isRehomed = WORKSPACE_NODE_TABS.some((t) => t.key === active);
+  if (isRehomed && !visited.includes(active)) setVisited([...visited, active]);
+
+  return (
+    <>
+      {WORKSPACE_NODE_TABS.filter((t) => visited.includes(t.key)).map((t) => {
+        const { key, element } = workspaceNodeTabOf(t);
+        return (
+          <div key={key} hidden={key !== active} data-testid={`atlas-tabpanel-${key}`}>
+            {/* The host tells the page inside which query key its OWN sub-tab may use, so a page that
+                owns a `?tab=` (Actors, Automation, the Companion node) cannot collide with this
+                node's. See lib/nodeTabHost.tsx. */}
+            <NodeTabHostProvider subKey={SUB_KEY}>{element}</NodeTabHostProvider>
+          </div>
+        );
+      })}
+    </>
   );
 }
 
