@@ -480,6 +480,18 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   // from this same event independently; this module must never ALSO push it as a new alert.
   check("classify: claude_boot_dialog_resolved → null (a resolve clears an alert, never a fresh one)",
     classify("claude_boot_dialog_resolved", {}) === null);
+  // Card ab3c965d: manager_kickoff_dropped — same shape/gate as claude_boot_dialog_stuck immediately
+  // above (a manager always sets parentNudged:false, since it never has a parent at all).
+  check("classify: manager_kickoff_dropped(parentNudged:false) → escalation (nobody else was addressed)",
+    classify("manager_kickoff_dropped", { parentNudged: false, role: "manager" }) === "escalation");
+  check("classify: manager_kickoff_dropped(no parentNudged field) → null (defensive default, never a false positive)",
+    classify("manager_kickoff_dropped", { role: "manager" }) === null);
+  // Card ab3c965d: confirms the pre-existing session_message_gave_up kind (the WORKER-scoped sibling of
+  // manager_kickoff_dropped — see that kind's own doc in shared/src/types.ts) still classifies exactly as
+  // before this card — null, the same as any other kind with no case in classify()'s switch. This kind has
+  // its own manager-targeted push path (sessions/service.ts's enqueueSystemNudge), never attention-push.
+  check("classify: session_message_gave_up(outcome:parked) → null (unchanged by this card — has its own manager-targeted push path, not attention-push)",
+    classify("session_message_gave_up", { outcome: "parked", rootMsgId: "r1" }) === null);
   check("classify: an unrelated kind → null", classify("spawn_worker", {}) === null);
   // Card 68f27faf: a type:"notice" question_asked is its OWN class ("notice"), never "decision-pending" —
   // discriminated purely on the event's own detail.type (stamped at the one filing site), never re-derived.
@@ -897,6 +909,38 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   e.watcher.tick(new Date());
   check("boot-stuck-not-deduped: a SECOND episode for the SAME taskId still pushes — never suppressed", e.enqueued.length === 2);
   check("boot-stuck-not-deduped: two companion_alert_pushed rows recorded, one per episode", events(e, "companion_alert_pushed").filter((ev) => ev.detail.sourceKind === "claude_boot_dialog_stuck").length === 2);
+  cleanupEnv(e);
+}
+
+// --- 29b. Card ab3c965d: manager_kickoff_dropped (parentNudged:false) end-to-end — pushes through the
+//     "escalation" class, same as claude_boot_dialog_stuck (test 27) but WITHOUT a custom alertLine case
+//     (deliberately not added — see attention-push.ts's own classify() comment), so the generic fallback
+//     line is what should render: `${projectName}: escalation — ${who}`. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "manager_kickoff_dropped", e.mgrA, { msgId: "m1", rootMsgId: "r1", role: "manager", parentNudged: false, leadNotified: false });
+  e.watcher.tick(new Date());
+  check("e2e: a manager_kickoff_dropped(parentNudged:false) event pushes exactly one turn", e.enqueued.length === 1);
+  check("e2e: framed [loom:alert]", e.enqueued.length === 1 && e.enqueued[0].text.startsWith(ALERT_TAG));
+  check("e2e: the pushed turn names the escalation class and the dropped manager (generic fallback line)",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("escalation") && e.enqueued[0].text.includes(e.mgrA.slice(0, 8)));
+  const pushed = events(e, "companion_alert_pushed");
+  check("e2e: emits one companion_alert_pushed audit row", pushed.length === 1 && pushed[0].detail.sourceKind === "manager_kickoff_dropped");
+  cleanupEnv(e);
+}
+
+// --- 29c. Card ab3c965d: manager_kickoff_dropped — the ordinary, pre-existing session_message_gave_up
+//     kind (fired for a WORKER's own kickoff drop, never a manager's) must NOT also push through
+//     attention-push — it has its own manager-targeted push path (sessions/service.ts's
+//     enqueueSystemNudge) and no case in classify()'s switch, unchanged by this card. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "session_message_gave_up", e.mgrA, { msgId: "m2", rootMsgId: "r2", outcome: "parked", origin: "kickoff" }, { workerSessionId: "wkr-e2e-gave-up" });
+  e.watcher.tick(new Date());
+  check("e2e negative: session_message_gave_up pushes nothing through attention-push", e.enqueued.length === 0);
+  check("e2e negative: no companion_alert_pushed row for it", events(e, "companion_alert_pushed").length === 0);
   cleanupEnv(e);
 }
 
