@@ -4,12 +4,14 @@
 // duplicated across pages. Token-driven (see ../../theme + ../../styles/global.css).
 // Interaction states (button hover, field focus) live as .loom-* classes in global.css.
 
+import { useRef } from "react";
 import type {
   AnchorHTMLAttributes,
   ButtonHTMLAttributes,
   CSSProperties,
   HTMLAttributes,
   InputHTMLAttributes,
+  KeyboardEvent,
   ReactNode,
   SelectHTMLAttributes,
 } from "react";
@@ -232,6 +234,11 @@ export function NavTab({ to, end, children, className, ...rest }: NavTabProps) {
 // phosphorDim + phosphor text; the rest read dim. Keyed generically so any string-union tab set fits.
 // Each segment carries `.loom-segment` purely so global.css can give it the shared phosphor
 // `:focus-visible` ring — the rest chrome stays inline, since it is per-segment state.
+//
+// role="radiogroup"/"radio", not "tablist"/"tab" (card 3f28f1c3): every call site uses this purely to
+// swap which body mounts underneath — a single-choice toggle, never a genuine ARIA tab (none associates
+// a `role="tabpanel"` via `aria-controls`/`id`). A radiogroup is a roving-tabindex widget: ONE segment is
+// ever a Tab stop (the active one); arrow keys move AND select among the rest, wrapping at the ends.
 type SegmentedProps<T extends string> = {
   value: T;
   onChange: (value: T) => void;
@@ -242,13 +249,35 @@ type SegmentedProps<T extends string> = {
 export function Segmented<T extends string>({
   value, onChange, items, ariaLabel, style, ...rest
 }: SegmentedProps<T>) {
+  const btnRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  const selectIndex = (i: number, moveFocus: boolean) => {
+    const it = items[i];
+    if (!it) return;
+    onChange(it.key);
+    if (moveFocus) btnRefs.current[i]?.focus();
+  };
+
+  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
+    let next: number | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (i + 1) % items.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = (i - 1 + items.length) % items.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = items.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    selectIndex(next, true);
+  };
+
   return (
-    <div {...rest} role="tablist" aria-label={ariaLabel}
+    <div {...rest} role="radiogroup" aria-label={ariaLabel}
       style={{ display: "inline-flex", gap: 0, border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden", alignSelf: "flex-start", ...style }}>
-      {items.map((it) => {
+      {items.map((it, i) => {
         const active = value === it.key;
         return (
-          <button key={it.key} className="loom-segment" role="tab" aria-selected={active} onClick={() => onChange(it.key)}
+          <button key={it.key} ref={(el) => { btnRefs.current[i] = el; }} className="loom-segment"
+            role="radio" aria-checked={active} tabIndex={active ? 0 : -1}
+            onClick={() => selectIndex(i, false)} onKeyDown={(e) => onKeyDown(e, i)}
             style={{
               background: active ? color.phosphorDim : "transparent",
               color: active ? color.phosphor : color.textDim,

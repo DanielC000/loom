@@ -81,15 +81,15 @@ test.describe("repository (Vault + Git consolidation)", () => {
     await pinActiveProject(page, id);
     await page.goto(`${loomDaemon.baseURL}/repository`);
 
-    // Both tabs render as an accessible tablist (the shared Segmented primitive).
-    await expect(page.getByRole("tab", { name: "Files" })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Git" })).toBeVisible();
+    // Both segments render as an accessible radiogroup (the shared Segmented primitive, card 3f28f1c3).
+    await expect(page.getByRole("radio", { name: "Files" })).toBeVisible();
+    await expect(page.getByRole("radio", { name: "Git" })).toBeVisible();
 
     // Default tab = Files: the Vault body is mounted (its filter), the Git body is not (its branch input).
     await expect(page.getByPlaceholder(FILES_BODY_PLACEHOLDER)).toBeVisible();
     await expect(page.getByPlaceholder(GIT_BODY_PLACEHOLDER)).toHaveCount(0);
-    await expect(page.getByRole("tab", { name: "Files" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByRole("tab", { name: "Git" })).toHaveAttribute("aria-selected", "false");
+    await expect(page.getByRole("radio", { name: "Files" })).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByRole("radio", { name: "Git" })).toHaveAttribute("aria-checked", "false");
   });
 
   test("switching to the Git tab swaps the mounted body (observable before/after)", async ({ page, loomDaemon }) => {
@@ -101,14 +101,14 @@ test.describe("repository (Vault + Git consolidation)", () => {
     await expect(page.getByPlaceholder(FILES_BODY_PLACEHOLDER)).toBeVisible();
     await expect(page.getByPlaceholder(GIT_BODY_PLACEHOLDER)).toHaveCount(0);
 
-    // ACT: click the Git tab.
-    await page.getByRole("tab", { name: "Git" }).click();
+    // ACT: click the Git segment.
+    await page.getByRole("radio", { name: "Git" }).click();
 
     // AFTER (observable #1 — DOM swap): the Git body is now mounted and the Files body is gone.
     await expect(page.getByPlaceholder(GIT_BODY_PLACEHOLDER)).toBeVisible();
     await expect(page.getByPlaceholder(FILES_BODY_PLACEHOLDER)).toHaveCount(0);
-    // AFTER (observable #2 — selection + URL): the Git tab reads selected and the tab is pinned in the URL.
-    await expect(page.getByRole("tab", { name: "Git" })).toHaveAttribute("aria-selected", "true");
+    // AFTER (observable #2 — selection + URL): the Git segment reads checked and the tab is pinned in the URL.
+    await expect(page.getByRole("radio", { name: "Git" })).toHaveAttribute("aria-checked", "true");
     await expect(page).toHaveURL(/\/repository\?tab=git/);
   });
 
@@ -140,7 +140,7 @@ test.describe("repository (Vault + Git consolidation)", () => {
 
     // Git pane is scoped to the pinned project's repo → its real default branch chip renders (the seeded
     // repo has exactly one branch, so this proves live repo state, not an empty/god-eye view).
-    await page.getByRole("tab", { name: "Git" }).click();
+    await page.getByRole("radio", { name: "Git" }).click();
     await expect(page.getByRole("button", { name: /^(main|master)$/ })).toBeVisible();
   });
 

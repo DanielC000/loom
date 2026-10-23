@@ -143,7 +143,7 @@ test("Keys & Endpoints: a key allowlisting a since-un-flagged agent is still sav
 
   await pinActiveProject(page, project.id);
   await page.goto(`${loomDaemon.baseURL}/runs`);
-  await page.getByRole("tab", { name: "Keys & Endpoints" }).click();
+  await page.getByRole("radio", { name: "Keys & Endpoints" }).click();
   await expect(page.getByText(keyName, { exact: false }).first()).toBeVisible();
 
   // EXERCISE — open the editor, rename the key, save. The ineligible grant has no checkbox to untick, so
@@ -217,7 +217,7 @@ test("Keys & Endpoints: an UNLOADED endpoint-agent list blocks the save instead 
   await pinActiveProject(page, project.id);
   await page.route("**/api/projects/*/agents", (route) => route.abort());
   await page.goto(`${loomDaemon.baseURL}/runs`);
-  await page.getByRole("tab", { name: "Keys & Endpoints" }).click();
+  await page.getByRole("radio", { name: "Keys & Endpoints" }).click();
   await expect(page.getByText(keyName, { exact: false }).first()).toBeVisible();
 
   await page.getByRole("button", { name: "Edit" }).first().click();
@@ -242,7 +242,7 @@ test("Keys & Endpoints: an UNLOADED endpoint-agent list blocks the save instead 
   // the gate above is a real precondition and not a permanently-stuck button.
   await page.unroute("**/api/projects/*/agents");
   await page.reload();
-  await page.getByRole("tab", { name: "Keys & Endpoints" }).click();
+  await page.getByRole("radio", { name: "Keys & Endpoints" }).click();
   await page.getByRole("button", { name: "Edit" }).first().click();
   await expect(page.getByText(/Endpoint agents could not be loaded/)).toHaveCount(0);
   const renamed = uniq("renamed-when-loaded");

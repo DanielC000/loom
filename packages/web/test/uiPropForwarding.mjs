@@ -88,7 +88,7 @@ check("PresetAccentDots forwards data-*/id but keeps its decorative aria-hidden 
   assert.match(html, /aria-hidden="true"/); // decorative default wins over a caller override
 });
 
-check("Segmented forwards data-* to its root and keeps role/tablist semantics", () => {
+check("Segmented forwards data-* to its root and keeps role/radiogroup semantics", () => {
   const html = renderToStaticMarkup(
     React.createElement(Segmented, {
       value: "a",
@@ -99,7 +99,7 @@ check("Segmented forwards data-* to its root and keeps role/tablist semantics", 
     }),
   );
   assert.match(html, /data-testid="segmented-el"/);
-  assert.match(html, /role="tablist"/);
+  assert.match(html, /role="radiogroup"/);
   assert.match(html, /aria-label="choice"/);
 });
 

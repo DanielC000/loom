@@ -985,4 +985,30 @@ export async function openActorsProfile(page: Page, baseURL: string, profileName
   await agentsReady;
 }
 
+/**
+ * The selected (or unselected) segment of a PAGE's own `Segmented` sub-tab control — never the Atlas
+ * NODE's tab row, and never another radiogroup that happens to sit on the same page.
+ *
+ * Shared here rather than declared per spec because the two kinds of node tab row have to be filtered
+ * by ONE rule or they drift: a WORKSPACE node tab (card 41eab0eb) hosts its page inside a panel
+ * wrapper, so a read scoped to that panel already leaves the node's row outside it, while a PROJECT
+ * node tab (card 25c08fba) renders its row INSIDE `main` — `/repository?tab=git` is exactly that — so
+ * a panel/`main` scope does not reach it and only this selector keeps the count at one.
+ *
+ * Each of the three filters earns its place:
+ *   • `.loom-segment` is `Segmented`'s own class (components/ui, on every segment for the shared
+ *     phosphor focus ring) and no other control carries it. It is load-bearing, not decoration:
+ *     `RolePicker` and `HarnessPicker` are ALSO `role="radio"`, and `/skills → /actors?tab=skills`
+ *     lands on a page that renders them, so a bare `[role="radio"]` would resolve a role card as
+ *     readily as a sub-tab. It names the primitive without naming a page or a label.
+ *   • `role="radio"`/`aria-checked` is what `Segmented` emits since card 3f28f1c3 — it is a
+ *     single-choice swapper, not a genuine ARIA tab (no call site associates a `role="tabpanel"`).
+ *     `atlasHome`'s `NodeTabs` kept `role="tab"`, so the role alone now excludes the node rows.
+ *   • `:not([data-testid^="atlas-tab-"])` (every NodeTabs link carries that stem) stays as a
+ *     structural backstop, so a node row that ever adopts the page control's role still cannot
+ *     satisfy this selector.
+ */
+export const PAGE_SUB_TAB = (selected: boolean) =>
+  `.loom-segment[role="radio"][aria-checked="${selected}"]:not([data-testid^="atlas-tab-"])`;
+
 export { expect } from "@playwright/test";

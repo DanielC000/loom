@@ -22,7 +22,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test, type Page } from "./fixtures/daemon";
+import { PAGE_SUB_TAB, expect, test, type Page } from "./fixtures/daemon";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
@@ -177,12 +177,13 @@ async function pageSkeleton(page: Page, maxDepth: number, root = "main"): Promis
 // this spec measured it failing (card 625d791c): a page that has not yet received its data is
 // perfectly STABLE in its placeholder state, so the poll settles on the placeholder and returns it as
 // if it were the finished page. Stability says the page STOPPED CHANGING; it cannot distinguish
-// "finished" from "has not started". /repository?tab=git is the specimen — its tablist renders
-// synchronously while the body holds a one-<p> placeholder until the git read lands:
+// "finished" from "has not started". /repository?tab=git is the specimen — its radiogroup (card
+// 3f28f1c3; it was a tablist when this was written) renders synchronously while the body holds a
+// one-<p> placeholder until the git read lands:
 //
 //     div                               div
-//       div[role=tablist]                 div[role=tablist]
-//         button[role=tab] x2               button[role=tab] x2
+//       div[role=radiogroup]              div[role=radiogroup]
+//         button[role=radio] x2             button[role=radio] x2
 //       div                               div
 //         p            <- placeholder       div … input.loom-field …   <- loaded
 //
@@ -334,27 +335,10 @@ async function crumbTrail(page: Page): Promise<string[]> {
 
 const nodeHeading = (page: Page) => page.locator(".loom-atlas-nodehead h1");
 
-/**
- * The selected tab of the PAGE's own tab control — never the Atlas NODE's tab row.
- *
- * Both are `role="tab"` with `aria-selected` (components/ui's `Segmented` and `atlasHome`'s
- * `NodeTabs`), and since card 25c08fba a node tab row renders ABOVE a re-homed page that has its own
- * sub-tabs — `/repository?tab=git` is exactly that pair. A bare `[role="tab"][aria-selected="true"]`
- * therefore resolves TWO elements there, one per tablist, and the "exactly one sub-tab is selected"
- * claim below would fail for a reason that is not about sub-tabs at all.
- *
- * Excluded by the node row's own testid stem (`atlas-tab-<key>`, given to every NodeTabs link) rather
- * than by naming a page: nesting one tablist inside another is legal, so what the claim needs is the
- * INNER one, whichever page it belongs to.
- *
- * The selector is named separately because a WORKSPACE node tab (card 41eab0eb) hosts its page inside
- * a panel wrapper, and a read there has to be scoped to that panel as well as filtered — one tab row
- * is excluded structurally, the other by this stem. Both callers share the one selector so the two
- * kinds of node tab row can never be filtered by two drifting rules.
- */
-const PAGE_SUB_TAB = (selected: boolean) =>
-  `[role="tab"][aria-selected="${selected}"]:not([data-testid^="atlas-tab-"])`;
-
+// The selected tab of the PAGE's own sub-tab control — never the Atlas NODE's tab row, and never a
+// neighbouring radiogroup. `PAGE_SUB_TAB` lives in fixtures/daemon.ts (read its own doc comment for
+// why each of its three filters is load-bearing): this spec and atlas-workspace-tabs.spec.ts both
+// read it, so the two kinds of node tab row can never be filtered by two drifting rules.
 const pageSubTabs = (page: Page, selected: boolean) => page.locator(PAGE_SUB_TAB(selected));
 
 /**
@@ -532,15 +516,15 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       // ── The right SUB-TAB, where the target pins one. Chromium folds Segmented's CSS
       // `text-transform: uppercase` into the accessible name, so match case-insensitively — and
       // derive the expected label from the `?tab=` value rather than hand-mapping it. Scoped to the
-      // page's own panel where a node tab hosts it: the node's own tab row is a second tablist on
+      // page's own panel where a node tab hosts it: the node's own tab row is a second tab row on
       // that document, so a page-wide count of one would be false for a reason that is not a defect.
       const tab = tabOf(r.to);
       if (tab) {
-        // BOTH exclusions are needed, because there are two kinds of node tab row above a page now.
+        // BOTH scopes are needed, because there are two kinds of node tab row above a page now.
         // A WORKSPACE node tab (card 41eab0eb) hosts the page in a panel, so scoping to that panel
         // leaves the node's row outside it. A PROJECT node tab (card 25c08fba) renders the node's row
         // INSIDE `main` — `/repository?tab=git` is exactly that — so the panel scope does not reach
-        // it and `PAGE_SUB_TAB`'s own `atlas-tab-` exclusion is what keeps the count at one.
+        // it and `PAGE_SUB_TAB`'s own filtering is what keeps the count at one.
         const scope = tabKey
           ? page.getByTestId(`atlas-tabpanel-${tabKey}`)
           : page.locator("main");
@@ -682,7 +666,7 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     const selected = scope().locator(PAGE_SUB_TAB(true));
     await expect(selected).toHaveText(new RegExp(`^${pinnedTab}$`, "i"));
 
-    // The OTHER tab in the same tablist — found by exclusion, so this never names a label.
+    // The OTHER tab in the same radiogroup — found by exclusion, so this never names a label.
     const others = scope().locator(PAGE_SUB_TAB(false));
     await expect(others).not.toHaveCount(0);
     const otherLabel = (await others.first().innerText()).trim();

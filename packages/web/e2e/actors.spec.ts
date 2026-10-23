@@ -24,19 +24,19 @@ const SKILLS_BODY = /injected into every session as project-local/;
 test.describe("actors (Profiles + Skills consolidation)", () => {
   // The first-run "Welcome to Loom" overlay is dismissed globally by the fixture (fixtures/daemon.ts).
 
-  test("/actors renders the Segmented tabs and defaults to the Profiles body", async ({ page, loomDaemon }) => {
+  test("/actors renders the Segmented radiogroup and defaults to the Profiles body", async ({ page, loomDaemon }) => {
     await page.goto(`${loomDaemon.baseURL}/actors`);
 
-    // Both tabs render as an accessible tablist (the shared Segmented primitive).
-    await expect(page.getByRole("tab", { name: "Profiles" })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Skills" })).toBeVisible();
+    // Both segments render as an accessible radiogroup (the shared Segmented primitive, card 3f28f1c3).
+    await expect(page.getByRole("radio", { name: "Profiles" })).toBeVisible();
+    await expect(page.getByRole("radio", { name: "Skills" })).toBeVisible();
 
     // Default tab = Profiles: the Profiles body is mounted, the Skills body is not.
     await expect(page.getByText(PROFILES_BODY)).toBeVisible();
     await expect(page.getByText(SKILLS_BODY)).toHaveCount(0);
-    // The Profiles tab reads selected; Skills does not.
-    await expect(page.getByRole("tab", { name: "Profiles" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByRole("tab", { name: "Skills" })).toHaveAttribute("aria-selected", "false");
+    // The Profiles segment reads checked; Skills does not.
+    await expect(page.getByRole("radio", { name: "Profiles" })).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByRole("radio", { name: "Skills" })).toHaveAttribute("aria-checked", "false");
   });
 
   test("switching to the Skills tab swaps the mounted body (observable before/after)", async ({ page, loomDaemon }) => {
@@ -46,15 +46,62 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
     await expect(page.getByText(PROFILES_BODY)).toBeVisible();
     await expect(page.getByText(SKILLS_BODY)).toHaveCount(0);
 
-    // ACT: click the Skills tab.
-    await page.getByRole("tab", { name: "Skills" }).click();
+    // ACT: click the Skills segment.
+    await page.getByRole("radio", { name: "Skills" }).click();
 
     // AFTER (observable #1 — DOM swap): the Skills body is now mounted and the Profiles body is gone.
     await expect(page.getByText(SKILLS_BODY)).toBeVisible();
     await expect(page.getByText(PROFILES_BODY)).toHaveCount(0);
-    // AFTER (observable #2 — selection + URL): the Skills tab reads selected and the tab is pinned in the URL.
-    await expect(page.getByRole("tab", { name: "Skills" })).toHaveAttribute("aria-selected", "true");
+    // AFTER (observable #2 — selection + URL): the Skills segment reads checked and the tab is pinned in the URL.
+    await expect(page.getByRole("radio", { name: "Skills" })).toHaveAttribute("aria-checked", "true");
     await expect(page).toHaveURL(/\/actors\?tab=skills/);
+  });
+
+  test("the Profiles|Skills switch is one Tab stop, and arrow keys move AND select (card 3f28f1c3)", async ({ page, loomDaemon }) => {
+    await page.goto(`${loomDaemon.baseURL}/actors`);
+
+    const group = page.getByRole("radiogroup", { name: "Actors — Profiles or Skills" });
+    await expect(group).toBeVisible();
+    const profiles = group.getByRole("radio", { name: "Profiles" });
+    const skills = group.getByRole("radio", { name: "Skills" });
+
+    // ONE tab stop: only the checked segment is in the tab order (roving tabindex) — the attribute
+    // contract, plus the behavior it buys: focusing the active segment and pressing Tab moves OUT of
+    // the group entirely (there is no second stop to land on), rather than onto "Skills".
+    await expect(profiles).toHaveAttribute("tabindex", "0");
+    await expect(skills).toHaveAttribute("tabindex", "-1");
+
+    await profiles.evaluate((n: HTMLElement) => n.focus());
+    await expect(profiles).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(skills).not.toBeFocused();
+    await expect(profiles).not.toBeFocused();
+
+    // Land back on the group the same way a real Tab walk would, to continue the arrow-key assertions.
+    await profiles.evaluate((n: HTMLElement) => n.focus());
+    await expect(profiles).toBeFocused();
+
+    // BEFORE: Profiles is checked and mounted, Skills is not.
+    await expect(skills).toHaveAttribute("aria-checked", "false");
+    await expect(page.getByText(PROFILES_BODY)).toBeVisible();
+
+    // ArrowRight moves AND selects — the same onChange a click would fire, with an observable DOM
+    // change (not just a highlight): the mounted body swaps, aria-checked flips on BOTH segments, and
+    // the roving tabindex moves with it.
+    await page.keyboard.press("ArrowRight");
+    await expect(skills).toBeFocused();
+    await expect(skills).toHaveAttribute("aria-checked", "true");
+    await expect(profiles).toHaveAttribute("aria-checked", "false");
+    await expect(skills).toHaveAttribute("tabindex", "0");
+    await expect(profiles).toHaveAttribute("tabindex", "-1");
+    await expect(page.getByText(SKILLS_BODY)).toBeVisible();
+    await expect(page.getByText(PROFILES_BODY)).toHaveCount(0);
+
+    // ArrowLeft wraps back.
+    await page.keyboard.press("ArrowLeft");
+    await expect(profiles).toBeFocused();
+    await expect(profiles).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByText(PROFILES_BODY)).toBeVisible();
   });
 
   test("the old /profiles and /skills routes redirect to the consolidated Actors page", async ({ page, loomDaemon }) => {
@@ -73,7 +120,7 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
     await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
 
     // Open a seeded bundled skill (sidebar rows are <button>s; the unique name pins one — the Segmented tabs
-    // are role="tab", so they never collide with this button filter).
+    // are role="radio", so they never collide with this button filter).
     await page.getByRole("button").filter({ hasText: "loom-pickup" }).first().click();
     await expect(page.getByText("· SKILL.md", { exact: false })).toBeVisible();
 

@@ -343,7 +343,7 @@ test.describe("schedules run history (card f624267a)", () => {
     await expect(page.getByText("failed", { exact: true })).toBeVisible();
 
     // ACT: click the "Failed" outcome tab — a SERVER-SIDE refetch (outcome=failed) drops the fired row.
-    await page.getByRole("tab", { name: "Failed" }).click();
+    await page.getByRole("radio", { name: "Failed" }).click();
     await expect(page.getByText("failed", { exact: true })).toBeVisible();
     await expect(page.getByText("fired", { exact: true })).toHaveCount(0);
     // The failure's reason text renders in the Result cell.
@@ -376,7 +376,7 @@ test.describe("schedules run history (card f624267a)", () => {
     await expect(page.getByText(/daemon down/i)).toBeVisible();
 
     // The "Missed" outcome tab isolates it (server-side filter).
-    await page.getByRole("tab", { name: "Missed" }).click();
+    await page.getByRole("radio", { name: "Missed" }).click();
     await expect(page.getByText("missed", { exact: true })).toBeVisible();
     await expect(page.getByText("fired", { exact: true })).toHaveCount(0);
   });

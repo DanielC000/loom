@@ -422,10 +422,10 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     // its labels in CSS, and Chromium folds text-transform into the computed accessible name, so an
     // exact-case name match here would be matching a presentation detail.
     const uiSwitch = page.getByTestId("atlas-ui-switch");
-    const classicTab = uiSwitch.getByRole("tab", { name: /^classic$/i });
-    const atlasTab = uiSwitch.getByRole("tab", { name: /^atlas preview$/i });
-    await expect(classicTab).toHaveAttribute("aria-selected", "true");
-    await expect(atlasTab).toHaveAttribute("aria-selected", "false");
+    const classicTab = uiSwitch.getByRole("radio", { name: /^classic$/i });
+    const atlasTab = uiSwitch.getByRole("radio", { name: /^atlas preview$/i });
+    await expect(classicTab).toHaveAttribute("aria-checked", "true");
+    await expect(atlasTab).toHaveAttribute("aria-checked", "false");
 
     // EXERCISE it. AFTER: the shell has actually swapped, not just the control's own appearance.
     await atlasTab.click();
@@ -451,6 +451,38 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     expect(await page.evaluate((k) => localStorage.getItem(k), ATLAS_KEY)).toBeNull();
   });
 
+  test("the Classic|Atlas switch is one Tab stop, and arrow keys move AND select (card 3f28f1c3)", async ({ page, loomDaemon }) => {
+    await page.goto(loomDaemon.baseURL + "/settings");
+
+    const group = page.getByTestId("atlas-ui-switch");
+    await expect(group).toHaveAttribute("role", "radiogroup");
+    const classicSeg = group.getByRole("radio", { name: /^classic$/i });
+    const atlasSeg = group.getByRole("radio", { name: /^atlas preview$/i });
+
+    // ONE tab stop: only the checked segment is in the tab order (roving tabindex).
+    await expect(classicSeg).toHaveAttribute("tabindex", "0");
+    await expect(atlasSeg).toHaveAttribute("tabindex", "-1");
+
+    await classicSeg.evaluate((n: HTMLElement) => n.focus());
+    await expect(classicSeg).toBeFocused();
+
+    // BEFORE: the classic shell.
+    await expect(rail(page)).toBeVisible();
+    await expect(atlas(page)).toHaveCount(0);
+
+    // ArrowRight moves AND selects — the same onChange a click would fire. What's observable here is
+    // the shell swap itself (LegacyShell <-> AtlasShell at the App root): this call site's own switch
+    // lives in Settings.tsx's "Interface" section, which is `scope: "workspace"` (card 595e2a47, P2-12)
+    // — under Atlas that section moves to the WORKSPACE-tier Settings node (`/workspace-settings`), so
+    // once the shell swaps, the project-tier `/settings` page this test stayed on no longer renders this
+    // switch at all. Re-querying `atlasSeg`/`classicSeg` after the press is therefore not meaningful —
+    // the selection firing is what's asserted (the shell actually swapped), not the switch's own
+    // post-swap attributes.
+    await page.keyboard.press("ArrowRight");
+    await expect(atlas(page)).toBeVisible();
+    await expect(rail(page)).toHaveCount(0);
+  });
+
   // The owner's standing rule: unfinished input is never destroyed. Swapping the shell unmounts every
   // page in the tab, so a switch flipped in ANOTHER tab must not take this one's half-typed agent
   // prompt or unsaved Settings form down with it. The other tab's choice is offered, not applied.
@@ -464,7 +496,7 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     const other = await context.newPage();
     try {
       await other.goto(loomDaemon.baseURL + "/settings");
-      await other.getByTestId("atlas-ui-switch").getByRole("tab", { name: /^atlas preview$/i }).click();
+      await other.getByTestId("atlas-ui-switch").getByRole("radio", { name: /^atlas preview$/i }).click();
       // The writing tab DOES swap: that one is its own deliberate action.
       await expect(other.getByTestId("atlas-shell")).toBeVisible();
 

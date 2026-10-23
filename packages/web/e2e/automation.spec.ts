@@ -26,16 +26,16 @@ test.describe("automation (Schedules + Event Triggers consolidation)", () => {
   test("/automation renders the Segmented tabs and defaults to the Time body", async ({ page, loomDaemon }) => {
     await page.goto(`${loomDaemon.baseURL}/automation`);
 
-    // Both tabs render as an accessible tablist (the shared Segmented primitive).
-    await expect(page.getByRole("tab", { name: "Time (cron)" })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Events" })).toBeVisible();
+    // Both segments render as an accessible radiogroup (the shared Segmented primitive, card 3f28f1c3).
+    await expect(page.getByRole("radio", { name: "Time (cron)" })).toBeVisible();
+    await expect(page.getByRole("radio", { name: "Events" })).toBeVisible();
 
     // Default tab = Time: the Schedules body is mounted, the Event Triggers body is not.
     await expect(page.getByText(TIME_BODY)).toBeVisible();
     await expect(page.getByText(EVENTS_BODY)).toHaveCount(0);
-    // The Time tab reads selected; Events does not.
-    await expect(page.getByRole("tab", { name: "Time (cron)" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByRole("tab", { name: "Events" })).toHaveAttribute("aria-selected", "false");
+    // The Time segment reads checked; Events does not.
+    await expect(page.getByRole("radio", { name: "Time (cron)" })).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByRole("radio", { name: "Events" })).toHaveAttribute("aria-checked", "false");
   });
 
   test("switching to the Events tab swaps the mounted body (observable before/after)", async ({ page, loomDaemon }) => {
@@ -45,14 +45,14 @@ test.describe("automation (Schedules + Event Triggers consolidation)", () => {
     await expect(page.getByText(TIME_BODY)).toBeVisible();
     await expect(page.getByText(EVENTS_BODY)).toHaveCount(0);
 
-    // ACT: click the Events tab.
-    await page.getByRole("tab", { name: "Events" }).click();
+    // ACT: click the Events segment.
+    await page.getByRole("radio", { name: "Events" }).click();
 
     // AFTER (observable #1 — DOM swap): the Events body is now mounted and the Time body is gone.
     await expect(page.getByText(EVENTS_BODY)).toBeVisible();
     await expect(page.getByText(TIME_BODY)).toHaveCount(0);
-    // AFTER (observable #2 — selection + URL): the Events tab reads selected and the tab is pinned in the URL.
-    await expect(page.getByRole("tab", { name: "Events" })).toHaveAttribute("aria-selected", "true");
+    // AFTER (observable #2 — selection + URL): the Events segment reads checked and the tab is pinned in the URL.
+    await expect(page.getByRole("radio", { name: "Events" })).toHaveAttribute("aria-checked", "true");
     await expect(page).toHaveURL(/\/automation\?tab=events/);
   });
 
@@ -78,7 +78,7 @@ test.describe("automation (Schedules + Event Triggers consolidation)", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
     // Events tab: the "+ New trigger" builder opens a dialog.
-    await page.getByRole("tab", { name: "Events" }).click();
+    await page.getByRole("radio", { name: "Events" }).click();
     await expect(page.getByText(EVENTS_BODY)).toBeVisible();
     await page.getByRole("button", { name: /new trigger/i }).click();
     await expect(page.getByRole("dialog", { name: /new event trigger/i })).toBeVisible();

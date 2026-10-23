@@ -52,11 +52,11 @@ test.describe("memory (per-project memory explorer)", () => {
     await expect(page.getByText("always in agent context")).toBeVisible();
     await expect(page.getByText("always", { exact: true }).first()).toBeVisible();
 
-    // The all-entries list + its three sort tabs (the shared Segmented primitive).
+    // The all-entries list + its three sort tabs (the shared Segmented primitive, card 3f28f1c3).
     await expect(page.getByText("All entries")).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Recall" })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Recent" })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Title" })).toBeVisible();
+    await expect(page.getByRole("radio", { name: "Recall" })).toBeVisible();
+    await expect(page.getByRole("radio", { name: "Recent" })).toBeVisible();
+    await expect(page.getByRole("radio", { name: "Title" })).toBeVisible();
 
     // One row per entry (four seeded).
     await expect(page.locator(".memory-row")).toHaveCount(4);
@@ -84,13 +84,13 @@ test.describe("memory (per-project memory explorer)", () => {
     await seedAndOpen(page, loomDaemon);
 
     // Default sort = Recall → the highest-recall entry (Zephyr Gate @ 30) leads.
-    await expect(page.getByRole("tab", { name: "Recall" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("radio", { name: "Recall" })).toHaveAttribute("aria-checked", "true");
     await expect(page.locator(".memory-row").first()).toContainText("Zephyr Gate");
 
     // ACT: switch to Title → alphabetical, so "Alpha Convention" now leads.
-    await page.getByRole("tab", { name: "Title" }).click();
+    await page.getByRole("radio", { name: "Title" }).click();
 
-    await expect(page.getByRole("tab", { name: "Title" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("radio", { name: "Title" })).toHaveAttribute("aria-checked", "true");
     await expect(page.locator(".memory-row").first()).toContainText("Alpha Convention");
   });
 

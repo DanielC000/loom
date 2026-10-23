@@ -126,8 +126,9 @@ const modeTab = (page: Page, name: RegExp) => modeTabs(page).getByRole("tab", { 
 const managePanel = (page: Page) => page.locator('[data-testid="companion-mode-panel-manage"]');
 const chatPanel = (page: Page) => page.locator('[data-testid="companion-mode-panel-chat"]');
 const groupPanel = (page: Page, group: string) => page.locator(`[data-testid="companion-manage-panel-${group}"]`);
+// Segmented is role="radiogroup"/"radio" (card 3f28f1c3), not "tablist"/"tab".
 const subTab = (page: Page, name: RegExp) =>
-  page.locator('[role="tablist"][aria-label="Companion manage sections"]').getByRole("tab", { name });
+  page.locator('[role="radiogroup"][aria-label="Companion manage sections"]').getByRole("radio", { name });
 
 /**
  * The Companion node's own address for a mode — card 41eab0eb. The node is the Workspace node's

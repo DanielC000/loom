@@ -531,8 +531,8 @@ test.describe("profile grant blast radius", () => {
     await page.getByRole("button").filter({ hasText: profile.name }).first().click();
     await warmed;
     await railTo(page, "Automation");
-    // The Time|Events switch is a Segmented control: role="tab", not a plain button.
-    await page.getByRole("tab", { name: "Events", exact: true }).click();
+    // The Time|Events switch is a Segmented control: role="radio", not a plain button.
+    await page.getByRole("radio", { name: "Events", exact: true }).click();
 
     // The Events builder’s target picker is god-eye (any project’s agent), labelled "Project / Agent".
     await page.getByRole("button", { name: /new trigger/i }).click();

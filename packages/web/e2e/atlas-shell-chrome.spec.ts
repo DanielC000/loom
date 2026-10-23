@@ -394,8 +394,9 @@ test("toggling the switch REMOUNTS the chrome rather than carrying one root moun
 
   // The switch itself, through its own testid + case-insensitive names: the Segmented kit uppercases its
   // labels in CSS and Chromium folds text-transform into the accessible name, so an exact-case match here
-  // would be matching a presentation detail (measured on card 757c80dd).
-  await page.getByTestId("atlas-ui-switch").getByRole("tab", { name: /^atlas preview$/i }).click();
+  // would be matching a presentation detail (measured on card 757c80dd). Segmented is role="radiogroup"/
+  // "radio" (card 3f28f1c3), not "tablist"/"tab".
+  await page.getByTestId("atlas-ui-switch").getByRole("radio", { name: /^atlas preview$/i }).click();
   await expect(atlasShell(page)).toBeVisible();
   await expect(rail(page)).toHaveCount(0);
 

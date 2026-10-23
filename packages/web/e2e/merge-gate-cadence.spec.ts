@@ -301,7 +301,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     await expect(editor.getByTestId("merge-gate-warn-interval")).toContainText("up to 5 merges reach the default branch");
     await expect(editor.getByTestId("merge-gate-warn-never")).toHaveCount(0);
 
-    await editor.getByTestId("merge-gate-cadence").getByRole("tab", { name: "Never" }).click();
+    await editor.getByTestId("merge-gate-cadence").getByRole("radio", { name: "Never" }).click();
 
     // AFTER: the red weakening note, and the interval field goes inert.
     await expect(editor.getByTestId("merge-gate-warn-never")).toContainText("No merge will run the gate command");
@@ -309,7 +309,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     await expect(editor.getByTestId("merge-gate-interval")).toBeDisabled();
 
     // And `every` clears both notes.
-    await editor.getByTestId("merge-gate-cadence").getByRole("tab", { name: "Every merge" }).click();
+    await editor.getByTestId("merge-gate-cadence").getByRole("radio", { name: "Every merge" }).click();
     await expect(editor.getByTestId("merge-gate-warn-never")).toHaveCount(0);
     await expect(editor.getByTestId("merge-gate-warn-interval")).toHaveCount(0);
   });
@@ -443,14 +443,14 @@ test.describe("Settings merge-gate cadence panel (card 00664e74)", () => {
     const field = panel.getByTestId("merge-gate-interval");
     // BEFORE: a fresh project inherits `every`; the field is present but inert (never removed, so the
     // control never looks like it lost a feature).
-    await expect(seg.getByRole("tab", { name: "Every merge" })).toHaveAttribute("aria-selected", "true");
+    await expect(seg.getByRole("radio", { name: "Every merge" })).toHaveAttribute("aria-checked", "true");
     await expect(field).toBeDisabled();
     await expect(panel.getByTestId("merge-gate-warn-interval")).toHaveCount(0);
 
     // AFTER: `every Nth` enables the field. The bisect-cost note stays away until there is a real N to
     // state a cost about — an empty field must not produce "up to 0 merges reach the default branch".
-    await seg.getByRole("tab", { name: "Every Nth merge" }).click();
-    await expect(seg.getByRole("tab", { name: "Every Nth merge" })).toHaveAttribute("aria-selected", "true");
+    await seg.getByRole("radio", { name: "Every Nth merge" }).click();
+    await expect(seg.getByRole("radio", { name: "Every Nth merge" })).toHaveAttribute("aria-checked", "true");
     await expect(field).toBeEnabled();
     await expect(field).toHaveValue("");
     await expect(panel.getByTestId("merge-gate-warn-interval")).toHaveCount(0);
@@ -477,7 +477,7 @@ test.describe("Settings merge-gate cadence panel (card 00664e74)", () => {
     await page.goto(`${loomDaemon.baseURL}/settings`);
 
     const panel = page.getByTestId("merge-gate-panel");
-    await panel.getByTestId("merge-gate-cadence").getByRole("tab", { name: "Every Nth merge" }).click();
+    await panel.getByTestId("merge-gate-cadence").getByRole("radio", { name: "Every Nth merge" }).click();
     await panel.getByTestId("merge-gate-interval").fill("5");
 
     const save = page.getByRole("button", { name: "Save", exact: true }).first();
@@ -502,7 +502,7 @@ test.describe("Settings merge-gate cadence panel (card 00664e74)", () => {
     await page.goto(`${loomDaemon.baseURL}/settings`);
 
     const seg = page.getByTestId("merge-gate-panel").getByTestId("merge-gate-cadence");
-    await seg.getByRole("tab", { name: "Never" }).click();
+    await seg.getByRole("radio", { name: "Never" }).click();
     await expect(page.getByTestId("merge-gate-warn-never")).toBeVisible();
     await page.getByRole("button", { name: "Save", exact: true }).first().click();
 
@@ -510,11 +510,11 @@ test.describe("Settings merge-gate cadence panel (card 00664e74)", () => {
 
     // A reload re-seeds the control from the PERSISTED override, not optimistic client state.
     await page.reload();
-    await expect(page.getByTestId("merge-gate-panel").getByTestId("merge-gate-cadence").getByRole("tab", { name: "Never" }))
-      .toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("merge-gate-panel").getByTestId("merge-gate-cadence").getByRole("radio", { name: "Never" }))
+      .toHaveAttribute("aria-checked", "true");
 
     // Back to `every`: the override key is REMOVED (inherits the default), never stored as "on".
-    await page.getByTestId("merge-gate-panel").getByTestId("merge-gate-cadence").getByRole("tab", { name: "Every merge" }).click();
+    await page.getByTestId("merge-gate-panel").getByTestId("merge-gate-cadence").getByRole("radio", { name: "Every merge" }).click();
     await page.getByRole("button", { name: "Save", exact: true }).first().click();
     await expect.poll(() => readOverride(loomDaemon.baseURL, project.id)).toEqual({ mergeGate: null, mergeGateInterval: null });
   });
@@ -532,7 +532,7 @@ test.describe("Settings merge-gate cadence panel (card 00664e74)", () => {
     await page.goto(`${loomDaemon.baseURL}/settings`);
 
     const panel = page.getByTestId("merge-gate-panel");
-    await panel.getByTestId("merge-gate-cadence").getByRole("tab", { name: "Every Nth merge" }).click();
+    await panel.getByTestId("merge-gate-cadence").getByRole("radio", { name: "Every Nth merge" }).click();
     await panel.getByTestId("merge-gate-interval").fill("5");
     await page.getByRole("button", { name: "Save", exact: true }).first().click();
 
@@ -542,7 +542,7 @@ test.describe("Settings merge-gate cadence panel (card 00664e74)", () => {
     await expect(page.getByTestId("merge-gate-panel").getByTestId("merge-gate-interval")).toHaveValue("5");
 
     // Switching to `never` must CLEAR the interval, not leave a stale one behind the scenes.
-    await page.getByTestId("merge-gate-panel").getByTestId("merge-gate-cadence").getByRole("tab", { name: "Never" }).click();
+    await page.getByTestId("merge-gate-panel").getByTestId("merge-gate-cadence").getByRole("radio", { name: "Never" }).click();
     await page.getByRole("button", { name: "Save", exact: true }).first().click();
     await expect.poll(() => readOverride(loomDaemon.baseURL, project.id)).toEqual({ mergeGate: "off", mergeGateInterval: null });
   });

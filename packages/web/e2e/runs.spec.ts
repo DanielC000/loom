@@ -157,4 +157,50 @@ test.describe("runs", () => {
     // The transcript field renders its no-session fallback (this run was seeded without a sessionId).
     await expect(page.getByText(/No session/)).toBeVisible();
   });
+
+  test("the Runs|Keys switch is one Tab stop, and arrow keys move AND select (card 3f28f1c3)", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`runs-radiogroup-${Date.now()}`);
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/runs`);
+
+    const group = page.getByRole("radiogroup", { name: "Runs or Keys & Endpoints" });
+    await expect(group).toBeVisible();
+    const runsSeg = group.getByRole("radio", { name: "Runs" });
+    const keysSeg = group.getByRole("radio", { name: "Keys & Endpoints" });
+
+    // ONE tab stop: only the checked segment is in the tab order (roving tabindex) — the attribute
+    // contract, plus the behavior it buys: focusing the active segment and pressing Tab moves OUT of
+    // the group entirely (there is no second stop to land on), rather than onto "Keys & Endpoints".
+    await expect(runsSeg).toHaveAttribute("tabindex", "0");
+    await expect(keysSeg).toHaveAttribute("tabindex", "-1");
+
+    await runsSeg.evaluate((n: HTMLElement) => n.focus());
+    await expect(runsSeg).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(keysSeg).not.toBeFocused();
+    await expect(runsSeg).not.toBeFocused();
+
+    // Land back on the group the same way a real Tab walk would, to continue the arrow-key assertions.
+    await runsSeg.evaluate((n: HTMLElement) => n.focus());
+    await expect(runsSeg).toBeFocused();
+
+    // BEFORE: Runs is checked; the Runs list is the mounted body (its placeholder prompt), not Keys.
+    await expect(page.getByText("Select a run to view its input, result, usage, and transcript.")).toBeVisible();
+
+    // ArrowRight moves AND selects — the same onChange a click would fire, with an observable DOM
+    // change: the mounted body swaps, aria-checked flips on BOTH segments, the roving tabindex moves.
+    await page.keyboard.press("ArrowRight");
+    await expect(keysSeg).toBeFocused();
+    await expect(keysSeg).toHaveAttribute("aria-checked", "true");
+    await expect(runsSeg).toHaveAttribute("aria-checked", "false");
+    await expect(keysSeg).toHaveAttribute("tabindex", "0");
+    await expect(runsSeg).toHaveAttribute("tabindex", "-1");
+    await expect(page.getByText("Select a run to view its input, result, usage, and transcript.")).toHaveCount(0);
+
+    // ArrowLeft wraps back.
+    await page.keyboard.press("ArrowLeft");
+    await expect(runsSeg).toBeFocused();
+    await expect(runsSeg).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByText("Select a run to view its input, result, usage, and transcript.")).toBeVisible();
+  });
 });

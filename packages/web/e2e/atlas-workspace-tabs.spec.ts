@@ -31,7 +31,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test, type Page } from "./fixtures/daemon";
+import { PAGE_SUB_TAB, expect, test, type Page } from "./fixtures/daemon";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
@@ -254,7 +254,7 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
     await page.goto(loomDaemon.baseURL + "/skills");
     await expect(page).toHaveURL(loomDaemon.baseURL + "/home?tab=actors&sub=skills");
     await expect(page.getByTestId("atlas-tab-actors")).toHaveAttribute("aria-selected", "true");
-    const guestTab = page.getByTestId("atlas-tabpanel-actors").locator('[role="tab"][aria-selected="true"]');
+    const guestTab = page.getByTestId("atlas-tabpanel-actors").locator(PAGE_SUB_TAB(true));
     await expect(guestTab, "/skills reached the Actors tab but landed on its default sub-tab")
       .toHaveText(/^skills$/i);
   });
@@ -322,13 +322,13 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
       const panel = page.getByTestId(`atlas-tabpanel-${tab}`);
       await expect(panel).toBeVisible();
       // The guest's OWN control, found by exclusion inside its own panel so no label is named here.
-      const others = panel.locator('[role="tab"][aria-selected="false"]');
+      const others = panel.locator(PAGE_SUB_TAB(false));
       await expect(others, `the ${tab} tab body renders no second sub-tab to exercise`).not.toHaveCount(0);
       await others.first().click();
 
       // OBSERVABLE: the guest moved…
       await expect.poll(async () =>
-        (await panel.locator('[role="tab"][aria-selected="true"]').innerText()).trim().toLowerCase(), {
+        (await panel.locator(PAGE_SUB_TAB(true)).innerText()).trim().toLowerCase(), {
         message: `clicking the ${tab} body's other sub-tab did not move its own selection`,
       }).toBe(sub);
       // …the host did NOT…

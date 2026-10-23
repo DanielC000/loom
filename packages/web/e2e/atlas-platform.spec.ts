@@ -133,14 +133,16 @@ async function serveDevPlatformHome(page: Page, d: LoomDaemon): Promise<SetupHom
   return home;
 }
 
-const tabs = (page: Page) => page.getByRole("tablist", { name: "Platform node tabs" });
+const tabs = (page: Page) => page.getByRole("radiogroup", { name: "Platform node tabs" });
 // Segmented uppercases its labels in CSS, and Chromium folds `text-transform` into the accessible name —
-// so tab names are matched case-insensitively (measured on P1-0 gotcha 5 / P1-3 gotcha 1).
-const tab = (page: Page, name: string) => tabs(page).getByRole("tab", { name: new RegExp(`^${name}$`, "i") });
+// so tab names are matched case-insensitively (measured on P1-0 gotcha 5 / P1-3 gotcha 1). Segmented is
+// role="radiogroup"/"radio" (card 3f28f1c3), not "tablist"/"tab" — these helpers keep their `tab`/`tabs`
+// names (what every call site below reads) but query the real roles.
+const tab = (page: Page, name: string) => tabs(page).getByRole("radio", { name: new RegExp(`^${name}$`, "i") });
 
 async function openTab(page: Page, name: string) {
   await tab(page, name).click();
-  await expect(tab(page, name)).toHaveAttribute("aria-selected", "true");
+  await expect(tab(page, name)).toHaveAttribute("aria-checked", "true");
 }
 
 // The View-as control Platform.tsx renders ABOVE whichever layout mounts (dev installs only).
@@ -242,7 +244,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // tab, because the tab lives in the URL rather than in component state — flipping the preview does
     // not throw away where you were. Pinned here so a later "reset to Home on toggle" change has to be a
     // deliberate one. Every marker below is read per tab, so walk back to Home explicitly.
-    await expect(tab(page, "Findings")).toHaveAttribute("aria-selected", "true");
+    await expect(tab(page, "Findings")).toHaveAttribute("aria-checked", "true");
     await openTab(page, "Home");
 
     // ── END-USER (previewed) — the exact complement, same order ──
@@ -342,7 +344,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       await page.goto(`${loomDaemon.baseURL}/platform?tab=board`);
 
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
-      await expect(tab(page, "Board")).toHaveAttribute("aria-selected", "true");
+      await expect(tab(page, "Board")).toHaveAttribute("aria-checked", "true");
       // The active project is genuinely the OTHER one — otherwise "the project's card is absent" would
       // hold for a reason that has nothing to do with the Board tab's scoping.
       await expect(page.getByTestId("atlas-project-node")).toContainText(project.name);
@@ -377,7 +379,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       await page.goto(`${loomDaemon.baseURL}/platform?tab=findings`);
 
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
-      await expect(tab(page, "Findings")).toHaveAttribute("aria-selected", "true");
+      await expect(tab(page, "Findings")).toHaveAttribute("aria-checked", "true");
 
       const findings = panel(page, "findings");
       const row = (label: string) => findings.locator("div").filter({ hasText: new RegExp(escapeRe(label)) }).last();
@@ -469,7 +471,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       // The row's one affordance: it hands the finding to the Board tab, which opens its card's dialog.
       // That is the whole point of listing findings here — triage still happens on the board.
       await page.getByRole("link", { name: /open on the board/i }).first().click();
-      await expect(tab(page, "Board")).toHaveAttribute("aria-selected", "true");
+      await expect(tab(page, "Board")).toHaveAttribute("aria-checked", "true");
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeVisible();
       // The dossier header carries the card's short id; the title lives in an editable INPUT, whose value
