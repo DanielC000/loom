@@ -98,21 +98,30 @@ try {
   const r1 = await batch(d1, [e, f]);
   check("(B1) the batch STILL lands (a tripwire, never a refusal)", r1.ok === true && r1.landed?.length === 2);
   const ev1 = mwEvents(d1);
-  check("(B1) exactly ONE mainline_moved_outside_loom event at the second batch, severity high", ev1.length === 1 && ev1[0].detail.severity === "high");
-  check("(B1) it carries BOTH evidences and names the worker's tip, branch, repoKey", ev1[0]?.detail.evidence?.includes("reflog-raw-write") && ev1[0]?.detail.evidence?.includes("loom-branch-reachable") && ev1[0]?.detail.suspectShas?.includes(c.tip) && ev1[0]?.detail.to === c.tip && ev1[0]?.detail.branch === MAIN && ev1[0]?.detail.repoKey === "primary");
-  check("(B1) exactly ONE manager nudge, tagged", d1.nudges.length === 1 && /\[loom:mainline-moved\]/.test(d1.nudges[0]));
+  // @decision 2a6a292a round 19 (card aa7677fa) — TWO events now fire here, not one: checkMainlineMove's
+  // own raw-write alert (unchanged), PLUS a separate landing-trust-freeze event — trust was established at
+  // (B0)'s first-sight landing, and this batch's own checked tip (the bypassed `c.tip`) no longer matches
+  // it, so `advanceMainlineWatermarkForBatch` declines to re-stamp trust and alerts instead of laundering.
+  check("(B1) exactly TWO mainline_moved_outside_loom events at the second batch: the raw-write move alert and round 19's own landing-trust-freeze", ev1.length === 2);
+  const moveEv1 = ev1.find((ev) => ev.detail.evidence?.includes("reflog-raw-write"));
+  const freezeEv1 = ev1.find((ev) => ev.detail.source === "landing-trust-freeze");
+  check("(B1) the move alert carries BOTH evidences and names the worker's tip, branch, repoKey", moveEv1?.detail.severity === "high" && moveEv1.detail.evidence?.includes("reflog-raw-write") && moveEv1.detail.evidence?.includes("loom-branch-reachable") && moveEv1.detail.suspectShas?.includes(c.tip) && moveEv1.detail.to === c.tip && moveEv1.detail.branch === MAIN && moveEv1.detail.repoKey === "primary");
+  check("(B1) THE ACCEPTED COST: the landing-trust-freeze event is HIGH, untrusted-tip-mismatch", freezeEv1?.detail.severity === "high" && freezeEv1.detail.evidence?.includes("untrusted-tip-mismatch"));
+  check("(B1) exactly TWO manager nudges (the move alert's own, plus round 19's freeze nudge)", d1.nudges.length === 2 && d1.nudges.every((nu) => /\[loom:mainline-moved\]/.test(nu)));
   check("(B1) the watermark advanced to the batch's landed tip (several commits above the checked tip)", watermark(d1)?.sha === canonHead());
 
   // ── (B2) dedupe ────────────────────────────────────────────────────────────
   const g = await addWorker(d1.db, "g"), h = await addWorker(d1.db, "h");
   const r2 = await batch(d1, [g, h]);
-  check("(B2) DEDUPE: the next batch lands and does not re-alert", r2.ok === true && mwEvents(d1).length === 1 && d1.nudges.length === 1);
+  // mwEvents/nudges stay at 2 — both (B1) sources dedupe (the move alert on its own sha-level dedupe, the
+  // freeze on `from` alone — see round 19's own comment).
+  check("(B2) DEDUPE: the next batch lands and does not re-alert", r2.ok === true && mwEvents(d1).length === 2 && d1.nudges.length === 2);
 
   // ── (B3) a human commit between batches is silent ──────────────────────────
   fs.writeFileSync(path.join(P.repo, "human1.txt"), "h1\n"); git(P.repo, "add", "human1.txt"); git(P.repo, "commit", "-q", "-m", "docs: human commit");
   const i = await addWorker(d1.db, "i"), j = await addWorker(d1.db, "j");
   const r3 = await batch(d1, [i, j]);
-  check("(B3) a human commit between batches ⇒ the batch lands, NO new event", r3.ok === true && mwEvents(d1).length === 1 && watermark(d1)?.sha === canonHead());
+  check("(B3) a human commit between batches ⇒ the batch lands, NO new event", r3.ok === true && mwEvents(d1).length === 2 && watermark(d1)?.sha === canonHead());
 
   // ── (B4) card 2a6a292a round 3 item 4: guard 1b EXERCISED ALONE on the BATCH twin —
   //        advanceMainlineWatermarkForBatch must refuse to change W.branch even with a fully valid

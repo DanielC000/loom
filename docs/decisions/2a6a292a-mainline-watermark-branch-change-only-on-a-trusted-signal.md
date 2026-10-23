@@ -1706,3 +1706,493 @@ correction above): a genuine landing, by itself, with no human reset and no inte
 establishes W + trust and `create:true` succeeds immediately afterward. (MISMATCH-STILL-LOUD) — the
 negative control: a genuine trust mismatch (not null) on `create:true` still files the loud HIGH event +
 marker + nudge, unaffected by this round's fix.
+
+## Round 19 (card `aa7677fa`, from Code Review `1230a06d` of `f683a5ad`) — `advanceMainlineWatermark{,ForBatch}`
+## were the last two UNCONDITIONAL trust writers; a forge-then-land sequence laundered into trust through them
+
+Round 16 (above) closed `checkMainlineMove`'s own `store()` as a trust writer, reasoning that the other two
+landing-path writers — `advanceMainlineWatermark` and `advanceMainlineWatermarkForBatch` — were safe because
+each "confirms the landed commit's own parentage" before stamping. That confirmation (`readFirstParent`/
+`isAncestorCommit` against `checkedTip`) only proves nothing slipped in BETWEEN the check and the squash. It
+never re-verifies that `checkedTip` ITSELF — `checkMainlineMove`'s own return value — was ever a Loom-trusted
+tip. `checkedTip` is the live tip whenever `classifyMainlineMove` returns "explained" (a forged porcelain
+reflog message + a forged `Loom-Worker-Branch:` trailer — the EXACT bypass round 9 named and round 16's own
+(A)/(B) repros prove), "unverifiable" (a scan-cap overflow) or a loom-tip cap-skip — all three paths return
+the unauthenticated live tip with zero cryptographic verification, by design (4fa36502's tripwire is
+detection-only, not a sandbox).
+
+### The bug
+
+1. `W = trust = C0`. An attacker (or anyone with `.git` write access to the shared canonical repo — worker
+   worktrees share it) forges a commit `F` (parent `C0`, any payload, a forged porcelain
+   `update-ref -m "commit: x"` message, a forged `Loom-Worker-Branch:` trailer) and moves `main` onto it.
+2. A REAL `worker_merge_confirm`/`merge_batch` runs next. `checkMainlineMove`, called just before the squash,
+   sees `w.sha(C0) != head.tip(F)`; `classifyMainlineMove` reads zero raw-reflog/untrailered evidence (the
+   forgery is porcelain-looking AND trailered) ⇒ verdict `"explained"` ⇒ `store()` writes `W=F` (never trust,
+   round 16) ⇒ returns `checkedTip = F`.
+3. The real squash/ff lands DIRECTLY on top of `F`: new tip `S`, `parent(S) = F` (solo) or `F` is an ancestor
+   of the batch's own landed tip (batch). `readFirstParent(S) === checkedTip` (or the batch's ancestor check)
+   passes — this is a TRUE fact, and it is also the ENTIRE verification `advanceMainlineWatermark{,ForBatch}`
+   performed pre-fix before calling `this.db.setMainlineBranchTrust(branch, S)`.
+4. Trust is now `S` — a descendant of the forged commit `F`, laundered into the SAME authenticated record
+   `refuseIfTargetBranchUntrusted`/`refuseIfWatermarkUntrusted` rely on as ground truth. A later
+   `project_checkout_branch`/`create:true` on this branch adopts `S` as if it had been independently verified,
+   because by the time it runs, it HAS an exact match — the launder is already complete.
+
+No existing test caught this: `mainline-watch-trust-store.mjs`'s own (A)/(B)/(A2)/(B2)/(MISMATCH-STILL-LOUD)
+all plant the forgery and call `checkMainlineMove` DIRECTLY, with no landing run afterward; (NULL-TRUST-LANDING)/
+(FIRST-SIGHT-THEN-LANDING) run a real landing but start from a NULL trust, never a mismatch. The compound
+"forge, then a REAL subsequent landing" sequence was untested in both directions until this card.
+
+### Fix — gate ONLY the trust write; W and the landing itself are untouched
+
+Both `advanceMainlineWatermark` and `advanceMainlineWatermarkForBatch` now read the branch's EXISTING trust
+record before stamping: `trusted === null` (first establishment) or `trusted === checkedTip` (the ordinary,
+lockstep case) ⇒ stamp as before, unchanged. Any OTHER `trusted` ⇒ do NOT stamp (trust stays frozen at its
+pre-existing value) and file ONE HIGH `mainline_moved_outside_loom` event (`detail.source:
+"landing-trust-freeze"`) + ONE manager nudge, via the new `fileLandingTrustFreezeEvent` (the landing-path twin
+of `fileManagerCheckoutRefusalEvent`). `W`'s own write is COMPLETELY UNCHANGED either way — it remains
+4fa36502's bookkeeping, never a trust decision, and 4fa36502's own "Do not" list (never a refusal, a merge
+block or a retry) forbids touching the landing itself; by the time either function runs, the merge has
+already happened (`merge.ok && !merge.noop && merge.sha` gates the call). **No marker is written** — this
+mirrors `checkMainlineMove`'s own landing-path sha-level alert (which also writes no marker, only an event +
+nudge); only `project_checkout_branch`'s own precondition (`fileManagerCheckoutRefusalEvent`) writes one, the
+first time a manager actually touches the now-frozen branch. Writing one reflexively from every landing would
+lock `project_checkout_branch` for every OTHER branch in the project too, which no landing has any business
+doing.
+
+### Dedupe: keyed on `from` alone, deliberately NOT the exact `(from, to)` pair
+
+`fileManagerCheckoutRefusalEvent`'s own m4 dedupe (`hasManagerCheckoutRefusalEvent`) keys on the EXACT
+`(from, to)` pair — correct for a MANAGER repeatedly calling `project_checkout_branch` against an unchanged
+live tip. It is WRONG for the landing path: every subsequent landing mints its OWN new squash/ff tip as its
+`checkedTip`, so an exact-pair dedupe would treat each one as a brand-new move and re-fire the event + nudge
+on EVERY landing after the first — an alert storm, not a tripwire. `Db.hasLandingTrustFreezeEvent` instead
+keys on `from` (the FROZEN trust sha) alone, scoped by the same `lastHumanResetTs`-derived `sinceTs` the
+sibling check uses: one alert per freeze episode, regardless of how many landings happen while it stands.
+
+### Accepted cost — round 16's "self-heals the moment a real landing lands" claim for TRUST no longer holds
+
+**SUPERSEDED, not deleted — see this round.** Round 16's own accepted-cost text (above) justified leaving
+`advanceMainlineWatermark{,ForBatch}` unconditional because "the ordinary case ... self-heals the moment a
+real `worker_merge_confirm`/`merge_batch` lands on it." That was TRUE pre-fix (any subsequent real landing's
+unconditional stamp silently re-synced trust to the new tip, forged ancestry included) and is EXACTLY the
+property this round removes. Post-fix: once a mismatch occurs — forged OR an entirely ordinary owner hand
+commit (an interactive `git commit`'s own reflog message is porcelain-looking, exactly like the forged one;
+with no `Loom-Worker-Branch:` trailer either, `classifyMainlineMove` still returns `"explained"`, not
+`"alert"` — see the (HAND-COMMIT-THEN-LANDING) test) — trust freezes PERMANENTLY, not just until the next
+landing: every subsequent landing's own `checkedTip` chains from the still-frozen trust and re-triggers the
+SAME mismatch (deduped, so silently, past the first alert). The only remedy is the human-only reset route; a
+further landing alone does not unfreeze it. **Ruling: KEEP this fail-closed shape — it is the identical
+"Loom cannot tell an ordinary hand commit from a forged move" principle round 9 already ruled on (see round
+9's own "Do not"); a classifier-based reprieve would reopen exactly the laundering this round closes.** This
+is a materially bigger change than round 17's own HAND-COMMIT-LOCKOUT ruling, which was scoped to the
+CHECKOUT GATE (an occasional, foreground manager action) — this one fires in the BACKGROUND on the ordinary
+landing path, on every stray/hand/forged commit, with no further self-heal via landings. The owner is told
+via the SAME notification channel (a manager nudge) either way, so discoverability is not worse, only the
+recovery path (always the human-only reset route, never "just land something else") is narrower than round
+16 assumed.
+
+**ROUND 20 CORRECTION:** the sentence above — "every subsequent landing's own `checkedTip` chains from
+the still-frozen trust and re-triggers the SAME mismatch... a further landing alone does not unfreeze
+it" — is no longer true in general. It remains EXACTLY true for a genuine forgery or an ordinary hand
+commit (neither ever gets a row in round 20's own ledger, so the walk still breaks and a human reset is
+still the only remedy). It is no longer true for a mismatch caused by LOOM'S OWN tripwire/advance lag — a
+real Code Review finding (`ead08b1c`) that round 20 closes; see that round's own section below.
+
+## Do not (round 19 additions)
+
+- Do not reuse `fileManagerCheckoutRefusalEvent`/`hasManagerCheckoutRefusalEvent` verbatim for the landing
+  path — their exact-`(from, to)`-pair dedupe would re-alert on every landing after the first, because every
+  landing mints its own new `to`. Use `fileLandingTrustFreezeEvent`/`hasLandingTrustFreezeEvent` (keyed on
+  `from` alone) instead.
+- Do not write a `mainline-boot-alerted` marker from `fileLandingTrustFreezeEvent` — see "Fix" above for why
+  that would lock `project_checkout_branch` for unrelated branches. The event + nudge are enough; the
+  checkout-gate's own precondition writes the marker the first time it is actually needed.
+- Do not read a frozen trust record's self-heal as broken or as a bug to "fix" by letting a subsequent
+  landing re-sync it automatically — see "Accepted cost" above; that reprieve is exactly the laundering this
+  round exists to close, and round 9's own ruling (no classifier-based trust decision) already forecloses it.
+- Do not assume `getMainlineBranchTrust(` has more than two readers — verified by grep
+  (`packages/daemon/src`) at authoring time: `refuseIfTargetBranchUntrusted` (service.ts) and
+  `refuseIfWatermarkUntrusted` (service.ts), both inside `project_checkout_branch`'s own gates. Re-grep
+  before relying on this if a new reader might have been added since.
+
+### Tests (round 19)
+
+`mainline-watch-landing-trust-freeze.mjs` (new): (SOLO-FREEZE) forge an "explained" move, run a REAL
+`confirmWorkerMergeTracked` on top of it — trust stays frozen at its pre-forgery sha, `W` still advances to
+the real landed tip, exactly ONE `landing-trust-freeze` event + nudge fires, NO marker is written, and the
+END-TO-END `checkoutProjectBranch({branch:"main"})` switch is refused afterward on the now-frozen trust.
+(SOLO-NO-STORM) — a SECOND real landing after the SAME freeze does NOT re-fire the event/nudge (NO ALERT
+STORM, condition 1). (SOLO-NULL-TRUST) — the ordinary first-landing case (no trust yet) is untouched:
+establishes unconditionally, no freeze, no event. (BATCH-FREEZE)/(BATCH-NO-STORM)/(BATCH-NULL-TRUST) — the
+same three shapes through a real `mergeBatchTracked`. (HAND-COMMIT-THEN-LANDING) — an ordinary, non-forged
+owner hand commit, boot-advanced (W moves, trust doesn't, per round 16), followed by a fully legitimate real
+landing: trust freezes anyway (the accepted cost above) — then the human-only reset route unfreezes it, and
+the NEXT real landing after that stamps trust again normally, with no further human step. RED-then-GREEN:
+reverting this round's own `service.ts` gates (the two `trustedBefore === null || trustedBefore ===
+checkedTip` checks + `fileLandingTrustFreezeEvent`) makes (SOLO-FREEZE)/(BATCH-FREEZE)'s "trust stays frozen"
+assertions fail — pre-fix code silently stamps the forged descendant into trust instead.
+
+## Round 20 (card `aa7677fa` round 2, Code Review `ead08b1c`) — round 19's exact-match-only gate caused its
+## OWN permanent false freeze; a Loom-owned ledger closes the Loom-caused lag without reopening the forgeable
+## classifier round 9 removed
+
+Code Review `ead08b1c` found round 19's own fix NOT MERGEABLE: a blocking Major, probe-verified. The
+exact-match-only gate (`trustedBefore === null || trustedBefore === checkedTip`) cannot tell "the gap is a
+forgery/hand-commit" apart from "the gap is 100% genuine Loom landings whose OWN trust advance happened to
+get skipped" — and round 19 treated both identically, freezing BOTH forever.
+
+### The bug, probe-verified
+
+1. `L1` lands; trust is null (first establishment) so it becomes `L1`'s own tip, matching `W`.
+2. `L2` is an entirely ORDINARY landing, but `checkMainlineMove` fails open for it — a reader deadline, a
+   thrown error, an unreadable `W` row, or a CAS miss (any of 4fa36502's own existing fail-open paths) —
+   so `mainlineCheckedTip` is `null`. `advanceMainlineWatermark` is gated on `if (mainlineCheckedTip &&
+   merge.ok …)`, so it is never even CALLED for `L2`. `L2` still lands (the squash/ff itself never depended
+   on the tripwire), but NEITHER `W` NOR trust move for it — trust stays at `L1`'s tip.
+3. `L3` is ALSO an entirely ordinary landing. Its own `checkMainlineMove` now sees `w.sha(L1) !=
+   head.tip(L2)` — a genuine mismatch, but a BENIGN one (the range `L1..L2` is `L2`'s own real,
+   Loom-trailered squash commit, with a normal porcelain reflog message) — classifies `"explained"`, and
+   returns `checkedTip = L2`. `L3`'s own squash lands fine. Round 19's gate then compares
+   `trustedBefore(L1)` against `checkedTip(L2)`: NOT EQUAL — freeze fires, HIGH severity, telling the
+   owner this looks like a manual commit or a forgery. Every commit involved was a genuine Loom landing.
+4. Because round 19's freeze is PERMANENT (see the round-19 correction above), this is not a one-time
+   false alarm: `W`/trust keep diverging on every later landing too, each one re-triggering the same
+   (deduped, so silent-after-the-first) freeze, until a human visits the reset route for something that
+   was never actually wrong.
+
+Four more feeders produce the EXACT same externally-observable shape (a real landing lands, but its own
+`W`/trust advance is skipped) — named by the Code Review, traced here rather than assumed:
+- (b) `advanceMainlineWatermark{,ForBatch}`'s OWN internal fail-open `return`s (the TOCTOU first-parent
+  mismatch, a CAS miss at `this.db.getMeta(key) !== rawW`, a repoPath-reconfirmation miss, an unreadable
+  watermark row) — `checkMainlineMove` succeeds and hands over a perfectly good `checkedTip`, but the
+  ADVANCE function's own later guard declines before ever reaching the trust write.
+- (c) a batch landing with `batchCheckedTip` null/falsy while `result.ok` is still true (the batch's own
+  gate-closure `checkMainlineMove` call is skipped entirely when `r.passed` is false, or itself fails
+  open) — `advanceMainlineWatermarkForBatch`'s own first guard (`if (!checkedTip || …) return;`) then
+  returns before touching anything, even though the fast-forward itself succeeded.
+- (d) a crash between the squash/ff actually landing and whatever would have advanced `W`/trust for it.
+- (e) a `!merge.ok`-but-possibly-landed (`mayHaveLanded`) outcome. Traced specifically (not assumed): at
+  the batch `mayHaveLanded` call sites (`git/batch-merge.ts`), Loom genuinely does NOT know whether the ff
+  landed — every site is an explicit "could not confirm" state, and the caller (`sessions/service.ts`)
+  never resolves that uncertainty itself; it durably records the ambiguity and asks the human/manager to
+  check and re-run `worker_merge_confirm`. The SOLO twin of this ambiguity resolves differently:
+  `finishSoloAlreadyLanded` calls `findLandedSquashCommit` (a content/trailer-equivalence proof) to decide
+  "this branch's work is already on main" with enough certainty to finalize the task — but that
+  "certainty" is itself a git-content/trailer check, exactly the class of signal round 9 already proved
+  forgeable. Writing a ledger row from EITHER of these would make the ledger trust something weaker than
+  "Loom's own merge code just ran, right now, with no adversarial ambiguity" — reopening a narrower version
+  of the exact hole this whole card closes. Both stay OUT of scope for the ledger, by design — see
+  "Residual" below.
+
+### Fix — a Loom-owned ledger, never a git-derived signal
+
+A new table, `mainline_landed_commits` (`project_id, repo_key, branch, tip, base`; see its own CREATE
+TABLE doc in `db.ts` for the exact schema/retention), records ONE row immediately after a squash/ff
+ACTUALLY succeeds — `tip` is the sha Loom's own merge code just created; `base` is the pre-landing
+mainline tip it landed on top of (the solo squash's own first parent, read via `readFirstParent`; the
+batch ff's own `baseMainSha`, already known with no git call needed, since the ff's own contract requires
+`HEAD === baseMainSha` before it runs at all). Written UNCONDITIONALLY — `recordMainlineLedgerEntry`
+(solo) / the inline batch write — independent of `mainlineCheckedTip`/`batchCheckedTip`, so a landing
+whose OWN tripwire check fail-opened (feeder a) still gets a walkable row; fail-open itself (a
+`readFirstParent` failure, a thrown DB error) just means no row, never a crash or a blocked landing.
+
+`advanceMainlineWatermark{,ForBatch}`'s own gate now reads: `trustedBefore === null || trustedBefore ===
+checkedTip || Db.isMainlineLedgerReachable(…, checkedTip, trustedBefore)`. The walk follows `tip -> base`
+pointers backward from `checkedTip`, up to `MAINLINE_LEDGER_WALK_CAP` (50) hops, looking for
+`trustedBefore`; past the cap it fails closed (freezes, exactly as before) — see `db.ts`'s own doc for
+why 50 is generous headroom without becoming an unbounded scan, and why retention (4x the walk cap) can
+never be the limiting factor. It is a PURE DB read: no git call, no reflog, no trailer text, nothing a
+`.git`-write-access attacker can influence. **A forged commit is NEVER entered into the ledger** —
+nothing but a genuinely successful Loom squash/ff ever calls the write — so a walk through one always
+breaks (no row for that `tip`) and the gate still freezes exactly as round 19 left it. This is WHY the
+ledger does not reopen round 9's own hole: it adds a second, independent, Loom-AUTHORED fact the gate may
+trust, never a new way to re-derive trust from git content.
+
+### Residual — named, not papered over
+
+Feeders (d) and (e) stay genuinely uncovered, on purpose:
+- A crash in the narrow window between the squash/ff landing and the ledger INSERT executing (a single
+  local SQLite write) loses that one row. The write is placed as the very first thing after the squash/ff
+  succeeds specifically to make this window as small as practically possible, but it is not zero.
+- A batch candidate whose own landing is `mayHaveLanded`-ambiguous, and that NOBODY ever individually
+  re-confirms via `worker_merge_confirm` (which would resolve it through `finishSoloAlreadyLanded`, per
+  above), stays permanently unresolved — not a ledger gap exactly, but the same class of unresolved state.
+
+Both residuals produce the SAME externally-observable shape as the ledger's own design target (a real
+landing, no row, a later mismatch) and so freeze exactly like a genuine forgery or hand commit would —
+correctly fail-closed, never a silent launder, but also never distinguishable from one by the owner
+reading the alert. The alert text (both the checkout-gate refusals and `fileLandingTrustFreezeEvent`'s own
+reason) now names this explicitly: "a genuine Loom landing whose own trust stamp was skipped with no
+recoverable record of it" alongside the existing "an ordinary hand commit" and "a forgery" — the owner is
+told plainly that a HIGH alert here does not prove either of the other two.
+
+## Do not (round 20 additions)
+
+- Do not write a ledger row from `finishSoloAlreadyLanded`'s own `findLandedSquashCommit` confirmation, or
+  from a batch's `mayHaveLanded` resolution — see "Residual" above for why either would make the ledger
+  trust a git-content/trailer signal, not "Loom's own merge code just ran." If a future card finds a way to
+  resolve either with the SAME certainty as a live successful squash/ff (never merely "the content looks
+  equivalent"), it may become a THIRD, independent ledger writer — but it must clear that same bar, not a
+  weaker one.
+- Do not key the ledger walk on anything git-derived (a reflog entry, a trailer, a commit message) — the
+  whole point is a SECOND fact source independent of the first (round 9's own classifier). A future
+  "optimization" that reads `tip`'s own first-parent chain via git instead of the ledger table reopens the
+  exact hole this round closes.
+- Do not raise `MAINLINE_LEDGER_WALK_CAP` casually — see `db.ts`'s own doc for the realistic-lag reasoning
+  (1-2 hops) behind 50, and re-derive the retention relationship (4x the walk cap) before changing either.
+- Do not claim, anywhere in the alert/refusal text, that a HIGH freeze proves a forgery or proves it is
+  NOT a forgery — round 20 adds a third, equally plausible, non-adversarial cause (a skipped Loom stamp);
+  the alert must keep naming all three, not quietly drop back to two.
+
+### Tests (round 20)
+
+`mainline-watch-trust-ledger.mjs` (new): (LAG-SOLO) one injected `mainlineHeadReader` throw fail-opens an
+otherwise ordinary solo landing (L2) — L2 still lands and writes its own ledger row, neither W nor trust
+advance for it, and a THIRD ordinary landing (L3) walks the ledger from L2's own tip back to the
+still-frozen trust and advances cleanly, no freeze. (LAG-BATCH) the same shape through a real
+`mergeBatchTracked`, with `batchCheckedTip` left null/falsy by the same injection. (LAG-ADVANCE-SKIP)
+feeder (b) specifically — no test seam reaches `advanceMainlineWatermark`'s own internal guards end to end
+through a real landing (same limitation (S7b)/(S7d)/(S7e) in `mainline-watch.mjs` already accept), so this
+reproduces the exact externally-observable state that guard leaves behind: a real commit plus a seeded
+ledger row (exactly what the real unconditional write would have produced), with the guard itself proven
+in isolation via a direct call with a deliberately-wrong `checkedTip` (mirroring `(S7b)`'s own technique).
+(FORGE-STILL-FREEZES) a forged "explained" move, with a REAL ledger-covered landing chain reaching right
+up to it, still freezes — the forgery itself has no row, so the walk breaks exactly there, and a SECOND
+real landing afterward still cannot bridge it. (RESIDUAL) a real landing's own ledger row is physically
+deleted (simulating a crash) — the next landing still freezes, with the new alert text asserted verbatim.
+RED-then-GREEN: temporarily stripping the `|| Db.isMainlineLedgerReachable(…)` clause from both gates
+(leaving round 19's own exact-match-only check) makes exactly the 6 fix-dependent assertions in
+(LAG-SOLO)/(LAG-BATCH)/(LAG-ADVANCE-SKIP) fail, while (FORGE-STILL-FREEZES) and (RESIDUAL) — which assert
+the walk correctly FAILS — stay green throughout, proving the test discriminates in both directions.
+Every round-19 test (`mainline-watch-landing-trust-freeze.mjs`) and every pre-existing mainline-watch test
+this card's round 19 already touched were re-run against round 20's gate change and stayed green
+unmodified — the ledger is additive only (a forged/hand-commit tip still has no row, so every round-19
+freeze scenario is byte-identical in outcome).
+
+## Round 21 (card `aa7677fa` round 3, Code Review `34562ac8`) — round 20's own ledger write was itself
+## an unverified re-read; verify a landing's own commit identity BEFORE trusting it as a ledger/trust fact
+
+Code Review `34562ac8` found round 20's own fix NOT MERGEABLE: one CRITICAL, reproduced, plus one MAJOR,
+reproduced.
+
+### The CRITICAL bug, probe-verified
+
+The solo ledger write (`recordMainlineLedgerEntry`, `sessions/service.ts`) took `merge.sha` — a bare
+`git rev-parse HEAD` re-read `mergeBranchLocked` (`git/worktrees.ts`) performed AFTER `git commit`
+settled — and re-derived `base` via its OWN fresh `readFirstParent(tip)` read. `verifyLandedOnMainline`,
+the only check standing between the squash and reporting `ok:true`, checked only the BRANCH NAME, never
+that the re-read sha was Loom's own commit. A racer who moves `refs/heads/main` in the window between the
+real `git commit` settling and that re-read — reproduced with a post-commit hook `reset --hard`-ing onto a
+forged sibling commit (same parent as the real squash, so a bare parent check alone would pass; a
+DIFFERENT tree carrying real evil content; a forged `Loom-Worker-Branch:` trailer) — got the FORGED commit
+a ledger row: `{tip: forged, base: readFirstParent(forged)}`, written as if Loom's own merge code had
+produced it. `advanceMainlineWatermark` had an OLDER, independent hole on top: it stamped trust from its
+OWN fresh `readMainlineHead().tip` unconditionally (on first establishment, or on an exact match against
+the prior trust) — so the SAME forged tip could be stamped straight into trust directly, with no ledger
+row and no event at all, predating round 20 entirely and already breaking round 19's own "a forged commit
+can no longer promote itself into trust" claim.
+
+### Fix — verify the landing's own identity BEFORE it ever reaches a ledger/trust decision
+
+`mergeBranchLocked` now captures the STAGED TREE (`git write-tree`) in the exact same pre-commit window it
+already captures `preCommitHead` (card `c862f14c`'s own load-bearing adjacency rule — no git call between
+either capture and the commit). A shared closure, `verifyLandedAsOwnCommit(sha)`, verifies a post-commit
+re-read's own parent AND tree against those two captured values before trusting `sha` as "the exact commit
+this call made" — returning the ledger `base` (always `preCommitHead`) only when BOTH match, `undefined`
+otherwise. Neither check alone is enough (a forged sibling can share either); the PAIR proves the
+mainline's content state is exactly what this landing produced. `mergeBranch`'s return type gained
+`landedBase?: string`, set only when verified. The SAME closure replaces the recovery branch's old
+parent+trailer check (`headAfterFailure`'s own recovery after a reported commit failure) — a trailer is
+forgeable by anyone with `.git` write access (round 9's own ruling); parent+tree is not a weaker
+substitute, it is the SAME proof the main path now uses.
+
+`recordMainlineLedgerEntry` no longer performs ANY git read of its own: it takes `base` directly from the
+caller (`merge.landedBase`), and the ledger write is gated on `merge.landedBase !== undefined` in addition
+to the existing `merge.ok && !merge.noop && merge.sha && expectedMainlineBranch` — an unverified `sha`
+never earns a row, full stop.
+
+`advanceMainlineWatermark` gained a `mergeSha: string | undefined` parameter and a new precondition:
+`head.tip === mergeSha` must hold before ANY of the existing trust logic (exact-match, first-establishment,
+ledger-reachable) may even run — a mismatch takes the SAME path as an ordinary freeze (or, if trust was
+null, a logged skip with no event, since there is no prior trust value to freeze). The caller passes
+`undefined` — never the raw, possibly-unverified `merge.sha` — whenever `merge.landedBase` is unset: a
+race INSIDE `mergeBranchLocked` can leave `merge.sha` ALREADY equal to a forged tip, so passing it through
+unconditionally would let that SAME forgery sail past the `head.tip === mergeSha` check trivially (both
+sides would already be the forgery). `undefined` can never equal a real sha, so an unverified landing
+always takes the mismatch branch, regardless of whether trust was null or already established.
+
+### Named residual — found while verifying this round, not papered over
+
+When trust is null going into a landing and the NEXT landing is an entirely ordinary one sitting directly
+on top of that still-live forged tip, trust DOES establish — at the ordinary landing's OWN tip, never at
+the forgery itself — because first-establishment (`trustedBefore === null`) is unconditional by design
+(round 9: there is nothing to compare a true first landing against). The forged commit is never itself
+trusted and never earns a ledger row, so this is narrower than the pre-round-21 bug — but trust still ends
+up resting on an ancestor (the forgery) that was never independently verified. The gap is self-limiting:
+the VERY NEXT landing's own `checkedTip` is that second landing's own real tip (now correctly ledgered),
+so the ordinary exact-match/ledger-reachable path takes over from there with no further laundering risk —
+reproduced and asserted in `mainline-watch-own-commit-verify.mjs`'s own (FORGE-RACE) scenario, including
+the follow-up third landing proving it doesn't compound. Closing this fully would mean first-establishment
+itself must prove the CURRENT live tip's own ancestry, not just accept it — a bigger design change than
+this round's own scope; left for a future round if the owner judges the residual worth closing.
+
+**ROUND 22 CORRECTION (card aa7677fa round 4, CR 5882d8cb Minor 2):** the sentence above used to open with *"(a PRIOR landing onto a forged/unverified tip was correctly refused a stamp, per the fix above)"* as the stated PRECONDITION for trust being null here. FALSE — a refusal never NULLS trust; it only ever leaves trust at whatever it ALREADY was (null stays null, non-null freezes at its pre-existing value — see round 19's own `fileLandingTrustFreezeEvent`/`console.warn` split). The actual precondition this residual needs is that trust was ALREADY null BEFORE any forge race at all — i.e. the forge races the VERY FIRST trust establishment ever attempted for that exact (projectId, repoKey, branch): a fresh project, a project whose repo was just rebound, or one whose trust a human reset and no landing has re-established since. "Self-limiting" (above) describes what happens if a SECOND forge then tries to compound on top of the FIRST ordinary landing's own tip — it says nothing about the first forge race itself, which this round closes a different way (see "Round 22" below): it no longer stays fully silent.
+
+### Do not (round 21 additions)
+
+- Do not read a post-commit `git rev-parse HEAD` re-read as proof of anything beyond "this is what HEAD
+  currently is" — it is NOT proof the sha is the commit this call made. Only a parent+tree check against
+  values captured BEFORE the commit (`verifyLandedAsOwnCommit`) proves that.
+- Do not revert to deriving a ledger `base` via a fresh `readFirstParent(tip)` git read inside
+  `recordMainlineLedgerEntry` — that read trusts `tip` as a given, which is exactly the CRITICAL hole this
+  round closes. `base` must be threaded from `mergeBranch`'s own verified `landedBase`.
+- Do not pass a caller's raw `merge.sha` into `advanceMainlineWatermark` unconditionally — pass `undefined`
+  whenever `merge.landedBase` is unset, or an UNVERIFIED tip can trivially satisfy the `head.tip ===
+  mergeSha` check against itself.
+- Do not treat the named residual above as closed by this round, and do not claim in any alert/doc text
+  that first-establishment itself verifies ancestry — it deliberately does not (round 9).
+- Do not re-derive `mainline_landed_commits`'s own FK cleanup from the `mainline-watermark:`/
+  `mainline-boot-alerted:` app_meta cleanup already in `deleteProject` — the ledger table needed its own
+  `DELETE FROM mainline_landed_commits WHERE project_id = ?` (an enforced FK to `projects(id)`, unlike
+  every app_meta key, which has none) and the `mainline-branch-trust:` prefix needed its own app_meta
+  cleanup too (round 6 added the trust key but never added its own `deleteProject` cleanup) — both were
+  missing until this round; re-derive from `db.ts`'s own `CREATE TABLE`/`deleteProject`, not from memory.
+
+### Tests (round 21)
+
+`mainline-watch-own-commit-verify.mjs` (new): (FORGE-RACE) the CRITICAL repro — a post-commit hook (scoped
+to fire ONLY against the canonical checkout's own toplevel, never a worker's worktree, which shares hooks
+with canonical via the common `.git/hooks` dir — a real gotcha hit while writing this test) races main
+onto a forged, genuinely content-diverged sibling commit during a real `confirmWorkerMergeTracked`
+landing: the landing still succeeds (4fa36502's own Do-not), the forged tip earns NO ledger row, trust is
+NEVER stamped to it, and a SECOND ordinary landing on top of it exercises the named residual exactly
+(asserted as what happens, not papered over), followed by a THIRD landing proving the residual doesn't
+compound. (CONTROL) the identical setup with no hook: an ordinary landing's own ledger row and trust stamp
+are unaffected (checked on a SECOND landing, since a project's true first-ever landing never writes a
+ledger row at all regardless of this fix — see the M1 note below). (UNIT) `mergeBranch` called directly
+against a bare repo: `landedBase` is `undefined` for the forged-tree case and equals the real
+`preCommitHead` for a clean case — isolating the claim at the `mergeBranch` layer from the service-layer
+plumbing above it. `mainline-ledger-delete-project.mjs` (new, DB-only, no git): the MAJOR fix —
+`deleteProject` on a project carrying a real ledger row and trust record no longer throws `FOREIGN KEY
+constraint failed` (RED on pre-fix code, reproduced verbatim), both rows are genuinely gone afterward (not
+merely orphaned), a sibling project sharing the identical (repoKey, branch) name survives untouched, and a
+never-landed project still deletes cleanly. RED-then-GREEN: both new files were run against a temporary
+revert of each fix (`git checkout HEAD --`, outside the repo's own patch capture, then `git apply` to
+restore) and confirmed failing on exactly the fix-dependent assertions before being confirmed green again.
+Every round-19/20 test (`mainline-watch-landing-trust-freeze.mjs`, `mainline-watch-trust-ledger.mjs`,
+`mainline-watch.mjs`, `mainline-watch-race-guards.mjs`, `mainline-watch-batch.mjs`,
+`mainline-watch-batch-edges.mjs`, `mainline-watch-boot.mjs`, `mainline-watermark-reset-route.mjs`,
+`batch-merge-watermark-branch-pin.mjs`, `solo-merge-watermark-branch-pin.mjs`) was re-run against this
+round's signature changes to `advanceMainlineWatermark`/`recordMainlineLedgerEntry` and stayed green — six
+direct call sites across `mainline-watch.mjs`/`mainline-watch-race-guards.mjs`/
+`mainline-watch-trust-ledger.mjs` needed their own positional-argument update to thread the new `mergeSha`
+parameter (three of them — the ones that reach the actual trust-stamp path, not an earlier guard — needed
+the REAL resulting tip threaded through, not a placeholder, or this round's own new precondition would
+have silently frozen trust in tests that were never about that).
+
+### M1 — a known, documented asymmetry, left as-is (not a round-21 regression)
+
+The solo ledger write is gated on `expectedMainlineBranch` (resolved once, from the project's stored
+watermark, at the top of `confirmWorkerMergeTracked` — `undefined` on a project's true first-ever landing,
+since no watermark exists yet to resolve a branch from). The batch path resolves its own equivalent
+locally and falls back to the LIVE checked-out branch when no watermark exists
+(`sessions/service.ts`'s `expectedBaseBranch = (watermarkRead.state === "ok" ? … : undefined) ??
+baseMainHead?.branch`), so a batch's first-ever landing DOES get a ledger row while a solo's does not.
+Costs nothing in practice: a true first landing establishes trust unconditionally regardless of the
+ledger (`trustedBefore === null`), so there is nothing for that landing's own (absent) row to have proven
+anyway — the asymmetry only matters for the FOLLOWING landing's own walk, and by then the solo path's own
+`advanceMainlineWatermark` has already seeded the watermark, so every landing after the first resolves
+`expectedMainlineBranch` normally and gets its row like any other. Aligning the two paths (having solo
+also fall back to the live branch) was considered and rejected for this round: it would mean deriving a
+BRANCH NAME fact independent of the stored watermark specifically to feed a ledger write for a landing
+whose own trust decision does not need it, adding a new git-adjacent read to a function that currently has
+none — not worth it for a residual that self-heals one landing later. Revisit only if a future card finds
+this asymmetry actually causing a wrong trust/freeze decision, not merely an absent row on a landing that
+never needed one.
+
+### M2 — the round-20 >50-hop cap residual still applies, unchanged by this round
+
+Round 20's own `MAINLINE_LEDGER_WALK_CAP` (50 hops) residual is untouched here: a chain of more than 50
+consecutive skip-lag landings (feeders (b)-(e), round 20's own "Residual" section) still exhausts the walk
+and freezes, exactly as round 20 accepted. This round's own fix narrows WHAT can earn a ledger row (only a
+verified landing, never a forged re-read) but does not change the cap, the walk algorithm, or the retention
+relationship (4x the cap) — re-derive from `db.ts`'s own doc comment on `MAINLINE_LEDGER_WALK_CAP`, never
+from a number restated here.
+
+## Round 22 (card aa7677fa round 4) — Third Code Review's three Minors
+
+### Minor 1 — `verifyLandedAsOwnCommit` checked parent+tree, never parent COUNT
+
+A racer commit with parents `[preCommitHead, <foreign root>]` and OUR OWN staged tree matched both of round 21's checks (first-parent equality, tree equality) while smuggling a second, wholly unverified ancestry line straight into the ledger/trust chain — `git commit` on a clean, non-merge squash always produces a SINGLE-parent commit, so any additional parent is proof the commit wasn't ours, regardless of what its first parent or tree say. Fix: `verifyLandedAsOwnCommit` now also requires exactly one parent.
+
+**Implementation trap, found only by testing it (not by reading the diff):** the first attempt checked this via `git rev-parse -q --verify <sha>^2`'s EXIT CODE (expecting it to reject for a single-parent commit). It instead silently broke verification for EVERY landing, forged or not — `landedBase` came back `undefined` universally. Root cause: this codebase's `canonicalGit()` wraps `simple-git`, and simple-git's own default error-detection (`isTaskError`, `error-detection.plugin.ts`) is `!!(exitCode && stdErr.length)` — a non-zero exit is only ever treated as a failure when stderr is ALSO non-empty. `-q`/`--quiet` GUARANTEES empty stderr on failure (that is the whole point of the flag), so simple-git's `.raw()` call RESOLVED (with empty stdout) instead of rejecting, for every `^2` lookup regardless of whether a second parent actually existed. The fix abandons exit-code-based detection entirely: `git rev-list --parents -n 1 <sha>` prints `<sha> <parent1> [<parent2> ...]` on stdout, and the parent COUNT is read directly from that text (`tokens.length !== 2` ⇒ not a single-parent commit) — immune to this library quirk because nothing depends on whether the call "succeeds" or "fails" by exit code at all. This single call also replaces round 21's separate `rev-parse <sha>^` lookup (its own `tokens[1]` IS the parent), so the fix is net ONE fewer git call per verification, not an additional one.
+
+**The generalizable lesson:** `-q`/`--quiet` on ANY git subcommand, piped through THIS codebase's `canonicalGit()`/simple-git stack, is not a safe way to get "fails loudly, succeeds silently" — it instead risks "fails silently (as success), succeeds silently" through this specific library's stderr-gated error detection. Never add a new `-q --verify`-shaped (or similarly exit-code-dependent, stderr-suppressing) check through this stack without first proving — by running it, not by reading the flag's own documentation — that a genuine failure case actually REJECTS the returned promise. Prefer parsing observable stdout content over trusting an exit code through this wrapper.
+
+Test: `mainline-watch-own-commit-verify.mjs`'s new (UNIT-TWO-PARENT) scenario — a racer sharing OUR OWN exact parent AND tree (content-identical, no EVIL.txt — a bare parent+tree check alone would have verified this) but carrying a second, foreign-root parent via `commit-tree <ourTree> -p <ourParent> -p <foreignRoot>`; asserts `landedBase` is `undefined` despite the parent+tree match. RED on 3c64c40b (pre-round-22 `verifyLandedAsOwnCommit` has no parent-count check at all, so this exact racer verifies as genuine and `landedBase` resolves to `preCommitHead`).
+
+### Minor 2 — the null-trust residual was fully SILENT; corrected precondition
+
+See the correction inline on the round-21 "Named residual" section above for the precondition fix (a refusal never nulls trust — the residual needs trust ALREADY null before the race, not caused by one).
+
+The null + VERIFIED-mismatch branch (`advanceMainlineWatermark`'s `head.tip !== mergeSha` gate, when `trustedBefore === null`) used to be a bare `console.warn` — a forge racing the very first trust establishment for a (projectId, repoKey, branch) left NO durable event and NO manager nudge at all. Fix: a new private method, `fileNullTrustForgeRaceEvent` (`sessions/service.ts`), fires the SAME HIGH `mainline_moved_outside_loom` event class as the existing `fileLandingTrustFreezeEvent`, deduped via `Db.hasLandingTrustFreezeEvent`'s SAME mechanism with `from:""` (there is no prior trust value to key on — `""` is the same sentinel the first-sight-seeded-stray/declined notices already use for "no prior value"), gated STRICTLY on `mergeSha !== undefined` — an UNVERIFIED landing (one `mergeBranch` itself could never confirm as its own commit) stays a plain `console.warn`, since that case isn't evidence of a race, only of a landing this call couldn't verify. A new `MainlineEvidence` tag, `first-establishment-forge-race`, and its own `mainlineMovedNudgeText` branch (`git/mainline-watch.ts`) carry wording that explicitly does NOT blame a hand commit — it names three equally plausible causes (a forged racer, a Loom stamp itself skipped e.g. by a crash, or an ordinary concurrent commit outside Loom) and the same human-only reset remedy every other freeze/forge-race event already uses. `advanceMainlineWatermarkForBatch` has no analogous null-trust branch to fix — its own trust-stamp gate (`trustedBefore === null || trustedBefore === checkedTip || ...`) never threads a verified-vs-unverified `mergeSha` distinction the way the solo path does (the batch path's own per-commit verification, `verifyLanded`'s `post.sha === targetSha` check, was already judged sound by the round-3 Code Review) — see that CR's own "(2) MAJOR... Batch path sound" note.
+
+Test: `mainline-watch-landing-trust-freeze.mjs`'s new (SOLO-NULL-TRUST-FORGE-RACE) scenario. Calls `advanceMainlineWatermark` DIRECTLY (the established pattern in `mainline-watch.mjs`/`mainline-watch-race-guards.mjs`/`mainline-watch-trust-ledger.mjs`), because the race window under test — strictly between `mergeBranchLocked`'s own verified post-commit read and this function's LATER `readMainlineHead()` re-read — has no git call in between it to hang a post-commit hook off; a real end-to-end repro of exactly this window does not exist as a reachable scenario. Asserts: trust stays null through the race, exactly one HIGH `first-establishment-forge-race` event (`from:""`, `to`=the racer), wording naming all three causes, dedupe on a second identical call, and a CONTROL call (same shape, no race) still establishes trust unconditionally at its own tip with no event.
+
+### Minor 3 — two assertions in `mainline-watch-own-commit-verify.mjs` were VACUOUS; the main protection was untested
+
+(FORGE-RACE)'s own first-landing scenario can never meaningfully test the ledger-row-skip: it IS the project's true first-ever landing, where `expectedMainlineBranch` resolves to `undefined` (the M1 asymmetry — no watermark exists yet to resolve a branch from), so the ledger write is skipped BEFORE it ever reaches `landedBase`'s verified/unverified distinction — pre-round-3 code (where `landedBase` didn't exist on the result type at all) would pass the exact same assertion, for the same reason, proving nothing. Separately, the (UNIT) block's `landedResult.landedBase === undefined` check is ALSO vacuous on pre-round-3 code: reading a genuinely ABSENT property also evaluates to `undefined` in plain JS, so "the field is present and holds `undefined`" (this round's real claim) and "the field was never added" read identically through a bare `=== undefined` check. And the header's own prose claimed a HIGH freeze alert fires in the FIRST scenario — false: trust is null there, so the code path is a plain `console.warn`, never `fileLandingTrustFreezeEvent` (`trustedBefore !== null` is that branch's own gate) — "the main protection" was never exercised by any test in this file before this round.
+
+Fixes, all in `mainline-watch-own-commit-verify.mjs`: (1) the vacuous ledger-row check in (FORGE-RACE) is replaced with an inline note explaining why it can't be meaningful there, pointing at (FORGE-RACE-2); (2) a NEW (FORGE-RACE-2) scenario reuses the IDENTICAL forging hook, but raced AFTER two ordinary clean landings have warmed up both trust and the ledger — here the ledger write genuinely IS attempted (and still correctly skipped for the forged tip), and `fileLandingTrustFreezeEvent`'s `trustedBefore !== null` branch fires exactly once, deduped on a fourth, entirely ordinary landing; (3) the (UNIT) block gains an `Object.hasOwn(forgedResult, "landedBase")` assertion ahead of the `=== undefined` one, distinguishing "key present, value undefined" from "key absent entirely"; (4) the file header is corrected to state plainly which scenario tests what, and that (FORGE-RACE)'s own first landing produces no freeze alert at all (it is a `console.warn`, consistent with Minor 2's own null-trust distinction above).
+
+### Do not (round 22 additions)
+
+- Do not add a NEW exit-code-dependent, stderr-suppressing (`-q`/`--quiet`-shaped) check anywhere in `canonicalGit()`'s own call surface without first proving by RUNNING it (not by reading documentation) that a genuine failure case actually rejects — see Minor 1's own "generalizable lesson" above; simple-git's `isTaskError` is `!!(exitCode && stdErr.length)`, not exit-code alone.
+- Do not read (FORGE-RACE)'s own first-landing scenario as proof of the ledger-row-skip or the `trustedBefore !== null` freeze path — it structurally cannot exercise either (M1's own `expectedMainlineBranch` asymmetry, and trust being null respectively). Use (FORGE-RACE-2) for both.
+- Do not treat the (UNIT) block's `landedBase === undefined` check, alone, as proof the field was computed rather than simply absent — pair it with the `Object.hasOwn` check this round added.
+- **ROUND 23 CORRECTION (card aa7677fa round 5, CR 57d7a27d finding 2):** this bullet used to say the firing condition must never widen past a VERIFIED mismatch, on the theory that any `mergeSha === undefined` case "is not evidence of a race". FALSE in general — `mergeSha === undefined` collapses two different things: "uncaptured" (preCommitHead/stagedTree never captured, nothing was ever checked — genuinely not evidence of anything) and "rejected" (checked, and a real parent/count/tree mismatch — exactly the race, and a racer can trivially force this by making mergeBranch's OWN re-read fail verification instead of merely mismatching later). Round 23 widens the firing condition to cover BOTH "verified" and "rejected" (see round 23's own section below); only "uncaptured" still stays a plain `console.warn`.
+
+### Named residuals (round 22) — found, NOT fixed
+
+1. **Canonical-INDEX tampering before `write-tree`** is still attested as Loom's own commit. `verifyLandedAsOwnCommit` (and its upstream `stagedTree` capture, `c862f14c`'s own adjacency rule) trusts whatever `git write-tree` reports for the CURRENTLY STAGED index at that moment — if something with write access to the canonical `.git` tampers with the INDEX itself (not a ref, not a commit object) between staging and the commit call, `stagedTree` captures the tampered content as "ours" and `verifyLandedAsOwnCommit` would verify a forged tree as genuine, since it never independently re-derives what SHOULD have been staged from the worker's own branch content. Out of scope for this round (it is a different trust boundary — the shared `.git`'s own writability, not the post-commit identity check this round covers).
+2. **A content-identical racer's trust/ledger commit carries racer-chosen trailers.** `verifyLandedAsOwnCommit` proves parent+tree+single-parent — it says nothing about the commit MESSAGE. A racer who reproduces OUR exact parent and OUR exact tree (trivial if they can read the worktree being merged) but writes their own commit message/trailers over the ref would pass every check this round adds, earning a ledger row and a trust stamp under a commit object Loom did not actually create, even though its CONTENT is byte-identical to what Loom would have produced. Not independently harmful (the content matches what Loom would have landed anyway), but it means "verified as our own commit" is better read as "verified as content-identical to what we would have committed", never as "verified as the literal object Loom's own `git commit` call produced." Out of scope for this round; closing it would mean comparing the commit's own message/trailers too, which this round did not attempt.
+
+## Round 23 (card aa7677fa round 5) — Fourth Code Review's three findings
+
+### Finding 1 — round 22's `rev-list --parents` honored `info/grafts`, bypassing the single-parent check
+
+`canonicalGit()` sets `core.useReplaceRefs=false`, which disables REPLACE REFS — but `$GIT_COMMON_DIR/info/grafts` is a SEPARATE, older legacy mechanism (deprecated, but still read by porcelain commands including `rev-list`) that `core.useReplaceRefs` does NOT touch at all. The shared canonical `.git` is worker-writable, so a racer with write access can: build a two-parent forgery `F = commit-tree <Loom's own staged tree> -p <preCommitHead> -p <EVILROOT>` (same shape as round 22's own UNIT-TWO-PARENT fixture), then append `"F <preCommitHead>"` to `.git/info/grafts` — a graft entry REPLACES what porcelain commands report as a commit's parent list, without touching the actual stored object. `git rev-list --parents -n 1 F` then reports only `F <preCommitHead>` (ONE parent), exactly as if `F` were genuinely single-parent, and round 22's check accepted it.
+
+Fix: `verifyLandedAsOwnCommit` now reads `git cat-file -p <sha>` instead — this returns the RAW, stored object content, which neither grafts nor replace refs can rewrite (both are porcelain-layer reinterpretations; the object database itself is untouched). The header block (everything up to the first blank line — git always separates headers from the message with exactly one blank line, including for a GPG-signed commit, whose `gpgsig` continuation lines are space-indented and never literally blank) is parsed for lines starting with `parent `, both for the COUNT (must be exactly 1) and for the parent value itself (replacing round 22's separate `rev-parse <sha>^` lookup, so this stays one call net, same as round 22's own claim). Restricting the parse to the header block specifically defeats a commit MESSAGE that happens to contain the literal text `parent ` on its own line.
+
+Verified directly (not just inferred): a throwaway repo was used to confirm `rev-list --parents` reports ONE parent for a graft-entry-hidden two-parent commit, while `cat-file -p` on the SAME commit still shows both `parent ` header lines — git even prints its own `info/grafts`-deprecation hint to stderr on the graft-aware read, confirming the mechanism engaged.
+
+Test: `mainline-watch-own-commit-verify.mjs`'s new (UNIT-GRAFT-HIDDEN) scenario and its own `installGraftHiddenTwoParentRacingPostCommitHook` — the SAME two-parent racer as (UNIT-TWO-PARENT), but the post-commit hook additionally writes the graft entry into `.git/info/grafts` in the SAME window, before `mergeBranchLocked`'s own re-read. Asserts `landedBase` is STILL `undefined` (and `landedVerify` is `"rejected"`) despite the graft. RED on 3f41473c (round 22's `rev-list --parents` accepts the graft-hidden racer as single-parent, so `landedBase` resolves to `preCommitHead` there).
+
+### Finding 2 — a racer could dodge the null-trust event entirely by racing EARLIER, forcing a REJECTED verification instead of a mere mismatch
+
+`advanceMainlineWatermark`'s null-trust branch (round 22) only fired `fileNullTrustForgeRaceEvent` for `mergeSha !== undefined` — i.e. a VERIFIED landing whose tip later moved again. But `mergeSha === undefined` collapses two structurally different cases round 22 never told apart: "uncaptured" (`preCommitHead`/`stagedTree` were never captured at all — e.g. the pre-commit capture itself threw — so nothing was ever checked, genuinely no evidence either way) and "rejected" (capture succeeded, `verifyLandedAsOwnCommit` RAN, and a real parent/count/tree mismatch rejected it — this IS the race, just caught one step earlier than a "verified mismatch"). A racer forcing `mergeBranchLocked`'s own post-commit re-read to reject (exactly what (FORGE-RACE)'s existing same-parent-different-tree hook already does, on a project's first-ever landing) produced a REJECTED verdict that round 22 treated identically to "uncaptured" — fully silent, no event, no nudge.
+
+Fix: `mergeBranch` now returns a tri-state `landedVerify: "verified" | "rejected" | "uncaptured"` alongside `landedBase` (computed by a `classifyLandedVerify` closure sharing `verifyLandedAsOwnCommit`'s own `preCommitHead`/`stagedTree` closure variables — "uncaptured" iff either is `undefined`, else "verified" iff `landedBase !== undefined`, else "rejected"), threaded through `confirmWorkerMergeTracked` into `advanceMainlineWatermark` as a new, OPTIONAL `mergeVerify` parameter (`mergeVerify ?? (mergeSha !== undefined ? "verified" : "uncaptured")` — the fallback default is byte-identical to round 22's own behavior for every caller, production or test, that doesn't pass it, so no existing direct-call test site needed updating). The null-trust branch's gate widened from `mergeSha !== undefined` to `effectiveMergeVerify !== "uncaptured"` — covering BOTH "verified" and "rejected", leaving only genuine "uncaptured" as a plain `console.warn`. `advanceMainlineWatermarkForBatch` is untouched — it has no verified-vs-rejected distinction to thread (see round 22's own note on why the batch path's own per-commit check was already judged sound).
+
+Test: this is exactly the shape of the EXISTING (FORGE-RACE) scenario in `mainline-watch-own-commit-verify.mjs` — first-ever landing (trust null), same-parent-different-tree forge racing before the post-commit read. Round 22 never asserted on the resulting event (none fired then); round 23 adds explicit assertions that EXACTLY ONE `first-establishment-forge-race` event (and one nudge) now fires, and corrects the file's own header (which round 22 wrote claiming this scenario produces no HIGH alert — true under round 22, false under round 23) and the scenario's later "third landing, no freeze" assertion (now "no NEW freeze", since the count is 1, not 0, from the first landing's own newly-firing event).
+
+### Finding 3 — the remedy text implied trust stays unstamped until a human reset; it doesn't
+
+Both the `first-establishment-forge-race` nudge (`mainlineMovedNudgeText`, `git/mainline-watch.ts`) and `fileNullTrustForgeRaceEvent`'s own durable `reason` (`sessions/service.ts`) told the manager to "ask the owner to review it... and only then call the human-only reset route... after that, the NEXT real landing establishes trust again normally" — implying the reset is what gates the next stamp. FALSE: first-establishment is UNCONDITIONAL by design (round 9's own ruling), so the VERY NEXT ordinary landing stamps trust at its own tip regardless of whether anyone ever calls the reset route — silently folding the suspect tip into the newly-stamped trust's own ancestry. The reset route is for ADOPTING a specific tip the owner has reviewed; it is not what prevents the fold, and the old wording never said what actually does (nothing, short of a human action).
+
+Fix: both texts reworded to tell the manager to HOLD any further landing on the affected branch until the owner has reviewed it, and to state the residual plainly — trust being null is not itself a safeguard, since first-establishment doesn't check ancestry. The reset route remains available (for adopting a tip the owner wants as the new baseline before resuming), but is now described as optional-not-required-to-resume, not as the one gate standing between "frozen" and "stamped".
+
+### Do not (round 23 additions)
+
+- Do not check parent count or parent identity via `git rev-list --parents` (or any other porcelain command that respects grafts/replace-refs) anywhere in `verifyLandedAsOwnCommit` or a similar own-commit identity check — use `git cat-file -p <sha>` and parse the header block directly; see Finding 1 above for the exact graft-based bypass this closes.
+- Do not parse `cat-file -p`'s output past the first blank line when looking for `parent ` lines — the commit MESSAGE is unstructured text a racer fully controls, and a message line that happens to start with `parent ` must never be read as a real parent.
+- Do not read `mergeSha === undefined` as a single, undifferentiated "unverified" case anywhere a null-trust decision is being made — it is EITHER "uncaptured" (no evidence) or "rejected" (the race, caught earlier). Thread `landedVerify`/`mergeVerify`, never collapse back to a boolean.
+- Do not add a new direct-call test site for `advanceMainlineWatermark` that passes a NEW seventh positional argument without first checking this function's own current parameter order — `mergeVerify` sits between `mergeSha` and `managerSessionId`; a test written against round 22's six-argument shape silently drops `managerSessionId` into the new slot otherwise, which would be a straight runtime bug (both are nullable/optional-looking types that TypeScript may not catch depending on context).
+- Do not word a reset-route remedy as "stamps trust again after the reset" for the null-trust case specifically — first-establishment is unconditional, so the NEXT landing (reset or not) stamps trust at its own tip. State the HOLD action instead; see Finding 3 above.
+
+### Named residual (round 23) — found, NOT fixed
+
+**`verifyLandedAsOwnCommit`'s `cat-file -p` read is immune to grafts and replace refs, but not to canonical-INDEX tampering before `write-tree`, nor to a content-identical racer's own trailers** — both residuals round 22 already named are UNCHANGED by this round's fix; grafts/replace-refs are a third, now-closed mechanism, structurally independent of either. Do not read Finding 1's fix as closing either of round 22's own two residuals.

@@ -154,7 +154,17 @@ try {
     // confirmWorkerMergeTracked), so the SAME real (unmocked) mainlineFactsReader classifies it there
     // instead, exactly once, before the next confirm's own check could duplicate it.
     const ev4 = mwEvents(d1).slice(before);
-    check("(B4) the move is NOT absorbed by the batch: across the forfeit's fallback landings and the next confirm it is reported exactly ONCE, naming the raw-written tip", ev4.length === 1 && ev4[0].detail.suspectShas?.includes(k.tip) && ev4[0].detail.to === k.tip);
+    // Select by the distinguishing attribute that actually matters (round 19's own freeze source), never
+    // by evidence string — the move's own evidence tag depends on exactly which commit relationship it
+    // measures at classification time and isn't worth guessing at here.
+    const moveEv4 = ev4.find((ev) => ev.detail.source !== "landing-trust-freeze");
+    const freezeEv4 = ev4.find((ev) => ev.detail.source === "landing-trust-freeze");
+    check("(B4) the move is NOT absorbed by the batch: across the forfeit's fallback landings and the next confirm it is reported exactly ONCE by checkMainlineMove's own classifier, naming the raw-written tip", ev4.length === 2 && moveEv4?.detail.suspectShas?.includes(k.tip) && moveEv4.detail.to === k.tip);
+    // @decision 2a6a292a round 19 (card aa7677fa) — a SEPARATE landing-trust-freeze event also fires once
+    // in this window: trust (established at the setup landing above) still doesn't match the first
+    // fallback's own checked tip (the TOCTOU-injected k.tip), so `advanceMainlineWatermark` declines to
+    // re-stamp it; every later landing in this window dedupes on the same frozen `from`.
+    check("(B4) THE ACCEPTED COST: a separate landing-trust-freeze event also fires once, HIGH, untrusted-tip-mismatch", freezeEv4?.detail.severity === "high" && freezeEv4.detail.evidence?.includes("untrusted-tip-mismatch"));
     void n;
   }
 

@@ -185,7 +185,14 @@ try {
   check("(S1) the human-REST GitWriter.commit succeeded on the canonical checkout (setup control)", wr.ok === true);
   const b = await addWorker("b");
   const rb = await confirm(b);
-  check("(S1) a human `git commit` + a GitWriter commit ⇒ landing merges, NO event, NO nudge", rb.merged === true && evFor(b).length === 0 && nudges.length === 0);
+  check("(S1) a human `git commit` + a GitWriter commit ⇒ landing merges, and checkMainlineMove ITSELF stays silent (no mainline_moved_outside_loom event attributed to this worker)", rb.merged === true && evFor(b).length === 0);
+  // @decision 2a6a292a round 19 (card aa7677fa) — a SEPARATE, orthogonal alert now fires here: the two
+  // human commits moved main's live tip away from the branch's existing TRUST record (established by
+  // (S0)'s own first landing) with no human-only reset in between, so `advanceMainlineWatermark` declines
+  // to re-stamp trust and files ONE landing-trust-freeze nudge instead — the accepted cost of closing the
+  // forge-then-land laundering this round fixes. This is a NEW, ordinary nudge, not a test regression.
+  const freezeEvsS1 = db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === P.projId && e.detail?.source === "landing-trust-freeze");
+  check("(S1) THE ACCEPTED COST: exactly ONE landing-trust-freeze event (not just the nudge) now fires for this hand-commit-then-landing sequence", freezeEvsS1.length === 1 && nudges.length === 1 && /\[loom:mainline-moved\]/.test(nudges[0]));
   check("(S1) the watermark advanced over the human commits to the new landing", watermark()?.sha === canonHead());
 
   // ── (S1b) an UNCOMMITTED worker's branch tip is a canonical commit — must never look like a bypass ──
@@ -194,7 +201,9 @@ try {
   check("(S1b) setup control: the uncommitted worker's branch tip IS the canonical head (the shape that used to false-alert)", u.tip === canonHead());
   const x1 = await addWorker("x");
   const rx1 = await confirm(x1);
-  check("(S1b) human commit → a fresh UNCOMMITTED worker → another worker lands ⇒ merges, NO event, NO nudge", rx1.merged === true && evFor(x1).length === 0 && nudges.length === 0);
+  // nudges.length stays at 1 (round 19's own freeze from (S1) above), never 0 — trust froze there and the
+  // same frozen `from` dedupes every later mismatch in this file; see that check's own comment.
+  check("(S1b) human commit → a fresh UNCOMMITTED worker → another worker lands ⇒ merges, NO event, NO NEW nudge", rx1.merged === true && evFor(x1).length === 0 && nudges.length === 1);
 
   // ── (S1d) a NO-COMMIT worker that forward-moves onto a human commit must never look like a bypass ──
   {
@@ -208,7 +217,8 @@ try {
     check("(S1d) setup controls: both no-commit branches now sit exactly on the human commit, via a `merge …: Fast-forward` and a `rebase (finish)` reflog entry", git(ue.worktreePath, "rev-parse", "HEAD") === h4 && git(ue2.worktreePath, "rev-parse", "HEAD") === h4 && /^merge .*Fast-forward/.test(ueMsg) && /^rebase \(finish\)/.test(ue2Msg));
     const x2 = await addWorker("x");
     const rx2 = await confirm(x2);
-    check("(S1d) E/E2: no-commit workers fast-forwarded / rebased onto a human commit ⇒ landing merges, NO event, NO nudge", rx2.merged === true && evFor(x2).length === 0 && nudges.length === 0);
+    // nudges.length stays at 1 — see (S1)'s own comment (round 19, card aa7677fa).
+    check("(S1d) E/E2: no-commit workers fast-forwarded / rebased onto a human commit ⇒ landing merges, NO event, NO NEW nudge", rx2.merged === true && evFor(x2).length === 0 && nudges.length === 1);
   }
 
   // ── (S1c) a reflog with >cap entries BEFORE W must not make a small move "unverifiable" ──
@@ -232,16 +242,19 @@ try {
   check("(S2) exactly ONE mainline_moved_outside_loom event, severity high — even with >cap reflog entries BEFORE the watermark", evD.length === 1 && evD[0].detail.severity === "high");
   check("(S2) it carries BOTH evidences", evD[0]?.detail.evidence?.includes("reflog-raw-write") && evD[0]?.detail.evidence?.includes("loom-branch-reachable"));
   check("(S2) it names the worker's tip as a suspect and from/to/branch/repoKey/projectId", evD[0]?.detail.suspectShas?.includes(c.tip) && evD[0]?.detail.to === c.tip && evD[0]?.detail.branch === MAIN && evD[0]?.detail.repoKey === "primary" && evD[0]?.detail.projectId === P.projId);
-  check("(S2) exactly ONE manager nudge, tagged and naming the branch", nudges.length === 1 && /\[loom:mainline-moved\]/.test(nudges[0]) && nudges[0].includes(MAIN));
+  // nudges.length is 2, not 1: index 0 is (S1)'s own round-19 landing-trust-freeze nudge (unrelated to
+  // this move); index 1 (the LATEST) is this move's own nudge — check that one, not nudges[0].
+  check("(S2) exactly ONE NEW manager nudge for this move, tagged and naming the branch", nudges.length === 2 && /\[loom:mainline-moved\]/.test(nudges[1]) && nudges[1].includes(MAIN));
   const e = await addWorker("e");
   await confirm(e);
-  check("(S2) DEDUPE: the next landing does not re-alert (watermark advanced past the move)", evFor(e).length === 0 && nudges.length === 1);
+  check("(S2) DEDUPE: the next landing does not re-alert (watermark advanced past the move)", evFor(e).length === 0 && nudges.length === 2);
 
   // ── (S3) a human reset is silent ───────────────────────────────────────────
   git(P.repo, "reset", "-q", "--hard", "HEAD~1");
   const f = await addWorker("f");
   const rf = await confirm(f);
-  check("(S3) a human `git reset --hard HEAD~1` (rewind, porcelain reflog message) ⇒ merges, NO event", rf.merged === true && evFor(f).length === 0 && nudges.length === 1);
+  // nudges.length stays at 2 — see (S1)'s own comment; the frozen trust dedupes this mismatch too.
+  check("(S3) a human `git reset --hard HEAD~1` (rewind, porcelain reflog message) ⇒ merges, NO event, NO NEW nudge", rf.merged === true && evFor(f).length === 0 && nudges.length === 2);
 
   // ── (S4) forged reflog message: only reachability fires ────────────────────
   const g = await addWorker("g"), h = await addWorker("h");
@@ -309,7 +322,7 @@ try {
     db.setMeta(key, JSON.stringify({ branch: MAIN, sha: before.sha }));
     await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, "f".repeat(40));
     check("(S7b) TOCTOU: a landing whose first parent is NOT the checked tip leaves the watermark UNCHANGED (a move in the window stays catchable)", watermark()?.sha === before.sha);
-    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHead);
+    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHead, headTip);
     check("(S7b) …while a landing sitting directly on the checked tip advances it to the new tip", watermark()?.sha === headTip);
   }
 
@@ -328,7 +341,7 @@ try {
     check("(S7d) THE GUARD: a branch-mismatched W is left COMPLETELY untouched despite a valid checkedTip", watermark()?.branch === strayGuardBranch && watermark()?.sha === parentOfHeadS7d);
     // control: the SAME checkedTip, with branch agreement restored, DOES advance — the guard is branch-specific, not a blanket refusal.
     db.setMeta(key, JSON.stringify({ branch: MAIN, sha: parentOfHeadS7d }));
-    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7d);
+    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7d, headTipS7d);
     check("(S7d) control: with branch agreement restored, the identical call DOES advance W", watermark()?.branch === MAIN && watermark()?.sha === headTipS7d);
   }
 
@@ -346,7 +359,7 @@ try {
     check("(S7e) THE GUARD: a present-but-unreadable row is left BYTE-IDENTICAL despite a valid checkedTip", db.getMeta(key) === rawBeforeS7e);
     // control: the SAME checkedTip, with a valid watermark restored, DOES advance — the guard is unreadable-specific, not a blanket refusal.
     db.setMeta(key, JSON.stringify({ branch: MAIN, sha: parentOfHeadS7e }));
-    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7e);
+    await sessions.advanceMainlineWatermark(P.projId, "primary", P.repo, parentOfHeadS7e, headTipS7e);
     check("(S7e) control: with a valid watermark restored, the identical call DOES advance", watermark()?.branch === MAIN && watermark()?.sha === headTipS7e);
   }
 

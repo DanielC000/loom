@@ -155,7 +155,7 @@ try {
       d.db.setMeta(key, JSON.stringify(concurrentWinner)); // a concurrent writer wins the race DURING this await
       return { state: "no-default" }; // this call's OWN decision would otherwise seed unconditionally
     };
-    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null);
+    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null);
     d.sessions.resolveMainlineBranchStateReader = realResolver;
     check("(c013e8a5) (R2) THE FIX: the concurrent writer's value survives — this call's own stale decision never clobbers it", watermark(d, projId)?.branch === concurrentWinner.branch && watermark(d, projId)?.sha === concurrentWinner.sha);
     d.db.close();
@@ -192,7 +192,7 @@ try {
       rebindRan = true;
       return { state: "no-default" };
     };
-    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null);
+    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null);
     d.sessions.resolveMainlineBranchStateReader = realResolver;
     check("(R3) setup control: the rebind genuinely ran during the await", rebindRan === true);
     check("(c013e8a5) (R3) THE FIX: the key (now naming the NEW repo) is never seeded with the OLD repo's head data", d.db.getMeta(key) === undefined);
@@ -284,10 +284,10 @@ try {
     const parentOfHead = git(repo, "rev-parse", "HEAD~1");
     const realResolver = d.sessions.resolveMainlineBranchStateReader;
     d.sessions.resolveMainlineBranchStateReader = async () => ({ state: "failed" });
-    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null);
-    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null);
+    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null);
+    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null);
     check("(defer-land) below threshold: no nudge yet", d.nudges.length === 0);
-    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null); // 3rd
+    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null); // 3rd
     d.sessions.resolveMainlineBranchStateReader = realResolver;
     check("(c013e8a5) (defer-land) THE FIX (Code Review ruling): the 3rd consecutive defer on the LANDING path ACTUALLY DELIVERS a nudge to the addressable manager", d.nudges.length === 1 && d.nudges[0].includes("first-sight-resolve-deferred"));
     check("(c013e8a5) (defer-land) the nudge carries its OWN wording, never the generic bypass framing", !/bypass of the merge gate/.test(d.nudges[0]) && /git remote set-head origin -a/.test(d.nudges[0]));
@@ -365,7 +365,7 @@ try {
       d.db.setMeta(key, JSON.stringify(concurrentWinner)); // a concurrent writer wins the race DURING this await
       return { state: "resolved", branch: "some-other-default-nr" }; // "decline": this call's own default disagrees
     };
-    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null);
+    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null);
     d.sessions.resolveMainlineBranchStateReader = realResolver;
     check("(notice-reorder-R2) THE FIX: the concurrent writer's value survives", watermark(d, projId)?.branch === concurrentWinner.branch);
     check("(c013e8a5 r2) (notice-reorder-R2) THE FIX: no seeded-stray event or nudge was filed — the CAS skipped the notice along with the store", mwEvents(d, projId).length === 0 && d.nudges.length === 0);
@@ -386,7 +386,7 @@ try {
       rebindRan = true;
       return { state: "resolved", branch: "some-other-default-nr3" }; // "decline"
     };
-    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null);
+    await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null);
     d.sessions.resolveMainlineBranchStateReader = realResolver;
     check("(notice-reorder-R3) setup control: the rebind genuinely ran during the await", rebindRan === true);
     check("(c013e8a5 r2) (notice-reorder-R3) THE FIX: the key is never seeded, and no seeded-stray event or nudge was filed", d.db.getMeta(key) === undefined && mwEvents(d, projId).length === 0 && d.nudges.length === 0);
@@ -404,7 +404,7 @@ try {
     d.db.setMeta(alertKey, JSON.stringify({ branch: "unrelated-branch", from: "a".repeat(40), to: "b".repeat(40), evidence: ["branch-diverted"], suspectShas: [], expectedBranch: "main", source: "landing", nudgedAt: null }));
     const parentOfHead = git(repo, "rev-parse", "HEAD~1");
     d.sessions.resolveMainlineBranchStateReader = async () => ({ state: "failed" });
-    for (let i = 0; i < 5; i++) await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, mgrId, null, null);
+    for (let i = 0; i < 5; i++) await d.sessions.advanceMainlineWatermark(projId, "primary", repo, parentOfHead, parentOfHead, undefined, mgrId, null, null);
     const ev = mwEvents(d, projId).filter((e) => e.detail.evidence?.includes("first-sight-resolve-deferred"));
     check("(c013e8a5 r2) (defer-unbounded) THE FIX: exactly ONE defer notice fires across 5 consecutive attempts past the threshold, even though the marker slot stays held by the unrelated alert", ev.length === 1);
     check("(defer-unbounded) setup control: the unrelated marker's own slot really is still undelivered (never overwritten)", MW.parseMainlineBootAlert(d.db.getMeta(alertKey))?.evidence?.join() === "branch-diverted");

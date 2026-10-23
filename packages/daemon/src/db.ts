@@ -1533,6 +1533,22 @@ CREATE TRIGGER IF NOT EXISTS project_memory_au AFTER UPDATE OF title, text ON pr
   INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
   INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
 END;
+
+-- @decision 2a6a292a round 20 (card aa7677fa) — a Loom-owned ledger (never git-derived); see that record's
+-- round-20 section for why a forged commit can never enter it and so can never make a walk reach trust.
+CREATE TABLE IF NOT EXISTS mainline_landed_commits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  repo_key TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  tip TEXT NOT NULL,
+  base TEXT NOT NULL,
+  landed_at TEXT NOT NULL
+);
+-- The walk (Db.isMainlineLedgerReachable) looks up by (project_id, repo_key, branch, tip); the prune
+-- (Db.pruneMainlineLedger) scans the newest rows for a (project_id, repo_key, branch) ordered by id.
+CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_tip ON mainline_landed_commits(project_id, repo_key, branch, tip);
+CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_branch_id ON mainline_landed_commits(project_id, repo_key, branch, id);
 `;
 
 /**
@@ -1620,6 +1636,15 @@ const PROJECT_CONFIG_HISTORY_LIMIT = 200;
  * to ~200 rows PER CHANNEL PER conversation — ~8k rows total for that session.
  */
 const MAX_RETAINED_CONVERSATIONS = 20;
+
+/** @decision 2a6a292a round 20 (card aa7677fa) — hops `isMainlineLedgerReachable`'s walk crosses before
+ * failing closed (freezing as before); a realistic lag is 1-2, 50 is generous headroom, never unbounded. */
+const MAINLINE_LEDGER_WALK_CAP = 50;
+/** How many ledger rows `Db.pruneMainlineLedger` retains per (project, repoKey, branch) — 4x
+ * {@link MAINLINE_LEDGER_WALK_CAP} so retention is never the limiting factor: a walk can only ever need
+ * its own cap's worth of rows, so keeping several times that leaves comfortable margin, never pruning one
+ * a still-in-bound walk could use. */
+const MAINLINE_LEDGER_RETENTION_PER_BRANCH = MAINLINE_LEDGER_WALK_CAP * 4;
 
 /** Max chars for a conversation-list preview (card 85f62475) — full text is always available via the
  *  fetch-one-conversation read; the list is not the place to ship whole message bodies. */
@@ -3611,6 +3636,39 @@ export class Db {
   setMainlineBranchTrust(projectId: string, repoKey: string, branch: string, sha: string): void {
     this.setMeta(mainlineBranchTrustKey(projectId, repoKey, branch), sha);
   }
+  /** @decision 2a6a292a round 20 (card aa7677fa) — call UNCONDITIONALLY right after a squash/ff actually
+   *  succeeds, never gated on the mainline tripwire's own verdict (see the CREATE TABLE's own doc). */
+  recordMainlineLandedCommit(projectId: string, repoKey: string, branch: string, tip: string, base: string): void {
+    this.db.prepare("INSERT INTO mainline_landed_commits (project_id, repo_key, branch, tip, base, landed_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(projectId, repoKey, branch, tip, base, new Date().toISOString());
+    this.pruneMainlineLedger(projectId, repoKey, branch);
+  }
+  /** Evicts the oldest rows for (project, repoKey, branch) once it holds more than
+   *  {@link MAINLINE_LEDGER_RETENTION_PER_BRANCH} — same "find the keep-cutoff id, delete below it" shape
+   *  as {@link pruneOldConversations}. Retention is set to 4x {@link MAINLINE_LEDGER_WALK_CAP} so pruning
+   *  can never remove a row a walk still within its own cap could have used — the walk is always the
+   *  tighter bound in practice. */
+  private pruneMainlineLedger(projectId: string, repoKey: string, branch: string): void {
+    const keep = this.db.prepare("SELECT id FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND branch = ? ORDER BY id DESC LIMIT ?")
+      .all(projectId, repoKey, branch, MAINLINE_LEDGER_RETENTION_PER_BRANCH) as { id: number }[];
+    if (keep.length < MAINLINE_LEDGER_RETENTION_PER_BRANCH) return; // nothing to evict yet
+    const minKeep = Math.min(...keep.map((r) => r.id));
+    this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND branch = ? AND id < ?").run(projectId, repoKey, branch, minKeep);
+  }
+  /** @decision 2a6a292a round 20 (card aa7677fa) — a PURE DB walk, never a git call: a forged commit was
+   *  never landed through Loom's own merge code, so it has no row here and always breaks the chain. Past
+   *  {@link MAINLINE_LEDGER_WALK_CAP} hops, fails closed (`false`), same posture as every bound in this file. */
+  isMainlineLedgerReachable(projectId: string, repoKey: string, branch: string, fromTip: string, toTrust: string): boolean {
+    let cur = fromTip;
+    for (let hop = 0; hop <= MAINLINE_LEDGER_WALK_CAP; hop++) {
+      if (cur === toTrust) return true;
+      const row = this.db.prepare("SELECT base FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND branch = ? AND tip = ?")
+        .get(projectId, repoKey, branch, cur) as { base: string } | undefined;
+      if (!row) return false;
+      cur = row.base;
+    }
+    return false;
+  }
   /** Whether `repoKey` names a repo of `project` ("primary" always does) — the validation the human REST
    *  mainline-watermark-reset route needs before calling {@link resetMainlineWatermark}; mirrors
    *  `SessionService.mergeGateRepoKnown`'s own (private, service-scoped) check. */
@@ -3651,6 +3709,20 @@ export class Db {
          AND ts >= ?
          LIMIT 1`,
     ).get(projectId, repoKey, branch, from, to, sinceTs ?? "");
+    return !!row;
+  }
+  /** @decision 2a6a292a round 19 (card aa7677fa) — never key this on `to` like
+   *  {@link hasManagerCheckoutRefusalEvent} does: each later landing mints a NEW `to`, so an exact-pair
+   *  match would re-alert on every landing after the first. Keyed on `from` (the frozen sha) alone. */
+  hasLandingTrustFreezeEvent(projectId: string, repoKey: string, branch: string, from: string, sinceTs?: string): boolean {
+    const row = this.db.prepare(
+      `SELECT 1 FROM orchestration_events WHERE kind = 'mainline_moved_outside_loom'
+         AND json_extract(detail_json,'$.projectId') = ? AND json_extract(detail_json,'$.repoKey') = ?
+         AND json_extract(detail_json,'$.branch') = ? AND json_extract(detail_json,'$.from') = ?
+         AND json_extract(detail_json,'$.source') = 'landing-trust-freeze'
+         AND ts >= ?
+         LIMIT 1`,
+    ).get(projectId, repoKey, branch, from, sinceTs ?? "");
     return !!row;
   }
   /** @decision 2a6a292a round 8 — the last `source:"human-reset"` event's own `ts` for (projectId,
@@ -3899,6 +3971,11 @@ export class Db {
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`mainline-boot-alerted:${id}:%`); // card 05e7f246
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_DIVERT_EPISODE_PREFIX}${id}:%`); // card c013e8a5
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_DEFER_STREAK_PREFIX}${id}:%`); // card c013e8a5
+      // @decision 2a6a292a round 21 (card aa7677fa round 3) — mainline_landed_commits.project_id is a
+      // REFERENCES projects(id) FK, enforced (better-sqlite3 defaults foreign_keys=ON): delete the rows
+      // first or the final `DELETE FROM projects` below throws for any project that has ever landed.
+      this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_BRANCH_TRUST_PREFIX}${id}:%`); // card 2a6a292a round 21
       // Card af08f7e8: delivered_credentials.project_id is a NOT NULL FK (enforced) with no session/agent
       // tie — deleteSession/deleteAgent never touch it (that's the point), but deleteProject genuinely
       // removes the project itself, so this must be cascaded explicitly or the transaction aborts.

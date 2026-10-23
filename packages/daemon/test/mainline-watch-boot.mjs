@@ -102,7 +102,12 @@ try {
   check("(D3) a human commit while down ⇒ NO event at boot, and W ADVANCED to main (a clean verdict stores W)", mwEvents(d1).length === 0 && wBeforeClean !== canonHead() && watermark(d1)?.sha === canonHead());
   const a1 = await addWorker(d1.db, "a");
   await confirm(d1, a1);
-  check("(D3) the next landing after a clean boot is quiet", mwEvents(d1).length === 0 && d1.nudges.length === 0);
+  // @decision 2a6a292a round 19 (card aa7677fa) — checkMainlineMove ITSELF stays quiet here (an ordinary
+  // human commit while down classifies "explained", unchanged) — but trust was established at the setup
+  // landing above (null -> first-sight) and never re-synced by the boot pass's own W-only advance, so this
+  // landing's checkedTip now mismatches it: `advanceMainlineWatermark` declines to re-stamp trust and
+  // files ONE landing-trust-freeze event + nudge instead. This is the accepted cost, not a regression.
+  check("(D3) the next landing after a clean boot stays quiet from checkMainlineMove's own classifier, but round 19's landing-trust-freeze fires ONCE", mwEvents(d1).length === 1 && mwEvents(d1)[0].detail.source === "landing-trust-freeze" && d1.nudges.length === 1);
 
   // (D4) the compare-and-set must never REGRESS W: a landing that advances W while the boot pass is still reading the head wins (the CAS's expected value is read BEFORE the head read).
   {
@@ -115,7 +120,9 @@ try {
     d1.sessions.mainlineHeadReader = async (...args) => { const h = await realHead(...args); d1.db.setMeta(MW.mainlineWatermarkKey(P.projId, "primary"), JSON.stringify({ branch: MAIN, sha: advanced })); return h; };
     await d1.sessions.checkMainlineMovesOnBoot();
     d1.sessions.mainlineHeadReader = realHead;
-    check("(D4) a concurrent advance of W during the boot pass's head read is NOT regressed by the boot pass's store", watermark(d1)?.sha === advanced && mwEvents(d1).length === 0);
+    // mwEvents(d1) stays at 1 (round 19's own freeze from (D3) above) — this boot pass never calls
+    // advanceMainlineWatermark (no landing here), so it can't add a second one.
+    check("(D4) a concurrent advance of W during the boot pass's head read is NOT regressed by the boot pass's store", watermark(d1)?.sha === advanced && mwEvents(d1).length === 1);
     d1.db.setMeta(MW.mainlineWatermarkKey(P.projId, "primary"), JSON.stringify({ branch: MAIN, sha: canonHead() })); // restore for the scenarios below
   }
 
@@ -132,7 +139,12 @@ try {
   check("(D1) the boot check returns a promise (async, off the boot critical path)", typeof bootP?.then === "function");
   await bootP;
   const evBoot = mwEvents(d2);
-  check("(D1) exactly ONE durable event at boot for the move made while down (severity high, source boot, empty manager id)", evBoot.length === 1 && evBoot[0].detail.severity === "high" && evBoot[0].detail.source === "boot" && evBoot[0].detail.suspectShas?.includes(v.tip) && evBoot[0].detail.to === v.tip && evBoot[0].detail.repoKey === "primary" && evBoot[0].managerSessionId === "");
+  // Filtered counts, never a raw length + find(): the shared event history (same LOOM_HOME/db across this
+  // "restart") also carries round 19's own landing-trust-freeze event from (D3) above — assert exactly
+  // ONE of EACH kind, so a stray extra of either kind fails loud instead of hiding behind a passing find().
+  const bootEvs = evBoot.filter((ev) => ev.detail.source === "boot");
+  const freezeEvsAtD1 = evBoot.filter((ev) => ev.detail.source === "landing-trust-freeze");
+  check("(D1) exactly ONE durable event at boot for the move made while down (severity high, source boot, empty manager id), and exactly ONE unrelated freeze event from (D3) alongside it", bootEvs.length === 1 && freezeEvsAtD1.length === 1 && bootEvs[0].detail.severity === "high" && bootEvs[0].detail.suspectShas?.includes(v.tip) && bootEvs[0].detail.to === v.tip && bootEvs[0].detail.repoKey === "primary" && bootEvs[0].managerSessionId === "");
   check("(D1) NO boot-time nudge (no manager is known at boot)", d2.nudges.length === 0);
   check("(D1) W is NOT advanced by an alerting boot pass (the boot path never absorbs an alert)", watermark(d2)?.sha === wDown);
   check("(D1) the boot check was quick on a tiny repo (bounded, not a scan)", Date.now() - t0 < 30_000);
@@ -141,12 +153,21 @@ try {
   const rn = await confirm(d2, nxt);
   const evAfter = mwEvents(d2);
   check("(D2) the next landing still merges (never a refusal)", rn.merged === true);
-  check("(D2) the next landing's check re-detects the move: ONE more event (not source boot) naming the same tip, and ONE nudge to its manager", evAfter.length === 2 && evAfter[1].detail.source === undefined && evAfter[1].detail.suspectShas?.includes(v.tip) && d2.nudges.length === 1 && /\[loom:mainline-moved\]/.test(d2.nudges[0]));
+  // Filtered counts again: the re-detect event has NO source at all (checkMainlineMove's own landing-path
+  // alert); assert exactly one of each of the three kinds now present, rather than a raw total length.
+  // `d2.nudges` is a SEPARATE array scoped to this reboot's own SessionService, so it is UNAFFECTED by
+  // (D3)'s freeze nudge (filed via d1.nudges) and by this landing's own freeze-gate check (deduped on
+  // `from`, same frozen sha since D3) — it stays exactly ONE, as before.
+  const redetectEvs = evAfter.filter((ev) => ev.detail.source === undefined);
+  const bootEvsAfter = evAfter.filter((ev) => ev.detail.source === "boot");
+  const freezeEvsAfter = evAfter.filter((ev) => ev.detail.source === "landing-trust-freeze");
+  check("(D2) the next landing's check re-detects the move: exactly ONE event with no source (not boot, not freeze) naming the same tip, and ONE nudge to its manager — the boot and freeze events stay exactly one each too", redetectEvs.length === 1 && bootEvsAfter.length === 1 && freezeEvsAfter.length === 1 && redetectEvs[0].detail.suspectShas?.includes(v.tip) && d2.nudges.length === 1 && /\[loom:mainline-moved\]/.test(d2.nudges[0]));
   check("(D2) after that landing W has advanced", watermark(d2)?.sha === canonHead());
   await d2.sessions.checkMainlineMovesOnBoot();
   const y = await addWorker(d2.db, "y");
   await confirm(d2, y);
-  check("(D2) DEDUPE: a second boot pass and the following landing raise no further event or nudge", mwEvents(d2).length === 2 && d2.nudges.length === 1);
+  const evDedupe = mwEvents(d2);
+  check("(D2) DEDUPE: a second boot pass and the following landing raise no further event or nudge (each of the three kinds stays at exactly one)", evDedupe.filter((ev) => ev.detail.source === undefined).length === 1 && evDedupe.filter((ev) => ev.detail.source === "boot").length === 1 && evDedupe.filter((ev) => ev.detail.source === "landing-trust-freeze").length === 1 && d2.nudges.length === 1);
 
   // (D5)/(D6) card 787dd2a7 — BOOT FIRST SIGHT with a RESOLVABLE default that DISAGREES with the checkout:
   // unlike (D0) (no origin/HEAD — nothing to compare against, seeds unconditionally, unchanged), a repo

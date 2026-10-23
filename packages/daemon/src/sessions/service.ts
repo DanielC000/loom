@@ -6533,7 +6533,7 @@ export class SessionService {
     // a stale claim the m4 fix above was built to stop making.
     return {
       ok: false,
-      error: `refusing: branch "${a.branch}"'s live tip (${liveTip.slice(0, 8)}) does not match its own trusted baseline (${trustedSha.slice(0, 8)}) exactly — only an EXACT match to the trust record is adopted, never a descendant or any other move (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity). This ALSO fires after a perfectly ordinary manual \`git commit\` on "${a.branch}" made outside Loom (e.g. by the owner directly in the canonical repo) — Loom cannot tell that apart from a forged move, by design (card f683a5ad). Ask the owner to review it, check out "${a.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before — before retrying`,
+      error: `refusing: branch "${a.branch}"'s live tip (${liveTip.slice(0, 8)}) does not match its own trusted baseline (${trustedSha.slice(0, 8)}) exactly — only an EXACT match to the trust record is adopted, never a descendant or any other move (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity). This ALSO fires after a perfectly ordinary manual \`git commit\` on "${a.branch}" made outside Loom (e.g. by the owner directly in the canonical repo), or after a genuine Loom landing whose own trust stamp was skipped with no recoverable record of it (e.g. a crash between the squash and the ledger write, card aa7677fa round 20) — Loom cannot tell any of these apart from a forged move, by design (card f683a5ad). Ask the owner to review it, check out "${a.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — that route reads whatever is CURRENTLY checked out, so it must be called AFTER the checkout, never before — before retrying`,
     };
   }
 
@@ -6553,7 +6553,7 @@ export class SessionService {
           evidence, suspectShas, rawReflogMessages: [], source: "manager-checkout-precheck",
           reason: evidence.includes("remote-tracking-shadow")
             ? `project_checkout_branch refused: branch "${a.branch}" has no local ref, but a remote-tracking ref with that name exists — refusing rather than risk git's own branch-DWIM creating a local one from it`
-            : `project_checkout_branch refused: branch "${a.branch}"'s live tip ${to.slice(0, 8)} does not EXACTLY match its own trusted baseline ${from.slice(0, 8)} — no other tip is accepted. This also fires after an ordinary manual commit on "${a.branch}" made outside Loom; it is not necessarily a forgery.`,
+            : `project_checkout_branch refused: branch "${a.branch}"'s live tip ${to.slice(0, 8)} does not EXACTLY match its own trusted baseline ${from.slice(0, 8)} — no other tip is accepted. This also fires after an ordinary manual commit on "${a.branch}" made outside Loom, or after a genuine Loom landing whose own trust stamp was skipped with no recoverable record of it; it is not necessarily a forgery.`,
         },
       });
       try {
@@ -6585,7 +6585,7 @@ export class SessionService {
     );
     return {
       ok: false, refused: true,
-      error: `refusing: the current mainline watermark ("${w.branch}" at ${w.sha.slice(0, 8)}) does not match its own trust record (${trusted.slice(0, 8)}) exactly — branching a new name from it would inherit whatever moved it there with no Loom verification (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity). This ALSO fires after a perfectly ordinary manual \`git commit\` on "${w.branch}" made outside Loom (e.g. by the owner) — Loom cannot tell that apart from a forged move, by design (card f683a5ad). Ask the owner to review it, check out "${w.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) before retrying`,
+      error: `refusing: the current mainline watermark ("${w.branch}" at ${w.sha.slice(0, 8)}) does not match its own trust record (${trusted.slice(0, 8)}) exactly — branching a new name from it would inherit whatever moved it there with no Loom verification (a mainline_moved_outside_loom event ${alreadyFiled ? "already exists for this episode" : "was just filed"}, HIGH severity). This ALSO fires after a perfectly ordinary manual \`git commit\` on "${w.branch}" made outside Loom (e.g. by the owner), or after a genuine Loom landing whose own trust stamp was skipped with no recoverable record of it — Loom cannot tell any of these apart from a forged move, by design (card f683a5ad). Ask the owner to review it, check out "${w.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) before retrying`,
     };
   }
 
@@ -21102,7 +21102,15 @@ export class SessionService {
     // mutates nothing, so firing here keeps a pre-squash crash indistinguishable from review-only.
     evt("merge_landing_started", {});
     merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
-    if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip, managerSessionId, workerSessionId, taskId); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
+    // @decision 2a6a292a round 20 (card aa7677fa) — record the ledger entry UNCONDITIONALLY (independent
+    // of mainlineCheckedTip): a landing whose own tripwire check fail-opened still needs a walkable row.
+    // @decision 2a6a292a round 21 (card aa7677fa round 3) — gated on `merge.landedBase` too: an unverified
+    // `merge.sha` (mergeBranch's own parent+tree check failed, see that function) never gets a ledger row.
+    if (merge.ok && !merge.noop && merge.sha && merge.landedBase && expectedMainlineBranch) this.recordMainlineLedgerEntry(project.id, worker.repoKey ?? "primary", expectedMainlineBranch, merge.sha, merge.landedBase);
+    // @decision 2a6a292a round 21 (card aa7677fa round 3) — pass `undefined`, never raw `merge.sha`,
+    // whenever `merge.landedBase` is unset: a race INSIDE mergeBranch can leave `merge.sha` ALREADY
+    // equal to a forged tip, so a bare `merge.sha` would sail through the `head.tip === mergeSha` check.
+    if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip, merge.landedBase !== undefined ? merge.sha : undefined, merge.landedVerify, managerSessionId, workerSessionId, taskId); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
     // that squashed after a pass is never erased by it. (Recording in `finalizeMerge`, after the guard, raced exactly that.) An inert docs-only
@@ -22685,6 +22693,13 @@ export class SessionService {
             // @decision 0d372516 (round 2) — see `batchAssemblyAborted`'s own declaration above and `onSettle` below.
             if (result.assemblyAborted) batchAssemblyAborted = result.assemblyAborted;
             batchFastForwarded = result.ok;
+            // @decision 2a6a292a round 20 (card aa7677fa) — record UNCONDITIONALLY (independent of
+            // batchCheckedTip, which can be null): `base` is `baseMainSha` directly, never a first-parent
+            // read — the ff's own contract already guarantees HEAD === baseMainSha before it ran.
+            if (result.ok && result.landed.length > 0 && result.batchHeadSha && expectedBaseBranch) {
+              try { this.db.recordMainlineLandedCommit(finalProjectId, batchRepoKey, expectedBaseBranch, result.batchHeadSha, baseMainSha); }
+              catch (err) { console.warn(`[mainline-watch] batch ledger record skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`); }
+            }
             if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha, managerSessionId); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
             // the batch's final landed tip, so the counter's order equals main's order (see the solo record after `mergeBranch`).
@@ -23695,11 +23710,82 @@ export class SessionService {
     }
   }
 
+  /** @decision 2a6a292a round 19 (card aa7677fa) — landing-path twin of {@link fileManagerCheckoutRefusalEvent};
+   *  deliberately writes NO marker (unlike that method) — only `project_checkout_branch`'s own precondition
+   *  does, the first time a manager actually touches the now-frozen branch. Never refuses the landing itself. */
+  private fileLandingTrustFreezeEvent(a: { projectId: string; repoKey: string; branch: string; managerSessionId: string | null; taskId: string | null }, from: string, to: string): void {
+    const sinceTs = this.db.lastHumanResetTs(a.projectId, a.repoKey) ?? undefined;
+    if (this.db.hasLandingTrustFreezeEvent(a.projectId, a.repoKey, a.branch, from, sinceTs)) return;
+    const evidence: MainlineEvidence[] = ["untrusted-tip-mismatch"];
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", taskId: a.taskId, kind: "mainline_moved_outside_loom",
+      detail: {
+        projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, from, to, severity: "high",
+        evidence, suspectShas: [to], rawReflogMessages: [], source: "landing-trust-freeze",
+        reason: `a real landing squashed/fast-forwarded on top of a tip (${to.slice(0, 8)}) that does not EXACTLY match branch "${a.branch}"'s own trusted baseline (${from.slice(0, 8)}), and the gap between them could not be proven to be entirely Loom's own landed history either (card aa7677fa round 20's own ledger walk) — the watermark still advanced (this is detection, never a landing block), but the per-branch trust record was deliberately left unstamped rather than laundering an unverified tip into it. This also fires after a perfectly ordinary manual commit on "${a.branch}" made outside Loom, or after a genuine Loom landing whose own trust stamp was skipped with no recoverable record of it (e.g. a crash between the squash and the ledger write); it is not necessarily a forgery. Ask the owner to review it, check out "${a.branch}" THEMSELVES, and only then call the human-only reset route (POST /api/projects/:id/mainline-watermark/reset) — after that, the NEXT real landing stamps trust again normally, no further human step needed.`,
+      },
+    });
+    try {
+      if (!a.managerSessionId) throw new Error("no manager to nudge");
+      this.enqueueDurableMessage(a.managerSessionId, mainlineMovedNudgeText({ branch: a.branch, repoKey: a.repoKey, from, to, evidence, suspectShas: [to], atBoot: false }), { sender: "system", taskId: a.taskId, kind: "warning" });
+    } catch { /* the durable event above is the record; a failed nudge must not matter */ }
+  }
+
+  /** @decision 2a6a292a round 22/23 (card aa7677fa rounds 4-5) — a forge racing the FIRST trust
+   *  establishment used to be fully silent; fires the same HIGH event as {@link fileLandingTrustFreezeEvent}
+   *  (deduped via `from:""`), for the caller's own `effectiveMergeVerify !== "uncaptured"` gate. */
+  private fileNullTrustForgeRaceEvent(a: { projectId: string; repoKey: string; branch: string; managerSessionId: string | null; taskId: string | null }, to: string): void {
+    const sinceTs = this.db.lastHumanResetTs(a.projectId, a.repoKey) ?? undefined;
+    if (this.db.hasLandingTrustFreezeEvent(a.projectId, a.repoKey, a.branch, "", sinceTs)) return;
+    const evidence: MainlineEvidence[] = ["first-establishment-forge-race"];
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", taskId: a.taskId, kind: "mainline_moved_outside_loom",
+      detail: {
+        projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, from: "", to, severity: "high",
+        evidence, suspectShas: [to], rawReflogMessages: [], source: "landing-trust-freeze",
+        // @decision 2a6a292a round 23 (card aa7677fa round 5, CR 57d7a27d finding 3) — the OLD remedy
+        // wording implied trust stays unstamped until a human reset. FALSE: first-establishment is
+        // unconditional, so the NEXT ordinary landing stamps trust regardless. Tell the manager to HOLD.
+        reason: `a real landing is establishing branch "${a.branch}"'s FIRST mainline trust baseline, but the live tip (${to.slice(0, 8)}) does not match this landing's own verified commit — something moved "${a.branch}" between the squash settling and this check. Trust was deliberately left UNSTAMPED (still null) rather than establishing it from an unverified tip; the watermark still advanced (this is detection, never a landing block). This can be a forged commit racing the very first landing on this branch, a Loom stamp that was itself skipped (e.g. a crash between the squash and this check), or an ordinary concurrent commit outside Loom — it is not necessarily a forgery, and not necessarily a hand commit either. Trust being null is NOT itself a safeguard: first-establishment is unconditional, so the VERY NEXT ordinary landing stamps trust at its own tip regardless of this notice, folding the suspect tip into its ancestry. The manager must HOLD any further landing on "${a.branch}" until the owner has reviewed this and checked it out THEMSELVES; only then resume landings (the human-only reset route, POST /api/projects/:id/mainline-watermark/reset, is there to adopt a specific tip first if they want it, but is not required to resume).`,
+      },
+    });
+    try {
+      if (!a.managerSessionId) throw new Error("no manager to nudge");
+      this.enqueueDurableMessage(a.managerSessionId, mainlineMovedNudgeText({ branch: a.branch, repoKey: a.repoKey, from: "", to, evidence, suspectShas: [to], atBoot: false }), { sender: "system", taskId: a.taskId, kind: "warning" });
+    } catch { /* the durable event above is the record; a failed nudge must not matter */ }
+  }
+
+  /** @decision 2a6a292a round 20 (card aa7677fa) — records a SOLO landing in the Loom-owned ledger
+   *  (Db's own CREATE TABLE doc), unconditionally, independent of the mainline tripwire's own verdict —
+   *  call this right after the squash itself succeeds, never gated on `checkMainlineMove`'s return.
+   *  @decision 2a6a292a round 21 (card aa7677fa round 3) — `base` is threaded from `mergeBranch`'s own
+   *  verified `landedBase`, never re-derived via a fresh `readFirstParent(tip)` re-read here — that
+   *  re-read trusted `tip` as a given, letting a racer-forged sibling commit earn a ledger row. */
+  private recordMainlineLedgerEntry(projectId: string, repoKey: string, branch: string, tip: string, base: string): void {
+    try {
+      this.db.recordMainlineLandedCommit(projectId, repoKey, branch, tip, base);
+    } catch (err) {
+      console.warn(`[mainline-watch] ledger record skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   /**
    * Advance the watermark to the canonical branch tip after a successful Loom landing. Fail-open like {@link checkMainlineMove}.
    * Only when the landing sits DIRECTLY on `checkedTip` (the tip the check verified): a move that slipped in between the check and the squash leaves the watermark unchanged, so the next check still sees it.
+   * @param mergeSha the commit `mergeBranch` verified as its own landing (its `landedBase` was set), or
+   *   `undefined` when it was NOT verified — see the TRUST stamp below for why `undefined` must never be
+   *   treated as "no opinion" and silently allowed through.
+   * @param mergeVerify (card aa7677fa round 5) `mergeBranch`'s own tri-state verdict, read from `merge.
+   *   landedVerify` — omitted (or `undefined`) by every test-direct caller that doesn't pass it, which
+   *   defaults it to "verified" when `mergeSha` is defined, else "uncaptured" (byte-identical to this
+   *   param's pre-round-5 absence). Only a REAL caller threading `merge.landedVerify` can ever produce
+   *   `"rejected"` — see the null-trust branch below for why that distinction matters.
    */
-  private async advanceMainlineWatermark(projectId: string, repoKey: string, repoPath: string, checkedTip: string, managerSessionId: string | null, workerSessionId: string | null, taskId: string | null): Promise<void> {
+  // @decision 2a6a292a round 21 (card aa7677fa round 3) — never stamp trust from `head` (a FRESH
+  // re-read) without checking `head.tip === mergeSha` first; `undefined` can never match, so an
+  // unverified landing always takes the mismatch branch below.
+  private async advanceMainlineWatermark(projectId: string, repoKey: string, repoPath: string, checkedTip: string, mergeSha: string | undefined, mergeVerify: "verified" | "rejected" | "uncaptured" | undefined, managerSessionId: string | null, workerSessionId: string | null, taskId: string | null): Promise<void> {
+    const effectiveMergeVerify = mergeVerify ?? (mergeSha !== undefined ? "verified" : "uncaptured");
     try {
       const head = await readMainlineHead(repoPath, this.mainlineGitMs());
       if (!head || (await readFirstParent(repoPath, head.tip, this.mainlineGitMs())) !== checkedTip) return;
@@ -23734,7 +23820,25 @@ export class SessionService {
       seedStray?.();
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: head.tip }));
       // @decision 2a6a292a round 6 — refresh this branch's own trust record alongside W.
-      this.db.setMainlineBranchTrust(projectId, repoKey, head.branch, head.tip);
+      // @decision 2a6a292a round 19/20 (card aa7677fa) — ONLY when `checkedTip` is already trusted, trust
+      // is null, or the LEDGER proves every landing between trust and `checkedTip` was Loom's own (round
+      // 20 — closes a false-freeze lag the round-19 exact-match-only gate left open; see that round).
+      const trustedBefore = this.db.getMainlineBranchTrust(projectId, repoKey, head.branch);
+      // @decision 2a6a292a round 21 (card aa7677fa round 3) — gate ALL of the above on `head.tip ===
+      // mergeSha` first: a mismatch means HEAD moved again since mergeBranch verified it, so never let
+      // the ledger walk (or a null `trustedBefore`) launder that unverified tip into trust.
+      // @decision 2a6a292a round 23 (card aa7677fa round 5) — null trust files the HIGH event for a
+      // VERIFIED mismatch AND a REJECTED one (a racer forcing mergeBranch's own re-read to reject is
+      // still the race); only "uncaptured" (nothing was ever checked) stays a plain console.warn.
+      if (head.tip !== mergeSha) {
+        if (trustedBefore !== null) this.fileLandingTrustFreezeEvent({ projectId, repoKey, branch: head.branch, managerSessionId, taskId }, trustedBefore, head.tip);
+        else if (effectiveMergeVerify !== "uncaptured") this.fileNullTrustForgeRaceEvent({ projectId, repoKey, branch: head.branch, managerSessionId, taskId }, head.tip);
+        else console.warn(`[mainline-watch] trust establishment skipped for ${head.branch}: live tip ${head.tip.slice(0, 8)} does not match this landing's own verified commit (none — unverified)`);
+      } else if (trustedBefore === null || trustedBefore === checkedTip || this.db.isMainlineLedgerReachable(projectId, repoKey, head.branch, checkedTip, trustedBefore)) {
+        this.db.setMainlineBranchTrust(projectId, repoKey, head.branch, head.tip);
+      } else {
+        this.fileLandingTrustFreezeEvent({ projectId, repoKey, branch: head.branch, managerSessionId, taskId }, trustedBefore, checkedTip);
+      }
     } catch (err) {
       console.warn(`[mainline-watch] watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -23776,7 +23880,11 @@ export class SessionService {
       seedStray?.();
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: batchHeadSha }));
       // @decision 2a6a292a round 6 — refresh this branch's own trust record alongside W.
-      this.db.setMainlineBranchTrust(projectId, repoKey, head.branch, batchHeadSha);
+      // @decision 2a6a292a round 19 (card aa7677fa) — same twin guard as the solo advance; see that
+      // method's own comment just above.
+      const trustedBefore = this.db.getMainlineBranchTrust(projectId, repoKey, head.branch);
+      if (trustedBefore === null || trustedBefore === checkedTip || this.db.isMainlineLedgerReachable(projectId, repoKey, head.branch, checkedTip, trustedBefore)) this.db.setMainlineBranchTrust(projectId, repoKey, head.branch, batchHeadSha);
+      else this.fileLandingTrustFreezeEvent({ projectId, repoKey, branch: head.branch, managerSessionId, taskId: null }, trustedBefore, checkedTip);
     } catch (err) {
       console.warn(`[mainline-watch] batch watermark advance skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -77,7 +77,7 @@ export interface MainlineFacts {
 
 // @decision 2a6a292a round 10 — three prior members were DEAD (round 9 removed their only filer);
 // dropped rather than left to rot. See the decision record's round-10 section before reintroducing any.
-export type MainlineEvidence = "reflog-raw-write" | "loom-branch-reachable" | "rewind-raw-write" | "watermark-missing" | "untrusted-tip-mismatch" | "remote-tracking-shadow";
+export type MainlineEvidence = "reflog-raw-write" | "loom-branch-reachable" | "rewind-raw-write" | "watermark-missing" | "untrusted-tip-mismatch" | "remote-tracking-shadow" | "first-establishment-forge-race";
 
 /** Reason text on the event a POSITIVELY-missing watermark files (alert-class: a mainline commit never becomes unresolvable in normal operation). */
 export const MAINLINE_WATERMARK_MISSING_REASON = "watermark commit no longer resolvable (possible reflog expire/prune or force-rewrite)";
@@ -140,6 +140,17 @@ export function mainlineMovedNudgeText(a: { branch: string; repoKey: string; fro
     return `[loom:mainline-moved] repo "${a.repoKey}" is checked out on "${a.branch}", not the expected mainline branch "${expected}"${a.atBoot ? " (found when the daemon started)" : ""} (evidence: branch-diverted; tip ${a.to.slice(0, 8)}). ` +
       `The likely cause is a checkout away from "${expected}" in the canonical repo — a human REST GitWriter checkout/branch create, the Platform Lead's own git_checkout/git_create_branch, or a stray manual checkout. This is a tripwire, not a block: merges continue, but the NEXT landing would land OFF the expected mainline branch while this persists. ` +
       `ACTION for you (the manager): check out "${expected}" again in the canonical repo to resume normal landings; if "${a.branch}" is actually a deliberate mainline RENAME, ask the owner to reset this project's mainline baseline (POST /api/projects/:id/mainline-watermark/reset, loopback, human-only — the only way to move this baseline onto a new branch name).`;
+  }
+  // @decision 2a6a292a round 22 (card aa7677fa round 4) — a forge racing the VERY FIRST trust
+  // establishment for this branch has no prior trust value to name, and the likely cause is not
+  // necessarily a hand commit — own wording, never the generic "bypass" framing below.
+  // @decision 2a6a292a round 23 (card aa7677fa round 5) — the OLD remedy implied trust stays unstamped
+  // until a human reset. FALSE: first-establishment is unconditional — the NEXT ordinary landing stamps
+  // trust at its own tip regardless. Tell the manager to HOLD landings instead; a reset doesn't prevent it.
+  if (a.evidence.includes("first-establishment-forge-race")) {
+    return `[loom:mainline-moved] repo "${a.repoKey}" is establishing branch "${a.branch}"'s FIRST mainline trust baseline, but its live tip (${a.to.slice(0, 8)}) does not match this landing's own verified commit — something moved "${a.branch}" between the squash settling and this check (evidence: first-establishment-forge-race). ` +
+      `Trust was deliberately left UNSTAMPED (still null) rather than establishing it from an unverified tip; this is detection, never a landing block — merges continue. This can be a forged commit racing the very first landing on this branch, a Loom stamp that was itself skipped (e.g. a crash between the squash and this check), or an ordinary concurrent commit outside Loom — it is not necessarily a forgery, and not necessarily a hand commit either. ` +
+      `ACTION for you (the manager): HOLD any further landing on "${a.branch}" until the owner has reviewed this. Trust being null is NOT itself a safeguard — first-establishment is unconditional, so the VERY NEXT ordinary landing stamps trust at its own tip regardless of this notice, folding the suspect tip into its ancestry; only YOUR hold actually buys the owner time to look. Ask the owner to review it and check out "${a.branch}" THEMSELVES; once they're satisfied, resume landings (the human-only reset route, POST /api/projects/:id/mainline-watermark/reset, is there if they want to adopt a specific tip first, but is not required to resume).`;
   }
   // @decision c013e8a5 — a repeated transient resolver failure is NOT a mainline move at all (nothing has
   // moved; the watermark simply never seeded) — own wording, never the generic "bypass" framing below.
