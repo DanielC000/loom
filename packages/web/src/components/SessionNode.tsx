@@ -3,6 +3,7 @@ import type { SessionListItem } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
 import { useAtlasNodeHeadSlot } from "../lib/atlasNodeHead";
+import { plural } from "../lib/atlasHome";
 import { harnessOf } from "../lib/harnessFields";
 import { sessionNodeTabHref, sessionNodeTabsFor, type SessionNodeTab } from "../lib/sessionNodeTabs";
 import { useStopSession, useForkSession } from "../lib/useSessionActions";
@@ -30,7 +31,7 @@ import { color, font } from "../theme";
  */
 export type SessionNodeRow = Pick<SessionListItem, "id"> &
   Partial<Pick<SessionListItem,
-    "role" | "busy" | "harness" | "projectId" | "projectName" | "agentName" | "taskId" | "model" | "ctxInputTokens" | "processState">>;
+    "role" | "busy" | "harness" | "projectId" | "projectName" | "agentName" | "taskId" | "model" | "ctxInputTokens" | "ctxTurns" | "gen" | "processState">>;
 
 /**
  * Live-or-starting: the states in which this session still has a pty to reach. Everything the node
@@ -60,7 +61,24 @@ function ctxReadout(s: SessionNodeRow) {
 }
 
 /**
- * The live state the frame's node head carries beside the `<h1>` — busy, harness, context.
+ * The GENERATION pill the round-4 mockup puts on a session node head (`gen 412 · 318 turns`) — card
+ * 5968d7e0, the one reading of its three that this head did not already carry.
+ *
+ * It is the pair `ctxReadout` beside it deliberately does NOT repeat: that one owns the `%`, so the
+ * mockup's `gen · turns · ctx%` arrives as two clusters rather than one of them stating the occupancy
+ * twice. `gen` alone (no turns yet) and turns alone (gen 0 on a first generation) are both real, so
+ * each half is conditional and the pill is omitted only when neither has anything to say.
+ */
+function genReadout(s: SessionNodeRow) {
+  const parts = [s.gen ? `gen ${s.gen}` : null, s.ctxTurns ? plural(s.ctxTurns, "turn") : null].filter(Boolean);
+  if (parts.length === 0) return null;
+  return (
+    <span className="loom-atlas-headpill" data-testid="session-node-gen">{parts.join(" · ")}</span>
+  );
+}
+
+/**
+ * The live state the frame's node head carries beside the `<h1>` — busy, harness, generation, context.
  *
  * Deliberately NOT the short id, although the mockup places one here: the heading already reads
  * `agent · role · <short id>`, so repeating it would restore a duplicate one row below the one this
@@ -79,6 +97,7 @@ function SessionNodeState({ s }: { s: SessionNodeRow }) {
     return (
       <span data-testid="session-node-state" style={{ display: "inline-flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <StatusPill tone="muted" label={s.processState} />
+        {genReadout(s)}
         {ctxReadout(s)}
       </span>
     );
@@ -88,6 +107,7 @@ function SessionNodeState({ s }: { s: SessionNodeRow }) {
       style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
       <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
       <HarnessTag harness={harnessOf(s.harness)} />
+      {genReadout(s)}
       {ctxReadout(s)}
     </span>
   );

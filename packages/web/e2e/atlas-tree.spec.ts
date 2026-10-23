@@ -163,7 +163,10 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   // happened. (`/memory` is the fourth such page; its 25c08fba row above already inverts it, and one
   // inversion per path is all this map can express. The other eight pages mounted in the frame carry
   // no identity block at all, so that card leaves their comparison exact.)
-  "/gates": "a7f23a2f — the frame names the node, so the page drops its own <h1> + subtitle",
+  // (/gates diverges TWICE over, and one row is all this map can express: card 5968d7e0 also drops
+  // the page's two occupancy lamps inside the frame, because the node's own KPI strip carries
+  // running·queued on that same tab row. The classic page keeps head and lamps both.)
+  "/gates": "a7f23a2f + 5968d7e0 — the frame names the node and carries its occupancy, so the page drops its own <h1>, subtitle and lamps",
   "/inbox": "a7f23a2f — the frame names the node, so the page drops its own name above its tab row",
   "/projects": "a7f23a2f — the frame names the node, so the page drops its own label + description",
 };

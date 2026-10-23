@@ -6,9 +6,11 @@
 // `api.*` calls) and hand these components finished values, so a figure and the pop-over detail
 // behind it are derived once, in one place, and cannot disagree.
 import { useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import type { UsageLimitsStatus } from "@loom/shared";
 import { Button, Panel, SectionLabel } from "./ui";
+import { useAtlasNodeHeadSlot } from "../lib/atlasNodeHead";
 import { useDismissable } from "../lib/useDismissable";
 import type { BoardLane } from "../lib/atlasHome";
 import { color, columnTone, font, radius, tone, type Tone } from "../theme";
@@ -145,6 +147,59 @@ function KpiTile({ item, open, align, onToggle, onClose }: {
         </div>
       )}
     </div>
+  );
+}
+
+// ── Node head: pills + actions ─────────────────────────────────────────────────────────────────
+// What a node portals into the frame's node-head slot (lib/atlasNodeHead.ts) — card 5968d7e0.
+//
+// A head pill is a STATE READING, never a KPI. The distinction is load-bearing and is what keeps
+// this row off the ground the KPI strip one line below already holds: a pill answers "what is this
+// node doing right now" in one phrase (`4 working`, `main 57143a90`, `gen 412 · 318 turns`), while a
+// strip pill is a labelled FIGURE from the node's six-item `kpis` array. They are also drawn
+// differently on purpose — round corners and a tinted ground here, square and upper-cased there — so
+// the two rows never read as one repeated readout.
+//
+// @decision 5968d7e0 — never feed this a figure the node's own `kpis` array already carries. The
+// strip is on every tab but Overview and the deck is on Overview, so a KPI restated here is the
+// same number twice within ~50px, which is the shape card 939922ee's owner rejection names.
+
+export interface NodeHeadPill {
+  key: string;
+  /** The whole reading, as one phrase. Not a label+value pair — that shape belongs to `KpiStrip`. */
+  text: ReactNode;
+  tone?: Tone;
+  /** The hover that expands a compressed reading (a short sha, an abbreviated branch). */
+  title?: string;
+}
+
+/**
+ * The node's own pills and action cluster, portalled into the frame's node head.
+ *
+ * Renders NOTHING outside the frame — the slot is `null` under the classic shell, which has no node
+ * head at all, so every consumer's classic path stays untouched by construction rather than by a
+ * second branch. (Same contract `useFrameOwnsNodeIdentity` reads, card a7f23a2f.)
+ */
+export function AtlasNodeHead({ pills, actions }: { pills: NodeHeadPill[]; actions?: ReactNode }) {
+  const slot = useAtlasNodeHeadSlot();
+  if (!slot) return null;
+  if (pills.length === 0 && !actions) return null;
+  return createPortal(
+    <div className="loom-atlas-nodehead-row" data-testid="atlas-nodehead-row"
+      style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div className="loom-atlas-headpills" data-testid="atlas-nodehead-pills">
+        {pills.map((p) => (
+          <span key={p.key} className={`loom-atlas-headpill is-${p.tone ?? "muted"}`}
+            data-testid={`atlas-nodehead-pill-${p.key}`} title={p.title}>{p.text}</span>
+        ))}
+      </div>
+      {/* Never compresses — the pills beside it are what give up width first, the same priority the
+          session node's own header row gives its lifecycle cluster. */}
+      {actions && (
+        <div className="loom-atlas-headactions" data-testid="atlas-nodehead-actions">{actions}</div>
+      )}
+    </div>,
+    slot,
   );
 }
 

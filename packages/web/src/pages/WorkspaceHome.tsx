@@ -11,8 +11,8 @@ import { useOpenRequest } from "../components/requests";
 import { AttentionRow, EventRow } from "../components/fleet";
 import { Badge, Button, Dot, Panel, StatusPill } from "../components/ui";
 import {
-  BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs,
-  nodeTabShowsKpiStrip, PlanUsageDetail, relativeResets, type KpiItem,
+  AtlasNodeHead, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar,
+  MeterRow, NodeTabs, nodeTabShowsKpiStrip, PlanUsageDetail, relativeResets, type KpiItem,
 } from "../components/atlasHome";
 import { FleetControlsBar } from "../components/fleetControls";
 import { CompactMergeAction } from "../components/reviewQueue";
@@ -80,6 +80,10 @@ export default function WorkspaceHome() {
   const live = fleet.filter(isLiveSession);
   const managers = live.filter((s) => s.role === "manager");
   const workers = live.filter((s) => s.role === "worker");
+  // The node head's one pill (card 5968d7e0) — BUSY, not live. Deliberately a different population
+  // from the `live sessions` tile beside it: a live agent parked on its manager counts there, not
+  // here, so the two never read as the same number drawn twice.
+  const workingCount = live.filter((s) => s.busy).length;
   const liveByProject = useMemo(() => liveCountsByProject(sessions), [sessions]);
   // Off the FULL session list, not `fleet`: these are exactly the rows the fleet filter removes.
   const operators = useMemo(() => standingOperators(sessions), [sessions]);
@@ -247,6 +251,21 @@ export default function WorkspaceHome() {
 
   return (
     <div className="loom-atlas-home">
+      {/* The node's own pill, portalled into the frame's node head (card 5968d7e0).
+          ONE pill, not the mockup's `7 live` + `5 projects` pair: this node's `kpis` array already
+          declares `live sessions` and `projects` as TILES, and the strip carries all six on every tab
+          but Overview — so both of the mockup's pills would be a figure restated within ~50px of
+          itself. `N working` is the busy count instead, which no tile on this node carries.
+          No action cluster either: the workspace tier's spawnables are the standing OPERATORS, and
+          card c6160c7d's decision record keeps this node a readout of those rather than a second
+          place to start or stop one — their lifecycle lives on the Platform and Companion nodes
+          that own it. A `Spawn +` here would also have no project to spawn INTO. */}
+      <AtlasNodeHead pills={[{
+        key: "working",
+        text: `${workingCount} working`,
+        tone: workingCount > 0 ? "phosphor" : "muted",
+        title: `${plural(workingCount, "session")} across every project taking a turn right now`,
+      }]} />
       {/* Overview is canonical, so its address is the bare node path — the shape every Atlas node
           gives its first tab. A tab link is built FRESH rather than merged over the live query: `sub`
           belongs to whichever re-homed page is showing, and carrying it onto a sibling tab would hand

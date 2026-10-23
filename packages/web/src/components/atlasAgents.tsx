@@ -196,7 +196,7 @@ export function RosterEmpty({ workers, projectName }: { workers: RosterAgent[]; 
  * exists only under a pointer cannot answer it on a touch screen, and is the last thing a reader
  * finds on a desktop.
  */
-export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quickspawn" }: {
+export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quickspawn", trigger = "plus" }: {
   projectId: string;
   projectName?: string;
   /**
@@ -206,13 +206,27 @@ export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quick
    * every `getByTestId` in the suite ambiguous the moment a second project exists.
    */
   testId?: string;
+  /**
+   * How the trigger draws itself (card 5968d7e0). `"plus"` is the tree's bare `＋`; `"button"` is the
+   * node head's labelled `Spawn +`, which sits in an action cluster where a lone glyph would read as
+   * decoration rather than the node's primary action. Defaulted, so both tree mounts are byte-
+   * identical — this prop adds a SECOND trigger shape, never a second dialog or a second guard.
+   */
+  trigger?: "plus" | "button";
 }) {
   const [open, setOpen] = useState(false);
   const label = projectName ? `Spawn an agent in ${projectName}` : "Spawn an agent";
   return (
     <>
-      <button type="button" className="loom-atlas-plus" data-testid={`${testId}-open`}
-        aria-label={label} title={label} aria-expanded={open} onClick={() => setOpen(true)}>+</button>
+      {trigger === "button" ? (
+        <Button variant="primary" data-testid={`${testId}-open`} aria-label={label} title={label}
+          aria-expanded={open} onClick={() => setOpen(true)}>
+          Spawn <span aria-hidden>+</span>
+        </Button>
+      ) : (
+        <button type="button" className="loom-atlas-plus" data-testid={`${testId}-open`}
+          aria-label={label} title={label} aria-expanded={open} onClick={() => setOpen(true)}>+</button>
+      )}
       {open && (
         <QuickSpawnDialog projectId={projectId} testId={testId}
           title={projectName ? `Spawn in ${projectName}` : "Spawn an agent"}

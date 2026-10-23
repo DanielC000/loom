@@ -384,23 +384,36 @@ export default function Gates() {
 
 // ── Page header — title + subtitle + the global semaphore occupancy lamps ────────
 // Inside the Atlas frame the title + subtitle go: the frame's crumbs, node head and tab row already
-// name this node (card a7f23a2f). The LAMPS stay either way — they are live state, not identity, and
-// nothing above the page carries them. Under the classic shell the whole head is unchanged.
+// name this node (card a7f23a2f). Under the classic shell the whole head is unchanged.
+//
+// THE LAMPS GO WITH THEM, INSIDE THE FRAME ONLY — and that reverses what card a7f23a2f's own record
+// says ("nothing above the page carries them", so card 5968d7e0 would move them into the node head).
+// That premise expired when card 7874e8c2 landed in between: the KPI strip now rides every node tab
+// but Overview, and this page is a node TAB, so the row ~40px above it already reads
+// `<running>·<queued> GATE RUN·QUEUED` from the same GateSemaphore. Measured at 1440 before this
+// change: strip `0·0 GATE RUN·QUEUED`, lamps `0 / 1 LANE BUSY` + `0 QUEUED`, and the Semaphore panel
+// in the body below reading `0 of 1 lane busy · 0 queued · maxConcurrentGates 1` — the same occupancy
+// three times on one screen. Moving the lamps UP would have closed the gap to ~60px rather than
+// removed the repeat. Nothing is lost: that Semaphore line is a strict superset of the two lamps (it
+// names the cap as well), and it is unconditional.
+//
+// @decision 5968d7e0 — do not re-add these lamps inside the Atlas frame, and do not move them into
+// the node head. The node's own KPI strip carries running·queued on this very tab row.
 function PageHead({ cap, activeCount, queuedCount }: { cap: number; activeCount: number; queuedCount: number }) {
   const laneTone = activeCount > 0 ? color.amber : color.borderStrong;
-  const ownIdentity = !useFrameOwnsNodeIdentity();
+  // The whole head, lamps included, is the classic shell's. Inside the frame it renders nothing at
+  // all — so this page starts on its filter row, exactly as every other re-homed tab body does.
+  if (useFrameOwnsNodeIdentity()) return null;
   return (
     <div style={{ display: "flex", alignItems: "flex-end", gap: space(4), flexWrap: "wrap" }}>
-      {ownIdentity && (
-        <div data-testid="page-identity">
-          <h1 style={{ fontFamily: font.head, fontWeight: 600, fontSize: 22, letterSpacing: "0.14em", textTransform: "uppercase", margin: 0, color: color.text }}>
-            Gates
-          </h1>
-          <div style={{ color: color.textDim, fontSize: 12, marginTop: 2 }}>
-            Every gate serializes through the GateSemaphore — {cap} lane{cap === 1 ? "" : "s"} by default
-          </div>
+      <div data-testid="page-identity">
+        <h1 style={{ fontFamily: font.head, fontWeight: 600, fontSize: 22, letterSpacing: "0.14em", textTransform: "uppercase", margin: 0, color: color.text }}>
+          Gates
+        </h1>
+        <div style={{ color: color.textDim, fontSize: 12, marginTop: 2 }}>
+          Every gate serializes through the GateSemaphore — {cap} lane{cap === 1 ? "" : "s"} by default
         </div>
-      )}
+      </div>
       <div style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: space(4) }}>
         <Lamp color={laneTone} glow={activeCount > 0} label={`${activeCount} / ${cap} lane${cap === 1 ? "" : "s"} busy`} />
         <Lamp color={queuedCount > 0 ? color.cyan : color.borderStrong} label={`${queuedCount} queued`} />

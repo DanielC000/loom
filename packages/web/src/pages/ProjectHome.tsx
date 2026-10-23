@@ -19,10 +19,10 @@ import Archive from "./Archive";
 import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
-  BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs,
-  nodeTabShowsKpiStrip, type KpiItem,
+  AtlasNodeHead, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar,
+  MeterRow, NodeTabs, nodeTabShowsKpiStrip, type KpiItem, type NodeHeadPill,
 } from "../components/atlasHome";
-import { AgentRosterRow, RosterEmpty, WorkersDispatchedNote } from "../components/atlasAgents";
+import { AgentRosterRow, AgentsQuickSpawn, RosterEmpty, WorkersDispatchedNote } from "../components/atlasAgents";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
 import { splitRoster } from "../lib/atlasAgents";
 import {
@@ -92,6 +92,16 @@ export default function ProjectHome() {
   // and the node has no reason to poll faster than the figure is read.
   const memoryQ = useQuery({ queryKey: ["projectMemory", projectId], queryFn: () => api.projectMemory(projectId), enabled: !!projectId });
   const runsQ = useQuery({ queryKey: ["runs", projectId], queryFn: () => api.runs(projectId), enabled: !!projectId });
+  // The node head's `<branch> <sha>` pill. The two EXISTING keys pages/Git.tsx reads — same keys,
+  // same fetchers — so opening the Repository tab's Git pane issues no second request and the pill
+  // and that pane can never disagree about where the repo's head is.
+  //
+  // These are the only reads on this page that are NOT already made for something else, and they are
+  // the deliberate cost of the pill: a long `staleTime` (the head moves on a merge, not on a tab
+  // click) and `retry: false`, because the expected failure here — a project with no repo bound, or
+  // a repo with no commits yet — is a permanent one and the pill's answer to it is to not render.
+  const branchesQ = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId, retry: false, staleTime: 30_000 });
+  const gitLogQ = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId, retry: false, staleTime: 30_000 });
   const activeGatesQ = useGatesActive();
   const historyQ = useGateHistoryRecent(projectId || undefined);
   const { items: attention } = useAttention();
@@ -271,6 +281,33 @@ export default function ProjectHome() {
   }));
   const hrefFor = (key: string) => PROJECT_NODE_TABS.find((t) => t.key === key)?.to ?? "/project";
 
+  // ── The node head (card 5968d7e0) ────────────────────────────────────────────────────────────
+  // Two readings, neither of them a figure from `kpis` above. That is the rule, not a coincidence:
+  // the strip carries all six KPIs on every tab but Overview and the deck carries them ON Overview,
+  // so a pill restating one would be the same number twice on one screen.
+  //
+  //  · `N working` is a BUSY count — how many of this project's agents are mid-turn. The `mgr ·
+  //    workers` tile beside it is a LIVE count split by role (`1/4`); a live agent waiting on its
+  //    manager counts there and not here, so the two move independently and answer different
+  //    questions. It is also the one fleet reading the tree's per-session rows never roll up.
+  //  · `<branch> <sha>` is the repo's head, which appears nowhere else on this node at all.
+  const working = live.filter((s) => s.busy).length;
+  const headBranch = branchesQ.data?.current;
+  const headSha = gitLogQ.data?.[0]?.hash;
+  const headPills: NodeHeadPill[] = [
+    {
+      key: "working", text: `${working} working`,
+      tone: working > 0 ? "phosphor" : "muted",
+      title: `${plural(working, "session")} in ${project?.name ?? "this project"} taking a turn right now`,
+    },
+    // The branch is NOT assumed to be `main` — the mockup's own `main 57143a90` is that repo's
+    // name for it, and a project bound to a repo on `master` or a release branch reads its own.
+    // Omitted entirely rather than guessed when either read fails: no repo bound, or no commit yet.
+    ...(headBranch && headSha
+      ? [{ key: "head", text: `${headBranch} ${headSha.slice(0, 8)}`, title: `${headBranch} at ${headSha}` } as NodeHeadPill]
+      : []),
+  ];
+
   // The nine re-homed tab bodies. Each is the EXISTING page component, mounted verbatim — this card
   // re-homes surfaces, it does not rebuild them. Sessions is the one that takes a prop: its page is
   // god-eye by design and already supports being "reached per-project by pre-selecting the filter",
@@ -290,6 +327,17 @@ export default function ProjectHome() {
     // decides whether the view is mixed-harness — the same contract the classic Overview honours.
     <HarnessMixProvider sessions={live}>
       <div className="loom-atlas-home">
+        {/* The node's own pills + its primary action, portalled into the frame's node head. ONE
+            mount for the whole node, outside the tab bodies, so it is identical on every tab and
+            survives a tab switch without remounting the dialog's own open state. */}
+        <AtlasNodeHead pills={headPills} actions={
+          // The SAME dialog the tree's `＋` opens and the SAME roster rows the Agents panel below
+          // renders — so the go-live guard (a live manager draws its held control plus Stop, never
+          // a second spawn) is inherited from `AgentActions`, not re-expressed here. Its own testid
+          // stem, because the tree mounts one too and a shared id resolves both.
+          <AgentsQuickSpawn projectId={projectId} projectName={project?.name}
+            testId="atlas-nodehead-spawn" trigger="button" />
+        } />
         <NodeTabs tabs={tabs} active={tab} hrefFor={hrefFor}>
           {nodeTabShowsKpiStrip(tab) && <KpiStrip items={kpis} />}
         </NodeTabs>
