@@ -68,6 +68,20 @@ const freshSfx = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 // merge-quarantine*.mjs test file in this family carries under this exact name.
 const hashKey = (key) => createHash("sha256").update(key).digest("hex").slice(0, 24);
 
+// The PRIMARY scenario's own headline outcome (T becomes unreachable) only manifests when PASS 1
+// processes the foreign repo's OWN latch file BEFORE the twin's degraded files — whichever side arrives
+// first at the shared key becomes `prior` in armQuarantineKey's union, and `prior`'s own identity is what
+// survives. Mirrors merge-quarantine-pass1-migrate-union.mjs's own empiricalOrder/placeStaleBeforeFixed
+// technique (that file's own comment: "fs.readdirSync on this filesystem returns entries in plain
+// alphabetical order, not creation order" — verified there via a real readdir, not assumed) — retries a
+// fresh candidate key string until ITS OWN hash sorts strictly after `floorHash`, so the twin's own files
+// are guaranteed to be read AFTER the already-written foreign file.
+function keyHashSortingAfter(prefix, floorHash) {
+  let candidate, i = 0;
+  do { candidate = `${prefix}-${i}`; i++; } while (hashKey(candidate) <= floorHash);
+  return candidate;
+}
+
 function makeToplevelRepo(tag) {
   const repo = path.join(os.tmpdir(), `loom-mqd69a6744-repo-${tag}-${freshSfx()}`);
   fs.mkdirSync(repo, { recursive: true });
@@ -114,8 +128,6 @@ function scenario1_site1AmbiguityText() {
 
   check("*** SITE 1 FIX *** the refusal text correctly flags the latch id as AMBIGUOUS (names the real sibling F)",
     refusal.reason.includes("ambiguous right now") && refusal.reason.includes(F));
-  check("*** SITE 1 FIX *** the refusal text does NOT unconditionally offer the bare-id shortcut for an ambiguous id",
-    !refusal.reason.includes(`"id"`) || refusal.reason.includes("ambiguous right now"));
 }
 
 scenario1_site1AmbiguityText();
@@ -125,14 +137,14 @@ console.log("\n=== SCENARIO 2 (SITE 2, PRIMARY) — active-only dual-key twin: o
 async function scenario2_activeOnlyTwinPrimary() {
   const sfx = freshSfx();
   const T = path.join(os.tmpdir(), `loom-mqd69a6744-S2-T-never-${sfx}`);
-  const kTwinA = `mqd69a6744-S2-kTwinA-${sfx}`;
-  const kTwinB = `mqd69a6744-S2-kTwinB-${sfx}`;
   const sharedToken = `shared-${sfx}`;
   const privateToken = `private-${sfx}`; // survives -> forces reduce, not remove
 
   // F: a REAL, resolvable, REGISTERED repo with its own genuine, currently-armed, unrelated quarantine.
+  // Raised FIRST, deliberately, so its own hash is known before choosing T's own candidate keys below.
   const F = makeToplevelRepo("S2-F");
   const kF = canonicalRepoLockKey(F);
+  const kFHash = hashKey(kF);
   const fToken = enterMergeQuarantine(F, "f-branch", "S2: F's own genuine, unrelated quarantine");
   check("(S2 precondition) F reads blocked (genuine quarantine)", !assertRepoNotQuarantined(F).ok);
 
@@ -141,6 +153,15 @@ async function scenario2_activeOnlyTwinPrimary() {
   // FOREIGN armedKeys: [kF] — simulating the pre-existing, Lead-acknowledged-open root cause
   // (protectOccupantContentBeforeDelete's re-point never stamps armedKeys) handing this entry a key that
   // genuinely belongs to someone else.
+  //
+  // kTwinA/kTwinB are chosen (keyHashSortingAfter) so their OWN hashes sort strictly AFTER kF's own hash
+  // — this is load-bearing for the headline outcome below: PASS 1 processes files in fs.readdirSync's
+  // own (plain alphabetical) order, and whichever side reaches the shared key FIRST becomes `prior` in
+  // armQuarantineKey's union, whose own identity is what survives. F must arrive first for T's identity
+  // to be the one that's lost. (The REVERSE order still shows contamination — SEE Scenario 3 — but does
+  // NOT reproduce T becoming unreachable; that is specifically an F-arrives-first consequence.)
+  const kTwinA = keyHashSortingAfter(`mqd69a6744-S2-kTwinA-${sfx}`, kFHash);
+  const kTwinB = keyHashSortingAfter(`mqd69a6744-S2-kTwinB-${sfx}`, kFHash);
   const tEntry = {
     repoPath: T, branch: "twin-branch", reason: "S2: active-only dual-key twin, stale armedKeys=[kF]",
     enteredAt: Date.now(), tokens: [sharedToken, privateToken], armedKeys: [kF],
@@ -152,6 +173,13 @@ async function scenario2_activeOnlyTwinPrimary() {
       repoPath: T, branch: "twin-branch", reason: "S2 fixture", enteredAt: Date.now(), tokens: [sharedToken, privateToken],
     }, null, 2) + "\n");
   }
+
+  // Verify the REAL on-disk order, empirically — never trust the hash-string comparison alone.
+  const namesOnDisk = fs.readdirSync(MERGE_QUARANTINE_DIR);
+  const idxF = namesOnDisk.indexOf(`${kFHash}.json`);
+  const idxTA = namesOnDisk.indexOf(`${hashKey(kTwinA)}.json`);
+  const idxTB = namesOnDisk.indexOf(`${hashKey(kTwinB)}.json`);
+  check("(S2 precondition) F's own file is empirically processed BEFORE both of T's degraded files", idxF < idxTA && idxF < idxTB);
 
   check("(S2 precondition) T reads blocked before the clear", !assertRepoNotQuarantined(T).ok);
 
