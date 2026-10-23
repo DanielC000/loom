@@ -348,7 +348,9 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
   check("(helper) CONTROL: bare git honours the replace ref", git(repo, `show ${c1}:x.txt`) === "fake");
   check("(helper) canonicalGit.raw ignores replace refs on a PURE READ (show)", (await g.raw(["show", `${c1}:x.txt`])).trim() === "real");
   check("(helper) gitSubcommand skips -c pairs and --long options", gitSubcommand(["-c", "user.name=x", "--attr-source=abc", "merge", "--squash", "b"]) === "merge" && gitSubcommand(["-C", "p", "-c", "a=b", "rev-parse"]) === "rev-parse" && gitSubcommand(["-c", "a=b"]) === undefined);
-  check("(helper) CANONICAL_GIT_CONFIG_ARGS is the -c form of the replace-refs config", CANONICAL_GIT_CONFIG_ARGS.join(" ") === "-c core.useReplaceRefs=false");
+  // card 7ebb4acf — widened from the replace-refs-only config: canonicalGit also disables commit-graph
+  // reads (B1, docs/decisions/356538ef-canonical-git-isolation.md item 9) via the SAME -c mechanism.
+  check("(helper) CANONICAL_GIT_CONFIG_ARGS is the -c form of the replace-refs + commit-graph config", CANONICAL_GIT_CONFIG_ARGS.join(" ") === "-c core.useReplaceRefs=false -c core.commitGraph=false");
   check("(helper) gitSubcommand skips the VALUE of separate-arg global options (--git-dir/--work-tree/--namespace/-C) so it is never read as the subcommand", gitSubcommand(["--git-dir", "merge", "log"]) === "log" && gitSubcommand(["--work-tree", "x", "--namespace", "y", "merge"]) === "merge");
   check("(helper) a known pure read is NOT exec-capable, an unknown/merge-ish subcommand IS", !canRunMergeDriver(["rev-parse", "HEAD"]) && !canRunMergeDriver(["log", "-1"]) && canRunMergeDriver(["merge", "--squash", "b"]) && canRunMergeDriver(["merge-tree", "--write-tree", "a", "b"]) && canRunMergeDriver(["cherry-pick", "x"]) && canRunMergeDriver(["frobnicate"]));
   check("(helper) a pure read carrying --remerge-diff IS exec-capable (show/log/diff-tree --remerge-diff run merge drivers)", ["show", "log", "diff-tree"].every((c) => canRunMergeDriver([c, "--remerge-diff", "HEAD"])));

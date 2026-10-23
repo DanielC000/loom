@@ -34,7 +34,7 @@ import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnre
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
-import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout } from "../git/bounded.js";
+import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert, type MainlineEvidence, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter, unsafeBranchNameReason } from "../git/writer.js";
@@ -742,6 +742,10 @@ type MergeBatchResult = {
    *  refusal: the checkout may be fine, it's the STORED RECORD that's untrustworthy, so the settle-nudge and
    *  tombstone-verdict synthesis (`onSettle` below) branch on this first — "restore the checkout" is wrong here. */
   watermarkUnreadable?: boolean;
+  /** @decision 356538ef (card 7ebb4acf, item 12) — canonical repo is shallow, refused at the TOP of
+   *  `mergeBatchTracked` (no gate, no fallback); classified `"canonical-repo-shallow"`, `NEVER_CACHED_OUTCOMES`.
+   *  Mirrors `ConfirmMergeResult.canonicalRepoShallow`. */
+  canonicalRepoShallow?: boolean;
   /** Card b801bad0 (fix round) — the fast-forward's `--ff-only` call did not throw, but the POST-ff
    *  re-read that confirms WHERE it landed could not be completed (see `FastForwardResult.unverified`) —
    *  distinct from a confirmed `branchDiverted`: the landing most likely happened, it just could not be
@@ -915,6 +919,10 @@ type ConfirmMergeResult = {
   /** Set only on a POST-squash `branchDiverted` — the sha of the commit that landed but is unreachable
    *  from the real mainline branch, so a human can recover it (`git branch rescue/<id>-<sha> <sha>`). */
   divertedSha?: string;
+  /** @decision 356538ef (card 7ebb4acf, item 12) — canonical repo is shallow, refused at the TOP of
+   *  `confirmWorkerMerge` (no gate, nothing attempted); classified `"canonical-repo-shallow"`,
+   *  `NEVER_CACHED_OUTCOMES`. Mirrors `MergeBatchResult.canonicalRepoShallow`. */
+  canonicalRepoShallow?: boolean;
   /** @decision fb525c31 — set ONLY via `squashRefusedResult` (the ONE constructor): a refusal caused by the state of the CANONICAL CHECKOUT (staged dirt, dirty/untracked overlap on a path the branch touches — at admission or at squash time) or by the squash itself failing after a passing gate (`conflict`/`merge_failed`). Not a verdict about the branch, so classified `"squash-refused"` and never cached (`NEVER_CACHED_OUTCOMES`): a re-call after the human cleans the checkout must be a real re-attempt. Deliberately NOT set for STAGE_EMPTY_RETRY/orphaned_zero_ahead (those ARE about the branch and stay cached). */
   squashRefused?: true;
   /** Card 6f13746c: an UNGATED (gate-off / gate-interval) landing was refused in-lock because a gate became owed after its decision — nothing squashed,
@@ -18835,6 +18843,13 @@ export class SessionService {
       // An affirmative "not a git repository" — genuinely nothing to check here; fall through to the real
       // git calls below, which fail on their own, clean terms (unchanged from before this guard).
     }
+    // @decision 356538ef (card 7ebb4acf, item 12) — checked at the TOP, before checkCutBaseAncestry/
+    // reviewedTipVerdict/findLandedSquashCommit/the admission-time union-merge/the gate ever run; see
+    // the record for the distinct canonicalRepoShallow flag/classification this return carries.
+    const shallowReason = await detectShallowCanonicalRepo(repoPath, this.gitOpMs ?? 15_000);
+    if (shallowReason) {
+      return { merged: false, reason: shallowReason, notified: false, opId: thisOpId, canonicalRepoShallow: true };
+    }
     const gate = targetRepo.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
     // @decision d69d4858 — the stored watermark's OWN `branch` (2a6a292a), resolved ONCE via the shared
@@ -21429,6 +21444,16 @@ export class SessionService {
           ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, landedContentDiverged: true,
         };
       }
+      // @decision 356538ef (card 7ebb4acf, item 13) — checked BEFORE the generic fallthrough, same shape
+      // as branchTipUnresolvable just below: nothing was attempted, and "Re-task a rebase" is wrong here
+      // too — a rebase cannot fix a canonical repo that went shallow mid-flight.
+      if (merge.canonicalRepoShallow) {
+        const why = merge.reason ?? "canonical repo is shallow";
+        const detailText = `${why}; nothing was squashed — canonical repo and worktree are untouched.`;
+        const { suppressed, sha } = await rejectNotify("canonical_repo_shallow", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "canonical_repo_shallow", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, canonicalRepoShallow: true };
+      }
       // @decision 56c10535 (Round 3, item 2) — checked BEFORE the generic fallthrough: nothing was ever
       // attempted here, and the fallthrough's "Re-task a rebase" is actively wrong for an unresolvable
       // branch tip — a rebase cannot fix a branch that is genuinely gone or ambiguous.
@@ -22110,6 +22135,12 @@ export class SessionService {
     if (!repoPath || !projectId) return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: "could not resolve a shared repo for this batch" } };
     const finalRepoPath = repoPath;
     const finalProjectId = projectId;
+    // @decision 356538ef (card 7ebb4acf, item 12) — checked at the TOP, before createWorktree or the
+    // advisory merge-base read below: no gate, no fallback, classified canonicalRepoShallow (never cached).
+    const batchShallowReason = await detectShallowCanonicalRepo(finalRepoPath, this.gitOpMs ?? 15_000);
+    if (batchShallowReason) {
+      return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: batchShallowReason, canonicalRepoShallow: true } };
+    }
     // ONE resolveConfig call for the whole method (card dbc6f660 correction — a manager-supplied `maxWorkers`
     // param used to bypass this entirely, both an ad-hoc default disagreeing with the resolved value AND a
     // caller-settable K, which is adaptive-K by another route; the owner fixed K and ruled that out). Mirrors
@@ -22999,6 +23030,19 @@ export class SessionService {
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, indexLockPresent: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
+          if (result.canonicalRepoShallow) {
+            // @decision 356538ef (card 7ebb4acf, item 13) — same no-fallback posture as quarantined/
+            // indexLockPresent above: each candidate would just re-hit the SAME refusal at
+            // confirmWorkerMerge's own top-of-function check.
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the canonical repo is shallow" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
+            ], opId, undefined, true);
+            return { ok: false, opId, landed: [], fallback: notStarted, canonicalRepoShallow: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
           if (result.branchDiverted) {
             // MAJOR fix (Code Review, fix round for card b801bad0): a branchDiverted refusal must NOT fall
             // into the ordinary per-candidate solo fallback below. The solo path (mergeBranchLocked,
@@ -23404,7 +23448,7 @@ export class SessionService {
         // exactly the `"squash-refused"` reasoning that const's own doc already states for the solo path.
         // @decision 62c4953a — `quarantined`/`indexLockPresent` had NO arm here (fell to "rejected", which
         // IS replayed) — same canonical-checkout-fact reasoning as branchDiverted/unverified above.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.
         //
@@ -25129,7 +25173,7 @@ export class SessionService {
         // @decision c30952c1 — `worktreeGoneLandingUnconfirmed` classifies distinctly too, same reasoning:
         // the cause (a transient lookup glitch, or the worktree still being gone) is checked fresh on a
         // re-call, never replayed from cache.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

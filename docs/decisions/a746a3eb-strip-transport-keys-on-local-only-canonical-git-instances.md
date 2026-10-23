@@ -138,15 +138,45 @@ promisor fetch — that genuinely needs `GIT_ASKPASS`/`GIT_SSH_COMMAND` to succe
 nor the raw-spawn path ever issues an EXPLICIT network verb — `push`/`fetch`/`clone` — itself; this implicit
 case is why the raw-spawn path keeps its env regardless.)
 
-**The fix, narrowed (Code Review round 2 of this follow-up):** `prepareCanonicalEnv` itself is UNCHANGED
-from before this follow-up (strips only `GIT_CONFIG`, then `scrubGitEnv`) — byte-identical for the
-raw-spawn path, in every case. `canonicalGit` ALONE now additionally strips `GIT_ENV_TRANSPORT_KEYS` from
-whatever `prepareCanonicalEnv` returns, and ONLY when the caller itself passed no `env` (`env ===
-undefined`) — i.e. only in the exact case where `prepareCanonicalEnv` just materialized a copy of ambient
-`process.env` for what the caller intended to be an env-less call. An EXPLICIT caller env (even one that
-happens to carry `GIT_CONFIG`) is left untouched and still refuses loudly under an ambient `GIT_ASKPASS` —
-that stays the caller's own responsibility, exactly like every other explicit-env caller in this codebase
-(`localNonInteractiveEnv()`/`localReadGitEnv()`).
+**The fix, narrowed (Code Review round 2 of this follow-up):** `canonicalGit` ALONE strips
+`GIT_ENV_TRANSPORT_KEYS` from whatever `prepareCanonicalEnv` returns, and ONLY when the caller itself
+passed no `env` (`env === undefined`) — gated on that alone, never on anything `prepareCanonicalEnv`
+itself did. An EXPLICIT caller env (even one that happens to carry `GIT_CONFIG`) is left untouched and
+still refuses loudly under an ambient `GIT_ASKPASS` — that stays the caller's own responsibility, exactly
+like every other explicit-env caller in this codebase (`localNonInteractiveEnv()`/`localReadGitEnv()`).
+
+**REWRITTEN IN PLACE (card 7ebb4acf) — the two sentences this replaces ("`prepareCanonicalEnv` itself is
+UNCHANGED from before this follow-up … byte-identical for the raw-spawn path, in every case" and "only in
+the exact case where `prepareCanonicalEnv` just materialized a copy of ambient `process.env`") are now
+FALSE and must not be restated or relied on.** `prepareCanonicalEnv` no longer stays byte-identical for an
+env-less call at all: card `7ebb4acf` (the `info/grafts`/`.git/shallow` neutralization) made it
+UNCONDITIONALLY materialize an explicit env on EVERY call, both consumers, so it can layer the
+`GIT_GRAFT_FILE`/`GIT_SHALLOW_FILE` sentinels onto the full base env — see `docs/decisions/356538ef-
+canonical-git-isolation.md`'s item 8 for why that can never be a bare small object. The prohibition this
+record's own "Do not" list states — never strip `GIT_ENV_TRANSPORT_KEYS` inside `prepareCanonicalEnv`
+itself — is UNCHANGED and was NOT violated: `7ebb4acf` added two unrelated keys there, nothing about the
+transport family. What DID change is `canonicalGit`'s own gate's practical effect: since
+`prepareCanonicalEnv` is now unconditionally truthy, the `env === undefined` check is the WHOLE gate now
+(no longer effectively narrowed further by whether materialization happened to occur) — which is exactly
+what this record's own "Do not" already demanded ("gate on `env === undefined`, full stop"), now true
+without any further narrowing left to accidentally reintroduce. One real, intentional consequence: an
+env-less `canonicalGit(...)` call now has its transport keys stripped UNCONDITIONALLY, not just when
+`GIT_CONFIG` also happened to be ambient — scenario (E) in `git-askpass-explicit-env.mjs` still passes
+under this broader stripping (re-verified), so this is a strictly SAFER outcome, never a regression.
+
+**One real audit find from this widening (card `7ebb4acf`, Code Review S2):** `git/worktrees.ts`'s
+`recutStaleReusedBranch` ran its own mutating `git reset --hard` through a bare, env-less `canonicalGit`
+instance (`boundedGit(worktreePath, deps)`) — exactly the shape that now loses `GIT_ASKPASS`/
+`GIT_SSH_COMMAND` unconditionally, where before it only lost them when `GIT_CONFIG` also happened to be
+ambient. Since that reset's own checkout can trigger an IMPLICIT LFS smudge needing those vars, it was
+moved onto `killableCanonicalRaw` with an explicit `nonInteractiveEnv()` (not `localNonInteractiveEnv()`
+— the transport family must survive) — the raw-spawn path is immune to `blockUnsafeOperationsPlugin` by
+construction (see the main record's own "structurally immune" section), so this both fixes the
+newly-widened transport-key gap AND gives the mutating reset proper kill-wiring it lacked before (`8e75ee20`'s
+own "never abandon a mutating call on a bare `withTimeout` race"). Anyone touching `canonicalGit`'s
+env-less gate again should re-grep for OTHER bare, env-less `boundedGit(...).raw([...])` call sites that
+MUTATE (not just read) the canonical/worktree state — this was the one found so far, not a claim none
+remain.
 
 `canonical-git-isolation.mjs`'s `GIT_CONFIG`-casing block, its "caller env" case in the earlier `MAJOR 2`
 block, and its separate locale block (`(round 5)`, which forces a UTF-8 locale via its own `{...process.env}`

@@ -174,5 +174,48 @@ for (const abs of allSrcFiles) {
 }
 check(`(global) no file anywhere under src/** spawns git via a literal bare "git" command, array- or shell-string-form (every site resolves the binary via the shared chokepoint)${bareLiteralHits.length ? ` — FOUND: ${bareLiteralHits.join(", ")}` : ""}`, bareLiteralHits.length === 0);
 
+// ── (4) card 7ebb4acf (Code Review S3) — the info/grafts + .git/shallow + commit-graph neutralization
+// reaches BOTH canonicalGit AND the raw-spawn path (spawnCanonicalGitTree), and CANONICAL_GIT_CONFIG
+// carries core.commitGraph=false. Source-text only (bounded.ts itself) — behavioral proof is
+// canonical-git-graft-shallow-neutralization.mjs.
+const BOUNDED_PATH = path.join(SRC_DIR, "git", "bounded.ts");
+const ENV_PREPARE_SITE_RE = /env:\s*prepareCanonicalEnv\(/g;
+const GRAFT_SENTINEL_RE = /GIT_GRAFT_FILE:\s*freshGitSentinelPath\(/;
+const SHALLOW_SENTINEL_RE = /GIT_SHALLOW_FILE:\s*freshGitSentinelPath\(/;
+const COMMIT_GRAPH_CONFIG_RE = /CANONICAL_GIT_CONFIG\s*=\s*\[[^\]]*["']core\.commitGraph=false["']/;
+
+/** @returns {{ rawSpawnSiteCount: number, graftSentinelSet: boolean, shallowSentinelSet: boolean, commitGraphDisabled: boolean }} */
+export function checkGraftShallowGraphWiring(raw) {
+  const t = stripComments(raw);
+  return {
+    rawSpawnSiteCount: (t.match(ENV_PREPARE_SITE_RE) ?? []).length,
+    graftSentinelSet: GRAFT_SENTINEL_RE.test(t),
+    shallowSentinelSet: SHALLOW_SENTINEL_RE.test(t),
+    commitGraphDisabled: COMMIT_GRAPH_CONFIG_RE.test(t),
+  };
+}
+
+// (self) RED demo: removing each piece flips its own check, independently.
+{
+  const good = 'const CANONICAL_GIT_CONFIG = ["core.useReplaceRefs=false", "core.commitGraph=false"];\n'
+    + 'function a() { return { env: prepareCanonicalEnv(env) }; }\n'
+    + 'function b() { return { env: prepareCanonicalEnv(env) }; }\n'
+    + 'function prepareCanonicalEnv() { return { GIT_GRAFT_FILE: freshGitSentinelPath("graft"), GIT_SHALLOW_FILE: freshGitSentinelPath("shallow") }; }\n';
+  const w = checkGraftShallowGraphWiring(good);
+  check("(self) the wiring check reads 2 raw-spawn sites + both sentinels + commitGraph=false on known-good text", w.rawSpawnSiteCount === 2 && w.graftSentinelSet && w.shallowSentinelSet && w.commitGraphDisabled);
+  check("(self) removing the SECOND raw-spawn site drops the count to 1 — RED", checkGraftShallowGraphWiring(good.replace('function b() { return { env: prepareCanonicalEnv(env) }; }\n', "")).rawSpawnSiteCount === 1);
+  check("(self) removing GIT_GRAFT_FILE's sentinel call flips graftSentinelSet false — RED", !checkGraftShallowGraphWiring(good.replace('GIT_GRAFT_FILE: freshGitSentinelPath("graft")', "GIT_GRAFT_FILE: undefined")).graftSentinelSet);
+  check("(self) removing GIT_SHALLOW_FILE's sentinel call flips shallowSentinelSet false — RED", !checkGraftShallowGraphWiring(good.replace('GIT_SHALLOW_FILE: freshGitSentinelPath("shallow")', "GIT_SHALLOW_FILE: undefined")).shallowSentinelSet);
+  check("(self) removing core.commitGraph=false flips commitGraphDisabled false — RED", !checkGraftShallowGraphWiring(good.replace(', "core.commitGraph=false"', "")).commitGraphDisabled);
+  check("(self) a mention inside a comment is NOT matched (comment-stripped first)", checkGraftShallowGraphWiring("// env: prepareCanonicalEnv(env)\nconst a = 1;").rawSpawnSiteCount === 0);
+}
+
+// ── the real file ──
+const boundedWiring = checkGraftShallowGraphWiring(fs.readFileSync(BOUNDED_PATH, "utf8"));
+check(`(wiring) exactly 2 raw-spawn sites in git/bounded.ts pass env: prepareCanonicalEnv( (both rawViaDirectSpawn and rawViaWinJobLauncher) — found ${boundedWiring.rawSpawnSiteCount}`, boundedWiring.rawSpawnSiteCount === 2);
+check("(wiring) prepareCanonicalEnv sets GIT_GRAFT_FILE via freshGitSentinelPath", boundedWiring.graftSentinelSet);
+check("(wiring) prepareCanonicalEnv sets GIT_SHALLOW_FILE via freshGitSentinelPath", boundedWiring.shallowSentinelSet);
+check("(wiring) CANONICAL_GIT_CONFIG carries core.commitGraph=false", boundedWiring.commitGraphDisabled);
+
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

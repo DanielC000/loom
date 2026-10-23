@@ -8,7 +8,7 @@ import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -853,8 +853,10 @@ async function recutStaleReusedBranch(
   // Snapshot what's about to be destroyed BEFORE the reset — see this function's own doc above.
   const discardedOnRecut = await captureDiscardedOnRecut(worktreePath, deps);
   // Empty/stale branch → re-cut its pointer + checkout onto current main (SHA, never a branch name).
-  const { git: wtGit, timeoutMs: wtTimeoutMs } = boundedGit(worktreePath, deps);
-  await withTimeout(wtGit.raw(["reset", "--hard", mainSha]), wtTimeoutMs, "git reset --hard");
+  // @decision 356538ef — `nonInteractiveEnv()`, not `localNonInteractiveEnv()`: canonicalGit's env-less
+  // transport-key strip is now unconditional, so an explicit non-stripped env keeps GIT_ASKPASS/
+  // GIT_SSH_COMMAND available for an implicit LFS smudge this reset's checkout may trigger.
+  await killableCanonicalRaw(worktreePath, ["reset", "--hard", mainSha], repoTimeoutMs, "git reset --hard (recut stale reused branch)", deps.gitFactory, nonInteractiveEnv());
   // @decision 0eaaa693 — `recut:true` here is what later licenses WorktreeInfo.cutBaseAdvanced: this
   // branch's tip was just reset to mainSha, so its cut base genuinely advances to it.
   return { recut: true, discardedOnRecut };
@@ -8444,7 +8446,7 @@ export async function mergeBranch(
   // what excludes `undefined` — TS1016 forbids a bare required param after these optional ones): an
   // omitting caller now gets the SAME logged legacy/grandfathered path as explicit `null`, never a silent skip.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalRepoShallow?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -8455,6 +8457,11 @@ export async function mergeBranch(
   // BEFORE mergeBranchLocked ever runs; catch it here and translate to this function's own {ok:false,
   // reason} shape rather than letting it escape as an unhandled rejection.
   //
+  // @decision 356538ef (card 7ebb4acf, item 13) — checked FIRST, before even the lock, and flagged
+  // canonicalRepoShallow so confirmWorkerMerge maps it before the generic squashRefused fallthrough — this
+  // IS the in-flight backstop for a repo that turns shallow after confirmWorkerMerge's own top check.
+  const shallowReason = await detectShallowCanonicalRepo(repoPath, deps.timeoutMs ?? GIT_OP_TIMEOUT_MS, deps.gitFactory);
+  if (shallowReason) return { ok: false, reason: shallowReason, canonicalRepoShallow: true };
   // @decision 87a3c87e — never drop this pause/resume bracket.
   // @decision 6e6b342d — pause/resume now live INSIDE the lock callback (taken at admission, resumed in
   // this callback's own `finally`), never before `withCanonicalIndexLock` is admitted.

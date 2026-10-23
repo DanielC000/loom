@@ -749,6 +749,7 @@ export const LOOM_HOME_WRITE_DENY_REGISTRY: readonly LoomHomeWriteDenyEntry[] = 
   { relPath: path.join("tmp", "decision-records"), kind: "dir" },
   { relPath: path.join("tmp", "companion-audio"), kind: "dir" },
   { relPath: path.join("tmp", "claude-usage.json"), kind: "file" },
+  { relPath: path.join("tmp", "git-sentinel"), kind: "dir" }, // git/bounded.ts's freshGitSentinelPath (card 7ebb4acf) — the GIT_GRAFT_FILE/GIT_SHALLOW_FILE neutralization sentinels; never legitimately written by anyone, and an agent-writable path here would reopen exactly the pre-plant residual that card's own sentinel design exists to avoid
 ];
 
 /**

@@ -6,8 +6,8 @@ import { performance } from "node:perf_hooks";
 import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
 import { killGateProcessTree } from "../orchestration/gate-runner.js";
 import { assertRepoNotQuarantined } from "./merge-quarantine.js";
-import { RepoQuarantinedError } from "./repo-lock.js";
-import { WIN_JOB_LAUNCHER_PATH } from "../paths.js";
+import { RepoQuarantinedError, resolveGitDirsSync } from "./repo-lock.js";
+import { WIN_JOB_LAUNCHER_PATH, LOOM_HOME } from "../paths.js";
 
 /**
  * Neutral extraction (card 9df3ea71) of the bounded-git primitives six independent copies across this
@@ -1222,12 +1222,13 @@ function withConsoleWarnSuppressed<T>(fn: () => T): T {
 
 /**
  * The ONE factory every CANONICAL merge-path git call uses (`git/worktrees.ts`, `git/batch-merge.ts`): ignores replace refs on every
- * command and fails closed on worker-set merge drivers in the shared `.git`. Deny-by-default: an unrecognised subcommand is exec-capable.
+ * command, neutralizes a worker-planted `info/grafts`/`.git/shallow` (via {@link prepareCanonicalEnv}'s sentinel env vars), and fails
+ * closed on worker-set merge drivers in the shared `.git`. Deny-by-default: an unrecognised subcommand is exec-capable.
  *
  * @decision 356538ef — do NOT construct git on the canonical path any other way (guarded by canonical-git-helper-guard.mjs), and do NOT
  * swap the driver blanking for `--attr-source`/`core.attributesFile` (verified not to stop a driver). Residual + not-hardened: the record.
  */
-export const CANONICAL_GIT_CONFIG = ["core.useReplaceRefs=false"] as const;
+export const CANONICAL_GIT_CONFIG = ["core.useReplaceRefs=false", "core.commitGraph=false"] as const;
 /** The `-c` argv equivalent of {@link CANONICAL_GIT_CONFIG}, for a raw `spawn("git", …)` site that cannot use {@link canonicalGit}. */
 export const CANONICAL_GIT_CONFIG_ARGS: readonly string[] = CANONICAL_GIT_CONFIG.flatMap((c) => ["-c", c]);
 
@@ -1351,13 +1352,48 @@ export async function canonicalRaw(git: Pick<SimpleGit, "raw">, args: string[], 
 }
 
 /**
+ * A fresh, almost-certainly-nonexistent absolute path under a Loom-controlled dir, for neutralizing a
+ * worker-writable `info/grafts`/`.git/shallow` via `GIT_GRAFT_FILE`/`GIT_SHALLOW_FILE` (see
+ * {@link prepareCanonicalEnv}). Fresh per {@link prepareCanonicalEnv} CALL — i.e. per `canonicalGit`
+ * CONSTRUCTION, but per `raw()` CALL for {@link spawnCanonicalGitTree} (card 7ebb4acf, N1 — `prepareCanonicalEnv`
+ * runs INSIDE `rawViaDirectSpawn`/`rawViaWinJobLauncher`, not at `spawnCanonicalGitTree`'s own construction
+ * time, so every mutating `raw()` call on that path gets its own fresh pair of sentinels) — never memoized,
+ * never created here.
+ *
+ * @decision 356538ef — never use the literal `"NUL"` (an MSYS/bash-invoked git resolves it as a
+ * plantable cwd-relative file, not the real null device) and never a FIXED literal path (this repo is
+ * public — a worker could pre-plant it); always a fresh absolute path, never created here.
+ *
+ * `path.resolve` (not `path.join`) on `LOOM_HOME`: a relative `LOOM_HOME` (an unusual, but not
+ * impossible, env override) would otherwise produce a relative sentinel, resolved against whatever cwd
+ * the spawned git child happens to run in — never the intended Loom-controlled location.
+ */
+export function freshGitSentinelPath(label: "graft" | "shallow"): string {
+  const dir = path.resolve(LOOM_HOME, "tmp", "git-sentinel");
+  return path.join(dir, `${label}-${crypto.randomBytes(16).toString("hex")}`);
+}
+
+/**
  * The env-prep `canonicalGit` itself applies before construction: strip ambient `GIT_CONFIG` (honoured
  * ONLY by the `git config` builtin, never by `git merge` — left in place it blinds both driver reads to a
  * file the real merge never reads; every OTHER config env var feeds the ONE config stack `merge` and
- * `config` both read, so only this one needs stripping), then {@link scrubGitEnv}. Shared with {@link
- * spawnCanonicalGitTree} (@decision 24c0bdba) so its raw spawn sees the IDENTICAL env `canonicalGit`
- * itself would build — keep env-less callers env-less either way (`undefined` stays `undefined`), since
- * simple-git's `blockUnsafeOperationsPlugin` only inspects an EXPLICIT env.
+ * `config` both read, so only this one needs stripping), then unconditionally layer the two graft/shallow
+ * neutralization sentinels (`GIT_GRAFT_FILE`/`GIT_SHALLOW_FILE`, {@link freshGitSentinelPath}) on top,
+ * then {@link scrubGitEnv}. Shared with {@link spawnCanonicalGitTree} so its raw spawn sees the
+ * IDENTICAL env `canonicalGit` itself would build (see that function's own doc for its `24c0bdba` anchor).
+ *
+ * ALWAYS returns a materialized object now (never `undefined`): the two sentinels must reach EVERY
+ * canonical call, including the common env-less one. Built by spreading whatever `cleanEnv` already
+ * resolved to (the caller's own env, or a GIT_CONFIG-stripped copy), defaulting to `{...base}` (i.e.
+ * `{...process.env}` for the common no-explicit-env call) when `cleanEnv` is still `undefined`.
+ *
+ * @decision 356538ef — never shrink this to a bare `{GIT_GRAFT_FILE, GIT_SHALLOW_FILE}` object: simple-git's
+ * own `.env(obj)` REPLACES the spawned child's entire environment wholesale (never merges with
+ * `process.env`), so a small object here would silently strip PATH/HOME/everything else for every call.
+ *
+ * @decision 356538ef (card 7ebb4acf, N3) — also strips ambient `GIT_TEST_COMMIT_GRAPH` (same case-aware
+ * presence-check-and-strip as `GIT_CONFIG` below): MEASURED to override `-c core.commitGraph=false` and
+ * resurrect item 9's forged-graph skew. See that item's own record entry for the measurement.
  *
  * Deliberately does NOT strip {@link GIT_ENV_TRANSPORT_KEYS} here (card `23c74c62`'s Code Review round):
  * the raw-spawn path ({@link spawnCanonicalGitTree}'s own `rawViaDirectSpawn`/`rawViaWinJobLauncher`) is
@@ -1365,15 +1401,64 @@ export async function canonicalRaw(git: Pick<SimpleGit, "raw">, args: string[], 
  * simple-git at all), and may legitimately need those vars for an IMPLICIT fetch during a canonical
  * mutation (an LFS smudge filter, a partial-clone promisor fetch during `worktree add`/checkout —
  * `CANONICAL_GIT_CONFIG` does not disable filters). {@link canonicalGit} applies its own narrower strip,
- * for the ONE consumer that actually needs it — see its own doc below.
+ * for the ONE consumer that actually needs it — see its own doc below. `GIT_GRAFT_FILE`/`GIT_SHALLOW_FILE`
+ * are NOT in simple-git's own unsafe-env blocklist (verified directly against the installed
+ * `@simple-git/argv-parser@1.1.1`'s own env→category map), so adding them needs no new `unsafe:` flag.
  */
-function prepareCanonicalEnv(env?: Record<string, string | undefined>): Record<string, string | undefined> | undefined {
+export function prepareCanonicalEnv(env?: Record<string, string | undefined>): Record<string, string | undefined> {
   const base = env ?? process.env;
   let cleanEnv = env;
   // Presence check AND strip both go through the ONE case-aware helper (win32: `Git_Config` is `GIT_CONFIG` — card e93703d9); a bare `base.GIT_CONFIG` read would find
   // it on process.env (Node's case-insensitive accessor) while a plain-object `delete` misses it.
-  if (envKeysNamed(base, ["GIT_CONFIG"]).some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, ["GIT_CONFIG"]); }
-  return cleanEnv ? scrubGitEnv(cleanEnv) : undefined;
+  // `GIT_TEST_COMMIT_GRAPH` rides the SAME check (card 7ebb4acf, N3) — see this function's own doc above.
+  if (envKeysNamed(base, ["GIT_CONFIG", "GIT_TEST_COMMIT_GRAPH"]).some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, ["GIT_CONFIG", "GIT_TEST_COMMIT_GRAPH"]); }
+  const withSentinels = { ...(cleanEnv ?? base), GIT_GRAFT_FILE: freshGitSentinelPath("graft"), GIT_SHALLOW_FILE: freshGitSentinelPath("shallow") };
+  return scrubGitEnv(withSentinels);
+}
+
+/**
+ * The canonical merge path does NOT support a shallow-cloned repo — fail closed, loudly, BEFORE any
+ * canonical read/mutation. Measured (card 7ebb4acf, B2): with `GIT_SHALLOW_FILE` neutralized (above) a
+ * read that must walk past the shallow boundary either errors (`merge-base` exit 255, a `^N`/`..`-range
+ * resolution exit 128) or, worse, `git merge --squash` silently reports "nothing to squash" and exits 0
+ * with the real content never staged — a SILENT no-op that must never be reachable. Returns a refusal
+ * reason string when `repoPath`'s COMMON git dir has a non-empty `shallow` file; `null` otherwise.
+ *
+ * @decision 356538ef (card 7ebb4acf, item 10 — SF4) — a `resolveGitDirsSync` `null` (a subdir-bound
+ * repo, or a `GIT_DIR`-pointed call) must never be read as "not shallow"; it now fails CLOSED via a
+ * `rev-parse --git-common-dir` probe instead, or an honest refusal if that probe itself fails.
+ */
+export async function detectShallowCanonicalRepo(
+  repoPath: string,
+  timeoutMs: number,
+  gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">,
+): Promise<string | null> {
+  const dirs = resolveGitDirsSync(repoPath);
+  const shallowMessage = (shallowPath: string) =>
+    `canonical repo is shallow (${shallowPath} is non-empty) — the canonical merge path does not support a shallow-cloned repository. An AGENT running \`git fetch --depth=N\` inside a worktree writes to this SAME shared \`shallow\` file, so a worktree can leave the canonical repo shallow even when nobody shallow-cloned the canonical checkout itself. Project managers have no canonical-repo git write access — escalate this to the Platform Lead, or ask the owner to run \`git fetch --unshallow\` in ${repoPath} (or re-clone it fully).`;
+  if (dirs) {
+    const shallowPath = path.join(dirs.commonDir, "shallow");
+    let size: number;
+    try { size = fs.statSync(shallowPath).size; } catch { return null; }
+    return size === 0 ? null : shallowMessage(shallowPath);
+  }
+  // FAIL CLOSED: `resolveGitDirsSync` could not resolve `repoPath` fs-only (a subdir-bound repo, or a
+  // `GIT_DIR` override) — ask git itself, via a call that reads no history.
+  //
+  // @decision 356538ef (card 7ebb4acf, item 13 — SF2) — the git factory CONSTRUCTION, not just the
+  // `.raw()` call, must sit inside this try: simple-git throws SYNCHRONOUSLY for a nonexistent repoPath.
+  let commonDirRaw: string;
+  try {
+    const git = (gitFactory ?? ((p, ms) => canonicalGit(p, ms)))(repoPath, timeoutMs);
+    commonDirRaw = (await withTimeout(git.raw(["rev-parse", "--git-common-dir"]), timeoutMs, "git rev-parse --git-common-dir (shallow check)")).trim();
+  } catch (e) {
+    return `could not determine whether the canonical repo is shallow (resolveGitDirsSync could not resolve ${repoPath} fs-only, and \`git rev-parse --git-common-dir\` failed: ${(e as Error).message}) — refusing to merge rather than risk a silent no-op against an unverifiable repository`;
+  }
+  const commonDir = path.resolve(repoPath, commonDirRaw);
+  const shallowPath = path.join(commonDir, "shallow");
+  let size: number;
+  try { size = fs.statSync(shallowPath).size; } catch { return null; }
+  return size === 0 ? null : shallowMessage(shallowPath);
 }
 
 export function canonicalGit(
@@ -1391,9 +1476,9 @@ export function canonicalGit(
   // `boundedSimpleGit` re-applies `scrubGitEnv` to whatever `prepareCanonicalEnv` already scrubbed — idempotent, kept for its own unconditional-at-construction guarantee (f7a80d76).
   let simpleGitEnv = prepareCanonicalEnv(env);
   // @decision a746a3eb (Follow-up 23c74c62) — strip GIT_ENV_TRANSPORT_KEYS here, ONLY for this real
-  // SimpleGit consumer and ONLY when the caller itself passed no `env` (prepareCanonicalEnv then
-  // materialized one because GIT_CONFIG was ambient) — see the decision record for the full rationale.
-  if (env === undefined && simpleGitEnv) { simpleGitEnv = { ...simpleGitEnv }; deleteEnvKeys(simpleGitEnv, GIT_ENV_TRANSPORT_KEYS); }
+  // SimpleGit consumer, and gate on "did the caller pass no `env`" alone — never on whether
+  // `prepareCanonicalEnv` materialized one (since 356538ef's graft/shallow fix it ALWAYS does).
+  if (env === undefined) { simpleGitEnv = { ...simpleGitEnv }; deleteEnvKeys(simpleGitEnv, GIT_ENV_TRANSPORT_KEYS); }
   const git = boundedSimpleGit(repoPath, blockTimeoutMs, simpleGitEnv, abortSignal, { ...extraUnsafe, allowUnsafeMergeDriver: true }, [...CANONICAL_GIT_CONFIG]);
   const raw = async (...callArgs: unknown[]): Promise<string> => {
     const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];

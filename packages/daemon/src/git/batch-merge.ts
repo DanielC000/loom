@@ -1,5 +1,5 @@
 import type { SimpleGit } from "simple-git";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, type MergeEmptyKind } from "./worktrees.js";
@@ -1183,6 +1183,10 @@ export interface RunBatchedMergeResult {
    *  cannot rule out that canonical main actually advanced. The caller must exclude a `mayHaveLanded:true`
    *  outcome from the terminal "aborted" write (see docs/decisions/b4080777-batch-ff-refused-terminal-event.md). */
   mayHaveLanded?: boolean;
+  /** @decision 356538ef (card 7ebb4acf, item 13) — the canonical repo is shallow (found at this function's
+   *  own early check). Same no-fallback treatment as `quarantined`/`indexLockPresent` — the caller
+   *  (`mergeBatchTracked`) must map it before the generic `!ok` fallthrough, never a per-candidate retry. */
+  canonicalRepoShallow?: boolean;
 }
 
 /**
@@ -1211,6 +1215,11 @@ export async function runBatchedMerge(
   // write it's named for).
   onBeforeFastForward?: (landed: BatchLandedBranch[]) => void,
 ): Promise<RunBatchedMergeResult> {
+  // @decision 356538ef (card 7ebb4acf, item 13) — checked FIRST, even before the quarantine check, and
+  // flagged canonicalRepoShallow so mergeBatchTracked maps it before the generic `!ok` fallthrough — this
+  // IS the in-flight backstop for a repo that turns shallow after mergeBatchTracked's own top check.
+  const shallowReason = await detectShallowCanonicalRepo(repoPath, deps.timeoutMs ?? GIT_OP_TIMEOUT_MS, deps.gitFactory);
+  if (shallowReason) return { ok: false, landed: [], dropped: [], baseMainSha, reason: shallowReason, canonicalRepoShallow: true };
   // QUARANTINE CHECK (round 4, convergence point) — before assembly even starts, so a repo already
   // quarantined by an unrelated op never burns worktree/assembly work, let alone a shared gate slot.
   const quarantineCheck = assertRepoNotQuarantined(repoPath);

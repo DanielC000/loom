@@ -57,7 +57,7 @@ export type PendingOpOutcome = string;
  *  @decision 62c4953a — "canonical-index-lock-present": same reasoning as "quarantined" — a refusal about
  *  the canonical repo's `.git/index.lock`, not the branch; a human removing it must see a fresh
  *  re-confirm, never a stale cached refusal from before it was removed. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable"]);
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable", "canonical-repo-shallow"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

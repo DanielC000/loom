@@ -367,7 +367,8 @@ try {
   // ===================================================================================
   // (4) round 5 (Code Review ff5de408, item 1) — REFUTES the decision record's "confirmed UNTESTABLE"
   // claim about the canonicalGit-vs-this.boundedGit choice at the advisory call sites (record ~:150).
-  // CANONICAL_GIT_CONFIG's one entry is `core.useReplaceRefs=false` (git/bounded.ts), and a PLANTED
+  // CANONICAL_GIT_CONFIG includes `core.useReplaceRefs=false` (git/bounded.ts; card 7ebb4acf later added
+  // a second, unrelated `core.commitGraph=false` entry alongside it), and a PLANTED
   // `git replace` object on the diverged branch's own tip changes `git merge-base`'s answer depending on
   // whether replace refs are honored — a real, constructible condition, not a theoretical one. Mirrors
   // scenario (1)'s own shape (a real spawnWorker + confirmWorkerMergeTracked) for the POSITIVE case (NO
