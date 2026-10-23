@@ -26,7 +26,7 @@
 // behind an in-test proxy, so the page's origin is non-loopback and its sockets are gateway-token
 // authenticated. The real daemon on 4317 and the real ~/.loom are never touched.
 import { expect, test } from "@playwright/test";
-import { GATEWAY_PROXY_LAUNCH_OPTIONS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
+import { GATEWAY_PROXY_LAUNCH_OPTIONS, GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
 test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 
@@ -35,7 +35,7 @@ test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 test.describe.configure({ mode: "serial" });
 
 let rig: GatewayProxyRig;
-test.beforeAll(async () => { rig = await startGatewayProxyRig(); });
+test.beforeAll(async () => { test.setTimeout(GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS); rig = await startGatewayProxyRig(); });
 test.afterAll(async () => { await rig?.stop(); });
 
 /** Records every WebSocket the PAGE constructs and keeps the last one, so a test can close it with a

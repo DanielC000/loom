@@ -24,7 +24,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import { GATEWAY_PROXY_LAUNCH_OPTIONS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
+import { GATEWAY_PROXY_LAUNCH_OPTIONS, GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
 test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 
@@ -50,6 +50,10 @@ async function post<T>(route: string, body: unknown): Promise<T> {
 }
 
 test.beforeAll(async () => {
+  // +30s margin over the plain rig boot budget (card b2ad8158): this hook ALSO creates a project and two
+  // companions (a `git init` + five loopback REST round-trips) on top of the rig itself — the exact spec
+  // that hit the original bare 30_000ms Playwright hook timeout under host load.
+  test.setTimeout(GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS + 30_000);
   rig = await startGatewayProxyRig();
   scratch = mkdtempSync(path.join(tmpdir(), "loom-e2e-comp-dead-"));
   // ONE project, TWO companions in it. The rig's seed script creates no project (it only seeds what proxy

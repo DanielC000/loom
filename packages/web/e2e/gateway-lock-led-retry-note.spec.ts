@@ -22,12 +22,12 @@
 // HARNESS: ./fixtures/gateway-proxy-rig.ts — the same isolated-daemon-behind-a-proxy rig gateway-proxy.spec.ts
 // and gateway-token-revoked.spec.ts use, so the page's origin is genuinely non-loopback.
 import { expect, test } from "@playwright/test";
-import { GATEWAY_PROXY_LAUNCH_OPTIONS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
+import { GATEWAY_PROXY_LAUNCH_OPTIONS, GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
 test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 
 let rig: GatewayProxyRig;
-test.beforeAll(async () => { rig = await startGatewayProxyRig(); });
+test.beforeAll(async () => { test.setTimeout(GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS); rig = await startGatewayProxyRig(); });
 test.afterAll(async () => { await rig?.stop(); });
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => { try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage blocked */ } });

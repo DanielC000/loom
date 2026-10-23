@@ -28,6 +28,26 @@ const DAEMON_INDEX = path.join(REPO_ROOT, "packages", "daemon", "dist", "index.j
 const WEB_DIST = path.join(REPO_ROOT, "packages", "web", "dist");
 const SEED_SCRIPT = path.join(__dirname, "gateway-proxy-seed.mjs");
 
+// Card b2ad8158: under host load, a spec's `beforeAll` calling `startGatewayProxyRig()` hit Playwright's
+// default 30_000ms hook timeout — the SAME number the daemon-listener wait loop below used as its own
+// deadline, so the two raced and the generic, non-diagnostic hook timeout usually won (it fires on the
+// OUTSIDE of this function, so it never sees which internal step was still running). Measured unloaded
+// (5 standalone runs + 7 in-suite runs, this host, 2026-10-23): seed script ~0.5-0.9s, daemon boot (from
+// after the seed step to both listener lines appearing) ~1.8-2.4s, rig fully ready ~2.3-2.9s total. Each
+// slow step below now gets its OWN generous, named deadline well clear of that baseline, so a stall names
+// itself loudly long before Playwright's own hook timeout would otherwise fire a bare, undiagnostic one.
+/** Budget for the seed script (a short-lived Node child process) — ~25x the measured ~0.5-0.9s baseline. */
+const SEED_SCRIPT_TIMEOUT_MS = 20_000;
+/** Budget for the daemon to log BOTH listener lines — ~20x the measured ~1.8-2.4s baseline, and
+ *  deliberately raised off the old 30_000 (which equaled Playwright's default hook timeout — see above). */
+const DAEMON_LISTEN_TIMEOUT_MS = 45_000;
+/** Export ONE source of truth for the `beforeAll` hook timeout every spec using this rig should set
+ *  explicitly via `test.setTimeout(...)`, instead of each spec hardcoding its own number that can drift.
+ *  Clears SEED_SCRIPT_TIMEOUT_MS + DAEMON_LISTEN_TIMEOUT_MS with margin to spare for a `beforeAll` that
+ *  does nothing but start the rig. A `beforeAll` that does MORE (seeding a companion, creating a project)
+ *  should add its own margin on top, e.g. `test.setTimeout(GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS + 30_000)`. */
+export const GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS = 90_000;
+
 /** The non-loopback hostname the page is served from. Chromium is told it resolves to 127.0.0.1. */
 export const PROXY_HOST = "box.tail1.ts.net";
 /** Pass as `test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS })` so `PROXY_HOST` resolves locally. */
@@ -98,10 +118,23 @@ export async function startGatewayProxyRig(): Promise<GatewayProxyRig> {
   const origin = `http://${PROXY_HOST}:${frontPort}`;
 
   // 2. Seed the home (first-run marker + remoteAccess config + a gateway token), then boot the daemon against it.
-  const token = execFileSync(process.execPath, [SEED_SCRIPT], {
-    env: { ...process.env, LOOM_HOME: home, LOOM_TEST: "1", LOOM_E2E_REMOTE_ACCESS: JSON.stringify({ enabled: true, bindHost: "127.0.0.1", proxyPort: 0, trustedProxyOrigins: [origin] }) },
-    encoding: "utf8",
-  }).trim();
+  let token: string;
+  try {
+    token = execFileSync(process.execPath, [SEED_SCRIPT], {
+      env: { ...process.env, LOOM_HOME: home, LOOM_TEST: "1", LOOM_E2E_REMOTE_ACCESS: JSON.stringify({ enabled: true, bindHost: "127.0.0.1", proxyPort: 0, trustedProxyOrigins: [origin] }) },
+      encoding: "utf8",
+      timeout: SEED_SCRIPT_TIMEOUT_MS,
+    }).trim();
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null; stdout?: string; stderr?: string };
+    // `execFileSync`'s own synchronous timeout kill surfaces as EITHER `.killed === true` (POSIX-ish
+    // async-spawn shape) OR a bare `code: "ETIMEDOUT"` with no `.killed` at all (observed on Windows,
+    // via the underlying `spawnSync`) — check both rather than assuming one platform's shape.
+    if (e.killed || e.code === "ETIMEDOUT") {
+      throw new Error(`gateway-proxy-rig: the seed script (${SEED_SCRIPT}) did not finish within ${SEED_SCRIPT_TIMEOUT_MS}ms and was killed (signal ${e.signal ?? "unknown"}).`);
+    }
+    throw err;
+  }
   let log = "";
   const child: ChildProcess = spawn(process.execPath, [DAEMON_INDEX], {
     env: { ...process.env, LOOM_HOME: home, LOOM_PORT: "0", LOOM_WEB_DIST: WEB_DIST, LOOM_DEV: "0", LOOM_SCHEDULER_ENABLED: "0", LOOM_PYTHON_NO_PROVISION: "1", LOOM_SUPPRESS_USAGE_POLLER: "1", LOOM_TEST: "1" },
@@ -120,17 +153,20 @@ export async function startGatewayProxyRig(): Promise<GatewayProxyRig> {
   };
   try {
     // Wait for BOTH listeners' log lines (the proxy listener's is logged after the loopback one).
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + DAEMON_LISTEN_TIMEOUT_MS;
     let proxyPort: number | null = null;
     let loopbackURL: string | null = null;
     while (Date.now() < deadline && (proxyPort === null || loopbackURL === null)) {
       loopbackURL = /listening on (http:\/\/\S+)/.exec(log)?.[1] ?? null;
       const m = /trusted-proxy listener: http:\/\/127\.0\.0\.1:(\d+)/.exec(log);
       proxyPort = m?.[1] ? Number(m[1]) : null;
-      if (child.exitCode !== null) throw new Error(`daemon exited early (${child.exitCode}):\n${log}`);
+      if (child.exitCode !== null) throw new Error(`gateway-proxy-rig: the daemon exited early (${child.exitCode}):\n${log}`);
       if (proxyPort === null || loopbackURL === null) await new Promise((r) => setTimeout(r, 100));
     }
-    if (proxyPort === null || loopbackURL === null) throw new Error(`the daemon never opened its trusted-proxy listener. Log:\n${log}`);
+    if (proxyPort === null || loopbackURL === null) {
+      const missing = [loopbackURL === null ? "the loopback listener" : null, proxyPort === null ? "the trusted-proxy listener" : null].filter(Boolean).join(" and ");
+      throw new Error(`gateway-proxy-rig: the daemon did not open ${missing} within ${DAEMON_LISTEN_TIMEOUT_MS}ms. Log:\n${log}`);
+    }
     target = proxyPort;
     assertNoRealClaudeSpawn(log, "post-boot");
     // The guard secret is written before `app.listen()`, so by the time the listening line is logged the file

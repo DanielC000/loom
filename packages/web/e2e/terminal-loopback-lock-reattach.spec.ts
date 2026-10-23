@@ -40,7 +40,7 @@
 // fixture and a spec written there would pass vacuously.
 import { expect, test } from "@playwright/test";
 import { randomUUID } from "node:crypto";
-import { GATEWAY_PROXY_LAUNCH_OPTIONS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
+import { GATEWAY_PROXY_LAUNCH_OPTIONS, GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
 test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 test.describe.configure({ mode: "serial" });
@@ -49,6 +49,10 @@ let rig: GatewayProxyRig;
 let companion: { sessionId: string; name: string };
 
 test.beforeAll(async () => {
+  // +30s margin over the plain rig boot budget: this hook also seeds one companion (a `git init` + two
+  // loopback REST round-trips), which is fast unloaded but can slow proportionally under the same host
+  // load that motivated this timeout in the first place (card b2ad8158).
+  test.setTimeout(GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS + 30_000);
   rig = await startGatewayProxyRig();
   const name = `Twin-${randomUUID().slice(0, 8)}`;
   const seeded = await rig.seedCompanion(name);

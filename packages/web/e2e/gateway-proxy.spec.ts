@@ -11,12 +11,12 @@
 // 127.0.0.1, so the page's origin is a genuine non-loopback hostname. NOT covered: a real Tailscale node (Host/Origin/ws
 // behaviour of Serve itself is unverified) — the daemon half is packages/daemon/test/remote-trusted-proxy-real.mjs.
 import { expect, test, type Page } from "@playwright/test";
-import { GATEWAY_PROXY_LAUNCH_OPTIONS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
+import { GATEWAY_PROXY_LAUNCH_OPTIONS, GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
 test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 
 let rig: GatewayProxyRig;
-test.beforeAll(async () => { rig = await startGatewayProxyRig(); });
+test.beforeAll(async () => { test.setTimeout(GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS); rig = await startGatewayProxyRig(); });
 test.afterAll(async () => { await rig?.stop(); });
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => { try { localStorage.setItem("loom.setupWelcomeDismissed", "1"); } catch { /* storage blocked */ } });

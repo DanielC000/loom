@@ -21,7 +21,7 @@
 // The real daemon on 4317 and the real ~/.loom are never touched. The revoke goes through the REAL REST route on
 // the daemon's own LOOPBACK surface, which is where a human owner revokes a token.
 import { expect, test } from "@playwright/test";
-import { GATEWAY_PROXY_LAUNCH_OPTIONS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
+import { GATEWAY_PROXY_LAUNCH_OPTIONS, GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
 test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 
@@ -30,7 +30,7 @@ test.use({ launchOptions: GATEWAY_PROXY_LAUNCH_OPTIONS });
 test.describe.configure({ mode: "serial" });
 
 let rig: GatewayProxyRig;
-test.beforeAll(async () => { rig = await startGatewayProxyRig(); });
+test.beforeAll(async () => { test.setTimeout(GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS); rig = await startGatewayProxyRig(); });
 test.afterAll(async () => { await rig?.stop(); });
 
 /** Records every WebSocket the PAGE constructs AND every close event those sockets receive, and keeps the last
