@@ -1750,13 +1750,13 @@ async function main(): Promise<void> {
     // ONLY path that brings these workers' managers (and any solo manager with no surviving worker) back.
     // Best-effort + runs once.
     // @decision 3d72900f — `recovered` (above) was read BEFORE recoverStaleSessions()'s own UPDATE
-    // zeroed every live/starting session's busy flag; this map carries that PRE-crash busy state through
-    // to escalateDeferredManagerKickoffAtBoot's own hasBusyAtCapture check (see that call site's own doc).
-    const busyAtCrashByManagerId = new Map(recovered.map((s) => [s.id, s.busy]));
+    // zeroed every busy flag. Card 7970db77: ONE map, keyed by ANY session id, read by both
+    // escalateDeferredManagerKickoffAtBoot AND escalateParkedKickoffAtBoot (see each call site's doc).
+    const busyAtCrashBySessionId = new Map(recovered.map((s) => [s.id, s.busy]));
     const { resumed, skippedParked, failed, managersFailed, retiredSkipped, consolidatedSkipped } =
       sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
         soloManagerIds: crashOrphanedManagers, shutdownMarker, hadCrashLogAtBoot, bootedAt: bootStartedAt, supervisorIteration,
-        busyAtCrashByManagerId,
+        busyAtCrashBySessionId,
       });
     console.log(
       `[boot] crash recovery: re-parented ${resumed.length} in-flight worker(s) to their resumed manager(s)` +

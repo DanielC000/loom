@@ -166,15 +166,14 @@ just before an unrelated restart. Mechanism, in `sessions/service.ts` unless not
   factored out as `buildKickoffNeverConfirmedBrokenMsg` and shared with
   `handleKickoffGiveUpExhausted`'s own immediate-park branch, so the two can never read as a divergent
   second notice for the same fact.
-- Tasked workers are excluded (`taskId !== null` → no re-arm): `tickIdleWorkers` (idle-watcher.ts)
-  re-registers fresh every boot, independent of the lost in-memory timer, and already catches a
-  never-started tasked worker on its own periodic cadence — re-arming here too would risk a genuine
-  double notice with no coordination between the two mechanisms.
-- **Known residual, deliberately out of scope here:** `recoverCrashOrphanedWorkers` (the OTHER,
-  mutually-exclusive boot-reconcile path, taken on a genuine crash with no captured `RestartIntent`) is
-  untouched. Its own candidate derivation (`deriveCrashOrphanedWorkers`,
-  `orchestration/crash-orphaned-workers.ts`) structurally excludes every taskless worker
-  (`!w.taskId → continue`, the same filter `tickIdleWorkers` uses) — so a taskless worker is never
-  resumed live on that path at all, and there is nothing for it to re-arm. If a future card ever widens
-  crash recovery to resume taskless workers too, it will need its own call to
-  `escalateParkedKickoffAtBoot` at that path's own worker-resume site.
+- ⛔ **SUPERSEDED by card `7970db77` (see `b03e636c`'s own record, "Card 7970db77" section) — tasked
+  workers are NO LONGER excluded.** This used to bail on `taskId !== null`, on the belief that
+  `tickIdleWorkers` already covered a tasked worker's loss on its own periodic cadence. FALSE: that
+  classifier is itself blinded by the SAME continuation nudge this re-arm exists to pre-empt, before it
+  ever gets a chance to look — see `b03e636c`'s record for the reachability evidence and the fix.
+- ⛔ **SUPERSEDED by card `7970db77` — `recoverCrashOrphanedWorkers` is NO LONGER untouched.** This used
+  to call it a "known residual, deliberately out of scope" on the premise that its taskless exclusion
+  meant nothing to re-arm there. That exclusion (taskless workers only) is still true, but a TASKED
+  worker holding the identical marker IS resumed live on that path — card `7970db77` found it reachable
+  and added the same `escalateParkedKickoffAtBoot` call to that path's per-worker loop, before its own
+  generic continuation nudge. See `b03e636c`'s record for the full mechanism.

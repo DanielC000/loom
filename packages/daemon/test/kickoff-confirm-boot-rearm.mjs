@@ -1,17 +1,22 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card b03e636c: `armKickoffConfirmRecheck`'s one-shot escalation timer (8882e2ca) is in-memory only and
-// is lost across a daemon restart. A TASKED worker still gets caught eventually by `tickIdleWorkers`'
-// own periodic cadence (unaffected by the lost timer), but a TASKLESS worker has NO periodic fallback at
-// all — a kickoff that reached terminal PARK (give-up ladder exhausted) just before an unrelated restart
-// can be stranded forever with zero manager signal. This drives the REAL
-// `SessionService.escalateParkedKickoffAtBoot`/`resumeFleetOnBoot`/`handleKickoffGiveUpExhausted`/
+// is lost across a daemon restart/crash, stranding a kickoff that reached terminal PARK (give-up ladder
+// exhausted) just before it fired, with zero manager signal. Card 7970db77 (see this record's own
+// section) found `tickIdleWorkers`'s assumed periodic fallback for a TASKED worker doesn't actually
+// cover this race — its classifier has no visibility into the `origin:"kickoff"` marker and is itself
+// blinded by either boot path's own continuation nudge first — so this now covers taskless AND tasked
+// workers alike, on BOTH the restart-intent path (`resumeFleetOnBoot`) and the crash/OS-service/
+// clean-stop path (`recoverCrashOrphanedWorkers`, tested in crash-orphaned-workers.mjs). This drives the
+// REAL `SessionService.escalateParkedKickoffAtBoot`/`resumeFleetOnBoot`/`handleKickoffGiveUpExhausted`/
 // `armKickoffConfirmRecheck` against a real Db + a configurable PtyStub.
 //
 // (1) POSITIVE: a taskless worker with a durable, unresolved `origin:"kickoff"` parked chain and
 //     turnSeq:0 gets re-armed at boot — the escalation notice reaches its manager, and a durable
 //     `kickoff_confirm_escalated` record is appended.
-// (2) NEGATIVE CONTROLS, each proving a DIFFERENT reason the re-arm must NOT fire:
-//     (2a) tasked worker (tickIdleWorkers already covers it — never double-escalate);
+// (2) (2a) POSITIVE (card 7970db77): a TASKED worker with the SAME shape is now re-armed too, both at
+//     the unit level and end-to-end via `resumeFleetOnBoot` (2a-e2e), with a control (2a-control) proving
+//     a tasked worker WITHOUT the marker is unaffected. NEGATIVE CONTROLS, each proving a DIFFERENT
+//     reason the re-arm must NOT fire:
 //     (2b) a parked chain with NO `origin:"kickoff"` marker (a pre-upgrade event, or a generic
 //          message's own park) — the documented "pre-upgrade events get no re-arm" behavior;
 //     (2c) turnSeq already >0 (resolved via some other route);
@@ -142,19 +147,78 @@ try {
     check("(1) a durable kickoff_confirm_escalated(source:\"boot\") record was appended", escalated.length === 1 && escalated[0].detail?.source === "boot");
   }
 
-  // ============================ (2a) NEGATIVE: tasked worker — never double-escalate ============================
+  // ============================ (2a) POSITIVE (card 7970db77): a TASKED worker IS re-armed too =========
+  // `tickIdleWorkers`'s periodic cadence was assumed to cover a TASKED worker's parked kickoff, but its
+  // own classifier (classifyIdleWorker) has no visibility into the `origin:"kickoff"` marker at all, and
+  // is itself blinded by EITHER boot path's own continuation nudge (the SAME race this function exists
+  // to close) before it ever gets a chance to look — see b03e636c's record, "card 7970db77" section, for
+  // the reachability evidence. So this function no longer bails on `w.taskId`.
   {
     const mgr = mkSession({ role: "manager" });
-    const task = `kcbr-task-${sfx}`;
+    const task = `kcbr-task-2a-${sfx}`;
     db.insertTask({ id: task, projectId: proj, title: "T", body: "", columnKey: "in_progress", position: 0, createdAt: now, updatedAt: now });
     const wkr = mkSession({ role: "worker", parentSessionId: mgr, taskId: task });
-    appendParkedChain(db, mgr, wkr, task, `root-tasked-${sfx}`);
+    const root = `root-tasked-${sfx}`;
+    appendParkedChain(db, mgr, wkr, task, root);
     const pty = new PtyStub();
     const sessions = new SessionService(db, pty, new OrchestrationControl());
 
     const fired = sessions.escalateParkedKickoffAtBoot(wkr, false, false, false);
-    check("(2a) NEGATIVE CONTROL: a TASKED worker is never re-armed here — tickIdleWorkers already covers it", fired === false);
-    check("(2a) no notice sent", pty.getPending(mgr).length === 0);
+    check("(2a) POSITIVE: a TASKED worker with a marked, unresolved parked kickoff IS now re-armed too", fired === true);
+    const mgrq = pty.getPending(mgr);
+    check("(2a) the escalation notice reaches the manager", mgrq.some((t) => t.startsWith("[loom:worker-spawn-broken]")));
+    const escalated = db.listEventsForWorker(wkr).filter((e) => e.kind === "kickoff_confirm_escalated" && e.detail?.rootMsgId === root);
+    check("(2a) a durable kickoff_confirm_escalated(source:\"boot\") record was appended", escalated.length === 1 && escalated[0].detail?.source === "boot");
+  }
+
+  // ============================ (2a-e2e) THE TRAP, tasked flavor — end-to-end via resumeFleetOnBoot =====
+  // Mirrors case (3) below (the taskless THE TRAP), proving the escalation fires INSTEAD OF the tasked
+  // worker's own normal continuation nudge on the restart-intent path too — item 1 of the manager's
+  // approval: "a tasked worker with a parked kickoff on the RESTART path escalates once".
+  {
+    const mgr = mkSession({ role: "manager" });
+    const task = `kcbr-task-2ae2e-${sfx}`;
+    db.insertTask({ id: task, projectId: proj, title: "T", body: "", columnKey: "in_progress", position: 0, createdAt: now, updatedAt: now });
+    const wkr = mkSession({ role: "worker", parentSessionId: mgr, taskId: task });
+    appendParkedChain(db, mgr, wkr, task, `root-tasked-e2e-${sfx}`);
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const resumeSet = [
+      { sessionId: mgr, role: "manager", parentSessionId: null },
+      { sessionId: wkr, role: "worker", parentSessionId: mgr },
+    ];
+    const intent = { reason: "deploy merged daemon code", managerSessionId: mgr, resume: resumeSet, pending: {}, requestedAt: now };
+    sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
+    await flush();
+
+    check("(2a-e2e) THE TRAP, tasked flavor: the worker's OWN queue gets NOTHING — no continuation nudge ever ran",
+      pty.getPending(wkr).length === 0);
+    check("(2a-e2e) the manager's queue gets exactly the escalation",
+      pty.getPending(mgr).filter((t) => t.startsWith("[loom:worker-spawn-broken]")).length === 1);
+  }
+
+  // ============================ (2a-control) a TASKED worker WITHOUT the marker is unaffected ==========
+  // Item 1 of the manager's approval: "a tasked worker WITHOUT the marker gets the normal nudge" — proves
+  // the widening above doesn't swallow the ordinary case.
+  {
+    const mgr = mkSession({ role: "manager" });
+    const task = `kcbr-task-2actrl-${sfx}`;
+    db.insertTask({ id: task, projectId: proj, title: "T", body: "", columnKey: "in_progress", position: 0, createdAt: now, updatedAt: now });
+    const wkr = mkSession({ role: "worker", parentSessionId: mgr, taskId: task }); // NO parked-kickoff chain at all
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const resumeSet = [
+      { sessionId: mgr, role: "manager", parentSessionId: null },
+      { sessionId: wkr, role: "worker", parentSessionId: mgr },
+    ];
+    const intent = { reason: "deploy merged daemon code", managerSessionId: mgr, resume: resumeSet, pending: {}, requestedAt: now };
+    sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
+    await flush();
+
+    check("(2a-control) a tasked worker WITHOUT a parked-kickoff marker gets the normal continuation nudge",
+      pty.getPending(wkr).some((t) => t.includes("Continue your assigned task")));
+    check("(2a-control) no escalation notice is sent to the manager",
+      pty.getPending(mgr).filter((t) => t.startsWith("[loom:worker-spawn-broken]")).length === 0);
   }
 
   // ============================ (2b) NEGATIVE: no origin marker (pre-upgrade shape) ============================
@@ -558,9 +622,10 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — card b03e636c: `escalateParkedKickoffAtBoot` re-arms the kickoff-confirm escalation " +
-    "at boot-reconcile for a taskless worker whose kickoff reached terminal park before an unrelated " +
-    "restart, scoped correctly (tasked workers excluded, pre-upgrade/unmarked events excluded, an " +
-    "already-resolved or already-escalated chain excluded), ordered BEFORE resumeFleetOnBoot's own " +
+    "at boot-reconcile for a worker (taskless OR tasked — card 7970db77 widened this; tickIdleWorkers " +
+    "never actually covered the tasked case) whose kickoff reached terminal park before an unrelated " +
+    "restart, scoped correctly (pre-upgrade/unmarked events excluded, an already-resolved or " +
+    "already-escalated chain excluded), ordered BEFORE resumeFleetOnBoot's own " +
     "continuation nudge so the trap (that nudge starting a turn and permanently hiding the dead kickoff) " +
     "cannot occur, durably auditable via kickoff_confirm_escalated, and never double-notifies across " +
     "repeated restarts or between the original in-memory timer and the boot path. Code Review ad92070b " +

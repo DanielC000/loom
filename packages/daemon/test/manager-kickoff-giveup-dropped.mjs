@@ -1174,7 +1174,7 @@ try {
   // (EE) Round 5 (card 3d72900f)'s own crash-path busy-capture correction: `db.getSession(mgr)?.busy` is
   // ALWAYS false by the time recoverCrashOrphanedWorkers runs in production (recoverStaleSessions() zeroes
   // it first, in index.ts's runBootRecoveryPrefix, well before this method ever runs) — so the PERSISTED
-  // row is left false here (simulating that reality), and ONLY the `busyAtCrashByManagerId` map (the
+  // row is left false here (simulating that reality), and ONLY the `busyAtCrashBySessionId` map (the
   // pre-flip capture `index.ts` builds from recoverStaleSessions()'s own pre-UPDATE `recovered` snapshot)
   // carries the real pre-crash busy state through. If this method wrongly read the live persisted row
   // instead, it would see `false` and NOT stand down — RED under the pre-fix code that read
@@ -1193,7 +1193,7 @@ try {
     const candidates = [{ workerSessionId: wkr, managerSessionId: mgr, reportedState: null, awaitingReview: false }];
     sessions.recoverCrashOrphanedWorkers(candidates, {
       resumeOne: () => ({ ok: true }),
-      busyAtCrashByManagerId: new Map([[mgr, true]]), // the PRE-flip capture: this manager WAS busy at crash time
+      busyAtCrashBySessionId: new Map([[mgr, true]]), // the PRE-flip capture: this manager WAS busy at crash time
     });
 
     check("(EE) the PRE-FLIP captured busy flag stands the crash-path escalation down — no event, even though the PERSISTED row reads false",
@@ -1202,7 +1202,7 @@ try {
       db.getSession(mgr)?.busy === false);
   }
 
-  // (EE-without-capture): the SAME fixture as (EE) but with NO `busyAtCrashByManagerId` map passed at all
+  // (EE-without-capture): the SAME fixture as (EE) but with NO `busyAtCrashBySessionId` map passed at all
   // — proves (EE)'s stand-down was the CAPTURED value's doing, not some fixture-wide default (a map
   // omitted entirely must behave as "not busy at crash", so the escalation fires normally here). =========
   {
@@ -1217,7 +1217,7 @@ try {
     appendDeferredMarker(db, mgr, null, msgId, rootMsgId, "manager");
 
     const candidates = [{ workerSessionId: wkr, managerSessionId: mgr, reportedState: null, awaitingReview: false }];
-    sessions.recoverCrashOrphanedWorkers(candidates, { resumeOne: () => ({ ok: true }) }); // no busyAtCrashByManagerId at all
+    sessions.recoverCrashOrphanedWorkers(candidates, { resumeOne: () => ({ ok: true }) }); // no busyAtCrashBySessionId at all
 
     check("(EE-without-capture) WITHOUT a captured busy map, the SAME fixture escalates normally — proving (EE)'s silence was the captured value's doing",
       db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped" && e.detail?.rootMsgId === rootMsgId).length === 1);
@@ -1267,6 +1267,51 @@ try {
 
     check("(EE-queued-without-marker) WITHOUT the queued row, the SAME fixture escalates normally — proving (EE-queued)'s silence was the queued row's doing",
       db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped" && e.detail?.rootMsgId === rootMsgId).length === 1);
+  }
+
+  // (FF) Code Review (card 7970db77, B1): a COMBINED fixture — the manager's OWN kickoff was
+  // deferred-dropped (the EE-queued shape above) AND it also parents a crash-orphaned TASKED worker
+  // holding its OWN unresolved parked-kickoff marker. The worker's own boot escalation (card 7970db77)
+  // calls enqueueSystemNudge(managerId, ...) — a durable `session_message_queued` row ADDRESSED TO THE
+  // MANAGER. Pre-fix, the manager-level call re-read `listUnresolvedQueuedMessagesForWorker(managerId)`
+  // LIVE, AFTER the per-worker loop ran — so it saw that very row and wrongly stood its OWN escalation
+  // down. Both must escalate independently: the worker's crash-path marker is NOT "queued direction
+  // about to replay for the manager" — it's the manager's own notice-of-concern about a DIFFERENT
+  // session. ====================================================================================
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-ff-mgr-${sfx}`, wkr = `mkgd-ff-wkr-${sfx}`;
+    const task = `mkgd-ff-task-${sfx}`;
+    mkSession({ id: mgr, role: "manager" }); // DB row: turnSeq:0, busy:false — the manager's own kickoff never confirmed
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: task }); // DB row: turnSeq:0, busy:false — ditto
+    pty.setLive(mgr); pty.setLive(wkr);
+    // PTY-level (not DB-level) busy on the manager: forces the worker's own enqueueSystemNudge(mgr, ...)
+    // call to go through enqueueDurableMessage's HELD branch (delivered:false), which is what actually
+    // WRITES the durable `session_message_queued` row this bug collides on — an immediately-delivered
+    // nudge (the default when a PtyStub marks a recipient merely live, not busy) never gets persisted at
+    // all, so the collision wouldn't reproduce without this. The manager's own DB `busy` column (read by
+    // escalateDeferredManagerKickoffAtBoot's unrelated discriminator) is untouched, stays false.
+    pty.setBusy(mgr, true);
+    const rootMsgIdMgr = `root-ff-mgr-${sfx}`, msgIdMgr = `msg-ff-mgr-${sfx}`;
+    appendDeferredMarker(db, mgr, null, msgIdMgr, rootMsgIdMgr, "manager");
+    const rootMsgIdWkr = `root-ff-wkr-${sfx}`;
+    db.appendEvent({
+      id: `evt-ff-wkr-${sfx}`, ts: now, managerSessionId: mgr, workerSessionId: wkr, taskId: task,
+      kind: "session_message_gave_up",
+      detail: { msgId: rootMsgIdWkr, rootMsgId: rootMsgIdWkr, chainDepth: 1, outcome: "parked", origin: "kickoff" },
+    });
+
+    const candidates = [{ workerSessionId: wkr, managerSessionId: mgr, reportedState: null, awaitingReview: false }];
+    sessions.recoverCrashOrphanedWorkers(candidates, { resumeOne: () => ({ ok: true }) });
+
+    const managerKickoffDroppedEvents = db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped" && e.detail?.rootMsgId === rootMsgIdMgr).length;
+    const workerEscalatedEvents = db.listEventsForWorker(wkr).filter((e) => e.kind === "kickoff_confirm_escalated" && e.detail?.rootMsgId === rootMsgIdWkr).length;
+    check("(FF) THE COMBINED-MARKERS CASE: the manager's OWN deferred kickoff still escalates (manager_kickoff_dropped === 1) despite its worker's unrelated crash-path escalation",
+      managerKickoffDroppedEvents === 1);
+    check("(FF) AND the worker's own crash-path kickoff escalation still fires too (kickoff_confirm_escalated === 1)",
+      workerEscalatedEvents === 1);
   }
 
   db.close();

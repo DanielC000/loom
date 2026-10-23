@@ -202,7 +202,9 @@ can never do. Fixed by threading the PRE-FLIP busy value through instead:
 `recoverStaleSessions()`'s own SELECT reads every live/starting session's busy flag BEFORE the UPDATE
 zeros it, and that snapshot (`recovered`) is already captured in `index.ts`. `recoverCrashOrphanedWorkers`
 gained a new opts field, `busyAtCrashByManagerId` (a `Map<string, boolean>` `index.ts` builds from
-`recovered`), threaded to `escalateDeferredManagerKickoffAtBoot`'s own `hasBusyAtCapture` parameter —
+`recovered`; card `7970db77` later widened this to ANY session id and renamed it
+`busyAtCrashBySessionId` once a worker-level consumer needed the same map — see that card's own section
+in `b03e636c`'s record), threaded to `escalateDeferredManagerKickoffAtBoot`'s own `hasBusyAtCapture` parameter —
 mirroring, on the crash path, the role `RestartResumeEntry.busy` already plays on the `resumeFleetOnBoot`
 path. `hasQueuedPending` needed no equivalent fix: it is read live from
 `db.listUnresolvedQueuedMessagesForWorker(managerId)` — the SAME durable store

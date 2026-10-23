@@ -8123,7 +8123,8 @@ export class SessionService {
       hadCrashLogAtBoot?: boolean; bootedAt?: Date; supervisorIteration?: number | null;
       // @decision 3d72900f — pre-crash busy, captured by index.ts from `recoverStaleSessions()`'s own
       // pre-UPDATE SELECT (`recovered`); the persisted row's busy is already 0 by the time this runs.
-      busyAtCrashByManagerId?: Map<string, boolean>;
+      // Card 7970db77 widened this from manager-only to ANY session id — see its own doc below.
+      busyAtCrashBySessionId?: Map<string, boolean>;
     } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[]; retiredSkipped: string[]; consolidatedSkipped: string[] } {
     const now = opts.now ?? new Date();
@@ -8228,6 +8229,14 @@ export class SessionService {
         }
         continue;
       }
+      // Code Review (card 7970db77, B1): snapshot the MANAGER's own hasQueuedPending HERE, before the
+      // per-worker loop below runs — that loop's own escalateParkedKickoffAtBoot call can enqueue a
+      // durable session_message_queued row ADDRESSED TO THIS MANAGER (its notice recipient), which would
+      // make a LATER live read of listUnresolvedQueuedMessagesForWorker(managerId) wrongly read true and
+      // silently stand down escalateDeferredManagerKickoffAtBoot below — a self-inflicted false positive
+      // on the very discriminator meant to detect UNRELATED queued direction, not this method's own
+      // notice. See b03e636c's own record for the full reproduction.
+      const hasQueuedPendingMgr = this.db.listUnresolvedQueuedMessagesForWorker(managerId).length > 0;
       let recoveredCount = 0;
       // Card db05e657 (MAJOR 1 review fix): split by `reportedState` — a `blocked` worker is folded into
       // `awaitingReview` (ruling 1) but is NOT "done and awaiting merge"; the old single `awaitingReviewCount`
@@ -8269,6 +8278,17 @@ export class SessionService {
         const integrity = classifyWorktreeIntegrity(this.db.getSession(w.workerSessionId)?.worktreePath);
         if (integrity.status !== "intact") worktreeAtRiskCount++;
         if (workerParked) { skippedParked.push(w.workerSessionId); continue; } // resumed live; honor the park — no nudge
+        // Card 7970db77: decide the kickoff-confirm boot escalation FIRST, before either continuation
+        // nudge below — same load-bearing ordering as the manager-level call further down, and as
+        // `resumeFleetOnBoot`'s own worker branch. `hadUnsentDraft` is always `false` here: unlike the
+        // restart-intent path, a genuine crash captures no RestartResumeEntry, so there is no composer-
+        // dirty snapshot to forward (mirrors `escalateDeferredManagerKickoffAtBoot`'s own default below).
+        if (this.escalateParkedKickoffAtBoot(
+          w.workerSessionId,
+          false,
+          this.db.listUnresolvedQueuedMessagesForWorker(w.workerSessionId).length > 0,
+          opts.busyAtCrashBySessionId?.get(w.workerSessionId) === true,
+        )) continue;
         // Card 959a5fb7: gated on `awaitingReview` — a done report the
         // manager already consumed (a subsequent directive delivered against it) must not be counted as
         // "awaiting your review/merge" below, and this worker should get the SAME continue-nudge as any
@@ -8344,11 +8364,13 @@ export class SessionService {
       }
       // @decision 3d72900f — this is the ONLY boot path a non-self-host install takes; decide the
       // escalation BEFORE the unconditional summary nudge below, or it hides the drop forever.
-      // `opts.busyAtCrashByManagerId` carries the PRE-crash busy (`db...busy` is always false here).
+      // `opts.busyAtCrashBySessionId` carries the PRE-crash busy (`db...busy` is always false here).
+      //
+      // Card 7970db77 (B1): `hasQueuedPendingMgr` is the pre-loop SNAPSHOT above — see its own comment.
       if (this.escalateDeferredManagerKickoffAtBoot(
         managerId,
-        this.db.listUnresolvedQueuedMessagesForWorker(managerId).length > 0,
-        opts.busyAtCrashByManagerId?.get(managerId) === true,
+        hasQueuedPendingMgr,
+        opts.busyAtCrashBySessionId?.get(managerId) === true,
       )) continue;
       // card c9e51581 (Path B extension of 61cc91c6): a manager/platform with NO stake in this crash —
       // no crash-orphaned worker candidates (recovered or failed) alongside it, no stranded board work,
@@ -11760,13 +11782,15 @@ export class SessionService {
   }
 
   /**
-   * @decision b03e636c — re-arms `armKickoffConfirmRecheck`'s escalation at boot-reconcile for a
-   * TASKLESS worker (a TASKED one already gets `tickIdleWorkers`' periodic coverage) whose kickoff
-   * reached terminal PARK just before an otherwise-unrelated restart dropped the in-memory timer.
+   * @decision b03e636c — re-arms `armKickoffConfirmRecheck`'s escalation at boot-reconcile for a worker
+   * (taskless OR tasked — card 7970db77 widened this from taskless-only; see that card's own section in
+   * this record) whose kickoff reached terminal PARK before an unrelated restart/crash dropped the timer.
    *
-   * Called from `resumeFleetOnBoot`'s worker branch BEFORE it composes ANY continuation nudge for this
-   * entry — deliberately, not after. `resumeFleetOnBoot`'s own continuation nudge (or even a replayed
-   * pending entry) can itself start the worker's first turn once the resumed pty drains, which flips
+   * Called from BOTH `resumeFleetOnBoot`'s worker branch (the restart-intent path) and
+   * `recoverCrashOrphanedWorkers`'s per-worker loop (the crash/OS-service/clean-stop path — card
+   * 7970db77 widened this from `resumeFleetOnBoot` alone) BEFORE either composes ANY continuation nudge
+   * for this entry — deliberately, not after. That continuation nudge (or even a replayed pending entry)
+   * can itself start the worker's first turn once the resumed pty drains, which flips
    * `turnSeq`/`hasFirstTurnStarted` true — and the ordinary fire-time safety check every OTHER consumer
    * of this escalation relies on (`armKickoffConfirmRecheck`'s own callback) would then permanently
    * stand down, even though the ORIGINAL kickoff never landed and the worker that "started a turn" is
@@ -11797,19 +11821,19 @@ export class SessionService {
    *   (e) a non-empty on-disk engine transcript — a turn genuinely ran.
    *
    * Returns true iff it escalated (the caller must skip the normal continuation nudge for this entry) —
-   * false for any of the above five, a tasked worker (`tickIdleWorkers` already covers it; never
-   * double-escalate), a worker whose PERSISTED `turnSeq` is already >0, a chain with no
+   * false for any of the above five, a worker whose PERSISTED `turnSeq` is already >0, a chain with no
    * `origin:"kickoff"` marker (a pre-upgrade parked event, or a generic message's own park — see that
    * field's own doc, out of scope either way), a chain whose park notice was itself SUPPRESSED as moot
    * (`detail.noticeSuppressed:true` — the live path already decided this specific notice shouldn't go
    * out, e.g. superseded by a newer directive; boot must never resurrect it, Code Review 397ff972), an
    * already-resolved chain (`confirmed-after-park`), or one already escalated
    * (`kickoff_confirm_escalated` durably recorded, from the immediate-park send, the original timer,
-   * this boot, or an earlier boot) — never a second notice for the same root.
+   * this boot, or an earlier boot) — never a second notice for the same root. Card 7970db77: no longer
+   * bails on a tasked worker (`w.taskId`) — see this method's own top-of-doc update for why.
    */
   private escalateParkedKickoffAtBoot(sessionId: string, hadUnsentDraft: boolean, hasQueuedPending: boolean, hasBusyAtCapture: boolean): boolean {
     const w = this.db.getSession(sessionId);
-    if (!w || w.taskId || !w.parentSessionId) return false;
+    if (!w || !w.parentSessionId) return false;
     if ((w.turnSeq ?? 0) > 0) return false;
     if (w.busy) return false;
     if (hasBusyAtCapture) return false;
@@ -11834,7 +11858,9 @@ export class SessionService {
     const draftClause = hadUnsentDraft
       ? ` Also: worker ${sessionId} had an unsent composer draft at the moment of this restart — never submitted, so it is not part of its resumed history. This was likely its own attempt to confirm the kickoff.`
       : "";
-    this.enqueueSystemNudge(w.parentSessionId, buildKickoffNeverConfirmedBrokenMsg(w) + draftClause, { kind: "warning", taskId: null });
+    // Card 7970db77 (N1): w.taskId, not a hardcoded null — parity with the live path's identical call
+    // (handleKickoffGiveUpExhausted, which passes `w.taskId ?? null`), now that a tasked worker reaches here too.
+    this.enqueueSystemNudge(w.parentSessionId, buildKickoffNeverConfirmedBrokenMsg(w) + draftClause, { kind: "warning", taskId: w.taskId ?? null });
     return true;
   }
 
@@ -11857,7 +11883,8 @@ export class SessionService {
    * `RestartResumeEntry`'s own captured busy flag, a second, independent busy signal; on the
    * crash-recovery call site there is no restart-intent snapshot, so it instead carries the PRE-crash
    * busy `recoverStaleSessions()` captured before zeroing it (`recoverCrashOrphanedWorkers`'s own
-   * `busyAtCrashByManagerId`, card 3d72900f/Round 5 SF-1 — the persisted row's busy is already false by
+   * `busyAtCrashBySessionId`, card 3d72900f/Round 5 SF-1 (renamed from the manager-only
+   * `busyAtCrashByManagerId` by card 7970db77) — the persisted row's busy is already false by
    * the time either boot path reaches this check, so reading it live here would always read false);
    * `hasQueuedPending` (queued direction about to replay would itself resolve the question). It omits ONE check the worker
    * twin has — "any worker_report ever recorded" — since nothing a manager calls on itself serves that

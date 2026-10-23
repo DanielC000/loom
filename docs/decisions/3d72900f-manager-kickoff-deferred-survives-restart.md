@@ -37,8 +37,9 @@ own method) plus the Lead-notify-side fixes from the same review.
 - Do not derive the crash-recovery call site's `hasBusyAtCapture` from a LIVE `db.getSession(managerId)
   ?.busy` read — `recoverStaleSessions()` already zeroed it before this method ever runs, so that read is
   always false and the discriminator becomes dead code. Thread the PRE-FLIP value through instead
-  (`recoverCrashOrphanedWorkers`'s own `busyAtCrashByManagerId`, built in `index.ts` from
-  `recoverStaleSessions()`'s own pre-UPDATE `recovered` snapshot) — round 5's own first attempt at this
+  (`recoverCrashOrphanedWorkers`'s own `busyAtCrashBySessionId`, built in `index.ts` from
+  `recoverStaleSessions()`'s own pre-UPDATE `recovered` snapshot; renamed from the manager-only
+  `busyAtCrashByManagerId` by card `7970db77` once a worker-level consumer needed it too) — round 5's own first attempt at this
   fix made exactly this mistake, and a test that sets `busy` AFTER that point (production can't) will
   pass against the bug without catching it.
 - Do not derive the crash-recovery call site's `hasQueuedPending` by inventing a captured-state concept

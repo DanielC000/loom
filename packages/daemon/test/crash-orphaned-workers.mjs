@@ -66,6 +66,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       matrix on a clean, dedicated project (no incidental board noise): a genuinely stakeless solo
 //       manager resumes silently; a manager with a recovered OR failed crash-orphaned worker candidate,
 //       a stranded board, or an unconsumed answered question all still get the full summary nudge.
+//   (16) PARKED-KICKOFF ESCALATION ON THE CRASH PATH (card 7970db77) — b03e636c's
+//       `escalateParkedKickoffAtBoot` used to bail on a tasked worker; this card widened it (and this
+//       per-worker call site) because `tickIdleWorkers` never actually covered the race (see
+//       kickoff-confirm-boot-rearm.mjs's own header for the full reachability finding). A tasked worker
+//       holding an unresolved `origin:"kickoff"` parked chain now escalates exactly once with NO
+//       continuation nudge (16a); a tasked sibling with no marker is unaffected (16b); every
+//       discriminator (persisted busy, unit-checked only — (16c), since recoverStaleSessions() always
+//       zeroes it before this real path ever runs; the pre-flip captured busy map now keyed by the
+//       WORKER's own id, the genuinely representative crash-path busy check (16d); queued pending
+//       direction (16e); any worker_report (16f); a non-empty transcript (16g)) stands the escalation
+//       down through the REAL recoverCrashOrphanedWorkers (16d-16g); and two
+//       simulated crashes in a row never double-fire (16h).
 // Run: 1) build daemon, 2) node test/crash-orphaned-workers.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -1078,6 +1090,172 @@ try {
       /^ Boot started .+\.$/.test(msg15b.slice(bodyNoExtra15b.length, msg15b.length - RESUME_NUDGE_TAIL.length)));
   }
 
+  // ============================ (16) PARKED-KICKOFF ESCALATION ON THE CRASH PATH (card 7970db77) ========
+  // b03e636c's `escalateParkedKickoffAtBoot` used to bail outright on a TASKED worker, trusting
+  // `tickIdleWorkers`'s periodic cadence to cover it — but `tickIdleWorkers`'s own classifier
+  // (classifyIdleWorker) has no visibility into the `origin:"kickoff"` marker at all, and this very
+  // crash path's own generic continuation nudge (below) starts a real first turn before that classifier
+  // ever gets a chance to look, permanently hiding that the ORIGINAL kickoff never confirmed — the exact
+  // race this card's own hermetic probe first demonstrated RED. These cases drive the REAL
+  // `recoverCrashOrphanedWorkers` end-to-end, proving the widened `escalateParkedKickoffAtBoot` is now
+  // consulted there too, BEFORE the per-worker continuation nudge, for a TASKED worker.
+  const appendParkedKickoff16 = (mgr, wkr, task, root) => db.appendEvent({
+    id: `evt-${root}`, ts: now, managerSessionId: mgr, workerSessionId: wkr, taskId: task,
+    kind: "session_message_gave_up",
+    detail: { msgId: root, rootMsgId: root, chainDepth: 1, outcome: "parked", origin: "kickoff" },
+  });
+
+  // (16a) POSITIVE: tasked + marker escalates exactly once, with NO continuation nudge.
+  {
+    const mgr = `cow-mgr16a-${sfx}`, wkr = `cow-wkr16a-${sfx}`;
+    const task = mkTask(`cow-t16a-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" });
+    const root = `root-16a-${sfx}`;
+    appendParkedKickoff16(mgr, wkr, task, root);
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16a) the worker's queue gets NOTHING — no continuation nudge ran", pty.getPending(wkr).length === 0);
+    check("(16a) the manager's queue gets exactly the escalation", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 1);
+    const escalated = db.listEventsForWorker(wkr).filter((e) => e.kind === "kickoff_confirm_escalated" && e.detail?.rootMsgId === root);
+    check("(16a) a durable kickoff_confirm_escalated(source:\"boot\") record was appended", escalated.length === 1 && escalated[0].detail?.source === "boot");
+  }
+
+  // (16b) CONTROL: a tasked sibling with NO parked-kickoff marker gets the ordinary nudge (unaffected).
+  {
+    const mgr = `cow-mgr16b-${sfx}`, wkr = `cow-wkr16b-${sfx}`;
+    const task = mkTask(`cow-t16b-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" });
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16b) CONTROL: a tasked worker with no marker gets the normal continuation nudge", pty.getPending(wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
+    check("(16b) CONTROL: no escalation notice is sent to the manager", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 0);
+  }
+
+  // (16c)-(16g) EACH DISCRIMINATOR STANDS DOWN. (16c) is a UNIT check only — see its own note below;
+  // (16d)-(16g) go through the real recoverCrashOrphanedWorkers end-to-end.
+  {
+    // (16c) UNIT CHECK of the PERSISTED w.busy guard — NOT a crash-path reachability claim. In the REAL
+    // crash boot sequence, `recoverStaleSessions()` ALWAYS zeroes every live/starting session's `busy`
+    // column (worker AND manager) BEFORE `recoverCrashOrphanedWorkers` ever runs — the same fact
+    // 3d72900f's own record already establishes for the manager case. So `w.busy=true` reaching THIS
+    // function is not a reachable crash-path state; this case only proves the discriminator itself
+    // still fires correctly when called directly against a `busy:true` row (skipping
+    // `recoverStaleSessions()`, unlike every other case here). (16d) below — the busyAtCrashBySessionId
+    // map — is the genuinely representative crash-path check for busy-at-capture.
+    const mgr = `cow-mgr16c-${sfx}`, wkr = `cow-wkr16c-${sfx}`;
+    const task = mkTask(`cow-t16c-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" });
+    db.setBusy(wkr, true);
+    appendParkedKickoff16(mgr, wkr, task, `root-16c-${sfx}`);
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16c) UNIT CHECK: the PERSISTED w.busy guard stands the escalation down when set directly — the normal nudge runs instead", pty.getPending(wkr).some((m) => /continue your assigned task/i.test(m)));
+    check("(16c) no escalation notice is sent to the manager", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 0);
+  }
+  {
+    // (16d) `busyAtCrashBySessionId` — THE NEW WIRING: the session row itself is busy:false (mirroring
+    // 3d72900f/397ff972's own "the persisted row is already zeroed by the time this runs" reality), and
+    // ONLY the pre-flip captured map carries the real pre-crash busy state through to THIS worker-level
+    // call site (not just the manager-level one it previously fed exclusively).
+    const mgr = `cow-mgr16d-${sfx}`, wkr = `cow-wkr16d-${sfx}`;
+    const task = mkTask(`cow-t16d-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" }); // busy:false, persisted
+    appendParkedKickoff16(mgr, wkr, task, `root-16d-${sfx}`);
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    check("(16d) setup: the persisted row really is busy:false", db.getSession(wkr)?.busy === false);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true, busyAtCrashBySessionId: new Map([[wkr, true]]) });
+    await flush();
+    check("(16d) THE REPRODUCTION: the PRE-FLIP captured busy flag (keyed by the WORKER's own id) stands the escalation down — the normal nudge runs instead", pty.getPending(wkr).some((m) => /continue your assigned task/i.test(m)));
+    check("(16d) no escalation notice is sent to the manager", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 0);
+  }
+  {
+    // (16d-without-capture): the SAME fixture as (16d) but with NO busyAtCrashBySessionId map passed at
+    // all — proves (16d)'s stand-down was the captured value's doing, not a fixture-wide default.
+    const mgr = `cow-mgr16dx-${sfx}`, wkr = `cow-wkr16dx-${sfx}`;
+    const task = mkTask(`cow-t16dx-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" });
+    const root = `root-16dx-${sfx}`;
+    appendParkedKickoff16(mgr, wkr, task, root);
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true }); // no busyAtCrashBySessionId at all
+    await flush();
+    check("(16d-without-capture) WITHOUT a captured busy map, the SAME fixture escalates normally", db.listEventsForWorker(wkr).filter((e) => e.kind === "kickoff_confirm_escalated" && e.detail?.rootMsgId === root).length === 1);
+  }
+  {
+    // (16e) queued pending direction — read LIVE from listUnresolvedQueuedMessagesForWorker, now scoped
+    // to the WORKER's own id (previously this call site only ever read it for a managerId).
+    const mgr = `cow-mgr16e-${sfx}`, wkr = `cow-wkr16e-${sfx}`;
+    const task = mkTask(`cow-t16e-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" });
+    appendParkedKickoff16(mgr, wkr, task, `root-16e-${sfx}`);
+    db.appendEvent({ id: `evt-16e-queued-${sfx}`, ts: now, managerSessionId: mgr, workerSessionId: wkr, taskId: task, kind: "session_message_queued", detail: { msgId: `q-16e-${sfx}` } });
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16e) NEGATIVE CONTROL: queued pending direction stands the escalation down — the normal nudge runs instead", pty.getPending(wkr).some((m) => /continue your assigned task/i.test(m)));
+    check("(16e) no escalation notice is sent to the manager", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 0);
+  }
+  {
+    // (16f) any worker_report ever recorded.
+    const mgr = `cow-mgr16f-${sfx}`, wkr = `cow-wkr16f-${sfx}`;
+    const task = mkTask(`cow-t16f-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" });
+    appendParkedKickoff16(mgr, wkr, task, `root-16f-${sfx}`);
+    db.appendEvent({ id: `evt-16f-report-${sfx}`, ts: now, managerSessionId: mgr, workerSessionId: wkr, taskId: task, kind: "worker_report", detail: { status: "progress", summary: "still going" } });
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16f) NEGATIVE CONTROL: any worker_report ever recorded stands the escalation down — the normal nudge runs instead", pty.getPending(wkr).some((m) => /continue your assigned task/i.test(m)));
+    check("(16f) no escalation notice is sent to the manager", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 0);
+  }
+  {
+    // (16g) a non-empty on-disk engine transcript — a real turn ran despite turnSeq:0.
+    const mgr = `cow-mgr16g-${sfx}`, wkr = `cow-wkr16g-${sfx}`;
+    const task = mkTask(`cow-t16g-${sfx}`, P.proj);
+    const eng = `eng-16g-${sfx}`;
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live", engineSessionId: eng });
+    transcriptDirs.push(writeTranscript(os.tmpdir(), eng));
+    appendParkedKickoff16(mgr, wkr, task, `root-16g-${sfx}`);
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16g) NEGATIVE CONTROL: a non-empty on-disk engine transcript stands the escalation down — the normal nudge runs instead", pty.getPending(wkr).some((m) => /continue your assigned task/i.test(m)));
+    check("(16g) no escalation notice is sent to the manager", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 0);
+  }
+
+  // (16h) NO-DOUBLE-NOTICE ACROSS TWO SIMULATED CRASHES: recoverCrashOrphanedWorkers called twice for
+  // the same still-parked candidate (a second crash, nothing resolved in between).
+  {
+    const mgr = `cow-mgr16h-${sfx}`, wkr = `cow-wkr16h-${sfx}`;
+    const task = mkTask(`cow-t16h-${sfx}`, P.proj);
+    mkSession({ id: mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+    mkSession({ id: wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: mgr, taskId: task, processState: "live" });
+    const root = `root-16h-${sfx}`;
+    appendParkedKickoff16(mgr, wkr, task, root);
+    const derived = deriveCrashOrphanedWorkers(db, [db.getSession(mgr), db.getSession(wkr)]);
+
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16h) crash #1 escalates exactly once", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 1);
+
+    sessions.recoverCrashOrphanedWorkers(derived, { resumeOne: () => true });
+    await flush();
+    check("(16h) NO-DOUBLE-NOTICE: crash #2 does NOT re-send the same notice", pty.getPending(mgr).filter((m) => m.startsWith("[loom:worker-spawn-broken]")).length === 1);
+    const escalatedEvents = db.listEventsForWorker(wkr).filter((e) => e.kind === "kickoff_confirm_escalated" && e.detail?.rootMsgId === root);
+    check("(16h) exactly one durable kickoff_confirm_escalated record exists across both crashes", escalatedEvents.length === 1);
+  }
+
 } finally {
   console.log = realLog;
   console.warn = realWarn;
@@ -1092,6 +1270,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a crash-orphaned worker (exited+resumable+parented+task in_progress) is derived from the pre-archive recoverStaleSessions snapshot, survives the boot-backstop auto-archive AND Pass B worktree-GC (via protectedSessionIds), and reappears in its manager's worker_list once resumed for real; a done-but-unmerged worker is recovered for visibility without a stray 'continue' nudge (a LATER merge_rejected does NOT supersede that report — card db05e657 unified this with worker_list's own projection); a landed/recycled/pre-archived worker is never resurrected; a parked worker/manager is resumed but never nudged (usage hold honored); a manager whose workers ALL fail to resume still gets a summary nudge; an unprotected control worker's worktree IS reclaimed (proving protection mattered); a worker whose manager can't be resumed is left untouched in its clean exited+archived state, not half-resumed; a worker wrongly stale-flagged 'dead' by an earlier watcher race is re-verified live and recovered (healing the flag) instead of silently stranding its manager, while a genuinely-dead sibling is still excluded WITH a logged reason; a manager with zero surviving worker candidates still gets an independent resume attempt, with any genuine failure logged instead of swallowed; and a BLOCKED report is announced in the summary like a done one but gets a distinct 're-state your blocker' nudge instead of the generic continue-nudge it cannot act on."
+  ? "\n✅ ALL PASS — a crash-orphaned worker (exited+resumable+parented+task in_progress) is derived from the pre-archive recoverStaleSessions snapshot, survives the boot-backstop auto-archive AND Pass B worktree-GC (via protectedSessionIds), and reappears in its manager's worker_list once resumed for real; a done-but-unmerged worker is recovered for visibility without a stray 'continue' nudge (a LATER merge_rejected does NOT supersede that report — card db05e657 unified this with worker_list's own projection); a landed/recycled/pre-archived worker is never resurrected; a parked worker/manager is resumed but never nudged (usage hold honored); a manager whose workers ALL fail to resume still gets a summary nudge; an unprotected control worker's worktree IS reclaimed (proving protection mattered); a worker whose manager can't be resumed is left untouched in its clean exited+archived state, not half-resumed; a worker wrongly stale-flagged 'dead' by an earlier watcher race is re-verified live and recovered (healing the flag) instead of silently stranding its manager, while a genuinely-dead sibling is still excluded WITH a logged reason; a manager with zero surviving worker candidates still gets an independent resume attempt, with any genuine failure logged instead of swallowed; a BLOCKED report is announced in the summary like a done one but gets a distinct 're-state your blocker' nudge instead of the generic continue-nudge it cannot act on; and (card 7970db77) a TASKED worker holding an unresolved parked kickoff now escalates on this crash path too, instead of silently getting the generic continue-nudge that would otherwise start a confused first turn and permanently hide the dead kickoff."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
