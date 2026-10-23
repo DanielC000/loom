@@ -236,6 +236,41 @@ export function activeBootStuckAlerts(
   return out;
 }
 
+// ── KICKOFF DROPPED pairing (card 5c2f8108) ─────────────────────────────────────────────────────────────
+// Same latest-wins pairing shape as activeBootStuckAlerts above, for manager_kickoff_dropped /
+// manager_kickoff_dropped_resolved — a cross-session, kind-filtered query (never the per-manager fan-out
+// `useAttention`'s own `managers` list drives), because this kind now also covers role "platform" (card
+// 5c2f8108), and a Platform Lead is never a member of that role==="manager" fan-out at all (same
+// `43084723` reasoning: a per-role/per-manager fan-out can make a real session's own unresolved event
+// unreachable). Resolve clears it — only via handleGiveUpConfirmed's own content-match confirmation of
+// the drop's own rootMsgId, never a bare completed-turn signal (see SessionService.
+// handleKickoffDroppedResolved's own doc); a still-live session with no later resolve keeps surfacing it.
+export interface KickoffDroppedAlert { event: OrchestrationEvent; sessionId: string }
+
+export function activeKickoffDroppedAlerts(
+  events: readonly OrchestrationEvent[],
+  isLiveSessionId: (sessionId: string) => boolean,
+): KickoffDroppedAlert[] {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of sorted) {
+    if (e.kind === "manager_kickoff_dropped") {
+      if ((e.detail as { parentNudged?: boolean } | undefined)?.parentNudged !== false) continue;
+    } else if (e.kind !== "manager_kickoff_dropped_resolved") {
+      continue;
+    }
+    latest.set(e.workerSessionId ?? e.managerSessionId, e);
+  }
+  const out: KickoffDroppedAlert[] = [];
+  for (const e of latest.values()) {
+    if (e.kind !== "manager_kickoff_dropped") continue; // a manager_kickoff_dropped_resolved is the latest → cleared.
+    const sessionId = e.workerSessionId ?? e.managerSessionId;
+    if (!isLiveSessionId(sessionId)) continue; // nobody can act on a no-longer-live session's alarm
+    out.push({ event: e, sessionId });
+  }
+  return out;
+}
+
 // ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) ──────────────────────────────────────────
 // Extracted out of lib/attention.ts's useAttention, same reason as activeBootStuckAlerts above: given a
 // combined, unsorted merge_request/merge_done/merge_rejected stream, keeps the LATEST per (taskId ||

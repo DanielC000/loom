@@ -426,7 +426,9 @@ async function main(): Promise<void> {
     },
     // Card 417cea0a: a give-up-tracked message was confirmed by content match — `sessions` (forward
     // reference, same pattern as onBusy/onExit above) decides whether it was ever actually PARKED and, if
-    // so, retracts that notice to the original sender. See PtyHostEvents.onGiveUpConfirmed's own doc.
+    // so, retracts that notice to the original sender; card 5c2f8108 (round 2) widened this to ALSO be
+    // the sole trigger for `manager_kickoff_dropped`'s resolve half — see PtyHostEvents.onGiveUpConfirmed's
+    // own doc and SessionService.handleGiveUpConfirmed's.
     onGiveUpConfirmed: (sessionId, logicalId, latencyMs) => sessions.handleGiveUpConfirmed(sessionId, logicalId, latencyMs),
     // Card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin exhausted its requeue budget — `sessions`
     // (forward reference, same pattern as onBusy/onGiveUpConfirmed above) decides who spawned this and

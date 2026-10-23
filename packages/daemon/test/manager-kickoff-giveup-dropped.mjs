@@ -55,6 +55,36 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //       immediately, byte-identical to (A)-(H)'s own behavior; proves the new window check doesn't
 //       regress the ordinary (unmeasurable-or-elapsed) case.
 //
+// Card 5c2f8108 widens the above from manager-only to ALSO cover role "platform" (the Platform Lead has
+// no Lead above it either, so its own dropped kickoff fell into the same generic bail), and adds a RESOLVE
+// half (`manager_kickoff_dropped_resolved`, fired on the session's own first completed turn):
+//   (L) a PLATFORM kickoff drop records the SAME durable event (role:"platform", parentNudged:false) but
+//       NEVER attempts a Lead escalation — leadNotified:false, no leadBoardTaskId, ZERO enqueueStdin calls
+//       — even with a LIVE + past-boot Lead present (unlike (C), which proves a manager's drop DOES reach
+//       that same Lead); there is no higher session to escalate a Lead's own drop to.
+//   (M) a PLATFORM kickoff that confirmed LATE (hasFirstTurnStarted:true) is suppressed exactly like (G).
+//   (N) a PLATFORM kickoff still WITHIN the plausible-confirm window defers, then fires exactly once (with
+//       role:"platform") at the recheck if still unconfirmed — mirrors (J).
+//   (O) a PLATFORM kickoff OUTSIDE the window drops immediately — mirrors (K).
+//   (P) `handleKickoffDroppedResolved`: a no-op with no prior unpaired `manager_kickoff_dropped` event.
+//   (Q) `handleKickoffDroppedResolved` REQUIRES its `confirmedRootMsgId` to match the unpaired drop's own
+//       recorded `rootMsgId` — a mismatch is a no-op, a match resolves it, and a repeat call once already
+//       resolved is idempotent.
+//   (R) the SAME resolve method pairs against a PLATFORM drop too (from (L)'s own session), keyed on ITS
+//       OWN rootMsgId — the pairing is session id + rootMsgId, never session id alone.
+//
+// Card 5c2f8108 ROUND 2 (Code Review ba4d1e14) replaced the generic "first completed turn resolves it"
+// trigger with a real delivery proof — an IdleWatcher nudge, a boot continuation note, ordinary chat, or
+// even a StopFailure can all complete a turn with the dropped kickoff's own brief never having landed, so
+// "turn-1 completed" was never actually proof of THIS kickoff's delivery:
+//   (S) THE REAL WIRING, AT SESSIONSERVICE LEVEL: `handleGiveUpConfirmed` (the method PtyHost's own live
+//       content-match hook actually calls — never a direct call to the resolve method alone) resolves a
+//       dropped manager kickoff when the confirmed logicalId matches its own rootMsgId. Calls
+//       `handleGiveUpConfirmed` directly, not through a real PtyHost; a host-level test is a separate,
+//       not-yet-built follow-up.
+//   (T) NEGATIVE: an unrelated confirmation (a different logicalId on the same session) does NOT resolve
+//       a still-open drop.
+//
 // RED-BEFORE-GREEN (this project's own standing verification posture): run against the PRE-FIX
 // `handleKickoffGiveUpExhausted` (role==="manager" still falling into the generic bail) — (A)'s
 // `manager_kickoff_dropped` event assertion fails (nothing is ever recorded for a manager), and so do
@@ -63,7 +93,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // filed and the Lead IS nudged for a session that only confirmed late. Run against ROUND-2 code (the
 // manager carve-out gated by `lateConfirmation` but with no `withinKickoffConfirmWindow` check at all,
 // this round's own CR finding #2) — (I) fails: its "deferred, NOT dropped on the first exhaustion"
-// assertion is false, since round-2 drops immediately regardless of the window.
+// assertion is false, since round-2 drops immediately regardless of the window. Run against PRE-5c2f8108
+// code (role==="manager" only, no resolve method at all) — (L)-(O) fail (a platform drop falls into the
+// generic bail, same as (A)'s pre-fix shape), and (P)-(R) fail (`handleKickoffDroppedResolved` doesn't
+// exist). Run against 5c2f8108-ROUND-1 code (the resolve method exists but takes only `sessionId`, with
+// no `confirmedRootMsgId` match at all) — (Q)'s mismatch assertion fails (it resolves on ANY call
+// regardless of rootMsgId), and (T) fails (nothing stops an unrelated confirmation from resolving it,
+// since round 1's trigger was keyed on `onTurnCompleted`/turnSeq, not on a specific rootMsgId at all).
 //
 // RUN: pnpm build (from packages/daemon) then `node test/manager-kickoff-giveup-dropped.mjs`.
 import fs from "node:fs";
@@ -431,12 +467,215 @@ try {
     db.setProcessState(lead, "exited");
   }
 
+  // ===================== (L) Card 5c2f8108: a PLATFORM kickoff drop — SAME event, NEVER escalated =======
+  // Mirrors (C)'s setup (a LIVE + past-boot Lead present) so a leaked escalation would be visible — this
+  // proves the Lead-escalation branch is structurally skipped for role:"platform", not merely untriggered
+  // for lack of a Lead to notify.
+  let platformEvent;
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const leadSelf = `mkgd-l-lead-${sfx}`, otherLead = `mkgd-l-other-lead-${sfx}`;
+    mkSession({ id: leadSelf, role: "platform" });
+    mkSession({ id: otherLead, role: "platform" });
+    pty.setLive(leadSelf); pty.setLive(otherLead); pty.setPastBoot(otherLead);
+
+    const tasksBefore = db.listTasks(home).length;
+    sessions.handleKickoffGiveUpExhausted(leadSelf, `msg-l-${sfx}`, `root-l-${sfx}`, `kickoff-l-${sfx}`);
+
+    const events = db.listEventsForWorker(leadSelf).filter((e) => e.kind === "manager_kickoff_dropped");
+    check("(L) a durable manager_kickoff_dropped event IS recorded for a platform-role kickoff drop", events.length === 1);
+    platformEvent = events[0];
+    check("(L) detail carries role:\"platform\" and parentNudged:false",
+      platformEvent?.detail?.role === "platform" && platformEvent?.detail?.parentNudged === false);
+    check("(L) leadNotified:false — a Platform Lead's own drop NEVER escalates, even with a live+past-boot Lead present",
+      platformEvent?.detail?.leadNotified === false);
+    check("(L) no leadBoardTaskId — no board task was filed for the Lead's own drop", platformEvent?.detail?.leadBoardTaskId === undefined);
+    check("(L) NO board task was filed at all (not even a reused/pre-existing one)", db.listTasks(home).length === tasksBefore);
+    check("(L) ZERO enqueueStdin calls anywhere — no Lead escalation, and no self-nudge into the dropped Lead itself", pty.sent.length === 0);
+    db.setProcessState(otherLead, "exited");
+  }
+
+  // ===================== (M) Card 5c2f8108: a PLATFORM kickoff that confirmed LATE is suppressed =========
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const lead = `mkgd-m-lead-${sfx}`;
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(lead);
+    pty.firstTurnStarted.add(lead); // the discriminator: this Lead already confirmed a turn
+
+    sessions.handleKickoffGiveUpExhausted(lead, `msg-m-${sfx}`, `root-m-${sfx}`, `kickoff-m-${sfx}`);
+
+    check("(M) NO manager_kickoff_dropped event is recorded for a late-confirmed Platform Lead",
+      db.listEventsForWorker(lead).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
+    check("(M) ZERO enqueueStdin calls anywhere", pty.sent.length === 0);
+  }
+
+  // ===================== (N) Card 5c2f8108: a PLATFORM kickoff still WITHIN the window defers, then =====
+  // =====================     fires exactly once (role:"platform") at the recheck if still unconfirmed ===
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const lead = `mkgd-n-lead-${sfx}`;
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(lead);
+
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    try {
+      pty.setLiveStartedAt(lead, Date.now() - 1_000);
+      const pending = withinKickoffConfirmWindow(pty, lead, 0);
+      sessions.handleKickoffGiveUpExhausted(lead, `msg-n-${sfx}`, `root-n-${sfx}`, `kickoff-n-${sfx}`);
+      check("(N) deferred, NOT dropped on the first exhaustion: NO manager_kickoff_dropped event yet",
+        db.listEventsForWorker(lead).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
+
+      mock.timers.tick(pending.windowMs - pending.sinceMs + 1_000);
+
+      const events = db.listEventsForWorker(lead).filter((e) => e.kind === "manager_kickoff_dropped");
+      check("(N) still unconfirmed at the recheck: the full drop fires exactly once", events.length === 1);
+      check("(N) detail carries role:\"platform\"", events[0]?.detail?.role === "platform");
+      check("(N) leadNotified:false — never escalated", events[0]?.detail?.leadNotified === false);
+      check("(N) ZERO enqueueStdin calls anywhere", pty.sent.length === 0);
+    } finally {
+      mock.timers.reset();
+    }
+  }
+
+  // ===================== (O) Card 5c2f8108: a PLATFORM kickoff OUTSIDE the window drops immediately =====
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const lead = `mkgd-o-lead-${sfx}`;
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(lead);
+    pty.setLiveStartedAt(lead, Date.now() - 61_000); // past BROKEN_SPAWN_HOLDOFF_MS (60s) — window elapsed
+    check("(O) (setup) the Lead reads as OUTSIDE its plausible confirm window",
+      withinKickoffConfirmWindow(pty, lead, 0) === null);
+
+    sessions.handleKickoffGiveUpExhausted(lead, `msg-o-${sfx}`, `root-o-${sfx}`, `kickoff-o-${sfx}`);
+
+    const events = db.listEventsForWorker(lead).filter((e) => e.kind === "manager_kickoff_dropped");
+    check("(O) outside the window: drops immediately, exactly once", events.length === 1);
+    check("(O) detail carries role:\"platform\", leadNotified:false", events[0]?.detail?.role === "platform" && events[0]?.detail?.leadNotified === false);
+  }
+
+  // ===================== (P) Card 5c2f8108 round 2: handleKickoffDroppedResolved — no-op, no prior drop ==
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const noHistory = `mkgd-p-nohist-${sfx}`;
+    mkSession({ id: noHistory, role: "manager" });
+
+    sessions.handleKickoffDroppedResolved(noHistory, `root-p-whatever-${sfx}`);
+    check("(P) no-op: calling handleKickoffDroppedResolved with no prior drop history appends nothing",
+      db.listEventsForWorker(noHistory).filter((e) => e.kind === "manager_kickoff_dropped_resolved").length === 0);
+  }
+
+  // ===================== (Q) Card 5c2f8108 round 2: handleKickoffDroppedResolved REQUIRES the confirmed ===
+  // =====================     rootMsgId to match (A)'s own drop — a mismatch is a no-op, a match resolves, ==
+  // =====================     and a repeat call once already resolved is idempotent. ========================
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    // Reuse (A)'s own dropped manager session id/rootMsgId verbatim — literal values minted at (A)'s scope.
+    const mgrASessionId = `mkgd-a-mgr-${sfx}`;
+    const mgrARootMsgId = `root-a-${sfx}`;
+    const before = db.listEventsForWorker(mgrASessionId).filter((e) => e.kind === "manager_kickoff_dropped");
+    check("(Q) (setup) exactly one unpaired manager_kickoff_dropped event exists for (A)'s manager",
+      before.length === 1 && db.listEventsForWorker(mgrASessionId).filter((e) => e.kind === "manager_kickoff_dropped_resolved").length === 0);
+
+    // Round 2's own new requirement: a confirmation of a DIFFERENT message must NOT resolve this alert —
+    // without this, a generic "something confirmed" signal would be indistinguishable from the dropped
+    // kickoff's own delivery, exactly the defect this round exists to close.
+    sessions.handleKickoffDroppedResolved(mgrASessionId, `root-UNRELATED-${sfx}`);
+    check("(Q) a mismatched rootMsgId does NOT resolve the alert",
+      db.listEventsForWorker(mgrASessionId).filter((e) => e.kind === "manager_kickoff_dropped_resolved").length === 0);
+
+    sessions.handleKickoffDroppedResolved(mgrASessionId, mgrARootMsgId);
+    const resolved = db.listEventsForWorker(mgrASessionId).filter((e) => e.kind === "manager_kickoff_dropped_resolved");
+    check("(Q) the MATCHING rootMsgId resolves it: exactly one resolved event appended", resolved.length === 1);
+    check("(Q) the resolved event is filed under the SAME managerSessionId/taskId as the paired drop",
+      resolved[0]?.managerSessionId === before[0]?.managerSessionId && resolved[0]?.taskId === before[0]?.taskId);
+    check("(Q) the resolved event names the affected session as its workerSessionId", resolved[0]?.workerSessionId === mgrASessionId);
+
+    sessions.handleKickoffDroppedResolved(mgrASessionId, mgrARootMsgId);
+    check("(Q) idempotent: a second matching call once already resolved appends no second resolved event",
+      db.listEventsForWorker(mgrASessionId).filter((e) => e.kind === "manager_kickoff_dropped_resolved").length === 1);
+  }
+
+  // ===================== (R) Card 5c2f8108 round 2: the SAME resolve method pairs against (L)'s PLATFORM ==
+  // =====================     drop too, keyed on ITS OWN rootMsgId (root-l-${sfx}), not (A)'s. ==============
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const leadSelfId = platformEvent?.workerSessionId;
+    const leadRootMsgId = `root-l-${sfx}`;
+    check("(R) (setup) (L)'s platform drop event is available", typeof leadSelfId === "string");
+    check("(R) (setup) (L)'s drop was recorded under its OWN rootMsgId", platformEvent?.detail?.rootMsgId === leadRootMsgId);
+
+    sessions.handleKickoffDroppedResolved(leadSelfId, leadRootMsgId);
+    const resolved = db.listEventsForWorker(leadSelfId).filter((e) => e.kind === "manager_kickoff_dropped_resolved");
+    check("(R) the SAME resolve method pairs against a PLATFORM drop too — exactly one resolved event appended", resolved.length === 1);
+  }
+
+  // ===================== (S) Card 5c2f8108 round 2: THE REAL WIRING, AT SESSIONSERVICE LEVEL — ============
+  // =====================     handleGiveUpConfirmed (the live content-match entry point PtyHost actually ===
+  // =====================     calls) is what resolves a dropped kickoff, not a direct call to ==============
+  // =====================     handleKickoffDroppedResolved alone. Called directly here, not through a real =
+  // =====================     PtyHost — a host-level test is a separate, not-yet-built follow-up. ==========
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-s-mgr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    pty.setLive(mgr);
+    const rootMsgId = `root-s-${sfx}`;
+
+    sessions.handleKickoffGiveUpExhausted(mgr, `msg-s-${sfx}`, rootMsgId, `kickoff-s-${sfx}`);
+    check("(S) (setup) the kickoff drop was recorded",
+      db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped").length === 1);
+
+    // The REAL path: PtyHost's own late content-match fires onGiveUpConfirmed(sessionId, logicalId, ms),
+    // which the daemon wires straight to handleGiveUpConfirmed — never a direct call to the resolve method.
+    sessions.handleGiveUpConfirmed(mgr, rootMsgId, 12_345);
+    const resolved = db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped_resolved");
+    check("(S) a late content-match confirmation of the dropped kickoff's OWN rootMsgId resolves it, at SessionService level",
+      resolved.length === 1);
+  }
+
+  // ===================== (T) Card 5c2f8108 round 2: NEGATIVE — an unrelated confirmation (an idle-nudge- ==
+  // =====================     shaped turn's own give-up chain, or any other message's logicalId) must =====
+  // =====================     NOT resolve a still-open drop for a DIFFERENT session. =========================
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-t-mgr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    pty.setLive(mgr);
+    const rootMsgId = `root-t-${sfx}`;
+
+    sessions.handleKickoffGiveUpExhausted(mgr, `msg-t-${sfx}`, rootMsgId, `kickoff-t-${sfx}`);
+    check("(T) (setup) the kickoff drop was recorded",
+      db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped").length === 1);
+
+    // An unrelated confirmation on the SAME session — e.g. an idle-nudge or ordinary chat message's own
+    // give-up/content-match chain confirming with a DIFFERENT logicalId — must not be read as proof THIS
+    // kickoff landed. This is the exact gap round 1's bare "first completed turn" trigger had.
+    sessions.handleGiveUpConfirmed(mgr, `root-UNRELATED-idle-nudge-${sfx}`, 999);
+    check("(T) an unrelated confirmation does NOT resolve the still-open drop",
+      db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped_resolved").length === 0);
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card ab3c965d: a MANAGER's turn-1 kickoff give-up-exhaustion now records a durable manager_kickoff_dropped event (role/parentNudged honest, always parentNudged:false) with no re-mint, and gets a best-effort Platform-Lead escalation (board task + live-nudge, generalized via notifyLeadOfParentlessManagerIssue) mirroring handleClaudeBootDialogStuck's own parentless-manager resolution — event-only with no platform-tier home (A), a durable board task even with no live Lead (B), a live-nudge to a live+past-boot Lead while the dropped manager itself NEVER gets a self-nudge (C), dedup across repeated episodes for the same session id (D), both LOOM_DEV states resolving the correct home (E), a worker's own kickoff-drop path is completely unaffected (F), late confirmation (via the pty hook (G) and a real transcript (H)) suppresses the drop, and (round 3) a still-within-window exhaustion defers the drop rather than firing it immediately — suppressed by a late confirmation (I), fired exactly once at the recheck when still unconfirmed (J), and an outside-the-window exhaustion still drops immediately as before (K)."
+  ? "\n✅ ALL PASS — card ab3c965d: a MANAGER's turn-1 kickoff give-up-exhaustion now records a durable manager_kickoff_dropped event (role/parentNudged honest, always parentNudged:false) with no re-mint, and gets a best-effort Platform-Lead escalation (board task + live-nudge, generalized via notifyLeadOfParentlessManagerIssue) mirroring handleClaudeBootDialogStuck's own parentless-manager resolution — event-only with no platform-tier home (A), a durable board task even with no live Lead (B), a live-nudge to a live+past-boot Lead while the dropped manager itself NEVER gets a self-nudge (C), dedup across repeated episodes for the same session id (D), both LOOM_DEV states resolving the correct home (E), a worker's own kickoff-drop path is completely unaffected (F), late confirmation (via the pty hook (G) and a real transcript (H)) suppresses the drop, and (round 3) a still-within-window exhaustion defers the drop rather than firing it immediately — suppressed by a late confirmation (I), fired exactly once at the recheck when still unconfirmed (J), and an outside-the-window exhaustion still drops immediately as before (K). Card 5c2f8108 widens this to role \"platform\" — the SAME event, but NEVER escalated to a Lead (L), suppressed by late confirmation (M), deferred-then-fired-once-unconfirmed (N), and dropped immediately outside the window (O) — plus the RESOLVE half (manager_kickoff_dropped_resolved), round 2: a no-op with no prior drop (P), REQUIRES the confirmed rootMsgId to match (Q), pairs against a PLATFORM drop too keyed on its own rootMsgId (R), and is driven by the REAL handleGiveUpConfirmed wiring, at SessionService level (S) with an unrelated confirmation proven NOT to resolve it (T)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -85,7 +85,11 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   `manager_kickoff_dropped` (card `ab3c965d` — the MANAGER-scoped sibling of `session_message_gave_up`:
   a manager's turn-1 kickoff exhausted its give-up budget with no parent session to notify (no spawn path
   ever sets `parentSessionId` for role="manager"); the only durable trace that this happened at all, and
-  the one a later content-matched confirming hook has nothing else to retract against).
+  the one a later content-matched confirming hook has nothing else to retract against; widened by card
+  `5c2f8108` to also cover role="platform"),
+  `manager_kickoff_dropped_resolved` (card `5c2f8108` — the RESOLVE half of the pair above, same
+  survival reason as `claude_boot_dialog_resolved`: a cascaded agent/session delete must not silently
+  un-pair the two and leave an orphaned drop row that now reads as never-resolved).
 - **Owner-interaction records** (ruled durable by the manager, `gen 345`: each is a record of an
   *owner* interaction — a decision asked for, an escalation crossing a board boundary, the owner's own
   brake being released; low volume, provenance is the whole value): `question_asked`,

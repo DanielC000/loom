@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -408,24 +408,23 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     if (e.kind === "give_up_recovery_escalated") latestGiveUpRecovery.set(e.managerSessionId, e);
   }
 
-  // Manager kickoff dropped (card ab3c965d): a MANAGER's (role:"manager" only — the Platform Lead's own
-  // kickoff-drop gap is a separate, not-yet-built card) turn-1 kickoff exhausted its give-up budget with
-  // no re-mint and no parent to notify. Same shape as give_up_recovery_escalated immediately above — no
-  // "cleared" event exists. This loop itself applies no liveness check of its own; the "LIVE manager"
-  // part is inherited entirely from `allEvents` already being scoped to the per-live-manager
-  // `eventQueries` fan-out above (the `managers` filter at the top of this function) — once a dropped
-  // manager's session stops being live, its event simply stops being fetched, which is what makes this
-  // surface clear on its own with no explicit "cleared" counterpart.
-  // Code Review 5f95e7a1: gated on `detail.parentNudged === false`, mirroring claude_boot_dialog_stuck's
-  // own gate (`activeBootStuckAlerts`, lib/fleet.ts) exactly — the record's own Do-not #4. A manager
-  // always sets this `false` (it never has a parent to nudge), so the practical effect is "always", but
-  // the field is what this surface should check, not the role.
-  const latestManagerKickoffDropped = new Map<string, OrchestrationEvent>();
-  for (const e of sortedEvents) {
-    if (e.kind === "manager_kickoff_dropped" && (e.detail as { parentNudged?: boolean } | undefined)?.parentNudged === false) {
-      latestManagerKickoffDropped.set(e.managerSessionId, e);
-    }
-  }
+  // Manager/Platform-Lead kickoff dropped (card ab3c965d, widened by card 5c2f8108 to also cover
+  // role:"platform"): a turn-1 kickoff exhausted its give-up budget with no re-mint and no parent to
+  // notify. Own cross-session, kind-filtered query — same `43084723` reasoning as bootStuckEventsQuery
+  // above: a Platform Lead is never a member of the `managers` (role==="manager") fan-out this function's
+  // `eventQueries` drives, so a per-manager fan-out can never reach its own dropped-kickoff event at all.
+  // Paired against the resolve half (`manager_kickoff_dropped_resolved`, card 5c2f8108 — fired ONLY from
+  // handleGiveUpConfirmed's own content-match confirmation of the drop's own rootMsgId, never a bare
+  // completed-turn signal; see SessionService.handleKickoffDroppedResolved's doc) via the
+  // same latest-wins-per-session shape `activeBootStuckAlerts` uses, extracted to `activeKickoffDroppedAlerts`
+  // (lib/fleet.ts) for the same reason that one is: unit-testable without React/react-query.
+  const kickoffDroppedEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "manager_kickoff_dropped", "manager_kickoff_dropped_resolved"],
+    queryFn: () => api.orchestrationEventsByKinds(["manager_kickoff_dropped", "manager_kickoff_dropped_resolved"]),
+    refetchInterval: 4000,
+  });
+  const activeKickoffDropped = activeKickoffDroppedAlerts(kickoffDroppedEventsQuery.data ?? [],
+    (sessionId) => all.find((s) => s.id === sessionId)?.processState === "live");
 
   // Quiet-board cause (card 275ac184, IdleWatcher's `nothingElseActionable` skip): a manager/Lead
   // suppressed because every non-terminal card is non-actionable (held/deferred/excluded-lane/
@@ -668,13 +667,21 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       text: `manager ${e.managerSessionId.slice(0, 8)} — submit give-up recovery fired ${detail.count ?? "?"}x${windowMin ? ` in ~${windowMin}m` : ""}; its composer submissions may be unreliable`,
     });
   }
-  for (const e of latestManagerKickoffDropped.values()) {
-    const detail = (e.detail ?? {}) as { leadNotified?: boolean; leadBoardTaskId?: string };
+  for (const { event: e, sessionId: kdSessionId } of activeKickoffDropped) {
+    const detail = (e.detail ?? {}) as { leadNotified?: boolean; leadBoardTaskId?: string; role?: string };
+    // Card 5c2f8108: `roleLabel` reads `detail.role` so a Platform Lead's own dropped kickoff isn't
+    // misreported as a manager's — a manager's own notice also names whether the Lead was notified
+    // (never applicable to the Lead's own drop, which skips that escalation entirely).
+    const roleLabel = detail.role === "platform" ? "Platform Lead" : "manager";
     items.push({
-      key: `mkd-${e.id}`, tone: "red", notify: "manager-kickoff-dropped", kind: "KICKOFF DROPPED", sessionId: e.managerSessionId,
+      key: `mkd-${e.id}`, tone: "red", notify: "manager-kickoff-dropped", kind: "KICKOFF DROPPED", sessionId: kdSessionId,
       dismissKey: `mkd:${e.id}`, // one manager_kickoff_dropped event per episode (card 611e76ba)
-      dismissHint: "Hide this alert — it returns if this manager's kickoff is dropped again. The session itself is untouched.",
-      text: `manager ${e.managerSessionId.slice(0, 8)} — turn-1 kickoff never confirmed delivered; Loom gave up retrying it and the session likely booted context-free${detail.leadNotified ? " (Platform Lead notified)" : ""}`,
+      dismissHint: `Hide this alert — it returns if this ${roleLabel.toLowerCase()}'s kickoff is dropped again. The session itself is untouched.`,
+      // A manual recovery (re-sending the brief as a new message) or a daemon restart between the drop
+      // and a late confirmation does NOT auto-clear this alert — by design (manager_kickoff_dropped_resolved
+      // only fires on handleGiveUpConfirmed's own content-match of THIS drop's rootMsgId). Say so, so the
+      // owner knows to dismiss it manually rather than wait for it to clear on its own.
+      text: `${roleLabel} ${kdSessionId.slice(0, 8)} — turn-1 kickoff never confirmed delivered; Loom gave up retrying it and the session likely booted context-free${detail.leadNotified ? " (Platform Lead notified)" : ""}. If you recover it manually (resend the brief, or restart), dismiss this alert — it won't clear on its own.`,
     });
   }
   for (const e of latestQuiet.values()) {
@@ -839,6 +846,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     && bootStuckEventsQuery.data !== undefined && vaultLockEventsQuery.data !== undefined
     && codexGapEventsQuery.data !== undefined && recycleConsolidatedEventsQuery.data !== undefined
     && crashLoopAbandonedEventsQuery.data !== undefined && crashLoopRecoveredEventsQuery.data !== undefined
+    && kickoffDroppedEventsQuery.data !== undefined
     && eventQueries.every((q) => q.data !== undefined);
   const derivableSig = items.filter((it) => it.dismissKey).map((it) => it.dismissKey!).sort().join("\n");
   useEffect(() => {
@@ -856,6 +864,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     && !vaultLockEventsQuery.isPending && !codexGapEventsQuery.isPending
     && !recycleConsolidatedEventsQuery.isPending
     && !crashLoopAbandonedEventsQuery.isPending && !crashLoopRecoveredEventsQuery.isPending
+    && !kickoffDroppedEventsQuery.isPending
     && eventQueries.every((q) => !q.isPending);
 
   return { items: visible, count: visible.length, resolved };

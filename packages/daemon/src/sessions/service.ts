@@ -11538,22 +11538,29 @@ export class SessionService {
     // has a parentSessionId (so it would otherwise always hit that guard anyway), but this must not
     // depend on that happening to stay true. Deliberately does NOT re-mint (see that method's own doc for
     // why extending re-mint to managers is out of scope here).
-    if (w?.role === "manager") {
+    // Card 5c2f8108: widened to also cover role "platform" — the Platform Lead has no Lead above it
+    // either, so its own dropped kickoff fell into the SAME generic console-only bail this carve-out was
+    // built to close for managers. `handleManagerKickoffDropped` itself gates the Lead-escalation call on
+    // the role (never attempted for "platform" — there is no higher session to escalate to); every other
+    // step here (late-confirmation suppression, the confirm-window defer/recheck) is shared verbatim.
+    if (w?.role === "manager" || w?.role === "platform") {
+      const roleLabel = w.role === "platform" ? "PLATFORM LEAD" : "MANAGER";
       if (lateConfirmation()) {
         // eslint-disable-next-line no-console
-        console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty()}) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
+        console.error(`[give-up] ${sessionId} turn-1 ${roleLabel} kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty()}) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
         return;
       }
-      // Round 3 (card ab3c965d): a manager's kickoff is the LARGEST of any role's (p95 confirmation lag
-      // ~342s measured), so the most likely of any role to confirm LATE — do not drop on the FIRST
-      // exhaustion with no plausible-confirm window at all. Consults the SAME `withinKickoffConfirmWindow`
-      // predicate and `armKickoffConfirmRecheck` escalation timer the worker park path (below) already
-      // relies on. Decision 8882e2ca's own doc says not to add a second, divergent timer/mechanism for
-      // "has the window passed yet" — this reuses that one instead of building a second.
+      // Round 3 (card ab3c965d): a manager's (and, per card 5c2f8108, a Platform Lead's) kickoff is the
+      // LARGEST of any role's (p95 confirmation lag ~342s measured), so the most likely of any role to
+      // confirm LATE — do not drop on the FIRST exhaustion with no plausible-confirm window at all.
+      // Consults the SAME `withinKickoffConfirmWindow` predicate and `armKickoffConfirmRecheck` escalation
+      // timer the worker park path (below) already relies on. Decision 8882e2ca's own doc says not to add
+      // a second, divergent timer/mechanism for "has the window passed yet" — this reuses that one instead
+      // of building a second.
       const pending = withinKickoffConfirmWindow(this.pty, sessionId, w.turnSeq);
       if (pending) {
         // eslint-disable-next-line no-console
-        console.warn(`[give-up] ${sessionId} turn-1 MANAGER kickoff (root ${rootMsgId}) exhausted its give-up requeue budget, but is still within its plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s) — deferring manager_kickoff_dropped and re-checking when the window ends instead of dropping immediately`);
+        console.warn(`[give-up] ${sessionId} turn-1 ${roleLabel} kickoff (root ${rootMsgId}) exhausted its give-up requeue budget, but is still within its plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s) — deferring manager_kickoff_dropped and re-checking when the window ends instead of dropping immediately`);
         this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs, rootMsgId, (ww) => {
           // The generic stand-down in armKickoffConfirmRecheck already re-checked hasFirstTurnStarted/
           // busy/turnSeq before calling this callback at all; re-check the ONE discriminator it doesn't
@@ -11561,14 +11568,14 @@ export class SessionService {
           const transcriptNonEmptyNow = !!ww.engineSessionId && readTranscript(ww.cwd, ww.engineSessionId, ww.harness).length > 0;
           if (transcriptNonEmptyNow) {
             // eslint-disable-next-line no-console
-            console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff's plausible-confirm window ended, but the session now shows real activity (transcriptNonEmpty=true) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
+            console.error(`[give-up] ${sessionId} turn-1 ${roleLabel} kickoff's plausible-confirm window ended, but the session now shows real activity (transcriptNonEmpty=true) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
             return;
           }
-          this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId);
+          this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId, w.role as "manager" | "platform");
         });
         return;
       }
-      this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId);
+      this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId, w.role as "manager" | "platform");
       return;
     }
     if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) {
@@ -12123,6 +12130,8 @@ export class SessionService {
       `- **Origin project:** ${originProject?.name ?? s?.projectId ?? "unknown"} (\`${s?.projectId ?? "unknown"}\`)`,
       "",
       "It likely booted (or is still sitting) with NO brief at all, and will not experience this as \"missing text\" — it just starts context-free and may rationalize it rather than report a gap. Check its live screen/transcript; if it genuinely never started a turn, recover its brief via `agent_get` (the full startupPrompt, verbatim) and send it directly, or session_stop + respawn.",
+      "",
+      "A manual recovery like that (or a daemon restart between this drop and a late confirmation) does NOT auto-clear this alert by itself — dismiss it once you've confirmed the session is actually running.",
     ].join("\n");
     return this.notifyLeadOfParentlessManagerIssue(
       sessionId, "manager_kickoff_dropped", `[Manager kickoff dropped] ${sessionId.slice(0, 8)}`, body,
@@ -12137,24 +12146,64 @@ export class SessionService {
    * `notifyLeadOfStuckManager` already relies on). Mirrors `handleClaudeBootDialogStuck`'s OWN
    * parentless-manager resolution (card e2a3c613) exactly: a durable `manager_kickoff_dropped` event
    * (`parentNudged:false`, so `companion/attention-push.ts`'s `classify()` surfaces it to the owner-
-   * attention surfaces unconditionally) PLUS a best-effort Platform-Lead escalation via
-   * `notifyLeadOfDroppedManagerKickoff` — never either/or. Deliberately NO self-nudge into this session:
-   * its first turn never started, so there is nothing live to read a notice typed into its own composer.
+   * attention surfaces unconditionally) PLUS, for role "manager" only, a best-effort Platform-Lead
+   * escalation via `notifyLeadOfDroppedManagerKickoff` — never either/or. Deliberately NO self-nudge into
+   * this session: its first turn never started, so there is nothing live to read a notice typed into its
+   * own composer.
+   *
+   * Card 5c2f8108 — `role` widened to also accept "platform": the Platform Lead's own dropped kickoff
+   * gets the SAME durable event + owner-attention alert, but Lead-escalation is skipped entirely for it
+   * (`leadNotified` stays `false`, no `leadBoardTaskId`) — there is no higher Lead session to escalate a
+   * Lead's own drop to; it IS the top of the parentless-session chain `notifyLeadOfParentlessManagerIssue`
+   * exists to reach.
    *
    * @decision ab3c965d (round 2) — do not call this method without the caller first verifying
    * `lateConfirmation` is false; this method has no way to check that itself, and round 1 omitted the
    * check for the manager branch entirely.
    */
-  private handleManagerKickoffDropped(sessionId: string, msgId: string, rootMsgId: string): void {
+  private handleManagerKickoffDropped(sessionId: string, msgId: string, rootMsgId: string, role: "manager" | "platform"): void {
     const s = this.db.getSession(sessionId);
-    const { leadNotified, leadBoardTaskId } = this.notifyLeadOfDroppedManagerKickoff(sessionId, s);
+    const { leadNotified, leadBoardTaskId } = role === "manager"
+      ? this.notifyLeadOfDroppedManagerKickoff(sessionId, s)
+      : { leadNotified: false, leadBoardTaskId: undefined };
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId, workerSessionId: sessionId, taskId: s?.taskId ?? null,
       kind: "manager_kickoff_dropped",
-      detail: { msgId, rootMsgId, role: "manager", parentNudged: false, leadNotified, ...(leadBoardTaskId ? { leadBoardTaskId } : {}) },
+      detail: { msgId, rootMsgId, role, parentNudged: false, leadNotified, ...(leadBoardTaskId ? { leadBoardTaskId } : {}) },
     });
     // eslint-disable-next-line no-console
-    console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff EXHAUSTED its give-up requeue budget with no parent session to notify — recorded as manager_kickoff_dropped (leadNotified=${leadNotified})`);
+    console.error(`[give-up] ${sessionId} turn-1 ${role.toUpperCase()} kickoff EXHAUSTED its give-up requeue budget with no parent session to notify — recorded as manager_kickoff_dropped (leadNotified=${leadNotified})`);
+  }
+
+  /**
+   * Card 5c2f8108 (round 2) — the RESOLVE half of `manager_kickoff_dropped`/
+   * `manager_kickoff_dropped_resolved`. Called ONLY from `handleGiveUpConfirmed`, with the SAME
+   * `logicalId` a late content-match just confirmed (round 1's `onTurnCompleted`-driven call, keyed on a
+   * bare completed-turn signal, has been removed — see the decision record's round-2 section for why).
+   * `confirmedRootMsgId` is required, matched exactly against the latest unpaired drop's own recorded
+   * `rootMsgId`. Derives the pairing decision from durable event history alone (never in-memory `Live`
+   * state), via `listEventsForWorkerKinds` (kind-filtered — cheap even for a session with a long,
+   * unrelated event history). Wrapped so a DB fault here can never escape into `handleGiveUpConfirmed`'s
+   * own caller.
+   *
+   * @decision 5c2f8108 (round 2) — never resolve on a bare completed-turn signal, and never make
+   * `confirmedRootMsgId` optional: a caller with no rootMsgId to match has no basis to resolve this alert.
+   */
+  handleKickoffDroppedResolved(sessionId: string, confirmedRootMsgId: string): void {
+    try {
+      const trail = this.db.listEventsForWorkerKinds(sessionId, ["manager_kickoff_dropped", "manager_kickoff_dropped_resolved"]);
+      const latest = trail[trail.length - 1];
+      if (!latest || latest.kind !== "manager_kickoff_dropped") return; // no-op: nothing unpaired to resolve
+      if (latest.detail?.rootMsgId !== confirmedRootMsgId) return; // a DIFFERENT message confirmed — not proof THIS kickoff landed
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: latest.managerSessionId,
+        workerSessionId: sessionId, taskId: latest.taskId,
+        kind: "manager_kickoff_dropped_resolved", detail: {},
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[give-up] ${sessionId} handleKickoffDroppedResolved threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
   }
 
   /**
@@ -12461,8 +12510,12 @@ export class SessionService {
    * @decision c2f8695a — `worker_flush` is a fourth candidate (same verify-and-retry ladder as
    * `submit()`'s redelivery); never add a `flush_worker_composer`-event lookup to name the cause —
    * that event is appended after this notice already fires, so the lookup would always read empty.
+   * @decision 5c2f8108 (round 2) — ALSO the sole trigger for `manager_kickoff_dropped`'s resolve half;
+   * called BEFORE (so unconditionally on) the `gaveUp` lookup below, which a dropped kickoff never
+   * populates. See `handleKickoffDroppedResolved`'s own doc for why.
    */
   handleGiveUpConfirmed(sessionId: string, logicalId: string, latencyMs: number): void {
+    this.handleKickoffDroppedResolved(sessionId, logicalId);
     const events = this.db.listEventsForWorker(sessionId);
     const gaveUp = events.find((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === logicalId && e.detail?.outcome === "parked");
     if (!gaveUp) return; // never parked (still mid-chain, or no give-up history here for this chain) — nothing to retract

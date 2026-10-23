@@ -1437,11 +1437,28 @@ export type OrchestrationEventKind =
   // parentSessionId to notify (no spawn path ever sets one for role="manager"). Filed under BOTH
   // managerSessionId AND workerSessionId = the manager session itself (mirrors `claude_boot_dialog_stuck`'s
   // own parentless-manager convention, so `listEventsForWorker` can find it for dedup). `detail` carries
-  // { msgId, rootMsgId, role: "manager", parentNudged: false, leadNotified, leadBoardTaskId? } — always
-  // `parentNudged:false` (a manager never has a parent), so `companion/attention-push.ts`'s `classify()`
-  // surfaces this unconditionally to the owner-attention surfaces (same gate `claude_boot_dialog_stuck`
-  // uses), alongside the best-effort Platform-Lead escalation (`notifyLeadOfParentlessManagerIssue`).
+  // { msgId, rootMsgId, role: "manager" | "platform", parentNudged: false, leadNotified, leadBoardTaskId? }
+  // — always `parentNudged:false` (neither role ever has a parent), so `companion/attention-push.ts`'s
+  // `classify()` surfaces this unconditionally to the owner-attention surfaces (same gate
+  // `claude_boot_dialog_stuck` uses). Card 5c2f8108 widened this from manager-only to also cover role
+  // "platform" (the Platform Lead's own turn-1 kickoff) — `leadNotified` is always `false` for that role
+  // (there is no higher Lead to escalate a Lead's own drop to; `notifyLeadOfParentlessManagerIssue` is
+  // never called for it), unlike a manager's drop, which gets a best-effort Platform-Lead escalation on
+  // top of this event.
   | "manager_kickoff_dropped"
+  // Card 5c2f8108: the RESOLVE half of the pair above — mirrors `claude_boot_dialog_stuck`/
+  // `claude_boot_dialog_resolved`'s own pairing shape exactly, but keyed to a DIFFERENT signal
+  // (`SessionService.handleKickoffDroppedResolved`, fired ONLY from `handleGiveUpConfirmed`'s own
+  // content-match confirmation of this drop's own `rootMsgId` — never a bare completed-turn signal; an
+  // IdleWatcher nudge, a boot continuation note, ordinary chat, or a StopFailure can all complete a turn
+  // without the dropped kickoff's own brief ever landing, so none of those resolve this alert). Filed
+  // under the SAME `managerSessionId`/`workerSessionId`/`taskId` convention as the paired
+  // `manager_kickoff_dropped` row it resolves; `detail` is always `{}`. Never classified into the
+  // owner-attention surfaces on its own (`companion/attention-push.ts`'s `classify()` returns null for
+  // it, mirroring `claude_boot_dialog_resolved`). A manual recovery (re-sending the brief as a new
+  // message) or a daemon restart between the drop and a late confirmation does NOT auto-clear this alert
+  // — by design; dismiss it manually in that case.
+  | "manager_kickoff_dropped_resolved"
   // Card b03e636c: the kickoff-confirm "broken" escalation actually fired — from any of THREE sites,
   // named by `detail.source`: `"immediate"` (`handleKickoffGiveUpExhausted`'s own immediate-park
   // branch, sent synchronously at park time when the plausible-confirm window has already elapsed),
@@ -2097,7 +2114,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   session_died: true, session_resume_attempt: true, session_recovered: true,
   session_recovery_abandoned: true, worker_report_undelivered: true, worker_exited_without_report: true,
   manager_exited_with_live_workers: true, session_message_queued: true, session_message_delivered: true,
-  session_message_gave_up: true, manager_kickoff_dropped: true, kickoff_confirm_escalated: true, companion_heartbeat_fired: true, companion_heartbeat_deferred: true,
+  session_message_gave_up: true, manager_kickoff_dropped: true, manager_kickoff_dropped_resolved: true, kickoff_confirm_escalated: true, companion_heartbeat_fired: true, companion_heartbeat_deferred: true,
   companion_reminder_fired: true, companion_reminder_deferred: true, companion_zero_reply_detected: true,
   set_worker_mode: true,
   flush_worker_composer: true, poll_fired: true, poll_fire_failed: true, poll_baseline_seeded: true,

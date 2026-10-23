@@ -486,6 +486,14 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     classify("manager_kickoff_dropped", { parentNudged: false, role: "manager" }) === "escalation");
   check("classify: manager_kickoff_dropped(no parentNudged field) → null (defensive default, never a false positive)",
     classify("manager_kickoff_dropped", { role: "manager" }) === null);
+  // Card 5c2f8108: widened to also cover role "platform" — the gate itself is role-agnostic
+  // (parentNudged, not role), so a Platform Lead's own drop classifies identically to a manager's.
+  check("classify: manager_kickoff_dropped(parentNudged:false, role:platform) → escalation too",
+    classify("manager_kickoff_dropped", { parentNudged: false, role: "platform" }) === "escalation");
+  // Card 5c2f8108: the RESOLVE half of this pair is NEVER an owner alert either, same reasoning as
+  // claude_boot_dialog_resolved above.
+  check("classify: manager_kickoff_dropped_resolved → null (a resolve clears an alert, never a fresh one)",
+    classify("manager_kickoff_dropped_resolved", {}) === null);
   // Card ab3c965d: confirms the pre-existing session_message_gave_up kind (the WORKER-scoped sibling of
   // manager_kickoff_dropped — see that kind's own doc in shared/src/types.ts) still classifies exactly as
   // before this card — null, the same as any other kind with no case in classify()'s switch. This kind has
@@ -505,6 +513,13 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     noticeLine.includes("FYI") && !/decision needed/.test(noticeLine) && noticeLine.includes("deploy done") && noticeLine.includes("question:q1"));
   const decisionLine = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "question_asked", detail: { title: "pick a plan", questionId: "q2" } }, "decision-pending", "Proj Z");
   check("alertLine: an ordinary decision still renders 'decision needed' (unchanged)", /decision needed/.test(decisionLine) && !decisionLine.includes("FYI"));
+  // Card 5c2f8108: alertLine's manager_kickoff_dropped case reads detail.role so a Platform Lead's own
+  // dropped kickoff isn't misreported as a manager's.
+  const mgrKickoffLine = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "manager_kickoff_dropped", detail: { role: "manager" } }, "escalation", "Proj Z");
+  check("alertLine: manager_kickoff_dropped(role:manager) names \"manager's\"", mgrKickoffLine.includes("manager's turn-1 kickoff"));
+  const platformKickoffLine = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "lead-12345678", kind: "manager_kickoff_dropped", detail: { role: "platform" } }, "escalation", "Proj Z");
+  check("alertLine: manager_kickoff_dropped(role:platform) names \"Platform Lead's\", never \"manager's\"",
+    platformKickoffLine.includes("Platform Lead's turn-1 kickoff") && !platformKickoffLine.includes("manager's"));
   cleanupEnv({ db: { close() {} }, dbFile: "" }); // no-op cleanup (nothing to remove) — keeps the block shape uniform
 }
 

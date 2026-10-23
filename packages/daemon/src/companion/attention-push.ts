@@ -221,12 +221,16 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // sets parentNudged:false, since it never has a parent at all), reusing "escalation" for the same
     // reason: the owner is the one party left to tell, and this must reach a lead-mode companion's
     // wildcard push the same way (see claude_boot_dialog_stuck's own comment on FLEET_OPS_ALERT_CLASSES).
+    // Card 5c2f8108 widened this kind to also cover role "platform" (the Platform Lead's own kickoff
+    // drop) — unaffected here, since this gate is already role-agnostic (`parentNudged`, not `role`).
     case "manager_kickoff_dropped":
       return detail?.parentNudged === false ? "escalation" : null;
     // Card b1da256d: the RESOLVE half of the pair above — a resolve clears an already-filed alert, it is
     // never itself a fresh owner-facing one. Falls to `default` (null) structurally either way; named
     // explicitly so a reader doesn't have to re-derive that from the switch's fallthrough.
     case "claude_boot_dialog_resolved":
+    // Card 5c2f8108: same reasoning, for `manager_kickoff_dropped`'s own RESOLVE half.
+    case "manager_kickoff_dropped_resolved":
       return null;
     default:
       return null;
@@ -471,9 +475,13 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     // Code Review 5f95e7a1: named explicitly, same discipline as claude_boot_dialog_stuck immediately
     // above — the generic default's bare `${alertClass} — ${m8}` gave no indication this is specifically
     // a NEVER-CONFIRMED kickoff, not a boot-dialog hang or any other escalation shape.
-    case "manager_kickoff_dropped":
-      line = `${projectName}: manager's turn-1 kickoff was never confirmed delivered — it may have booted with no brief — ${who}`;
+    // Card 5c2f8108: `roleLabel` reads `detail.role` (same pattern as claude_boot_dialog_stuck's own
+    // roleLabel above) so a Platform Lead's own dropped kickoff isn't misreported as a manager's.
+    case "manager_kickoff_dropped": {
+      const roleLabel = detail.role === "platform" ? "Platform Lead's" : "manager's";
+      line = `${projectName}: ${roleLabel} turn-1 kickoff was never confirmed delivered — it may have booted with no brief — ${who}`;
       break;
+    }
     default:
       line = `${projectName}: ${alertClass} — ${m8}`;
   }

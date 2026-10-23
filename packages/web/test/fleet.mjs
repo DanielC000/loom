@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
-  activeBootStuckAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
+  activeBootStuckAlerts, activeKickoffDroppedAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
   activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts,
   resolveAttentionProjectId, attentionItemInProject,
 } from "../src/lib/fleet.ts";
@@ -237,6 +237,69 @@ check("card 43084723 — GREEN: the fix (one unconditional, kind-filtered fetch)
   const alerts = activeBootStuckAlerts([stuck], (sessionId) => sessionId === "W"); // only W is live; M1 is not
   assert.equal(alerts.length, 1, "GREEN: W's alert surfaces — keyed/checked on W's OWN liveness, never M1's");
   assert.equal(alerts[0].sessionId, "W");
+});
+
+// ── KICKOFF DROPPED pairing (card 5c2f8108) — same latest-wins pairing shape as activeBootStuckAlerts =====
+const kickoffEv = (o = {}) => ({
+  id: `ev-${++evSeq}`,
+  ts: o.ts ?? new Date(evSeq).toISOString(),
+  kind: o.kind ?? "manager_kickoff_dropped",
+  workerSessionId: o.workerSessionId ?? "sess-kd-1",
+  managerSessionId: o.managerSessionId ?? "sess-kd-1",
+  taskId: o.taskId ?? null,
+  detail: o.detail ?? { parentNudged: false, role: "manager" },
+});
+
+check("activeKickoffDroppedAlerts: a lone drop event (nobody else addressed) on a LIVE session surfaces an alert", () => {
+  const dropped = kickoffEv({ workerSessionId: "sess-a", managerSessionId: "sess-a" });
+  const alerts = activeKickoffDroppedAlerts([dropped], alwaysLive);
+  assert.equal(alerts.length, 1, "drop only ⇒ item");
+  assert.equal(alerts[0].sessionId, "sess-a");
+  assert.equal(alerts[0].event.id, dropped.id);
+});
+
+check("activeKickoffDroppedAlerts: a drop event followed by its resolved counterpart clears the alert (card 5c2f8108's own 'cleared' fix)", () => {
+  const sid = "sess-b";
+  const dropped = kickoffEv({ workerSessionId: sid, managerSessionId: sid, ts: "2026-01-01T00:00:00.000Z" });
+  const resolved = kickoffEv({ workerSessionId: sid, managerSessionId: sid, kind: "manager_kickoff_dropped_resolved", detail: {}, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeKickoffDroppedAlerts([dropped, resolved], alwaysLive);
+  assert.equal(alerts.length, 0, "dropped then resolved ⇒ none — a content-matched confirmation of the drop's own rootMsgId cleared it");
+});
+
+check("activeKickoffDroppedAlerts: a resolved event followed by a NEW drop episode re-surfaces the alert", () => {
+  const sid = "sess-c";
+  const resolved = kickoffEv({ workerSessionId: sid, managerSessionId: sid, kind: "manager_kickoff_dropped_resolved", detail: {}, ts: "2026-01-01T00:00:00.000Z" });
+  const dropped = kickoffEv({ workerSessionId: sid, managerSessionId: sid, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeKickoffDroppedAlerts([resolved, dropped], alwaysLive);
+  assert.equal(alerts.length, 1, "resolved then dropped ⇒ item — latest wins, in EITHER order in the input array");
+  assert.equal(alerts[0].sessionId, sid);
+});
+
+check("activeKickoffDroppedAlerts: a dropped session that's no longer live is dropped — nobody can act on it anymore", () => {
+  const dropped = kickoffEv({ workerSessionId: "sess-d", managerSessionId: "sess-d" });
+  const alerts = activeKickoffDroppedAlerts([dropped], alwaysDead);
+  assert.equal(alerts.length, 0, "a non-live session ⇒ none");
+});
+
+check("activeKickoffDroppedAlerts: a drop event where someone else WAS addressed (parentNudged:true) never surfaces", () => {
+  const dropped = kickoffEv({ workerSessionId: "sess-e", managerSessionId: "sess-e", detail: { parentNudged: true, role: "manager" } });
+  const alerts = activeKickoffDroppedAlerts([dropped], alwaysLive);
+  assert.equal(alerts.length, 0, "parentNudged:true ⇒ none");
+});
+
+check("activeKickoffDroppedAlerts: unsorted input is sorted internally — order of the array passed in doesn't matter", () => {
+  const sid = "sess-f";
+  const dropped = kickoffEv({ workerSessionId: sid, managerSessionId: sid, ts: "2026-01-01T00:00:00.000Z" });
+  const resolved = kickoffEv({ workerSessionId: sid, managerSessionId: sid, kind: "manager_kickoff_dropped_resolved", detail: {}, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeKickoffDroppedAlerts([resolved, dropped], alwaysLive);
+  assert.equal(alerts.length, 0, "still clears — sorted by ts internally, not by array position");
+});
+
+check("activeKickoffDroppedAlerts: a PLATFORM Lead's own drop (role:\"platform\") surfaces exactly like a manager's", () => {
+  const dropped = kickoffEv({ workerSessionId: "lead-a", managerSessionId: "lead-a", detail: { parentNudged: false, role: "platform", leadNotified: false } });
+  const alerts = activeKickoffDroppedAlerts([dropped], alwaysLive);
+  assert.equal(alerts.length, 1, "a platform-role drop surfaces too — this helper gates on parentNudged, never role");
+  assert.equal(alerts[0].event.detail.role, "platform");
 });
 
 // ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) — extracted out of lib/attention.ts ──────
