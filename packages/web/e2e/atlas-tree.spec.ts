@@ -4,13 +4,16 @@
 // The card's claim is a PARITY claim — "every NAV_PAGES entry gets a tree node, and clicking it
 // renders the EXISTING component unmodified" — so every assertion here is derived from the live app
 // rather than from a list typed into this file:
-//   1. NODE-SET PARITY. The destinations are collected from the CLASSIC rail (switch off) and from the
-//      Atlas tree (switch on), in the same browser, against the same build, and the two sets are
-//      compared. Nothing hand-copies NAV_PAGES — which matters because the whole failure mode this
-//      guards is a count going stale, and a hand-copied list in the test would go stale identically.
-//      Since card fd99b2d7 the tree also holds Atlas-ONLY nodes the rail has no equivalent of, so the
-//      claim is "every rail destination has a node, and every extra node is a declared Atlas home"
-//      rather than a bare set equality — see `parseAtlasHomes` below for why that is no weaker.
+//   1. REACHABILITY PARITY. The destinations are collected from the CLASSIC rail (switch off) and
+//      from the Atlas tree (switch on), in the same browser, against the same build, and the two sets
+//      are compared. Nothing hand-copies NAV_PAGES — which matters because the whole failure mode
+//      this guards is a count going stale, and a hand-copied list in the test would go stale
+//      identically. Since card fd99b2d7 the tree also holds Atlas-ONLY nodes the rail has no
+//      equivalent of, and since card 0d0c6cee the ten cross-project destinations are no longer tree
+//      rows at all — they sit in the escape hatch at the foot of the tree until cards 41eab0eb /
+//      25c08fba re-home them as node tabs. So the claim is a PARTITION: every rail destination is
+//      either a node or a hatch entry, never both and never neither, and every extra node is a
+//      declared Atlas home. See `parseAtlasHomes` below for why that is no weaker than an equality.
 //   2. CONTENT IDENTITY. For every one of those destinations, the page's rendered structure is
 //      fingerprinted at the OLD route (switch off) and again after clicking the node (switch on), and
 //      required to match. "The same content the old route rendered" is asserted against the old route
@@ -72,6 +75,10 @@ async function seedAtlasOn(page: Page) {
 // is a <button> with no href, so it is excluded by construction rather than by a filter.
 const RAIL_LINKS = "a.loom-rail-item, a.loom-rail-statrow";
 const TREE_NODES = "a.loom-atlas-node";
+// The escape hatch at the foot of the tree (card 0d0c6cee): the cross-project destinations that have
+// LEFT the tree pending cards 41eab0eb / 25c08fba, which re-home them as node tabs. Deliberately NOT
+// `.loom-atlas-node` — that is the whole point of the removal — so it needs its own selector here.
+const UNHOMED_LINKS = "a.loom-atlas-unhomed-link";
 
 // ── Destinations PHASE 2 has deliberately rebuilt ──────────────────────────────────────────────
 // Claim 2 above ("the same content the old route rendered") is a PHASE-1 contract: phase 1 mounts
@@ -250,27 +257,62 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     await page.goto(loomDaemon.baseURL + "/");
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
     const treeRoutes = await routesFrom(page, TREE_NODES);
+    // Collected whether or not the disclosure is open: `evaluateAll` reads the DOM, and a closed
+    // <details> hides its content without removing it.
+    const unhomedRoutes = await routesFrom(page, UNHOMED_LINKS);
 
-    // The parity claim, in two halves since phase 2 began adding Atlas-only nodes (card fd99b2d7).
+    // The parity claim, in two halves since phase 2 began adding Atlas-only nodes (card fd99b2d7),
+    // and re-stated as a PARTITION since card 0d0c6cee made the tree an entity hierarchy.
     //
-    // (a) STRICT, unchanged in strength: every rail destination still has a node. A missing node
-    //     fails here exactly as it did when this was a bare equality.
+    // (a) EXHAUSTIVE PARTITION. P1-1's claim was "every rail destination has a node"; 0d0c6cee moved
+    //     the ten cross-project destinations out of the tree and onto the escape hatch at its foot
+    //     (cards 41eab0eb / 25c08fba re-home them as node tabs). So the claim is now that every rail
+    //     destination is in EXACTLY ONE of the two places — which is STRONGER than the old
+    //     equality-plus-carve-out it replaces, and needs no hand-named exemption list that could go
+    //     stale: a destination that fell out of BOTH fails here, and so does one in both at once.
+    const homedSet = new Set(treeRoutes);
+    const unhomedSet = new Set(unhomedRoutes);
     for (const route of railRoutes) {
-      expect(treeRoutes, `the Atlas tree has no node for the classic destination ${route}`).toContain(route);
+      expect(homedSet.has(route) || unhomedSet.has(route),
+        `the classic destination ${route} is neither an Atlas tree node nor a "not yet re-homed" entry`
+        + ` — it is unreachable from the tree. nodes: ${JSON.stringify(treeRoutes)};`
+        + ` escape hatch: ${JSON.stringify(unhomedRoutes)}`).toBe(true);
+      expect(homedSet.has(route) && unhomedSet.has(route),
+        `${route} is BOTH a tree node and a "not yet re-homed" entry`).toBe(false);
     }
-    // (b) Every EXTRA node must be an address src/nav.tsx declares as an Atlas home. This is what
-    //     replaces the equality's other direction — a node pointing at a page that does not exist,
-    //     or a typo'd `to`, still fails, because it is in neither set.
+    // Positive control on the escape-hatch collector: a reading of zero would satisfy every
+    // "is in exactly one" check above by making the second disjunct dead, so it has to be non-empty.
+    // When cards 41eab0eb / 25c08fba land, THIS is the assertion that tells you to delete the hatch
+    // and this half of the partition with it.
+    expect(unhomedRoutes.length, "the escape-hatch collector found no entries at all").toBeGreaterThan(0);
+    // Card 0d0c6cee's own claim, stated positively rather than left implicit in the partition: a
+    // cross-project destination is NOT a tree row any more.
+    expect(treeRoutes, "the Inbox destination is still an Atlas tree row").not.toContain("/inbox");
+    // ...with a positive control, since an absence reads the same from a broken collector: the node
+    // collector DOES still see the two destinations that deliberately stayed.
+    expect(treeRoutes, "the tree node collector missed the Platform node").toContain("/platform");
+    expect(treeRoutes, "the tree node collector missed the project-tier Board node").toContain("/board");
+
+    // (b) Every EXTRA node must be an address src/nav.tsx declares as an Atlas home — a node
+    //     pointing at a page that does not exist, or a typo'd `to`, is in neither set and fails.
     const homes = parseAtlasHomes();
     expect(homes.paths.length, `the ATLAS_HOMES parse found no rows. Block:\n${homes.block}`).toBeGreaterThan(0);
     expect(homes.paths.length,
       `the parse returned ${homes.paths.length} row(s) but the declaration contains ${homes.rawMarkers} entries`
       + ` — the pattern is dropping rows. Block:\n${homes.block}`).toBe(homes.rawMarkers);
     const extras = treeRoutes.filter((r) => !railRoutes.includes(r));
-    //     Equality, not a subset, in BOTH directions: a declared home that stopped rendering leaves
-    //     `extras` short, and an undeclared node leaves it long.
-    expect(extras.sort(), "the tree's extra nodes are not exactly the declared Atlas home nodes")
-      .toEqual([...homes.paths].sort());
+    for (const extra of extras) {
+      expect(homes.paths, `the tree renders an extra node for ${extra}, which src/nav.tsx does not`
+        + ` declare as an Atlas home`).toContain(extra);
+    }
+    //     The other direction, as the same partition: a declared home is a node OR an escape-hatch
+    //     entry, never missing from both. (The workspace Settings home is a `ROOT_TABS` row in the
+    //     approved design, so 0d0c6cee moved it to the hatch with the nine rail destinations.)
+    for (const declared of homes.paths) {
+      expect(homedSet.has(declared) || unhomedSet.has(declared),
+        `src/nav.tsx declares the Atlas home ${declared}, which the tree renders neither as a node nor`
+        + ` as a "not yet re-homed" entry`).toBe(true);
+    }
 
     // The tree IS navigation, not a complementary region (the P1-0 review finding this card carries).
     const tree = page.getByTestId("atlas-tree");
@@ -339,12 +381,33 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
     await expect(page.locator(".loom-rail")).toHaveCount(0);
 
+    // Which half of card 0d0c6cee's partition each destination is in, read off the rendered tree
+    // rather than named here — see the parity test above for why that is the stronger form.
+    const homedSet = new Set(await routesFrom(page, TREE_NODES));
+    const unhomedSet = new Set(await routesFrom(page, UNHOMED_LINKS));
+    for (const route of routes) {
+      expect(homedSet.has(route) || unhomedSet.has(route),
+        `${route} is reachable from neither the tree nor its escape hatch, so this walk cannot visit it`)
+        .toBe(true);
+    }
+
     let previous = "";
     for (const route of routes) {
-      await page.getByTestId(`atlas-node-${route}`).click();
-      // The click navigated — the node is a real link, not decoration.
+      if (homedSet.has(route)) {
+        await page.getByTestId(`atlas-node-${route}`).click();
+      } else {
+        // A re-homed destination is reached the way a reader reaches it: through the escape hatch at
+        // the foot of the tree, not by typing the URL — so this walk also exercises the one
+        // affordance keeping those ten addresses alive until cards 41eab0eb / 25c08fba re-home them.
+        // Opened by setting the property rather than clicking the summary, which would TOGGLE: the
+        // disclosure auto-opens on whichever of these you are already looking at, so a click is not
+        // idempotent here. (The summary's own click is exercised in atlas-tree-hierarchy.spec.ts.)
+        await page.getByTestId("atlas-unhomed").evaluate((el) => { (el as HTMLDetailsElement).open = true; });
+        await page.getByTestId(`atlas-unhomed-${route}`).click();
+      }
+      // The click navigated — the row is a real link, not decoration.
       await expect.poll(() => new URL(page.url()).pathname,
-        { message: `clicking the ${route} node did not navigate` }).toBe(route);
+        { message: `clicking the ${route} row did not navigate` }).toBe(route);
       const after = await settledPageSkeleton(page);
 
       const rebuilt = REBUILT_IN_PHASE_2[route];
@@ -372,9 +435,19 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
       // The frame tracks the landed node: the heading and the last breadcrumb name it.
       await expect(page.getByTestId("atlas-breadcrumb")).toBeVisible();
       await expect(page.locator(".loom-atlas-nodehead h1")).not.toBeEmpty();
-      // Exactly one node reads as active, and it is this one.
-      await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
-      await expect(page.getByTestId(`atlas-node-${route}`)).toHaveClass(/is-active/);
+      if (homedSet.has(route)) {
+        // Exactly one node reads as active, and it is this one.
+        await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
+        await expect(page.getByTestId(`atlas-node-${route}`)).toHaveClass(/is-active/);
+      } else {
+        // A re-homed destination has no node, so NOTHING may read as the landed node — marking the
+        // nearest-looking row instead would be the tree lying about where you are. The escape
+        // hatch's own weaker `is-here` mark is what says which address is showing, and asserting it
+        // keeps this from being a bare absence claim that a blank tree would also satisfy.
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${route} has no tree node, but the tree marked one as landed anyway`).toHaveCount(0);
+        await expect(page.getByTestId(`atlas-unhomed-${route}`)).toHaveClass(/is-here/);
+      }
     }
 
     await page.waitForLoadState("networkidle");

@@ -319,8 +319,16 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     // three URLs, which is what makes the comparison mean anything.
     await page.goto(loomDaemon.baseURL + reviewUrl);
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
-    const inboxLabel = (await page.getByTestId("atlas-node-/inbox").locator(".loom-atlas-lbl").innerText()).trim();
-    expect(inboxLabel, "the tree has no /inbox node to take the detail crumb's label from").not.toBe("");
+    // Card 0d0c6cee re-homed /inbox out of the tree's rows and into the escape hatch at its foot
+    // (cards 41eab0eb / 25c08fba turn it into a Workspace node tab). The hatch entry carries the
+    // same `.loom-atlas-lbl`, derived from the same NAV_PAGES row, so this read still proves the
+    // crumb and the tree name ONE destination — which is the whole reason it is read rather than
+    // typed. ⚠️ When those cards land and the hatch goes, re-point this at the tab's own label.
+    // `textContent`, not `innerText`: the hatch is a <details> that auto-opens only on one of its own
+    // destinations, and this read happens on a SESSION address, where it is collapsed. The label
+    // carries no CSS text-transform, so the two reads would agree anyway if it were open.
+    const inboxLabel = (await page.getByTestId("atlas-unhomed-/inbox").locator(".loom-atlas-lbl").textContent() ?? "").trim();
+    expect(inboxLabel, "the tree has no /inbox row to take the detail crumb's label from").not.toBe("");
 
     const workerNode = `${worker.agentName} · worker · ${shortId(worker.sessionId)}`;
     const plainNode = `${plain.agentName} · ${shortId(plain.sessionId)}`;
@@ -337,9 +345,20 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     // Card 525c8ad9 (P2-7) moved /session/:id from `belowNode: 0` to 1: the session node has TABS now,
     // and a session address always ends on the active one — which is what makes /review/:workerId's
     // own "Diff" crumb read as that same node's tab rather than as a different kind of address.
-    const expected: Record<string, { trail: string[]; belowNode: number; node: string | null }> = {
+    //
+    // `hatch` (card 0d0c6cee) is the CONTRAST CASE for `node: null`. All three addresses now claim
+    // "nothing is marked", and three zeros from one locator is a claim no broken instrument could
+    // fail — so the DETAIL address, whose destination moved to the escape hatch rather than
+    // vanishing, must still carry the hatch's own weaker `is-here` mark, and the two SESSION
+    // addresses must carry none. Asserted on the same page at the same moment, with no extra
+    // navigation, which would pollute the console-error contrast at the bottom of this test.
+    const expected: Record<string, { trail: string[]; belowNode: number; node: string | null; hatch?: string }> = {
       [reviewUrl]: { trail: ["Workspace", mgr.projectName, workerNode, "Diff"], belowNode: 1, node: null },
-      [questionUrl]: { trail: ["Workspace", inboxLabel, questionTitle], belowNode: 1, node: "/inbox" },
+      // `node: null` since card 0d0c6cee: /inbox is no longer a tree ROW, so there is nothing for
+      // the tree to mark. The frame still names the destination (the crumb + heading above come
+      // from the same NAV_PAGES row they always did) — only the tree's own highlight is gone, and
+      // highlighting a nearby row instead would be a lie about where you are.
+      [questionUrl]: { trail: ["Workspace", inboxLabel, questionTitle], belowNode: 1, node: null, hatch: "/inbox" },
       [sessionUrl]: { trail: ["Workspace", mgr.projectName, plainNode, "Terminal"], belowNode: 1, node: null },
     };
     const expectationFor = (url: string) => {
@@ -371,6 +390,15 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
       const marked = expectationFor(url).node;
       await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(marked ? 1 : 0);
       if (marked) await expect(page.getByTestId(`atlas-node-${marked}`)).toHaveClass(/is-active/);
+      // The contrast case for that zero — see `hatch` in the declaration above.
+      const hatch = expectationFor(url).hatch;
+      if (hatch) {
+        await expect(page.getByTestId(`atlas-unhomed-${hatch}`),
+          `the ${url} address did not mark its ${hatch} escape-hatch entry`).toHaveClass(/is-here/);
+      } else {
+        await expect(page.locator("a.loom-atlas-unhomed-link.is-here"),
+          `the ${url} address marked an escape-hatch entry it has nothing to do with`).toHaveCount(0);
+      }
 
       const rebuilt = REBUILT_IN_PHASE_2[pattern];
       if (rebuilt) {

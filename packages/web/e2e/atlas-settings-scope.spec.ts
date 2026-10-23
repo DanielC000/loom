@@ -132,12 +132,26 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
       }
     }
 
-    // The Workspace node is reachable from the tree, under the Workspace tier (not the project's).
+    // The Workspace node is still reachable from the tree, and still at workspace depth (not the
+    // project's). Card 0d0c6cee moved it out of the tree's ROWS and into the escape hatch at the
+    // foot of the tree — it is a `ROOT_TABS` row in the approved design, so cards 41eab0eb /
+    // 25c08fba re-home it as a Workspace node tab. What this test is about — that a workspace-tier
+    // Settings address exists, is reachable, and reads at workspace depth — is unchanged; only which
+    // control reaches it moved. ⚠️ Re-point at the tab when those cards land.
     await page.goto(loomDaemon.baseURL + "/home");
-    const treeRow = page.getByTestId("atlas-home-workspace-settings");
+    // The hatch is a <details> that auto-opens only on one of its OWN destinations, and /home is not
+    // one — so it has to be opened before its rows can be clicked. Exercised as a reader would, by
+    // clicking the summary, with the before/after state asserted on both sides: a bare
+    // `open = true` would prove the row works while leaving the only new control here unexercised.
+    const hatch = page.getByTestId("atlas-unhomed");
+    await expect(hatch, "the escape hatch is open on /home, which is not one of its destinations")
+      .not.toHaveAttribute("open", /.*/);
+    await hatch.locator("summary").click();
+    await expect(hatch, "clicking the escape hatch's summary did not open it").toHaveAttribute("open", /.*/);
+    const treeRow = page.getByTestId("atlas-unhomed-/workspace-settings");
     await expect(treeRow).toBeVisible();
     expect(await treeRow.evaluate((el) => !!el.closest("ul.loom-atlas-nodes.is-kids")),
-      "the Workspace Settings node is nested under the project branch").toBe(false);
+      "the Workspace Settings row is nested under the project branch").toBe(false);
     await treeRow.click();
     await expect.poll(() => new URL(page.url()).pathname,
       { message: "clicking the Workspace Settings tree node did not navigate" }).toBe(WORKSPACE_NODE);

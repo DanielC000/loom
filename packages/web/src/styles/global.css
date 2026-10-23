@@ -1266,6 +1266,100 @@ button.loom-atlas-node.is-branch.is-open {
 }
 /* No scope marker here on purpose — depth carries it. See the note in AtlasTree.tsx's TreeNode. */
 
+/* ── The project BRANCH row (card 0d0c6cee) ───────────────────────────────────────────
+   The twist is its own button now, because expansion is not selection — so it sits
+   OUTSIDE the selector, as a sibling in the row. Which makes the ROW, not the button,
+   the thing that starts at the rail's left edge: the phosphor "you are inside this
+   branch" edge moves onto the row, and the selector gives up its own left border so the
+   pair still reads as one row rather than as a control with a gutter in front of it.
+   A branch label lands on the SAME text origin as a destination label's, which is what
+   keeps the tier from stepping in and out: 2px border + 10px row padding + 12px twist +
+   7px selector padding, against a destination's own 2px border + 10px padding + 12px
+   twist + 7px flex gap. MEASURED (both label boxes read at 58px from the viewport edge),
+   not reasoned: the first draft of this rule dropped the row to 8px, forgetting that a
+   destination row carries its own 2px transparent left border, and sat 2px adrift. */
+.loom-atlas-noderow.is-branchrow {
+  padding-left: 10px;
+  border-left: 2px solid transparent;
+}
+.loom-atlas-noderow.is-branchrow.is-open {
+  border-left-color: var(--loom-phosphor);
+}
+.loom-atlas-noderow.is-branchrow:hover {
+  background: var(--loom-panel);
+}
+.loom-atlas-noderow.is-branchrow > button.loom-atlas-node.is-branch {
+  padding-left: 7px;
+  border-left: none;
+}
+/* Hovering anywhere in the row already tints the whole row; a second tint on the button
+   alone would make the selector read as a separate strip inside its own row. */
+.loom-atlas-noderow.is-branchrow > button.loom-atlas-node.is-branch:hover {
+  background: transparent;
+}
+/* The twist: a real control, so it answers the pointer and the keyboard in its own right,
+   and rotates to report the one state it owns. Centred so the rotation turns in place
+   rather than drifting off its own column. */
+.loom-atlas-twistbtn {
+  flex: 0 0 12px;
+  display: grid;
+  place-items: center;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--loom-text-muted);
+  font-family: var(--loom-font-mono);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    transform 110ms cubic-bezier(0.2, 0, 0, 1),
+    color 80ms linear;
+}
+.loom-atlas-twistbtn:hover {
+  color: var(--loom-text);
+}
+.loom-atlas-twistbtn.is-expanded {
+  transform: rotate(90deg);
+  color: var(--loom-phosphor);
+}
+.loom-atlas-twistbtn:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -1px;
+}
+
+/* ── Row metrics (card 0d0c6cee) ──────────────────────────────────────────────────────
+   The mockup's `.node-meta` and `.node-badge`: every row answers "how much is in here"
+   without being opened. Two treatments, because they carry two different claims — a
+   metric is a quantity and stays muted; a badge is an ATTENTION count and is allowed to
+   be loud. `tabular-nums` so a column of counts does not jitter as they change.
+   The badge's two alphas are `atlas.css`'s own `.node-badge` values, lifted verbatim
+   rather than tokenised: they are the approved design's, and both are the EXISTING amber
+   hue — no new colour enters the system. */
+.loom-atlas-nodemeta {
+  flex: none;
+  color: var(--loom-text-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.loom-atlas-nodemeta.is-amber {
+  color: var(--loom-amber);
+}
+.loom-atlas-nodebadge {
+  flex: none;
+  min-width: 16px;
+  padding: 0 4px;
+  border: 1px solid rgba(255, 178, 62, 0.3);
+  border-radius: 7px;
+  background: rgba(255, 178, 62, 0.14);
+  color: var(--loom-amber);
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Main column: a fixed topbar over a content region that owns the scroll. */
 .loom-atlas-main {
   display: flex;
@@ -2275,6 +2369,91 @@ button.loom-kpi.is-open {
   outline-offset: 1px;
 }
 
+/* ── The re-homed destinations' escape hatch (card 0d0c6cee) ──────────────────────────
+   Scaffolding with a named demolition date (cards 41eab0eb / 25c08fba re-home these as
+   node tabs), and styled to say so: a quiet disclosure BELOW the hierarchy, deliberately
+   not in the node row's own language, so nothing in it reads as part of the tree. */
+.loom-atlas-unhomed {
+  margin-top: 18px;
+  padding: 10px 10px 0;
+  border-top: 1px solid var(--loom-border);
+}
+.loom-atlas-unhomed-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  color: var(--loom-text-muted);
+  font-family: var(--loom-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  /* Both halves of suppressing the native marker: `list-style` covers engines that render
+     it as a ::marker, the pseudo-element covers WebKit/Blink's own. The caret below is the
+     replacement, so one has to go or the row shows two. */
+  list-style: none;
+}
+.loom-atlas-unhomed-summary::-webkit-details-marker {
+  display: none;
+}
+.loom-atlas-unhomed-summary:hover {
+  color: var(--loom-text-dim);
+}
+.loom-atlas-unhomed-summary:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: 2px;
+}
+.loom-atlas-unhomed-caret {
+  flex: none;
+  font-size: 9px;
+  line-height: 1;
+  transition: transform 110ms cubic-bezier(0.2, 0, 0, 1);
+}
+details[open] > .loom-atlas-unhomed-summary .loom-atlas-unhomed-caret {
+  transform: rotate(90deg);
+}
+.loom-atlas-unhomed-summary > .loom-atlas-nodemeta {
+  margin-left: auto;
+}
+.loom-atlas-unhomed-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.loom-atlas-unhomed-link {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  padding: 0 2px;
+  color: var(--loom-text-muted);
+  text-decoration: none;
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  transition: color 80ms linear;
+}
+.loom-atlas-unhomed-link:hover,
+.loom-atlas-unhomed-link.is-here {
+  color: var(--loom-text-dim);
+}
+/* The one mark these rows carry: which address is currently showing. Deliberately weaker
+   than a node's own active state — this is not a node, and claiming the frame's "you are
+   here" treatment for it would undo the removal. */
+.loom-atlas-unhomed-link.is-here .loom-atlas-ico {
+  color: var(--loom-phosphor);
+}
+.loom-atlas-unhomed-link:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
+}
+.loom-atlas-unhomed-note {
+  margin: 8px 0 0;
+  color: var(--loom-text-muted);
+  font-family: var(--loom-font-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
 @media (max-width: 820px) {
   /* One column: at phone width the two node panels are read in sequence, not compared. */
   .loom-agentsplit {
@@ -2309,6 +2488,11 @@ button.loom-kpi.is-open {
      e47df20a). The node row itself was missed when the tree landed — same block, same fix. */
   .loom-atlas-node,
   .loom-atlas-twist,
+  /* The project twist's own button + the escape hatch's caret and links (card 0d0c6cee):
+     same cosmetic rotation and colour fade, so they drop under the same rule. */
+  .loom-atlas-twistbtn,
+  .loom-atlas-unhomed-caret,
+  .loom-atlas-unhomed-link,
   /* The Atlas home nodes' own hover fades (card fd99b2d7) — the KPI tiles and the project cards. */
   .loom-kpi,
   .loom-projcard,

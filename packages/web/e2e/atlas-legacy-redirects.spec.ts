@@ -281,14 +281,25 @@ const nodeHeading = (page: Page) => page.locator(".loom-atlas-nodehead h1");
  * (`ul.loom-atlas-nodes.is-kids`, AtlasTree's project level) or at workspace depth. That makes the
  * expected crumb trail a statement about tree/frame AGREEMENT — the only thing worth asserting,
  * since a frame that derived its depth from a different input than the tree is exactly the bug.
+ *
+ * Card 0d0c6cee: a redirect target may no longer BE a tree node. The ten cross-project destinations
+ * moved to the escape hatch at the foot of the tree, pending cards 41eab0eb / 25c08fba, and a hatch
+ * entry carries the same `.loom-atlas-lbl` — derived from the same `NAV_PAGES` row — so the
+ * agreement claim survives the move intact rather than degrading to a literal typed in here. Which
+ * half answered is reported back, because it changes what the tree may MARK (see the caller).
+ *
+ * ⚠️ When those two cards land and the hatch is deleted, this fallback has to be re-pointed at
+ * whatever names the destination then — its node tab's own label — not simply removed.
  */
-async function treeNodeAddress(page: Page, to: string): Promise<{ label: string; underProject: boolean }> {
+async function treeNodeAddress(page: Page, to: string): Promise<{ label: string; underProject: boolean; homed: boolean }> {
   const node = page.getByTestId(`atlas-node-${to}`);
-  await expect(node, `the tree has no node for ${to}`).toHaveCount(1);
-  const label = (await node.locator(".loom-atlas-lbl").innerText()).trim();
-  expect(label, `the tree's ${to} node renders no label`).not.toBe("");
-  const underProject = await node.evaluate((el) => !!el.closest("ul.loom-atlas-nodes.is-kids"));
-  return { label, underProject };
+  const homed = (await node.count()) > 0;
+  const row = homed ? node : page.getByTestId(`atlas-unhomed-${to}`);
+  await expect(row, `the tree has neither a node nor a "not yet re-homed" entry for ${to}`).toHaveCount(1);
+  const label = (await row.locator(".loom-atlas-lbl").innerText()).trim();
+  expect(label, `the tree's ${to} row renders no label`).not.toBe("");
+  const underProject = homed && await row.evaluate((el) => !!el.closest("ul.loom-atlas-nodes.is-kids"));
+  return { label, underProject, homed };
 }
 
 test.describe("Atlas legacy redirects (card 82bde849)", () => {
@@ -374,11 +385,22 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
         .toHaveURL(classic.get(r.from)?.url ?? "");
 
       // ── The right NODE: the tree marks it, the heading names it, the crumbs lead to it. ──
-      const { label, underProject } = await treeNodeAddress(page, pathOf(r.to));
-      await expect(page.getByTestId(`atlas-node-${pathOf(r.to)}`),
-        `${r.from} landed without marking the ${pathOf(r.to)} node in the tree`).toHaveClass(/is-active/);
-      await expect(page.locator("a.loom-atlas-node.is-active"),
-        `${r.from} marked more than one tree node`).toHaveCount(1);
+      const { label, underProject, homed } = await treeNodeAddress(page, pathOf(r.to));
+      if (homed) {
+        await expect(page.getByTestId(`atlas-node-${pathOf(r.to)}`),
+          `${r.from} landed without marking the ${pathOf(r.to)} node in the tree`).toHaveClass(/is-active/);
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${r.from} marked more than one tree node`).toHaveCount(1);
+      } else {
+        // Card 0d0c6cee: this destination has no node, so NO node may read as landed — marking the
+        // nearest-looking row would be the tree lying about where you are. The hatch entry's own
+        // weaker `is-here` mark is asserted too, so this is not a bare absence a blank tree passes.
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${r.from} lands on ${pathOf(r.to)}, which has no tree node, yet a node reads as landed`)
+          .toHaveCount(0);
+        await expect(page.getByTestId(`atlas-unhomed-${pathOf(r.to)}`),
+          `${r.from} landed without marking the ${pathOf(r.to)} escape-hatch entry`).toHaveClass(/is-here/);
+      }
       await expect(nodeHeading(page)).toHaveText(label);
       // Depth comes from the tree itself: a project-level node hangs under the project crumb.
       expect(await crumbTrail(page), `${r.from} produced the wrong breadcrumb trail`)
@@ -532,8 +554,15 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       })
       .toBe(otherLabel.toLowerCase());
     await expect(page).not.toHaveURL(new RegExp(`tab=${pinnedTab}`));
-    // Still the same node, still inside the Atlas frame — switching a tab is not a navigation out.
+    // Still the same destination, still inside the Atlas frame — switching a tab is not a
+    // navigation out. Which row carries the mark depends on whether card 0d0c6cee has re-homed this
+    // destination out of the tree; `treeNodeAddress` answers that off the rendered tree, so this
+    // assertion follows the destination rather than assuming where it lives.
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await expect(page.getByTestId(`atlas-node-${pathOf(target.to)}`)).toHaveClass(/is-active/);
+    const landed = await treeNodeAddress(page, pathOf(target.to));
+    await expect(page.getByTestId(landed.homed
+      ? `atlas-node-${pathOf(target.to)}`
+      : `atlas-unhomed-${pathOf(target.to)}`))
+      .toHaveClass(landed.homed ? /is-active/ : /is-here/);
   });
 });
