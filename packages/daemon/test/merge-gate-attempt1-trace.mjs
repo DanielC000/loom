@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-a1t-home-${Date.now()}-${process.pid}`);
@@ -129,7 +129,10 @@ try {
     const a = await seedWorker(db, P, "ba", null); const b = await seedWorker(db, P, "bb", null);
     worktrees.push(a.worktreePath, b.worktreePath);
     const batchP = sessions.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]);
-    const live = await waitUntil(() => sessions.gateQueueForManager(P.projId).running.find((e) => e.gateType === "merge" && e.attempt === 2), { timeoutMs: 20000, label: "batch retry admitted as attempt 2" });
+    // Card 926c178d: this fixed 20_000ms budget was observed arriving at 25,760ms under real gate load
+    // (op d9618675) — a bigger fixed number just moves the same failure mode further out, so scale it by
+    // this process's OWN measured ambient contention instead (never a guessed larger constant).
+    const live = await waitUntil(() => sessions.gateQueueForManager(P.projId).running.find((e) => e.gateType === "merge" && e.attempt === 2), { timeoutMs: ambientScaledBudget(20_000, 3), label: "batch retry admitted as attempt 2" });
     check("(B) setup: the batch retry is live as attempt:2", !!live && calls === 2);
     const evs = eventsOfKind(db, P.mgrId, EVT);
     check("(B) attempt-1 event exists WHILE the batch retry is running", evs.length === 1);
