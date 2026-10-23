@@ -86,3 +86,32 @@ per-file table, every measurement, and the honest-limit discussion: project memo
 
 `packages/daemon/scripts/test-daemon.mjs`, `TEST_TIMEOUT_OVERRIDES` round-2 block. Card `ae141763`.
 Related: `a9119abf`, `2403d1bc`, `45d6e631`.
+
+## Card 99f5f0cd — the censored-history case: no real pass exists at all, so the ~2.5x-of-real-max-pass convention has nothing to multiply
+
+Every entry sized under this decision so far (926c178d, a9119abf, 2403d1bc, ae141763 and its round 2)
+has at least one real PASS in `daemon-per-file-timing.ndjson` to anchor a ~2.5x margin against. Card
+`99f5f0cd` hit a case with none: `mainline-watch-trust-ledger`, `mainline-watch-landing-trust-freeze`
+and `mainline-watch-own-commit-verify` had, across all 9 historical rows (3 real full-gate runs on
+2026-10-23), exactly zero real passes — every single row is a SIGTERM kill at ~120,000-120,300ms. One
+of those three runs was a single-file retry that ran ONLY these 3 files together in their own pool of
+3, nothing else in the suite, and still killed all three — ruling out "it's just full-suite-wide
+starvation" as the sole explanation.
+
+**There is no real-max-pass number to apply the ~2.5x convention to in this shape.** Solo measurements
+(fresh hermetic LOOM_HOME, no load, both LOOM_DEV/LOOM_SUPERVISED states) all passed well under 120s
+(68-99s), but per `a9119abf`'s own prohibition this is corroboration only, never a sizing basis — solo
+alone has already been shown to understate real contended cost by up to ~4x elsewhere in this family
+(`batch-merge-merge-commits`: solo ~49-54s vs real max pass 203,562ms).
+
+**Decision:** sized at 450_000 for all three — generously above the solo max (98.6s) times this
+family's own observed worst-case solo-to-gate ratio (~4x), on the owner-approved reasoning that a
+second red here costs a real ~2h gate cycle while an over-generous budget only costs time if a file
+genuinely hangs. This is explicitly a provisional, not-measured margin — **re-size all three from the
+first real passing ndjson rows once they exist**, the same way every other entry in this map is sized,
+rather than treating 450_000 as settled.
+
+## Source (99f5f0cd addendum)
+
+`packages/daemon/scripts/test-daemon.mjs`, `TEST_TIMEOUT_OVERRIDES`, the `@decision 99f5f0cd` block.
+Card `99f5f0cd`. Related: `926c178d`, `a9119abf`.
