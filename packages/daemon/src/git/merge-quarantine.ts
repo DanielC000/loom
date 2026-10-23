@@ -3492,21 +3492,44 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
 
   for (const pending of targets) {
     const identity = directPathIdentity(pending.entry.repoPath);
-    const plan = planByEntry.get(pending)!;
+    let live: PendingUnresolvedQuarantine = pending;
+    let plan = planByEntry.get(pending)!;
+    // @decision 3315b08a — a protect call an earlier target's own "remove" branch reaches can ASSIGN a
+    // fresh wrapper into THIS exact slot (never a splice, so indexOf-fresh alone never catches it) — when
+    // `pending` is no longer live, re-resolve by identity and re-derive the whole plan fresh, never trust.
+    if (!pendingUnresolvedQuarantines.includes(pending)) {
+      const liveMatches = pendingUnresolvedQuarantines.filter((p) => directPathIdentity(p.entry.repoPath) === identity);
+      if (liveMatches.length !== 1) {
+        // Not a silent skip — see 07e3ad30's own "Do not" for why this is surfaced loudly rather than
+        // swallowed. A genuinely ambiguous (0 or >1) re-resolution IS still not expected to fire in
+        // production; a future regression that does make it fire should be visible, not papered over.
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] expected to find ${pending.entry.repoPath}'s own pending entry (${pending.sourceFile}) in pendingUnresolvedQuarantines during a token clear, but it was REPLACED (not spliced) by an earlier target's own protect call, and ${liveMatches.length} live same-identity candidate(s) could be unambiguously re-resolved (need exactly 1) — ${token} may be left stuck on whatever is currently live for this identity; investigate if seen.`);
+        continue;
+      }
+      live = liveMatches[0]!;
+      const remainingLive = live.entry.tokens.filter((t) => t !== token);
+      plan = remainingLive.length === 0
+        ? { action: "remove", ownedArmedKeys: (live.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, live.entry)) }
+        : { action: "reduce" };
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] ${pending.entry.repoPath}'s own pending entry (${pending.sourceFile}) was REPLACED (not spliced) mid-clear by a protect call against a co-located occupant — re-resolved it fresh by identity (now at ${live.sourceFile}) and re-derived a '${plan.action}' plan from its CURRENT tokens, rather than trusting the stale pre-pass plan.`);
+    }
     if (plan.action === "remove") {
-      // @decision 9c681680 — resolve `pending`'s own CURRENT index fresh, right now, never a precomputed
+      // @decision 9c681680 — resolve `live`'s own CURRENT index fresh, right now, never a precomputed
       // one — mirrors 07e3ad30's own rule for clearMergeQuarantineByKey's sibling pending loop.
-      const idx = pendingUnresolvedQuarantines.indexOf(pending);
+      const idx = pendingUnresolvedQuarantines.indexOf(live);
       if (idx !== -1) {
         pendingUnresolvedQuarantines.splice(idx, 1);
       } else {
         // Not a silent skip — see 07e3ad30's own "Do not" for why this is surfaced loudly rather than
-        // swallowed: it is not expected to fire in production, so a future regression that DOES make it
-        // fire should be visible, not papered over.
+        // swallowed. `live` was just re-resolved (or confirmed live) immediately above this branch, so
+        // this -1 is now genuinely unexpected either way — a future regression that does make it fire
+        // should be visible, not papered over.
         // eslint-disable-next-line no-console
-        console.error(`[merge-quarantine] expected to remove ${pending.entry.repoPath}'s own pending entry (${pending.sourceFile}) from pendingUnresolvedQuarantines during a token clear, but it was already absent from the live array by the time this ran — nothing stale was left behind, but this was not expected; investigate if seen.`);
+        console.error(`[merge-quarantine] expected to remove ${live.entry.repoPath}'s own pending entry (${live.sourceFile}) from pendingUnresolvedQuarantines during a token clear, but it was already absent from the live array by the time this ran — this was not expected; investigate if seen.`);
       }
-      const orphanFilesToSweep = new Set(pending.entry.orphanLatchFiles ?? []);
+      const orphanFilesToSweep = new Set(live.entry.orphanLatchFiles ?? []);
       // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the pre-pass
       // above, against the then-still-unmutated map — never recomputed here against a map an earlier
       // index's own removal in THIS SAME descending loop may have already mutated. A repeated
@@ -3515,7 +3538,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       for (const k of plan.ownedArmedKeys) {
         activeQuarantines.delete(k);
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        const { relocated } = deleteMergeQuarantineLatchByKey(k, undefined, pending.entry, identity, L);
+        const { relocated } = deleteMergeQuarantineLatchByKey(k, undefined, live.entry, identity, L);
         // @decision 182c01cc (round 2, item 4) — clearMergeQuarantineByToken has no human route to report
         // a relocation through; LOG it (disclosure-safe: repoPath + pending id, never content) rather than
         // silently discarding it, same as clearActiveEntryTokenAtKey's own full-lift call below.
@@ -3527,9 +3550,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // @decision 8db913e2 (round 4) — tombstone `token` HERE, after the splice/delete above already
       // removed every in-memory trace of this pending entry — see `tombstoneIfNotSurviving`'s own doc.
       tombstoneIfNotSurviving([token]);
-      sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile);
-      // @decision 8db913e2 (Follow-up f2cc5f18) — `pending.entry.tokens` captured via the `pending` const
-      // bound above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
+      sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile);
+      // @decision 8db913e2 (Follow-up f2cc5f18) — `live.entry.tokens` captured via the `live` binding
+      // resolved above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
       //
       // @decision 8db913e2 (Follow-up 0a783fb2) — this path has NO human-facing return (clearMergeQuarantineByToken
       // is `void`), so fold only to LOG, same disclosure-safe convention as the warning just above.
@@ -3540,7 +3563,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       const excludeOwnIdentity = new Set([identity]);
       let orphanUnattributed = false;
       for (const orphanFile of orphanFilesToSweep) {
-        const folded = foldOrphanSweepResult(sweepOrphanLatchFileIfUnreferenced(orphanFile, pending.entry.tokens, excludeOwnIdentity), orphanFile, orphanContentKept);
+        const folded = foldOrphanSweepResult(sweepOrphanLatchFileIfUnreferenced(orphanFile, live.entry.tokens, excludeOwnIdentity), orphanFile, orphanContentKept);
         orphanKeptRepoPaths.push(...folded.referencingRepoPaths);
         if (folded.unattributed) orphanUnattributed = true;
       }
@@ -3553,46 +3576,46 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       }
       continue;
     }
-    const remaining = pending.entry.tokens.filter((t) => t !== token);
-    const updated: MergeQuarantineEntry = { ...pending.entry, tokens: remaining };
+    const remaining = live.entry.tokens.filter((t) => t !== token);
+    const updated: MergeQuarantineEntry = { ...live.entry, tokens: remaining };
     // @decision d4b25feb (round 3) — re-point EVERY in-memory reference to this entry (883e29bc's own
     // divert can make it the SAME object armed in activeQuarantines) before durably rewriting each owned key.
     //
     // @decision 64283e06 — ROUTED, DEFENSIVE (fd189d91's own posture): unreachable today ONLY because the
     // caller's own identity-scan already catches any active twin first — do not remove this routing on
     // that basis, or a future change to that scan silently reopens the bug class this call closes.
-    replaceEntryEverywhere(activeQuarantines, pending.entry, updated);
-    // @decision 9c681680 — mutate `pending` IN PLACE (never a stale-idx array reassignment) — mirrors
+    replaceEntryEverywhere(activeQuarantines, live.entry, updated);
+    // @decision 9c681680 — mutate `live` IN PLACE (never a stale-idx array reassignment) — mirrors
     // clearMergeQuarantineByKey's own reduce branch (64119847/b47cf261): no index lookup needed at all.
-    pending.entry = updated;
+    live.entry = updated;
     // @decision 8db913e2 (round 4) — tombstone `token` HERE, before the write loop below, same reason
     // as `clearActiveEntryTokenAtKey`'s own identical placement.
     tombstoneIfNotSurviving([token]);
-    const writtenBasenames = new Set<string>([pending.sourceFile]);
+    const writtenBasenames = new Set<string>([live.sourceFile]);
     // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens`
     // (DEFENSIVE — `64283e06`'s own posture: unreachable today, see that record).
-    for (const k of pending.entry.armedKeys ?? []) {
+    for (const k of live.entry.armedKeys ?? []) {
       if (activeQuarantines.get(k) !== updated) continue; // no longer genuinely owned — do not write there
       writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
       if (!writeMergeQuarantineLatch(updated, new Set([token]), false, k)) {
         // eslint-disable-next-line no-console
-        console.error(`[merge-quarantine] could not durably persist the reduced token set for ${pending.entry.repoPath}'s own armed copy at key ${k} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
+        console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own armed copy at key ${k} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
       }
     }
     // @decision 702b4241 (round 3) — use whatever `writePendingDivertFile` ACTUALLY wrote to, never
-    // `pending.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
+    // `live.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
     // @decision 2dd97aaa (Follow-up 535fd69d) — `updated` drops `token`; pass it as `droppedTokens` — `tombstoneIfNotSurviving`
     // above does not protect this write when `token` is still "surviving" on another in-memory record.
-    const written = writePendingDivertFile(pending.sourceFile, updated, new Set([token]));
+    const written = writePendingDivertFile(live.sourceFile, updated, new Set([token]));
     if (written) {
       if (written.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, written.entry);
       // @decision 9c681680 — same in-place mutation as above, no index lookup needed.
-      pending.entry = written.entry;
-      pending.sourceFile = written.filename;
+      live.entry = written.entry;
+      live.sourceFile = written.filename;
       rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
     } else {
       // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${pending.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
+      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
     }
   }
