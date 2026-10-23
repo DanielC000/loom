@@ -155,10 +155,14 @@ would change any outcome. Left unwidened; this section is the closure.
   (`env -u LOOM_DEV -u LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane.
 - `pnpm --filter @loom/daemon guards`, committed first.
 
-The root cause (`protectOccupantContentBeforeDelete`'s re-point never stamps `armedKeys`) and the
-remaining `armedKeys`-only consumers this card did not touch are tracked on card `1fc3a561` ("fix(git):
-widen the remaining armedKeys-only quarantine clear consumers to live-armed keys") — this card closes
-Sites 1-4 of `6be6c9ff`'s own audit only, never the root cause itself.
+This card closed Sites 1-4 of `6be6c9ff`'s own audit only, never the root cause itself. **The remaining
+`armedKeys`-only consumers are now widened to live-armed keys by card `1fc3a561`** — see
+`docs/decisions/1fc3a561-remaining-armedkeys-consumers-closed-via-live-scan.md` for the per-site fixes
+(the SAME `liveArmedKeysOf`/`liveArmedKeys` widening pattern this card established, never root-cause
+stamping — the Lead's own ruling on that card rejected stamping for covering only one of this file's 20+
+`replaceEntryEverywhere` sites) and the RED/GREEN proofs. **The ROOT CAUSE itself (the re-point never
+stamps `written.entry.armedKeys`) is deliberately LEFT OPEN (Lead ruling) — do not trust
+`entry.armedKeys` as complete.**
 
 See `docs/decisions/6be6c9ff-live-armed-keys-covers-every-key-a-multi-key-twin-reaches.md`'s own "Do not"
 section, now updated to state Sites 1/3/4 are closed here and Site 2 is closed non-reproducible here.

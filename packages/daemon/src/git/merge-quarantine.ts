@@ -4505,7 +4505,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     // @decision 8db913e2 (Follow-up 4b06875f, Round 4, CR be296830) — ownership gated through
     // `entryStillOwnsKey`, never the whole `armedKeys` list — over-including is FAIL-OPEN. Read against
     // the still-unmutated live map; nothing in this function has deleted anything yet at this point.
-    const ownedArmedKeys = (p.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, p.entry));
+    // @decision 1fc3a561 — the candidate set is {@link liveArmedKeysOf}, never `p.entry.armedKeys` alone —
+    // a re-pointed twin tied here ONLY via `subsetOfClearedTokens` was stranded at its OTHER live-armed
+    // key(s) once spliced. See the decision record.
+    const ownedArmedKeys = liveArmedKeysOf(p.entry).filter((k) => entryStillOwnsKey(k, p.entry));
     pendingPlan.set(p, { action: "remove", ownedArmedKeys });
     for (const k of ownedArmedKeys) L.add(k);
   }
@@ -4564,6 +4567,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       const overlapTokens = p.entry.tokens.filter((t) => entry!.tokens.includes(t));
       const remainingTokens = p.entry.tokens.filter((t) => !entry!.tokens.includes(t));
       const updated: MergeQuarantineEntry = { ...p.entry, tokens: remainingTokens };
+      // @decision 1fc3a561 — captured from the OLD `p.entry` object, BEFORE `replaceEntryEverywhere`
+      // re-points its live map slots onto `updated` below — a re-pointed twin's `armedKeys` alone can
+      // miss a key it is still live-armed at by reference. See the decision record.
+      const liveKeysBeforeRepoint = liveArmedKeysOf(p.entry);
       // @decision d4b25feb (round 3) — re-point every in-memory reference BEFORE any durable write.
       // @decision 64119847 — `p` IS `arr[idx]`; this call's own in-place `p.entry = newEntry` mutation
       // is what makes the kept slot reflect `updated` — see the decision record, never a reassignment.
@@ -4575,7 +4582,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // @decision 2dd97aaa (Follow-up 58957b1e) — pass the FULL `entry!.tokens` as `droppedTokens`, same
       // strict-superset reasoning (and same value) as this branch's own `writePendingDivertFile` call
       // below — this write runs BEFORE the function's one deferred tombstone call (line ~4472).
-      for (const k of p.entry.armedKeys ?? []) {
+      //
+      // @decision 1fc3a561 — iterates `liveKeysBeforeRepoint`; the next line's live
+      // `activeQuarantines.get(k) !== updated` re-check is the ownership gate, stricter than a one-time
+      // `entryStillOwnsKey` filter — see the decision record for why no separate filter is needed here.
+      for (const k of liveKeysBeforeRepoint) {
         if (activeQuarantines.get(k) !== updated) continue;
         writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
         if (!writeMergeQuarantineLatch(updated, new Set(entry!.tokens), false, k)) {
@@ -4857,7 +4868,9 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   const L = new Set<string>(activeLiftedKeys);
   for (const p of pendingUnresolvedQuarantines) {
     if (directPathIdentity(p.entry.repoPath) !== identity) continue;
-    const ownedArmedKeys = (p.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, p.entry));
+    // @decision 1fc3a561 — widened to {@link liveArmedKeysOf}, same reason as the sibling site in
+    // `clearMergeQuarantineByKey`. See the decision record.
+    const ownedArmedKeys = liveArmedKeysOf(p.entry).filter((k) => entryStillOwnsKey(k, p.entry));
     pendingOwnedArmedKeys.set(p, ownedArmedKeys);
     for (const k of ownedArmedKeys) L.add(k);
   }
@@ -5303,7 +5316,10 @@ export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[]
   // @decision 8db913e2 (Follow-up 3152ec90) — gate every member through `entryStillOwnsKey` first — a
   // stale `armedKeys` member would otherwise hand out a FOREIGN entry's own latch id as if it belonged
   // to `entry`.
-  const ownedArmedKeys = entry.armedKeys?.filter((k) => entryStillOwnsKey(k, entry)) ?? [];
+  // @decision 1fc3a561 — widened to {@link liveArmedKeysOf}, never `entry.armedKeys` alone — a
+  // re-pointed twin could otherwise hand out a pending-sourceFile-derived or fresh-hash id instead of
+  // its own real live-armed key ids. See the decision record.
+  const ownedArmedKeys = liveArmedKeysOf(entry).filter((k) => entryStillOwnsKey(k, entry));
   if (ownedArmedKeys.length) {
     const ids = [...new Set(ownedArmedKeys.map(quarantineHashForKey))];
     return ids.sort((a, b) => {

@@ -70,11 +70,19 @@ alternative: robust against this file's 20+ `replaceEntryEverywhere` sites leavi
   re-filtered through `entryStillOwnsKey` — never the raw, unfiltered union.
 - **Sites 1-4 of this card's own audit are closed by `c52b290e`** — `confirmedDurableBackingElsewhere`,
   `ownedKeysIncluding`, and `clearMergeQuarantineByRecordedPath`'s `activeLiftedKeys` are fixed there;
-  `clearMergeQuarantineByKey`'s `tiedViaKeyOrOrphanRef` is closed non-reproducible there, not widened. The
-  ROOT CAUSE (`protectOccupantContentBeforeDelete`'s own re-point never stamps `armedKeys`) and the
-  remaining `armedKeys`-only consumers `c52b290e` did not touch are **NOT** closed — tracked on card
-  `1fc3a561` ("fix(git): widen the remaining armedKeys-only quarantine clear consumers to live-armed
-  keys"). See `c52b290e`'s own decision record for the Sites-1-4 audit, fixes, and the equivalence proof.
+  `clearMergeQuarantineByKey`'s `tiedViaKeyOrOrphanRef` is closed non-reproducible there, not widened. See
+  `c52b290e`'s own decision record for the Sites-1-4 audit, fixes, and the equivalence proof.
+- **The five `armedKeys`-only consumers `c52b290e` did not touch are now widened to live-armed keys by
+  `1fc3a561`** (`clearMergeQuarantineByKey`'s pendingPlan `ownedArmedKeys` and its "remove" loop, the
+  reduce-branch write loop, `clearMergeQuarantineByRecordedPath`'s `pendingOwnedArmedKeys`, and
+  `quarantineLatchFileIdsFor`) — via the SAME `liveArmedKeysOf`/`liveArmedKeys` helpers, never by stamping
+  `armedKeys` at the re-point itself (the Lead's own ruling on that card rejected root-cause stamping, for
+  covering only one of 20+ `replaceEntryEverywhere` sites). **The ROOT CAUSE itself (the re-point never
+  stamps `written.entry.armedKeys`) is deliberately LEFT OPEN (Lead ruling) — do not trust
+  `entry.armedKeys` as complete.** See
+  `docs/decisions/1fc3a561-remaining-armedkeys-consumers-closed-via-live-scan.md` for the per-site fixes,
+  the RED/GREEN proofs, and `clearMergeQuarantineByRecordedPath`'s own site — closed non-reproducible
+  there, mirroring `c52b290e`'s own Site-2 closure, rather than independently fixed.
 
 ## Verification
 
