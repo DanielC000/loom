@@ -1098,6 +1098,41 @@ try {
     check("(o2) the POSIX slack accepts the same row the win32 default rejected", acceptedUnderPosixSlack === STARTED_AT + posixDelta);
   }
 
+  // (o3, card 0d8270b2) THE REAL DEFECT THIS CARD FIXES: a genuine, correctly-identified root whose
+  // creationTime lands a FEW MS after startedAt — measured directly on real hardware (a live capture
+  // caught a real witness process with this exact +4ms shape; two independent failure-rate campaigns
+  // found the same miss at roughly 0.5-2% per trial (1 in 44, and 1 in 215) — see docs/decisions/
+  // 0d8270b2-*.md for the method; no fuller distribution/min-max was retained beyond that one +4ms catch)
+  // — is NOT evidence of pid reuse, just cross-API clock-read skew. Uses a FIXED, hardcoded delta (never
+  // the live ROOT_CREATION_CAPTURE_SLACK_MS
+  // constant, unlike (o)/(o2) above, which "automatically re-pin whatever value ships" and so could never
+  // demonstrate a RED/GREEN split across the OLD vs NEW default) — this is the one test in this file that
+  // would have gone RED against round 3's old 2ms default and must go GREEN against the corrected one.
+  {
+    const MEASURED_REAL_SKEW_MS = 4; // the exact delta caught live; see docs/decisions/0d8270b2-*.md
+    const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: STARTED_AT + MEASURED_REAL_SKEW_MS };
+    const OLD_SLACK_MS = 2; // round 3's own (now-corrected) default — hardcoded, never the live constant
+    const rejectedUnderOldSlack = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT, OLD_SLACK_MS);
+    check("(o3) RED proof: the measured real +4ms skew IS rejected under the OLD 2ms default",
+      rejectedUnderOldSlack === null);
+    const acceptedUnderCurrentSlack = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
+    check("(o3) GREEN proof: the SAME +4ms skew is ACCEPTED under the corrected (live) default",
+      acceptedUnderCurrentSlack === STARTED_AT + MEASURED_REAL_SKEW_MS);
+    check("(o3) sanity: the live default is actually wider than the old one (this test is non-vacuous)",
+      ROOT_CREATION_CAPTURE_SLACK_MS > OLD_SLACK_MS);
+  }
+
+  // (o4, card 0d8270b2, negative control) a genuine reuse — a creationTime FAR past any realistic slack
+  // (500ms, utterly unlike the single-digit-ms skew (o3) legitimizes) — is STILL rejected even under the
+  // corrected, widened default. Proves the fix widens the margin, not the filter: the pid-reuse rejection
+  // itself is untouched.
+  {
+    const row = { pid: 1, ppid: EXPECTED_PPID, creationTime: STARTED_AT + 500 };
+    const result = resolveVerifiedRootCreationTime(row, EXPECTED_PPID, STARTED_AT);
+    check("(o4, negative control) a creationTime 500ms past startedAt (genuine reuse) is still rejected",
+      result === null);
+  }
+
   // (p, negative control) no row at all (enumeration found nothing, e.g. already dead) — null, never throws.
   check("(p, negative control) a null row: returns null", resolveVerifiedRootCreationTime(null, EXPECTED_PPID, STARTED_AT) === null);
 
@@ -1261,8 +1296,8 @@ if (process.platform === "win32") {
 // This check NAMES WHAT IT DOES NOT COVER: it proves (a) darwin actually ARMS (reaches
 // `captureRootCreationRow` at all — would NOT happen if the gate regressed to raw
 // `process.platform === "linux"` early-return reasoning that happened to agree with `resolveRootReapPlatform`
-// only by coincidence) and (b) the VERIFICATION slack used is POSIX's (1000ms default), not win32's (2ms)
-// — via a row whose creationTime delta from startedAt is picked to be accepted under the POSIX slack and
+// only by coincidence) and (b) the VERIFICATION slack used is POSIX's (1000ms default), not win32's (20ms,
+// card 0d8270b2) — via a row whose creationTime delta from startedAt is picked to be accepted under the POSIX slack and
 // REJECTED under the win32 one. It does NOT exercise `captureRootCreationRow`'s own real dispatch BODY
 // (the win32-CIM-vs-POSIX-ps ternary) — that would need a real `ps` spawn, which this Windows host can't
 // do; `pty-root-reap-posix-lstart-real-spawn.mjs` is the (darwin-only, currently unverified-on-target) real
@@ -1288,7 +1323,7 @@ if (process.platform === "win32") {
   });
 
   // (v) forced-darwin spawn: a row whose creationTime is 500ms AHEAD of startedAt — rejected under
-  // win32's 2ms slack, accepted under POSIX's 1000ms default. Two real failure modes collapse to the SAME
+  // win32's 20ms slack (card 0d8270b2), accepted under POSIX's 1000ms default. Two real failure modes collapse to the SAME
   // observable (live.creationTime stays null): darwin never arming at all, or arming but verifying against
   // the wrong (win32) slack — either regression turns this RED.
   {
@@ -1299,7 +1334,7 @@ if (process.platform === "win32") {
     await host.lastCapturePromise;
     check("(v) forced-darwin spawn: captureRootCreationRow WAS called (darwin arms, same as win32)",
       host.capturedPids.length === 1 && host.capturedPids[0] === 4242);
-    check("(v) forced-darwin spawn: a +500ms row is ACCEPTED (verified against the POSIX 1000ms slack, not win32's 2ms)",
+    check("(v) forced-darwin spawn: a +500ms row is ACCEPTED (verified against the POSIX 1000ms slack, not win32's 20ms)",
       host.captureLiveRef("sess-capture-darwin-posix-slack")?.creationTime === t0 + 500);
   }
   // (v, negative control) the SAME +500ms delta, but forcing win32 instead — proves the row genuinely
@@ -1316,7 +1351,7 @@ if (process.platform === "win32") {
     host.nextRow = { pid: 4242, ppid: process.pid, creationTime: t0 + 500 };
     host.spawn(spawnOpts("sess-capture-win32-rejects-500ms"));
     await host.lastCapturePromise;
-    check("(v, negative control) the SAME +500ms row IS rejected under the win32 (2ms) slack",
+    check("(v, negative control) the SAME +500ms row IS rejected under the win32 (20ms) slack",
       host.captureLiveRef("sess-capture-win32-rejects-500ms")?.creationTime === null);
   }
 }

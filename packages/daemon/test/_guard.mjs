@@ -31,6 +31,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { ambientScaledBudget } from "./_wait.mjs";
 
 // @decision 8c8ee0ee — STRUCTURAL test-spawn registry for pty/host.ts's real-reaper test tripwire
 // (assertReapTargetIsOwnLiveDescendantUnderTest). A live OS pid->ppid walk alone can't recognize a pid
@@ -62,6 +63,21 @@ globalThis.__LOOM_TEST_SPAWNED_PID_CREATION_TIMES__ = LOOM_TEST_SPAWNED_PID_CREA
 // production or by assertReapTargetIsOwnLiveDescendantUnderTest; purely diagnostic/assertable state.
 const CAPTURE_STATS = { started: 0, skippedReentrant: 0, failed: 0 };
 globalThis.__LOOM_TEST_CAPTURE_STATS__ = CAPTURE_STATS;
+
+// @decision 0d8270b2 — pid -> WHY the most recent capture for that pid came back unverified (never why it
+// succeeded — a verified entry clears/overwrites any stale reason here). One of "no-row" (the OS enumeration
+// returned nothing for this pid), "ppid-mismatch" (a live row exists but its ppid isn't ours — the genuine
+// pid-reuse signal this whole mechanism exists to catch), "slack-margin" (a row exists, ppid matches, but
+// `row.creationTime` landed after `registeredAt + ROOT_CREATION_CAPTURE_SLACK_MS` — see
+// `armWitnessWithFreshRetry`'s own doc for why this one, specifically, is NOT evidence of reuse), or "infra"
+// (the capture's OWN spawn/CIM call itself threw or rejected for THIS pid — never a verification outcome).
+// `armWitnessWithFreshRetry` reads THIS pid's own entry — never the global `CAPTURE_STATS.failed` counter —
+// to decide, PER PID, whether a null result is worth retrying with a fresh candidate: a concurrent capture
+// failure for an unrelated pid must never be read as THIS pid's own infra failure (@decision 0d8270b2 round 2).
+const CAPTURE_REJECTION_REASONS = new Map();
+// @decision 0d8270b2 (round 2) — test-visible for the "per pid, not global" regression test (see
+// pty-root-reap-test-tripwire.mjs's own "(helper)" scenario); never read by production.
+globalThis.__LOOM_TEST_CAPTURE_REJECTION_REASONS__ = CAPTURE_REJECTION_REASONS;
 
 // @decision 85ae7768 (CR 85360986/165cf2fa) — OFF BY DEFAULT. `node:child_process`'s own `spawn` is also
 // the primitive simple-git (and most test helpers) spawn real `git`/helper processes through — narrowing
@@ -109,10 +125,28 @@ const PENDING_CAPTURES = new Map();
 
 /**
  * Fire-and-forget: captures pid's verified OS creation time, win32-only. `registeredAt` must be stamped
- * AFTER the real spawn call returns (mirrors production's real spawn-then-stamp ordering, 87691385) —
- * the genuine root's own OS creation time is always `<= registeredAt`, which is what lets
- * `resolveVerifiedRootCreationTime` trust it.
+ * AFTER the real spawn call returns (mirrors production's real spawn-then-stamp ordering, 87691385) so
+ * `resolveVerifiedRootCreationTime` can verify the row against it within `ROOT_CREATION_CAPTURE_SLACK_MS`
+ * (20ms, card 0d8270b2) — NOT, as an earlier draft of this doc claimed, because the genuine root's own OS
+ * creation time is "always `<= registeredAt`"; that invariant is empirically false (see
+ * docs/decisions/0d8270b2-*.md and `docs/decisions/87691385-*.md` round 7) — a genuine root's creationTime
+ * can land a few ms AFTER `registeredAt`, which is exactly why the slack exists.
  */
+// @decision 0d8270b2 — the capture's own CIM enumeration (a REAL spawned `powershell.exe` doing real I/O,
+// not a guessed sleep) gets MORE wall-clock headroom under genuine host contention — same
+// `ambientScaledBudget` convention every other load-sensitive real-OS-call wait in this suite already
+// uses (dev-server-teardown.mjs's `ROOT_DEATH_TIMEOUT_MS`/`REAP_TIMEOUT_MS`). Orthogonal to, and NOT the
+// confirmed fix for, the card's own root cause — that turned out to be `armWitnessWithFreshRetry`'s own
+// slack-margin miss (see its doc below, and docs/decisions/0d8270b2-*.md for the full investigation); this
+// stays as a harmless, independently-justified hardening against a genuinely slow CIM query under extreme
+// contention. Lazy: `ambientScaledBudget` only pays its one-time ambient-probe cost (~50ms) the first time
+// a win32 capture actually runs, never for the large majority of test files that import this module but
+// never call `enableRootCreationCapture()`.
+const CAPTURE_ENUMERATION_BASE_TIMEOUT_MS = 10_000; // == enumerateWin32SweepRowForPid's own unscaled default.
+function resolveCaptureEnumerationTimeoutMs() {
+  return ambientScaledBudget(CAPTURE_ENUMERATION_BASE_TIMEOUT_MS);
+}
+
 function captureTestRegistryCreationTime(pid, registeredAt) {
   if (!rootCreationCaptureEnabled) return; // opt-in, card 85ae7768 — see its own doc above.
   if (process.platform !== "win32") return; // POSIX never carries a creation-time column; stays unpopulated.
@@ -123,11 +157,27 @@ function captureTestRegistryCreationTime(pid, registeredAt) {
       captureReentrancyDepth++;
       let rowPromise;
       try {
-        rowPromise = enumerateWin32SweepRowForPid(pid);
+        // @decision 0d8270b2 — explicit, ambient-scaled timeoutMs (see above); the production call site
+        // (pty/host.ts's captureRootCreationRow) still uses this function's own unscaled 10s default —
+        // this override is test-only and never reaches production.
+        rowPromise = enumerateWin32SweepRowForPid(pid, resolveCaptureEnumerationTimeoutMs());
       } finally {
         captureReentrancyDepth--;
       }
-      return rowPromise.then((row) => resolveVerifiedRootCreationTime(row, process.pid, registeredAt));
+      return rowPromise.then((row) => {
+        const verified = resolveVerifiedRootCreationTime(row, process.pid, registeredAt);
+        // @decision 0d8270b2 — classify WHY a null came back (see CAPTURE_REJECTION_REASONS's own doc
+        // above); a verified result clears any stale reason from an earlier capture of this same pid.
+        if (verified == null) {
+          const reason = row == null ? "no-row"
+            : row.ppid !== process.pid ? "ppid-mismatch"
+            : "slack-margin";
+          CAPTURE_REJECTION_REASONS.set(pid, reason);
+        } else {
+          CAPTURE_REJECTION_REASONS.delete(pid);
+        }
+        return verified;
+      });
     })
     .then((verified) => {
       // @decision 85ae7768 (CR 165cf2fa) — only the LATEST capture for THIS pid may write. A pid can be
@@ -148,6 +198,10 @@ function captureTestRegistryCreationTime(pid, registeredAt) {
     })
     .catch((err) => {
       CAPTURE_STATS.failed++;
+      // @decision 0d8270b2 (round 2) — record the infra failure PER PID too, not just the global
+      // counter above: `armWitnessWithFreshRetry` classifies a null result from THIS pid's own entry
+      // here, never from `CAPTURE_STATS.failed`'s global count (see that map's own doc above).
+      CAPTURE_REJECTION_REASONS.set(pid, "infra");
       // eslint-disable-next-line no-console
       console.error(`[pty-reap-test-guard-capture] REFUSED pid=${pid}: ${err?.message ?? err}`);
       return null;
@@ -157,7 +211,13 @@ function captureTestRegistryCreationTime(pid, registeredAt) {
 
 // Generous relative to the ~560-630ms measured real latency (CR 85360986) — this bounds a genuinely
 // wedged capture (e.g. a hung powershell.exe), it is not tuned to the common-case timing.
-const AWAIT_ROOT_CREATION_CAPTURE_TIMEOUT_MS = 10_000;
+// @decision 0d8270b2 — ambient-scaled (see resolveCaptureEnumerationTimeoutMs above) with a 20% margin
+// ABOVE the inner enumeration's own scaled ceiling, so this outer race can never fire first and reject a
+// capture that is still legitimately running under load — it must always lose that race to the inner
+// call's own tolerant-null `.catch()` resolution, never pre-empt it.
+function resolveAwaitRootCreationCaptureTimeoutMs() {
+  return Math.round(resolveCaptureEnumerationTimeoutMs() * 1.2);
+}
 
 /**
  * Waits for pid's own capture (if one was ever started) to settle, so a caller can arm-then-assert
@@ -168,7 +228,7 @@ const AWAIT_ROOT_CREATION_CAPTURE_TIMEOUT_MS = 10_000;
  * — on a real timeout, so a wedged capture is an observable failure, never silently indistinguishable
  * from a legitimate null result.
  */
-export function awaitRootCreationCapture(pid, timeoutMs = AWAIT_ROOT_CREATION_CAPTURE_TIMEOUT_MS) {
+export function awaitRootCreationCapture(pid, timeoutMs = resolveAwaitRootCreationCaptureTimeoutMs()) {
   const pending = PENDING_CAPTURES.get(pid);
   if (!pending) return Promise.resolve(null);
   let timer;
@@ -179,6 +239,110 @@ export function awaitRootCreationCapture(pid, timeoutMs = AWAIT_ROOT_CREATION_CA
     );
   });
   return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * @decision 0d8270b2 — card 0d8270b2's investigation (docs/decisions/0d8270b2-*.md) found a genuine,
+ * correctly-identified (ppid-matched) witness child occasionally failing `resolveVerifiedRootCreationTime`'s
+ * own slack check by a few ms — CONFIRMED via a captured diagnostic (a real witness, delta=4ms against the
+ * OLD 2ms slack). The fix for THAT is in PRODUCTION (`ROOT_CREATION_CAPTURE_SLACK_MS`, `pty/
+ * win32-root-creation.ts`, raised to 20ms — see `docs/decisions/87691385-*.md` round 7): a genuine root's
+ * skew is now comfortably inside the slack, so a slack-margin miss should no longer occur for a real
+ * witness in practice. This helper therefore retries ONLY a genuine INFRA failure (the spawn/CIM call
+ * itself threw or rejected — `CAPTURE_STATS.failed` advances) with a BRAND NEW candidate process (never
+ * re-querying the same pid — both `row.creationTime` and `registeredAt` are fixed once set for a given
+ * pid, so only a fresh spawn gives a fresh, independent trial). EVERY verification rejection — `no-row`,
+ * `ppid-mismatch`, OR `slack-margin` — is now a HARD, NON-RETRIED failure: retrying past a slack-margin
+ * miss would MASK a regression of the production fix above (if the slack were ever narrowed again, a
+ * retry-dependent test would silently keep passing instead of catching it), and `ppid-mismatch`/`no-row`
+ * are already the genuine pid-reuse-adjacent signals this whole mechanism exists to catch loudly. This
+ * mirrors `pty-exit-reap-seam.mjs`'s own pre-existing, independent "only infra failures retry" design —
+ * not a new idea, just this file's own reusable version of it.
+ *
+ * `spawnCandidate()` must return a fresh `ChildProcess` on every call (same shape every scenario in
+ * `pty-root-reap-test-tripwire.mjs` already uses: `spawnProcess(process.execPath, ["-e", "setTimeout(()
+ * => {}, N)"], { stdio: "ignore" })`). Returns `{ pid, child, creationTime }` on success — the caller owns
+ * `child` from here on (kill it, reap it, whatever the scenario needs) exactly as if it had spawned it
+ * itself. On a hard rejection (any non-infra verification failure) or exhaustion (every attempt was a
+ * genuine infra failure), returns `{ pid: null, child: null, creationTime: null, hardRejected, reason, log
+ * }` — `hardRejected:true` + `reason` (`"no-row"`/`"ppid-mismatch"`/`"slack-margin"`) on a hard rejection;
+ * `hardRejected:false` + `reason:null` on exhaustion (every attempt was infra); `log` is every attempt's
+ * own one-line diagnostic, newline-joinable, naming WHICH branch fired each time.
+ *
+ * @decision 0d8270b2 — a BOUNDED, logged backoff (`INFRA_RETRY_BACKOFF_MS`) sits between infra-failure
+ * retries ONLY — a transient spawn/CIM squeeze (the manager's own "resource starvation under a concurrent
+ * gate" hypothesis) may need more than an immediate re-try to clear; the default 5 attempts / ~3.75s of
+ * total backoff is a deliberately small, bounded budget, not a blind long wait. Never applied before a
+ * hard rejection (there is nothing to wait out) or before the first attempt.
+ *
+ * @decision 0d8270b2 (round 2) — the infra-vs-hard-reject decision is made PER PID, from THIS pid's own
+ * `CAPTURE_REJECTION_REASONS` entry (set by `captureTestRegistryCreationTime`'s own settle handler, either
+ * to `"infra"` on a genuine spawn/CIM error or to one of the three verification-rejection reasons) — never
+ * from the GLOBAL `CAPTURE_STATS.failed` counter. A concurrent capture for an UNRELATED pid also bumps that
+ * global counter while THIS pid's own await is still outstanding; reading it as THIS pid's own outcome
+ * would misclassify a genuine hard rejection (slack-margin/ppid-mismatch/no-row) as a retryable infra
+ * failure and retry past it — masking exactly the regression this mechanism exists to catch. `__testHooks`
+ * (test-only, never set by a real caller) lets a hermetic test fully control the per-attempt outcome
+ * without a real win32 CIM race — see `pty-root-reap-test-tripwire.mjs`'s own "(helper)" scenario.
+ */
+const INFRA_RETRY_BACKOFF_MS = [250, 500, 1000, 2000];
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+export async function armWitnessWithFreshRetry(spawnCandidate, { attempts = 5, __testHooks } = {}) {
+  // Capture mechanism not engaged at all (POSIX, or `enableRootCreationCapture()` never called) — mirrors
+  // `awaitRootCreationCapture`'s own immediate-null shape for this case: spawn ONCE, return immediately
+  // with `creationTime: null`, never retry (there is nothing a retry could change).
+  if (!rootCreationCaptureEnabled || process.platform !== "win32") {
+    const child = spawnCandidate();
+    return {
+      pid: child.pid, child, creationTime: null, hardRejected: false, reason: null,
+      log: ["capture mechanism not engaged (non-win32 or disabled) — single spawn, no retry"],
+    };
+  }
+  const awaitCapture = __testHooks?.awaitCapture ?? awaitRootCreationCapture;
+  const log = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const child = spawnCandidate();
+    const pid = child.pid;
+    let result = null;
+    let threw = null;
+    try {
+      result = await awaitCapture(pid);
+    } catch (err) {
+      threw = err;
+    }
+    if (threw) {
+      try { child.kill(); } catch { /* already gone */ }
+      const backoffMs = attempt <= INFRA_RETRY_BACKOFF_MS.length ? INFRA_RETRY_BACKOFF_MS[attempt - 1] : null;
+      log.push(`attempt ${attempt}/${attempts} pid=${pid}: INFRA FAILURE (spawn/CIM error) — ${threw?.message ?? threw}` +
+        (backoffMs != null ? ` — backing off ${backoffMs}ms then retrying` : " — retrying (no backoff slot left)"));
+      if (backoffMs != null) await sleep(backoffMs);
+      continue;
+    }
+    if (typeof result === "number" && result > 0) {
+      log.push(`attempt ${attempt}/${attempts} pid=${pid}: VERIFIED (creationTime=${result}) — armed`);
+      return { pid, child, creationTime: result, hardRejected: false, reason: null, log };
+    }
+    // @decision 0d8270b2 (round 2) — PER-PID classification, never the global CAPTURE_STATS.failed
+    // counter (see this function's own doc above for why that counter is unsafe to read here).
+    const reason = CAPTURE_REJECTION_REASONS.get(pid) ?? "unknown";
+    try { child.kill(); } catch { /* already gone */ }
+    if (reason === "infra") {
+      const backoffMs = attempt <= INFRA_RETRY_BACKOFF_MS.length ? INFRA_RETRY_BACKOFF_MS[attempt - 1] : null;
+      log.push(`attempt ${attempt}/${attempts} pid=${pid}: INFRA FAILURE (resolved null via capture's own catch)` +
+        (backoffMs != null ? ` — backing off ${backoffMs}ms then retrying` : " — retrying (no backoff slot left)"));
+      if (backoffMs != null) await sleep(backoffMs);
+      continue;
+    }
+    // A genuine verification rejection (no-row / ppid-mismatch / slack-margin), OR an "unknown" pid this
+    // run never classified at all (fail safe: never silently retry something unclassified) — NEVER
+    // retried. See this function's own doc for why slack-margin joined ppid-mismatch/no-row here once the
+    // production fix (docs/decisions/87691385-*.md round 7) made it a real, test-worthy anomaly rather
+    // than noise.
+    log.push(`attempt ${attempt}/${attempts} pid=${pid}: HARD REJECT (${reason}) — NOT retrying`);
+    return { pid: null, child: null, creationTime: null, hardRejected: true, reason, log };
+  }
+  return { pid: null, child: null, creationTime: null, hardRejected: false, reason: null, log };
 }
 
 /**

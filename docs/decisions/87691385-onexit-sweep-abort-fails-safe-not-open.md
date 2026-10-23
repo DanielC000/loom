@@ -182,6 +182,13 @@ cleanly at both 50ms and 2ms on this host, confirming the claim empirically (the
 under 2ms in every run); the pure boundary tests in `pty-root-reap-identity.mjs` read the live exported
 constant, so they automatically re-pin whatever value ships.
 
+**⛔ SUPERSEDED BY ROUND 7 (below).** The "ALWAYS `<= startedAt`" invariant this item's own 2ms shrink
+rested on is empirically false — card `0d8270b2` caught a real, correctly-ppid-matched root landing 4ms
+*after* `startedAt`. Round 7 raises the slack to 20ms for exactly that reason. The "it passed cleanly at
+both 50ms and 2ms on this host" observation above was a true report of what ran on that host, on that
+day — it was never a proof the skew can't exceed 2ms elsewhere, and Round 7's own measurement is what
+actually settles the question this item only assumed the answer to.
+
 ## Round 4 (Code Review f8d7c90a): the codex spawn path was never actually exercised
 
 Round 3's own text (above) claimed its three behavioural tests drove "the real `spawn()`/`spawnCodex()`
@@ -253,7 +260,67 @@ the pid and — for the unverified case — which check failed (no row / ppid mi
 exception message for a genuine rejection. This card's own (r)/(s) scenarios (a wrong-ppid row; a row later
 than `startedAt+slack`) now also exercise this logging path directly.
 
+## Round 7 (card 0d8270b2): the "always <= startedAt" invariant was false
+
+Round 3's own MINOR 3b (above) narrowed `ROOT_CREATION_CAPTURE_SLACK_MS` from 50ms to 2ms on the claim
+that `CreateProcess` returns before `startedAt` is ever stamped, so the genuine root's own creation time
+is ALWAYS `<= startedAt` — 2ms was presented as covering rounding only, "never a real margin." That claim
+is **empirically false**. Card `0d8270b2` (investigating a sibling incident — a test file using the same
+capture mechanism failing its "creationTime is armed" checks) caught a REAL, correctly-ppid-matched
+witness process whose WMI-reported `CreationDate` landed 4ms AFTER `startedAt`, with no infra failure and
+no pid reuse — the row was genuinely ours, just a few ms "late" by this comparison. Two independent
+failure-rate campaigns (see `docs/decisions/0d8270b2-*.md` for the method) found the same miss recurring
+at roughly 0.5–2% per trial (1 failure in 44 runs of one real-spawn file; 1 in 215 trials of an isolated
+stress script) — rare, but not a one-off, and not dependent on heavy host load to occur. **No fuller
+distribution (a full min/max, or a negative-tail figure) was retained beyond the one directly-captured
++4ms catch** — a prior version of this section cited "~950 trials" and a wider skew range; that figure is
+not substantiated by anything recorded in `docs/decisions/0d8270b2-*.md` and is withdrawn here rather than
+repeated.
+
+**The fix:** `ROOT_CREATION_CAPTURE_SLACK_MS` is raised from 2ms to 20ms — roughly 5x the measured worst
+case, and comfortably above the classic Windows system-clock-interrupt granularity (~15.625ms, a known
+source of multi-ms cross-API clock-read discrepancies on this platform) as a second, independent
+justification ceiling. 20ms remains utterly negligible next to any REALISTIC pid-reuse interval, which
+needs the OS to fully tear down the original process and then hand the freed pid number to a brand-new,
+unrelated `CreateProcess` call — not a single-digit-to-low-double-digit-ms event. Round 2's own
+`resolveVerifiedRootCreationTime` predicate and its two independent guard clauses (ppid match; creation
+time within slack) are UNCHANGED — only the slack CONSTANT moved. The `ppid === expectedPpid` check still
+does the vast majority of the real pid-reuse-rejection work — but NOT all of it: the one residual the
+slack value itself still gates, unchanged in kind from round 3's own accepted residual, is a reused pid
+that happens to be owned by ANOTHER of THIS SAME daemon's own children (so `ppid === expectedPpid` still
+passes) and that gets created within the slack window after `startedAt`. Widening the slack 10x (2ms to
+20ms) widens that window by the same factor. It stays very improbable — it needs the original root to
+have died, AND the OS to have handed its exact freed pid to a brand-new, unrelated `CreateProcess` call
+from this same daemon, AND that to happen within ~20ms of the ORIGINAL spawn — not merely possible to
+state, never reduced to "the ppid check does all the work."
+
+A new production-level test (`pty-root-reap-identity.mjs`, scenario "(o3)") pins a FIXED, hardcoded +4ms
+delta (not a value derived from the live constant, unlike (o)/(o2) above) — proven RED against the OLD
+2ms default and GREEN against the new 20ms one — plus a negative control that a delta far past any
+realistic slack (500ms) is still rejected even under the widened value.
+
 ## Do not
+
+- **(Round 7) Do not read `ROOT_CREATION_CAPTURE_SLACK_MS` as bounding only "rounding."** The corrected
+  invariant: a genuine root's `creationTime` can land a FEW MS (measured up to +4ms) after `startedAt`,
+  not just sub-ms rounding noise — this is real clock-domain skew between two different APIs, not an
+  implementation bug to "fix away." Do not shrink the slack back toward 2ms on the theory that the skew
+  "shouldn't" exist; it is measured, not theorized.
+- **(Round 7) Do not treat a wider capture slack as weakening the pid-reuse filter — but do not claim the
+  `ppid === expectedPpid` check does ALL of the real pid-reuse-rejection work either.** It does the vast
+  majority of it (unconditional, independent of slack, and 20ms stays many orders of magnitude below any
+  realistic reuse interval). The ONE residual the slack value itself still gates — unchanged in kind from
+  round 3's own accepted residual, only widened 10x — is a reused pid owned by ANOTHER of this SAME
+  daemon's own children (same ppid) created within the slack window after `startedAt`. State that
+  residual explicitly when describing what the slack protects; it needs root death plus a same-daemon pid
+  reuse within ~20ms of spawn, so it is very improbable, not impossible.
+- **(Round 7) Do not re-derive the 20ms figure from first principles without re-measuring.** It is
+  anchored to a specific measurement — one directly-captured +4ms catch plus two failure-rate campaigns
+  (1/44, 1/215), this host, 2026-10-23 — plus the Windows clock-tick granularity as a ceiling, not a
+  theoretically "correct" number — if a future host/Node/Windows version shows a materially different
+  tail, re-measure (see `docs/decisions/0d8270b2-*.md`'s own method) rather than guessing a new constant.
+  **Do not cite "~950 trials" for this measurement** — an earlier version of this bullet did; that figure
+  is not substantiated by anything recorded in `docs/decisions/0d8270b2-*.md` and was withdrawn.
 
 - Do not use `Live.startedAt`/`CodexLive.startedAt` as `computeOrphanSweepPlan`'s `rootCreationTime` — it
   is `Date.now()` at the moment Loom's own `spawn()` call runs, not the OS's own creation timestamp;
@@ -313,10 +380,13 @@ than `startedAt+slack`) now also exercise this logging path directly.
   the single MOST REACHABLE reuse shape (our own helper inheriting the just-freed pid), not every
   conceivable reuse sequence in the capture's own window; treat this as an accepted, narrowed residual,
   not a proof of impossibility.
-- (Round 3) Do not widen `ROOT_CREATION_CAPTURE_SLACK_MS` back toward 50ms (or beyond rounding margin) —
-  `CreateProcess` returns before `startedAt` is ever stamped, so the genuine root's own creation time is
-  ALWAYS `<= startedAt`; a wider slack was never a real margin, only an untested guess the round-3 review
-  corrected.
+- (Round 3) ⛔ **SUPERSEDED BY ROUND 7 — do not carry this bullet's claim forward.** It read: "Do not widen
+  `ROOT_CREATION_CAPTURE_SLACK_MS` back toward 50ms (or beyond rounding margin) — `CreateProcess` returns
+  before `startedAt` is ever stamped, so the genuine root's own creation time is ALWAYS `<= startedAt`; a
+  wider slack was never a real margin, only an untested guess the round-3 review corrected." Round 7 found
+  that "ALWAYS `<= startedAt`" false (a real, correctly-ppid-matched root measured 4ms late) and widened
+  the slack to 20ms for exactly that reason — see Round 7's own "Do not" bullets above, which replace this
+  one rather than merely sitting beside it.
 - (Round 3) Do not widen `pty-subclass-reap-seam-guard.mjs`'s `REQUIRED_OVERRIDES` to include
   `captureRootCreationRow` as part of THIS card — doing so would force an edit across ~63 unrelated test
   files that define their own bare `extends PtyHost` subclass outside the shared fixture; that residual is

@@ -21,7 +21,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { spawn as spawnProcess } from "node:child_process";
-import { requireHermeticEnv, enableRootCreationCapture, awaitRootCreationCapture } from "./_guard.mjs";
+import { requireHermeticEnv, enableRootCreationCapture, awaitRootCreationCapture, armWitnessWithFreshRetry } from "./_guard.mjs";
 import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
@@ -151,14 +151,23 @@ try {
   // tripwire doesn't collaterally break the real, legitimate call shape the two existing witness tests use.
   // ===================================================================================================
   {
-    fabWitnessChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
-    const witnessPid = fabWitnessChild.pid;
     // @decision 85ae7768 (CR 85360986, MAJOR) — await + assert BEFORE reaping: the capture is async
     // (~560-630ms measured) while reapOrphanedDescendants reads the registry synchronously.
-    const capturedCreationTime = await awaitRootCreationCapture(witnessPid);
+    // @decision 0d8270b2 — retry with a FRESH candidate on a genuine INFRA failure only (spawn/CIM error);
+    // a verification rejection (no-row/ppid-mismatch/slack-margin) is a HARD, non-retried failure — see
+    // armWitnessWithFreshRetry's own doc.
+    const armed = await armWitnessWithFreshRetry(
+      () => spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" }),
+    );
+    fabWitnessChild = armed.child;
+    const witnessPid = armed.pid;
     if (process.platform === "win32") {
       check("(A, positive control) witness creationTime is armed before reap (the filter this card protects)",
-        typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+        typeof armed.creationTime === "number" && armed.creationTime > 0);
+    }
+    if (witnessPid == null) {
+      console.log(`(A, positive control) witness capture never armed:\n  ${armed.log.join("\n  ")}`);
+      throw new Error("(A, positive control) could not arm a real witness after retrying — see log above");
     }
     let threw = null;
     try { reapOrphanedDescendants(witnessPid); } catch (err) { threw = err; }
@@ -176,17 +185,26 @@ try {
   // (dev-server-teardown.mjs's own real shape: a dead root has NO row in a live OS enumeration at all).
   // ===================================================================================================
   {
-    deadChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
-    const deadPid = deadChild.pid;
     const isAlive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
-    check("(B) the soon-to-be-dead child is alive right after spawn", isAlive(deadPid));
     // @decision 85ae7768 (CR 85360986, MAJOR) — THE card's own primary scenario: await + assert BEFORE
     // killing — kill first and this races the capture's own ~560-630ms real latency and loses almost
     // every time, leaving the dead-registered-root filter silently un-armed (started, never recorded).
-    const capturedCreationTime = await awaitRootCreationCapture(deadPid);
+    // @decision 0d8270b2 — retry with a FRESH candidate on a genuine INFRA failure only (spawn/CIM error);
+    // a verification rejection (no-row/ppid-mismatch/slack-margin) is a HARD, non-retried failure — see
+    // armWitnessWithFreshRetry's own doc.
+    const armed = await armWitnessWithFreshRetry(
+      () => spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" }),
+    );
+    deadChild = armed.child;
+    const deadPid = armed.pid;
+    if (deadPid == null) {
+      console.log(`(B) deadPid capture never armed:\n  ${armed.log.join("\n  ")}`);
+      throw new Error("(B) could not arm a real dead-to-be candidate after retrying — see log above");
+    }
+    check("(B) the soon-to-be-dead child is alive right after spawn", isAlive(deadPid));
     if (process.platform === "win32") {
       check("(B) deadPid's creationTime is armed BEFORE it dies (the filter this card protects)",
-        typeof capturedCreationTime === "number" && capturedCreationTime > 0);
+        typeof armed.creationTime === "number" && armed.creationTime > 0);
     }
     deadChild.kill();
     await waitUntil(() => !isAlive(deadPid), { timeoutMs: 8_000, label: "deadChild actually dead" });
@@ -264,11 +282,21 @@ try {
   // non-null rootCreationTime exists.
   // ===================================================================================================
   {
-    liveRootLikeChild = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
-    const liveRootPid = liveRootLikeChild.pid;
-    const capturedCreationTime = await awaitRootCreationCapture(liveRootPid);
+    // @decision 0d8270b2 — retry with a FRESH candidate on a genuine INFRA failure only (spawn/CIM error);
+    // a verification rejection (no-row/ppid-mismatch/slack-margin) is a HARD, non-retried failure — see
+    // armWitnessWithFreshRetry's own doc.
+    const armed = await armWitnessWithFreshRetry(
+      () => spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" }),
+    );
+    liveRootLikeChild = armed.child;
+    const liveRootPid = armed.pid;
+    const capturedCreationTime = armed.creationTime;
     check("(B4) the live root's own creationTime is armed (needed for both legs below)",
       process.platform !== "win32" || (typeof capturedCreationTime === "number" && capturedCreationTime > 0));
+    if (liveRootPid == null) {
+      console.log(`(B4) live-root capture never armed:\n  ${armed.log.join("\n  ")}`);
+      throw new Error("(B4) could not arm a real live-root candidate after retrying — see log above");
+    }
 
     if (process.platform === "win32") {
       // @decision 914c9363 — never let the guard's own real OS enumeration run here (it can ETIMEDOUT
@@ -330,6 +358,47 @@ try {
       }
     } else {
       console.log("WARN  SKIP  (B4) live-root-abort->walk transition — win32-only (no POSIX creationTime data); process.platform !== 'win32' here.");
+    }
+  }
+
+  // ===================================================================================================
+  // (helper) card 0d8270b2 round 2 — armWitnessWithFreshRetry must classify a null capture result PER
+  // PID, never via the GLOBAL CAPTURE_STATS.failed counter: a concurrent capture failure for an unrelated
+  // ("foreign") pid, happening DURING this pid's own await, must never cause THIS pid's own genuine hard
+  // rejection (no-row/ppid-mismatch/slack-margin) to be misread as a retryable infra failure and retried
+  // past it — that would mask the exact regression this mechanism exists to catch. Uses `__testHooks`
+  // (test-only — see armWitnessWithFreshRetry's own doc) to fully control the per-attempt outcome
+  // deterministically, without depending on a real win32 CIM race: the hook itself simulates the
+  // concurrent foreign-pid failure (bumping the global counter) in the SAME tick it classifies THIS pid's
+  // own result as a genuine, non-infra rejection.
+  // ===================================================================================================
+  {
+    if (process.platform === "win32") {
+      const reasons = globalThis.__LOOM_TEST_CAPTURE_REJECTION_REASONS__;
+      const stats = globalThis.__LOOM_TEST_CAPTURE_STATS__;
+      let spawnCount = 0;
+      // Fabricated pids, never a real OS process — this scenario tests armWitnessWithFreshRetry's own
+      // classification logic in isolation, not the real win32 CIM capture (already covered elsewhere in
+      // this file and in pty-root-reap-identity.mjs).
+      const spawnCandidate = () => { spawnCount++; return { pid: 999_000_100 + spawnCount, kill() {} }; };
+      const armed = await armWitnessWithFreshRetry(spawnCandidate, {
+        attempts: 3,
+        __testHooks: {
+          awaitCapture: async (pid) => {
+            // Simulate the race: a DIFFERENT, unrelated pid's capture fails concurrently (the global
+            // counter advances) while THIS pid's own capture settles to a genuine, non-infra rejection.
+            stats.failed++;
+            reasons.set(pid, "slack-margin");
+            return null;
+          },
+        },
+      });
+      check("(helper) a concurrent foreign-pid failure does NOT misclassify this pid's own slack-margin rejection as infra",
+        armed.hardRejected === true && armed.reason === "slack-margin");
+      check("(helper) only ONE attempt was made — a misclassified retry would have spawned a second candidate",
+        spawnCount === 1);
+    } else {
+      console.log("WARN  SKIP  (helper) armWitnessWithFreshRetry per-pid classification — win32-only (capture mechanism disabled on POSIX).");
     }
   }
 

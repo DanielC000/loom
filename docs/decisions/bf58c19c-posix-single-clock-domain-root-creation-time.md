@@ -65,8 +65,9 @@ Two different numbers guard two different moments:
   (`resolveVerifiedRootCreationTime`'s `row.creationTime <= startedAt + slackMs` check). `lstart` is only
   SECOND-granular and whether a given `ps` implementation rounds or floors to that second is NOT verified
   here (no macOS host was available while making this fix) — a floor only ever under-reports (always safe
-  for a "no later than" check), but a round could over-report by up to ~500ms, which win32's 2ms slack would
-  wrongly reject. 1000ms comfortably covers either case. Mistuning this wide only costs more frequent,
+  for a "no later than" check), but a round could over-report by up to ~500ms, which win32's slack
+  (`ROOT_CREATION_CAPTURE_SLACK_MS`, 20ms as of card 0d8270b2 — 2ms at the time this record was written)
+  would wrongly reject. 1000ms comfortably covers either case. Mistuning this wide only costs more frequent,
   correct-but-unnecessary `identity:"unreadable"` refusals — never a wrong kill.
 - `POSIX_CREATION_TIME_MATCH_TOLERANCE_MS` (0ms) governs the AT-VERIFY comparison between two ALREADY-
   VERIFIED-OR-FRESH reads of the exact same attribute — see "why exact match" above.
@@ -135,7 +136,8 @@ but this was never independently confirmed against a real darwin kernel as part 
   local timezone, not the spawned `ps` child's `TZ`, and is ambiguous across a DST transition. Always spawn
   `ps` with `TZ=UTC`/`LC_ALL=C` and parse via explicit `Date.UTC(...)` construction
   (`parsePsLstartTimestamp`).
-- Do not reuse `ROOT_CREATION_CAPTURE_SLACK_MS` (win32's 2ms) for the POSIX at-spawn capture verification —
+- Do not reuse `ROOT_CREATION_CAPTURE_SLACK_MS` (win32's slack — 20ms as of card 0d8270b2) for the POSIX
+  at-spawn capture verification —
   `lstart`'s second granularity (and unknown round-vs-floor behavior) needs `POSIX_ROOT_CREATION_CAPTURE_SLACK_MS`
   (1000ms) instead; reusing the tighter win32 value risks wrongly rejecting a genuine capture.
 - Do not reuse `ROOT_CREATION_MATCH_TOLERANCE_MS` (win32's 1ms, for a CROSS-source pair) for the POSIX

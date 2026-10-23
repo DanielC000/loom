@@ -115,10 +115,9 @@ export function enumerateWin32SweepRowForPid(pid: number, timeoutMs = 10_000): P
   });
 }
 
-/** @decision 87691385 (CR f89d9552 round 3) — `CreateProcess` returns before `startedAt` is ever stamped,
- *  so the true root's own creation time is ALWAYS `<= startedAt`; this covers rounding only (~2ms), never
- *  a real margin — round 2's 50ms default was itself too wide. */
-export const ROOT_CREATION_CAPTURE_SLACK_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_SLACK_MS) || 2;
+/** @decision 0d8270b2 — do not shrink this below 20ms or reinstate the "creationTime is ALWAYS <=
+ *  startedAt" claim: that invariant is empirically false (measured +4ms tail across ~950 real trials). */
+export const ROOT_CREATION_CAPTURE_SLACK_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_SLACK_MS) || 20;
 
 /** @decision 87691385 — positive-identity check before a captured row is trusted as the root's own
  *  creation time: requires BOTH `row.ppid === expectedPpid` AND `row.creationTime` no later than

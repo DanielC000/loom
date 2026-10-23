@@ -1734,8 +1734,9 @@ export const ROOT_CREATION_MATCH_TOLERANCE_MS = Number(process.env.LOOM_ROOT_CRE
 export const ROOT_CREATION_CAPTURE_AWAIT_MS = Number(process.env.LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS) || 3_000;
 
 /**
- * @decision bf58c19c — NOT the win32 slack (`ROOT_CREATION_CAPTURE_SLACK_MS`, 2ms): `ps`'s `lstart` is
- * only second-granular and may round rather than floor. Never tighten without re-reading the record.
+ * @decision bf58c19c — NOT the win32 slack (`ROOT_CREATION_CAPTURE_SLACK_MS`, 20ms as of card 0d8270b2):
+ * `ps`'s `lstart` is only second-granular and may round rather than floor. Never tighten without
+ * re-reading the record.
  */
 export const POSIX_ROOT_CREATION_CAPTURE_SLACK_MS = Number(process.env.LOOM_POSIX_ROOT_CREATION_CAPTURE_SLACK_MS) || 1_000;
 
