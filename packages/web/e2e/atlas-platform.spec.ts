@@ -133,17 +133,25 @@ async function serveDevPlatformHome(page: Page, d: LoomDaemon): Promise<SetupHom
   return home;
 }
 
-const tabs = (page: Page) => page.getByRole("radiogroup", { name: "Platform node tabs" });
-// Segmented uppercases its labels in CSS, and Chromium folds `text-transform` into the accessible name —
-// so tab names are matched case-insensitively (measured on P1-0 gotcha 5 / P1-3 gotcha 1). Segmented is
-// role="radiogroup"/"radio" (card 3f28f1c3), not "tablist"/"tab" — these helpers keep their `tab`/`tabs`
-// names (what every call site below reads) but query the real roles.
-const tab = (page: Page, name: string) => tabs(page).getByRole("radio", { name: new RegExp(`^${name}$`, "i") });
+// Card f76b89b9: the node wears the SHARED `NodeTabs` row now — the same underlined row the project and
+// workspace nodes wear — not the boxed `Segmented` it used to carry. `atlas-node-tabs` is that row's own
+// testid, and it is the one NodeTabs on this address (no session or Companion node mounts here).
+const tabs = (page: Page) => page.getByTestId("atlas-node-tabs");
+// NodeTabs is deliberately still role="tablist"/"tab" + aria-selected — card 3f28f1c3 re-roled the shared
+// `Segmented` to radiogroup/radio but left NodeTabs alone, because it has real tab semantics. Names are
+// matched case-insensitively because CSS `text-transform` is folded into the accessible name (P1-0
+// gotcha 5), which holds for whichever of the two rows this helper is pointed at.
+const tab = (page: Page, name: string) => tabs(page).getByRole("tab", { name: new RegExp(`^${name}$`, "i") });
 
 async function openTab(page: Page, name: string) {
   await tab(page, name).click();
-  await expect(tab(page, name)).toHaveAttribute("aria-checked", "true");
+  await expect(tab(page, name)).toHaveAttribute("aria-selected", "true");
 }
+
+// The node head's own slot (components/AtlasShell.tsx) — where this node's identity pills now live. The
+// frame renders it on every node and `:empty`-hides it, so a count of zero here is a real "no pills".
+const nodeHeadPill = (page: Page, key: string) =>
+  page.getByTestId("atlas-nodehead-extras").getByTestId(`atlas-nodehead-pill-${key}`);
 
 // The View-as control Platform.tsx renders ABOVE whichever layout mounts (dev installs only).
 const viewAs = (page: Page, label: string) =>
@@ -244,16 +252,18 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // tab, because the tab lives in the URL rather than in component state — flipping the preview does
     // not throw away where you were. Pinned here so a later "reset to Home on toggle" change has to be a
     // deliberate one. Every marker below is read per tab, so walk back to Home explicitly.
-    await expect(tab(page, "Findings")).toHaveAttribute("aria-checked", "true");
+    await expect(tab(page, "Findings")).toHaveAttribute("aria-selected", "true");
     await openTab(page, "Home");
 
     // ── END-USER (previewed) — the exact complement, same order ──
     await expect(page.getByText(/your cross-project workspace agent/i)).toBeVisible();
     await expect(page.getByText(/the management layer above all projects/i)).toHaveCount(0);
 
-    // The Atlas identity strip drops the classic label's leading "Platform" word — the node head owns
-    // the page's one <h1>, so repeating it would read as a second heading. This is the exact regex the
-    // switch-OFF test asserts VISIBLE on the classic page, read here against the same edition's copy.
+    // The classic page's one-label heading ("Platform" + the home badge + the muted span) has no Atlas
+    // twin at all since card f76b89b9: the node head owns the page's one <h1> and carries the other two
+    // as pills. This is the exact regex the switch-OFF test asserts VISIBLE on the classic page, read
+    // here against the same edition's copy. (Leg 8 is what proves the pills POSITIVELY — this absence
+    // on its own would also be satisfied by a node that stated nothing.)
     await expect(page.getByText(/^Platform\s*Platform\s*your cross-project workspace agent/)).toHaveCount(0);
 
     await expect(panel(page, "home").getByText("Assistants", { exact: true })).toBeVisible();
@@ -266,7 +276,12 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // absence. This pins that `main` is present and is the populated content column, so the next line
     // is measuring the string rather than an empty subtree.
     await expect(content(page)).toBeVisible();
-    await expect(content(page).getByText(/your cross-project workspace agent/i)).toBeVisible();
+    // Card f76b89b9 moved this edition marker OUT of `main` and into the node head, so it is read off
+    // the pill now. Kept as a per-edition marker: the pill's text IS the edition's own muted span, so it
+    // discriminates exactly as the in-column span did — and the complement below still proves `main`
+    // carries no copy of it.
+    await expect(nodeHeadPill(page, "scope")).toHaveText(/your cross-project workspace agent/i);
+    await expect(content(page).getByText(/your cross-project workspace agent/i)).toHaveCount(0);
     await expect(content(page).getByText("Agents", { exact: true })).toHaveCount(0);
 
     await expect(page.getByRole("button", { name: /^start platform$/i })).toBeVisible();
@@ -344,7 +359,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       await page.goto(`${loomDaemon.baseURL}/platform?tab=board`);
 
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
-      await expect(tab(page, "Board")).toHaveAttribute("aria-checked", "true");
+      await expect(tab(page, "Board")).toHaveAttribute("aria-selected", "true");
       // The active project is genuinely the OTHER one — otherwise "the project's card is absent" would
       // hold for a reason that has nothing to do with the Board tab's scoping.
       await expect(page.getByTestId("atlas-project-node")).toContainText(project.name);
@@ -379,7 +394,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       await page.goto(`${loomDaemon.baseURL}/platform?tab=findings`);
 
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
-      await expect(tab(page, "Findings")).toHaveAttribute("aria-checked", "true");
+      await expect(tab(page, "Findings")).toHaveAttribute("aria-selected", "true");
 
       const findings = panel(page, "findings");
       const row = (label: string) => findings.locator("div").filter({ hasText: new RegExp(escapeRe(label)) }).last();
@@ -471,7 +486,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       // The row's one affordance: it hands the finding to the Board tab, which opens its card's dialog.
       // That is the whole point of listing findings here — triage still happens on the board.
       await page.getByRole("link", { name: /open on the board/i }).first().click();
-      await expect(tab(page, "Board")).toHaveAttribute("aria-checked", "true");
+      await expect(tab(page, "Board")).toHaveAttribute("aria-selected", "true");
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeVisible();
       // The dossier header carries the card's short id; the title lives in an editable INPUT, whose value
@@ -571,6 +586,13 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // and its paragraph matches the same leading text.
     const classicHeading = /^Platform\s*Platform\s*your cross-project workspace agent/;
     await expect(content(page).getByText(classicHeading).first()).toBeVisible();
+
+    // Card f76b89b9 folded that label into the Atlas node head and dropped the explainer paragraph with
+    // it. Neither move may leak here: the classic shell renders no node head at all (so there is nothing
+    // to portal pills into), and its paragraph is still the only place this edition explains itself.
+    await expect(page.getByTestId("atlas-nodehead-extras")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-nodehead-pill-scope")).toHaveCount(0);
+    await expect(content(page).getByText(/Platform is your friendly, cross-project workspace agent/i)).toBeVisible();
 
     // The distinguishing property of the single-column stack: sections that Atlas puts on SEPARATE tabs
     // are all on screen AT ONCE here. Checking them together is what makes this a stack assertion rather
@@ -873,7 +895,161 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     }
   });
   }
+
+  // ── 10. card f76b89b9 — ONE tab affordance across the nodes ───────────────────────────────────────
+  //
+  // The node used to carry a boxed `Segmented` while every other node wore the underlined `NodeTabs`
+  // row, so the app taught two different "this is a tab" shapes on adjacent addresses. This asserts the
+  // SHARED MARKUP rather than the look: the structural shape of the row is collected from the PROJECT
+  // node and from the Platform node and the two must be equal. Text is deliberately excluded — the two
+  // nodes have different tabs, and a fingerprint that included labels could only ever differ.
+  test("switch ON: the node wears the same NodeTabs row the project node wears, and all five tabs select",
+    async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(uniq("atlasplat-tabs"));
+    await seedAtlasOn(page);
+    await pinProject(page, project.id);
+
+    // `/board` is a PROJECT node tab (card 25c08fba), so this renders the project node and its own row.
+    await page.goto(`${loomDaemon.baseURL}/board`);
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+    await expect(tabs(page)).toBeVisible();
+    const projectShape = await tabRowShape(page);
+
+    await page.goto(`${loomDaemon.baseURL}/platform`);
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+    await expect(tabs(page)).toBeVisible();
+    const platformShape = await tabRowShape(page);
+
+    // ⚠️ NOT VACUOUS — pinned before the comparison is relied on. An equality between two empty shapes
+    // passes for the wrong reason and reads exactly like a real match, so each side is independently
+    // asserted to be the real NodeTabs markup first.
+    for (const [who, shape] of [["project", projectShape], ["platform", platformShape]] as const) {
+      expect(shape.rowClass, `${who}: not the NodeTabs wrapper`).toBe("loom-atlas-tabs");
+      expect(shape.listClass, `${who}: not the NodeTabs tab row`).toBe("loom-atlas-tabrow");
+      expect(shape.listLabel, `${who}: the shared row's own aria-label`).toBe("Node tabs");
+      expect(shape.tabTags, `${who}: a NodeTabs tab is a real <a href>, never a button`).toEqual(["A"]);
+      expect(shape.allAreLinks, `${who}: a tab without an href is not linkable`).toBe(true);
+      expect(shape.allHaveAriaSelected, `${who}: a tab without aria-selected states nothing to AT`).toBe(true);
+      expect(shape.testIdStems, `${who}: the shared per-tab testid stem`).toEqual(["atlas-tab-"]);
+      expect(shape.tabClasses, `${who}: exactly one tab carries the active class`)
+        .toEqual(["loom-navtab", "loom-navtab is-active"]);
+    }
+    // And they are two DIFFERENT rows, not the same page measured twice — otherwise the equality below
+    // would be a tautology. `tabCount` is therefore the ONE field the comparison excludes: the two nodes
+    // legitimately have different numbers of tabs, which is exactly what makes them different rows.
+    expect(platformShape.tabCount).toBe(5);
+    expect(projectShape.tabCount).not.toBe(platformShape.tabCount);
+    const { tabCount: _p, ...platformMarkup } = platformShape;
+    const { tabCount: _q, ...projectMarkup } = projectShape;
+    expect(platformMarkup).toEqual(projectMarkup);
+
+    // ── All five select, each with an observable before/after: the panel it owns becomes visible and
+    //    the other four go hidden. A tab that merely marks itself selected has moved nothing.
+    for (const key of ["cadence", "history", "board", "findings", "home"] as const) {
+      const label = key.charAt(0).toUpperCase() + key.slice(1);
+      const before = await panel(page, key).isVisible();
+      await openTab(page, label);
+      await expect(page).toHaveURL(key === "home"
+        ? new RegExp(`${escapeRe(loomDaemon.baseURL)}/platform$`)
+        : new RegExp(`${escapeRe(loomDaemon.baseURL)}/platform\\?tab=${key}$`));
+      await expect(panel(page, key), `${key}: its own panel did not become visible`).toBeVisible();
+      expect(before, `${key}: already visible before its tab was clicked — no before/after to observe`)
+        .toBe(false);
+      for (const other of ["home", "cadence", "history", "board", "findings"].filter((k) => k !== key)) {
+        await expect(panel(page, other), `${key}: ${other} stayed visible`).toBeHidden();
+      }
+    }
+  });
+
+  // ── 11. card f76b89b9 — the identity sits in the node head, and nowhere below it ──────────────────
+  test("switch ON: the node's identity is node-head pills, with no second block under the tab row",
+    async ({ page, loomDaemon }) => {
+    // The REAL end-user edition — no `/api/platform/home` mock, so this is the shipping surface. Its
+    // identity is asserted against the home the daemon actually resolved, never a typed-in name.
+    const home = await readSetupHome(loomDaemon);
+    expect(home.project.name, "the reserved home this leg reads its identity from").toBe("Platform");
+    await seedAtlasOn(page);
+    await page.goto(`${loomDaemon.baseURL}/platform`);
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+
+    // POSITIVE: both readings the old strip carried are in the node head now — which reserved home
+    // resolved, and what that home is. Read through `atlas-nodehead-extras` so this cannot be satisfied
+    // by a pill rendered anywhere else on the page.
+    await expect(nodeHeadPill(page, "home")).toHaveText(home.project.name);
+    await expect(nodeHeadPill(page, "scope")).toHaveText(/your cross-project workspace agent/i);
+    // The clause the PILL drops is not lost — the classic page's full caption is its title. Asserted
+    // because the pill text alone would let that clause be deleted outright and still read green.
+    await expect(nodeHeadPill(page, "scope"))
+      .toHaveAttribute("title", /your cross-project workspace agent · hidden from the project picker/i);
+
+    // NEGATIVE, with its scope pinned non-empty first: `main` carries no copy of either reading. A
+    // `toHaveCount(0)` inside a scope that resolved to nothing passes for the wrong reason.
+    await expect(content(page)).toBeVisible();
+    await expect(content(page).getByTestId("atlas-nodehead-pill-scope")).toHaveCount(0);
+    await expect(content(page).getByText(/hidden from the project picker/i)).toHaveCount(0);
+    // The explainer paragraph goes with it — a paragraph cannot sit on a one-row node head, and leaving
+    // it below the tab row is the same second identity block in a different place. Its presence on the
+    // CLASSIC page is asserted by leg 6, so this pair is a split, not a bare deletion.
+    await expect(content(page).getByText(/Platform is your friendly, cross-project workspace agent/i))
+      .toHaveCount(0);
+
+    // The identity is stated ONCE: the frame's <h1>, not a second heading underneath it.
+    await expect(page.locator("h1")).toHaveCount(1);
+    await expect(page.locator(".loom-atlas-nodehead h1")).toHaveText("Platform");
+    await expect(content(page).locator("h1")).toHaveCount(0);
+
+    // It is NODE-level, not per-tab (card 5968d7e0's rule): the same pills on a different tab. A pill
+    // that moved with the tab would be a per-tab reading wearing an identity's clothes.
+    await openTab(page, "Cadence");
+    await expect(nodeHeadPill(page, "home")).toHaveText(home.project.name);
+    await expect(nodeHeadPill(page, "scope")).toHaveText(/your cross-project workspace agent/i);
+
+    // ── 420px: a pill whose text is wider than its box is NOT ellipsised, it is chopped mid-word —
+    //    `.loom-atlas-headpill` is `inline-flex`, and `text-overflow` does not reach a bare text child
+    //    of a flex container. MEASURED on the first build of this card: the full caption rendered 462px
+    //    of text into a 388px box and lost "…ect picker" with no "…" to show for it. So the claim is
+    //    about the TEXT's own width, not the box's: a box that fits proves nothing here.
+    await page.setViewportSize({ width: 420, height: 900 });
+    await page.goto(`${loomDaemon.baseURL}/platform`);
+    for (const key of ["home", "scope"]) {
+      const pill = nodeHeadPill(page, key);
+      await expect(pill).toBeVisible();
+      const fits = await pill.evaluate((e) => ({ scroll: e.scrollWidth, client: e.clientWidth }));
+      expect(fits.client, `${key}: the pill box collapsed, so the comparison below is vacuous`)
+        .toBeGreaterThan(0);
+      expect(fits.scroll, `${key}: pill text is ${fits.scroll}px in a ${fits.client}px box — chopped`)
+        .toBeLessThanOrEqual(fits.client);
+    }
+    // And the head does not push the document sideways at a phone width.
+    const doc = await page.evaluate(() => ({
+      scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
+    }));
+    expect(doc.scroll).toBeLessThanOrEqual(doc.client);
+  });
 });
+
+/**
+ * The tab row's structural SHAPE — roles, classes, tag names and testid stems, never the labels. Two
+ * nodes with different tabs must fingerprint identically, so including text could only ever differ.
+ */
+async function tabRowShape(page: Page) {
+  return await tabs(page).evaluate((row) => {
+    const list = row.querySelector('[role="tablist"]');
+    const tabEls = [...row.querySelectorAll('[role="tab"]')];
+    return {
+      rowClass: row.className,
+      listClass: list?.className ?? null,
+      listLabel: list?.getAttribute("aria-label") ?? null,
+      tabCount: tabEls.length,
+      tabTags: [...new Set(tabEls.map((t) => t.tagName))].sort(),
+      tabClasses: [...new Set(tabEls.map((t) => t.className))].sort(),
+      // The STEM only — `atlas-tab-board` and `atlas-tab-cadence` must collapse to one shared prefix.
+      testIdStems: [...new Set(tabEls.map((t) => (t.getAttribute("data-testid") ?? "").replace(/[^-]*$/, "")))],
+      allAreLinks: tabEls.every((t) => t.tagName === "A" && t.hasAttribute("href")),
+      allHaveAriaSelected: tabEls.every((t) => t.hasAttribute("aria-selected")),
+    };
+  });
+}
 
 // ── Direct REST helpers. The fixture patches Node's global fetch to attach the loopback token to every
 // non-GET write (card 783dca99), so a POST/DELETE here needs no header of its own; a GET still does. ──

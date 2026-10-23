@@ -54,7 +54,14 @@ export interface HistoryCopy {
 
 export interface PlatformEditionCopy {
   errorText: string; // shown when the reserved home fails to resolve
-  header: { mutedSpan: string; paragraph: string };
+  // `mutedSpan` is the classic page's one-line scope caption; `paragraph` its explainer under it.
+  // `scopePill` is the SAME scope as a node-head pill (card f76b89b9) — deliberately its own field and
+  // not a split of `mutedSpan`: a pill is a phrase, and a caption that grows a third clause must not
+  // silently become a pill that no longer fits. MEASURED at 420px the pills box is 388px wide, so keep
+  // this under ~40 characters; `.loom-atlas-headpill` is `inline-flex`, which means its CSS
+  // `text-overflow: ellipsis` never fires on a bare text child — an over-long pill is chopped mid-word
+  // rather than ellipsised. The full `mutedSpan` rides on that pill's `title`.
+  header: { mutedSpan: string; scopePill: string; paragraph: string };
   agentsLabel: string; // the go-live section label ("Agents" | "Assistants")
   operatorCard: AgentCardCopy;
   auditorCard: AgentCardCopy;
@@ -149,6 +156,7 @@ export const developerEdition: PlatformEdition = {
     errorText: "No reserved “Loom Platform” project found — the platform layer may not be seeded yet.",
     header: {
       mutedSpan: "the management layer above all projects · hidden from the project picker",
+      scopePill: "the management layer above all projects",
       paragraph:
         "The Platform Lead is the always-available, human-driven operator above all projects; the Auditor is the " +
         "scheduled, read-and-file-only transcript reviewer. Spawning either is a human go-live action — you may run " +
@@ -233,6 +241,7 @@ export const endUserEdition: PlatformEdition = {
     errorText: "No reserved “Platform” project found — the home may not be seeded yet.",
     header: {
       mutedSpan: "your cross-project workspace agent · hidden from the project picker",
+      scopePill: "your cross-project workspace agent",
       // Wording tracks the fact-checked README/site copy (commit 06267d94) — the capability list and the
       // "acts on its own … built to confirm first" phrasing are deliberate: confirm-first is DOCTRINE the
       // agent follows, NOT a gate Loom enforces, so never phrase it as "it confirms" (owner Request

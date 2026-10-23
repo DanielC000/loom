@@ -8,7 +8,8 @@ import { PlatformSessionTile } from "../components/PlatformSessionTile";
 import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { RunHistory } from "../components/RunHistory";
 import { CollapsibleHistory } from "../components/CollapsibleHistory";
-import { Panel, Button, Input, SectionLabel, Segmented, StatusPill, Badge } from "../components/ui";
+import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
+import { AtlasNodeHead, NodeTabs, type NodeHeadPill } from "../components/atlasHome";
 import { SetupWizard } from "../components/SetupWizard";
 import { LogoMark } from "../components/Logo";
 import { looksLikeCron } from "./Schedules";
@@ -251,6 +252,11 @@ const PLATFORM_TABS: { key: PlatformTab; label: string }[] = [
 
 const PLATFORM_TAB_KEYS = new Set<string>(PLATFORM_TABS.map((t) => t.key));
 
+/** Home is the canonical tab, so its address carries no query — the same shape the project and
+ *  workspace nodes give their own Overview tab. Built fresh rather than from the current params, so a
+ *  consumed `?task=` deep link is dropped instead of riding onto a tab with no board to open it on. */
+const platformTabHref = (key: string) => (key === "home" ? "/platform" : `/platform?tab=${key}`);
+
 function AtlasPlatformLayout({
   edition, previewOnly, project, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
   homeSessions, operatorLive, auditorLive, liveCountFor, wizardOpen, setWizardOpen,
@@ -258,31 +264,41 @@ function AtlasPlatformLayout({
   // `?tab=` keeps a chosen tab linkable and survives a reload, the same mechanism Actors / Repository /
   // Automation already use for their own sub-tabs. Home is the canonical tab, so its URL carries no
   // query; an unknown value falls back to Home rather than rendering nothing.
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const raw = params.get("tab") ?? "";
   const tab: PlatformTab = PLATFORM_TAB_KEYS.has(raw) ? (raw as PlatformTab) : "home";
-  // `replace` keeps tab switches out of the history stack (a back press leaves the node, not the tab) —
-  // and building the params fresh drops a consumed `?task=` deep link rather than carrying it onto a tab
-  // that has no board to open it on.
-  const setTab = (t: PlatformTab) => setParams(t === "home" ? {} : { tab: t }, { replace: true });
+
+  // @decision f76b89b9 — the identity this node states lives in the node head and NOWHERE below it.
+  // Re-adding a title/description strip under the tab row is the duplication this card removed.
+  //
+  // Both readings the old strip carried, as node-level pills: WHICH reserved home resolved (the dev and
+  // end-user editions resolve different ones, so the frame's own "Platform" heading cannot stand in for
+  // it) and WHAT that home is. Constant across tabs, like every other node's pills (card 5968d7e0) —
+  // the scope phrase is identity, not a per-tab reading, so it must not move when a tab does.
+  const headPills: NodeHeadPill[] = [
+    { key: "home", text: project.name, tone: "cyan", title: "The reserved home this node resolved to" },
+    // The PILL phrasing, never the classic page's full caption: MEASURED at 420px the full span is
+    // 462px of text in a 388px box, and `.loom-atlas-headpill` is `inline-flex`, so its own
+    // `text-overflow: ellipsis` never fires on a bare text child — it was chopped mid-word. The caption
+    // rides on the title instead, where the clause the pill drops stays reachable.
+    { key: "scope", text: edition.copy.header.scopePill, title: edition.copy.header.mutedSpan },
+  ];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* The node head already renders "Platform" as the page's one <h1>, so this strip names the home it
-          resolved to and what it is for — never the word again, which would read as a second heading. */}
-      <div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <Badge tone="cyan">{project.name}</Badge>
-          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11 }}>
-            {edition.copy.header.mutedSpan}
-          </span>
-        </div>
-        <p style={{ color: color.textMuted, fontSize: 11, margin: "6px 0 0", fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
-          {edition.copy.header.paragraph}
-        </p>
-      </div>
+      {/* The frame states this node's identity once — crumbs, the one <h1>, these pills and the tab row —
+          so the page starts on its content, exactly as every other re-homed surface does (card a7f23a2f).
+          ⛔ The edition's explainer PARAGRAPH is deliberately not carried up: a node head is a row, and a
+          paragraph in it would be the same second identity block in a different place. It still renders
+          in full on the classic layout, which has no frame to state anything for it. */}
+      <AtlasNodeHead pills={headPills} />
 
-      <Segmented value={tab} onChange={setTab} items={PLATFORM_TABS} ariaLabel="Platform node tabs" />
+      {/* The SAME underlined row the project and workspace nodes wear — one tab affordance for every
+          node, not a boxed segmented control here and an underlined row everywhere else. Its tabs are
+          real `<Link>`s, so a tab is linkable, survives a reload, and leaves the back button meaning
+          what it means on the other nodes (back returns to the tab you came from, where the old
+          `replace` left the node entirely). */}
+      <NodeTabs tabs={PLATFORM_TABS} active={tab} hrefFor={platformTabHref} />
 
       {/* ⛔ EVERY PANEL STAYS MOUNTED; the inactive ones are HIDDEN, never unmounted.
           Unmounting a tab destroys the local React state inside it with no warning and no undo — a
@@ -327,11 +343,11 @@ function AtlasPlatformLayout({
 // The five node panels, all mounted, all but one `hidden` — see the note at the call site for why
 // unmounting is not an option here.
 //
-// Deliberately NO `role="tabpanel"`: the shared `Segmented` control emits no `id` on its tabs, so there
-// is nothing for a panel to be `aria-labelledby`/`aria-controls`-associated with, and the app's other
-// `?tab=` surfaces (Actors, Repository, Automation) don't claim the role either. A tabpanel role with no
-// association is a worse answer than none — it promises a relationship to AT that isn't there. Wiring it
-// properly means giving `Segmented` ids, which is a shared-primitive change and its own card.
+// Deliberately NO `role="tabpanel"`: the shared `NodeTabs` row emits no `id` on its tabs, so there is
+// nothing for a panel to be `aria-labelledby`/`aria-controls`-associated with, and neither do the other
+// nodes that wear that same row. A tabpanel role with no association is a worse answer than none — it
+// promises a relationship to AT that isn't there. Wiring it properly means giving `NodeTabs` ids, which
+// is a shared-primitive change (every node wears it) and its own card.
 function Panels({ tab, children }: { tab: PlatformTab; children: Record<PlatformTab, ReactNode> }) {
   return (
     <>
