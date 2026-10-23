@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { matchPath, Navigate, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
-import { AtlasTree } from "./AtlasTree";
+import { ATLAS_TREE_ID, AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
 import {
   ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
@@ -200,6 +200,35 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // portaling into it has to RE-RENDER once the element exists; a ref would leave it pointing at null
   // for the lifetime of the page.
   const [nodeHeadSlot, setNodeHeadSlot] = useState<HTMLElement | null>(null);
+
+  // ── The tree as a drawer below the narrow breakpoint (card 49e883a9) ───────────────────────────
+  // State only. WHICH widths this state is allowed to mean anything at is entirely CSS's call (see
+  // `.loom-atlas-tree.is-open` in styles/global.css): no JS media query, no resize listener, so a
+  // reader who opens the drawer and then rotates to landscape gets the persistent rail back with
+  // nothing to reconcile, and the wide shell is byte-identical to before this card whatever this
+  // boolean holds.
+  //
+  // @decision 49e883a9 — the drawer OVERLAYS: never express it by unmounting the tree, the content
+  // column or a page panel, and never read its state with `toHaveCount(0)` or a one-shot
+  // getComputedStyle right after `aria-expanded` flips.
+  //
+  // Unmounting the content would discard a half-typed composer or card draft (the owner's standing
+  // rule), and unmounting the TREE would throw away its own expansion state, so a reader who opened
+  // three branches would find them shut on the next open.
+  const [treeDrawerOpen, setTreeDrawerOpen] = useState(false);
+  const drawerToggleRef = useRef<HTMLButtonElement | null>(null);
+  // Every close path — the toggle, Escape, the scrim, a tree row — returns focus to the toggle,
+  // because every one of them removes the element the focus was on (or could be on) from view.
+  const closeTreeDrawer = useCallback(() => {
+    setTreeDrawerOpen(false);
+    drawerToggleRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!treeDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeTreeDrawer(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [treeDrawerOpen, closeTreeDrawer]);
   // A detail address hangs off a REAL tree node, so that node reads as the landed one even though
   // its own path never matches.
   //
@@ -274,11 +303,38 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   return (
     <div className="loom-atlas" data-testid="atlas-shell">
       {overlays}
-      <AtlasTree activeTo={activeNodeTo} />
+      <AtlasTree activeTo={activeNodeTo} open={treeDrawerOpen} onNavigate={closeTreeDrawer} />
+      {/* The scrim is the drawer's own dismiss surface, and it is deliberately NOT a modal backdrop:
+          it sits at z-index 44, under the 50-and-up every dialog in the app already uses, so a board
+          card opened from the tree still arrives as the centred dialog on top of it rather than being
+          trapped behind navigation chrome. `display: none` outside the breakpoint, so a drawer left
+          open while the viewport grows cannot leave a dead sheet over the wide shell. */}
+      {treeDrawerOpen && (
+        <div className="loom-atlas-scrim" data-testid="atlas-tree-scrim" aria-hidden
+          onClick={closeTreeDrawer} />
+      )}
 
       <div className="loom-atlas-main">
         <header className={`loom-atlas-topbar${orchestrationPaused ? " is-paused" : ""}`}>
           <div className="loom-atlas-crumbs">
+            {/* Hidden above the breakpoint, so the wide shell gains no control. It carries an icon and
+                no text node ON PURPOSE: every Atlas nav label is already a live page-wide exact-text
+                match in both shells, and a worded button here would be one more string for an
+                unrelated spec's text locator to collide with. The name is the aria-label. */}
+            <button type="button" ref={drawerToggleRef}
+              className={`loom-atlas-drawerbtn${treeDrawerOpen ? " is-open" : ""}`}
+              data-testid="atlas-tree-toggle"
+              aria-expanded={treeDrawerOpen} aria-controls={ATLAS_TREE_ID}
+              aria-label={treeDrawerOpen ? "Close the navigation tree" : "Open the navigation tree"}
+              title={treeDrawerOpen ? "Close the navigation tree" : "Open the navigation tree"}
+              onClick={() => (treeDrawerOpen ? closeTreeDrawer() : setTreeDrawerOpen(true))}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                strokeWidth="1.5" strokeLinecap="round" aria-hidden focusable="false">
+                {treeDrawerOpen
+                  ? <path d="M4 4l8 8M12 4l-8 8" />
+                  : <path d="M2.5 4h11M2.5 8h11M2.5 12h11" />}
+              </svg>
+            </button>
             <nav aria-label="Breadcrumb" data-testid="atlas-breadcrumb" style={{ minWidth: 0 }}>
               <ol style={{ display: "flex", alignItems: "center", gap: 8, listStyle: "none", margin: 0, padding: 0,
                 overflow: "hidden", fontFamily: font.mono, fontSize: 11.5, color: color.textMuted }}>
@@ -312,10 +368,18 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {/* The way back. Settings is a tree node now, so this is no longer the ONLY exit — but it
                 stays: it is one click from anywhere, and a preview whose exit is buried in a settings
                 page is a preview people stop trying. */}
+            {/* Two labels, one accessible name. At 420px the full wording was eating the crumb row —
+                the half of backlog card 9477a5ed this card supersedes, where the trail squeezed down
+                to "W… / live-a305eb…". The `aria-label` is stated so the name does NOT change with the
+                breakpoint: a control whose accessible name depends on viewport width is a different
+                control to a screen reader at every size, and every by-name locator would have to know
+                which width it is at. */}
             <Button data-testid="atlas-leave" onClick={() => setAtlasUi(false)}
+              aria-label="Switch to the classic UI"
               title="Turn the Atlas preview off and return to the classic UI"
               style={{ padding: "5px 12px" }}>
-              Switch to the classic UI
+              <span className="loom-atlas-leave-full">Switch to the classic UI</span>
+              <span className="loom-atlas-leave-short" aria-hidden>Classic</span>
             </Button>
           </div>
 

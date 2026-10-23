@@ -1539,12 +1539,15 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 20px;
 }
 
-/* Narrow viewports (card 8cbb2ac2). The tree now holds every destination, so it is the ONLY
-   navigation this shell has — hiding it, as the empty-frame phase did, would leave a phone with no
-   way to move around the app at all. Instead the frame restacks: the tree becomes a capped,
-   self-scrolling strip above the content (it is already first in document order, so no reordering
-   is needed) and the content column keeps the rest of the viewport. */
-@media (max-width: 820px) {
+/* ── The tree below the narrow breakpoints (cards 8cbb2ac2, then 49e883a9) ────────────────────────
+   The tree holds every destination, so it is the ONLY navigation this shell has — hiding it, as the
+   empty-frame phase did, would leave a phone with no way to move around the app at all. Two answers,
+   at two widths, because the same answer does not fit both.
+
+   721–820px: the frame restacks and the tree becomes a capped, self-scrolling strip above the content
+   (it is already first in document order, so no reordering is needed). Unchanged from card 8cbb2ac2 —
+   card 49e883a9 narrowed the query's lower bound and touched nothing inside it. */
+@media (min-width: 721px) and (max-width: 820px) {
   .loom-atlas {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
@@ -1555,6 +1558,131 @@ button.loom-atlas-node.is-branch.is-open {
     max-height: 33dvh;
     border-right: none;
     border-bottom: 1px solid var(--loom-border);
+  }
+}
+
+/* The drawer toggle and the short leave label are OUT of the media query in their off state, so the
+   wide shell renders exactly what it rendered before card 49e883a9: neither is reachable, and
+   neither takes a gap in the crumb row. */
+.loom-atlas-drawerbtn {
+  display: none;
+}
+.loom-atlas-leave-short {
+  display: none;
+}
+.loom-atlas-scrim {
+  display: none;
+}
+
+/* ≤720px: the strip above becomes an OVERLAY drawer. At 420px that stacked strip was 33dvh of nav
+   above the content, pushing the node head ~290px down — most of a phone's first screen spent on
+   chrome before the page says anything — and card 3b563642's session and card rows only made it
+   taller. Over the content instead of above it, the node head starts directly under the crumb row.
+
+   @decision 49e883a9 — the drawer OVERLAYS; it must never be expressed by unmounting the tree, the
+   content column or the page panels. Unmounting the content discards unfinished input, and
+   unmounting the tree throws away its own branch-expansion state. */
+@media (max-width: 720px) {
+  .loom-atlas {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .loom-atlas-tree {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    /* Wide enough for a four-level row to still read at its own indent, never so wide that the page
+       behind it stops being visible context for where you are about to go. */
+    width: min(300px, 86vw);
+    z-index: 45;
+    transform: translateX(-100%);
+    /* `visibility`, not just the transform: an off-canvas drawer that stays `visible` keeps every row
+       in the tab order and in the accessibility tree, so a keyboard reader would tab through a dozen
+       hidden links before reaching the page. Held until the slide finishes on the way out, taken
+       immediately on the way in — hence the two transition delays rather than one. */
+    visibility: hidden;
+    transition:
+      transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      visibility 0s linear 180ms;
+  }
+  .loom-atlas-tree.is-open {
+    transform: translateX(0);
+    visibility: visible;
+    transition:
+      transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      visibility 0s linear 0s;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  }
+  .loom-atlas-tree:focus-visible {
+    outline: none;
+  }
+  .loom-atlas-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    /* Under the drawer, and under the 50-and-up every dialog in this app uses — a board card opened
+       from the tree still arrives as the centred dialog ON TOP of this, never behind it. */
+    z-index: 44;
+    background: rgba(0, 0, 0, 0.5);
+  }
+  /* 52px of crumb row, matching `.loom-atlas-treehead`'s own 52px exactly — so the toggle sits on the
+     SAME centre line as the drawer's logo whether the drawer is open or shut, and the control does not
+     appear to jump when the panel slides out from under it. (`min-height` is border-box here, so this
+     is the whole row, not 52 plus the padding — measured, after 44px left the toggle 4.5px high.) */
+  .loom-atlas-crumbs {
+    min-height: 52px;
+    padding: 4px 12px;
+    gap: 6px;
+  }
+  .loom-atlas-drawerbtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid var(--loom-border-strong);
+    border-radius: var(--loom-radius);
+    background: transparent;
+    color: var(--loom-text);
+    cursor: pointer;
+    transition:
+      background 80ms linear,
+      border-color 80ms linear;
+  }
+  .loom-atlas-drawerbtn:hover {
+    background: var(--loom-panel);
+    border-color: var(--loom-text-dim);
+  }
+  /* Above the drawer, not under it: the toggle is the one control that has to stay hittable while the
+     panel it opened covers its own corner, or "the toggle closes it" is only true in prose. The
+     drawer's head is padded to clear it, below. */
+  .loom-atlas-drawerbtn.is-open {
+    position: relative;
+    z-index: 46;
+    border-color: var(--loom-text-dim);
+  }
+  .loom-atlas-treehead {
+    padding-left: 56px;
+  }
+  /* The crumb trail's own half of backlog card 9477a5ed: the full "Switch to the classic UI" wording
+     took ~110px off a 420px row, which is most of what a two-segment trail needs. */
+  .loom-atlas-leave-full {
+    display: none;
+  }
+  .loom-atlas-leave-short {
+    display: inline;
+  }
+}
+
+/* The slide is the only motion this frame adds, so it is the only thing to null. Stated at the same
+   specificity as `.is-open`'s own transition, which would otherwise win. */
+@media (prefers-reduced-motion: reduce) {
+  .loom-atlas-tree,
+  .loom-atlas-tree.is-open {
+    transition: none;
   }
 }
 

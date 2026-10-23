@@ -21,7 +21,7 @@
 // @decision 3b563642 — a session/card ENTITY row carries `data-atlas-entity` and is never a
 // destination; card rows exist only on the SELECTED branch (any other project's board would be a new
 // per-project query); each sub-tier owns its own expansion state, never `openBranches`.
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CONTEXT_WARN_RATIO, contextWindowForModel, type BoardTask, type Project, type SessionListItem } from "@loom/shared";
@@ -514,7 +514,16 @@ function UnhomedDestinations({ pages, activeTo }: { pages: NavPage[]; activeTo?:
   );
 }
 
-export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
+/** The id AtlasShell's drawer toggle points `aria-controls` at — one constant, so the two can't drift. */
+export const ATLAS_TREE_ID = "atlas-tree-drawer";
+
+export function AtlasTree({ activeTo, open = false, onNavigate }: {
+  activeTo?: string;
+  /** Narrow-viewport drawer state (card 49e883a9). Above the breakpoint the CSS ignores it entirely. */
+  open?: boolean;
+  /** Called when a click inside the tree actually NAVIGATES — see the delegated handler on the <nav>. */
+  onNavigate?: () => void;
+} = {}) {
   const pages = useVisibleNavPages();
   const { workspace, project } = splitByDepth(pages);
   const { projectId, setProjectId, projects } = useActiveProject();
@@ -543,6 +552,21 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
   // stays shut until a reader asks (which is also how the approved mockup draws it — its own card
   // node sits under a CLOSED Board row in every captured view).
   const [openSubBranches, setOpenSubBranches] = useState<Record<string, boolean>>({});
+
+  // Opening the drawer moves focus INTO it and brings the landed node into view (card 49e883a9). The
+  // second half is the other thing backlog card 9477a5ed asked for: the old narrow strip was capped at
+  // 33dvh and ranked projects above sessions, so on a phone the row you were looking at was usually
+  // scrolled out of it. A full-height drawer has the room, but only if something actually scrolls to it.
+  // `preventScroll` on the focus so the nav does not also yank the page — the scrollIntoView below is
+  // the ONE deliberate scroll, and it is scoped to the treebody by `nearest`.
+  const navRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const nav = navRef.current;
+    if (!nav) return;
+    nav.focus({ preventScroll: true });
+    nav.querySelector(".loom-atlas-node.is-active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [open]);
   const isSubOpen = (key: string, fallback: boolean) => openSubBranches[key] ?? fallback;
   const toggleSub = (key: string, fallback: boolean) =>
     setOpenSubBranches((prev) => ({ ...prev, [key]: !(prev[key] ?? fallback) }));
@@ -748,7 +772,18 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
   };
 
   return (
-    <nav className="loom-atlas-tree" aria-label="Primary navigation" data-testid="atlas-tree">
+    // The drawer's close-on-navigate is ONE delegated handler, not an `onNavigate` threaded through
+    // every row factory: a later card that adds a row would have to remember to thread it, and a row
+    // that forgot would leave the drawer standing over the page it just navigated to. Gated on an
+    // ANCHOR so the controls that are not navigation — a twist, the project selector, the quick-spawn
+    // `＋` — leave the drawer open, which is the whole point of card 0d0c6cee's expansion-is-not-
+    // selection split: a reader must be able to open a branch and look before committing to a row.
+    // `tabIndex={-1}` makes the nav itself the focus target when the drawer opens; it is never in the
+    // tab order, so nothing changes above the breakpoint.
+    <nav id={ATLAS_TREE_ID} ref={navRef} tabIndex={-1}
+      className={`loom-atlas-tree${open ? " is-open" : ""}`}
+      onClick={onNavigate ? (e) => { if ((e.target as HTMLElement).closest("a")) onNavigate(); } : undefined}
+      aria-label="Primary navigation" data-testid="atlas-tree">
       <div className="loom-atlas-treehead">
         <Logo size={20} />
       </div>
