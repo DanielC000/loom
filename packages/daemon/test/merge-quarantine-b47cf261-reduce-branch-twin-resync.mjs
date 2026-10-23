@@ -30,7 +30,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { useOwnLoomHome, registerForCleanup } from "./_tmp-fixture.mjs";
 
 useOwnLoomHome("loom-mqb47cf261-");
 requireHermeticEnv();
@@ -49,9 +49,13 @@ const { canonicalRepoLockKey } = await import(repoLockModuleHref);
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const freshSfx = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+// @decision 9c681680 — registerForCleanup (never a bare fs.mkdirSync-and-forget): an empty os.tmpdir()
+// dir left behind per call leaks across every run of this file (same shape as the 58957b1e test's own
+// freshRepo() nit).
 const freshDir = (tag) => {
   const d = path.join(os.tmpdir(), `loom-mqb47cf261-${tag}-${freshSfx()}`);
   fs.mkdirSync(d, { recursive: true });
+  registerForCleanup(d);
   return d;
 };
 

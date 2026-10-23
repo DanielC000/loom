@@ -3468,25 +3468,44 @@ function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry,
  * this same per-entry logic to each, in descending order. See the decision record.
  */
 function clearTokenFromPendingIndices(indices: number[], token: string): void {
-  // @decision 8db913e2 (Follow-up c93e9e7a) — one plan per index (reduce-or-remove plus owned keys),
+  // @decision 9c681680 — plan keyed by WRAPPER OBJECT, never by index: a protect call reached from this
+  // same loop's own "remove" branch can splice an UNRELATED entry out of this array mid-loop, shifting a
+  // not-yet-processed index onto a DIFFERENT wrapper (mirrors 07e3ad30's own fix for the identical hazard).
+  //
+  // @decision 8db913e2 (Follow-up c93e9e7a) — one plan per entry (reduce-or-remove plus owned keys),
   // computed ONCE before any delete, never re-derived against an already-mutated map or a second time
   // (round 2 CR item 3) — the mutating loop below reuses this exact plan. See the decision record.
-  const planByIdx = new Map<number, { action: "reduce" } | { action: "remove"; ownedArmedKeys: string[] }>();
+  const planByEntry = new Map<PendingUnresolvedQuarantine, { action: "reduce" } | { action: "remove"; ownedArmedKeys: string[] }>();
   const L = new Set<string>();
   for (const idx of indices) {
     const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine;
-    if (pending.entry.tokens.filter((t) => t !== token).length !== 0) { planByIdx.set(idx, { action: "reduce" }); continue; }
+    if (pending.entry.tokens.filter((t) => t !== token).length !== 0) { planByEntry.set(pending, { action: "reduce" }); continue; }
     const ownedArmedKeys = (pending.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, pending.entry));
-    planByIdx.set(idx, { action: "remove", ownedArmedKeys });
+    planByEntry.set(pending, { action: "remove", ownedArmedKeys });
     for (const k of ownedArmedKeys) L.add(k);
   }
 
-  for (const idx of [...indices].sort((a, b) => b - a)) { // descending so earlier (lower) indices stay valid
-    const pending = pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine;
+  // @decision 9c681680 — snapshot the WRAPPER OBJECTS now, before any mutation; descending order is kept
+  // only for log-ordering parity, never relied on for correctness — every write below resolves its own
+  // current index (or avoids needing one) fresh, right before use.
+  const targets = [...indices].sort((a, b) => b - a).map((idx) => pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine);
+
+  for (const pending of targets) {
     const identity = directPathIdentity(pending.entry.repoPath);
-    const plan = planByIdx.get(idx)!;
+    const plan = planByEntry.get(pending)!;
     if (plan.action === "remove") {
-      pendingUnresolvedQuarantines.splice(idx, 1);
+      // @decision 9c681680 — resolve `pending`'s own CURRENT index fresh, right now, never a precomputed
+      // one — mirrors 07e3ad30's own rule for clearMergeQuarantineByKey's sibling pending loop.
+      const idx = pendingUnresolvedQuarantines.indexOf(pending);
+      if (idx !== -1) {
+        pendingUnresolvedQuarantines.splice(idx, 1);
+      } else {
+        // Not a silent skip — see 07e3ad30's own "Do not" for why this is surfaced loudly rather than
+        // swallowed: it is not expected to fire in production, so a future regression that DOES make it
+        // fire should be visible, not papered over.
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] expected to remove ${pending.entry.repoPath}'s own pending entry (${pending.sourceFile}) from pendingUnresolvedQuarantines during a token clear, but it was already absent from the live array by the time this ran — nothing stale was left behind, but this was not expected; investigate if seen.`);
+      }
       const orphanFilesToSweep = new Set(pending.entry.orphanLatchFiles ?? []);
       // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the pre-pass
       // above, against the then-still-unmutated map — never recomputed here against a map an earlier
@@ -3543,7 +3562,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     // caller's own identity-scan already catches any active twin first — do not remove this routing on
     // that basis, or a future change to that scan silently reopens the bug class this call closes.
     replaceEntryEverywhere(activeQuarantines, pending.entry, updated);
-    pendingUnresolvedQuarantines[idx] = { ...pending, entry: updated };
+    // @decision 9c681680 — mutate `pending` IN PLACE (never a stale-idx array reassignment) — mirrors
+    // clearMergeQuarantineByKey's own reduce branch (64119847/b47cf261): no index lookup needed at all.
+    pending.entry = updated;
     // @decision 8db913e2 (round 4) — tombstone `token` HERE, before the write loop below, same reason
     // as `clearActiveEntryTokenAtKey`'s own identical placement.
     tombstoneIfNotSurviving([token]);
@@ -3565,7 +3586,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     const written = writePendingDivertFile(pending.sourceFile, updated, new Set([token]));
     if (written) {
       if (written.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, written.entry);
-      pendingUnresolvedQuarantines[idx] = { entry: written.entry, sourceFile: written.filename };
+      // @decision 9c681680 — same in-place mutation as above, no index lookup needed.
+      pending.entry = written.entry;
+      pending.sourceFile = written.filename;
       rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
     } else {
       // eslint-disable-next-line no-console
@@ -4427,7 +4450,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // @decision eedf16f5 — called ONCE with the FULL overlap set, never once per token, and only
       // when non-empty — a twin tied by key/orphan-ref alone, no shared token, makes ZERO calls here,
       // byte-identical to pre-fix; a non-empty overlap must never be split back into per-token calls.
-      if (overlapTokens.length > 0) rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set(overlapTokens));
+      //
+      // @decision 9c681680 — pass `writtenTwin.entry` when truthy, never the stale pre-union `updated`,
+      // mirroring the sibling clearTokenFromPendingIndices's own equivalent call — else an orphan file
+      // only `writtenTwin.entry`'s own disk-unioned `orphanLatchFiles` names is never narrowed.
+      if (overlapTokens.length > 0) rewriteOrphanLatchFilesAfterPartialClear(writtenTwin ? writtenTwin.entry : updated, writtenBasenames, new Set(overlapTokens));
       candidateTokens.push(...overlapTokens);
       continue; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched; nothing to splice
     }

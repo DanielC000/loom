@@ -341,12 +341,6 @@ clear, plus survival across a real reboot. Proven RED-before (`negative-control.
   call's own re-read-and-union — `unionQuarantineEntries` never subtracts `clearedTokens`. Pass the
   caller's own known-dropped set via `droppedTokens` instead; tombstoning only affects a LATER
   reconciliation, never the write it (mistakenly) appeared to precede.
-- Do not treat `clearTokenFromPendingIndices`'s own partial-clear branch or `clearActiveEntryTokenAtKey`'s
-  own dual-tracked-twin loop as fully safe against this union-resurrection just because card `535fd69d`
-  (above) fixed their own `writePendingDivertFile` call — that fixed only the PENDING-divert write. Each
-  of these two functions ALSO has a SEPARATE armed-key write (via `writeMergeQuarantineLatch`, reached
-  through `reconcileMarkedBasenameBeforeWrite`) sharing the identical vulnerability, left unfixed by
-  535fd69d and fixed only by card `58957b1e` — see the Follow-up section below.
 - Do not assume `writePendingDivertFile`'s own `droppedTokens` parameter is optional, or give it an
   implicit default, at any NEW call site — it is REQUIRED (card `535fd69d`), so a new site is forced to
   decide, explicitly, whether its own write narrows (pass the dropped tokens) or not (pass `new Set()`),
@@ -373,6 +367,8 @@ clear, plus survival across a real reboot. Proven RED-before (`negative-control.
   (round 2, CR Minor 3).
 - Do not assume fixing a function's `writePendingDivertFile` call (the pending-divert record) also covers
   its OWN `writeMergeQuarantineLatch` call (the armed-key final) — they are two STRUCTURALLY SEPARATE
-  writes, each with its own chokepoint and its own `droppedTokens` parameter; a function can narrow
-  through one path while the other stays unfixed, exactly what happened to `clearTokenFromPendingIndices`
-  and `clearActiveEntryTokenAtKey` between card `535fd69d` and card `58957b1e` (see that Follow-up above).
+  writes, each with its own chokepoint and its own `droppedTokens` parameter. `clearTokenFromPendingIndices`'s
+  own partial-clear branch and `clearActiveEntryTokenAtKey`'s own dual-tracked-twin loop each had this
+  exact gap: card `535fd69d` fixed only their `writePendingDivertFile` call, leaving their SEPARATE
+  `writeMergeQuarantineLatch` call (reached through `reconcileMarkedBasenameBeforeWrite`) sharing the
+  identical vulnerability, unfixed until card `58957b1e`.

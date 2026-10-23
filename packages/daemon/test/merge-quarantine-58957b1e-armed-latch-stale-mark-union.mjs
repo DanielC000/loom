@@ -27,7 +27,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // reference, mirroring 2dd97aaa item 2's own tied-twin construction but with P's OWN armed-key final
 // stale-marked instead of P's pending sourceFile.
 //
-// SCENARIO 3 ("58957b1e-s3-clearTokenFromPendingIndices-armed-loop") — clearTokenFromPendingIndices's own
+// A THIRD SITE, NOT independently reproduced here ("58957b1e-clearTokenFromPendingIndices-armed-loop",
+// not a SCENARIO — no test block exists for it below) — clearTokenFromPendingIndices's own
 // armed-key loop (~:3551) shares the IDENTICAL shape and was threaded with the same `droppedTokens` fix,
 // but per decision 64283e06's own posture this loop is UNREACHABLE today: its sole caller
 // (clearMergeQuarantineByToken) only ever passes NON-TWIN pending indices (any pending entry whose own
@@ -44,7 +45,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { useOwnLoomHome, registerForCleanup } from "./_tmp-fixture.mjs";
 
 useOwnLoomHome("loom-mq58957b1e-");
 requireHermeticEnv();
@@ -73,9 +74,12 @@ function parkAt(key, repoPath, tag, tokens, extra = {}) {
   }, null, 2) + "\n");
 }
 
+// @decision 9c681680 — registerForCleanup (never a bare fs.mkdirSync-and-forget): an empty os.tmpdir()
+// dir left behind per call leaks across every run of this file.
 function freshRepo(tag) {
   const p = path.join(os.tmpdir(), `loom-mq58957b1e-${tag}-${freshSfx()}`);
   fs.mkdirSync(p, { recursive: true });
+  registerForCleanup(p);
   return p;
 }
 
@@ -109,7 +113,7 @@ async function rebootSim() {
   clearMergeQuarantineByToken(y, "ta");
 
   const finalYPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k)}.json`);
-  check("*** THE BUG (if reproduced) *** Y is correctly reduced to {tb} in-memory", listActiveMergeQuarantines().some((e) => e.repoPath === y && JSON.stringify([...e.tokens].sort()) === JSON.stringify(["tb"])));
+  check("(invariant) Y is correctly reduced to {tb} in-memory", listActiveMergeQuarantines().some((e) => e.repoPath === y && JSON.stringify([...e.tokens].sort()) === JSON.stringify(["tb"])));
   check("*** THE BUG (if reproduced) *** Y's own armed-key final holds EXACTLY {tb}, not a resurrected {ta,tb}", (() => {
     try { return JSON.stringify(JSON.parse(fs.readFileSync(finalYPath, "utf8")).tokens.sort()) === JSON.stringify(["tb"]); } catch { return false; }
   })());
@@ -166,7 +170,7 @@ async function rebootSim() {
 
   check("W is fully lifted (wa gone)", !listActiveMergeQuarantines().some((e) => e.repoPath === y && e.tokens.includes("wa")));
   const pAfter = listActiveMergeQuarantines().find((e) => e.armedKeys?.includes(k2));
-  check("*** THE BUG (if reproduced) *** in-memory P is reduced to EXACTLY {p-token}, wa does NOT come back via the union", !!pAfter && JSON.stringify([...pAfter.tokens].sort()) === JSON.stringify(["p-token"]));
+  check("(invariant) in-memory P is reduced to EXACTLY {p-token}, wa does NOT come back via the union", !!pAfter && JSON.stringify([...pAfter.tokens].sort()) === JSON.stringify(["p-token"]));
   check("*** THE BUG (if reproduced) *** P's own armed-key final (k2) holds EXACTLY {p-token}, not a resurrected {wa,p-token}", (() => {
     try { return JSON.stringify(JSON.parse(fs.readFileSync(k2FinalPath, "utf8")).tokens.sort()) === JSON.stringify(["p-token"]); } catch { return false; }
   })());
