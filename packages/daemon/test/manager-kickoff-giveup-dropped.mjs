@@ -45,18 +45,31 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //   (H) The SAME late-confirmation case (G) proves via the pty hook, proven independently via a REAL,
 //       non-empty on-disk transcript (mirrors kickoff-giveup-exhausted.mjs's own (S9) for the worker path)
 //       — hasFirstTurnStarted is never set, the transcript alone must suppress: NO event, NO task, NO nudge.
+//   (I) ROUND 3 (card ab3c965d): still WITHIN the plausible-confirm window (`withinKickoffConfirmWindow`,
+//       the SAME predicate the worker park path already consults) at the FIRST exhaustion — the drop is
+//       DEFERRED (no event/task/enqueue yet), and a confirmation (a real transcript) landing BEFORE the
+//       recheck timer fires suppresses it entirely: still no event/task/enqueue once the timer fires.
+//   (J) ROUND 3: still WITHIN the window at call time, but STILL UNCONFIRMED when the recheck timer
+//       fires — the full drop treatment fires exactly once, at the recheck, never at the first exhaustion.
+//   (K) ROUND 3: OUTSIDE the window at call time (`withinKickoffConfirmWindow` returns null) — drops
+//       immediately, byte-identical to (A)-(H)'s own behavior; proves the new window check doesn't
+//       regress the ordinary (unmeasurable-or-elapsed) case.
 //
 // RED-BEFORE-GREEN (this project's own standing verification posture): run against the PRE-FIX
 // `handleKickoffGiveUpExhausted` (role==="manager" still falling into the generic bail) — (A)'s
 // `manager_kickoff_dropped` event assertion fails (nothing is ever recorded for a manager), and so do
 // (B)/(C)/(D)/(E), which all depend on that event/the Lead-escalation call ever firing at all. Run against
 // ROUND-1 code (the manager carve-out ungated by `lateConfirmation`) — (G)/(H) fail: a board task IS
-// filed and the Lead IS nudged for a session that only confirmed late.
+// filed and the Lead IS nudged for a session that only confirmed late. Run against ROUND-2 code (the
+// manager carve-out gated by `lateConfirmation` but with no `withinKickoffConfirmWindow` check at all,
+// this round's own CR finding #2) — (I) fails: its "deferred, NOT dropped on the first exhaustion"
+// assertion is false, since round-2 drops immediately regardless of the window.
 //
 // RUN: pnpm build (from packages/daemon) then `node test/manager-kickoff-giveup-dropped.mjs`.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { mock } from "node:test";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -64,11 +77,20 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-mkgd-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Round 3 (card ab3c965d, CR b0cc737e BLOCKING): scenario (H) writes a REAL transcript via
+// `engineTranscriptPath`, which resolves off `os.homedir()` — sandbox HOME/USERPROFILE to a dir under
+// `tmpHome` BEFORE the `../dist` import below (mirrors kickoff-giveup-exhausted.mjs's own convention),
+// or this leaks a real file into the owner's actual `~/.claude/projects/...` on every run.
+const sandboxHome = path.join(tmpHome, "home");
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { withinKickoffConfirmWindow } = await import("../dist/pty/host.js");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -94,17 +116,25 @@ class PtyStub {
     this.pastBoot = new Set();
     this.firstTurnStarted = new Set(); // (F) needs this — the worker branch reads it before the manager carve-out ever applies
     this.sent = []; // { id, text }
+    // Round 3 (card ab3c965d): (I)/(J)/(K) need per-id liveStartedAt/composerDirtyLen so
+    // withinKickoffConfirmWindow can read BOTH "still within the plausible-confirm window" and "window
+    // already elapsed" for different sessions in the SAME run — a shared, unset default (below) stays
+    // the "unmeasurable" path (A)-(H) rely on.
+    this.liveStartedAtMap = new Map();
+    this.composerDirtyLenMap = new Map();
   }
   setLive(id, on = true) { if (on) this.live.add(id); else this.live.delete(id); }
   setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
   setPastBoot(id, on = true) { if (on) this.pastBoot.add(id); else this.pastBoot.delete(id); }
   isLiveAndPreBoot(id) { return this.live.has(id) && !this.pastBoot.has(id); }
   hasFirstTurnStarted(id) { return this.firstTurnStarted.has(id); }
+  setLiveStartedAt(id, ms) { this.liveStartedAtMap.set(id, ms); }
+  setComposerDirtyLen(id, n) { this.composerDirtyLenMap.set(id, n); }
   // (F)'s worker-path terminal branch also calls withinKickoffConfirmWindow, which reads these two —
   // unset (null/undefined) is the "unmeasurable" path (mirrors kickoff-giveup-exhausted.mjs's own
   // PtyStub default), which resolves to the SAME terminal outcome (F) asserts.
-  liveStartedAt() { return null; }
-  getComposerDirtyLen() { return undefined; }
+  liveStartedAt(id) { return this.liveStartedAtMap.has(id) ? this.liveStartedAtMap.get(id) : null; }
+  getComposerDirtyLen(id) { return this.composerDirtyLenMap.has(id) ? this.composerDirtyLenMap.get(id) : undefined; }
   enqueueStdin(id, text, _source = "system", _onDeliver, _route, _kind, _questionId, _ownerText, _proactive, _senderId, _tail) {
     this.sent.push({ id, text });
     if (!this.live.has(id)) return { delivered: false, reason: "session-dead", queued: false };
@@ -308,12 +338,105 @@ try {
     db.setProcessState(lead, "exited");
   }
 
+  // ===================== (I) Round 3 (card ab3c965d): STILL WITHIN the plausible-confirm window — the
+  // drop is DEFERRED (not fired on the first exhaustion), and a confirmation landing BEFORE the recheck
+  // timer fires suppresses it entirely: no event, no board task, no enqueue — ever.
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-i-mgr-${sfx}`, lead = `mkgd-i-lead-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(mgr); pty.setLive(lead); pty.setPastBoot(lead);
+
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    try {
+      pty.setLiveStartedAt(mgr, Date.now() - 1_000); // well within BROKEN_SPAWN_HOLDOFF_MS (60s)
+      const pending = withinKickoffConfirmWindow(pty, mgr, 0);
+      check("(I) (setup) the manager reads as still within its plausible confirm window", pending !== null);
+
+      sessions.handleKickoffGiveUpExhausted(mgr, `msg-i-${sfx}`, `root-i-${sfx}`, `kickoff-i-${sfx}`);
+      check("(I) deferred, NOT dropped on the first exhaustion: NO manager_kickoff_dropped event yet",
+        db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
+      check("(I) deferred, NOT dropped: ZERO enqueueStdin calls yet", pty.sent.length === 0);
+
+      // The confirmation lands BEFORE the recheck timer fires — a real, non-empty transcript.
+      writeLiveTranscript(os.tmpdir(), `eng-${mgr}`, ["manager's real turn-1 output, confirmed late"]);
+      mock.timers.tick(pending.windowMs - pending.sinceMs + 1_000);
+
+      check("(I) the late confirmation suppresses the drop entirely: still NO event",
+        db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
+      check("(I) still ZERO enqueueStdin calls anywhere — no Lead nudge, no self-nudge", pty.sent.length === 0);
+    } finally {
+      mock.timers.reset();
+    }
+    db.setProcessState(lead, "exited");
+  }
+
+  // ===================== (J) Round 3: STILL WITHIN the window at call time, but STILL UNCONFIRMED when
+  // the recheck fires — the full drop treatment fires exactly once, at the recheck, not before. ========
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-j-mgr-${sfx}`, lead = `mkgd-j-lead-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(mgr); pty.setLive(lead); pty.setPastBoot(lead);
+
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    try {
+      pty.setLiveStartedAt(mgr, Date.now() - 1_000);
+      const pending = withinKickoffConfirmWindow(pty, mgr, 0);
+      sessions.handleKickoffGiveUpExhausted(mgr, `msg-j-${sfx}`, `root-j-${sfx}`, `kickoff-j-${sfx}`);
+      check("(J) deferred, NOT dropped on the first exhaustion: NO manager_kickoff_dropped event yet",
+        db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
+
+      mock.timers.tick(pending.windowMs - pending.sinceMs + 1_000);
+
+      const events = db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped");
+      check("(J) still unconfirmed at the recheck: the full drop fires exactly once", events.length === 1);
+      check("(J) leadNotified:true — a live, past-boot Lead was nudged", events[0]?.detail?.leadNotified === true);
+      const toLead = pty.sent.filter((s) => s.id === lead);
+      check("(J) exactly ONE enqueueStdin call reaches the Lead", toLead.length === 1);
+      check("(J) the dropped manager itself still gets ZERO enqueueStdin calls — no self-nudge",
+        pty.sent.filter((s) => s.id === mgr).length === 0);
+    } finally {
+      mock.timers.reset();
+    }
+    db.setProcessState(lead, "exited");
+  }
+
+  // ===================== (K) Round 3: OUTSIDE the plausible-confirm window at call time — drops
+  // immediately, exactly as before this round. ============================================================
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-k-mgr-${sfx}`, lead = `mkgd-k-lead-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(mgr); pty.setLive(lead); pty.setPastBoot(lead);
+
+    pty.setLiveStartedAt(mgr, Date.now() - 61_000); // past BROKEN_SPAWN_HOLDOFF_MS (60s) — window elapsed
+    check("(K) (setup) the manager reads as OUTSIDE its plausible confirm window",
+      withinKickoffConfirmWindow(pty, mgr, 0) === null);
+
+    sessions.handleKickoffGiveUpExhausted(mgr, `msg-k-${sfx}`, `root-k-${sfx}`, `kickoff-k-${sfx}`);
+
+    const events = db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped");
+    check("(K) outside the window: drops immediately, exactly once", events.length === 1);
+    check("(K) leadNotified:true — a live, past-boot Lead was nudged", events[0]?.detail?.leadNotified === true);
+    db.setProcessState(lead, "exited");
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card ab3c965d: a MANAGER's turn-1 kickoff give-up-exhaustion now records a durable manager_kickoff_dropped event (role/parentNudged honest, always parentNudged:false) with no re-mint, and gets a best-effort Platform-Lead escalation (board task + live-nudge, generalized via notifyLeadOfParentlessManagerIssue) mirroring handleClaudeBootDialogStuck's own parentless-manager resolution — event-only with no platform-tier home (A), a durable board task even with no live Lead (B), a live-nudge to a live+past-boot Lead while the dropped manager itself NEVER gets a self-nudge (C), dedup across repeated episodes for the same session id (D), both LOOM_DEV states resolving the correct home (E), and a worker's own kickoff-drop path is completely unaffected (F)."
+  ? "\n✅ ALL PASS — card ab3c965d: a MANAGER's turn-1 kickoff give-up-exhaustion now records a durable manager_kickoff_dropped event (role/parentNudged honest, always parentNudged:false) with no re-mint, and gets a best-effort Platform-Lead escalation (board task + live-nudge, generalized via notifyLeadOfParentlessManagerIssue) mirroring handleClaudeBootDialogStuck's own parentless-manager resolution — event-only with no platform-tier home (A), a durable board task even with no live Lead (B), a live-nudge to a live+past-boot Lead while the dropped manager itself NEVER gets a self-nudge (C), dedup across repeated episodes for the same session id (D), both LOOM_DEV states resolving the correct home (E), a worker's own kickoff-drop path is completely unaffected (F), late confirmation (via the pty hook (G) and a real transcript (H)) suppresses the drop, and (round 3) a still-within-window exhaustion defers the drop rather than firing it immediately — suppressed by a late confirmation (I), fired exactly once at the recheck when still unconfirmed (J), and an outside-the-window exhaustion still drops immediately as before (K)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

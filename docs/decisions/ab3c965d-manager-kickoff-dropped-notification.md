@@ -54,6 +54,59 @@ worker path's own suppression wording, when true) and the worker path is otherwi
 round 1. `handleManagerKickoffDropped`'s own doc now states this as a precondition the CALLER enforces,
 not something the method can verify on its own.
 
+## Round 3 (re-review CR `b0cc737e` BLOCKER + its own finding #2)
+
+**Blocker:** `manager-kickoff-giveup-dropped.mjs` set only `LOOM_HOME`, never `HOME`/`USERPROFILE`, before
+its `../dist` import — scenario (H)'s `writeLiveTranscript` resolves its path via `engineTranscriptPath`
+(`sessions/transcript.ts`), which reads `os.homedir()`, so every run leaked a real file into the owner's
+actual `~/.claude/projects/...` (6 files at review time; agents can't read/delete transcript roots).
+Fixed by copying `kickoff-giveup-exhausted.mjs`'s own sandbox block — a `sandboxHome` dir under the
+test's own `tmpHome`, with `HOME`/`USERPROFILE` pointed at it, set BEFORE the `../dist` import.
+Reproduced the leak directly (revert the sandbox lines, rerun, grep the real `~/.claude/projects` for
+the run's own engine-session-id suffix — a hit), then restored and reconfirmed no leak for a matching run.
+
+**Finding #2 (design fix):** the manager branch fired the FULL drop treatment (durable event, owner
+attention alert, Platform board task, Lead nudge) on the FIRST exhaustion, with no plausible-confirm
+window at all — unlike the worker park path a few lines below, which already consults
+`withinKickoffConfirmWindow` and defers via `armKickoffConfirmRecheck` before treating a give-up as a
+genuine drop. A manager's kickoff is the LARGEST of any role's (it carries the full agent brief +
+kickoff), so by `fd4704bc`/`8882e2ca`'s own reasoning it is the role MOST likely to confirm late — p95
+confirmation lag measured ~342s in production (project memory `5748425f-kickoff-remint-two-mechanisms`).
+
+Fixed by mirroring the worker path exactly, reusing its own mechanism rather than building a second one
+(decision `8882e2ca`'s own "do not add a second...timer...mechanism" rule): the manager branch now
+consults `withinKickoffConfirmWindow` too. Still within the window → defer (no event/task/enqueue yet),
+arm the SAME `armKickoffConfirmRecheck` timer, and re-evaluate once it fires; still unconfirmed at that
+point → `handleManagerKickoffDropped` fires then, exactly once; confirmed by then (a real transcript) →
+suppressed entirely, forever (no event ever recorded for that episode). Outside the window (the
+unmeasurable-or-elapsed case, which is what (A)-(H)'s hermetic `PtyStub` always reads) → drops
+immediately, byte-identical to round 2.
+
+`armKickoffConfirmRecheck` itself is generalized from a worker-only terminal action (it used to call
+`notifyManagerOfIdleWorker` unconditionally) to a caller-supplied `onExhausted(w)` callback — the worker
+call site now passes its own `notifyManagerOfIdleWorker` + `recordKickoffConfirmEscalated` logic as that
+callback, byte-identical in behavior; the manager call site passes its own transcript re-check +
+`handleManagerKickoffDropped`. The timer's generic stand-down (hasFirstTurnStarted/busy/turnSeq>0) is
+unchanged and applies to both callers; it does NOT cover the on-disk-transcript discriminator, so each
+caller's own `onExhausted` re-checks that itself before treating the fire as a genuine, still-unconfirmed
+exhaustion.
+
+Nitpick (same round): `transcriptNonEmpty`/`lateConfirmation` were computed unconditionally at the top of
+`handleKickoffGiveUpExhausted` for EVERY role, paying `readTranscript`'s disk read even for a
+platform/setup/auditor/other role that bails via the generic guard a few lines down without ever needing
+it. Made lazy + memoized (a closure, computed at most once, only by a role that actually reaches a
+`lateConfirmation()` check) — no behavior change, only avoids the needless read.
+
+New test scenarios (I)/(J)/(K) in `manager-kickoff-giveup-dropped.mjs`, using `node:test`'s `mock.timers`
+to drive the real in-memory timer deterministically (same technique `kickoff-confirm-boot-rearm.mjs`'s own
+"(5) TIMER-PATH PARITY" section uses): (I) still within the window, confirmed (a real transcript) BEFORE
+the recheck fires — suppressed forever, no event/task/enqueue ever; (J) still within the window, still
+unconfirmed when the recheck fires — the full drop fires exactly once, at the recheck, never at the first
+exhaustion; (K) outside the window at call time — drops immediately, proving the new check doesn't
+regress the ordinary case. Negative-controlled against round-2 shape via `negative-control.mjs`: (I)'s
+"deferred, NOT dropped on the first exhaustion" assertions go RED under round-2 code (which drops
+immediately regardless of the window), GREEN after this round's fix, tree restored byte-identical.
+
 ## Do not
 
 - Do not re-mint a manager's kickoff inside `handleKickoffGiveUpExhausted` without first proving the
@@ -82,16 +135,32 @@ not something the method can verify on its own.
 - Do not describe this feature's scope as "manager/platform-lead" in a comment — only `role === "manager"`
   is carved out here (and in `handleClaudeBootDialogStuck`'s own Lead-notify call). The Platform Lead's own
   equivalent gap is a separate, not-yet-built card (`5c2f8108`).
+- Do not write a hermetic test that calls `readTranscript`/`engineTranscriptPath`/anything resolving off
+  `os.homedir()` without sandboxing `HOME`/`USERPROFILE` to a dir under the test's own `tmpHome`, set
+  BEFORE the `../dist` import — round 3's blocker (above) is exactly this gap, and it leaks a real file
+  into the owner's actual home on every run with no error to notice it by.
+- Do not drop a manager's kickoff on the first exhaustion without consulting `withinKickoffConfirmWindow`
+  first — round 3's own finding; a manager's kickoff is the LARGEST (and so the most likely to confirm
+  late) of any role's, which is exactly backwards from dropping it with the LEAST plausible-confirm
+  patience of any role.
+- Do not give `armKickoffConfirmRecheck` a second, independent terminal-action path for the manager case —
+  it takes a caller-supplied `onExhausted(w)` callback precisely so the worker and manager paths share the
+  ONE timer mechanism (decision `8882e2ca`'s own rule); add a new caller's own callback, never a second
+  timer/arming method.
 
 ## Source
 
 `packages/daemon/src/sessions/service.ts` (`handleKickoffGiveUpExhausted`'s manager carve-out +
-hoisted `lateConfirmation`, `handleManagerKickoffDropped`, `notifyLeadOfParentlessManagerIssue`/
-`notifyLeadOfStuckManager`/`notifyLeadOfDroppedManagerKickoff`), `packages/shared/src/types.ts`
+lazy-memoized `transcriptNonEmpty`/`lateConfirmation`, its round-3 `withinKickoffConfirmWindow` consult +
+deferred recheck, `armKickoffConfirmRecheck`'s round-3 `onExhausted` generalization + both call sites,
+`handleManagerKickoffDropped`, `notifyLeadOfParentlessManagerIssue`/`notifyLeadOfStuckManager`/
+`notifyLeadOfDroppedManagerKickoff`), `packages/shared/src/types.ts`
 (`manager_kickoff_dropped` kind + `ORCHESTRATION_EVENT_KIND_MEMBERSHIP`), `packages/shared/src/config.ts`
 (`BROWSER_NOTIFICATION_KINDS`), `packages/daemon/src/db.ts` (`DURABLE_AUDIT_EVENT_KINDS`),
 `packages/daemon/src/companion/attention-push.ts` (`classify()`'s switch case + `alertLine()`'s own
 `manager_kickoff_dropped` case, round 2), `packages/web/src/lib/attention.ts` (`BROWSER_NOTIFICATION_LABELS`,
-the `latestManagerKickoffDropped` map's `parentNudged` filter (round 2), and the render item). Tests:
-`packages/daemon/test/manager-kickoff-giveup-dropped.mjs`,
+the `latestManagerKickoffDropped` map's `parentNudged` filter (round 2) + its round-3 comment clarifying the
+liveness scoping is inherited from `allEvents`, not a local check, and the render item). Tests:
+`packages/daemon/test/manager-kickoff-giveup-dropped.mjs` (round 3: HOME/USERPROFILE sandboxing +
+scenarios (I)/(J)/(K), via `node:test`'s `mock.timers`),
 `packages/daemon/test/kickoff-giveup-exhausted.mjs`, `packages/daemon/test/companion-attention-push.mjs`.

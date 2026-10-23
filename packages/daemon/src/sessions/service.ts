@@ -11491,13 +11491,20 @@ export class SessionService {
   // handleGiveUpExhausted's own reasoning (finding [1]) for why an immediate re-hammer is blocked.
   handleKickoffGiveUpExhausted(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string, chainDepth = 0): void {
     const w = this.db.getSession(sessionId);
-    // Code Review 5f95e7a1 (round 2, BLOCKING): hoisted ABOVE the manager carve-out below so a manager
-    // whose kickoff actually landed but confirmed LATE is never treated as a genuine drop — see
-    // `hasFirstTurnStarted`/`readTranscript`'s use just below for the worker path this mirrors. Computed
-    // unconditionally (cheap for every role) so the manager branch and the generic worker branch below
-    // share the exact same discriminator rather than risking the two drifting apart.
-    const transcriptNonEmpty = !!w?.engineSessionId && readTranscript(w.cwd, w.engineSessionId, w.harness).length > 0;
-    const lateConfirmation = !!w && (this.pty.hasFirstTurnStarted(sessionId) || transcriptNonEmpty);
+    // Round 3 (card ab3c965d) nitpick: lazy + memoized — a platform/setup/auditor/other role bails via
+    // the generic guard below without ever reaching a `lateConfirmation()` check, so it must never pay
+    // `readTranscript`'s disk read; only a manager or an eligible worker/role-less child does.
+    let transcriptNonEmptyCached: boolean | undefined;
+    const transcriptNonEmpty = (): boolean => {
+      if (transcriptNonEmptyCached === undefined) {
+        transcriptNonEmptyCached = !!w?.engineSessionId && readTranscript(w.cwd, w.engineSessionId, w.harness).length > 0;
+      }
+      return transcriptNonEmptyCached;
+    };
+    // Code Review 5f95e7a1 (round 2, BLOCKING): consulted by BOTH the manager branch and the generic
+    // worker branch below — the SAME discriminator for both, never two independent copies, so a manager
+    // whose kickoff actually landed but confirmed LATE is never treated as a genuine drop.
+    const lateConfirmation = (): boolean => !!w && (this.pty.hasFirstTurnStarted(sessionId) || transcriptNonEmpty());
     // Card ab3c965d: a MANAGER kickoff has its own dedicated resolution (durable event + Platform-Lead
     // escalation + owner-attention alert) rather than falling into the generic bail below — see
     // `handleManagerKickoffDropped`'s own doc for why. Checked BEFORE the generic guard: a manager never
@@ -11505,9 +11512,33 @@ export class SessionService {
     // depend on that happening to stay true. Deliberately does NOT re-mint (see that method's own doc for
     // why extending re-mint to managers is out of scope here).
     if (w?.role === "manager") {
-      if (lateConfirmation) {
+      if (lateConfirmation()) {
         // eslint-disable-next-line no-console
-        console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty}) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
+        console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty()}) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
+        return;
+      }
+      // Round 3 (card ab3c965d): a manager's kickoff is the LARGEST of any role's (p95 confirmation lag
+      // ~342s measured), so the most likely of any role to confirm LATE — do not drop on the FIRST
+      // exhaustion with no plausible-confirm window at all. Consults the SAME `withinKickoffConfirmWindow`
+      // predicate and `armKickoffConfirmRecheck` escalation timer the worker park path (below) already
+      // relies on. Decision 8882e2ca's own doc says not to add a second, divergent timer/mechanism for
+      // "has the window passed yet" — this reuses that one instead of building a second.
+      const pending = withinKickoffConfirmWindow(this.pty, sessionId, w.turnSeq);
+      if (pending) {
+        // eslint-disable-next-line no-console
+        console.warn(`[give-up] ${sessionId} turn-1 MANAGER kickoff (root ${rootMsgId}) exhausted its give-up requeue budget, but is still within its plausible confirm window (up to ~${Math.round(pending.windowMs / 1000)}s) — deferring manager_kickoff_dropped and re-checking when the window ends instead of dropping immediately`);
+        this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs, rootMsgId, (ww) => {
+          // The generic stand-down in armKickoffConfirmRecheck already re-checked hasFirstTurnStarted/
+          // busy/turnSeq before calling this callback at all; re-check the ONE discriminator it doesn't
+          // cover — the on-disk transcript — mirroring this method's own `lateConfirmation` compound.
+          const transcriptNonEmptyNow = !!ww.engineSessionId && readTranscript(ww.cwd, ww.engineSessionId, ww.harness).length > 0;
+          if (transcriptNonEmptyNow) {
+            // eslint-disable-next-line no-console
+            console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff's plausible-confirm window ended, but the session now shows real activity (transcriptNonEmpty=true) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
+            return;
+          }
+          this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId);
+        });
         return;
       }
       this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId);
@@ -11518,9 +11549,9 @@ export class SessionService {
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget with no parent session to notify (role=${w?.role ?? "none"}) — the dispatch was DROPPED; only the generic idle-watchdog can still catch this`);
       return;
     }
-    if (lateConfirmation) {
+    if (lateConfirmation()) {
       // eslint-disable-next-line no-console
-      console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty}) — this was a LATE confirmation, not a dropped kickoff; suppressing the worker-spawn-broken notice`);
+      console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty()}) — this was a LATE confirmation, not a dropped kickoff; suppressing the worker-spawn-broken notice`);
       return;
     }
     if (chainDepth < GIVE_UP_REMINT_LIMIT) {
@@ -11584,7 +11615,15 @@ export class SessionService {
     if (pending) {
       // @decision 8882e2ca — Major 1: arm the one-shot escalation EXACTLY when this window ends (never
       // earlier, never left to an unrelated periodic cadence that skips taskless workers entirely).
-      this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs, rootMsgId);
+      this.armKickoffConfirmRecheck(sessionId, pending.windowMs - pending.sinceMs, rootMsgId, (ww) => {
+        // Code Review ad92070b (BLOCKING): record the marker ONLY once `notifyManagerOfIdleWorker` says
+        // it actually sent a broken-spawn notice — this classifier can also no-op entirely (e.g. direction
+        // queued, about to drain) or send a DIFFERENT wording; recording unconditionally here would mark a
+        // root "escalated" when nothing was ever sent, permanently disabling a later, genuine escalation.
+        let outcome: IdleWorkerNotifyOutcome | undefined;
+        try { outcome = this.notifyManagerOfIdleWorker(sessionId); } catch { /* best-effort */ }
+        if (outcome === "broken-spawn" && ww.parentSessionId) this.recordKickoffConfirmEscalated(sessionId, ww.parentSessionId, ww.taskId ?? null, rootMsgId, "timer");
+      });
     } else {
       // Code Review ad92070b (BLOCKING): this branch sends the TERMINAL notice immediately (the window
       // had already elapsed by park time) but, before this fix, never recorded
@@ -11615,9 +11654,16 @@ export class SessionService {
   /** @decision 8882e2ca — arms the one-shot escalation timer; see `kickoffConfirmRecheckTimers`' own
    *  doc. Clears any PRIOR timer for this session first — never two outstanding at once. The fired
    *  callback re-checks live state itself (see its own comments) rather than trusting the clears alone.
-   *  @decision b03e636c — `rootMsgId` threaded through so the fired callback can audit itself via
-   *  `recordKickoffConfirmEscalated`; see that method's own doc. */
-  private armKickoffConfirmRecheck(sessionId: string, delayMs: number, rootMsgId: string): void {
+   *  @decision b03e636c — `rootMsgId` threaded through so a caller's `onExhausted` can audit itself via
+   *  `recordKickoffConfirmEscalated`; see that method's own doc.
+   *
+   *  Round 3 (card ab3c965d): `onExhausted` generalizes this from a worker-only terminal action (it used
+   *  to call `notifyManagerOfIdleWorker` unconditionally) to a caller-supplied callback, so the MANAGER
+   *  kickoff-drop path (`handleKickoffGiveUpExhausted`'s manager branch) can reuse this SAME timer
+   *  mechanism instead of building a second one. Only invoked once the generic stand-down below has
+   *  already ruled out hasFirstTurnStarted/busy/turnSeq>0 for the CURRENT fire; it does not itself know
+   *  about any caller-specific discriminator (e.g. the manager path's own transcript re-check). */
+  private armKickoffConfirmRecheck(sessionId: string, delayMs: number, rootMsgId: string, onExhausted: (w: Session) => void): void {
     this.clearKickoffConfirmRecheckTimer(sessionId);
     const timer = setTimeout(() => {
       this.kickoffConfirmRecheckTimers.delete(sessionId);
@@ -11634,14 +11680,8 @@ export class SessionService {
       // a re-mint, or this can fire a hair early); if it STILL reads pending, RE-ARM for the remaining
       // time rather than silently dropping the ONLY coverage a taskless worker has.
       const stillPending = withinKickoffConfirmWindow(this.pty, sessionId, w.turnSeq);
-      if (stillPending) { this.armKickoffConfirmRecheck(sessionId, stillPending.windowMs - stillPending.sinceMs, rootMsgId); return; }
-      // Code Review ad92070b (BLOCKING): record the marker ONLY once `notifyManagerOfIdleWorker` says
-      // it actually sent a broken-spawn notice — this classifier can also no-op entirely (e.g. direction
-      // queued, about to drain) or send a DIFFERENT wording; recording unconditionally here would mark a
-      // root "escalated" when nothing was ever sent, permanently disabling a later, genuine escalation.
-      let outcome: IdleWorkerNotifyOutcome | undefined;
-      try { outcome = this.notifyManagerOfIdleWorker(sessionId); } catch { /* best-effort */ }
-      if (outcome === "broken-spawn" && w.parentSessionId) this.recordKickoffConfirmEscalated(sessionId, w.parentSessionId, w.taskId ?? null, rootMsgId, "timer");
+      if (stillPending) { this.armKickoffConfirmRecheck(sessionId, stillPending.windowMs - stillPending.sinceMs, rootMsgId, onExhausted); return; }
+      onExhausted(w);
     }, Math.max(0, delayMs));
     this.kickoffConfirmRecheckTimers.set(sessionId, timer);
   }

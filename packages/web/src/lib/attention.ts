@@ -411,7 +411,11 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // Manager kickoff dropped (card ab3c965d): a MANAGER's (role:"manager" only — the Platform Lead's own
   // kickoff-drop gap is a separate, not-yet-built card) turn-1 kickoff exhausted its give-up budget with
   // no re-mint and no parent to notify. Same shape as give_up_recovery_escalated immediately above — no
-  // "cleared" event exists, so the latest one per LIVE manager simply surfaces.
+  // "cleared" event exists. This loop itself applies no liveness check of its own; the "LIVE manager"
+  // part is inherited entirely from `allEvents` already being scoped to the per-live-manager
+  // `eventQueries` fan-out above (the `managers` filter at the top of this function) — once a dropped
+  // manager's session stops being live, its event simply stops being fetched, which is what makes this
+  // surface clear on its own with no explicit "cleared" counterpart.
   // Code Review 5f95e7a1: gated on `detail.parentNudged === false`, mirroring claude_boot_dialog_stuck's
   // own gate (`activeBootStuckAlerts`, lib/fleet.ts) exactly — the record's own Do-not #4. A manager
   // always sets this `false` (it never has a parent to nudge), so the practical effect is "always", but
