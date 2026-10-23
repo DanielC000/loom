@@ -151,7 +151,8 @@ fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
 // as S1, but the on-disk content at k2 holds ONLY the token being cleared (no survivor), so the
 // re-derived plan is REMOVE (not reduce) — exercising the remove branch's own ownedArmedKeys, computed
 // fresh via entryStillOwnsKey against the RE-RESOLVED live.entry rather than reused from the stale
-// pre-pass plan, and the indexOf(live) splice path (never a stale index).
+// pre-pass plan, and the indexOf(live) splice path (never a stale index). The k2own check below is an
+// END-STATE guard only — it cannot isolate ownedArmedKeys' own correctness (see its own comment).
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 {
   const sfx = freshSfx();
@@ -176,10 +177,18 @@ fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, finalBasenameForK2), JSON.stringify({
     repoPath: Z2, branch: "z2-disk-branch", reason: "3315b08a S2: Z2's own real on-disk content at k2 (no survivor)", enteredAt: Date.now(), tokens: ["shared-token-2"],
   }, null, 2) + "\n");
-  // Z2's OWN armed key (k2own) ALSO needs a REAL on-disk latch file before the clear — without one,
-  // "the file doesn't exist after" would trivially pass even if ownedArmedKeys were wrongly computed as
-  // [] (nothing to delete either way), making the check vacuous. Writing a real file here is what lets
-  // this assertion actually fail if the fresh-ownedArmedKeys computation regresses.
+  // Z2's OWN armed key (k2own) ALSO needs a REAL on-disk latch file before the clear — a prior draft
+  // asserted only "the file doesn't exist after", which is vacuous when no file exists before either.
+  // This writes a real one so the END STATE is a genuine assertion, but it CANNOT isolate
+  // ownedArmedKeys' own correctness in the remove branch: verified (card 0faffa95's own review) that
+  // forcing ownedArmedKeys to [] here still leaves this check green, because
+  // clearMergeQuarantineByToken's own phase 2 independently re-discovers and cleans k2own regardless —
+  // see docs/decisions/0faffa95-*.md's own "test-design limitation" note for the full argument (in
+  // short: a REMOVE-shaped clear's live.entry.tokens is exactly the one token being cleared, and
+  // entryStillOwnsKey's subset test forces any occupant it can find to carry that SAME token, which
+  // phase 2's own token-filtered walk would independently reach anyway). This check still has value as
+  // an end-to-end outcome guard (k2own's file is gone, by whichever path), just not as a unit check of
+  // ownedArmedKeys specifically.
   const k2ownLatchPath = path.join(MERGE_QUARANTINE_DIR, `${hashKey(k2own)}.json`);
   fs.writeFileSync(k2ownLatchPath, JSON.stringify({
     repoPath: Z2, branch: "occupant-z2-branch", reason: "3315b08a S2: Z2's own real on-disk latch at k2own, pre-clear", enteredAt: Date.now(), tokens: ["shared-token-2"],
@@ -193,7 +202,7 @@ fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   check("*** S2 *** M2 is fully lifted", assertRepoNotQuarantined(M2).ok);
   check("*** S2 *** Z2 is fully lifted too (re-derived REMOVE, not left stuck as a stale reduce)", assertRepoNotQuarantined(Z2).ok);
   check("*** S2 *** no entry anywhere still carries Z2's identity (the re-resolved pending slot was actually spliced, never left dangling at a stale index)", !listActiveMergeQuarantines().some((e) => e.repoPath === Z2));
-  check("*** S2 *** Z2's OWN armed key k2own was also durably cleared (fresh ownedArmedKeys, derived from the re-resolved live.entry, was actually processed)", !fs.existsSync(k2ownLatchPath));
+  check("*** S2 *** Z2's OWN armed key k2own has no latch file left after the clear (end-state only — see the comment above for why this can't isolate ownedArmedKeys itself in the remove branch)", !fs.existsSync(k2ownLatchPath));
 
   // ACROSS A REBOOT: re-import fresh and re-scan — Z2 must read clear, not resurrected by a stale file.
   const rb2 = await rebootSim();

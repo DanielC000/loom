@@ -30,6 +30,20 @@ genuinely points that key at `live.entry`.
   and fully lifts it there, including unlinking the twin's own physical latch file — this is the "phase 2
   backstops" case named in the card.
 
+**Test-design limitation (same backstop, a different test):** `3315b08a`'s own S2 scenario
+(`merge-quarantine-3315b08a-replace-not-splice-stale-target.mjs`) tries to check that the remove branch's
+`ownedArmedKeys` — re-derived fresh via `entryStillOwnsKey` against the re-resolved `live.entry`, never
+reused from the stale pre-pass plan — actually gets durably processed, by writing a real on-disk latch
+file at the owned key and asserting it's gone after the clear. Verified (forcing `ownedArmedKeys` to
+`[]` locally and restoring) that this check CANNOT go red: phase 2 independently re-discovers and cleans
+that same key regardless, for the identical structural reason as the REMOVE bullet above — a
+REMOVE-shaped clear's `live.entry.tokens` is exactly the one token being cleared, and
+`entryStillOwnsKey`'s subset test forces any occupant it can discover to itself carry that same token,
+which phase 2's own token-filtered walk over `activeQuarantines` would reach on its own either way. S2's
+check is kept as an end-state outcome guard (the file is genuinely gone, by whichever path) — it is not,
+and cannot be, a unit-isolating proof of `ownedArmedKeys`' own correctness in the remove branch. Do not
+re-derive this by trying to force a RED there again; this is why there isn't one.
+
 ## The fix
 
 In the re-resolve branch only, immediately after resolving `live`: scan `activeQuarantines.values()` for
