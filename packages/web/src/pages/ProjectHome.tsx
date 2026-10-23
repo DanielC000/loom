@@ -122,7 +122,11 @@ export default function ProjectHome() {
     },
     {
       key: "context", label: "worst context", value: wc.ctx > 0 ? `${ctxPct}%` : "—",
-      tone: ctxPct >= 80 ? "amber" : ctxPct >= 95 ? "red" : "phosphor",
+      // Highest band FIRST. Tested amber-before-red, `>= 95` was unreachable — anything at 95 is also
+      // at 80 — so neither the figure nor the meter fill under it could ever go red, which is the one
+      // state the tile exists to surface. The workspace node's `plan` tile already orders it this way;
+      // these two are the only meter tiles in the deck and they now read the same.
+      tone: ctxPct >= 95 ? "red" : ctxPct >= 80 ? "amber" : "phosphor",
       sub: worstSession ? `${worstSession.agentName} · ${plural(worstSession.ctxTurns ?? 0, "turn")}` : "no session reports context",
       fill: wc.ctx > 0 ? wc.ratio : undefined,
       popover: <ContextList sessions={live} recycleAt={recycleAt} />,

@@ -1613,11 +1613,30 @@ button.loom-atlas-node.is-branch.is-open {
 }
 
 /* ── KPI deck ──────────────────────────────────────────────────────────────────────────
-   Six readouts, full size. auto-fit rather than a fixed six, so the deck folds 6 → 3 → 2
-   on its own as the column narrows and no breakpoint has to know the count. */
+   Six readouts, full size, on ONE row — the row IS the readout, and a tile pushed onto a
+   second row stops being part of it.
+
+   Columns flow from the ITEM COUNT (`grid-auto-flow: column`), not from a minimum tile
+   width. `repeat(auto-fit, minmax(190px, 1fr))` derived the count from the available width
+   instead, which inside this frame's content column (viewport − 244px tree − 40px padding)
+   resolved to FIVE at 1440 and orphaned the sixth tile on a row of its own — measured 1156px
+   of deck, five 223px columns, tile six at a second offsetTop (card 14e48890). The orphan was
+   not a 1440 edge case either: the same five-up landed at 1280, and the ≤820px rule below
+   used to re-derive five 148px columns and orphan tile six a second time. Any width-derived
+   count has that failure mode for a six-item deck — 5+1 and 4+2 are both reachable — so the
+   count is declared instead, exactly as the approved mockup's own deck declares it
+   (Mockups/2026-10-19 UI Overhaul Round 4, atlas.css `.kpideck`).
+
+   The folds below are therefore the ONLY column counts this deck ever takes: 6 → 3 → 2, each
+   a whole number of rows. That also makes KpiDeck's index-based pop-over alignment true
+   rather than approximately true — it assumes the count is fixed per breakpoint, which it
+   now is. 1320px is the mockup's own first fold and sits comfortably above the width where
+   a six-up tile stops holding "GATE RUN·QUEUED" on one line (measured: the label needs
+   ~120px of content box, i.e. a ~148px tile, i.e. a ~1222px viewport). */
 .loom-kpideck {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   gap: 10px;
 }
 .loom-kpi-slot {
@@ -2080,6 +2099,16 @@ button.loom-kpi.is-open {
   border-top: 1px solid var(--loom-border);
 }
 
+/* The KPI deck's first fold, at the mockup's own breakpoint. Below this a six-up tile is too
+   narrow to hold its label on one line, so the deck becomes two rows of three rather than six
+   cramped columns — an explicit count, for the reason in `.loom-kpideck`'s own note above. */
+@media (max-width: 1320px) {
+  .loom-kpideck {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 /* Narrow: the band and the deck both collapse to one column, and the band's fixed panel
    height is released — at phone width a panel is read in sequence, not scanned across a row,
    so capping its height would hide rows behind a scroll nobody would find. */
@@ -2096,8 +2125,10 @@ button.loom-kpi.is-open {
     height: auto;
     max-height: 300px;
   }
+  /* The second fold. Two of three, never the five 148px columns `auto-fit` used to derive here —
+     which orphaned tile six at phone width exactly as it did at 1440 (card 14e48890). */
   .loom-kpideck {
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .loom-kpi-value {
     font-size: 22px;

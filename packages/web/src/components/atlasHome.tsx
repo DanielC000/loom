@@ -83,6 +83,10 @@ export function KpiDeck({ items }: { items: KpiItem[] }) {
           // The last two tiles hang their pop-over from the RIGHT edge so it stays inside the content
           // column. Index-based rather than measured: the deck's column count is fixed by CSS at each
           // breakpoint, so the edge tiles are known without reading layout back out of the DOM.
+          // ⛔ That holds because `.loom-kpideck` DECLARES its count (6 → 3 → 2, card 14e48890). Go
+          // back to a width-derived `auto-fit` track list and the count floats between breakpoints,
+          // which put the orphaned last tile at the LEFT edge of its own row still right-aligning
+          // its pop-over — read that note before changing the grid.
           align={i >= items.length - 2 ? "right" : "left"}
           onToggle={() => setOpen((cur) => (cur === item.key ? null : item.key))}
           onClose={() => setOpen(null)} />
