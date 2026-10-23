@@ -285,10 +285,14 @@ export function awaitRootCreationCapture(pid, timeoutMs = resolveAwaitRootCreati
  * (test-only, never set by a real caller) lets a hermetic test fully control the per-attempt outcome
  * without a real win32 CIM race — see `pty-root-reap-test-tripwire.mjs`'s own "(helper)" scenario.
  */
-const INFRA_RETRY_BACKOFF_MS = [250, 500, 1000, 2000];
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-export async function armWitnessWithFreshRetry(spawnCandidate, { attempts = 5, __testHooks } = {}) {
+// @decision 0bc86798 — attempts/backoff are no longer a local const: both are read from
+// win32-root-creation.ts (`ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS`/`_BACKOFF_MS`), the SAME ladder
+// production's own `armRootCreationTimeWithRetry` (pty/host.ts) retries with — one source, never two
+// copies to drift. `attempts` stays an explicit override param (tests that want a smaller/larger budget
+// still can); only its DEFAULT comes from the shared leaf now.
+export async function armWitnessWithFreshRetry(spawnCandidate, { attempts, __testHooks } = {}) {
   // Capture mechanism not engaged at all (POSIX, or `enableRootCreationCapture()` never called) — mirrors
   // `awaitRootCreationCapture`'s own immediate-null shape for this case: spawn ONCE, return immediately
   // with `creationTime: null`, never retry (there is nothing a retry could change).
@@ -299,9 +303,15 @@ export async function armWitnessWithFreshRetry(spawnCandidate, { attempts = 5, _
       log: ["capture mechanism not engaged (non-win32 or disabled) — single spawn, no retry"],
     };
   }
+  // @decision 0bc86798 — the backoff itself is also read from the shared leaf
+  // (`resolveRootCreationCaptureBackoffMs`, CR 5518e77c item 3), never a local index into the raw ladder
+  // array — production's own retry loop repeats the last slot past the ladder's length and applies
+  // jitter; computing backoff any other way here would silently diverge the moment either side changes.
+  const { ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS, resolveRootCreationCaptureBackoffMs: resolveBackoffMs } = await loadWin32RootCreationLeaf();
+  const resolvedAttempts = attempts ?? ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS;
   const awaitCapture = __testHooks?.awaitCapture ?? awaitRootCreationCapture;
   const log = [];
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  for (let attempt = 1; attempt <= resolvedAttempts; attempt++) {
     const child = spawnCandidate();
     const pid = child.pid;
     let result = null;
@@ -313,14 +323,15 @@ export async function armWitnessWithFreshRetry(spawnCandidate, { attempts = 5, _
     }
     if (threw) {
       try { child.kill(); } catch { /* already gone */ }
-      const backoffMs = attempt <= INFRA_RETRY_BACKOFF_MS.length ? INFRA_RETRY_BACKOFF_MS[attempt - 1] : null;
-      log.push(`attempt ${attempt}/${attempts} pid=${pid}: INFRA FAILURE (spawn/CIM error) — ${threw?.message ?? threw}` +
-        (backoffMs != null ? ` — backing off ${backoffMs}ms then retrying` : " — retrying (no backoff slot left)"));
+      const isLastAttempt = attempt >= resolvedAttempts;
+      const backoffMs = isLastAttempt ? null : resolveBackoffMs(attempt);
+      log.push(`attempt ${attempt}/${resolvedAttempts} pid=${pid}: INFRA FAILURE (spawn/CIM error) — ${threw?.message ?? threw}` +
+        (backoffMs != null ? ` — backing off ~${backoffMs}ms then retrying` : ""));
       if (backoffMs != null) await sleep(backoffMs);
       continue;
     }
     if (typeof result === "number" && result > 0) {
-      log.push(`attempt ${attempt}/${attempts} pid=${pid}: VERIFIED (creationTime=${result}) — armed`);
+      log.push(`attempt ${attempt}/${resolvedAttempts} pid=${pid}: VERIFIED (creationTime=${result}) — armed`);
       return { pid, child, creationTime: result, hardRejected: false, reason: null, log };
     }
     // @decision 0d8270b2 (round 2) — PER-PID classification, never the global CAPTURE_STATS.failed
@@ -328,9 +339,10 @@ export async function armWitnessWithFreshRetry(spawnCandidate, { attempts = 5, _
     const reason = CAPTURE_REJECTION_REASONS.get(pid) ?? "unknown";
     try { child.kill(); } catch { /* already gone */ }
     if (reason === "infra") {
-      const backoffMs = attempt <= INFRA_RETRY_BACKOFF_MS.length ? INFRA_RETRY_BACKOFF_MS[attempt - 1] : null;
-      log.push(`attempt ${attempt}/${attempts} pid=${pid}: INFRA FAILURE (resolved null via capture's own catch)` +
-        (backoffMs != null ? ` — backing off ${backoffMs}ms then retrying` : " — retrying (no backoff slot left)"));
+      const isLastAttempt = attempt >= resolvedAttempts;
+      const backoffMs = isLastAttempt ? null : resolveBackoffMs(attempt);
+      log.push(`attempt ${attempt}/${resolvedAttempts} pid=${pid}: INFRA FAILURE (resolved null via capture's own catch)` +
+        (backoffMs != null ? ` — backing off ~${backoffMs}ms then retrying` : ""));
       if (backoffMs != null) await sleep(backoffMs);
       continue;
     }
@@ -339,7 +351,7 @@ export async function armWitnessWithFreshRetry(spawnCandidate, { attempts = 5, _
     // retried. See this function's own doc for why slack-margin joined ppid-mismatch/no-row here once the
     // production fix (docs/decisions/87691385-*.md round 7) made it a real, test-worthy anomaly rather
     // than noise.
-    log.push(`attempt ${attempt}/${attempts} pid=${pid}: HARD REJECT (${reason}) — NOT retrying`);
+    log.push(`attempt ${attempt}/${resolvedAttempts} pid=${pid}: HARD REJECT (${reason}) — NOT retrying`);
     return { pid: null, child: null, creationTime: null, hardRejected: true, reason, log };
   }
   return { pid: null, child: null, creationTime: null, hardRejected: false, reason: null, log };

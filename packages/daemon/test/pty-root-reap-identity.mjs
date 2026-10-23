@@ -41,6 +41,11 @@ process.env.LOOM_HOME = tmpHome;
 // below doesn't cost 3 real seconds on every run; read at module load, so this MUST be set before the
 // dist import below.
 process.env.LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS = "150";
+// Card 0bc86798 (CR c44dc616, nit 6) — pinned to the real production default, EXPLICITLY, so an ambient
+// LOOM_ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS on the host running this suite can't silently change how many
+// attempts the (w...) block's own assertions expect. Also read at module load — must be set before the
+// dist import below, same reason as the AWAIT_MS pin above.
+delete process.env.LOOM_ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS;
 
 const {
   PtyHost, commandLineMatchesSession,
@@ -49,6 +54,7 @@ const {
   CREATION_TIME_SLACK_MS, ROOT_CREATION_MATCH_TOLERANCE_MS, ROOT_CREATION_CAPTURE_SLACK_MS,
   ROOT_CREATION_CAPTURE_AWAIT_MS, resolveVerifiedRootCreationTime, isHelperPidCollision,
   POSIX_ROOT_CREATION_CAPTURE_SLACK_MS, POSIX_CREATION_TIME_MATCH_TOLERANCE_MS,
+  ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS, resolveRootCreationCaptureRetryAttempts, resolveRootCreationCaptureBackoffMs,
 } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
@@ -1354,6 +1360,212 @@ if (process.platform === "win32") {
     check("(v, negative control) the SAME +500ms row IS rejected under the win32 (20ms) slack",
       host.captureLiveRef("sess-capture-win32-rejects-500ms")?.creationTime === null);
   }
+}
+
+// =======================================================================================================
+// Card 0bc86798 — armRootCreationTime's own retry loop (armRootCreationTimeWithRetry): retries ONLY a
+// genuine INFRA failure (the `captureRootCreationRow` override REJECTS); a RESOLVED row (even an
+// unverified one) is verified exactly ONCE and the loop stops regardless of attempts remaining — no-row/
+// ppid-mismatch/slack-margin are HARD VERDICTs, never retried.
+//
+// @decision 0bc86798 — CR 5518e77c item 5(c): forces `resolveRootReapPlatform()` -> "win32" (mirroring
+// (v)/(v negative control) above) so this block runs on EVERY host, including ubuntu CI — the retry loop
+// itself is platform-agnostic (it wraps `captureRootCreationRow`, never a win32-specific code path), so
+// gating it to a real win32 host (as the pre-fix version of this block did) left it entirely unexercised
+// on CI.
+// =======================================================================================================
+{
+  class CaptureRetryHost extends createSeamHost(PtyHost) {
+    resolveRootReapPlatform() { return "win32"; }
+    capturedPids = [];
+    callCount = 0;
+    rejectCount = 0; // how many of the FIRST attempts reject before `nextRow` is returned
+    nextRow = null;
+    killLiveAfterCall = null; // if set, live.alive flips false once callCount reaches this value
+    captureRootCreationRow(pid) {
+      this.callCount++;
+      this.capturedPids.push(pid);
+      if (this.killLiveAfterCall != null && this.callCount === this.killLiveAfterCall) {
+        const live = this.captureLiveRef(this.killLiveSessionId);
+        if (live) live.alive = false;
+      }
+      if (this.callCount <= this.rejectCount) return Promise.reject(new Error(`injected infra failure (attempt ${this.callCount})`));
+      return Promise.resolve(this.nextRow);
+    }
+  }
+  const mkEvents = () => ({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {}, onCodexBootStuck() {} });
+  const spawnOpts = (sessionId) => ({
+    sessionId, cwd: tmpHome,
+    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+    geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+  });
+  function captureConsoleError() {
+    const orig = console.error;
+    const lines = [];
+    console.error = (...args) => { lines.push(args.map(String).join(" ")); };
+    return { lines, restore: () => { console.error = orig; } };
+  }
+
+  // (w1) 2 INFRA rejections then a genuine row on attempt 3 -> RECOVERS. The whole point of this card.
+  {
+    const host = new CaptureRetryHost(mkEvents());
+    host.rejectCount = 2;
+    const genuineCreationTime = Date.now() - 60_000;
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: genuineCreationTime };
+    const cap = captureConsoleError();
+    host.spawn(spawnOpts("sess-retry-recovers"));
+    const liveRef = host.captureLiveRef("sess-retry-recovers");
+    await liveRef.creationTimeReady;
+    cap.restore();
+    check("(w1) 2 infra rejections then a genuine row on attempt 3 -> creationTime recovers",
+      liveRef.creationTime === genuineCreationTime);
+    check("(w1) exactly 3 capture attempts were made (2 infra + 1 success)", host.callCount === 3);
+    check("(w1) each infra attempt logged its own [pty-reap-capture] INFRA FAILURE line",
+      cap.lines.filter((l) => l.includes("[pty-reap-capture]") && l.includes("INFRA FAILURE")).length === 2);
+  }
+
+  // (w2) a RESOLVED ppid-mismatch row on the FIRST attempt -> exactly ONE capture call, never retried
+  // (a VERDICT is hard, never an infra failure, regardless of attempts remaining).
+  {
+    const host = new CaptureRetryHost(mkEvents());
+    host.nextRow = { pid: 4242, ppid: process.pid + 1, creationTime: Date.now() - 60_000 };
+    host.spawn(spawnOpts("sess-retry-ppid-mismatch-no-retry"));
+    const liveRef = host.captureLiveRef("sess-retry-ppid-mismatch-no-retry");
+    await liveRef.creationTimeReady;
+    check("(w2) a ppid-mismatch VERDICT makes exactly ONE capture call (never retried)", host.callCount === 1);
+    check("(w2) creationTime stays null on the hard-rejected verdict", liveRef.creationTime === null);
+  }
+
+  // (w2b) a RESOLVED no-row (null) VERDICT on the FIRST attempt -> exactly ONE capture call, never
+  // retried — CR 5518e77c item 5(a).
+  {
+    const host = new CaptureRetryHost(mkEvents());
+    host.nextRow = null; // captureRootCreationRow resolves null: a clean "no row found" result
+    host.spawn(spawnOpts("sess-retry-no-row-no-retry"));
+    const liveRef = host.captureLiveRef("sess-retry-no-row-no-retry");
+    await liveRef.creationTimeReady;
+    check("(w2b) a no-row VERDICT makes exactly ONE capture call (never retried)", host.callCount === 1);
+    check("(w2b) creationTime stays null on the hard-rejected verdict", liveRef.creationTime === null);
+  }
+
+  // (w2c) a RESOLVED row that fails the SLACK-MARGIN check on the FIRST attempt -> exactly ONE capture
+  // call, never retried — CR 5518e77c item 5(a). Retrying this would mask a future regression of card
+  // 0d8270b2's own 20ms slack fix (see docs/decisions/0bc86798-*.md's own Do-not list).
+  {
+    const host = new CaptureRetryHost(mkEvents());
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: Date.now() + 60_000 }; // far past startedAt+slack
+    host.spawn(spawnOpts("sess-retry-slack-margin-no-retry"));
+    const liveRef = host.captureLiveRef("sess-retry-slack-margin-no-retry");
+    await liveRef.creationTimeReady;
+    check("(w2c) a slack-margin VERDICT makes exactly ONE capture call (never retried)", host.callCount === 1);
+    check("(w2c) creationTime stays null on the hard-rejected verdict", liveRef.creationTime === null);
+  }
+
+  // (w2, negative control) the SAME host/harness, but with an INFRA rejection (not a verdict) on attempt
+  // 1 — proves this harness genuinely DOES retry when the override rejects, so (w2)/(w2b)/(w2c)'s
+  // exactly-one-call result is a real "VERDICT stops the loop" finding, not a harness that never retries
+  // anything at all.
+  {
+    const host = new CaptureRetryHost(mkEvents());
+    host.rejectCount = 1;
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: Date.now() - 60_000 };
+    host.spawn(spawnOpts("sess-retry-ppid-negative-control"));
+    const liveRef = host.captureLiveRef("sess-retry-ppid-negative-control");
+    await liveRef.creationTimeReady;
+    check("(w2, negative control) an INFRA rejection on attempt 1 DOES retry — more than one call",
+      host.callCount === 2);
+  }
+
+  // (w3) EVERY attempt is a genuine INFRA failure, through exhaustion -> creationTime stays null, a
+  // distinct GAVE UP line is logged (never only the per-attempt line's wording), and exactly
+  // ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS calls were made (no 6th attempt).
+  {
+    const host = new CaptureRetryHost(mkEvents());
+    host.rejectCount = Number.POSITIVE_INFINITY; // every attempt rejects
+    const cap = captureConsoleError();
+    host.spawn(spawnOpts("sess-retry-exhausted"));
+    const liveRef = host.captureLiveRef("sess-retry-exhausted");
+    await liveRef.creationTimeReady;
+    cap.restore();
+    check(`(w3) ${ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS} straight infra failures -> creationTime stays null`,
+      liveRef.creationTime === null);
+    check(`(w3) exactly ${ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS} capture attempts were made`,
+      host.callCount === ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS);
+    check("(w3) a distinct GAVE UP line was logged",
+      cap.lines.some((l) => l.includes("[pty-reap-capture]") && l.includes("GAVE UP")));
+    check(`(w3) exactly ${ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS} per-attempt INFRA FAILURE lines were logged (one per attempt, including the final one)`,
+      cap.lines.filter((l) => l.includes("INFRA FAILURE")).length === ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS);
+  }
+
+  // (w4) re-review (CR c44dc616, reversing an earlier draft's bail-on-dead-live): @decision 2897acc4's
+  // own S1 finding is that node-pty's `onExit` can fire while the real root process is STILL ALIVE, so
+  // `live.alive` is NOT a reliable "nothing left to protect" signal — bailing on it would leak exactly
+  // the survivor class this card exists to catch. This proves the loop does NOT bail: attempt 1 is a
+  // genuine INFRA failure; `live.alive` flips false (simulating onExit firing) DURING the backoff before
+  // attempt 2; attempt 2 still runs anyway and lands the genuine creationTime.
+  {
+    const host = new CaptureRetryHost(mkEvents());
+    host.rejectCount = 1; // only attempt 1 fails
+    const genuineCreationTime = Date.now() - 60_000;
+    host.nextRow = { pid: 4242, ppid: process.pid, creationTime: genuineCreationTime };
+    host.killLiveSessionId = "sess-retry-no-bail-on-exit";
+    host.killLiveAfterCall = 1; // flip live.alive=false right after attempt 1 settles, before attempt 2
+    host.spawn(spawnOpts("sess-retry-no-bail-on-exit"));
+    const liveRef = host.captureLiveRef("sess-retry-no-bail-on-exit");
+    await liveRef.creationTimeReady;
+    check("(w4) live.alive flipping false mid-retry does NOT stop the loop — attempt 2 still runs",
+      host.callCount === 2);
+    check("(w4) attempt 2 still lands the genuine creationTime despite the dead-looking live",
+      liveRef.creationTime === genuineCreationTime);
+  }
+}
+
+// =======================================================================================================
+// Card 0bc86798 (CR 5518e77c item 3) — `resolveRootCreationCaptureRetryAttempts`'s env-value clamp, pure,
+// driven directly with every input shape (no env var, no module reload needed).
+// =======================================================================================================
+{
+  check("[retry attempts clamp] unset raw value falls back to the given fallback, unadjusted",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts(undefined, 5); return r.value === 5 && r.adjusted === false; })());
+  check("[retry attempts clamp] a non-numeric raw value falls back, unadjusted (never a clamp — nothing to clamp)",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("not-a-number", 5); return r.value === 5 && r.adjusted === false; })());
+  check("[retry attempts clamp] an in-range integer passes through unadjusted",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("3", 5); return r.value === 3 && r.adjusted === false; })());
+  check("[retry attempts clamp] 0 clamps up to the floor (1), adjusted",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("0", 5); return r.value === 1 && r.adjusted === true; })());
+  check("[retry attempts clamp] a negative value clamps up to the floor (1), adjusted",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("-3", 5); return r.value === 1 && r.adjusted === true; })());
+  check("[retry attempts clamp] a value past the ceiling (10) clamps down to 10, adjusted",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("25", 5); return r.value === 10 && r.adjusted === true; })());
+  check("[retry attempts clamp] exactly at the ceiling (10) passes through unadjusted",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("10", 5); return r.value === 10 && r.adjusted === false; })());
+  check("[retry attempts clamp] a non-integer in range truncates, adjusted",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("3.7", 5); return r.value === 3 && r.adjusted === true; })());
+  check("[retry attempts clamp, negative control] an empty string is treated as absent (fallback, unadjusted — not clamped to 0)",
+    (() => { const r = resolveRootCreationCaptureRetryAttempts("", 5); return r.value === 5 && r.adjusted === false; })());
+}
+
+// =======================================================================================================
+// Card 0bc86798 (CR 5518e77c item 3) — `resolveRootCreationCaptureBackoffMs`'s repeat-last-slot behavior,
+// pure. Jitter itself is NOT asserted exactly (it's intentionally random) — only that every result stays
+// within the documented +/-25% band around the right base value.
+// =======================================================================================================
+{
+  const ladder = [100, 200, 400];
+  const withinJitterBand = (value, base) => value >= Math.round(base * 0.75) && value <= Math.round(base * 1.25);
+  check("[backoff ladder] attempt 1 uses the ladder's own first slot (within jitter band)",
+    withinJitterBand(resolveRootCreationCaptureBackoffMs(1, ladder), 100));
+  check("[backoff ladder] attempt 3 (the ladder's last defined slot) uses that slot (within jitter band)",
+    withinJitterBand(resolveRootCreationCaptureBackoffMs(3, ladder), 400));
+  check("[backoff ladder] attempt 4 (past the ladder's length) REPEATS the last slot, never zero/null (within jitter band)",
+    withinJitterBand(resolveRootCreationCaptureBackoffMs(4, ladder), 400));
+  check("[backoff ladder] attempt 10 (far past the ladder's length) still repeats the last slot (within jitter band)",
+    withinJitterBand(resolveRootCreationCaptureBackoffMs(10, ladder), 400));
+  // Jitter actually varies run to run (not a constant multiplier bug) — sample several calls at the same
+  // attempt and confirm at least two distinct values turn up almost always in practice.
+  const samples = new Set(Array.from({ length: 12 }, () => resolveRootCreationCaptureBackoffMs(1, ladder)));
+  check("[backoff ladder] jitter actually varies across repeated calls at the same attempt (not a frozen constant)",
+    samples.size > 1);
 }
 
 // =======================================================================================================

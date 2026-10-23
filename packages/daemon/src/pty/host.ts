@@ -14,11 +14,15 @@ import {
   type OrphanSweepRow, parseWin32SweepTicks, parseOrphanSweepLine, WIN32_SWEEP_PS_COMMAND,
   isHelperPidCollision, enumerateWin32SweepRows, enumerateWin32SweepRowForPid,
   ROOT_CREATION_CAPTURE_SLACK_MS, resolveVerifiedRootCreationTime,
+  ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS, ROOT_CREATION_CAPTURE_RETRY_BACKOFF_MS,
+  resolveRootCreationCaptureBackoffMs, resolveRootCreationCaptureRetryAttempts,
 } from "./win32-root-creation.js";
 export {
   type OrphanSweepRow, parseWin32SweepTicks, parseOrphanSweepLine, WIN32_SWEEP_PS_COMMAND,
   isHelperPidCollision, enumerateWin32SweepRows, enumerateWin32SweepRowForPid,
   ROOT_CREATION_CAPTURE_SLACK_MS, resolveVerifiedRootCreationTime,
+  ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS, ROOT_CREATION_CAPTURE_RETRY_BACKOFF_MS,
+  resolveRootCreationCaptureBackoffMs, resolveRootCreationCaptureRetryAttempts,
 } from "./win32-root-creation.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
@@ -5162,11 +5166,12 @@ async function enumerateProcessesPosixViaPs(timeoutMs: number): Promise<Worktree
 }
 
 /** @decision bf58c19c — single-pid filtered counterpart to {@link enumerateProcessesPosixViaPs}, for the
- *  at-spawn root-creation-time capture — mirrors win32's own {@link enumerateWin32SweepRowForPid} shape and
- *  cost rationale (a filtered single-pid query, never a full-table scan, for both cost and capture-window
- *  reasons). `null` on any failure/timeout/no-row — never thrown; `armRootCreationTime`'s own `.catch`
- *  already treats a rejection as "unknown". Reuses {@link isHelperPidCollision} (same hazard: the OS could
- *  hand this helper itself the just-freed `pid`). */
+ *  at-spawn capture — mirrors win32's own {@link enumerateWin32SweepRowForPid} shape/cost rationale.
+ *  Reuses {@link isHelperPidCollision} (same hazard: the OS could hand this helper the just-freed `pid`).
+ *
+ * @decision 0bc86798 — a spawn `error` or timeout already REJECTS (retried as INFRA, same as win32).
+ * UNCHANGED, deliberately: a non-zero `ps` exit still folds into "no row" below — no real POSIX host
+ * exists here to tell that apart from a legitimate "no such pid" exit. */
 export function enumeratePosixSweepRowForPid(pid: number, timeoutMs = 10_000): Promise<OrphanSweepRow | null> {
   return new Promise((resolve, reject) => {
     const cmd = spawnProcess("ps", ["-p", String(pid), "-o", "pid=,ppid=,lstart="], { stdio: ["ignore", "pipe", "ignore"], env: POSIX_PS_UTC_ENV });
@@ -8243,13 +8248,50 @@ export class PtyHost {
     // @decision 2897acc4 — replaces the construction-time `Promise.resolve()` stub with the real
     // in-flight chain, so `verifyRootDeadOrForceKill`'s guard-2 branch can await an in-flight capture
     // (bounded) rather than reading a pre-resolution `null` as "unknown forever".
-    //
-    // CR 33ae2f8a (round 2, minor 4): every path that leaves `live.creationTime` null is logged, once,
-    // under a single fixed, greppable tag — a silent null here is exactly what later reads as
-    // "owner-creation-time-unavailable" at guard 2, with no way to tell a genuine capture failure from a
-    // row the OS never produced.
     const slackMs = this.resolveRootReapPlatform() === "win32" ? ROOT_CREATION_CAPTURE_SLACK_MS : POSIX_ROOT_CREATION_CAPTURE_SLACK_MS;
-    live.creationTimeReady = this.captureRootCreationRow(live.pid).then((row) => {
+    // @decision 2897acc4 — `creationTimeReady` never rejects (same contract as the field's own doc). A
+    // structural backstop independent of the retry loop's own internal try/catch (CR 5518e77c item 2).
+    live.creationTimeReady = this.armRootCreationTimeWithRetry(live, slackMs).catch((err) => {
+      live.creationTime = null;
+      // eslint-disable-next-line no-console
+      console.error(`[pty-reap-capture] pid=${live.pid}: capture loop threw unexpectedly — creationTime stays null (${(err as Error)?.message ?? err})`);
+    });
+  }
+
+  /**
+   * @decision 0bc86798 — retries ONLY a genuine INFRA failure (a rejected `captureRootCreationRow`);
+   * never retry a VERDICT (no-row/ppid-mismatch/slack-margin) — a resolved row is verified exactly ONCE,
+   * then this returns, win or hard-reject.
+   *
+   * @decision 2897acc4 — deliberately does NOT bail on `live.alive === false` (an earlier draft did; CR
+   * `c44dc616` reversed it): S1's own finding is that node-pty's `onExit` can fire while the real root
+   * process is STILL ALIVE, so `alive` is not a reliable "nothing left to protect" signal.
+   */
+  private async armRootCreationTimeWithRetry(live: Live | CodexLive, slackMs: number): Promise<void> {
+    for (let attempt = 1; attempt <= ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS; attempt++) {
+      let row: OrphanSweepRow | null;
+      try {
+        row = await this.captureRootCreationRow(live.pid);
+      } catch (err) {
+        // @decision 0bc86798 — shared with `armWitnessWithFreshRetry` (one source): repeats the last
+        // ladder slot past its length, +/-25% jitter against fleet-wide lockstep retries.
+        const backoffMs = resolveRootCreationCaptureBackoffMs(attempt);
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap-capture] pid=${live.pid}: capture INFRA FAILURE attempt ${attempt}/${ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS} (${(err as Error)?.name ?? "Error"}: ${(err as Error)?.message ?? err})` +
+          (attempt < ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS ? ` — backing off ~${backoffMs}ms then retrying` : ""));
+        if (attempt < ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS) {
+          await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+        live.creationTime = null;
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap-capture] pid=${live.pid}: capture GAVE UP after ${ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS} attempts, all infra failures — creationTime stays null`);
+        return;
+      }
+      // Resolved (even a no-row null) — verify exactly ONCE, then stop. CR 33ae2f8a (round 2, minor 4):
+      // every path that leaves `live.creationTime` null is logged once, under a single fixed, greppable
+      // tag — a silent null here is exactly what later reads as "owner-creation-time-unavailable" at
+      // guard 2, with no way to tell a genuine capture failure from a row the OS never produced.
       const verified = resolveVerifiedRootCreationTime(row, process.pid, live.startedAt, slackMs);
       live.creationTime = verified;
       if (verified == null) {
@@ -8259,11 +8301,8 @@ export class PtyHost {
         // eslint-disable-next-line no-console
         console.error(`[pty-reap-capture] pid=${live.pid}: capture unverified — creationTime stays null (${reason})`);
       }
-    }).catch((err) => {
-      live.creationTime = null;
-      // eslint-disable-next-line no-console
-      console.error(`[pty-reap-capture] pid=${live.pid}: capture FAILED — creationTime stays null (${(err as Error)?.message ?? err})`);
-    });
+      return;
+    }
   }
 
   /** Injectable seam used by {@link verifyRootDeadOrForceKill} for the actual OS kill — overridden

@@ -129,6 +129,42 @@ try {
   }
 
   // =====================================================================================================
+  // Card 0bc86798 (CR 5518e77c item 1) — a REAL, induced CIM query failure through the REAL leaf function
+  // (enumerateWin32SweepRowForPid), never a captureRootCreationRow override — proving the rejection
+  // genuinely happens at the PowerShell/exit-code layer. `NaN` as the pid produces a syntactically
+  // invalid WQL filter ("ProcessId=NaN"); Get-CimInstance genuinely throws on it — empirically verified
+  // by hand on this host (see win32-root-creation.ts's own doc on win32SweepFilteredCommand): "Die
+  // Anfrage ist ungültig" (localized "the request is invalid"), exit 1. This is the REAL failure shape
+  // the production retry loop now treats as INFRA (retryable), not a fabricated stub.
+  // =====================================================================================================
+  {
+    let threw = null;
+    try {
+      await enumerateWin32SweepRowForPid(NaN);
+    } catch (err) {
+      threw = err;
+    }
+    check("[leaf rejection] a genuinely invalid CIM filter (NaN pid) makes enumerateWin32SweepRowForPid REJECT, never resolve null",
+      threw !== null);
+    check("[leaf rejection] the rejection's message names the CIM failure (not a generic/timeout message)",
+      typeof threw?.message === "string" && /CIM query failed/.test(threw.message));
+    // Negative control, same real leaf function: a syntactically VALID filter that simply matches no
+    // running process must still resolve null, never reject — proving the exit-code check doesn't ALSO
+    // swallow a clean, legitimate "no row" result into a false rejection. 2147483647 is the same odd,
+    // out-of-range sentinel pid `pty-root-reap-test-tripwire.mjs` uses for a provably-impossible-on-any-OS
+    // target (card 8c8ee0ee's own doc) — never a real pid, but a well-formed WQL integer literal.
+    let noRowResult;
+    let noRowThrew = null;
+    try {
+      noRowResult = await enumerateWin32SweepRowForPid(2147483647);
+    } catch (err) {
+      noRowThrew = err;
+    }
+    check("[leaf rejection, negative control] a well-formed filter with no matching process resolves null, never rejects",
+      noRowThrew === null && noRowResult === null);
+  }
+
+  // =====================================================================================================
   // Card 85ae7768 — test/_guard.mjs's OWN companion-registry capture, end-to-end: a REAL
   // node:child_process.spawn root (the ONE spawn kind this suite ever hands directly to
   // reapOrphanedDescendants as a registered root — see docs/decisions/85ae7768) must end up with a
