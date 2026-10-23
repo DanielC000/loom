@@ -21,7 +21,10 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { Project } from "@loom/shared";
-import { ATLAS_HOMES, useVisibleNavPages, type AtlasHome, type NavPage } from "../nav";
+import {
+  ATLAS_HOMES, PROJECT_NODE_TABS, isRehomedProjectTab, projectTabPath, useVisibleNavPages,
+  type AtlasHome, type NavPage,
+} from "../nav";
 import { AgentsQuickSpawn } from "./atlasAgents";
 import { NavIcon } from "./navIcons";
 import { Logo } from "./Logo";
@@ -37,11 +40,36 @@ import { color, font } from "../theme";
 // shallowest node that contains everything it spans. `NAV_PAGES[i].scoped` already records exactly
 // that distinction — a scoped page rescopes on the active project, an unscoped one is god-eye — so it
 // is the only input needed to split the tree into its two levels. Nothing here re-decides placement.
+//
+// @decision 25c08fba — a row's depth is `scoped` OR named as a re-homed project tab; never the flag
+// alone.
+//
+// Card 25c08fba adds the ONE case the flag cannot answer. `/terminals` is an unscoped, god-eye page
+// in the classic rail AND the approved design's project-node "Sessions" tab, so under Atlas it sits
+// at project depth even though its own flag says workspace. Depth is therefore `scoped` OR named as a
+// re-homed project tab — read off the same PROJECT_NODE_TABS declaration the node and the frame read,
+// so the tree cannot put a row at a different depth than the crumbs the row leads to.
+//
+// The project tier is then ORDERED by that declaration, which is the approved design's own tab order,
+// so a reader's eye moves between the branch and the node's tab row without re-sorting. A
+// project-scoped page with no tab (today only `/overview`, which P3-switch-over owns) leads, since
+// the declaration has no opinion about where it goes.
 function splitByDepth(pages: NavPage[]): { workspace: NavPage[]; project: NavPage[] } {
+  const tabAt = (to: string) => PROJECT_NODE_TABS.findIndex((t) => isRehomedProjectTab(t) && projectTabPath(t) === to);
+  const atProjectDepth = (p: NavPage) => !!p.scoped || tabAt(p.to) >= 0;
   return {
-    workspace: pages.filter((p) => !p.scoped),
-    project: pages.filter((p) => p.scoped),
+    workspace: pages.filter((p) => !atProjectDepth(p)),
+    project: pages.filter(atProjectDepth).sort((a, b) => {
+      const ia = tabAt(a.to), ib = tabAt(b.to);
+      return (ia < 0 ? -1 : ia) - (ib < 0 ? -1 : ib);
+    }),
   };
+}
+
+/** What the project node calls a re-homed destination — "Sessions" for `/terminals`, else its own. */
+function projectRowLabel(page: NavPage): string {
+  const tab = PROJECT_NODE_TABS.find((t) => isRehomedProjectTab(t) && projectTabPath(t) === page.to);
+  return tab?.label ?? page.label;
 }
 
 // The ONE god-eye destination that stays a WORKSPACE-TIER NODE rather than becoming a tab: the
@@ -82,11 +110,14 @@ function NodeBadge({ count, title }: { count: number; title: string }) {
 // depth already says it — a destination under a project node is scoped to that project, and the node
 // names which one. Round 2's approved IA retires the scope dot for this exact reason ("tree selection
 // IS scoping"); re-adding it would be decoration restating the indent.
-function TreeNode({ page, activeTo, active = true, testId, metric, onNavigate }: {
+function TreeNode({ page, activeTo, active = true, testId, label, metric, onNavigate }: {
   page: NavPage;
   activeTo?: string;
   active?: boolean;
   testId: string;
+  /** Overrides the page's own label where the NODE calls the destination something else (card
+   *  25c08fba: `/terminals` is the project node's "Sessions"). The classic rail keeps `page.label`. */
+  label?: string;
   metric?: ReactNode;
   onNavigate?: () => void;
 }) {
@@ -98,7 +129,7 @@ function TreeNode({ page, activeTo, active = true, testId, metric, onNavigate }:
           ProjectNode: it has children and genuinely opens and closes.) */}
       <span className="loom-atlas-twist" aria-hidden />
       <span className="loom-atlas-ico" aria-hidden><NavIcon to={page.to} /></span>
-      <span className="loom-atlas-lbl">{page.label}</span>
+      <span className="loom-atlas-lbl">{label ?? page.label}</span>
       {metric}
     </>
   );
@@ -406,7 +437,7 @@ export function AtlasTree({ activeTo }: { activeTo?: string } = {}) {
           : undefined} />,
       ...project.map((page) => (
         <TreeNode key={page.to} page={page} activeTo={activeTo} active={selected} onNavigate={scopeFirst}
-          testId={nodeId(page.to)}
+          testId={nodeId(page.to)} label={projectRowLabel(page)}
           metric={selected && page.to === "/board" && openCards > 0
             ? <NodeMeta value={openCards} title={`${openCards} open card${openCards === 1 ? "" : "s"}`} />
             : undefined} />

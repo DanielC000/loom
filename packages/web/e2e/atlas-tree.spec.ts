@@ -108,6 +108,18 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   // /workspace-settings node. The classic page still renders both halves in one column. Same
   // one-map-only reasoning as /companion above — no legacy redirect targets /settings either.
   "/settings": "595e2a47 — split by scope; the daemon-global sections moved to /workspace-settings",
+  // Card 25c08fba: these six are now TABS on the project node. Each keeps its own address, and that
+  // address renders the node — the tab row, the node's counts, and the page itself as the tab body —
+  // where the classic shell still renders the bare page. (`/settings` above is in this set too; its
+  // own entry already inverts the comparison, so it needs no second row.) `/agents` is re-homed with
+  // them but is Atlas-ONLY, so it is not a rail destination this walk visits and must NOT be named
+  // here — the positive control above would reject it.
+  "/board": "25c08fba — a tab on the project node, under its tab row and counts",
+  "/terminals": "25c08fba — re-homed as the project node's Sessions tab, at project depth",
+  "/repository": "25c08fba — a tab on the project node, under its tab row and counts",
+  "/memory": "25c08fba — a tab on the project node, under its tab row and counts",
+  "/runs": "25c08fba — a tab on the project node, under its tab row and counts",
+  "/archive": "25c08fba — a tab on the project node, under its tab row and counts",
 };
 
 async function routesFrom(page: Page, selector: string): Promise<string[]> {

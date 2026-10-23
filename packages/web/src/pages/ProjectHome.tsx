@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useMemo, useRef, type ReactNode } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { contextWindowForModel, resolveConfig, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
@@ -10,6 +10,13 @@ import { bySessionActivity, byCreatedStable } from "../lib/sessions";
 import { EventRow, FleetRow, worstContext } from "../components/fleet";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import Board from "./Board";
+import Terminals from "./Terminals";
+import AgentsNode from "./AgentsNode";
+import Repository from "./Repository";
+import Memory from "./Memory";
+import Runs from "./Runs";
+import Archive from "./Archive";
+import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
   BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs,
@@ -22,21 +29,53 @@ import {
   boardRollup, gateLanes, isLiveSession, mergeThroughput, plural, relativeTime,
   useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
+import { PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt } from "../nav";
 import { color, font } from "../theme";
 
-// THE PROJECT NODE — card fd99b2d7 (Atlas P2-1), the project-scoped twin of WorkspaceHome. Same two
-// tabs, same grammar, one depth down: every figure is scoped to the ActiveProjectProvider's project,
-// which the tree's own project row writes.
+// THE PROJECT NODE — card fd99b2d7 (Atlas P2-1), the project-scoped twin of WorkspaceHome, widened
+// to the approved design's TEN tabs by card 25c08fba. Every figure is scoped to the
+// ActiveProjectProvider's project, which the tree's own project row writes.
 //
-// ⭐ OWNER-RULED (card c6bdf358, and restated on this card): the board embedded in the Overview tab
-// is the owner's PRIMARY board surface. It is the real <Board/>, whole — all its lanes, filters,
-// drag and the centred card dialog — never a summary, a trimmed view or a link to one.
-
-const TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label: "Deck" }];
+// The tab SET and each tab's address are declared once, in src/nav.tsx's PROJECT_NODE_TABS — read
+// there for why a re-homed tab keeps the path it already had rather than becoming a `?tab=`. This
+// file owns only what the declaration cannot: each tab's COUNT, and its BODY.
+//
+// ⭐ OWNER-RULED (card c6bdf358, restated on fd99b2d7 and again on 25c08fba): the board embedded in
+// the Overview tab is the owner's PRIMARY board surface. It is the real <Board/>, whole — all its
+// lanes, filters, drag and the centred card dialog — never a summary, a trimmed view or a link to
+// one. The Board TAB is a second, full-bleed mount of the same component, not a replacement for it.
+//
+// 🔴 A TAB BODY IS MOUNTED ON FIRST VISIT AND NEVER UNMOUNTED AFTER (card 25c08fba). An inactive
+// body stays in the tree with `hidden`, exactly as the Platform node's five panels do (card
+// c07ff42a) and for the same owner directive: a tab click is not consent to discard unfinished
+// input, and unmounting the body you are leaving destroys a half-typed memory note, a Settings field
+// mid-edit or a composer draft. `hidden` — never an inline `display` — also keeps a parked body out
+// of the accessibility tree and the tab order.
+//
+// It is FIRST-VISIT rather than always-mounted because the cost here is not the Platform node's. Nine
+// bodies polling on every project page is not what the classic shell already paid (these were nine
+// separate pages), and the Sessions body in particular opens a live pty WebSocket per live session —
+// so mounting it before anyone has asked for it would make every project address pay for terminals
+// nobody opened. First-visit-then-sticky is exactly enough for the directive: input can only exist in
+// a body that has rendered, and once it has rendered it is never torn down.
+//
+// @decision 25c08fba — never unmount an inactive tab body, and never park one with an inline
+// `display` (it out-specifies the UA `[hidden]` rule). Unfinished input must survive a tab switch.
 
 export default function ProjectHome() {
-  const [params] = useSearchParams();
-  const tab = params.get("tab") === "deck" ? "deck" : "overview";
+  const { pathname, search } = useLocation();
+  const tab = projectNodeTabAt(pathname, search)?.key ?? "overview";
+  // Which bodies have ever been shown. A ref, not state: the set only ever GROWS, and it grows in the
+  // same render that changed `tab` — so there is nothing to re-render for, and going through state
+  // would cost every first visit a frame of blank content.
+  //
+  // 🔴 DECLARED ABOVE THE `!projectId` EARLY RETURN, with every other hook. Below it, the no-project
+  // render path calls one FEWER hook than the resolved one, and the first resolve of the active
+  // project then throws React error #310 ("rendered more hooks than during the previous render"),
+  // blanking the whole app. Measured: it crashed every project-node address — only on a first load
+  // that had no project pinned yet, which is why half the suite stayed green through it.
+  const visited = useRef<Set<string>>(new Set());
+  visited.current.add(tab);
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
 
@@ -45,6 +84,14 @@ export default function ProjectHome() {
   const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const boardQ = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, staleTime: 30_000 });
   const archivedQ = useQuery({ queryKey: ["archive", projectId, 100], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId });
+  // The two tab counts no existing read on this page already answers (card 25c08fba). Both reuse the
+  // EXACT query key + fetcher their own tab body uses — ["projectMemory", id] in pages/Memory.tsx,
+  // ["runs", id] in pages/Runs.tsx — so the count on a tab and the rows inside it share one cache
+  // entry and cannot disagree, and opening the tab issues no second request. Neither adds an api.ts
+  // member. Deliberately NO refetchInterval: the Runs body sets its own 4s poll while it is mounted,
+  // and the node has no reason to poll faster than the figure is read.
+  const memoryQ = useQuery({ queryKey: ["projectMemory", projectId], queryFn: () => api.projectMemory(projectId), enabled: !!projectId });
+  const runsQ = useQuery({ queryKey: ["runs", projectId], queryFn: () => api.runs(projectId), enabled: !!projectId });
   const activeGatesQ = useGatesActive();
   const historyQ = useGateHistoryRecent(projectId || undefined);
   const { items: attention } = useAttention();
@@ -203,15 +250,67 @@ export default function ProjectHome() {
     </BandPanel>
   );
 
+  // One count per tab, keyed by the declaration's own `key`. A tab with no entry here renders no
+  // count — Repository and Settings have no natural figure, and the approved design gives them none.
+  // `undefined` is deliberately distinct from `0`: a count that has not loaded yet shows nothing
+  // rather than claiming an empty surface.
+  const tabCounts: Record<string, number | undefined> = {
+    board: board.open,
+    // The project's own live sessions — the same set the Sessions body shows once its pre-selected
+    // project filter is applied, so the tab's figure describes what is actually inside it.
+    sessions: live.length,
+    agents: agentsQ.data?.length,
+    memory: memoryQ.data?.length,
+    runs: runsQ.data?.length,
+    // `total`, not `items.length`: archivedSessions is PAGINATED, so the row count is a page size.
+    archive: archivedQ.data?.total,
+  };
+  const tabs = PROJECT_NODE_TABS.map((t) => ({
+    key: t.key, label: t.label,
+    count: tabCounts[t.key] !== undefined && tabCounts[t.key]! > 0 ? tabCounts[t.key] : undefined,
+  }));
+  const hrefFor = (key: string) => PROJECT_NODE_TABS.find((t) => t.key === key)?.to ?? "/project";
+
+  // The nine re-homed tab bodies. Each is the EXISTING page component, mounted verbatim — this card
+  // re-homes surfaces, it does not rebuild them. Sessions is the one that takes a prop: its page is
+  // god-eye by design and already supports being "reached per-project by pre-selecting the filter",
+  // so the project node hands it this project's name and the body matches the tab's own count.
+  const tabBodies: Record<string, ReactNode> = {
+    board: <Board projectId={projectId} />,
+    sessions: <Terminals projectName={project?.name} />,
+    agents: <AgentsNode />,
+    repository: <Repository />,
+    memory: <Memory />,
+    runs: <Runs />,
+    archive: <Archive />,
+    settings: <Settings />,
+  };
   return (
     // Every fleet row below renders a session from THIS project-filtered live set, so it is also what
     // decides whether the view is mixed-harness — the same contract the classic Overview honours.
     <HarnessMixProvider sessions={live}>
       <div className="loom-atlas-home">
-        <NodeTabs tabs={TABS} active={tab} hrefFor={(k) => (k === "overview" ? "/project" : `/project?tab=${k}`)}>
+        <NodeTabs tabs={tabs} active={tab} hrefFor={hrefFor}>
           {tab === "deck" && <KpiStrip items={kpis} />}
         </NodeTabs>
 
+        {/* Every re-homed body that has been visited, the inactive ones parked with `hidden`. Rendered
+            BEFORE the home tabs' own content so a body's position in the DOM is stable across tab
+            switches — a parked body that moved would remount and take its draft with it. */}
+        {PROJECT_NODE_TABS.filter(isRehomedProjectTab).map((t) => (
+          visited.current.has(t.key) ? (
+            <div key={t.key} hidden={t.key !== tab} data-testid={`atlas-tabpanel-${t.key}`}>
+              {tabBodies[t.key]}
+            </div>
+          ) : null
+        ))}
+
+        {/* The two HOME tabs stay mutually exclusive — the one deliberate exception to the
+            mount-once rule above. They are two READINGS of the same readout rather than two
+            surfaces, they hold no input of their own, and each carries a full <Board/>; keeping both
+            alive would render two boards on every project address for a tab you can switch back to
+            in one click with nothing lost. atlas-home.spec.ts pins it from the other side: the Deck
+            tab must leave NO `atlas-kpi-deck` in the document, which a parked Overview would. */}
         {tab === "overview" ? (
           <>
             <KpiDeck items={kpis} />
@@ -234,7 +333,7 @@ export default function ProjectHome() {
               <Board projectId={projectId} />
             </section>
           </>
-        ) : (
+        ) : tab === "deck" ? (
           <div className="loom-atlas-deck">
             <section className="loom-atlas-deckmain" data-testid="atlas-board-embed">
               <div className="loom-atlas-primaryhead">
@@ -254,7 +353,7 @@ export default function ProjectHome() {
               {pulsePanel}
             </aside>
           </div>
-        )}
+        ) : null}
         {project && <span hidden data-testid="atlas-project-name">{project.name}</span>}
       </div>
     </HarnessMixProvider>

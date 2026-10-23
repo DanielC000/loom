@@ -1463,6 +1463,15 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 18px;
   min-width: 0;
+  /* WRAPS (card 25c08fba). With the two tabs this row was built for it never reached its container's
+     edge; the project node's ten do, and an unwrapped row is CLIPPED at that edge — measured at 420px,
+     where the last five tabs were off-screen with no scrollbar and no other way to reach them. The
+     parent `.loom-atlas-tabs` already wraps, so this is the row following its own container rather
+     than a new behaviour. `row-gap` is smaller than the 18px column gap because wrapped tab LINES sit
+     closer than tabs within a line. Nothing changes where the row already fits — every node whose tabs
+     fit on one line, 1440 included, lays out identically. */
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 /* .loom-navtab carries no focus ring of its own (it is a shared primitive the classic shell
    also uses). Scoped here rather than added to the primitive: this card has no business

@@ -5,7 +5,11 @@ import type { SessionListItem } from "@loom/shared";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
 import { AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
-import { ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, type AtlasHome, type NavPage, type ParamPage } from "../nav";
+import {
+  ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
+  isRehomedProjectTab, projectNodeTabAt, projectTabPath,
+  type AtlasHome, type NavPage, type ParamPage,
+} from "../nav";
 import { AtlasNodeHeadContext } from "../lib/atlasNodeHead";
 import { activeSessionNodeTab, SESSION_NODE_TAB_LABEL } from "../lib/sessionNodeTabs";
 import { useLatchedSession } from "../lib/useLatchedSession";
@@ -45,6 +49,23 @@ function currentPage(pathname: string): NavPage | undefined {
 function currentHome(pathname: string): AtlasHome | undefined {
   return ATLAS_HOMES.find((h) => matchPath({ path: h.to, end: true }, pathname));
 }
+
+// ── The project node's re-homed tabs (card 25c08fba) ───────────────────────────────────────────
+// The eight project-scoped surfaces that are now TABS on the project node rather than pages of their
+// own. Each keeps the address it already had (see PROJECT_NODE_TABS in src/nav.tsx for why), so the
+// only thing that changes here is WHICH element the address renders: the project node, with that tab
+// selected, instead of the bare page.
+//
+// The paths are therefore REMOVED from the NAV_PAGES / ATLAS_HOMES mounts below and re-added pointing
+// at the node — never mounted twice. Two <Route>s on one literal path is a precedence contest with no
+// stated winner, and the one that lost would be invisible.
+const REHOMED_TAB_PATHS = new Set(
+  PROJECT_NODE_TABS.filter(isRehomedProjectTab).map(projectTabPath),
+);
+
+// The project node's own element, resolved from the SAME declaration that mounts `/project` — so a
+// re-homed address and the node's own path can never render two different components.
+const PROJECT_NODE_ELEMENT = ATLAS_HOMES.find((h) => h.to === PROJECT_NODE_PATH)?.element;
 
 // No specificity sort for these: each pattern's FIRST segment is a distinct literal, so at most one
 // can ever match a given path and the iteration order cannot change the answer.
@@ -170,8 +191,27 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // label would add a fourth word naming a node that is already the crumb before it. An Atlas-only
   // node that is NOT its tier's head (the Agents node, card c6160c7d) names itself last, exactly as
   // a NAV_PAGES destination at the same depth does.
+  // @decision 25c08fba — a re-homed project tab's depth and label come from the tab declaration,
+  // never from the page's own `scoped` flag.
+  //
+  // It takes them from that declaration
+  // rather than from the page's own `scoped` flag — ONE resolver, shared with the node and the tree,
+  // so the three cannot disagree about which tab an address means or how deep it sits.
+  //
+  // For seven of the eight this reproduces exactly what the `scoped` flag already said. The eighth is
+  // `/terminals`, which genuinely CHANGED TIER: the classic rail still carries it as the god-eye
+  // "Terminals", and under Atlas it is the project node's "Sessions". Deriving it from the flag would
+  // put the project node's own tab at workspace depth, naming the wrong tier and the wrong label.
+  //
+  // The two HOME tabs are excluded: the project node is its tier's head, so its trail stops at the
+  // project's name and never appends "Overview" (the same rule ATLAS_HOMES' `tierHead` states).
+  const projectTab = projectNodeTabAt(pathname, search);
+  const rehomedTab = projectTab && isRehomedProjectTab(projectTab) ? projectTab : undefined;
+
   const navCrumbs: string[] = ["Workspace"];
-  if (home) {
+  if (rehomedTab) {
+    navCrumbs.push(activeProjectName, rehomedTab.label);
+  } else if (home) {
     if (home.scoped) navCrumbs.push(activeProjectName);
     if (!home.tierHead) navCrumbs.push(home.label);
   } else {
@@ -184,6 +224,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // order, not a precedence contest.
   const crumbs = paramAddress?.crumbs ?? navCrumbs;
   const heading = paramAddress?.heading
+    ?? rehomedTab?.label
     ?? (home
       ? (home.tierHead ? (home.scoped ? activeProjectName : "Workspace") : home.label)
       : page?.label)
@@ -254,8 +295,10 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
         <main className="loom-atlas-content">
           <AtlasNodeHeadContext.Provider value={nodeHeadSlot}>
           <Routes>
-            {/* Each destination's own component, rendered exactly as the legacy shell renders it. */}
-            {NAV_PAGES.map((p) => (
+            {/* Each destination's own component, rendered exactly as the legacy shell renders it —
+                minus the eight card 25c08fba re-homed onto the project node, which are mounted at the
+                bottom of this table pointing at the node instead. */}
+            {NAV_PAGES.filter((p) => !REHOMED_TAB_PATHS.has(p.to)).map((p) => (
               <Route key={p.to} path={p.to} element={p.element} />
             ))}
             {/* The parameterized addresses (P1-2), from the SAME declaration LegacyShell mounts —
@@ -273,8 +316,14 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {/* The Atlas-only nodes (P2-1's two home nodes, P2-2's Agents node). The classic shell
                 deliberately does NOT mount these; see ATLAS_HOMES' own anchor in src/nav.tsx for
                 why, and why `/` and `/overview` must not be re-pointed at them. */}
-            {ATLAS_HOMES.map((h) => (
+            {ATLAS_HOMES.filter((h) => !REHOMED_TAB_PATHS.has(h.to)).map((h) => (
               <Route key={h.to} path={h.to} element={h.element} />
+            ))}
+            {/* The re-homed project tabs (card 25c08fba). Every one renders the project NODE, which
+                reads the address back through the same `projectNodeTabAt` resolver this frame uses and
+                shows that tab. The old page is still what renders — as the node's tab body. */}
+            {[...REHOMED_TAB_PATHS].map((to) => (
+              <Route key={to} path={to} element={PROJECT_NODE_ELEMENT} />
             ))}
             {/* Anything not yet mounted (an address phase 2 still owes, a typo) lands on the frame
                 with an explanation instead of an empty column. */}

@@ -48,8 +48,11 @@ const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 // the new one simply is not checked HERE, while atlas-tree.spec.ts's exhaustive node/hatch PARTITION
 // (derived from the rendered tree, so it cannot go stale) still refuses to let it fall out of both.
 // The two together are what make the claim both specific and drift-proof.
+// ⚠️ `/terminals` LEFT this list with card 25c08fba, which re-homed it as the project node's
+// "Sessions" tab: it is a project-branch tree ROW again now, at project depth, so both halves of the
+// claim below would be false for it. Cards 41eab0eb / 11 take the rest the same way.
 const RE_HOMED = [
-  "/", "/terminals", "/inbox", "/gates", "/projects", "/actors", "/companion", "/automation", "/usage",
+  "/", "/inbox", "/gates", "/projects", "/actors", "/companion", "/automation", "/usage",
   // The Atlas-only workspace Settings node (card 595e2a47) — a `ROOT_TABS` row in the approved design,
   // so it re-homes with the nine rail destinations above rather than staying the tier's footer.
   "/workspace-settings",

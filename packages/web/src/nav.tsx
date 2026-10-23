@@ -221,6 +221,87 @@ export const ATLAS_HOMES: AtlasHome[] = [
   { key: "workspace-settings", to: "/workspace-settings", label: "Settings", scoped: false, tierHead: false, element: <WorkspaceSettings /> },
 ];
 
+// ── The project node's tabs ────────────────────────────────────────────────────────────────────
+// Card 25c08fba (Atlas restructure 3 of 11). The approved round-4 V2 design puts every
+// project-scoped surface on the project NODE, as a tab under its persistent readout, rather than
+// leaving each one a full page of its own — `atlas.js`'s `PROJ_TABS`, prepended by `homeTabs("proj")`
+// (Overview + Deck), which is exactly the ten rows below in exactly that order.
+//
+// 🔴 A TAB'S ADDRESS IS THE PATH IT ALREADY HAD. Only the two HOME tabs are `?tab=` on the node's own
+// path, because they are two readings of the same home — which is what the mockup's own
+// `homeTabs().concat(PROJ_TABS)` split says they are. Every other tab keeps `/board`, `/memory`,
+// `/repository` and friends. Three reasons, each load-bearing:
+//
+//   • A `?tab=` on `/project` would COLLIDE with the page's own `?tab=`. Repository reads `?tab=git`
+//     off the query string itself (pages/Repository.tsx), as Actors and Automation do; one query
+//     parameter cannot address both the node's tab and the tab body's own sub-tab.
+//   • `LEGACY_REDIRECTS` below is mounted by BOTH shells from ONE declaration, so a row pointing
+//     `/board` at `/project?tab=board` would redirect the CLASSIC shell too — and this card's DoD is
+//     that every old path still renders its classic page untouched with the switch off. The
+//     alternative, a second Atlas-only redirect table, is a second list to keep in step for no gain.
+//   • Nothing has to be re-pointed. Every `<Link to="/runs">`, every band panel's `action`, every
+//     command-palette row and every bookmark already names these paths, so the re-home costs no link
+//     churn and no redirect hop — which is also why this card adds no `LEGACY_REDIRECTS` row at all:
+//     a redirect needs an address to leave behind, and these addresses did not move.
+//
+// @decision 25c08fba — never re-address a project tab as `?tab=` on /project. It collides with the
+// tab body's own `?tab=`, and a both-shells redirect row would break the switch-OFF contract.
+export type ProjectNodeTab = {
+  /** The `?tab=` value for a HOME tab, and the `atlas-tab-<key>` testid stem for every tab. */
+  key: string;
+  /** What the project node calls this surface — the tab's label, and the frame's deepest crumb. */
+  label: string;
+  /** The tab's own address. A home tab's is the project node's own path. */
+  to: string;
+};
+
+/** The project node's own path — the one address the two home tabs share. */
+export const PROJECT_NODE_PATH = "/project";
+
+export const PROJECT_NODE_TABS: ProjectNodeTab[] = [
+  { key: "overview", label: "Overview", to: PROJECT_NODE_PATH },
+  { key: "deck", label: "Deck", to: `${PROJECT_NODE_PATH}?tab=deck` },
+  { key: "board", label: "Board", to: "/board" },
+  // "Sessions", not "Terminals": the only tab here that genuinely CHANGES TIER. /terminals is a
+  // god-eye page in the classic rail, and the approved design has it as a PROJECT tab ("Sessions 5"),
+  // so under Atlas it moves to project depth and takes the node's own name for it. The classic rail's
+  // own label and depth are untouched — NAV_PAGES above still declares it unscoped, because the
+  // CLASSIC page still is: it rescopes only through the project filter the Atlas tab pre-selects.
+  { key: "sessions", label: "Sessions", to: "/terminals" },
+  { key: "agents", label: "Agents", to: "/agents" },
+  { key: "repository", label: "Repository", to: "/repository" },
+  { key: "memory", label: "Memory", to: "/memory" },
+  { key: "runs", label: "Runs", to: "/runs" },
+  { key: "archive", label: "Archive", to: "/archive" },
+  { key: "settings", label: "Settings", to: "/settings" },
+];
+
+/** A tab's address without its query — what the router matches, and what the tree's row points at. */
+export function projectTabPath(tab: ProjectNodeTab): string {
+  return tab.to.split("?")[0] ?? tab.to;
+}
+
+/** True for a tab that brought its OWN address with it, i.e. everything but the two home tabs. */
+export function isRehomedProjectTab(tab: ProjectNodeTab): boolean {
+  return projectTabPath(tab) !== PROJECT_NODE_PATH;
+}
+
+/**
+ * Which project tab an address selects, or `undefined` when the address is not on the project node
+ * at all. ONE resolver, read by the node (to pick its body), the frame (for its crumbs and heading)
+ * and the tree (for a row's label and depth) — so the three can never disagree about which tab a URL
+ * means, which is the drift a second copy of this rule would introduce.
+ */
+export function projectNodeTabAt(pathname: string, search: string): ProjectNodeTab | undefined {
+  if (pathname === PROJECT_NODE_PATH) {
+    const want = new URLSearchParams(search).get("tab");
+    // An unrecognised `?tab=` falls back to the home tab rather than to no tab: the node's own path
+    // always shows SOMETHING, and Overview is what it shows.
+    return PROJECT_NODE_TABS.find((t) => !isRehomedProjectTab(t) && t.key === want) ?? PROJECT_NODE_TABS[0];
+  }
+  return PROJECT_NODE_TABS.find((t) => isRehomedProjectTab(t) && projectTabPath(t) === pathname);
+}
+
 // ── The legacy redirects ───────────────────────────────────────────────────────────────────────
 // Old URLs kept working after an IA merge or a rename. Each one's `to` is the destination's CURRENT
 // address — including the `?tab=` that picks its sub-tab — which under phase 1 is also its ATLAS

@@ -24,8 +24,18 @@ type SessionRow = SessionRowGroup<SessionListItem>;
 
 // Global Live Terminals grid: all running sessions, with a project filter, tiled, maximizable.
 // Also reachable per-project by pre-selecting the filter.
-export default function Terminals() {
-  const [filter, setFilter] = useState<string>("");      // projectName filter ("" = all)
+//
+// `projectName` is that pre-selection, made a prop by card 25c08fba so the Atlas project node can
+// mount this page as its "Sessions" tab at project depth. The classic shell passes nothing, so its
+// filter still starts at "" (= all) and the page is byte-identical there. The filter control itself
+// stays — a reader who pre-selected a project may still widen it, and every tile carries its project.
+export default function Terminals({ projectName }: { projectName?: string } = {}) {
+  const [filter, setFilter] = useState<string>(projectName ?? "");  // projectName filter ("" = all)
+  // Re-sync when the host changes which project it is showing — the Atlas tab stays MOUNTED across a
+  // project switch (it is parked with `hidden`, never unmounted), so a mount-time initial value alone
+  // would leave it filtered to the project the reader has since navigated away from. Only ever
+  // written when the host actually names one, so the god-eye mount never has its "all" reset.
+  useEffect(() => { if (projectName !== undefined) setFilter(projectName); }, [projectName]);
 
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const stop = useStopSession();

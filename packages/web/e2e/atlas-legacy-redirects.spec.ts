@@ -44,6 +44,12 @@ const PROJECT_KEY = "loom.projectId";
 const REBUILT_IN_PHASE_2: Record<string, string> = {
   // Card c07ff42a (P2-4) — /setup is the redirect that lands here.
   "/platform": "c07ff42a — rebuilt as the five-tab Platform node",
+  // Card 25c08fba — /vault and /git are the redirects that land here. /repository is now a TAB on the
+  // project node, so under Atlas the address renders the node (its tab row + counts) with Repository
+  // as the tab body, where the classic shell still renders the bare page. It is the only one of that
+  // card's eight re-homed paths any redirect targets, and this map's own positive control above
+  // rejects a path that none does.
+  "/repository": "25c08fba — a tab on the project node, under its tab row and counts",
 };
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
@@ -276,6 +282,22 @@ async function crumbTrail(page: Page): Promise<string[]> {
 const nodeHeading = (page: Page) => page.locator(".loom-atlas-nodehead h1");
 
 /**
+ * The selected tab of the PAGE's own tab control — never the Atlas NODE's tab row.
+ *
+ * Both are `role="tab"` with `aria-selected` (components/ui's `Segmented` and `atlasHome`'s
+ * `NodeTabs`), and since card 25c08fba a node tab row renders ABOVE a re-homed page that has its own
+ * sub-tabs — `/repository?tab=git` is exactly that pair. A bare `[role="tab"][aria-selected="true"]`
+ * therefore resolves TWO elements there, one per tablist, and the "exactly one sub-tab is selected"
+ * claim below would fail for a reason that is not about sub-tabs at all.
+ *
+ * Excluded by the node row's own testid stem (`atlas-tab-<key>`, given to every NodeTabs link) rather
+ * than by naming a page: nesting one tablist inside another is legal, so what the claim needs is the
+ * INNER one, whichever page it belongs to.
+ */
+const pageSubTabs = (page: Page, selected: boolean) =>
+  page.locator(`[role="tab"][aria-selected="${selected}"]:not([data-testid^="atlas-tab-"])`);
+
+/**
  * Where the TREE says a destination lives, read off the rendered tree rather than re-derived from
  * nav.tsx's `scoped` flag: the node's own label, and whether it hangs under the project node
  * (`ul.loom-atlas-nodes.is-kids`, AtlasTree's project level) or at workspace depth. That makes the
@@ -411,9 +433,9 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       // derive the expected label from the `?tab=` value rather than hand-mapping it.
       const tab = tabOf(r.to);
       if (tab) {
-        await expect(page.locator('[role="tab"][aria-selected="true"]'),
+        await expect(pageSubTabs(page, true),
           `${r.from} → ${r.to} did not select exactly one sub-tab`).toHaveCount(1);
-        await expect(page.locator('[role="tab"][aria-selected="true"]'),
+        await expect(pageSubTabs(page, true),
           `${r.from} → ${r.to} selected the wrong sub-tab`).toHaveText(new RegExp(`^${tab}$`, "i"));
       }
 
