@@ -84,10 +84,12 @@ re-resolved `live` wrapper in place of `pending`.
   guess through — leave it untouched and log loudly, exactly like the original -1 posture for a genuinely
   unexpected case; guessing which candidate is "the" target risks destroying or resurrecting the wrong
   one's content.
-- Do not scope this fix to `clearTokenFromPendingIndices` alone and assume `clearActiveEntryTokenAtKey`'s
-  own dual-tracked-twin loop (project memory: `535fd69d`) is immune to the same ASSIGN shape — it was not
-  independently re-verified by this card and may share the identical hazard; a follow-up card should check
-  it before assuming otherwise.
+- CLOSED (Code Review `d7eaad3d`, card `0faffa95`): `clearActiveEntryTokenAtKey`'s own dual-tracked-twin
+  loop (`merge-quarantine.ts:3724-3733`) is NOT exposed to this ASSIGN shape — it only ever calls
+  `writePendingDivertFile` for each pending slot it finds, never `protectOccupantContentBeforeDelete` (or
+  any other function that could detach a DIFFERENT, not-yet-processed pending wrapper via an ASSIGN from
+  outside its own loop). `0faffa95` found the real sibling hazard elsewhere: a re-resolved `live` can
+  itself be an ACTIVE TWIN protect's own both-indices branch just re-pointed — see that card's own record.
 
 ## Verification
 

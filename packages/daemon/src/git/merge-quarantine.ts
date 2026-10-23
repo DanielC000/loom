@@ -3508,6 +3508,18 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
         continue;
       }
       live = liveMatches[0]!;
+      // @decision 0faffa95 — a re-resolved `live` can be an ACTIVE TWIN protect's both-indices branch
+      // just re-pointed, but its own armedKeys never join `live.entry` (c9114934/cd5a3cf9 gate the union
+      // to `atFilenameIdx` alone) — never derive an armedKeys-based plan here; defer to phase 2 instead.
+      let liveIsActiveTwin = false;
+      for (const v of activeQuarantines.values()) {
+        if (v === live.entry) { liveIsActiveTwin = true; break; }
+      }
+      if (liveIsActiveTwin) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] ${pending.entry.repoPath}'s own pending entry (${pending.sourceFile}) was REPLACED (not spliced) mid-clear by a protect call against a co-located occupant, and the live wrapper now at ${live.sourceFile} is ALSO an active twin (armed in activeQuarantines) — protectOccupantContentBeforeDelete's own both-indices branch re-points an armed twin's key onto the replacement without unioning the twin's own armedKeys, so deriving a remove/reduce plan here would leave that key's own durable latch unrewritten; deferring entirely to the active-entry clear pass (clearActiveEntryTokenAtKey), which walks activeQuarantines directly and also durably rewrites any pending slot sharing this same reference.`);
+        continue;
+      }
       const remainingLive = live.entry.tokens.filter((t) => t !== token);
       plan = remainingLive.length === 0
         ? { action: "remove", ownedArmedKeys: (live.entry.armedKeys ?? []).filter((k) => entryStillOwnsKey(k, live.entry)) }
@@ -3619,6 +3631,29 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
     }
   }
+}
+
+/** TEST-ONLY: calls the private {@link clearTokenFromPendingIndices} directly, bypassing
+ *  `clearMergeQuarantineByToken`'s own `collectPendingIndices` filtering — lets a test pass a hand-built
+ *  (and, for the 0-live-candidate fail-closed branch, deliberately DUPLICATED) `indices` list that no
+ *  real caller can ever produce (`collectPendingIndices` enumerates each index at most once). See
+ *  `setActiveQuarantineTestOnly`'s own doc for the identical "state no real code path can produce"
+ *  rationale, and card `0faffa95`'s own decision record for why a genuine 0-live-candidate state is
+ *  provably unreachable via `protectOccupantContentBeforeDelete`'s own copy-aside mutations alone. Never imported
+ *  by `index.ts` — the `TestOnly` suffix is load-bearing: `no-src-testonly-import-guard.mjs` matches
+ *  `/TestOnly$/` specifically to catch a future import of this exact kind of seam into production code. */
+export function clearTokenFromPendingIndicesTestOnly(indices: number[], token: string): void {
+  clearTokenFromPendingIndices(indices, token);
+}
+
+/** TEST-ONLY: the CURRENT `pendingUnresolvedQuarantines` index whose entry shares `repoPath`'s own
+ *  identity, or -1 if none — lets a test using {@link clearTokenFromPendingIndicesTestOnly} find its own
+ *  target's real index without assuming a fixed position a boot-time scan's own leftover on-disk
+ *  entries could otherwise shift. See `setActiveQuarantineTestOnly`'s own doc for the identical "state
+ *  no real code path can produce" rationale (never imported by `index.ts`, same `TestOnly` guard). */
+export function findPendingIndexByIdentityTestOnly(repoPath: string): number {
+  const identity = directPathIdentity(repoPath);
+  return pendingUnresolvedQuarantines.findIndex((p) => directPathIdentity(p.entry.repoPath) === identity);
 }
 
 /**
