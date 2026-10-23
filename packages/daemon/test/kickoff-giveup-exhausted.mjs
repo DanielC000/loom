@@ -70,9 +70,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        record for the notice (redriven on its next resume/boot), unlike the idle-watchdog's own bare
 //        `pty.enqueueStdin` broken-spawn nudge.
 //   (S3)-(S5) SCOPING matches `notifyManagerOfIdleWorker` exactly: no parentSessionId → no-op; a non-worker/
-//        non-null role (e.g. a manager parented under another manager) → no-op; a role-less child (role:
-//        null) with a parent → IS covered (same as the existing broken-spawn nudge's own role-less fix,
-//        card df48366b).
+//        non-null/non-manager role (e.g. an operator parented under a manager) → no-op; a role-less child
+//        (role: null) with a parent → IS covered (same as the existing broken-spawn nudge's own role-less
+//        fix, card df48366b). Card ab3c965d: role:"manager" moved OUT of (S4) into its own dedicated
+//        coverage (manager-kickoff-giveup-dropped.mjs) — a manager no longer hits this generic bail at all.
 //   (S6) an unknown sessionId is a silent no-op, never a throw.
 //   (S7) THE FALSE-POSITIVE CASE card 00bd3b4a IS ABOUT: hasFirstTurnStarted:true ⇒ NO notice at all, even
 //        though the give-up budget genuinely exhausted.
@@ -403,16 +404,20 @@ try {
       check("(S3) no parentSessionId → no-op, nothing dispatched", pty.sent.length === 0);
     }
 
-    // (S4) a non-worker/non-null role (e.g. a manager parented under another manager) → no-op, same scope gate.
+    // (S4) a non-worker/non-null/non-manager role (e.g. an operator parented under a manager) → no-op,
+    // same scope gate. Card ab3c965d: this used to use role:"manager" here, but a MANAGER now takes its
+    // OWN dedicated path (handleManagerKickoffDropped — see manager-kickoff-giveup-dropped.mjs) rather
+    // than this generic bail, so this scenario was moved to a role the carve-out doesn't touch at all —
+    // "operator" still proves the generic bail's scope gate for every OTHER non-worker/non-null role.
     {
-      const top = `kge-top-${sfx}`, child = `kge-childmgr-${sfx}`;
+      const top = `kge-top-${sfx}`, child = `kge-childop-${sfx}`;
       mkSession({ id: top, role: "manager" });
-      mkSession({ id: child, role: "manager", parentSessionId: top });
+      mkSession({ id: child, role: "operator", parentSessionId: top });
       const pty = new PtyStub();
       pty.setLive(top);
       const sessions = new SessionService(db, pty, new OrchestrationControl());
       sessions.handleKickoffGiveUpExhausted(child, `msg-s4-${sfx}`, `root-s4-${sfx}`, `kickoff-s4-${sfx}`);
-      check("(S4) role scoped exactly like notifyManagerOfIdleWorker: a non-worker/non-null role → no-op", pty.sent.length === 0);
+      check("(S4) role scoped exactly like notifyManagerOfIdleWorker: a non-worker/non-null/non-manager role → no-op", pty.sent.length === 0);
     }
 
     // (S5) a role-less child (role: null) with a parent IS covered — same as the existing broken-spawn

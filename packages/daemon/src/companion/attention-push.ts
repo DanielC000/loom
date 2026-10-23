@@ -216,6 +216,13 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // resolve this, a human must. See docs/decisions/e2a3c613-*.md for the full reasoning.
     case "claude_boot_dialog_stuck":
       return detail?.parentNudged === false ? "escalation" : null;
+    // Card ab3c965d: a MANAGER's own turn-1 kickoff exhausted its give-up budget with no parent to
+    // notify — same shape/reasoning as claude_boot_dialog_stuck immediately above (a manager always
+    // sets parentNudged:false, since it never has a parent at all), reusing "escalation" for the same
+    // reason: the owner is the one party left to tell, and this must reach a lead-mode companion's
+    // wildcard push the same way (see claude_boot_dialog_stuck's own comment on FLEET_OPS_ALERT_CLASSES).
+    case "manager_kickoff_dropped":
+      return detail?.parentNudged === false ? "escalation" : null;
     // Card b1da256d: the RESOLVE half of the pair above — a resolve clears an already-filed alert, it is
     // never itself a fresh owner-facing one. Falls to `default` (null) structurally either way; named
     // explicitly so a reader doesn't have to re-derive that from the switch's fallthrough.

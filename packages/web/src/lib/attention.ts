@@ -145,6 +145,7 @@ export const BROWSER_NOTIFICATION_LABELS: Record<BrowserNotificationKind, { labe
   "crash-looped": { label: "Crash looped", hint: "A session kept dying and auto-resume gave up on it." },
   "orphaned-fleet": { label: "Orphaned fleet", hint: "A worker outlived the manager that dispatched it." },
   "recycle-lineage-consolidated": { label: "Recycle lineage consolidated", hint: "A halted recycle's successor died too; its fleet was consolidated back onto the predecessor with no automatic owner." },
+  "manager-kickoff-dropped": { label: "Manager kickoff dropped", hint: "A manager's own turn-1 kickoff was never confirmed delivered and Loom gave up retrying it." },
 };
 
 /**
@@ -407,6 +408,14 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     if (e.kind === "give_up_recovery_escalated") latestGiveUpRecovery.set(e.managerSessionId, e);
   }
 
+  // Manager kickoff dropped (card ab3c965d): a manager/platform-lead's own turn-1 kickoff exhausted its
+  // give-up budget with no re-mint and no parent to notify. Same shape as give_up_recovery_escalated
+  // immediately above — no "cleared" event exists, so the latest one per LIVE manager simply surfaces.
+  const latestManagerKickoffDropped = new Map<string, OrchestrationEvent>();
+  for (const e of sortedEvents) {
+    if (e.kind === "manager_kickoff_dropped") latestManagerKickoffDropped.set(e.managerSessionId, e);
+  }
+
   // Quiet-board cause (card 275ac184, IdleWatcher's `nothingElseActionable` skip): a manager/Lead
   // suppressed because every non-terminal card is non-actionable (held/deferred/excluded-lane/
   // platform-parked/pending-request) reads identically whether it's genuinely converged or starved on
@@ -646,6 +655,15 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       dismissKey: `gr:${e.id}`, // one give_up_recovery_escalated event per episode (card 611e76ba)
       dismissHint: "Hide this alert — it returns on the next give-up-recovery episode for this manager.",
       text: `manager ${e.managerSessionId.slice(0, 8)} — submit give-up recovery fired ${detail.count ?? "?"}x${windowMin ? ` in ~${windowMin}m` : ""}; its composer submissions may be unreliable`,
+    });
+  }
+  for (const e of latestManagerKickoffDropped.values()) {
+    const detail = (e.detail ?? {}) as { leadNotified?: boolean; leadBoardTaskId?: string };
+    items.push({
+      key: `mkd-${e.id}`, tone: "red", notify: "manager-kickoff-dropped", kind: "KICKOFF DROPPED", sessionId: e.managerSessionId,
+      dismissKey: `mkd:${e.id}`, // one manager_kickoff_dropped event per episode (card 611e76ba)
+      dismissHint: "Hide this alert — it returns if this manager's kickoff is dropped again. The session itself is untouched.",
+      text: `manager ${e.managerSessionId.slice(0, 8)} — turn-1 kickoff never confirmed delivered; Loom gave up retrying it and the session likely booted context-free${detail.leadNotified ? " (Platform Lead notified)" : ""}`,
     });
   }
   for (const e of latestQuiet.values()) {

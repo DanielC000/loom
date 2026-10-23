@@ -1006,6 +1006,11 @@ export const BROWSER_NOTIFICATION_KINDS = [
   // docs/decisions/a4c5f234): deliberately distinct from "orphaned-fleet" so it keeps its own toggle and
   // wording rather than riding the generic kind's accidental lastError-prefix reuse.
   "recycle-lineage-consolidated",
+  // Card ab3c965d — a manager's own turn-1 kickoff never confirmed delivered and Loom gave up retrying it
+  // (manager_kickoff_dropped): a distinct toggle from "boot-stuck" (a blocking CLI dialog) since this is a
+  // different mechanism (a give-up-budget exhaustion with no re-mint) and the manager's own session may
+  // never have reached SessionStart at all.
+  "manager-kickoff-dropped",
 ] as const;
 
 /** One member of {@link BROWSER_NOTIFICATION_KINDS}. */

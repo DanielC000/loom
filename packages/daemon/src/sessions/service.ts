@@ -7,7 +7,7 @@ import { mapWithConcurrency } from "../concurrency.js";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
   usesOrchestrationMcp, contextPercentFor, PROFILE_SPAWNABLE_ROLES,
-  type Session, type StopMode, type OrchestrationEvent, type Task, type Project, type Profile,
+  type Session, type StopMode, type OrchestrationEvent, type OrchestrationEventKind, type Task, type Project, type Profile,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type MergeGateAgentView, type MergeGateStatus, type CompanionRoute, type ProjectMemoryEntry,
@@ -11491,6 +11491,16 @@ export class SessionService {
   // handleGiveUpExhausted's own reasoning (finding [1]) for why an immediate re-hammer is blocked.
   handleKickoffGiveUpExhausted(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string, chainDepth = 0): void {
     const w = this.db.getSession(sessionId);
+    // Card ab3c965d: a MANAGER kickoff has its own dedicated resolution (durable event + Platform-Lead
+    // escalation + owner-attention alert) rather than falling into the generic bail below — see
+    // `handleManagerKickoffDropped`'s own doc for why. Checked BEFORE the generic guard: a manager never
+    // has a parentSessionId (so it would otherwise always hit that guard anyway), but this must not
+    // depend on that happening to stay true. Deliberately does NOT re-mint (see that method's own doc for
+    // why extending re-mint to managers is out of scope here).
+    if (w?.role === "manager") {
+      this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId);
+      return;
+    }
     if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) {
       // eslint-disable-next-line no-console
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget with no parent session to notify (role=${w?.role ?? "none"}) — the dispatch was DROPPED; only the generic idle-watchdog can still catch this`);
@@ -11932,36 +11942,41 @@ export class SessionService {
   }
 
   /**
-   * Card e2a3c613 — a stuck MANAGER has no parentSessionId to nudge, so this mirrors `platformEscalate`'s
-   * own pattern instead of the parent-nudge path above: best-effort live-nudge a live Platform Lead
-   * (suppressed if the Lead is itself live-and-pre-boot on the same dialog family — the identical hazard
-   * 850eb55c already guards for a manager parent), AND file a durable task onto whichever platform-tier
-   * home is actually live (`resolveLiveLeadHome`, card 1731ab5b) so an offline/not-yet-live Lead still
-   * sees it later — the owner-attention path always fires too regardless (see the caller), so an absent
-   * home is never a silent drop.
+   * Card e2a3c613 — a parentless (manager/platform-lead) session's own issue has no parentSessionId to
+   * nudge, so this mirrors `platformEscalate`'s own pattern instead of an ordinary parent-nudge: best-
+   * effort live-nudge a live Platform Lead (suppressed if the Lead is itself live-and-pre-boot on the
+   * same episode family — the identical hazard 850eb55c guards for a manager parent), AND file a durable
+   * task onto whichever platform-tier home is actually live (`resolveLiveLeadHome`, card 1731ab5b) so an
+   * offline/not-yet-live Lead still sees it later — the owner-attention path always fires too regardless
+   * (see each caller), so an absent home is never a silent drop.
+   *
+   * @decision ab3c965d — do not add a second near-duplicate of this helper for a new parentless-manager
+   * episode kind; add a `dedupEventKind`-parameterized thin caller instead (see `notifyLeadOfStuckManager`/
+   * `notifyLeadOfDroppedManagerKickoff` below).
    */
-  private notifyLeadOfStuckManager(
+  private notifyLeadOfParentlessManagerIssue(
     sessionId: string,
-    s: Session | undefined,
-    info: { timeoutMs: number; signatureName: string | null },
-    sigLabel: string,
+    dedupEventKind: OrchestrationEventKind,
+    taskTitle: string,
+    taskBody: string,
+    liveNudgeText: (leadBoardTaskId: string) => string,
   ): { leadNotified: boolean; leadBoardTaskId?: string } {
     const home = resolveLiveLeadHome(this.db);
     if (!home) return { leadNotified: false };
 
-    // Dedup the BOARD TASK per session id (never per timer fire/boot): a resumed session that gets stuck
-    // again re-fires this handler for the SAME session id, and must reuse its prior task rather than
-    // file a duplicate; a recycle successor is a NEW session id and may file its own.
+    // Dedup the BOARD TASK per session id (never per timer fire/boot): a resumed session that hits this
+    // again re-fires for the SAME session id, and must reuse its prior task rather than file a duplicate;
+    // a recycle successor is a NEW session id and may file its own.
     // Card e2a3c613 round 2: reuse ONLY while that prior task is still OPEN (same `columnEscalationStatus
     // !== "resolved"` check platformEscalate uses for its own dedup) — a prior task the Lead already
-    // closed (or that was deleted) must not silently absorb a NEW stuck episode's nudge; file a fresh task
+    // closed (or that was deleted) must not silently absorb a NEW episode's nudge; file a fresh task
     // instead so the Lead actually sees it.
     // Card e2a3c613 round 3: `listEventsForWorker` returns ts-ASC, so a plain `.find()` picked the OLDEST
-    // prior `leadBoardTaskId`-carrying event — across three-plus stuck episodes on a resumed session, every
+    // prior `leadBoardTaskId`-carrying event — across three-plus episodes on a resumed session, every
     // later check re-derived the FIRST episode's task rather than the most recently filed one. `findLast`
     // walks from the end, so this always resolves to the LATEST matching event.
     const priorWithTask = this.db.listEventsForWorker(sessionId).findLast(
-      (e) => e.kind === "claude_boot_dialog_stuck" && typeof (e.detail as Record<string, unknown> | undefined)?.leadBoardTaskId === "string",
+      (e) => e.kind === dedupEventKind && typeof (e.detail as Record<string, unknown> | undefined)?.leadBoardTaskId === "string",
     );
     const priorTaskId = priorWithTask ? (priorWithTask.detail as Record<string, unknown>).leadBoardTaskId as string : undefined;
     const priorTask = priorTaskId ? this.db.getTask(priorTaskId) : undefined;
@@ -11970,19 +11985,8 @@ export class SessionService {
       : undefined;
     if (!leadBoardTaskId) {
       const now = new Date().toISOString();
-      const originProject = s?.projectId ? this.db.getProject(s.projectId) : undefined;
-      const body = [
-        "**A project manager never reached SessionStart — possibly stuck on a blocking CLI dialog.**",
-        "",
-        `- **Manager session:** \`${sessionId}\``,
-        `- **Origin project:** ${originProject?.name ?? s?.projectId ?? "unknown"} (\`${s?.projectId ?? "unknown"}\`)`,
-        `- **Timeout:** ${info.timeoutMs}ms`,
-        `- **Signature:** ${sigLabel}`,
-        "",
-        "It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, session_stop + respawn.",
-      ].join("\n");
       const task: Task = {
-        id: randomUUID(), projectId: home.id, title: `[Manager boot stuck] ${sessionId.slice(0, 8)}`, body,
+        id: randomUUID(), projectId: home.id, title: taskTitle, body: taskBody,
         columnKey: this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "backlog",
         position: Date.now(), priority: DEFAULT_TASK_PRIORITY,
         createdAt: now, updatedAt: now, version: 1,
@@ -11994,11 +11998,79 @@ export class SessionService {
     const liveLead = this.db.listAllSessions().find((x) => x.role === "platform" && x.processState === "live" && !this.db.hasSuccessor(x.id));
     let leadNotified = false;
     if (liveLead && !this.pty.isLiveAndPreBoot(liveLead.id)) {
-      const senderMsg = `[loom:claude-boot-dialog-stuck] manager session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). Filed as Platform task ${leadBoardTaskId}. Check the session's live screen and, if genuinely stuck, session_stop + respawn.`;
-      this.enqueueSystemNudge(liveLead.id, senderMsg, { kind: "warning", taskId: null });
+      this.enqueueSystemNudge(liveLead.id, liveNudgeText(leadBoardTaskId), { kind: "warning", taskId: null });
       leadNotified = true;
     }
     return { leadNotified, leadBoardTaskId };
+  }
+
+  /** Card e2a3c613 — thin caller of `notifyLeadOfParentlessManagerIssue` above; see that method's own doc. */
+  private notifyLeadOfStuckManager(
+    sessionId: string,
+    s: Session | undefined,
+    info: { timeoutMs: number; signatureName: string | null },
+    sigLabel: string,
+  ): { leadNotified: boolean; leadBoardTaskId?: string } {
+    const originProject = s?.projectId ? this.db.getProject(s.projectId) : undefined;
+    const body = [
+      "**A project manager never reached SessionStart — possibly stuck on a blocking CLI dialog.**",
+      "",
+      `- **Manager session:** \`${sessionId}\``,
+      `- **Origin project:** ${originProject?.name ?? s?.projectId ?? "unknown"} (\`${s?.projectId ?? "unknown"}\`)`,
+      `- **Timeout:** ${info.timeoutMs}ms`,
+      `- **Signature:** ${sigLabel}`,
+      "",
+      "It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, session_stop + respawn.",
+    ].join("\n");
+    return this.notifyLeadOfParentlessManagerIssue(
+      sessionId, "claude_boot_dialog_stuck", `[Manager boot stuck] ${sessionId.slice(0, 8)}`, body,
+      (leadBoardTaskId) => `[loom:claude-boot-dialog-stuck] manager session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). Filed as Platform task ${leadBoardTaskId}. Check the session's live screen and, if genuinely stuck, session_stop + respawn.`,
+    );
+  }
+
+  /**
+   * Card ab3c965d — thin caller of `notifyLeadOfParentlessManagerIssue` above, for the OTHER parentless-
+   * manager episode: a turn-1 kickoff that exhausted its give-up budget. See that method's own doc, and
+   * `handleManagerKickoffDropped`'s own doc for why this exists at all.
+   */
+  private notifyLeadOfDroppedManagerKickoff(sessionId: string, s: Session | undefined): { leadNotified: boolean; leadBoardTaskId?: string } {
+    const originProject = s?.projectId ? this.db.getProject(s.projectId) : undefined;
+    const body = [
+      "**A project manager's turn-1 kickoff (its brief) was never confirmed delivered, and Loom gave up retrying it.**",
+      "",
+      `- **Manager session:** \`${sessionId}\``,
+      `- **Origin project:** ${originProject?.name ?? s?.projectId ?? "unknown"} (\`${s?.projectId ?? "unknown"}\`)`,
+      "",
+      "It likely booted (or is still sitting) with NO brief at all, and will not experience this as \"missing text\" — it just starts context-free and may rationalize it rather than report a gap. Check its live screen/transcript; if it genuinely never started a turn, recover its brief via `agent_get` (the full startupPrompt, verbatim) and send it directly, or session_stop + respawn.",
+    ].join("\n");
+    return this.notifyLeadOfParentlessManagerIssue(
+      sessionId, "manager_kickoff_dropped", `[Manager kickoff dropped] ${sessionId.slice(0, 8)}`, body,
+      (leadBoardTaskId) => `[loom:manager-kickoff-dropped] manager session ${sessionId}'s turn-1 kickoff was never confirmed delivered — Loom gave up retrying it. Filed as Platform task ${leadBoardTaskId}. It likely booted context-free; check its live screen/transcript and recover its brief via agent_get if so.`,
+    );
+  }
+
+  /**
+   * Card ab3c965d — a MANAGER's turn-1 kickoff exhausted its give-up budget with no re-mint (managers are
+   * excluded from `handleKickoffGiveUpExhausted`'s re-mint ladder — see that method's own doc) and no
+   * parentSessionId to notify (no spawn path ever sets one for role="manager" — the same invariant
+   * `notifyLeadOfStuckManager` already relies on). Mirrors `handleClaudeBootDialogStuck`'s OWN
+   * parentless-manager resolution (card e2a3c613) exactly: a durable `manager_kickoff_dropped` event
+   * (`parentNudged:false`, so `companion/attention-push.ts`'s `classify()` surfaces it to the owner-
+   * attention surfaces unconditionally) PLUS a best-effort Platform-Lead escalation via
+   * `notifyLeadOfDroppedManagerKickoff` — never either/or. Deliberately NO self-nudge into this session:
+   * its first turn never started (the caller already confirmed this is a genuine drop, not a late
+   * confirmation), so there is nothing live to read a notice typed into its own composer.
+   */
+  private handleManagerKickoffDropped(sessionId: string, msgId: string, rootMsgId: string): void {
+    const s = this.db.getSession(sessionId);
+    const { leadNotified, leadBoardTaskId } = this.notifyLeadOfDroppedManagerKickoff(sessionId, s);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sessionId, workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "manager_kickoff_dropped",
+      detail: { msgId, rootMsgId, role: "manager", parentNudged: false, leadNotified, ...(leadBoardTaskId ? { leadBoardTaskId } : {}) },
+    });
+    // eslint-disable-next-line no-console
+    console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff EXHAUSTED its give-up requeue budget with no parent session to notify — recorded as manager_kickoff_dropped (leadNotified=${leadNotified})`);
   }
 
   /**
