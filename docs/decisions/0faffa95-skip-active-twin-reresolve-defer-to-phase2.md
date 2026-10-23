@@ -60,12 +60,15 @@ SAME object reference (`collectPendingIndices((p) => p.entry === updated)`, its 
 loop, `@decision ae79d492`) — durably rewriting the stranded target's own pending slot in the same pass
 that fixes the twin's latch.
 
-**Known residual, NOT closed by this card (card `6be6c9ff`):** for a twin armed at MORE THAN ONE key,
-the SAME `armedKeys`-empty gap means `armedKeysForEntry`'s one-key fallback only ever covers whichever
-key phase 2's own iteration happened to land on — the twin's OTHER key(s) are never durably rewritten by
-this call, even though `activeQuarantines` was re-pointed for all of them. This record's "complete" claim
-does not extend to that shape; see card `6be6c9ff` for the multi-key gap itself and card `f00e9de8` for
-the related question of an armed twin's own in-memory tokens being dropped by the re-point.
+**Known residual for a twin armed at MORE THAN ONE key — CLOSED by card `6be6c9ff`.** The SAME
+`armedKeys`-empty gap used to mean `armedKeysForEntry`'s one-key fallback only ever covered whichever key
+phase 2's own iteration happened to land on, leaving the twin's OTHER key(s) never durably rewritten even
+though `activeQuarantines` was re-pointed for all of them. `6be6c9ff` closed it by deriving
+`armedKeysForEntry` (and `clearMergeQuarantineByKey`'s own `keysToLift`) from LIVE `activeQuarantines`
+occupancy via a shared `liveArmedKeys` helper, never `entry.armedKeys` alone — see
+`docs/decisions/6be6c9ff-live-armed-keys-covers-every-key-a-multi-key-twin-reaches.md` for the fix and
+its own verification. Card `f00e9de8` (the related question of an armed twin's own in-memory tokens being
+dropped by the re-point) remains separately open.
 
 ## Do not
 

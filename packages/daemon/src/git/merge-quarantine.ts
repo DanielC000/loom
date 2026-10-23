@@ -3135,7 +3135,10 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
       : existing.contributorRepoPaths;
     // `existing` may be armed under a SECOND key too (its own resolvedKey) — update every one of those
     // slots to this rebuilt object, not just `key` (round 2 finding 2).
-    const armedKeysForEntry = existing.armedKeys?.length ? existing.armedKeys : [key];
+    //
+    // @decision 6be6c9ff — derive via {@link liveArmedKeys}, never `existing.armedKeys` alone — the SAME
+    // re-pointed multi-key-twin gap this card closes on the clear side; see the decision record.
+    const armedKeysForEntry = liveArmedKeys(key, existing);
     const finalForKey = quarantinePathForKey(key);
     // @decision 8db913e2 (Follow-up 78fccd3f) — `liftedKeys` is `ownedKeysIncluding`, NEVER the raw
     // `armedKeysForEntry` — the write loop below already re-gates each secondary key itself. See record.
@@ -3150,7 +3153,10 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // only `writeMergeQuarantineLatch`'s own chokepoint.
     const protectOk = protectUnincorporatedOccupantBeforeDelete(finalForKey, existing, undefined, liftedKeys).ok;
     const mustDivert = resolveRaiseOverwrite(finalForKey, existing.repoPath, existing.tokens, protectOk, liftedKeys);
-    const baseEntry: MergeQuarantineEntry = { ...existing, tokens: [...existing.tokens, token], contributorRepoPaths };
+    // @decision 6be6c9ff — stamp the live-derived `armedKeysForEntry` onto the rebuilt object itself (not
+    // just used transiently for the write loop below), so a LATER reader of this same object (e.g.
+    // `writeMergeQuarantineLatch`'s own resolvedKeys-retention formula) also sees the complete set.
+    const baseEntry: MergeQuarantineEntry = { ...existing, tokens: [...existing.tokens, token], contributorRepoPaths, armedKeys: armedKeysForEntry };
     if (mustDivert) {
       replaceEntryEverywhere(activeQuarantines, existing, baseEntry);
       // @decision 8db913e2 — `final` could not be safely protected; divert this raise's own write
@@ -3702,7 +3708,10 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     tombstoneIfNotSurviving([token]);
     return;
   }
-  const updated: MergeQuarantineEntry = { ...entry, tokens: remaining };
+  // @decision 6be6c9ff — derive via {@link liveArmedKeys}, before `updated` so it can be stamped onto it
+  // directly; never `entry.armedKeys` alone — see the decision record.
+  const armedKeysForEntry = liveArmedKeys(key, entry);
+  const updated: MergeQuarantineEntry = { ...entry, tokens: remaining, armedKeys: armedKeysForEntry };
   // Update EVERY key `entry` is armed under, not just `key` — reference equality breaks the moment an
   // entry is REBUILT elsewhere (a union, an orphan merge), since the rebuilt object stops being `===` the
   // one still sitting at another of its own keys (round 2 finding 2). ALSO re-points any PENDING entry
@@ -3711,7 +3720,6 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // @decision 82032b5c (round 3 CR, MINOR A) — route through replaceEntryEverywhere, never a bare per-key
   // `.set()` — a stale `armedKeys` member can, by now, genuinely belong to a DIFFERENT entry, and a bare
   // `.set()` silently clobbered that OTHER entry's in-memory slot with `updated`.
-  const armedKeysForEntry = entry.armedKeys?.length ? entry.armedKeys : [key];
   replaceEntryEverywhere(activeQuarantines, entry, updated);
   // @decision 8db913e2 (round 4) — tombstone `token` HERE: the in-memory update above already reflects
   // its removal, so the scan correctly finds nothing surviving. Doing this BEFORE the write loop below
@@ -4313,17 +4321,53 @@ export function markLatchFileUnreadableTestOnly(basename: string): void {
 }
 
 /**
+ * `entry`'s own (possibly stale or INCOMPLETE) `armedKeys`, UNIONED with a fresh scan of
+ * `activeQuarantines` for every key `k` where `activeQuarantines.get(k) === entry` (reference equality —
+ * the SAME discriminator {@link replaceEntryEverywhere} itself uses), UNIONED with `key` itself. Union
+ * only — this can ADD a key `armedKeys` never recorded, but never DROPS one `armedKeys` already names,
+ * even a stale one no longer actually owned (a caller's own {@link entryStillOwnsKey} gate is what
+ * screens those out for an ACTING decision; this helper only answers "what might this entry be armed at
+ * right now", never "what does it still genuinely own").
+ *
+ * Exists because `protectOccupantContentBeforeDelete`'s own both-indices re-point branch can re-point
+ * EVERY `activeQuarantines` slot that pointed at a multi-key twin onto one freshly-written replacement
+ * object (`written.entry`, via `replaceEntryEverywhere`) WITHOUT ever unioning the twin's own `armedKeys`
+ * onto it — the `c9114934`/`cd5a3cf9` union gate restricts `written.entry`'s own `armedKeys` source to
+ * `toPersist`/`oldAtFilename` alone — so the replacement can carry NO `armedKeys` of its own even though
+ * `activeQuarantines` now genuinely maps MULTIPLE keys to it.
+ *
+ * @decision 8db913e2 ("armedKeys — left unfixed (Lead ruling)") — derive from LIVE occupancy, never trust
+ * a cached list alone (and never copy a REPLACED object's own stale list forward uncritically) — this is
+ * that ruling's own endorsed alternative, applied at each of this card's own consumption chokepoints.
+ * @decision 6be6c9ff — the concrete gap this closes: a clear/lift/raise keyed off `entry.armedKeys` alone
+ * only ever covers whichever ONE key resolved it, silently stranding a re-pointed multi-key twin's OTHER
+ * key(s) — see the decision record.
+ */
+function liveArmedKeys(key: string, entry: MergeQuarantineEntry): string[] {
+  const keys = new Set<string>(entry.armedKeys ?? []);
+  for (const [k, v] of activeQuarantines) { if (v === entry) keys.add(k); }
+  keys.add(key);
+  return [...keys];
+}
+
+/**
  * `key` itself (unconditionally — the caller already freshly matched it) plus every OTHER member of
- * `entry`'s own `armedKeys`, gated through {@link entryStillOwnsKey} — the SAME shape
- * `clearMergeQuarantineByKey`'s own `keysToLift` computes INLINE (not via this helper — that computation
- * runs BEFORE `keysToLift`'s own deletes, while this helper's one caller runs before any mutation too;
- * see this file's own Follow-up 78fccd3f for why they stayed two separate computations). `undefined` for
- * `entry` degrades to `[key]` alone.
+ * `entry`'s own `armedKeys` ALONE, gated through {@link entryStillOwnsKey}. `undefined` for `entry`
+ * degrades to `[key]` alone.
+ *
+ * **NO LONGER the same shape as `clearMergeQuarantineByKey`'s own `keysToLift`** (card `6be6c9ff`
+ * widened that one to `liveArmedKeys(key, entry).filter(...)`, a live-occupancy UNION) — this helper
+ * deliberately keeps the NARROWER, `armedKeys`-only shape, because its one caller's `liftedKeys` must
+ * stay conservative: over-including a key there is FAIL-OPEN (wrongly strips a resolvedKey from a
+ * protective copy that should survive), the opposite of `keysToLift`'s own fail-closed-safe widening.
+ * **Known under-inclusion (card `6be6c9ff`'s own audit, NOT fixed here — see card `c52b290e`):** when
+ * `entry` is itself a re-pointed multi-key twin with an EMPTY `armedKeys` (the shape `6be6c9ff` closes
+ * elsewhere), this helper still misses the twin's OTHER key(s) — fail-closed (over-protective), not
+ * fail-open, so lower priority than the sites `6be6c9ff` actually fixed.
  *
  * Serves `enterMergeQuarantine`'s existing-branch raise, feeding its own `liftedKeys` set into
  * `excludeLiftedResolvedKey(s)` — never hand-roll a second, unfiltered `[key, ...entry.armedKeys]` at a
- * new call site: over-including a key there is FAIL-OPEN (it wrongly strips a resolvedKey from a
- * protective copy that should survive).
+ * new call site.
  *
  * @decision 8db913e2 (Follow-up 78fccd3f) — extracted because the raise path built this UNFILTERED,
  * re-including a stale `armedKeys` member the entry no longer owns. See the decision record.
@@ -4365,8 +4409,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 8db913e2 (Follow-up 3152ec90) — gate every OTHER `armedKeys` member through
   // `entryStillOwnsKey` (never `key` itself, already freshly matched) — an unconditional lift here
   // deletes an unrelated raise's own live map slot once a boot-diverted twin's `armedKeys` goes stale.
-  const keysToLift = entry?.armedKeys?.length
-    ? [key, ...entry.armedKeys.filter((k) => k !== key && entryStillOwnsKey(k, entry))]
+  //
+  // @decision 6be6c9ff — the candidate set itself is {@link liveArmedKeys}, never `entry.armedKeys`
+  // alone — see the decision record for the re-pointed multi-key-twin gap this closes.
+  const keysToLift = entry
+    ? liveArmedKeys(key, entry).filter((k) => k === key || entryStillOwnsKey(k, entry))
     : [key];
   // @decision 8db913e2 (round 4) — every physical final this clear's own write path touches, for the
   // `tombstoneIfNotSurviving` call at the end — see that function's own doc, part (b).
