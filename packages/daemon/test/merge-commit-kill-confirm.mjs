@@ -340,6 +340,29 @@ function installDoubleForkedPreCommitHook(repo, markerName, holdMs, mainMs) {
     `sleep ${mainMs / 1000}\n`);
   fs.chmodSync(hookPath, 0o755);
 }
+// SCENARIO 6 (card 4a484a2d, additive to scenario 5 above — never alters it): the SAME double-forked
+// escape trick, installed as a POST-commit hook instead of pre-commit. Card 623c7a82 found scenario 5's
+// own "no corruption" assertion can't attribute the protection to the quarantine specifically, because a
+// PRE-commit hook means `git commit` never reaches its commit step at all while the hook hangs — the
+// squash diff is therefore ALWAYS left STAGED, so the entry staged-residue check (@decision 2eddf573)
+// would ALSO independently refuse merge2 there, quarantine or not. A POST-commit hook runs AFTER git has
+// already created the commit object and moved HEAD (same property scenario 2 above already exercises for
+// a non-escaping slow hook) — so by the time this hook's own escaping descendant turns the kill
+// unconfirmed, the squash has already landed cleanly and the index is clean. merge2's refusal here can
+// then be attributed to the quarantine ALONE — this scenario asserts the index is clean at merge2's own
+// entry (never true for scenario 5), isolating the quarantine's contribution the way 623c7a82 asked for.
+function installDoubleForkedPostCommitHook(repo, markerName, holdMs, mainMs) {
+  const hookPath = path.join(repo, ".git", "hooks", "post-commit");
+  fs.writeFileSync(hookPath,
+    `#!/bin/sh\n` +
+    `if command -v setsid >/dev/null 2>&1; then\n` +
+    `  ( setsid sh -c 'sleep ${holdMs / 1000}; echo fixedY > fixedY.txt; git add fixedY.txt; echo done > ${markerName}' & )\n` +
+    `else\n` +
+    `  ( (sleep ${holdMs / 1000}; echo fixedY > fixedY.txt; git add fixedY.txt; echo done > ${markerName}) & )\n` +
+    `fi\n` +
+    `sleep ${mainMs / 1000}\n`);
+  fs.chmodSync(hookPath, 0o755);
+}
 // Comfortably past withTimeoutKillingChild's own give-up deadline (2*SMALL_MS from call start) — the
 // escaped descendant must still be alive when BOTH merge1 and merge2 (attempted immediately after) run.
 const S5_HOLD_MS = 2 * SMALL_MS + 4000;
@@ -356,6 +379,25 @@ async function runScenario5(tag) {
   const merge1 = await mergeBranch(repo, BRANCH_A, "feat(a): add a", { timeoutMs: SMALL_MS });
   const merge2 = await mergeBranch(repo, BRANCH_B, "feat(b): add b", { timeoutMs: SMALL_MS });
   return { repo, merge1, merge2, markerPath };
+}
+
+// SCENARIO 6 (card 4a484a2d) — see installDoubleForkedPostCommitHook's own doc above. Reuses scenario 5's
+// own S5_HOLD_MS/S5_MAIN_MS: the escape mechanism and its timing requirements (outlive the kill-trigger,
+// outlive withTimeoutKillingChild's own give-up deadline) are identical; only the hook's hook-point (post-
+// vs pre-commit) differs, so the same constants apply unchanged.
+async function runScenario6(tag) {
+  const repo = makeRepo(`s6-${tag}`);
+  makeWorktree(repo, BRANCH_A, "file-a.txt", "content-a\n", `s6-${tag}`);
+  makeWorktree(repo, BRANCH_B, "file-b.txt", "content-b\n", `s6-${tag}`);
+  const markerName = "escaped-descendant-post.marker";
+  const markerPath = path.join(repo, markerName);
+  installDoubleForkedPostCommitHook(repo, markerName, S5_HOLD_MS, S5_MAIN_MS);
+  const merge1 = await mergeBranch(repo, BRANCH_A, "feat(a): add a", { timeoutMs: SMALL_MS });
+  // Captured BEFORE merge2 is even attempted — proves (for THIS repro shape) the staged-residue guard
+  // (@decision 2eddf573) has nothing to catch, isolating the quarantine as merge2's sole possible refuser.
+  const stagedAtMerge2Entry = git(repo, ["diff", "--cached", "--name-only"]).trim();
+  const merge2 = await mergeBranch(repo, BRANCH_B, "feat(b): add b", { timeoutMs: SMALL_MS });
+  return { repo, merge1, merge2, markerPath, stagedAtMerge2Entry };
 }
 
 // POSITIVE CONTROL — proves corruptionExists() can actually observe the violation shape, independent of
@@ -575,6 +617,92 @@ check("[scenario 5] once the quarantine has cleared AND a human has resolved the
   merge3.ok === true);
 console.log(`[scenario 5] info: merge3=${JSON.stringify({ ok: merge3.ok, reason: merge3.reason })}`);
 
+// SCENARIO 6 (card 4a484a2d) — the post-commit-hook twin of scenario 5, isolating the quarantine's
+// own contribution (see installDoubleForkedPostCommitHook's doc above for why). Same real-exe
+// existence/hash discipline as scenario 5 — @decision 1718416d.
+const launcher6ExeExistedAtStart = fs.existsSync(launcherExe);
+const launcher6ExeHashAtStart = launcher6ExeExistedAtStart
+  ? crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex") : null;
+setWinJobLauncherOverrideForTest(null);
+let s6;
+try {
+  s6 = await runScenario6(tag);
+} finally {
+  setWinJobLauncherOverrideForTest(undefined);
+}
+const launcher6ExeExistedAtEnd = fs.existsSync(launcherExe);
+check("[scenario 6] the real win-job-launcher.exe's existence is unchanged across this scenario",
+  launcher6ExeExistedAtEnd === launcher6ExeExistedAtStart);
+if (launcher6ExeExistedAtStart && launcher6ExeExistedAtEnd) {
+  const launcher6ExeHashAtEnd = crypto.createHash("sha256").update(fs.readFileSync(launcherExe)).digest("hex");
+  check("[scenario 6] the real win-job-launcher.exe's content hash is UNCHANGED (this scenario never touched it)",
+    launcher6ExeHashAtEnd === launcher6ExeHashAtStart);
+}
+console.log(`[scenario 6] info: merge1=${JSON.stringify({ ok: s6.merge1?.ok, reason: s6.merge1?.reason })} ` +
+  `merge2=${JSON.stringify({ ok: s6.merge2?.ok, reason: s6.merge2?.reason })} ` +
+  `stagedAtMerge2Entry=${JSON.stringify(s6.stagedAtMerge2Entry)}`);
+
+check("[scenario 6] the index is CLEAN at merge2's entry — the commit landed before the escape, so the " +
+  "staged-residue guard (2eddf573) has nothing to catch here",
+  s6.stagedAtMerge2Entry === "");
+check("[scenario 6] merge1 (whose post-commit hook's own descendant escapes the tree-kill) is refused",
+  s6.merge1?.ok === false);
+if (s6.merge1?.ok === false) {
+  check("[scenario 6] merge1 failed for the TIMEOUT/kill reason specifically (not vacuously for something else)",
+    KILL_REASON_RE.test(s6.merge1?.reason ?? ""));
+  check("[scenario 6] merge1's OWN result carries quarantined:true — not just inferred from merge2's refusal",
+    s6.merge1?.quarantined === true);
+  check("[scenario 6] merge1's reason says the commit may have already landed, and that a cleared retry finalizes as ALREADY_MERGED",
+    /may have already landed/.test(s6.merge1?.reason ?? "") && /ALREADY_MERGED/.test(s6.merge1?.reason ?? ""));
+}
+// Unlike scenario 5 (whose pre-commit hook never let the commit step run at all), the commit here
+// genuinely DID land — verify directly via git, independent of merge1's own (truthfully pessimistic)
+// ok:false report, that branch A's real commit exists with its own trailer and correct content.
+const s6LandedShas = trailerCommits(s6.repo, BRANCH_A);
+check("[scenario 6] despite merge1's ok:false, the squash commit genuinely landed (its own trailer is reachable on HEAD)",
+  s6LandedShas.length === 1);
+if (s6LandedShas.length === 1) {
+  let s6Content = null;
+  try { s6Content = execFileSync("git", ["-C", s6.repo, "show", `${s6LandedShas[0]}:file-a.txt`], { encoding: "utf8" }); } catch { /* absent */ }
+  check("[scenario 6] the genuinely-landed commit truthfully contains branch A's own file",
+    s6Content === "content-a\n");
+}
+check("[scenario 6] merge2 (a DIFFERENT branch, same repo, attempted immediately after) is refused by the QUARANTINE, not a generic failure or the staged-residue guard",
+  s6.merge2?.ok === false && /QUARANTINED/.test(s6.merge2?.reason ?? ""));
+check("[scenario 6] the quarantine is visible directly via the internal quarantine state (not merely inferred from merge2's refusal)",
+  !!activeMergeQuarantineFor(s6.repo));
+
+// POSITIVE CONTROL (via the real event, not a guessed sleep): proves the escaped descendant genuinely
+// runs — this scenario is not vacuous.
+const s6MarkerAppeared = await pollUntil(() => fs.existsSync(s6.markerPath), { timeoutMs: S5_HOLD_MS + SETTLE_MARGIN_MS });
+check("[scenario 6] the escaped descendant's marker write IS eventually observed (proves it genuinely ran)",
+  s6MarkerAppeared);
+check("[scenario 6] no corruption — the escaped descendant's own git add (fixedY.txt) never lands in EITHER merge's real commit",
+  !anyCommitHasPath(s6.repo, "fixedY.txt"));
+
+// AUTO-CLEAR, same bounded-poll discipline as scenario 5.
+const s6AutoCleared = await pollUntil(() => !activeMergeQuarantineFor(s6.repo), { timeoutMs: 20_000 });
+check("[scenario 6] the quarantine AUTO-CLEARS once the real tree-death confirmation eventually arrives (no human action)",
+  s6AutoCleared);
+
+// MEASURED (not assumed): by the time the descendant's marker write lands, its own `git add fixedY.txt`
+// has ALSO already run directly against the canonical repo — independent of, and well after, the squash
+// commit this scenario's own entry-check above proved was already clean. That leaves `fixedY.txt` staged
+// in the canonical tree once the quarantine lifts, same residue SHAPE scenario 5 leaves behind (just via
+// a different mechanism: there it's the squash's own interrupted diff, here it's the escaped descendant's
+// unrelated later write) — so a fresh merge needs the SAME human-resolves-the-residue step scenario 5
+// already models, not a bare retry. This does NOT contradict the entry-check above: that check is about
+// the index AT MERGE2'S OWN ENTRY, before this later write ever lands — it still proves the quarantine,
+// not the staged-residue guard, is what refused merge2 at the moment it actually ran.
+const s6ResidueAtClear = git(s6.repo, ["diff", "--cached", "--name-only"]).trim();
+console.log(`[scenario 6] info: stagedAfterAutoClear=${JSON.stringify(s6ResidueAtClear)}`);
+fs.rmSync(path.join(s6.repo, ".git", "hooks", "post-commit"), { force: true });
+git(s6.repo, ["reset", "--hard", "HEAD"]);
+const merge2Retry = await mergeBranch(s6.repo, BRANCH_B, "feat(b): add b", { timeoutMs: SMALL_MS });
+check("[scenario 6] once the quarantine has cleared AND a human has resolved the escaped descendant's own later residue, a fresh merge succeeds",
+  merge2Retry.ok === true);
+console.log(`[scenario 6] info: merge2Retry=${JSON.stringify({ ok: merge2Retry.ok, reason: merge2Retry.reason })}`);
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — mergeBranchLocked's squash commit is kill-confirmed: a timed-out commit's real git " +
     "child is confirmed dead before the canonical lock releases (scenario 1), a commit that actually " +
@@ -583,6 +711,8 @@ console.log(failures === 0
     "hook's own unprompted git add never lands in any commit either merge actually makes (scenario 4), " +
     "and a double-forked hook tail that escapes the tree-kill entirely quarantines the repo (no corruption " +
     "on this repro shape, a second merge refused) and auto-clears once its own eventual confirmed death " +
-    "arrives (scenario 5)."
+    "arrives (scenario 5), and the same escape as a POST-commit hook (scenario 6) isolates the quarantine's " +
+    "own contribution — the commit lands cleanly first, so the index is provably clean when the second " +
+    "merge is refused, pinning the refusal on the quarantine alone."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
