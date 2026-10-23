@@ -132,7 +132,9 @@ try {
   }
 
   // ==================== (B) resolveWakeDeliveryTarget: NO holder — falls through to resume(), behavior
-  // byte-identical to the pre-af165ec7 bare isAlive+resume check ====================
+  // byte-identical to the pre-af165ec7 bare isAlive+resume check. Card 162eba4b NEGATIVE CONTROL: the
+  // ordinary-resume fallthrough must NEVER retarget a standing wake row — it never calls retargetWakeRows
+  // at all, so every row still pointed at M1 must be byte-unchanged after the call ====================
   {
     const { db, host, sessions } = makeHarness();
     const P = "rwr-b";
@@ -141,9 +143,37 @@ try {
     host.handles.get(m1.id).kill();
     check("(B pre) M1 is not alive, and nothing else is live for its agent", host.isAlive(m1.id) === false);
 
+    db.insertEventTrigger({
+      id: "trig-rwr-b", eventKind: "worker_report", projectId: null, mode: "wake",
+      targetSessionId: m1.id, agentId: null, enabled: true, lastSeq: 0, lastFiredAt: null,
+      createdAt: new Date().toISOString(),
+    });
+    const connB = db.createConnection({ name: "rwr-b-conn", host: "api.example.com", authScheme: "bearer", secretBlob: "irrelevant-ciphertext" });
+    db.insertPollJob({
+      id: "job-rwr-b", connectionId: connB.id, path: "/notifications", method: "GET", intervalMs: 60_000,
+      nextPollAt: new Date(Date.now() - 60_000).toISOString(), lastPolledAt: null,
+      itemsPath: "items", idPath: "id", cursorJson: null,
+      mode: "wake", sessionId: m1.id, agentId: null,
+      enabled: true, consecutiveFailures: 0, lastError: null, createdAt: new Date().toISOString(),
+    });
+    const endpointB = createWebhookEndpoint(db, {
+      name: "rwr-b target", sourceType: "generic", secret: "rwr-b-secret", mode: "wake",
+      targetSessionId: m1.id, agentId: null,
+    });
+
     const result = sessions.resolveWakeDeliveryTarget(m1.id);
     check("(B) no redirect — resolves to the target's own id", result.sessionId === m1.id && result.redirectedFrom === undefined);
     check("(B) the target was actually RESUMED (genuinely live again)", host.isAlive(m1.id) === true);
+    check("(B) NEGATIVE CONTROL: the event-trigger row is byte-unchanged (still M1)", db.getEventTrigger("trig-rwr-b").targetSessionId === m1.id);
+    check("(B) NEGATIVE CONTROL: the poll-job row is byte-unchanged (still M1)", db.getPollJob("job-rwr-b").sessionId === m1.id);
+    check("(B) NEGATIVE CONTROL: the webhook-endpoint row is byte-unchanged (still M1)", db.getWebhookEndpoint(endpointB.id).targetSessionId === m1.id);
+    // Every scenario in this file shares ONE underlying DB (new Db() with no path defaults to DB_PATH) —
+    // delete these rows now so a LATER scenario's own real EventTriggerService/PollService.tick() never
+    // picks them up (they'd otherwise match on eventKind/mode alone and fire against a session id these
+    // later scenarios' own fake pty host never created).
+    db.deleteEventTrigger("trig-rwr-b");
+    db.deletePollJob("job-rwr-b");
+    db.deleteWebhookEndpoint(endpointB.id);
   }
 
   // ==================== (C) resolveWakeDeliveryTarget: a NON-MANAGER target is never redirected, even
@@ -200,9 +230,20 @@ try {
     const holderIgnoringHaltedCheck = sessions.findLiveManagerForAgent(m1Row.agentId, [m1Row.id]);
     check("(D) RED PROOF: ignoring the halted-partner check, the scan finds M2 as a live holder", holderIgnoringHaltedCheck?.id === m2.id);
 
+    // Card 162eba4b NEGATIVE CONTROL: the halted-partner fallthrough must NEVER retarget a standing wake
+    // row either — a row pointed at M1 must still point at M1 afterward, never at its halted partner M2.
+    db.insertEventTrigger({
+      id: "trig-rwr-d", eventKind: "worker_report", projectId: null, mode: "wake",
+      targetSessionId: m1.id, agentId: null, enabled: true, lastSeq: 0, lastFiredAt: null,
+      createdAt: new Date().toISOString(),
+    });
+
     const result = sessions.resolveWakeDeliveryTarget(m1.id);
     check("(D) FIX: NO redirect to the sanctioned halted partner — falls through to resume() instead", result.sessionId === m1.id && result.redirectedFrom === undefined);
     check("(D) FIX: M1 (the target) is genuinely live again — its OWN resume() succeeded via its own exemption", host.isAlive(m1.id) === true);
+    check("(D) NEGATIVE CONTROL: the event-trigger row is byte-unchanged (still M1, never retargeted to its halted partner M2)", db.getEventTrigger("trig-rwr-d").targetSessionId === m1.id);
+    // Same shared-DB hygiene as scenario (B) — delete before a later scenario's own tick() can see it.
+    db.deleteEventTrigger("trig-rwr-d");
   }
 
   // ==================== (E) REAL fire() site — EventTriggerService, wake mode — redirects through the
@@ -237,11 +278,29 @@ try {
     });
     db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: m1.id, kind: "worker_report", detail: { status: "blocked" } });
 
-    await svc.tick(new Date());
+    const tick1 = new Date();
+    await svc.tick(tick1);
     check("(E) the nudge landed on M2 (the redirect target), not M1", enqueued.length === 1 && enqueued[0].sessionId === m2.id);
     check("(E) resume() was NEVER called for the stale M1 — the redirect replaced it", resumeCalls.length === 0);
     check("(E) wake_target_redirected filed under M2 with source:'event-trigger' and originalTargetId:M1",
       db.listEventsForSession(m2.id).some((ev) => ev.kind === "wake_target_redirected" && ev.detail.source === "event-trigger" && ev.detail.originalTargetId === m1.id));
+    // Card 162eba4b: the row itself is now durably retargeted to M2, not just THIS fire's delivery.
+    check("(E) card 162eba4b: the trigger row's own targetSessionId is now M2 (durably retargeted)", db.getEventTrigger("trig-rwr-e").targetSessionId === m2.id);
+
+    // Card 162eba4b: a SECOND fire, after the retarget, must converge — no second redirect decision is
+    // even reached (the row already reads M2, which is alive), so NO second wake_target_redirected is
+    // filed and resume() is still never called. MIN_EVENT_TRIGGER_INTERVAL_MS (60s) elapsed via a later
+    // `now`, not a real sleep.
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: m2.id, kind: "worker_report", detail: { status: "progress" } });
+    const tick2 = new Date(tick1.getTime() + 61_000);
+    await svc.tick(tick2);
+    check("(E) second fire: the nudge landed on M2 again, directly (row already points at M2)", enqueued.length === 2 && enqueued[1].sessionId === m2.id);
+    check("(E) second fire: resume() still never called", resumeCalls.length === 0);
+    check("(E) second fire: NO second wake_target_redirected filed — the redirect converged",
+      db.listEventsForSession(m2.id).filter((ev) => ev.kind === "wake_target_redirected").length === 1);
+    // Same shared-DB hygiene as scenario (B)/(D) — delete before scenario (H)'s own EventTriggerService
+    // (a separate instance, same shared DB) can see this still-enabled row.
+    db.deleteEventTrigger("trig-rwr-e");
   }
 
   // ==================== (F) REAL fire() site — PollService, wake mode — same redirect, through the SAME
@@ -288,6 +347,10 @@ try {
     check("(F) resume() was NEVER called for the stale M1 — the redirect replaced it", resumeCalls.length === 0);
     check("(F) wake_target_redirected filed under M2 with source:'poll' and originalTargetId:M1",
       db.listEventsForSession(m2.id).some((ev) => ev.kind === "wake_target_redirected" && ev.detail.source === "poll" && ev.detail.originalTargetId === m1.id));
+    // Card 162eba4b: the poll-job row's own sessionId is now durably retargeted to M2.
+    check("(F) card 162eba4b: the poll-job row's own sessionId is now M2 (durably retargeted)", db.getPollJob("job-rwr-f").sessionId === m2.id);
+    // Same shared-DB hygiene as scenario (B)/(D)/(E) — delete before any later scenario could see it.
+    db.deletePollJob("job-rwr-f");
   }
 
   // ==================== (G) REAL fire() site — the webhook ingress route, through the REAL buildServer
@@ -335,14 +398,77 @@ try {
       durableCalls.length === 1 && durableCalls[0][0] === m2.id);
     check("(G) wake_target_redirected filed under M2 with source:'webhook' and originalTargetId:M1",
       db.listEventsForSession(m2.id).some((ev) => ev.kind === "wake_target_redirected" && ev.detail.source === "webhook" && ev.detail.originalTargetId === m1.id));
+    // Card 162eba4b: the webhook-endpoint row's own targetSessionId is now durably retargeted to M2.
+    check("(G) card 162eba4b: the webhook-endpoint row's own targetSessionId is now M2 (durably retargeted)", db.getWebhookEndpoint(endpoint.id).targetSessionId === m2.id);
+    // Same shared-DB hygiene as scenario (B)/(D)/(E)/(F) — DISABLE (not delete: this endpoint has a real
+    // recorded delivery-dedupe row referencing it, and webhook_deliveries.endpoint_id is FK-enforced with
+    // no cascade, so a delete here would throw) before any later scenario could see it.
+    db.setWebhookEndpointEnabled(endpoint.id, false);
 
     await app.close();
+  }
+
+  // ==================== (H) card 162eba4b: the HOLDER ITSELF later exits and a THIRD, newer manager
+  // takes over — the next fire must land on the NEWEST manager, never fall back to the ORIGINAL stale
+  // target (the literal bug f643b83a found: "once the holder exits, the next fire resumes the STALE
+  // original target instead of the agent's newer manager") ====================
+  {
+    const { db, host, sessions } = makeHarness();
+    const P = "rwr-h";
+    seedProject(db, P);
+    const m1 = startLiveManager(sessions, host, `${P}-mgr`, "m1-h");
+    host.handles.get(m1.id).kill();
+    const m2 = startLiveManager(sessions, host, `${P}-mgr`, "m2-h"); // supersedes M1
+    check("(H pre) M1 dead, M2 live, same agent", host.isAlive(m1.id) === false && host.isAlive(m2.id) === true);
+
+    const resumeCalls = [];
+    const realResume = sessions.resume.bind(sessions);
+    const enqueued = [];
+    const svc = new EventTriggerService({
+      db, control: new OrchestrationControl(),
+      pty: {
+        isAlive: (id) => host.isAlive(id),
+        enqueueStdin: (id, text, source, onDeliver, route, kind) => { enqueued.push({ sessionId: id, text, kind }); return { delivered: true }; },
+      },
+      resume: (id) => { resumeCalls.push(id); return realResume(id); },
+      resolveWakeTarget: (id) => sessions.resolveWakeDeliveryTarget(id),
+      spawn: async () => { throw new Error("spawn must not be called — this trigger is wake mode"); },
+    });
+    db.insertEventTrigger({
+      id: "trig-rwr-h", eventKind: "worker_report", projectId: null, mode: "wake",
+      targetSessionId: m1.id, agentId: null, enabled: true, lastSeq: 0, lastFiredAt: null,
+      createdAt: new Date().toISOString(),
+    });
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: m1.id, kind: "worker_report", detail: { status: "blocked" } });
+
+    const tick1 = new Date();
+    await svc.tick(tick1);
+    check("(H) first fire redirects to M2, retargets the row to M2",
+      enqueued.length === 1 && enqueued[0].sessionId === m2.id && db.getEventTrigger("trig-rwr-h").targetSessionId === m2.id);
+
+    // M2 (the current holder) now exits, and a THIRD manager (M3) takes over for the same agent.
+    host.handles.get(m2.id).kill();
+    const m3 = startLiveManager(sessions, host, `${P}-mgr`, "m3-h");
+    check("(H pre) M2 dead, M3 live, same agent", host.isAlive(m2.id) === false && host.isAlive(m3.id) === true);
+
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: m3.id, kind: "worker_report", detail: { status: "progress" } });
+    const tick2 = new Date(tick1.getTime() + 61_000);
+    await svc.tick(tick2);
+    check("(H) FIX: the second fire lands on M3 (the NEWEST manager), never falls back to the original stale M1",
+      enqueued.length === 2 && enqueued[1].sessionId === m3.id);
+    check("(H) resume() was never called for the stale M1 at any point", resumeCalls.length === 0);
+    check("(H) the row is now retargeted to M3", db.getEventTrigger("trig-rwr-h").targetSessionId === m3.id);
+    check("(H) wake_target_redirected filed under M3 with originalTargetId:M2 (the chain, not M1)",
+      db.listEventsForSession(m3.id).some((ev) => ev.kind === "wake_target_redirected" && ev.detail.originalTargetId === m2.id));
+    // Same shared-DB hygiene as every scenario above — delete before any future scenario added after
+    // this one could see it.
+    db.deleteEventTrigger("trig-rwr-h");
   }
 } finally {
   // Nothing to clean up beyond the OS temp dirs — each harness closes its own Db implicitly on process exit.
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — SessionService.resolveWakeDeliveryTarget redirects a stale manager target to a DIFFERENT live manager (ordinary fresh start), falls through to resume() when no holder exists or the target isn't a manager, and never redirects to the target's own sanctioned halted-recycle partner (resume()'s own exemption covers that pairing instead) — and all three real wake-mode fire() sites (EventTriggerService, PollService, the webhook ingress route) exercise the SAME real method end-to-end, each filing wake_target_redirected with its own source."
+  ? "\n✅ ALL PASS — SessionService.resolveWakeDeliveryTarget redirects a stale manager target to a DIFFERENT live manager (ordinary fresh start), falls through to resume() when no holder exists or the target isn't a manager, and never redirects to the target's own sanctioned halted-recycle partner (resume()'s own exemption covers that pairing instead) — and all three real wake-mode fire() sites (EventTriggerService, PollService, the webhook ingress route) exercise the SAME real method end-to-end, each filing wake_target_redirected with its own source. Card 162eba4b: an actual redirect also durably retargets the underlying event-trigger/poll-job/webhook-endpoint row to the holder (never on the ordinary-resume or halted-partner fallthroughs, proven by negative control), so a second fire converges with no second wake_target_redirected, and when the holder itself later exits a THIRD manager's fire lands on the newest manager, never falling back to the original stale target."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

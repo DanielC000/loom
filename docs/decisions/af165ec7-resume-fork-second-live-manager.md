@@ -169,6 +169,59 @@ regression this ordering fixes).
 
 `wake_me` (`orchestration/wake.ts`) needed no code change — its existing catch already files a `wake_dropped`
 event with the real thrown reason, which now includes `SecondLiveManagerError`'s message automatically.
+`wake_me`/`WakeService` never call `resolveWakeDeliveryTarget` at all — a wake fires against `wakes.session_id`,
+a row OWNED by the session it belongs to (cascade-deleted with it, `db.ts`'s per-session FK cascade doc), not a
+standing human-configured target like the three row kinds below; it has no analogous staleness to fix.
+
+## The wake-mode redirect, made durable (card 162eba4b)
+
+Code Review `f643b83a` (item 7) found that the redirect above was never durable: none of the three `fire()`
+sites wrote the resolved holder back onto the row they fired from, so every later fire re-ran the same
+redirect and re-filed `wake_target_redirected` under the (same) holder, and — the actual bug — once that
+holder itself exited, the next fire fell back to resuming the ORIGINAL stale `targetSessionId` instead of
+whatever now-live manager had actually superseded it.
+
+**Fix: `resolveWakeDeliveryTarget` itself durably retargets, at the single chokepoint, inside the actual-
+redirect branch only.** Immediately before returning `{sessionId: holder.id, redirectedFrom: targetSessionId}`,
+it calls a new private `retargetWakeRows(targetSessionId, holder.id)`, which runs the SAME three DB methods
+recycle already calls unconditionally at every recycle/revive site — `reparentEventTriggerTargets`/
+`reparentPollJobTargets`/`reparentWebhookTargets` (`db.ts`) — wrapped in one best-effort try/catch so a DB
+failure here can never break the delivery that already landed on `holder.id`. All three run unconditionally
+regardless of which table actually owns the row that fired (an `UPDATE … WHERE … = oldId` against a table
+with no matching row is a no-op) — this is deliberately the SAME pattern `recycleManager`/
+`settleRecycleHandoff`/the platform-lead recycle/the worker-revive path already use, not a new one: no
+caller needs to tell `resolveWakeDeliveryTarget` which of the three row kinds it was called for.
+
+**Every production caller of `resolveWakeDeliveryTarget` is enumerated, by symbol, not assumed:** the
+function is reached ONLY via the `resolveWakeTarget` indirection wired at exactly three places —
+`PollServiceDeps.resolveWakeTarget` (`index.ts`, wiring `PollService`), `EventTriggerServiceDeps.resolveWakeTarget`
+(`index.ts`, wiring `EventTriggerService`), and `WebhookIngressDeps.resolveWakeTarget` (`gateway/server.ts`,
+wiring the webhook ingress route) — each a direct `(id) => sessions.resolveWakeDeliveryTarget(id)` with no
+indirection in between. There is no fourth caller anywhere in `src/` (`wake_me`/`WakeService` is NOT one —
+see above). The retarget is correct for all three by construction, not by auditing each one separately: it
+only ever runs inside the branch that has already confirmed `targetSessionId` is not alive AND `holder` is
+the live session THIS SAME call is about to return as `sessionId` — so whichever of the three callers
+invoked it, the row is always retargeted to exactly the session the wake was just delivered to, never to
+some other candidate.
+
+**The halted-partner exemption holds because of WHERE the call sits, not a new check.** `retargetWakeRows`
+is called only inside the `holder && !isSanctionedHaltedPartner(...)` branch — the halted-partner
+fallthrough (`this.resume(targetSessionId); return { sessionId: targetSessionId };`) returns before ever
+reaching it, and the no-holder fallthrough (ordinary `resume()`, nothing superseded) returns the same way.
+Neither of those two paths ever retargets a row — proven directly in `resume-wake-redirect.mjs` scenario
+(D) (halted partner) and a new negative-control scenario (ordinary resume, no holder): both assert every
+row's target column is byte-unchanged afterward.
+
+**Deliberately silent — no new owner-facing notice.** This is the same category of session-identity churn
+Loom already resolves silently for the architecturally-identical recycle case: `reparentEventTriggerTargets`/
+`reparentPollJobTargets`/`reparentWebhookTargets` are already called unconditionally, with no owner notice,
+from `recycleManager`, `settleRecycleHandoff`, the worker-revive path, and the platform-lead recycle path.
+The existing `wake_target_redirected` durable event (filed by each of the three `fire()` sites on an actual
+redirect, unchanged by this card) remains the audit trail — it is not acceptable to treat a silent DB write
+as literally silent in the "no record exists" sense; it is silent only in the "no owner-facing push/notice"
+sense, exactly like a recycle reparent. Leaving the row stale (the pre-fix behavior) is strictly worse than
+retargeting it: it produces a permanent bounce-back to a target that cannot even be resumed to directly once
+superseded.
 
 ## Do not
 
@@ -199,16 +252,25 @@ event with the real thrown reason, which now includes `SecondLiveManagerError`'s
   8d8a3647) refusing a session that is itself someone's still-unresolved halted successor from recycling
   again. If that guard is ever removed, this file's "one hop only" claim stops being true in practice, even
   though the predicate's own code never changes.
+- Do not call `retargetWakeRows` from anywhere but `resolveWakeDeliveryTarget`'s own actual-redirect branch
+  (card 162eba4b) — it must never run on the halted-partner fallthrough or the no-holder/ordinary-resume
+  fallthrough, or it would retarget a row away from a target that is itself still the right delivery point.
+- Do not add an owner-facing notice for this retarget — it is deliberately silent, matching the existing
+  recycle-reparent precedent; the `wake_target_redirected` event already filed on every redirect is the
+  audit trail, unchanged by card 162eba4b.
 
 ## Source
 
 `packages/daemon/src/sessions/service.ts` (`SecondLiveManagerError`, `ForkLiveManagerError`,
 `findLiveManagerForAgent`, `refuseSecondLiveManager`, `refuseSecondLiveManagerUnlessHaltedPartner`,
-`resolveWakeDeliveryTarget`, `resume`, `forkSession`). `packages/daemon/src/orchestration/crash-orphaned-workers.ts`
+`resolveWakeDeliveryTarget`, `retargetWakeRows`, `resume`, `forkSession`).
+`packages/daemon/src/orchestration/crash-orphaned-workers.ts`
 (`isSanctionedHaltedPartner`). `packages/daemon/src/gateway/server.ts` (the three REST 409 mappings, the
 `registerWebhookIngress` typeof-guarded wiring). `packages/daemon/src/orchestration/event-triggers.ts`,
 `packages/daemon/src/orchestration/poll.ts`, `packages/daemon/src/webhooks/ingress.ts` (the redirect
-nesting). `packages/shared/src/types.ts` (`wake_target_redirected`). Tests:
+nesting). `packages/shared/src/types.ts` (`wake_target_redirected`). `packages/daemon/src/db.ts`
+(`reparentEventTriggerTargets`/`reparentPollJobTargets`/`reparentWebhookTargets`, reused verbatim by
+`retargetWakeRows`). Tests:
 `packages/daemon/test/resume-halted-partner-exemption.mjs` (new),
 `packages/daemon/test/recycle-manager-halted-successor-dies.mjs`,
 `packages/daemon/test/resume-refuses-retired-recycle-successor.mjs`,
@@ -217,6 +279,8 @@ nesting). `packages/shared/src/types.ts` (`wake_target_redirected`). Tests:
 `packages/daemon/test/codex-role-force-start-matrix.mjs`,
 `packages/daemon/test/forced-role-resume-retry-safety.mjs`,
 `packages/daemon/test/webhook-enqueue-durable-nudge-wiring.mjs`,
-`packages/daemon/test/webhook-ingress.mjs`. See also `docs/decisions/0368c784-second-live-manager-refusal.md`
+`packages/daemon/test/webhook-ingress.mjs`,
+`packages/daemon/test/resume-wake-redirect.mjs` (card 162eba4b's durable-retarget scenarios).
+See also `docs/decisions/0368c784-second-live-manager-refusal.md`
 and `docs/decisions/8d8a3647-halted-successor-self-recycle-guard.md` (the companion guard that keeps this
 file's one-hop invariant true in practice).

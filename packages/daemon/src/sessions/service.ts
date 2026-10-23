@@ -3839,16 +3839,43 @@ export class SessionService {
    * @decision af165ec7 — never redirect to a holder that is the target's own sanctioned halted partner
    * (`isSanctionedHaltedPartner`) — resume()'s own `refuseSecondLiveManagerUnlessHaltedPartner` exemption
    * already covers that pairing (the target is itself resumable); fall through to resume() instead.
+   * @decision af165ec7 — card 162eba4b: see "The wake-mode redirect, made durable" in this decision record.
    */
   resolveWakeDeliveryTarget(targetSessionId: string): { sessionId: string; redirectedFrom?: string } {
     if (this.pty.isAlive(targetSessionId)) return { sessionId: targetSessionId };
     const target = this.db.getSession(targetSessionId);
     if (target?.role === "manager") {
       const holder = this.findLiveManagerForAgent(target.agentId, [targetSessionId]);
-      if (holder && !isSanctionedHaltedPartner(this.db, target, holder)) return { sessionId: holder.id, redirectedFrom: targetSessionId };
+      if (holder && !isSanctionedHaltedPartner(this.db, target, holder)) {
+        this.retargetWakeRows(targetSessionId, holder.id);
+        return { sessionId: holder.id, redirectedFrom: targetSessionId };
+      }
     }
     this.resume(targetSessionId);
     return { sessionId: targetSessionId };
+  }
+
+  /**
+   * Card 162eba4b: durably move every standing wake-mode row (event-trigger/poll-job/webhook-endpoint)
+   * pointed at `oldSessionId` onto `newSessionId` — called ONLY from `resolveWakeDeliveryTarget`'s actual-
+   * redirect branch, so it never fires for the halted-partner fallthrough (that branch returns before
+   * reaching this call) and never fires for an ordinary `resume()` with no holder. Reuses the SAME three
+   * DB methods recycle already calls unconditionally at every recycle/revive site (an UPDATE against a
+   * table with no matching row is a no-op), so a caller never needs to know which table actually owns the
+   * row that fired. Idempotent: once a row's target reads `newSessionId`, a later fire finds it alive and
+   * never re-enters the redirect branch at all, so this collapses the pre-fix "every later fire re-
+   * redirects and re-files wake_target_redirected" into a one-time transition. Best-effort — a DB failure
+   * here must never break the wake delivery itself; the delivery already landed on `newSessionId` by the
+   * time this runs.
+   */
+  private retargetWakeRows(oldSessionId: string, newSessionId: string): void {
+    try {
+      this.db.reparentEventTriggerTargets(oldSessionId, newSessionId);
+      this.db.reparentPollJobTargets(oldSessionId, newSessionId);
+      this.db.reparentWebhookTargets(oldSessionId, newSessionId);
+    } catch (e) {
+      console.error(`[sessions] retargeting wake-mode rows from ${oldSessionId} to ${newSessionId} failed (best-effort — the redirect delivery itself already succeeded):`, (e as Error).message);
+    }
   }
 
   /**
