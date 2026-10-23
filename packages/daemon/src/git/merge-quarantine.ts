@@ -1372,8 +1372,11 @@ function foldInOnDiskTokensIfMarked(final: string, entry: MergeQuarantineEntry, 
  * @decision 2dd97aaa (Follow-up 58957b1e) — `droppedTokens` (REQUIRED) forwards to the internal
  * {@link reconcileMarkedBasenameBeforeWrite} call below when `!reconciledAlready`. Every call site must
  * state what it narrows. See that function's own doc.
- */
-function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, sweepOtherTmpsOnSuccess = false, targetKey?: string, skipDegradedOccupantGuard = false, reconciledAlready = false): boolean {
+ *
+ * @decision d69a6744 — `ownershipMap` (default {@link activeQuarantines}) is what the `freshSecondaryKeys`
+ * ownership check reads. `bootWriteLatch` passes its own local `byRepoKey` instead — `activeQuarantines`
+ * is not synced from it until boot returns. See the decision record. */
+function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, sweepOtherTmpsOnSuccess = false, targetKey?: string, skipDegradedOccupantGuard = false, reconciledAlready = false, ownershipMap: ReadonlyMap<string, MergeQuarantineEntry> = activeQuarantines): boolean {
   let fd: number | undefined;
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
@@ -1403,7 +1406,7 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, droppedTokens: R
     // @decision d69a6744 — derived from LIVE occupancy (liveArmedKeysOf), filtered by ownership
     // (entryStillOwnsKey), never bare `entry.armedKeys` — a stale/foreign armedKeys member used to
     // persist straight through here. See the decision record.
-    const freshSecondaryKeys = liveArmedKeysOf(entry).filter((k) => k !== ownKeyForWrite && entryStillOwnsKey(k, entry));
+    const freshSecondaryKeys = liveArmedKeysOf(entry, ownershipMap).filter((k) => k !== ownKeyForWrite && entryStillOwnsKey(k, entry, ownershipMap));
     const retainedResolvedKeys = unionResolvedKeysRetaining(entry.resolvedKeys, freshSecondaryKeys, `writeMergeQuarantineLatch(${entry.repoPath})`);
     const resolvedKeys = retainedResolvedKeys.length > 0 ? retainedResolvedKeys : undefined;
     // Backward compat: an OLD reader only ever looks at the scalar — promote the first surviving
@@ -4325,8 +4328,8 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
  *  side too) is exactly the disjoint-tokens case and still correctly returns `false`. Lifting/overwriting
  *  `key` when this is `false` would destroy an unrelated repo's own, genuine quarantine — gate every such
  *  write on this. */
-function entryStillOwnsKey(key: string, entry: MergeQuarantineEntry): boolean {
-  const occupant = activeQuarantines.get(key);
+function entryStillOwnsKey(key: string, entry: MergeQuarantineEntry, map: ReadonlyMap<string, MergeQuarantineEntry> = activeQuarantines): boolean {
+  const occupant = map.get(key);
   if (!occupant) return false;
   if (occupant === entry) return true;
   if (directPathIdentity(occupant.repoPath) !== directPathIdentity(entry.repoPath)) return false;
@@ -4385,9 +4388,9 @@ export function markLatchFileUnreadableTestOnly(basename: string): void {
  * (which has no `key` of its own to seed with) and {@link ownedKeysIncluding} (below) can share the SAME
  * live-occupancy source {@link liveArmedKeys} itself uses, rather than each re-deriving it by hand.
  */
-function liveArmedKeysOf(entry: MergeQuarantineEntry): string[] {
+function liveArmedKeysOf(entry: MergeQuarantineEntry, map: ReadonlyMap<string, MergeQuarantineEntry> = activeQuarantines): string[] {
   const keys = new Set<string>(entry.armedKeys ?? []);
-  for (const [k, v] of activeQuarantines) { if (v === entry) keys.add(k); }
+  for (const [k, v] of map) { if (v === entry) keys.add(k); }
   return [...keys];
 }
 
@@ -7018,7 +7021,10 @@ function reenterMergeQuarantinesAtBootImpl(
       toWrite = reconciled;
       reconciledAlready = true;
     }
-    const ok = writeMergeQuarantineLatch(toWrite, new Set(), false, targetKey, true, reconciledAlready);
+    // @decision d69a6744 — pass `byRepoKey` as the ownership map: `activeQuarantines` isn't synced from
+    // it until this whole boot function returns, so the default would see none of this boot's own
+    // in-progress arming. See writeMergeQuarantineLatch's own doc.
+    const ok = writeMergeQuarantineLatch(toWrite, new Set(), false, targetKey, true, reconciledAlready, byRepoKey);
     if (ok) writeTargetsThisPass.add(targetBasename);
     return ok;
   };
