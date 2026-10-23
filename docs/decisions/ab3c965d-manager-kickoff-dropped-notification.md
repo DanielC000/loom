@@ -32,9 +32,27 @@ gates `manager_kickoff_dropped` into the owner-attention surfaces on the same `p
 condition `claude_boot_dialog_stuck` already uses.
 
 Deliberately no self-nudge into the dropped session itself: its first turn never started (the caller
-already confirmed this is a genuine drop, not a late confirmation via `hasFirstTurnStarted`/
-`transcriptNonEmpty`), so there is nothing live to read a notice typed into its own composer, and reusing
+confirms this is a genuine drop, not a late confirmation, via `hasFirstTurnStarted`/`transcriptNonEmpty`
+— see round 2 below), so there is nothing live to read a notice typed into its own composer, and reusing
 the same delivery mechanism that just failed for the kickoff buys nothing.
+
+## Round 2 (Code Review 5f95e7a1, BLOCKING)
+
+Round 1 shipped the manager carve-out (`w?.role === "manager"`) in `handleKickoffGiveUpExhausted` BEFORE
+the generic path's own late-confirmation guard (`hasFirstTurnStarted(sessionId) || transcriptNonEmpty`,
+a few lines lower) — so the Narrative's own claim above ("the caller already confirmed this is a genuine
+drop") was false as shipped: a manager whose kickoff actually landed but confirmed late still took the
+manager branch unconditionally and got the full drop treatment (durable event, owner-attention push, web
+KICKOFF DROPPED alert, Platform board task, a Lead nudge telling it to recover its brief and resend) — a
+duplicated-work hazard. Project memory `5748425f-kickoff-remint-two-mechanisms`'s specimen `a38a6b47` is
+exactly this shape: the requeue landed 7.5s before the final give-up fired.
+
+Fixed by hoisting the SAME discriminator (`lateConfirmation = hasFirstTurnStarted(sessionId) ||
+transcriptNonEmpty`) above both branches, computed once and consulted by both: the manager branch now
+checks it before calling `handleManagerKickoffDropped` (suppressing with a log line, mirroring the
+worker path's own suppression wording, when true) and the worker path is otherwise byte-identical to
+round 1. `handleManagerKickoffDropped`'s own doc now states this as a precondition the CALLER enforces,
+not something the method can verify on its own.
 
 ## Do not
 
@@ -52,15 +70,28 @@ the same delivery mechanism that just failed for the kickoff buys nothing.
 - Do not gate `manager_kickoff_dropped` into the owner-attention surfaces (`companion/attention-push.ts`'s
   `classify()`, `web/src/lib/attention.ts`) unconditionally — gate on `detail.parentNudged === false`,
   mirroring `claude_boot_dialog_stuck`'s own gate exactly (a manager always sets this `false`, so the
-  practical effect is "always", but the field is what a reader should check, not the role).
+  practical effect is "always", but the field is what a reader should check, not the role). Enforced at
+  TWO distinct sites, round 2: `companion/attention-push.ts`'s `classify()` switch (already correct, round
+  1) and `web/src/lib/attention.ts`'s `latestManagerKickoffDropped` map build (round 1 built the map from
+  every matching event unconditionally, with no `parentNudged` check at all — round 2 added it).
+- Do not let a role-scoped carve-out (the manager branch in `handleKickoffGiveUpExhausted`) skip a
+  generic-path safety check just because it returns earlier in the function — round 1's manager branch ran
+  BEFORE the late-confirmation guard the generic/worker path uses a few lines later, so the two silently
+  diverged on a precondition the Narrative claimed was shared. Compute a shared discriminator once, above
+  every branch that needs it, when two branches must agree on the same check.
+- Do not describe this feature's scope as "manager/platform-lead" in a comment — only `role === "manager"`
+  is carved out here (and in `handleClaudeBootDialogStuck`'s own Lead-notify call). The Platform Lead's own
+  equivalent gap is a separate, not-yet-built card (`5c2f8108`).
 
 ## Source
 
-`packages/daemon/src/sessions/service.ts` (`handleKickoffGiveUpExhausted`'s manager carve-out,
-`handleManagerKickoffDropped`, `notifyLeadOfParentlessManagerIssue`/`notifyLeadOfStuckManager`/
-`notifyLeadOfDroppedManagerKickoff`), `packages/shared/src/types.ts` (`manager_kickoff_dropped` kind +
-`ORCHESTRATION_EVENT_KIND_MEMBERSHIP`), `packages/shared/src/config.ts`
+`packages/daemon/src/sessions/service.ts` (`handleKickoffGiveUpExhausted`'s manager carve-out +
+hoisted `lateConfirmation`, `handleManagerKickoffDropped`, `notifyLeadOfParentlessManagerIssue`/
+`notifyLeadOfStuckManager`/`notifyLeadOfDroppedManagerKickoff`), `packages/shared/src/types.ts`
+(`manager_kickoff_dropped` kind + `ORCHESTRATION_EVENT_KIND_MEMBERSHIP`), `packages/shared/src/config.ts`
 (`BROWSER_NOTIFICATION_KINDS`), `packages/daemon/src/db.ts` (`DURABLE_AUDIT_EVENT_KINDS`),
-`packages/daemon/src/companion/attention-push.ts` (`classify()`), `packages/web/src/lib/attention.ts`
-(`BROWSER_NOTIFICATION_LABELS` + the render item). Test:
-`packages/daemon/test/manager-kickoff-giveup-dropped.mjs`.
+`packages/daemon/src/companion/attention-push.ts` (`classify()`'s switch case + `alertLine()`'s own
+`manager_kickoff_dropped` case, round 2), `packages/web/src/lib/attention.ts` (`BROWSER_NOTIFICATION_LABELS`,
+the `latestManagerKickoffDropped` map's `parentNudged` filter (round 2), and the render item). Tests:
+`packages/daemon/test/manager-kickoff-giveup-dropped.mjs`,
+`packages/daemon/test/kickoff-giveup-exhausted.mjs`, `packages/daemon/test/companion-attention-push.mjs`.

@@ -38,11 +38,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //       change — no `manager_kickoff_dropped` event is ever recorded for a worker, and its existing
 //       `[loom:worker-spawn-broken]` parent-notice path (kickoff-giveup-exhausted.mjs's own (S1)-(S16))
 //       fires exactly as before.
+//   (G) Code Review 5f95e7a1 (round 2, BLOCKING): a MANAGER whose kickoff genuinely landed but confirmed
+//       LATE (pty reports hasFirstTurnStarted:true) must produce NO event, NO board task, and NO nudge to
+//       the Lead — round 1 ran the manager carve-out BEFORE this discriminator, so it filed the full drop
+//       treatment for a session that wasn't actually dropped.
+//   (H) The SAME late-confirmation case (G) proves via the pty hook, proven independently via a REAL,
+//       non-empty on-disk transcript (mirrors kickoff-giveup-exhausted.mjs's own (S9) for the worker path)
+//       — hasFirstTurnStarted is never set, the transcript alone must suppress: NO event, NO task, NO nudge.
 //
 // RED-BEFORE-GREEN (this project's own standing verification posture): run against the PRE-FIX
 // `handleKickoffGiveUpExhausted` (role==="manager" still falling into the generic bail) — (A)'s
 // `manager_kickoff_dropped` event assertion fails (nothing is ever recorded for a manager), and so do
-// (B)/(C)/(D)/(E), which all depend on that event/the Lead-escalation call ever firing at all.
+// (B)/(C)/(D)/(E), which all depend on that event/the Lead-escalation call ever firing at all. Run against
+// ROUND-1 code (the manager carve-out ungated by `lateConfirmation`) — (G)/(H) fail: a board task IS
+// filed and the Lead IS nudged for a session that only confirmed late.
 //
 // RUN: pnpm build (from packages/daemon) then `node test/manager-kickoff-giveup-dropped.mjs`.
 import fs from "node:fs";
@@ -59,9 +68,20 @@ process.env.LOOM_HOME = tmpHome;
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+/** Writes a real transcript JSONL to the (sandboxed) `~/.claude/projects/...` path `readTranscript`
+ *  resolves — mirrors kickoff-giveup-exhausted.mjs's own `writeLiveTranscript` fixture helper. */
+function writeLiveTranscript(cwd, engineSessionId, turnTexts) {
+  const file = engineTranscriptPath(cwd, engineSessionId);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, turnTexts.map((t, i) =>
+    JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: t }] } })
+  ).join("\n") + "\n");
+}
 
 /** Minimal hermetic PtyStub — records every enqueueStdin call by recipient id. Mirrors
  *  kickoff-giveup-exhausted.mjs's own PtyStub (the tail-object `enqueueStdin` overload
@@ -240,6 +260,52 @@ try {
       db.listEventsForWorker(wkr).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
     check("(F) the worker's existing [loom:worker-spawn-broken] parent-notice path still fires, unchanged",
       pty.sent.some((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")));
+  }
+
+  // ===================== (G) Code Review 5f95e7a1: hasFirstTurnStarted:true suppresses EVERYTHING =======
+  // LOOM_DEV ON + a LIVE/past-boot Lead present (same shape as (C)) so that, if round 1's bug were still
+  // live, we'd see exactly the full drop treatment (C) proved — this proves instead that NONE of it fires.
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-g-mgr-${sfx}`, lead = `mkgd-g-lead-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(mgr); pty.setLive(lead); pty.setPastBoot(lead);
+    pty.firstTurnStarted.add(mgr); // the discriminator: this manager already confirmed a turn
+
+    const tasksBefore = db.listTasks(home).length;
+    sessions.handleKickoffGiveUpExhausted(mgr, `msg-g-${sfx}`, `root-g-${sfx}`, `kickoff-g-${sfx}`);
+
+    check("(G) NO manager_kickoff_dropped event is recorded for a late-confirmed manager",
+      db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
+    check("(G) NO board task was filed", db.listTasks(home).length === tasksBefore);
+    check("(G) ZERO enqueueStdin calls anywhere — no Lead nudge, no self-nudge", pty.sent.length === 0);
+    db.setProcessState(lead, "exited");
+  }
+
+  // ===================== (H) Code Review 5f95e7a1: a REAL non-empty transcript ALSO suppresses =========
+  // Same shape as (G), but hasFirstTurnStarted is never set — the on-disk transcript alone must carry it
+  // (mirrors kickoff-giveup-exhausted.mjs's own (S9) for the worker path).
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-h-mgr-${sfx}`, lead = `mkgd-h-lead-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(mgr); pty.setLive(lead); pty.setPastBoot(lead);
+    writeLiveTranscript(os.tmpdir(), `eng-${mgr}`, ["manager's real turn-1 output", "continuing the brief"]);
+
+    const tasksBefore = db.listTasks(home).length;
+    sessions.handleKickoffGiveUpExhausted(mgr, `msg-h-${sfx}`, `root-h-${sfx}`, `kickoff-h-${sfx}`);
+
+    check("(H) NO manager_kickoff_dropped event is recorded when a real transcript exists",
+      db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped").length === 0);
+    check("(H) NO board task was filed", db.listTasks(home).length === tasksBefore);
+    check("(H) ZERO enqueueStdin calls anywhere — no Lead nudge, no self-nudge", pty.sent.length === 0);
+    db.setProcessState(lead, "exited");
   }
 
   db.close();

@@ -408,12 +408,19 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     if (e.kind === "give_up_recovery_escalated") latestGiveUpRecovery.set(e.managerSessionId, e);
   }
 
-  // Manager kickoff dropped (card ab3c965d): a manager/platform-lead's own turn-1 kickoff exhausted its
-  // give-up budget with no re-mint and no parent to notify. Same shape as give_up_recovery_escalated
-  // immediately above — no "cleared" event exists, so the latest one per LIVE manager simply surfaces.
+  // Manager kickoff dropped (card ab3c965d): a MANAGER's (role:"manager" only — the Platform Lead's own
+  // kickoff-drop gap is a separate, not-yet-built card) turn-1 kickoff exhausted its give-up budget with
+  // no re-mint and no parent to notify. Same shape as give_up_recovery_escalated immediately above — no
+  // "cleared" event exists, so the latest one per LIVE manager simply surfaces.
+  // Code Review 5f95e7a1: gated on `detail.parentNudged === false`, mirroring claude_boot_dialog_stuck's
+  // own gate (`activeBootStuckAlerts`, lib/fleet.ts) exactly — the record's own Do-not #4. A manager
+  // always sets this `false` (it never has a parent to nudge), so the practical effect is "always", but
+  // the field is what this surface should check, not the role.
   const latestManagerKickoffDropped = new Map<string, OrchestrationEvent>();
   for (const e of sortedEvents) {
-    if (e.kind === "manager_kickoff_dropped") latestManagerKickoffDropped.set(e.managerSessionId, e);
+    if (e.kind === "manager_kickoff_dropped" && (e.detail as { parentNudged?: boolean } | undefined)?.parentNudged === false) {
+      latestManagerKickoffDropped.set(e.managerSessionId, e);
+    }
   }
 
   // Quiet-board cause (card 275ac184, IdleWatcher's `nothingElseActionable` skip): a manager/Lead

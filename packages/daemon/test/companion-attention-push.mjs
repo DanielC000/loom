@@ -913,9 +913,9 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
 }
 
 // --- 29b. Card ab3c965d: manager_kickoff_dropped (parentNudged:false) end-to-end — pushes through the
-//     "escalation" class, same as claude_boot_dialog_stuck (test 27) but WITHOUT a custom alertLine case
-//     (deliberately not added — see attention-push.ts's own classify() comment), so the generic fallback
-//     line is what should render: `${projectName}: escalation — ${who}`. ---
+//     "escalation" class, same as claude_boot_dialog_stuck (test 27). Code Review 5f95e7a1 gave it its
+//     own alertLine case (sibling to claude_boot_dialog_stuck's), so the specific line renders now, never
+//     the generic `${projectName}: escalation — ${who}` fallback. ---
 {
   const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
   e.watcher.start(); e.watcher.stop();
@@ -923,8 +923,8 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   e.watcher.tick(new Date());
   check("e2e: a manager_kickoff_dropped(parentNudged:false) event pushes exactly one turn", e.enqueued.length === 1);
   check("e2e: framed [loom:alert]", e.enqueued.length === 1 && e.enqueued[0].text.startsWith(ALERT_TAG));
-  check("e2e: the pushed turn names the escalation class and the dropped manager (generic fallback line)",
-    e.enqueued.length === 1 && e.enqueued[0].text.includes("escalation") && e.enqueued[0].text.includes(e.mgrA.slice(0, 8)));
+  check("e2e: the pushed turn names the never-confirmed kickoff and the dropped manager (specific alertLine case)",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("never confirmed delivered") && e.enqueued[0].text.includes(e.mgrA.slice(0, 8)));
   const pushed = events(e, "companion_alert_pushed");
   check("e2e: emits one companion_alert_pushed audit row", pushed.length === 1 && pushed[0].detail.sourceKind === "manager_kickoff_dropped");
   cleanupEnv(e);

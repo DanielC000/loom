@@ -11491,6 +11491,13 @@ export class SessionService {
   // handleGiveUpExhausted's own reasoning (finding [1]) for why an immediate re-hammer is blocked.
   handleKickoffGiveUpExhausted(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string, chainDepth = 0): void {
     const w = this.db.getSession(sessionId);
+    // Code Review 5f95e7a1 (round 2, BLOCKING): hoisted ABOVE the manager carve-out below so a manager
+    // whose kickoff actually landed but confirmed LATE is never treated as a genuine drop — see
+    // `hasFirstTurnStarted`/`readTranscript`'s use just below for the worker path this mirrors. Computed
+    // unconditionally (cheap for every role) so the manager branch and the generic worker branch below
+    // share the exact same discriminator rather than risking the two drifting apart.
+    const transcriptNonEmpty = !!w?.engineSessionId && readTranscript(w.cwd, w.engineSessionId, w.harness).length > 0;
+    const lateConfirmation = !!w && (this.pty.hasFirstTurnStarted(sessionId) || transcriptNonEmpty);
     // Card ab3c965d: a MANAGER kickoff has its own dedicated resolution (durable event + Platform-Lead
     // escalation + owner-attention alert) rather than falling into the generic bail below — see
     // `handleManagerKickoffDropped`'s own doc for why. Checked BEFORE the generic guard: a manager never
@@ -11498,6 +11505,11 @@ export class SessionService {
     // depend on that happening to stay true. Deliberately does NOT re-mint (see that method's own doc for
     // why extending re-mint to managers is out of scope here).
     if (w?.role === "manager") {
+      if (lateConfirmation) {
+        // eslint-disable-next-line no-console
+        console.error(`[give-up] ${sessionId} turn-1 MANAGER kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty}) — this was a LATE confirmation, not a dropped kickoff; suppressing manager_kickoff_dropped`);
+        return;
+      }
       this.handleManagerKickoffDropped(sessionId, msgId, rootMsgId);
       return;
     }
@@ -11506,8 +11518,7 @@ export class SessionService {
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget with no parent session to notify (role=${w?.role ?? "none"}) — the dispatch was DROPPED; only the generic idle-watchdog can still catch this`);
       return;
     }
-    const transcriptNonEmpty = !!w.engineSessionId && readTranscript(w.cwd, w.engineSessionId, w.harness).length > 0;
-    if (this.pty.hasFirstTurnStarted(sessionId) || transcriptNonEmpty) {
+    if (lateConfirmation) {
       // eslint-disable-next-line no-console
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty}) — this was a LATE confirmation, not a dropped kickoff; suppressing the worker-spawn-broken notice`);
       return;
@@ -11942,13 +11953,16 @@ export class SessionService {
   }
 
   /**
-   * Card e2a3c613 — a parentless (manager/platform-lead) session's own issue has no parentSessionId to
-   * nudge, so this mirrors `platformEscalate`'s own pattern instead of an ordinary parent-nudge: best-
-   * effort live-nudge a live Platform Lead (suppressed if the Lead is itself live-and-pre-boot on the
-   * same episode family — the identical hazard 850eb55c guards for a manager parent), AND file a durable
-   * task onto whichever platform-tier home is actually live (`resolveLiveLeadHome`, card 1731ab5b) so an
-   * offline/not-yet-live Lead still sees it later — the owner-attention path always fires too regardless
-   * (see each caller), so an absent home is never a silent drop.
+   * Card e2a3c613 — a parentless MANAGER's own issue has no parentSessionId to nudge, so this mirrors
+   * `platformEscalate`'s own pattern instead of an ordinary parent-nudge: best-effort live-nudge a live
+   * Platform Lead (suppressed if the Lead is itself live-and-pre-boot on the same episode family — the
+   * identical hazard 850eb55c guards for a manager parent), AND file a durable task onto whichever
+   * platform-tier home is actually live (`resolveLiveLeadHome`, card 1731ab5b) so an offline/not-yet-live
+   * Lead still sees it later — the owner-attention path always fires too regardless (see each caller), so
+   * an absent home is never a silent drop. Both current callers gate on `role === "manager"` at their own
+   * call site (`handleClaudeBootDialogStuck`, `handleKickoffGiveUpExhausted`'s manager carve-out) — the
+   * Platform Lead's own equivalent gap (it has no parent to notify either, but can't live-nudge itself)
+   * is a separate, not-yet-built card (`5c2f8108`), not covered by either caller today.
    *
    * @decision ab3c965d — do not add a second near-duplicate of this helper for a new parentless-manager
    * episode kind; add a `dedupEventKind`-parameterized thin caller instead (see `notifyLeadOfStuckManager`/
@@ -12058,8 +12072,11 @@ export class SessionService {
    * (`parentNudged:false`, so `companion/attention-push.ts`'s `classify()` surfaces it to the owner-
    * attention surfaces unconditionally) PLUS a best-effort Platform-Lead escalation via
    * `notifyLeadOfDroppedManagerKickoff` — never either/or. Deliberately NO self-nudge into this session:
-   * its first turn never started (the caller already confirmed this is a genuine drop, not a late
-   * confirmation), so there is nothing live to read a notice typed into its own composer.
+   * its first turn never started, so there is nothing live to read a notice typed into its own composer.
+   *
+   * @decision ab3c965d (round 2) — do not call this method without the caller first verifying
+   * `lateConfirmation` is false; this method has no way to check that itself, and round 1 omitted the
+   * check for the manager branch entirely.
    */
   private handleManagerKickoffDropped(sessionId: string, msgId: string, rootMsgId: string): void {
     const s = this.db.getSession(sessionId);

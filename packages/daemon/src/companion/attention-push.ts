@@ -468,6 +468,12 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       line = `${projectName}: ${roleLabel} never reached SessionStart — possible blocking CLI dialog (${sigName}) — ${who}`;
       break;
     }
+    // Code Review 5f95e7a1: named explicitly, same discipline as claude_boot_dialog_stuck immediately
+    // above — the generic default's bare `${alertClass} — ${m8}` gave no indication this is specifically
+    // a NEVER-CONFIRMED kickoff, not a boot-dialog hang or any other escalation shape.
+    case "manager_kickoff_dropped":
+      line = `${projectName}: manager's turn-1 kickoff was never confirmed delivered — it may have booted with no brief — ${who}`;
+      break;
     default:
       line = `${projectName}: ${alertClass} — ${m8}`;
   }
