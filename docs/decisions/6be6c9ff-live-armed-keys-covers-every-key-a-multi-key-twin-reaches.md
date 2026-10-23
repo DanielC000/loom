@@ -64,9 +64,17 @@ alternative: robust against this file's 20+ `replaceEntryEverywhere` sites leavi
 
 - Do not union a replaced/discarded object's own `armedKeys` forward onto a replacement — derive from
   LIVE occupancy instead. See `@decision 8db913e2`'s own "Do not" for the regression this avoids.
-- Do not use `liveArmedKeys`'s raw output as `liftedKeys` — `enterMergeQuarantine`'s own `liftedKeys`
-  stays `ownedKeysIncluding`; over-including there is FAIL-OPEN (`8db913e2`, Follow-up `78fccd3f`).
-- Do not assume this card closes the production-side gap — see residual card `c52b290e`.
+- Do not use `liveArmedKeys`'s raw output as `liftedKeys` directly, unfiltered — `enterMergeQuarantine`'s
+  own `liftedKeys` (`ownedKeysIncluding`) now ALSO derives from `liveArmedKeys` (card `c52b290e` widened
+  it, after re-deriving the formula does not reopen the FAIL-OPEN `78fccd3f` guards against), but always
+  re-filtered through `entryStillOwnsKey` — never the raw, unfiltered union.
+- **Sites 1-4 of this card's own audit are closed by `c52b290e`** — `confirmedDurableBackingElsewhere`,
+  `ownedKeysIncluding`, and `clearMergeQuarantineByRecordedPath`'s `activeLiftedKeys` are fixed there;
+  `clearMergeQuarantineByKey`'s `tiedViaKeyOrOrphanRef` is closed non-reproducible there, not widened. The
+  ROOT CAUSE (`protectOccupantContentBeforeDelete`'s own re-point never stamps `armedKeys`) and the
+  remaining `armedKeys`-only consumers `c52b290e` did not touch are **NOT** closed — tracked on card
+  `1fc3a561` ("fix(git): widen the remaining armedKeys-only quarantine clear consumers to live-armed
+  keys"). See `c52b290e`'s own decision record for the Sites-1-4 audit, fixes, and the equivalence proof.
 
 ## Verification
 
