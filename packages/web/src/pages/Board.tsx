@@ -19,7 +19,7 @@ import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
 import { taskMatchesSearch } from "../lib/taskFilter";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
-import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
+import { PRIORITY_META, PriorityChip, prio, byPriorityThenPosition } from "../components/priority";
 import { errorText } from "../lib/loopbackCredential";
 import { submitDraft } from "../lib/draftSubmit";
 
@@ -32,9 +32,8 @@ type TaskEditPatch = {
   title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean;
   repoKey?: string | null; parentId?: string | null; baseVersion?: number;
 };
-// Sort a column's cards high→low priority (p0 first), then by position — strings p0<p1<p2<p3 sort right.
-const byPriorityThenPosition = (a: BoardTask, b: BoardTask) =>
-  prio(a) === prio(b) ? a.position - b.position : (prio(a) < prio(b) ? -1 : 1);
+// A live lane's card order now lives beside `prio` in components/priority, because the Atlas tree's
+// own card rows read the SAME order (lib/atlasHome.ts's `openCardsForTree`, card 3b563642).
 // Done columns sort most-recently-done first. `updatedAt` (ISO string → lexical compare is chronological)
 // is the stand-in for completion time; tie-break on position then id so equal-timestamp cards never
 // reshuffle on the 3s refetch (deterministic, no flicker).

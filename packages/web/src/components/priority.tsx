@@ -18,6 +18,18 @@ export const PRIORITY_META: Record<TaskPriority, { tone: Tone; label: string; sh
 // card 4fa2c146 — satisfies it too, same as Task.
 export const prio = (t: Pick<Task, "priority">): TaskPriority => t.priority ?? "p2";
 
+// A LIVE lane's card order: high→low priority (p0 first), then by position — the strings p0<p1<p2<p3
+// sort right, so the comparison needs no lookup table. Lives here, beside `prio`, because it is now
+// read by two surfaces: pages/Board.tsx's own lanes and the Atlas tree's card rows
+// (lib/atlasHome.ts's `openCardsForTree`). A second copy would let the rail and the board disagree
+// about which open card comes first, which is exactly the re-find the tree exists to save.
+// (A DONE lane sorts most-recently-done first instead — that rule stays in Board.tsx, which is the
+// only surface that renders one.)
+export const byPriorityThenPosition = (
+  a: Pick<Task, "priority"> & { position: number },
+  b: Pick<Task, "priority"> & { position: number },
+) => (prio(a) === prio(b) ? a.position - b.position : (prio(a) < prio(b) ? -1 : 1));
+
 // Small colored priority chip shown on a card face. p0/p1 are filled (pop); p2/p3 are outlined
 // and understated so a board full of Normal cards stays calm.
 export function PriorityChip({ priority }: { priority: TaskPriority }) {

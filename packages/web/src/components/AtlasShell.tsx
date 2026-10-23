@@ -201,10 +201,21 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // for the lifetime of the page.
   const [nodeHeadSlot, setNodeHeadSlot] = useState<HTMLElement | null>(null);
   // A detail address hangs off a REAL tree node, so that node reads as the landed one even though
-  // its own path never matches. A session address has no node in the tree yet (phase 2 gives it
-  // one), so nothing is highlighted for it — marking some nearby node instead would be a lie.
+  // its own path never matches.
+  //
+  // A SESSION address now has a real node too (card 3b563642 hung live sessions in the tree), and it
+  // is the same node for both of its addresses: `/review/:workerId` IS that worker node's Diff tab,
+  // so the row it marks is the worker's own `/session/<id>` row. On `/session/:id` the row's NavLink
+  // already matches by path and this is simply redundant; on `/review/:workerId` it is the only
+  // thing that stops the tree being the one part of the frame disagreeing about where you are.
+  // A session with no row — one that has exited, which `/review/:workerId` deliberately still
+  // renders — marks nothing, which stays the honest answer.
   const paramAtlas = paramPage?.page.atlas;
-  const activeNodeTo = paramAtlas?.kind === "detail" ? paramAtlas.under : undefined;
+  const activeNodeTo = paramAtlas?.kind === "detail"
+    ? paramAtlas.under
+    : paramAtlas?.kind === "session" && paramPage?.id
+      ? `/session/${paramPage.id}`
+      : undefined;
   // The peripheral half of the fleet-controls chip (card 7b893d54): a paused fleet changes what every
   // other node's emptiness MEANS, so the frame itself carries a marker rather than leaving the state to
   // a chip the reader has to look at. Same shared `["orchStatus"]` entry the chip reads — one

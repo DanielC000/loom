@@ -339,20 +339,30 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     // or runs one crumb BELOW it — a node tab (/review → Diff) or a detail row (/question → the
     // request). So each address declares how many crumbs hang below its node and the heading is
     // DERIVED from the trail, never written out a second time where the two could drift apart.
-    // `node` is the tree node this address hangs off, when one exists. A DETAIL address sits under a
-    // real nav destination, so the tree must mark it as landed — NavLink's own isActive cannot, since
-    // /question/:id is not a path under /inbox. A SESSION address has no node in the tree until phase
-    // 2 builds one, so `null` here is the claim that NOTHING is marked, which is a real assertion:
-    // marking the nearest-looking node instead would be a lie the tree told about where you are.
+    // `node` is the tree node this address hangs off, when one exists — named by its destination, so
+    // the testid is `atlas-node-<to>`. A DETAIL address sits under a real nav destination, so the
+    // tree must mark it as landed — NavLink's own isActive cannot, since /question/:id is not a path
+    // under /inbox. `null` is the claim that NOTHING is marked, which is a real assertion: marking
+    // the nearest-looking node instead would be a lie the tree told about where you are.
+    //
+    // `nodeTestId` is the same claim for a node that is not a destination at all. Card 3b563642 hung
+    // every LIVE session in the tree, so a SESSION address now has a real node — its own entity row,
+    // addressed by session id rather than by path. BOTH session addresses mark the SAME row: a
+    // worker's `/review/:workerId` IS that worker node's Diff tab, which is why AtlasShell resolves
+    // its `activeNodeTo` to `/session/<workerId>` (NavLink's own isActive cannot see that, exactly as
+    // it cannot for a detail row). An EXITED session still has no row — /review/:workerId renders one
+    // deliberately — and `null` stays the honest answer there.
     //
     // Card 525c8ad9 (P2-7) moved /session/:id from `belowNode: 0` to 1: the session node has TABS now,
     // and a session address always ends on the active one — which is what makes /review/:workerId's
     // own "Diff" crumb read as that same node's tab rather than as a different kind of address.
     //
-    // `hatch` was card 0d0c6cee's CONTRAST CASE for `node: null`: all three addresses claim "nothing
-    // is marked", and three zeros from one locator is a claim no broken instrument could fail, so the
-    // DETAIL address — whose destination had moved rather than vanished — had to still carry the
-    // hatch's own weaker `is-here` mark.
+    // `hatch` was card 0d0c6cee's CONTRAST CASE for `node: null`: all three addresses claimed
+    // "nothing is marked", and three zeros from one locator is a claim no broken instrument could
+    // fail, so the DETAIL address — whose destination had moved rather than vanished — had to still
+    // carry the hatch's own weaker `is-here` mark. Card 3b563642 made the contrast structural as
+    // well: the two session addresses now assert a ONE, from the same locator, in the same walk, so
+    // the remaining zero is read off an instrument shown firing rather than off three silences.
     //
     // Card 41eab0eb made /inbox a Workspace node TAB, so there is no hatch entry left to mark. The
     // contrast case is kept, and strengthened, by moving it to the tab: a tab that is NOT selected is
@@ -361,14 +371,22 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     // Workspace node's Inbox tab exists and reads unselected here", which a broken locator fails.
     // Asserted on the same page at the same moment, with no extra navigation, which would pollute the
     // console-error contrast at the bottom of this test.
-    const expected: Record<string, { trail: string[]; belowNode: number; node: string | null; hatch?: string }> = {
-      [reviewUrl]: { trail: ["Workspace", mgr.projectName, workerNode, "Diff"], belowNode: 1, node: null },
+    const expected: Record<string, {
+      trail: string[]; belowNode: number; node: string | null; nodeTestId?: string; hatch?: string;
+    }> = {
+      [reviewUrl]: {
+        trail: ["Workspace", mgr.projectName, workerNode, "Diff"], belowNode: 1,
+        node: null, nodeTestId: `atlas-session-${worker.sessionId}`,
+      },
       // `node: null` since card 0d0c6cee: /inbox is no longer a tree ROW, so there is nothing for
       // the tree to mark. The frame still names the destination (the crumb + heading above come
       // from the same NAV_PAGES row they always did) — only the tree's own highlight is gone, and
       // highlighting a nearby row instead would be a lie about where you are.
       [questionUrl]: { trail: ["Workspace", inboxLabel, questionTitle], belowNode: 1, node: null, hatch: "inbox" },
-      [sessionUrl]: { trail: ["Workspace", mgr.projectName, plainNode, "Terminal"], belowNode: 1, node: null },
+      [sessionUrl]: {
+        trail: ["Workspace", mgr.projectName, plainNode, "Terminal"], belowNode: 1,
+        node: null, nodeTestId: `atlas-session-${plain.sessionId}`,
+      },
     };
     const expectationFor = (url: string) => {
       const e = expected[url];
@@ -396,9 +414,12 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
       await expect(nodeHeading(page)).toHaveText(headingOf(url) ?? "");
 
       // The tree agrees with the crumbs about which node this address belongs to — or marks none.
-      const marked = expectationFor(url).node;
-      await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(marked ? 1 : 0);
-      if (marked) await expect(page.getByTestId(`atlas-node-${marked}`)).toHaveClass(/is-active/);
+      // A destination node is named by its path, an ENTITY node (a session row, card 3b563642) by
+      // its own testid; either way exactly one element may read as landed, and it must be that one.
+      const { node, nodeTestId } = expectationFor(url);
+      const markedTestId = nodeTestId ?? (node ? `atlas-node-${node}` : null);
+      await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(markedTestId ? 1 : 0);
+      if (markedTestId) await expect(page.getByTestId(markedTestId)).toHaveClass(/is-active/);
       // The contrast case for that zero — see `hatch` in the declaration above. These three
       // addresses render inside the Atlas frame but NOT on the Workspace node, so its tab row is not
       // on the page at all, and neither is the escape hatch's own mark. Both collectors have already

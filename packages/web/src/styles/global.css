@@ -1329,6 +1329,73 @@ button.loom-atlas-node.is-branch.is-open {
   outline-offset: -1px;
 }
 
+/* ── The ENTITY tier (card 3b563642) ──────────────────────────────────────────────────
+   A row whose link is an <a> — a manager with workers, the Board with open cards — draws
+   its twist OVER the anchor's own reserved column rather than in front of it. The anchor
+   then stays structurally identical to a childless row, which is what keeps the whole
+   tier on ONE label origin and leaves the 2px phosphor landed edge at the same x as
+   every sibling's. (The project BRANCH row above does the opposite, and correctly: it is
+   a <button> whose edge belongs at the rail's own left edge.)
+   `left: 12px` = the anchor's 2px left border + its 10px padding, i.e. exactly where its
+   `.loom-atlas-twist` span begins; `top: 3px` centres the 22px button in the 28px row. */
+.loom-atlas-noderow.is-twistrow {
+  position: relative;
+}
+/* `width` is restated because taking the button out of flow also takes it out of FLEX,
+   where `flex: 0 0 12px` was what sized it: MEASURED at 5.3px without this line, a hit
+   area a third of the project row's own twist for the identical control. */
+.loom-atlas-noderow.is-twistrow > .loom-atlas-twistbtn {
+  position: absolute;
+  top: 3px;
+  left: 12px;
+  width: 12px;
+  z-index: 1;
+}
+
+/* An entity's status, where a destination carries its nav glyph. Sized and placed to the
+   same 14px icon box so the two kinds of row share one column. A SESSION dot answers
+   "what is this doing" in the app's existing three states — the amber/phosphor/muted the
+   node head's own StatusPill and the project row's live dot already use. A CARD dot
+   answers "how urgent is this" instead, in the four PRIORITY_META tones, hollow rather
+   than filled so a board of Normal cards stays as calm in the rail as it does on the
+   board. No new colour value enters the system either way. */
+.loom-atlas-entdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 7px;
+  background: var(--loom-text-muted);
+}
+.loom-atlas-entdot.is-live {
+  background: var(--loom-phosphor);
+  box-shadow: 0 0 6px var(--loom-phosphor);
+}
+.loom-atlas-entdot.is-busy {
+  background: var(--loom-amber);
+  box-shadow: 0 0 6px var(--loom-amber);
+}
+.loom-atlas-entdot.is-card {
+  width: 6px;
+  height: 6px;
+  background: transparent;
+  border: 1.5px solid var(--loom-text-muted);
+}
+.loom-atlas-entdot.is-card.is-p0 {
+  border-color: var(--loom-red);
+}
+.loom-atlas-entdot.is-card.is-p1 {
+  border-color: var(--loom-amber);
+}
+.loom-atlas-entdot.is-card.is-p2 {
+  border-color: var(--loom-cyan);
+}
+
+/* The bound the card tier admits to. Muted and italic so it reads as a note about the
+   list rather than as another card in it. */
+.loom-atlas-cardmore {
+  color: var(--loom-text-muted);
+  font-style: italic;
+}
+
 /* ── Row metrics (card 0d0c6cee) ──────────────────────────────────────────────────────
    The mockup's `.node-meta` and `.node-badge`: every row answers "how much is in here"
    without being opened. Two treatments, because they carry two different claims — a
