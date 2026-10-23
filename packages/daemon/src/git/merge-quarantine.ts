@@ -2431,6 +2431,27 @@ function excludeLiftedResolvedKeys(keys: string[] | undefined, final: string, li
   return filtered.length > 0 ? filtered : undefined;
 }
 
+/** Disclosure-safe, logging-ONLY warning for `protectOccupantContentBeforeDelete`'s own
+ *  `atFinalBasenameIdx` re-point (both the both-indices branch and the atFinalBasenameIdx-only branch) —
+ *  never a fix, never a behavior change. `c9114934` forbids unioning `oldAtFinalBasename`'s own tokens
+ *  into `toWrite`/`written.entry` (its token set can be contaminated by a boot-time `armQuarantineKey`
+ *  cross-identity union that never stamps `contributorRepoPaths`/`provenanceUnknown` — see
+ *  docs/decisions/f00e9de8-*.md for why no safe discriminator exists today), so a re-point can silently
+ *  drop an in-memory-only token this twin genuinely owned. This logs the COUNT and the twin's own
+ *  disclosure-safe identity (`repoPath`, `armedKeys`) — NEVER a token value — so the loss is audited
+ *  instead of silent. No-op (and logs nothing) when nothing is actually dropped.
+ *
+ * @decision f00e9de8 — accepted residual; see the decision record for why a union fix is unsafe without
+ * card `398f476c`'s own token-level identity model. */
+function logProtectRepointDroppedTokens(oldAtFinalBasename: MergeQuarantineEntry, writtenEntry: MergeQuarantineEntry): void {
+  const keptTokens = new Set(writtenEntry.tokens);
+  const droppedCount = oldAtFinalBasename.tokens.filter((t) => !keptTokens.has(t)).length;
+  if (droppedCount === 0) return;
+  const keys = oldAtFinalBasename.armedKeys?.length ? oldAtFinalBasename.armedKeys.join(", ") : "(no armedKeys recorded)";
+  // eslint-disable-next-line no-console
+  console.warn(`[merge-quarantine] protect-repoint-dropped-tokens — re-pointing an armed twin for '${oldAtFinalBasename.repoPath}' (armed at key(s): ${keys}) during protectOccupantContentBeforeDelete dropped ${droppedCount} in-memory-only token(s) never reflected in the durable copy (c9114934 forbids unioning them in; never logging token values).`);
+}
+
 /** Shared tail for both protect-before-delete wrappers above — durably copies `final`'s own content
  *  aside (under `occupantRepoPath`'s own pending-divert filename) before the caller's own unconditional
  *  unlink proceeds. `describeClearer` is used only for the failure log's own wording.
@@ -2606,12 +2627,18 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // untouched (no union, no re-point, no splice) and falls through to the independent-mint `else` below.
   if (atFilenameSameIdentity) {
     replaceEntryEverywhere(activeQuarantines, oldAtFilename!, written.entry);
-    if (atFinalBasenameSameIdentity) replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, written.entry);
+    if (atFinalBasenameSameIdentity) {
+      // @decision f00e9de8 — log (never union) whatever in-memory-only tokens this re-point drops.
+      logProtectRepointDroppedTokens(oldAtFinalBasename!, written.entry);
+      replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, written.entry);
+    }
     pendingUnresolvedQuarantines[atFilenameIdx] = { entry: written.entry, sourceFile: written.filename };
     if (atFinalBasenameSameIdentity) pendingUnresolvedQuarantines.splice(atFinalBasenameIdx, 1);
   } else if (atFinalBasenameSameIdentity) {
     // @decision 8db913e2 (Follow-up 37452ddd) — re-point for the REPLACEMENT only, never as a union
     // source — `c9114934` still forbids unioning `atFinalBasenameIdx`'s own tokens into `toWrite`.
+    // @decision f00e9de8 — log (never union) whatever in-memory-only tokens this re-point drops.
+    logProtectRepointDroppedTokens(oldAtFinalBasename!, written.entry);
     replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, written.entry);
     pendingUnresolvedQuarantines[atFinalBasenameIdx] = { entry: written.entry, sourceFile: written.filename };
   } else {

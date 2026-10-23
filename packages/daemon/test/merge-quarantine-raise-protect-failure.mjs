@@ -4206,6 +4206,233 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card f00e9de8 ("f00e9de8-dropped-tokens-finalbasename-only") -- accepted residual, LOGGING-ONLY fix.
+  // c9114934 forbids unioning atFinalBasenameIdx's own tokens into toWrite (see docs/decisions/f00e9de8-
+  // *.md for why that is still correct even with cd5a3cf9's identity gate) -- so when the twin genuinely
+  // holds an in-memory-only token never reflected in its own stale backing file, the atFinalBasenameIdx-
+  // only re-point silently drops it. Setup: the SAME single-file twin shape as `37452ddd-twin-repoint-
+  // finalbasename`, but D raises a SECOND time BEFORE R raises (not after) -- D's existing-branch raise
+  // durably rewrites D's OWN armed-key latch (hash(Ks).json, a NEW file), never <Krhash>.json (D's only
+  // OTHER physical reference, and the exact file `final` will read when R later raises) -- so by the time
+  // R raises, the twin's in-memory tokens have genuinely outrun that one stale file, with no injected
+  // failure at all (Q2 of the decision record's own mechanism).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("f00e9de8-fb-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("f00e9de8-fb-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-f00e9de8-fb-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const KrFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(KrFinalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "f00e9de8-dropped-tokens-finalbasename-only: D degraded, filed at R's own name but resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["f00e9de8-fb-tok-x"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  check("(f00e9de8-dropped-tokens-finalbasename-only precondition) the TWIN exists: D armed at S's own key, pending ref at R's own final basename",
+    (() => {
+      const direct = activeMergeQuarantineFor(s);
+      return !!direct && direct.repoPath === d && new Set(direct.tokens).has("f00e9de8-fb-tok-x");
+    })());
+
+  // D raises AGAIN, BEFORE R -- an unresolvable D's own raise routes through mergeTokenIntoPendingEntries
+  // (enterMergeQuarantine's own `!verified` branch), which merges the fresh token into memory
+  // UNCONDITIONALLY (replaceEntryEverywhere runs before the write attempt) but then tries to durably
+  // rewrite the twin's OWN pending sourceFile, which IS <Krhash>.json here. Inject a write failure on
+  // THAT exact file so the in-memory merge still succeeds (e1cb7d33: a raise must persist) while the
+  // durable copy stays stale -- the genuine "memory outran disk" shape this card's own decision record
+  // (Q2) describes, with no OTHER file touched.
+  const injectFB = injectOpenSyncFailureForPrefix(KrFinalPath);
+  let dExtraTokenFB;
+  try {
+    dExtraTokenFB = enterMergeQuarantine(d, "d-extra-branch", "f00e9de8-dropped-tokens-finalbasename-only: D raises again BEFORE R, adding an in-memory-only token never durably written to <Krhash>.json");
+  } finally {
+    injectFB.restore();
+  }
+  check("(f00e9de8-dropped-tokens-finalbasename-only precondition) the durable rewrite was actually attempted (and injected to fail)", injectFB.count() >= 1);
+  check("(f00e9de8-dropped-tokens-finalbasename-only precondition) the extra token is live in memory",
+    new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFB));
+  check("*** SETUP PROOF (f00e9de8-dropped-tokens-finalbasename-only) *** <Krhash>.json itself is STILL STALE -- it never carries the extra token, only X's original",
+    (() => {
+      const onDisk = JSON.parse(fs.readFileSync(KrFinalPath, "utf8"));
+      return new Set(onDisk.tokens).has("f00e9de8-fb-tok-x") && !new Set(onDisk.tokens).has(dExtraTokenFB);
+    })());
+
+  const warningsFB = [];
+  const realWarnFB = console.warn;
+  console.warn = (...args) => { warningsFB.push(args.join(" ")); realWarnFB(...args); };
+  let rTokenFB;
+  try {
+    rTokenFB = enterMergeQuarantine(r, "r-branch", "f00e9de8-dropped-tokens-finalbasename-only: r raises, triggers protect's atFinalBasenameIdx-only branch while the twin holds an in-memory-only token");
+  } finally {
+    console.warn = realWarnFB;
+  }
+  check("(f00e9de8-dropped-tokens-finalbasename-only) R's own token lands directly at its own final",
+    (contentIfExists(KrFinalPath) ?? "").includes(rTokenFB));
+  check("*** THE WARNING (f00e9de8-dropped-tokens-finalbasename-only) *** fires exactly once, naming a dropped count of 1",
+    warningsFB.length === 1 && warningsFB[0].includes("protect-repoint-dropped-tokens") && warningsFB[0].includes("dropped 1 in-memory-only token"));
+  check("*** THE WARNING (f00e9de8-dropped-tokens-finalbasename-only) *** NEVER names the dropped token's own value",
+    !warningsFB.some((w) => w.includes(dExtraTokenFB)));
+  check("*** ACCEPTED RESIDUAL (f00e9de8-dropped-tokens-finalbasename-only) *** the extra in-memory-only token IS genuinely dropped by the re-point -- this documents the residual, not a regression",
+    !new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFB));
+  check("(f00e9de8-dropped-tokens-finalbasename-only) X's own original token and R's own token both survive",
+    (() => {
+      const t = new Set(activeMergeQuarantineFor(s)?.tokens ?? []);
+      return t.has("f00e9de8-fb-tok-x") && new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? [])).has(rTokenFB);
+    })());
+
+  clearMergeQuarantineByToken(d, "f00e9de8-fb-tok-x");
+  clearMergeQuarantineByToken(r, rTokenFB);
+  clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card f00e9de8 ("f00e9de8-dropped-tokens-both-indices") -- the SAME logging-only fix, at the
+  // both-indices branch (atFilenameIdx AND atFinalBasenameIdx both match, two DIFFERENT objects -- the
+  // SAME shape as `37452ddd-branch1-dual-twin`: X armed at S via <Krhash>.json, Y an INDEPENDENT
+  // pending-divert file for D with no resolvedKey, never armed). Both files are written to disk BEFORE
+  // the ONE boot call, exactly like `37452ddd-branch1-dual-twin`'s own already-proven construction (a
+  // raise of D's own identity AFTER boot would instead merge X and Y into one object via
+  // `mergeTokenIntoPendingEntries`, which matches EVERY pending index sharing D's identity -- confirmed
+  // empirically while building this scenario; not the shape under test here). X's own extra in-memory-
+  // only token is then added by directly mutating the twin's own live, shared object (`activeMergeQuarantineFor`
+  // returns the live reference, not a copy) -- the cheapest, most reliable way to put the twin in the
+  // "memory outran disk" state this test needs without going through a raise that could re-shape the
+  // fixture; the finalbasename-only scenario above already covers the realistic write-FAILURE trigger
+  // for this same divergence, so this scenario's own job is only to prove the both-indices branch logs
+  // identically. Y is untouched and still correctly unions into `toWrite` via atFilenameIdx (c9114934
+  // permits that union; only atFinalBasenameIdx's own entry -- X -- is forbidden as a union source).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("f00e9de8-bi-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("f00e9de8-bi-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-f00e9de8-bi-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const KrFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(KrFinalPath, JSON.stringify({
+    repoPath: d, branch: "x-branch", reason: "f00e9de8-dropped-tokens-both-indices: object X, filed at R's own name, resolvedKey=S's key -- ARMED",
+    enteredAt: Date.now(), tokens: ["f00e9de8-bi-tok-x"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+  const pendingPathBI = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(d));
+  fs.writeFileSync(pendingPathBI, JSON.stringify({
+    repoPath: d, branch: "y-branch", reason: "f00e9de8-dropped-tokens-both-indices: object Y, D's own pending-divert file, NO resolvedKey -- NEVER armed",
+    enteredAt: Date.now() - 100000, tokens: ["f00e9de8-bi-tok-y"],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  check("(f00e9de8-dropped-tokens-both-indices precondition) X is armed at S's own key",
+    (() => {
+      const direct = activeMergeQuarantineFor(s);
+      return !!direct && direct.repoPath === d && new Set(direct.tokens).has("f00e9de8-bi-tok-x");
+    })());
+  check("(f00e9de8-dropped-tokens-both-indices precondition) X and Y are TWO SEPARATE objects for D right now",
+    listActiveMergeQuarantines().filter((e) => e.repoPath === d).length === 2);
+
+  // Directly mutate X's own live, shared twin object -- an in-memory-only token never reflected in
+  // <Krhash>.json's own on-disk bytes, with no raise and no re-scan involved.
+  const dExtraTokenBI = "f00e9de8-bi-tok-extra-inmemory";
+  activeMergeQuarantineFor(s).tokens.push(dExtraTokenBI);
+  check("(f00e9de8-dropped-tokens-both-indices precondition) the extra token is live in memory, and X/Y are STILL two separate objects",
+    new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenBI)
+    && listActiveMergeQuarantines().filter((e) => e.repoPath === d).length === 2);
+  check("*** SETUP PROOF (f00e9de8-dropped-tokens-both-indices) *** <Krhash>.json itself is STILL STALE -- it never carries the extra token",
+    (() => {
+      const onDisk = JSON.parse(fs.readFileSync(KrFinalPath, "utf8"));
+      return new Set(onDisk.tokens).has("f00e9de8-bi-tok-x") && !new Set(onDisk.tokens).has(dExtraTokenBI);
+    })());
+
+  const warningsBI = [];
+  const realWarnBI = console.warn;
+  console.warn = (...args) => { warningsBI.push(args.join(" ")); realWarnBI(...args); };
+  let rTokenBI;
+  try {
+    rTokenBI = enterMergeQuarantine(r, "r-branch", "f00e9de8-dropped-tokens-both-indices: r raises, triggers protect's both-indices branch while X holds an in-memory-only token");
+  } finally {
+    console.warn = realWarnBI;
+  }
+  check("(f00e9de8-dropped-tokens-both-indices) R's own token lands directly at its own final",
+    (contentIfExists(KrFinalPath) ?? "").includes(rTokenBI));
+  check("*** THE WARNING (f00e9de8-dropped-tokens-both-indices) *** fires exactly once, naming a dropped count of 1",
+    warningsBI.length === 1 && warningsBI[0].includes("protect-repoint-dropped-tokens") && warningsBI[0].includes("dropped 1 in-memory-only token"));
+  check("*** THE WARNING (f00e9de8-dropped-tokens-both-indices) *** NEVER names the dropped token's own value",
+    !warningsBI.some((w) => w.includes(dExtraTokenBI)));
+  check("*** ACCEPTED RESIDUAL (f00e9de8-dropped-tokens-both-indices) *** the extra in-memory-only token IS genuinely dropped by the re-point -- this documents the residual, not a regression",
+    !new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenBI));
+  check("(f00e9de8-dropped-tokens-both-indices) X's original token AND Y's own token (unioned via atFilenameIdx, which c9114934 permits) both survive",
+    (() => {
+      const t = new Set(activeMergeQuarantineFor(s)?.tokens ?? []);
+      return t.has("f00e9de8-bi-tok-x") && t.has("f00e9de8-bi-tok-y");
+    })());
+  check("*** THE FIX, UNCHANGED (f00e9de8-dropped-tokens-both-indices) *** exactly ONE D object exists -- the pre-existing 37452ddd re-point/splice behavior is untouched by this card's own logging-only change",
+    listActiveMergeQuarantines().filter((e) => e.repoPath === d).length === 1);
+
+  clearMergeQuarantineByToken(d, "f00e9de8-bi-tok-y");
+  clearMergeQuarantineByToken(r, rTokenBI);
+  clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card f00e9de8 ("f00e9de8-no-drop-no-warning") -- NEGATIVE CONTROL: the EXACT same single-file twin
+  // shape as `37452ddd-twin-repoint-finalbasename` (and this card's own finalbasename-only scenario
+  // above), but WITHOUT the extra pre-raise -- D never raises again before R does, so nothing is dropped
+  // by the re-point (toPersist's own disk read already IS the twin's complete, undiverged token set).
+  // Asserts the warning NEVER fires in this case.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("f00e9de8-ctrl-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("f00e9de8-ctrl-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-f00e9de8-ctrl-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const KrFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(KrFinalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "f00e9de8-no-drop-no-warning: D degraded, filed at R's own name but resolvedKey=S's key -- NO second raise before R",
+    enteredAt: Date.now(), tokens: ["f00e9de8-ctrl-tok-x"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  check("(f00e9de8-no-drop-no-warning precondition) the TWIN exists: D armed at S's own key",
+    (() => {
+      const direct = activeMergeQuarantineFor(s);
+      return !!direct && direct.repoPath === d && new Set(direct.tokens).has("f00e9de8-ctrl-tok-x");
+    })());
+
+  const warningsCtrl = [];
+  const realWarnCtrl = console.warn;
+  console.warn = (...args) => { warningsCtrl.push(args.join(" ")); realWarnCtrl(...args); };
+  let rTokenCtrl;
+  try {
+    rTokenCtrl = enterMergeQuarantine(r, "r-branch", "f00e9de8-no-drop-no-warning: r raises, triggers protect's atFinalBasenameIdx-only branch -- the twin holds NOTHING beyond what final's own disk bytes already carry");
+  } finally {
+    console.warn = realWarnCtrl;
+  }
+  check("(f00e9de8-no-drop-no-warning) R's own token lands directly at its own final",
+    (contentIfExists(KrFinalPath) ?? "").includes(rTokenCtrl));
+  check("*** NEGATIVE CONTROL (f00e9de8-no-drop-no-warning) *** the warning does NOT fire when nothing is actually dropped",
+    warningsCtrl.length === 0);
+  check("(f00e9de8-no-drop-no-warning) D's own token and R's own token both survive, in-process",
+    (() => {
+      const t = new Set(activeMergeQuarantineFor(s)?.tokens ?? []);
+      return t.has("f00e9de8-ctrl-tok-x") && new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? [])).has(rTokenCtrl);
+    })());
+
+  clearMergeQuarantineByToken(d, "f00e9de8-ctrl-tok-x");
+  clearMergeQuarantineByToken(r, rTokenCtrl);
+  clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // PROBE C — Code Review of 7282d183 (card 4b06875f), Finding 2: readPendingDivertFileAt's own field
   // whitelist (merge-quarantine.ts ~2086-2103) never reads `resolvedKey` back off an on-disk pending-
   // divert file, and unionQuarantineEntries's own `{...older}` spread (~608-627) lets whichever side is
