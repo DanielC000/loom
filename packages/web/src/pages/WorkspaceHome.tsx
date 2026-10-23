@@ -12,7 +12,7 @@ import { AttentionRow, EventRow } from "../components/fleet";
 import { Badge, Button, Dot, Panel, StatusPill } from "../components/ui";
 import {
   BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs,
-  PlanUsageDetail, relativeResets, type KpiItem,
+  nodeTabShowsKpiStrip, PlanUsageDetail, relativeResets, type KpiItem,
 } from "../components/atlasHome";
 import { FleetControlsBar } from "../components/fleetControls";
 import { CompactMergeAction } from "../components/reviewQueue";
@@ -252,7 +252,7 @@ export default function WorkspaceHome() {
           belongs to whichever re-homed page is showing, and carrying it onto a sibling tab would hand
           one guest's sub-tab value to another. */}
       <NodeTabs tabs={tabs} active={tab} hrefFor={(k) => (k === "overview" ? "/home" : `/home?tab=${k}`)}>
-        {tab === "deck" && <KpiStrip items={kpis} />}
+        {nodeTabShowsKpiStrip(tab) && <KpiStrip items={kpis} />}
       </NodeTabs>
 
       <RehomedTabPanels active={tab} />

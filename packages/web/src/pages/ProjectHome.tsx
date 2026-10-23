@@ -20,7 +20,7 @@ import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
   BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar, MeterRow, NodeTabs,
-  type KpiItem,
+  nodeTabShowsKpiStrip, type KpiItem,
 } from "../components/atlasHome";
 import { AgentRosterRow, RosterEmpty, WorkersDispatchedNote } from "../components/atlasAgents";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
@@ -291,7 +291,7 @@ export default function ProjectHome() {
     <HarnessMixProvider sessions={live}>
       <div className="loom-atlas-home">
         <NodeTabs tabs={tabs} active={tab} hrefFor={hrefFor}>
-          {tab === "deck" && <KpiStrip items={kpis} />}
+          {nodeTabShowsKpiStrip(tab) && <KpiStrip items={kpis} />}
         </NodeTabs>
 
         {/* Every re-homed body that has been visited, the inactive ones parked with `hidden`. Rendered

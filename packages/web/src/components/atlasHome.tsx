@@ -148,13 +148,30 @@ function KpiTile({ item, open, align, onToggle, onClose }: {
   );
 }
 
-/** The Deck tab's compact readouts — the same figures, sized to sit on the tab row beside the tabs
- *  rather than to be read first. Deliberately NOT buttons: the Overview tab owns the breakdowns. */
+/**
+ * Which of a home node's tabs carry the compact strip on their tab row. The rule is not a list of
+ * tab keys but a predicate — *every tab whose own body does not already carry the node's readout* —
+ * so a tab a later card re-homes onto a node inherits the strip without this being touched.
+ *
+ * @decision 7874e8c2 — never make this return true for `overview`: the strip and the deck are fed
+ * the same `kpis`, so a strip there renders the node's six figures twice on one screen.
+ */
+export function nodeTabShowsKpiStrip(tab: string): boolean {
+  return tab !== "overview";
+}
+
+/** The compact readouts carried on every node tab but Overview — the same figures, sized to sit on
+ *  the tab row beside the tabs rather than to be read first. Deliberately NOT buttons: the Overview
+ *  tab owns the breakdowns. */
 export function KpiStrip({ items }: { items: KpiItem[] }) {
   return (
     <div className="loom-kpistrip" data-testid="atlas-kpi-strip">
       {items.map((item) => (
-        <span key={item.key} className="loom-kpipill" title={`${item.label}${item.sub ? ` — ${typeof item.sub === "string" ? item.sub : ""}` : ""}`}>
+        // Keyed by the SAME `item.key` the deck's own tile testid is built from, so a reader can
+        // pair a pill with its tile without going through the label — which CSS upper-cases, and
+        // which `innerText` therefore returns in a different case than the source.
+        <span key={item.key} className="loom-kpipill" data-testid={`atlas-kpi-pill-${item.key}`}
+          title={`${item.label}${item.sub ? ` — ${typeof item.sub === "string" ? item.sub : ""}` : ""}`}>
           <span className="loom-kpipill-v" style={{ color: tone[item.tone ?? "phosphor"] }}>{item.value}</span>
           <span className="loom-kpipill-l">{item.label}</span>
         </span>
