@@ -1461,6 +1461,8 @@ ordinary, no-action-needed path for a project that simply hasn't landed on this 
   second, softer check for "no trust record yet" — the three authenticated writers above (a landing, this
   tool, the reset route) are the only three ways trust may ever be established; a fourth, softer one would
   reopen exactly the hole this round closes.
+  **Card `8418479f` investigated and rejected adding a fourth (the human REST `git_commit`) — see
+  `docs/decisions/8418479f-human-rest-commit-does-not-advance-trust.md`.**
 
 ### Tests (round 16)
 
