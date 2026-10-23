@@ -87,8 +87,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (MISMATCH-STILL-LOUD) is the negative control: a genuine trust mismatch (not null) on create:true still
 //   files the loud HIGH event + marker — the fix narrows the null case only, never softens the real one.
 //
-// NOT covered here (out of scope for this card, unaffected by it): `project-checkout-branch.mjs` owns the
-// full refuseIfTargetBranchUntrusted/createProjectBranch surface (case-folding, remote shadows, name
+// NOT covered here (out of scope for this card, unaffected by it): the `project-checkout-branch-*.mjs`
+// family (card 0b00aa6a — split from the former single `project-checkout-branch.mjs`) owns the full
+// refuseIfTargetBranchUntrusted/createProjectBranch surface (case-folding, remote shadows, name
 // validation, the TOCTOU races); `mainline-watch.mjs`/`mainline-watch-branch-divert.mjs` own the tripwire's
 // own classifier + branch-diverted alert behavior, both unchanged by this card.
 // Run: 1) build daemon (pnpm build), 2) node test/mainline-watch-trust-store.mjs

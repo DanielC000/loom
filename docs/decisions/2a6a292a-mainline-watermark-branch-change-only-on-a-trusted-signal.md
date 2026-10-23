@@ -1,5 +1,13 @@
 # 2a6a292a — the mainline watermark's BRANCH changes only on a trusted signal, never on an observed checkout
 
+**Card `0b00aa6a` (test-only, no behavior change):** every `project-checkout-branch.mjs` reference below is
+historical — it names where each round's scenario lived AT THE TIME. That single file grew to ~7-10 min /
+299 checks and could never fit the advisory dist-importer check's per-file run under contention, so it was
+split into the `project-checkout-branch-*.mjs` family (shared fixture kit:
+`packages/daemon/test/_project-checkout-branch-fixture.mjs`). Every scenario tag named below still exists,
+just relocated — grep the family for the `(TAG)` in question rather than opening the single file this
+record still cites.
+
 Follow-up to `4fa36502` (the mainline-move tripwire) and `b801bad0` (the batch branch pin). `checkMainlineMove`'s
 "first sight of a branch" rule used to read `!w || w.branch !== head.branch` as ONE condition: both "no
 watermark exists yet" and "a watermark exists but a different branch is checked out right now" fell through
