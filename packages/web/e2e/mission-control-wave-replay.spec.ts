@@ -13,6 +13,7 @@
 // events row (loomDaemon.seedOrchestrationEvent). One manager is archived mid-test by hitting the same seed
 // endpoint directly (archiveSessions) so it becomes an archived-manager the picker must still surface.
 import { expect, test } from "./fixtures/daemon";
+import { expectTimestampInsideRow, FIT_CHECK_KINDS } from "./helpers/replayRow";
 
 test.describe("Mission Control — Wave Replay collapse + activity project attribution (Product Review §7)", () => {
   test("Wave Replay is collapsed by default with its archived-manager poll gated, expands to a picker listing archived managers, and activity rows carry a project chip", async ({ page, loomDaemon }) => {
@@ -76,5 +77,51 @@ test.describe("Mission Control — Wave Replay collapse + activity project attri
     await expect.poll(() => managerPolls.length).toBeGreaterThan(0);
     const archFeed = await (await fetch(`${loomDaemon.baseURL}/api/archived-sessions?limit=300&role=manager`)).json() as { items: { id: string }[] };
     expect(archFeed.items.some((s) => s.id === archMgr.sessionId)).toBe(true);
+  });
+
+  // ── C. The event row keeps its timestamp at narrow widths (card f51d3068) ───────────────────────
+  // The SAME claim atlas-wave-replay.spec.ts makes on the Atlas Replay tab, re-made here because
+  // `ReplayEvent` is shared and this is the other surface that mounts it. Not a duplicate: Mission
+  // Control gives the row a 294px box against the Replay tab's 354px, and pre-fix that was the worse of
+  // the two — 15 of 15 rows cut, worst 154px past the row's right edge, against the Replay tab's 12 of 15
+  // and 94px.
+  //
+  // ⛔ This does NOT assert the page stops scrolling sideways, and card f51d3068 did not fix that.
+  // Mission Control's own page overflow at 420 (documentElement.scrollWidth 453) was MEASURED to survive
+  // this fix unchanged, and to be present with the Wave Replay section COLLAPSED and its panel unmounted
+  // entirely — so it was never this row. It is the god-eye ACTIVITY feed's own `EventRow`
+  // (pages/MissionControl.tsx), a different component with its own un-shrinkable project chip + kind
+  // columns. Don't add a page-width leg here expecting the replay row to own it.
+  test("at 420px the Wave Replay event row keeps its timestamp inside the row", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const proj = await loomDaemon.createProject(`mc-replay-fit-${Date.now()}`);
+    const mgr = await loomDaemon.seedLiveSession({ project: proj, role: "manager", agentName: "FitMgr" });
+    // Serial: the audit timeline's `seq` is positional over an ordered read, so the count must not race.
+    for (const kind of FIT_CHECK_KINDS) {
+      await loomDaemon.seedOrchestrationEvent({ managerSessionId: mgr.sessionId, kind });
+    }
+
+    // 1440 first as the control — the row was already correct there, so this leg is what catches a fix
+    // that buys the narrow case by spending the desktop layout.
+    for (const width of [1440, 420]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`${loomDaemon.baseURL}/`);
+      const toggle = page.locator("main").getByRole("button", { name: /Wave replay/i });
+      await expect(toggle, `Mission Control's Wave replay section is missing at ${width}px`).toBeVisible();
+      // The open state persists across loads, so only click when it is genuinely still collapsed.
+      if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+      const panel = page.getByTestId("audit-replay");
+      await expect(panel, `expanding Wave replay mounted no panel at ${width}px`).toHaveCount(1);
+      // Select THIS spec's own manager rather than whichever subject the picker defaults to — the daemon
+      // is shared, so the default can be a sibling spec's wave with a different (shorter) event set.
+      await panel.getByRole("combobox").first().selectOption(mgr.sessionId);
+      await expect(panel.getByTestId("audit-replay-position"),
+        `the seeded wave's timeline never loaded at ${width}px`)
+        .toHaveText(`${FIT_CHECK_KINDS.length}/${FIT_CHECK_KINDS.length}`);
+
+      await expectTimestampInsideRow(panel, FIT_CHECK_KINDS.length, `Mission Control @${width}px`);
+    }
   });
 });

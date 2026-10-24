@@ -81,10 +81,18 @@ function ReplayEvent({ t, e, state }: { t: AuditTimeline; e: AuditEvent; state: 
   const ref = actorRef(t, e);
   const detail = detailLine(e);
   const future = state === "future";
+  // Hoisted so it can be both the column's text AND its `title`: the actor is the column the row's shrink
+  // priority spends first (after the detail), so a truncated one is only recoverable from the hover.
+  const actorLine = ref
+    ? `${ref.role ?? "session"} ${ref.id.slice(0, 8)}`
+    : (e.workerSessionId ?? e.managerSessionId).slice(0, 8);
   return (
     // `data-replay-state` mirrors the visual state (the phosphor edge + panel2 fill on the head, the
     // 0.34 opacity on everything after it) as an assertable attribute, so a test can prove the scrub
     // MOVED rather than sniffing computed opacity off a row it had to find by style. Additive only.
+    // @decision f51d3068 — the timestamp must never be the column that gets cut. Do NOT flatten the
+    // kind/actor/detail `flexShrink` weights, drop their `minWidth: 0` + `overflow` + `textOverflow`,
+    // or swap the timestamp's `marginLeft: "auto"` back for a flex spacer.
     <div data-testid="audit-replay-event" data-replay-state={state} style={{
       display: "flex", alignItems: "baseline", gap: 8, padding: "2px 6px",
       fontFamily: font.mono, fontSize: 12, opacity: future ? 0.34 : 1,
@@ -93,13 +101,13 @@ function ReplayEvent({ t, e, state }: { t: AuditTimeline; e: AuditEvent; state: 
     }}>
       <span style={{ color: color.textMuted, width: 26, textAlign: "right", flexShrink: 0 }}>{e.seq}</span>
       <Dot tone={tn} glow={state === "current"} />
-      <span style={{ color: tone[tn], whiteSpace: "nowrap" }}>{e.kind}</span>
-      <span style={{ color: color.textMuted, whiteSpace: "nowrap" }}>
-        {ref ? `${ref.role ?? "session"} ${ref.id.slice(0, 8)}` : (e.workerSessionId ?? e.managerSessionId).slice(0, 8)}
+      <span title={e.kind} style={{ color: tone[tn], whiteSpace: "nowrap", minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{e.kind}</span>
+      <span title={actorLine} style={{ color: color.textMuted, whiteSpace: "nowrap", minWidth: 0, flexShrink: 1000, overflow: "hidden", textOverflow: "ellipsis" }}>
+        {actorLine}
       </span>
-      {detail && <span style={{ color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</span>}
-      <span style={{ flex: 1 }} />
-      <span style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0 }}>{timeOfDay(e.ts)}</span>
+      {detail && <span title={detail} style={{ color: color.textDim, minWidth: 0, flexShrink: 100000, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</span>}
+      <span data-testid="audit-replay-event-time"
+        style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0, marginLeft: "auto" }}>{timeOfDay(e.ts)}</span>
     </div>
   );
 }

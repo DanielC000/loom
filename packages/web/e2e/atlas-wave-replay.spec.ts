@@ -19,6 +19,7 @@
 // is derived from a DAEMON-GLOBAL archived page, where a sibling spec's exited sessions genuinely appear.
 import { expect, test, type Locator, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
+import { expectTimestampInsideRow, FIT_CHECK_KINDS } from "./helpers/replayRow";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only, so a spec cannot pull `src/` in.
@@ -325,6 +326,29 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
       // the claim is not simply "every panel is always mounted".
       await expect(page.getByTestId("atlas-tabpanel-automation"),
         "an unvisited panel is mounted after all, so the survival claim above proves nothing").toHaveCount(0);
+    });
+
+  test("switch ON: at 420px the event row keeps its timestamp inside the row, and 1440 is unchanged (card f51d3068)",
+    async ({ page, loomDaemon }) => {
+      test.setTimeout(180_000);
+      const project = await loomDaemon.createProject(`atlas-replay-fit-${Date.now()}`);
+      const mgr = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: "FitMgr" });
+      await seedWave(loomDaemon, mgr.sessionId, FIT_CHECK_KINDS);
+      await pinProject(page, project.id);
+      await seedAtlasOn(page);
+
+      // 1440 FIRST, as the control. The row was already correct there, so this leg is what distinguishes
+      // "the narrow case was fixed" from "the row was rebuilt and desktop happened to survive" — and it
+      // is the leg that catches a future fix that buys 420 by spending the desktop layout.
+      for (const width of [1440, 420]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto(loomDaemon.baseURL + "/home");
+        await openNodeTab(page, "replay");
+        const wave = waveSection(page);
+        await expect(position(wave), `the seeded wave's timeline never loaded at ${width}px`)
+          .toHaveText(`${FIT_CHECK_KINDS.length}/${FIT_CHECK_KINDS.length}`);
+        await expectTimestampInsideRow(wave, FIT_CHECK_KINDS.length, `Atlas Replay tab @${width}px`);
+      }
     });
 
   test("switch OFF: Mission Control keeps both surfaces, and the Replay tab's address renders nothing",
